@@ -1101,8 +1101,8 @@ pub(crate) fn softmax_last_axis(
 /// max+sum-exp normalizer as [`softmax_src`], but the finalize step
 /// writes the LOG of the softmax rather than the softmax itself:
 ///
-///   lse  = m + log(d)          (d = Σ_j exp(x_j - m))
-///   y_i  = x_i - lse           ( = x_i - m - log(d) )
+///   log_d = log(d)             (d = Σ_j exp(x_j - m))
+///   y_i   = (x_i - m) - log_d
 ///
 /// numerically stable because the max `m` is subtracted before any
 /// `exp`. Accumulations (`m` in dtype `T`, `d` in `float`) mirror the
@@ -1171,11 +1171,91 @@ kernel void {entry}(
     const MD_t md_total = shared[0];
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // lse = m + log(Σ exp(x - m)); y_i = x_i - lse. All math in float;
-    // store back in dtype T.
-    const float lse = (float)md_total.m + log(md_total.d);
+    // Keep x-m separate from log(Σ exp(x-m)). Forming m+log(d) first can
+    // round log(d) away when the row has a large common offset.
+    const float row_max = (float)md_total.m;
+    const bool positive_infinity = isinf(row_max) && row_max > 0.0f;
+    const float log_sum_exp = log(md_total.d);
     for (uint i = tid + offset; i < stop_idx; i += block_dim) {{
-        dst[i] = ({ty})((float)src[i] - lse);
+        // Match CPU/CUDA/ROCm log-softmax semantics for a row containing
+        // +Inf. A conventional max-subtracted reduction observes Inf-Inf and
+        // returns NaN for every position; the online reducer otherwise hides
+        // that indeterminate term and would incorrectly return -Inf for the
+        // finite positions.
+        dst[i] = positive_infinity
+            ? ({ty})as_type<float>(0x7fc00000u)
+            : ({ty})(((float)src[i] - row_max) - log_sum_exp);
+    }}
+}}
+"#
+    )
+}
+
+/// Mixed-input log-softmax source with an F32 accumulator and F32 output.
+/// Unlike the same-dtype compatibility kernel above, reduced-precision input
+/// never narrows the running maximum or exponential terms.
+fn log_softmax_f32_src(input_ty: &str, entry: &str) -> String {
+    format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct MD_t {{
+    float m;
+    float d;
+}};
+
+static inline MD_t kt_md_merge(MD_t a, MD_t b) {{
+    bool a_bigger = a.m > b.m;
+    MD_t bigger  = a_bigger ? a : b;
+    MD_t smaller = a_bigger ? b : a;
+    MD_t res;
+    res.d = bigger.d + smaller.d * fast::exp(smaller.m - bigger.m);
+    res.m = bigger.m;
+    return res;
+}}
+
+kernel void {entry}(
+    constant uint& src_numel    [[buffer(0)]],
+    constant uint& el_per_block [[buffer(1)]],
+    device const {input_ty}* src [[buffer(2)]],
+    device float* dst            [[buffer(3)]],
+    threadgroup MD_t* shared     [[threadgroup(0)]],
+    uint tid       [[thread_index_in_threadgroup]],
+    uint dst_id    [[threadgroup_position_in_grid]],
+    uint block_dim [[threads_per_threadgroup]])
+{{
+    const uint offset   = dst_id * el_per_block;
+    const uint stop_idx = min(el_per_block + offset, src_numel);
+
+    MD_t md;
+    md.m = -INFINITY;
+    md.d = 0.0f;
+    for (uint i = tid + offset; i < stop_idx; i += block_dim) {{
+        MD_t e;
+        e.m = (float)src[i];
+        e.d = 1.0f;
+        md = kt_md_merge(md, e);
+    }}
+
+    shared[tid] = md;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = block_dim / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            shared[tid] = kt_md_merge(shared[tid], shared[tid + s]);
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }}
+
+    const MD_t md_total = shared[0];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const bool positive_infinity = isinf(md_total.m) && md_total.m > 0.0f;
+    const float log_sum_exp = log(md_total.d);
+    for (uint i = tid + offset; i < stop_idx; i += block_dim) {{
+        dst[i] = positive_infinity
+            ? as_type<float>(0x7fc00000u)
+            : ((float)src[i] - md_total.m) - log_sum_exp;
     }}
 }}
 "#
@@ -1201,7 +1281,57 @@ pub(crate) fn log_softmax_last_axis(
     let ty = msl_ty(dt)?;
     let entry = format!("kt_log_softmax_{ty}");
     let src = log_softmax_src(ty, &entry);
-    let pipeline = op_pipeline(companion, &src, &entry)?;
+    dispatch_log_softmax_last_axis(
+        companion,
+        input,
+        output,
+        rows,
+        cols,
+        &entry,
+        &src,
+        "kt_log_softmax_last_axis",
+    )
+}
+
+/// Contiguous last-axis log-softmax from F32/BF16/F16 input to F32 output.
+/// Both fields of the online normalizer and the final store remain F32.
+pub(crate) fn log_softmax_last_axis_f32(
+    companion: &MetalCompanion,
+    input: &MetalBuffer,
+    output: &MetalBuffer,
+    input_dt: DType,
+    rows: usize,
+    cols: usize,
+) -> Result<()> {
+    if rows == 0 || cols == 0 {
+        return Ok(());
+    }
+    let input_ty = msl_ty(input_dt)?;
+    let entry = format!("kt_log_softmax_{input_ty}_f32");
+    let src = log_softmax_f32_src(input_ty, &entry);
+    dispatch_log_softmax_last_axis(
+        companion,
+        input,
+        output,
+        rows,
+        cols,
+        &entry,
+        &src,
+        "kt_log_softmax_last_axis_f32",
+    )
+}
+
+fn dispatch_log_softmax_last_axis(
+    companion: &MetalCompanion,
+    input: &MetalBuffer,
+    output: &MetalBuffer,
+    rows: usize,
+    cols: usize,
+    entry: &str,
+    src: &str,
+    label: &str,
+) -> Result<()> {
+    let pipeline = op_pipeline(companion, src, entry)?;
 
     // candle's width: min(maxTotalThreads, (cols/2).next_pow2) — always a
     // power of two so the reduction tree halves cleanly.
@@ -1210,20 +1340,23 @@ pub(crate) fn log_softmax_last_axis(
         .min((cols / 2).next_power_of_two().max(1));
 
     let encoder = companion.command_encoder().map_err(|e| {
-        Error::Msg(format!(
-            "metal_kernels::log_softmax_last_axis: encoder: {e:?}"
-        ))
+        let operation = label.strip_prefix("kt_").unwrap_or(label);
+        Error::Msg(format!("metal_kernels::{operation}: encoder: {e:?}"))
     })?;
-    encoder.set_label("kt_log_softmax_last_axis");
+    encoder.set_label(label);
     encoder.set_compute_pipeline_state(&pipeline);
 
-    let src_numel = (rows * cols) as u32;
-    let el_per_block = cols as u32;
+    let src_numel = rows
+        .checked_mul(cols)
+        .and_then(|elements| u32::try_from(elements).ok())
+        .ok_or_else(|| Error::Msg(format!("metal_kernels::{label}: element count exceeds u32")))?;
+    let el_per_block = u32::try_from(cols)
+        .map_err(|_| Error::Msg(format!("metal_kernels::{label}: trailing axis exceeds u32")))?;
     encoder.set_bytes(0, &src_numel);
     encoder.set_bytes(1, &el_per_block);
     encoder.set_buffer(2, Some(input), 0);
     encoder.set_buffer(3, Some(output), 0);
-    // shared[width] of MD_t; sizeof(MD_t) == 8 for the float triple.
+    // shared[width] of MD_t; sizeof(MD_t) == 8 for the accumulator pair.
     encoder.set_threadgroup_memory_length(0, width * 8);
 
     let groups = objc2_metal::MTLSize {

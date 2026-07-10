@@ -224,6 +224,59 @@ fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
     strides
 }
 
+/// Record the two-dispatch causal-convolution update as one ordered operation.
+///
+/// The output dispatch reads `state`; the state-advance dispatch then writes
+/// that same buffer. The second dispatch must retain the default inter-dispatch
+/// barrier so its write cannot race the preceding read.
+#[allow(clippy::too_many_arguments)]
+fn record_causal_conv1d_update_into(
+    batch: &mut CommandBatch<'_>,
+    x: &VulkanBuffer,
+    weight: &VulkanBuffer,
+    state: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch_size: usize,
+    channels: usize,
+    seq_len: usize,
+    kernel_size: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        kernel_size == 4,
+        "resident causal conv1d: only kernel_size=4 supported"
+    );
+    let state_total = batch_size
+        .checked_mul(channels)
+        .context("resident causal conv1d: element count overflow")?;
+    let conv_total = state_total
+        .checked_mul(seq_len)
+        .context("resident causal conv1d: element count overflow")?;
+    anyhow::ensure!(conv_total > 0, "resident causal conv1d: empty dispatch");
+
+    batch.record_shader(
+        shaders::CAUSAL_CONV1D,
+        &[x.handle(), weight.handle(), state.handle(), out.handle()],
+        &[
+            batch_size as u32,
+            channels as u32,
+            seq_len as u32,
+            kernel_size as u32,
+        ],
+        Workgroups::OneD(conv_total.div_ceil(256) as u32),
+    )?;
+    batch.record_shader(
+        shaders::CAUSAL_CONV1D_STATE_ADVANCE,
+        &[x.handle(), state.handle()],
+        &[
+            batch_size as u32,
+            channels as u32,
+            seq_len as u32,
+            kernel_size as u32,
+        ],
+        Workgroups::OneD(state_total.div_ceil(256) as u32),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn batched_decode_replay_resources(
     x_in_buf: &VulkanBuffer,
@@ -1383,25 +1436,17 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
         &[qkv_dim as u32, z_dim as u32, a_dim as u32, b_dim as u32],
         Workgroups::OneD(in_proj_total.div_ceil(64) as u32),
     )?;
-    // 4a) causal_conv1d stage 1: output
-    let conv_total = 1 * qkv_dim * 1;
-    batch.record_shader(
-        shaders::CAUSAL_CONV1D,
-        &[
-            mixed_qkv.handle(),
-            conv_w.handle(),
-            conv_buf.handle(),
-            conv_qkv.handle(),
-        ],
-        &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
-        Workgroups::OneD(conv_total.div_ceil(256) as u32),
-    )?;
-    // 4b) causal_conv1d stage 2: state advance
-    batch.record_shader_no_previous_barrier(
-        shaders::CAUSAL_CONV1D_STATE_ADVANCE,
-        &[mixed_qkv.handle(), conv_buf.handle()],
-        &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
-        Workgroups::OneD((1 * qkv_dim) as u32),
+    // 4) causal_conv1d output + ordered state advance.
+    record_causal_conv1d_update_into(
+        &mut batch,
+        &mixed_qkv,
+        &conv_w,
+        &conv_buf,
+        &conv_qkv,
+        1,
+        qkv_dim,
+        1,
+        conv_kernel,
     )?;
     // 5) split conv_qkv → (q, k, v)
     batch.record_shader(
@@ -1723,26 +1768,17 @@ pub fn gated_deltanet_forward_decode_resident_b1_kt(
         &[qkv_dim as u32, z_dim as u32, a_dim as u32, b_dim as u32],
         Workgroups::OneD(total_in_proj.div_ceil(64) as u32),
     )?;
-    // 3a) causal_conv1d stage 1: output. push = [batch, channels, seq_len, kernel];
-    //     workgroups = (batch*channels*seq_len).div_ceil(256).
-    let conv_total = 1 * qkv_dim * 1;
-    batch.record_shader(
-        shaders::CAUSAL_CONV1D,
-        &[
-            mixed_qkv.handle(),
-            conv_w.handle(),
-            conv_buf.handle(),
-            conv_qkv.handle(),
-        ],
-        &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
-        Workgroups::OneD(conv_total.div_ceil(256) as u32),
-    )?;
-    // 3b) causal_conv1d stage 2: state advance.
-    batch.record_shader_no_previous_barrier(
-        shaders::CAUSAL_CONV1D_STATE_ADVANCE,
-        &[mixed_qkv.handle(), conv_buf.handle()],
-        &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
-        Workgroups::OneD((1 * qkv_dim) as u32),
+    // 3) causal_conv1d output + ordered state advance.
+    record_causal_conv1d_update_into(
+        &mut batch,
+        &mixed_qkv,
+        &conv_w,
+        &conv_buf,
+        &conv_qkv,
+        1,
+        qkv_dim,
+        1,
+        conv_kernel,
     )?;
     // 4) split conv_qkv → (q, k, v). push = [qk_dim, v_dim].
     batch.record_shader(
@@ -2709,23 +2745,16 @@ pub fn record_gdn_block_into(
         &[qkv_dim as u32, z_dim as u32, a_dim as u32, b_dim as u32],
         Workgroups::OneD(in_proj_total.div_ceil(64) as u32),
     )?;
-    let conv_total = 1 * qkv_dim * 1;
-    batch.record_shader(
-        shaders::CAUSAL_CONV1D,
-        &[
-            mixed_qkv.handle(),
-            conv_w.handle(),
-            conv_buf.handle(),
-            conv_qkv.handle(),
-        ],
-        &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
-        Workgroups::OneD(conv_total.div_ceil(256) as u32),
-    )?;
-    batch.record_shader_no_previous_barrier(
-        shaders::CAUSAL_CONV1D_STATE_ADVANCE,
-        &[mixed_qkv.handle(), conv_buf.handle()],
-        &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
-        Workgroups::OneD((1 * qkv_dim) as u32),
+    record_causal_conv1d_update_into(
+        batch,
+        &mixed_qkv,
+        &conv_w,
+        &conv_buf,
+        &conv_qkv,
+        1,
+        qkv_dim,
+        1,
+        conv_kernel,
     )?;
     batch.record_shader(
         shaders::GDN_QKV_SPLIT,
@@ -5145,4 +5174,116 @@ pub fn submit_transformer_stack_batched_hidden_from_host(
         recurrent_states,
         conv_states,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn upload_f32(device: &VulkanDevice, values: &[f32]) -> Result<VulkanBuffer> {
+        let bytes = bytemuck::cast_slice(values);
+        let buffer = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            bytes.len() as u64,
+        )?;
+        VulkanBuffer::upload_data(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &buffer,
+            bytes,
+        )?;
+        Ok(buffer)
+    }
+
+    fn read_f32(device: &VulkanDevice, buffer: &VulkanBuffer) -> Result<Vec<f32>> {
+        let bytes = VulkanBuffer::read_back(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            buffer,
+        )?;
+        Ok(bytemuck::cast_slice(&bytes).to_vec())
+    }
+
+    #[test]
+    fn causal_conv_state_advance_waits_for_output_read() -> Result<()> {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            eprintln!(
+                "skip causal_conv_state_advance_waits_for_output_read: \
+                 KILN_TENSOR_VULKAN_TEST unset"
+            );
+            return Ok(());
+        }
+        assert!(
+            VulkanDevice::probe(),
+            "KILN_TENSOR_VULKAN_TEST=1 requires a working Vulkan device"
+        );
+        let device = VulkanDevice::new()?;
+
+        const CHANNELS: usize = 4096;
+        const KERNEL_SIZE: usize = 4;
+        const REPEATS: usize = 64;
+        let x: Vec<f32> = (0..CHANNELS)
+            .map(|channel| 0.25 + (channel % 31) as f32 * 0.03125)
+            .collect();
+        // With fresh zero state and seq_len=1, only the final weight sees x.
+        // Keeping that weight zero makes every correct output exactly zero;
+        // any nonzero value exposes state advance racing the preceding read.
+        let weights: Vec<f32> = (0..CHANNELS)
+            .flat_map(|_| [0.125f32, -0.25, 0.5, 0.0])
+            .collect();
+        let x_buffer = upload_f32(&device, &x)?;
+        let weight_buffer = upload_f32(&device, &weights)?;
+        let output_buffer = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            (CHANNELS * size_of::<f32>()) as u64,
+        )?;
+        let zero_state = vec![0.0f32; CHANNELS * (KERNEL_SIZE - 1)];
+        let mut baseline_state = None;
+
+        for iteration in 0..REPEATS {
+            let state_buffer = upload_f32(&device, &zero_state)?;
+            let mut batch = CommandBatch::new(&device)?;
+            record_causal_conv1d_update_into(
+                &mut batch,
+                &x_buffer,
+                &weight_buffer,
+                &state_buffer,
+                &output_buffer,
+                1,
+                CHANNELS,
+                1,
+                KERNEL_SIZE,
+            )?;
+            batch.submit_and_wait("causal conv state ordering regression")?;
+
+            let output = read_f32(&device, &output_buffer)?;
+            assert!(
+                output.iter().all(|&value| value == 0.0),
+                "iteration {iteration}: state advance raced convolution output read"
+            );
+            let state = read_f32(&device, &state_buffer)?;
+            for (channel, state_row) in state.chunks_exact(KERNEL_SIZE - 1).enumerate() {
+                assert_eq!(
+                    state_row,
+                    &[0.0, 0.0, x[channel]],
+                    "iteration {iteration}: wrong state for channel {channel}"
+                );
+            }
+            if let Some(baseline) = &baseline_state {
+                assert_eq!(
+                    &state, baseline,
+                    "iteration {iteration}: fresh-state update was nondeterministic"
+                );
+            } else {
+                baseline_state = Some(state);
+            }
+        }
+        Ok(())
+    }
 }

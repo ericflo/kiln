@@ -1,7 +1,7 @@
 //! Vulkan decode-weight cache and prewarm helpers.
 //!
-//! These helpers own kt `TensorId`-keyed f32/BF16-packed VulkanBuffer caches,
-//! decode-weight prewarming, and post-upload BF16 host-storage stubbing. The
+//! These helpers own kt `TensorId`-keyed f32/BF16-packed VulkanBuffer caches
+//! and non-destructive decode-weight prewarming. The
 //! runtime facade in `vulkan.rs` delegates here so operation dispatch remains
 //! separate from explicit weight residency plumbing.
 
@@ -404,179 +404,163 @@ pub(super) fn prewarm_decode_weights(backend: &VulkanBackend, weights: &GpuWeigh
     Ok(())
 }
 
-/// Phase 4.x residency: drop the CPU storage of every
-/// pre-transposed weight cache (`*_proj_t`, `embed_tokens_t`)
-/// whose BF16-packed bytes are already resident in
-/// `bf16_packed_weight_cache_kt`. Replace each with a
-/// 1-element BF16 stub and re-key the cache so subsequent
-/// lookups against the new kt `TensorId` still find the same
-/// `Arc<VulkanBuffer>`.
-///
-/// Saves ~6-7 GB peak RSS on Qwen3.5-4B training at T=918 - the
-/// transposed-cache copies are the dominant remaining
-/// CPU-side residency item documented in
-/// `docs/audits/candle_cpu_residency_2026-05-11.md`.
-///
-/// Safe because:
-/// - The bf16-packed Vulkan code paths read the weight via the
-///   `Arc<VulkanBuffer>` looked up in `bf16_packed_weight_cache_kt`.
-///   They never re-read the CPU storage of the source tensor
-///   after the buffer is cached.
-/// - `VulkanLinearOp::bwd` for BF16 weights routes through the
-///   transposed Vulkan kernel (also buffer-backed). The F32
-///   fallback bwd path that *does* read the source weight tensor cannot
-///   fire for BF16 weights.
-/// - Non-BF16 tensors and tensors not in the cache are skipped.
-pub(super) fn drop_uploaded_bf16_weights(
-    backend: &VulkanBackend,
-    weights: &mut crate::forward::GpuWeights,
-    device: &kiln_tensor::Device,
-) -> Result<usize> {
-    if !backend.has_vulkan() {
-        return Ok(0);
-    }
-    // Broadcast-base for cheap shape-preserving stubs. Source has
-    // 2 bytes of storage; broadcast_as(target_shape) creates views
-    // with stride [0, 0] sharing the same backing storage. Each per-
-    // weight stub costs ~24 bytes of metadata (Layout + Tensor
-    // struct), not `hidden * out_dim * 2` bytes. The weights are
-    // kt-typed (#1082 forward-flip), and the Vulkan buffer cache is
-    // re-keyed directly from the old kt TensorId to the stub's kt
-    // TensorId.
-    let broadcast_base = kiln_tensor::Tensor::zeros(
-        (1usize, 1usize),
-        kiln_tensor::DType::BF16,
-        kiln_tensor::Device::Cpu,
-    )
-    .context("drop_uploaded_bf16_weights: create broadcast base")?;
-    let _ = device;
-    let mut bf16_cache = backend
-        .bf16_packed_weight_cache_kt
-        .lock()
-        .map_err(|_| anyhow::anyhow!("bf16 weight cache mutex poisoned"))?;
-    let mut f32_cache = backend
-        .weight_cache_kt
-        .lock()
-        .map_err(|_| anyhow::anyhow!("f32 weight cache mutex poisoned"))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::LinearBackend;
+    use crate::forward::{
+        GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
+    };
+    use kiln_tensor::{DType, Device, Tensor};
 
-    // Per-tensor replacement closure. Returns true if the tensor
-    // was stubbed (was BF16, rank-2, and in the cache).
-    //
-    // - Reads the original `[hidden, out_dim]` shape from `t.dims()`
-    //   *before* replacement.
-    // - Creates a shape-preserving stub by broadcasting the
-    //   2-byte base to that shape (so downstream `weight_t.dims2()`
-    //   reads continue to return the right shape, but the storage
-    //   bytes drop to ~zero).
-    // - Re-keys the packed cache and any F32 shadow cache entry so
-    //   subsequent kt-native lookups by the stub's new TensorId still find
-    //   the original `Arc<VulkanBuffer>`s.
-    fn replace(
-        t: &mut kiln_tensor::Tensor,
-        bf16_cache: &mut std::collections::HashMap<
-            kiln_tensor::TensorId,
-            Arc<kiln_vulkan_kernel::VulkanBuffer>,
-        >,
-        f32_cache: &mut std::collections::HashMap<
-            kiln_tensor::TensorId,
-            Arc<kiln_vulkan_kernel::VulkanBuffer>,
-        >,
-        broadcast_base: &kiln_tensor::Tensor,
-    ) -> bool {
-        if t.dtype() != kiln_tensor::DType::BF16 {
-            return false;
-        }
-        let dims = t.dims();
-        if dims.len() != 2 {
-            return false; // Only rank-2 transposed-cache tensors are stubbable.
-        }
-        let (d0, d1) = (dims[0], dims[1]);
-        let old_id = t.id();
-        let Some(bf16_buf) = bf16_cache.remove(&old_id) else {
-            return false;
+    fn bf16_tensor(values: Vec<f32>, shape: Vec<usize>, device: Device) -> Result<Tensor> {
+        Ok(Tensor::from_vec(values, shape)?
+            .to_dtype(DType::BF16)?
+            .to_device(device)?)
+    }
+
+    fn patterned_bf16(shape: &[usize], seed: usize, device: Device) -> Result<Tensor> {
+        let values = (0..shape.iter().product())
+            .map(|index| (((index + seed) % 17) as f32 - 8.0) * 0.03125)
+            .collect();
+        bf16_tensor(values, shape.to_vec(), device)
+    }
+
+    fn prewarm_fixture(device: Device) -> Result<GpuWeights> {
+        let hidden = 4usize;
+        let intermediate = 5usize;
+        let vocab = 6usize;
+        let q_proj_t = bf16_tensor(
+            vec![
+                0.5, -0.25, 0.125, -0.5, 0.75, 0.25, 1.0, -0.125, 0.375, -0.75, 0.625, 0.5,
+            ],
+            vec![hidden, 3],
+            device,
+        )?;
+        let layer = GpuLayerWeights {
+            input_layernorm: patterned_bf16(&[hidden], 1, device)?,
+            post_attention_layernorm: patterned_bf16(&[hidden], 2, device)?,
+            attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                q_proj: patterned_bf16(&[3, hidden], 3, device)?,
+                k_proj: patterned_bf16(&[2, hidden], 4, device)?,
+                v_proj: patterned_bf16(&[2, hidden], 5, device)?,
+                o_proj: patterned_bf16(&[hidden, 3], 6, device)?,
+                q_norm: patterned_bf16(&[2], 7, device)?,
+                k_norm: patterned_bf16(&[2], 8, device)?,
+                q_proj_t,
+                k_proj_t: patterned_bf16(&[hidden, 2], 9, device)?,
+                v_proj_t: patterned_bf16(&[hidden, 2], 10, device)?,
+                qkv_proj_t: None,
+                o_proj_t: patterned_bf16(&[3, hidden], 11, device)?,
+                qkv_proj_w8: None,
+                o_proj_w8: None,
+                q_proj_marlin: None,
+            }),
+            mlp: GpuFfnWeights {
+                gate_proj: patterned_bf16(&[intermediate, hidden], 12, device)?,
+                up_proj: patterned_bf16(&[intermediate, hidden], 13, device)?,
+                down_proj: patterned_bf16(&[hidden, intermediate], 14, device)?,
+                gate_proj_t: patterned_bf16(&[hidden, intermediate], 15, device)?,
+                up_proj_t: patterned_bf16(&[hidden, intermediate], 16, device)?,
+                down_proj_t: patterned_bf16(&[intermediate, hidden], 17, device)?,
+                gate_up_proj_t: None,
+                gate_proj_marlin: None,
+                up_proj_marlin: None,
+                down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
+            },
         };
-        let f32_buf = f32_cache.remove(&old_id);
-        let Ok(new_stub) = broadcast_base.broadcast_as((d0, d1)) else {
-            bf16_cache.insert(old_id, bf16_buf); // restore on failure
-            if let Some(buf) = f32_buf {
-                f32_cache.insert(old_id, buf);
-            }
-            return false;
+        Ok(GpuWeights {
+            embed_tokens: patterned_bf16(&[vocab, hidden], 18, device)?,
+            embed_tokens_t: patterned_bf16(&[hidden, vocab], 19, device)?,
+            lm_head_w8: None,
+            layers: vec![layer],
+            final_norm: patterned_bf16(&[hidden], 20, device)?,
+            rotary_inv_freq: Tensor::from_vec(vec![1.0_f32, 0.01], 2)?.to_device(device)?,
+            mtp: None,
+        })
+    }
+
+    fn assert_prewarm_retains_projection(
+        backend: &VulkanBackend,
+        weight_device: Device,
+    ) -> Result<()> {
+        let weights = prewarm_fixture(weight_device)?;
+        let q_proj_t = match &weights.layers[0].attention {
+            GpuAttentionWeights::Full(attention) => &attention.q_proj_t,
+            GpuAttentionWeights::Linear(_) => unreachable!(),
         };
-        let new_id = new_stub.id();
-        *t = new_stub;
-        bf16_cache.insert(new_id, bf16_buf);
-        if let Some(buf) = f32_buf {
-            f32_cache.insert(new_id, buf);
-        }
-        true
+        let before_id = q_proj_t.id();
+        let before_bytes = q_proj_t.storage().byte_len();
+        let before_values = q_proj_t
+            .to_device(Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<half::bf16>()?;
+
+        LinearBackend::runtime_prewarm_decode_weights(backend, &weights)?;
+
+        let q_proj_t = match &weights.layers[0].attention {
+            GpuAttentionWeights::Full(attention) => &attention.q_proj_t,
+            GpuAttentionWeights::Linear(_) => unreachable!(),
+        };
+        assert_eq!(q_proj_t.id(), before_id);
+        assert_eq!(q_proj_t.device(), weight_device);
+        assert_eq!(q_proj_t.storage().byte_len(), before_bytes);
+        assert!(q_proj_t.is_contiguous());
+        assert_eq!(
+            q_proj_t
+                .to_device(Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<half::bf16>()?,
+            before_values
+        );
+        assert!(
+            backend
+                .bf16_packed_weight_cache_kt
+                .lock()
+                .map_err(|_| anyhow::anyhow!("packed cache mutex poisoned"))?
+                .contains_key(&before_id)
+        );
+
+        let x = Tensor::from_vec(
+            vec![0.25_f32, -0.5, 0.75, 1.0, -0.25, 0.5, -0.75, -1.0],
+            (1, 2, 4),
+        )?
+        .to_device(weight_device)?;
+        let output = LinearBackend::runtime_linear_decode(backend, &x, q_proj_t)?
+            .context("prewarmed projection should remain executable")?;
+        assert_eq!(output.device(), weight_device);
+        assert_eq!(
+            output
+                .to_device(Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            vec![0.375, 0.09375, 0.6875, -0.375, -0.09375, -0.6875]
+        );
+        Ok(())
     }
 
-    let mut stubbed = 0usize;
-
-    // Intentionally NOT stubbing `weights.embed_tokens_t`:
-    // `embedding_lookup_from_transposed_index` calls
-    // `embed_tokens_t.index_select(idx, 1)` which reads the
-    // tensor's data (not just shape), so a 1-element stub would
-    // make the embedding lookup return garbage. The other `*_proj_t`
-    // caches go through the kt TensorId -> Arc<VulkanBuffer> packed cache,
-    // so they only need shape/dtype metadata locally. Embedding savings
-    // (~750 MB) are small
-    // next to the per-layer transposes (~5-6 GB across 32 layers).
-
-    // Per-layer attention + MLP transposes.
-    for layer in weights.layers.iter_mut() {
-        match &mut layer.attention {
-            crate::forward::GpuAttentionWeights::Full(attn) => {
-                for t in [
-                    &mut attn.q_proj_t,
-                    &mut attn.k_proj_t,
-                    &mut attn.v_proj_t,
-                    &mut attn.o_proj_t,
-                ] {
-                    if replace(t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
-                        stubbed += 1;
-                    }
-                }
-                if let Some(qkv_t) = attn.qkv_proj_t.as_mut() {
-                    if replace(qkv_t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
-                        stubbed += 1;
-                    }
-                }
-            }
-            crate::forward::GpuAttentionWeights::Linear(attn) => {
-                for t in [
-                    &mut attn.in_proj_qkv_t,
-                    &mut attn.in_proj_z_t,
-                    &mut attn.in_proj_a_t,
-                    &mut attn.in_proj_b_t,
-                    &mut attn.out_proj_t,
-                ] {
-                    if replace(t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
-                        stubbed += 1;
-                    }
-                }
-                if let Some(ab_t) = attn.in_proj_ab_t.as_mut() {
-                    if replace(ab_t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
-                        stubbed += 1;
-                    }
-                }
-            }
+    #[test]
+    fn default_prewarm_retains_authoritative_serving_and_resident_weights() -> Result<()> {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            return Ok(());
         }
-        for t in [
-            &mut layer.mlp.gate_proj_t,
-            &mut layer.mlp.up_proj_t,
-            &mut layer.mlp.down_proj_t,
-        ] {
-            if replace(t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
-                stubbed += 1;
-            }
-        }
+        assert!(
+            crate::backend::vulkan::vulkan_is_available(),
+            "KILN_TENSOR_VULKAN_TEST=1 requires a working Vulkan device"
+        );
+        let backend = VulkanBackend::new(Device::Cpu);
+        assert!(
+            backend.weight_prewarm_enabled,
+            "default qualification requires KILN_DISABLE_VULKAN_WEIGHT_PREWARM to be unset"
+        );
+
+        // Serving keeps model weights on CPU and uses the backend-private
+        // packed cache. Training may keep the same authoritative tensors
+        // resident. Prewarm must preserve both representations exactly.
+        assert_prewarm_retains_projection(&backend, Device::Cpu)?;
+        assert_prewarm_retains_projection(&backend, Device::Vulkan(0))?;
+        Ok(())
     }
-
-    tracing::info!(
-        stubbed,
-        "dropped CPU storage of pre-transposed bf16 weight caches"
-    );
-    Ok(stubbed)
 }

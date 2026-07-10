@@ -429,9 +429,8 @@ def body_without_comments(body: str) -> str:
     return body.strip()
 
 
-def production_source_text(path: str) -> str:
-    """Return source excluding cfg(test) modules while preserving later production code."""
-    source = file_text(path)
+def source_without_cfg_test_modules(source: str) -> str:
+    """Exclude cfg(test) modules while preserving later production code."""
     pattern = re.compile(
         r"\n?\s*#\[cfg\(test\)\]\s*(?:\n\s*#\[[^\n]+\]\s*)*\n\s*mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{"
     )
@@ -447,6 +446,10 @@ def production_source_text(path: str) -> str:
         end_idx = find_matching_brace(source, open_idx)
         cursor = end_idx + 1
     return "".join(pieces)
+
+
+def production_source_text(path: str) -> str:
+    return source_without_cfg_test_modules(file_text(path))
 
 
 def source_between(source: str, start_marker: str, end_marker: str) -> str:
@@ -529,7 +532,10 @@ def backend_source_paths(backend: str, main_path: Path) -> list[Path]:
 
 
 def read_backend_sources(backend: str, main_path: Path) -> str:
-    return "\n".join(path.read_text() for path in backend_source_paths(backend, main_path))
+    return "\n".join(
+        production_source_text(str(path.relative_to(ROOT)))
+        for path in backend_source_paths(backend, main_path)
+    )
 
 
 def gate_hints(body: str) -> dict[str, bool]:
@@ -2959,6 +2965,27 @@ def check_report_files(
 
 
 def run_self_test() -> int:
+    cfg_test_fixture = """
+const PROD_BEFORE: &str = "KILN_VULKAN_PRODUCTION";
+#[cfg(test)]
+mod tests {
+    const TEST_ONLY: &str = "KILN_TENSOR_VULKAN_TEST";
+    fn nested() { if true { let _ = TEST_ONLY; } }
+}
+const PROD_AFTER: &str = "KILN_VULKAN_AFTER_TESTS";
+"""
+    production_fixture = source_without_cfg_test_modules(cfg_test_fixture)
+    if (
+        "KILN_VULKAN_PRODUCTION" not in production_fixture
+        or "KILN_VULKAN_AFTER_TESTS" not in production_fixture
+        or "KILN_TENSOR_VULKAN_TEST" in production_fixture
+    ):
+        print(
+            "cfg(test) production-source filter self-test failed",
+            file=sys.stderr,
+        )
+        return 1
+
     expected_json = '{"status": "fresh"}\n'
     expected_markdown = "# Fresh\n"
     with TemporaryDirectory() as tmp:

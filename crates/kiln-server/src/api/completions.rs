@@ -1438,6 +1438,22 @@ impl Drop for PrefillProgressGuard {
     }
 }
 
+struct CancelOnDrop(CancelHandle);
+
+impl CancelOnDrop {
+    fn new(cancel: CancelHandle) -> Self {
+        Self(cancel)
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        // A dropped HTTP future must still tell any queued or running blocking
+        // worker to stop at its next cooperative boundary.
+        self.0.cancel();
+    }
+}
+
 fn tool_call_parsing_allowed(
     tools: Option<&[serde_json::Value]>,
     tool_choice: Option<&serde_json::Value>,
@@ -4253,16 +4269,36 @@ pub enum TextCompletionPrompt {
     TokenIds(Vec<TokenId>),
 }
 
+const fn completion_add_special_tokens_default() -> bool {
+    true
+}
+
 /// vLLM-shaped text-completions request subset.
 ///
 /// Kiln supports this endpoint's prompt-logprobs mode so `RemoteTeacher`
 /// clients can query a kiln-served teacher through the same `/v1/completions`
-/// shape they use for vLLM/sglang. Token display is fail closed: an unknown
-/// token ID or decoder failure returns `tokenization_error` instead of a
-/// successful response containing an empty fallback token. Model output is
-/// also validated before rendering; vocabulary-width or non-finite-value
-/// corruption returns `generation_error` rather than a short map or JSON
-/// `null` value.
+/// shape they use for vLLM/sglang. `prompt_logprobs` accepts `0..=256`. The
+/// first position is `null`; every later position contains the observed prompt
+/// token plus the requested top K, yielding K entries when the observed token
+/// is already top K and K+1 otherwise. Extra observed tokens report their
+/// full-vocabulary rank. Scores are F32 log-softmax values from the preceding
+/// logits row, and token display uses only preceding actual prompt tokens to
+/// complete split UTF-8 sequences.
+///
+/// This is a bounded, correctness-first subset: text prompts default to
+/// tokenizer special-token insertion; `-1` all-vocabulary requests are not
+/// accepted; candidate output is capped at 65,536 entries; and real scoring is
+/// serialized under exclusive GPU admission. `model` must match the served
+/// base model, and an active LoRA is rejected until an adapter content revision
+/// can be pinned in the request and response identity. The current scorer still
+/// reads full vocabulary rows to the host (O(TV)); a selected-only O(TK) device
+/// kernel remains an explicit performance gate.
+///
+/// Token display is fail closed: an unknown token ID or decoder failure returns
+/// `tokenization_error` instead of a successful response containing an empty
+/// fallback token. Model output is also validated before rendering;
+/// vocabulary-width or non-finite-value corruption returns `generation_error`
+/// rather than a short map or JSON `null` value.
 #[derive(Debug, Deserialize)]
 pub struct TextCompletionRequest {
     /// When omitted, the server falls back to its configured `served_model_id`.
@@ -4277,6 +4313,9 @@ pub struct TextCompletionRequest {
     pub n: Option<usize>,
     #[serde(default)]
     pub stream: bool,
+    /// vLLM-compatible text-prompt default. Ignored for token-ID prompts.
+    #[serde(default = "completion_add_special_tokens_default")]
+    pub add_special_tokens: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -4559,6 +4598,14 @@ async fn completions_inner(
     state: &AppState,
     req: TextCompletionRequest,
 ) -> Result<Response, ApiError> {
+    if let Some(requested_model) = req.model.as_deref()
+        && requested_model != state.served_model_id
+    {
+        return Err(ApiError::completion_invalid_request(format!(
+            "model {requested_model:?} is not served by this process; expected {:?}",
+            state.served_model_id
+        )));
+    }
     if req.stream {
         return Err(ApiError::completion_invalid_request(
             "stream=true is not supported on /v1/completions prompt-logprobs requests",
@@ -4581,16 +4628,17 @@ async fn completions_inner(
         )
     })?;
     validate_prompt_logprobs_top_k(state, top_k)?;
-    let prompt_tokens = tokens_for_text_completion_prompt(state, &req.prompt)?;
+    let prompt_tokens =
+        tokens_for_text_completion_prompt(state, &req.prompt, req.add_special_tokens)?;
     if prompt_tokens.is_empty() {
         return Err(ApiError::completion_invalid_request(
             "prompt must tokenize to at least one token",
         ));
     }
-    // The response materializes seq x top_k logprobs on the host, so an
-    // unbounded prompt is a memory amplification vector (4 MB+ per 4K
-    // tokens at the top_k cap); raw token-id prompts also bypass the
-    // tokenizer, so out-of-range ids would reach the embedding lookup.
+    // Raw token-ID prompts bypass the tokenizer, so out-of-range IDs would
+    // otherwise reach the embedding lookup. Prompt length and total candidate
+    // count are bounded independently: T=4096 and K=256 would exceed one
+    // million decoded map entries even though each individual field is valid.
     if prompt_tokens.len() > MAX_COMPLETION_PROMPT_TOKENS {
         return Err(ApiError::completion_invalid_request(format!(
             "prompt is {} tokens; prompt-logprobs requests are capped at \
@@ -4598,10 +4646,27 @@ async fn completions_inner(
             prompt_tokens.len()
         )));
     }
+    if prompt_tokens.len() > state.model_config.max_position_embeddings {
+        return Err(ApiError::context_length_exceeded(
+            state.model_config.max_position_embeddings,
+            prompt_tokens.len(),
+            0,
+        ));
+    }
     let vocab_size = state.model_config.vocab_size;
     if let Some(bad) = prompt_tokens.iter().find(|&&t| (t as usize) >= vocab_size) {
         return Err(ApiError::completion_invalid_request(format!(
             "prompt token id {bad} is out of range for vocab size {vocab_size}"
+        )));
+    }
+    let scored_positions = prompt_tokens.len().saturating_sub(1);
+    let candidate_upper_bound = scored_positions
+        .checked_mul(top_k.saturating_add(1))
+        .unwrap_or(usize::MAX);
+    if candidate_upper_bound > MAX_COMPLETION_PROMPT_LOGPROB_CANDIDATES {
+        return Err(ApiError::completion_invalid_request(format!(
+            "prompt_logprobs response may contain {candidate_upper_bound} candidates; \
+             kiln caps prompt-logprob responses at {MAX_COMPLETION_PROMPT_LOGPROB_CANDIDATES}"
         )));
     }
 
@@ -4612,10 +4677,7 @@ async fn completions_inner(
         }
     };
 
-    let model = req
-        .model
-        .clone()
-        .unwrap_or_else(|| state.served_model_id.clone());
+    let model = state.served_model_id.clone();
     let response = TextCompletionResponse {
         id: format!("cmpl-{}", Uuid::new_v4()),
         object: "text_completion",
@@ -4637,6 +4699,21 @@ async fn completions_inner(
 }
 
 const MAX_COMPLETION_PROMPT_LOGPROBS: usize = 256;
+const MAX_COMPLETION_PROMPT_LOGPROB_CANDIDATES: usize = 65_536;
+/// Bound the combined logits plus F32 log-softmax storage for one projection
+/// chunk. Eight bytes per vocabulary entry pessimistically covers F32 logits
+/// plus F32 output; reduced-precision logits use less. The 32-row cap keeps
+/// tiny-vocabulary models from growing an excessively long projection.
+const PROMPT_LOGPROB_PROJECTION_BYTE_BUDGET: usize = 64 * 1024 * 1024;
+const MAX_PROMPT_LOGPROB_PROJECTION_CHUNK_TOKENS: usize = 32;
+
+fn prompt_logprob_projection_chunk_tokens(vocab_size: usize) -> usize {
+    let bytes_per_row = vocab_size
+        .saturating_mul(2 * std::mem::size_of::<f32>())
+        .max(1);
+    (PROMPT_LOGPROB_PROJECTION_BYTE_BUDGET / bytes_per_row)
+        .clamp(1, MAX_PROMPT_LOGPROB_PROJECTION_CHUNK_TOKENS)
+}
 
 /// Cap on prompt length for prompt-logprobs requests. OPD teachers score
 /// student rollouts in chunks well under this; the cap exists because each
@@ -4644,11 +4721,6 @@ const MAX_COMPLETION_PROMPT_LOGPROBS: usize = 256;
 const MAX_COMPLETION_PROMPT_TOKENS: usize = 4096;
 
 fn validate_prompt_logprobs_top_k(state: &AppState, top_k: usize) -> Result<(), ApiError> {
-    if top_k == 0 {
-        return Err(ApiError::completion_invalid_request(
-            "prompt_logprobs must be greater than 0",
-        ));
-    }
     if top_k > MAX_COMPLETION_PROMPT_LOGPROBS {
         return Err(ApiError::completion_invalid_request(format!(
             "prompt_logprobs {top_k} exceeds kiln's cap of {MAX_COMPLETION_PROMPT_LOGPROBS}"
@@ -4666,27 +4738,23 @@ fn validate_prompt_logprobs_top_k(state: &AppState, top_k: usize) -> Result<(), 
 fn tokens_for_text_completion_prompt(
     state: &AppState,
     prompt: &TextCompletionPrompt,
+    add_special_tokens: bool,
 ) -> Result<Vec<TokenId>, ApiError> {
     match prompt {
         TextCompletionPrompt::TokenIds(tokens) => Ok(tokens.clone()),
         TextCompletionPrompt::Text(text) => state
             .tokenizer
-            .encode(text)
+            .encode_with_special_tokens(text, add_special_tokens)
             .map_err(ApiError::tokenization_failed),
     }
 }
 
-fn decoded_token_for_logprob(state: &AppState, token_id: TokenId) -> Result<String, ApiError> {
-    decode_prompt_logprob_token(token_id, |token_id| {
-        state.tokenizer.decode_token_for_display(token_id)
-    })
-}
-
 fn decode_prompt_logprob_token(
     token_id: TokenId,
-    decode_token: impl FnOnce(TokenId) -> Result<String, TokenizerError>,
+    preceding_actual_ids: &[TokenId],
+    decode_token: impl FnOnce(TokenId, &[TokenId]) -> Result<String, TokenizerError>,
 ) -> Result<String, ApiError> {
-    decode_token(token_id).map_err(|err| {
+    decode_token(token_id, preceding_actual_ids).map_err(|err| {
         ApiError::tokenization_failed(format!(
             "failed to render prompt-logprob token id {token_id}: {err}"
         ))
@@ -4698,24 +4766,68 @@ struct ValidatedPromptLogprobRow<'a> {
     values: &'a [f32],
 }
 
-fn top_k_logprob_map(
-    state: &AppState,
-    row: ValidatedPromptLogprobRow<'_>,
-    top_k: usize,
-) -> Result<PromptLogprobMap, ApiError> {
-    let mut decode_token = |token_id| state.tokenizer.decode_token_for_display(token_id);
-    top_k_logprob_map_from_validated_row(row, top_k, &mut decode_token)
+#[derive(Debug, Clone, PartialEq)]
+struct CompactPromptLogprobEntry {
+    token_id: TokenId,
+    logprob: f32,
+    rank: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CompactPromptLogprobSelection {
+    entries: Vec<CompactPromptLogprobEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PromptLogprobRankCandidate {
+    token_id: TokenId,
+    logit: f32,
+}
+
+impl Eq for PromptLogprobRankCandidate {}
+
+impl Ord for PromptLogprobRankCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // BinaryHeap::peek returns the greatest item. Reverse score order and
+        // keep token-ID order forward so the root is the worst retained
+        // candidate: lowest logit, then highest token ID.
+        other
+            .logit
+            .partial_cmp(&self.logit)
+            .expect("prompt-logprob rank candidates are validated finite")
+            .then_with(|| self.token_id.cmp(&other.token_id))
+    }
+}
+
+impl PartialOrd for PromptLogprobRankCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[cfg(test)]
 fn top_k_logprob_map_with_decoder(
-    row: &[f32],
+    logit_row: &[f32],
+    logprob_row: &[f32],
     expected_vocab_size: usize,
+    observed_token_id: TokenId,
     top_k: usize,
-    mut decode_token: impl FnMut(TokenId) -> Result<String, TokenizerError>,
+    preceding_actual_ids: &[TokenId],
+    mut decode_token: impl FnMut(TokenId, &[TokenId]) -> Result<String, TokenizerError>,
 ) -> Result<PromptLogprobMap, ApiError> {
-    let row = validate_prompt_logprob_row(row, expected_vocab_size)?;
-    top_k_logprob_map_from_validated_row(row, top_k, &mut decode_token)
+    let logit_row = validate_prompt_logprob_row(logit_row, expected_vocab_size)?;
+    let logprob_row = validate_prompt_logprob_row(logprob_row, expected_vocab_size)?;
+    let selection = select_prompt_logprobs_from_validated_rows(
+        logit_row,
+        logprob_row,
+        observed_token_id,
+        top_k,
+    )?;
+    prompt_logprob_map_from_selection_with_decoder(
+        &selection,
+        preceding_actual_ids,
+        &mut decode_token,
+    )
 }
 
 fn validate_prompt_logprob_row<'a>(
@@ -4738,17 +4850,48 @@ fn validate_prompt_logprob_row<'a>(
     Ok(ValidatedPromptLogprobRow { values: row })
 }
 
-fn top_k_logprob_map_from_validated_row(
-    row: ValidatedPromptLogprobRow<'_>,
+fn select_prompt_logprobs_from_validated_rows(
+    logit_row: ValidatedPromptLogprobRow<'_>,
+    logprob_row: ValidatedPromptLogprobRow<'_>,
+    observed_token_id: TokenId,
     top_k: usize,
-    decode_token: &mut impl FnMut(TokenId) -> Result<String, TokenizerError>,
-) -> Result<PromptLogprobMap, ApiError> {
-    let row = row.values;
-    if top_k > row.len() {
+) -> Result<CompactPromptLogprobSelection, ApiError> {
+    let logits = logit_row.values;
+    let logprobs = logprob_row.values;
+    if logits.len() != logprobs.len() {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "prompt-logprobs logits width {} did not match log-probability width {}",
+            logits.len(),
+            logprobs.len()
+        )));
+    }
+    if top_k > logits.len() {
         return Err(ApiError::generation_failed(anyhow::anyhow!(
             "requested {top_k} prompt-logprob candidates from a vocabulary row with width {}",
-            row.len()
+            logits.len()
         )));
+    }
+    let observed_index = observed_token_id as usize;
+    let observed_logit = logits.get(observed_index).copied().ok_or_else(|| {
+        ApiError::generation_failed(anyhow::anyhow!(
+            "observed prompt token id {observed_token_id} was outside vocabulary row width {}",
+            logits.len()
+        ))
+    })?;
+    let observed_logprob = logprobs[observed_index];
+
+    if top_k == 0 {
+        let observed_rank = logits
+            .iter()
+            .filter(|&&logit| logit >= observed_logit)
+            .count();
+        return Ok(CompactPromptLogprobSelection {
+            entries: vec![CompactPromptLogprobEntry {
+                token_id: observed_token_id,
+                logprob: observed_logprob,
+                rank: observed_rank,
+            }],
+        });
     }
 
     let compare_rank = |a: &(TokenId, f32), b: &(TokenId, f32)| {
@@ -4756,67 +4899,182 @@ fn top_k_logprob_map_from_validated_row(
             .expect("validated prompt-logprob rows contain only finite values")
             .then_with(|| a.0.cmp(&b.0))
     };
-    let mut pairs: Vec<(TokenId, f32)> = row
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(idx, logprob)| (idx as TokenId, logprob))
-        .collect();
-    if top_k < pairs.len() {
-        pairs.select_nth_unstable_by(top_k, compare_rank);
-        pairs.truncate(top_k);
+    let mut heap = std::collections::BinaryHeap::with_capacity(top_k);
+    for (token_id, &logit) in logits.iter().enumerate() {
+        let candidate = PromptLogprobRankCandidate {
+            token_id: token_id as TokenId,
+            logit,
+        };
+        if heap.len() < top_k {
+            heap.push(candidate);
+        } else if heap.peek().is_some_and(|worst| {
+            compare_rank(
+                &(candidate.token_id, candidate.logit),
+                &(worst.token_id, worst.logit),
+            )
+            .is_lt()
+        }) {
+            heap.pop();
+            heap.push(candidate);
+        }
     }
+    let mut pairs = heap
+        .into_iter()
+        .map(|candidate| (candidate.token_id, candidate.logit))
+        .collect::<Vec<_>>();
     pairs.sort_unstable_by(compare_rank);
 
-    let mut out = BTreeMap::new();
-    for (rank, (token_id, logprob)) in pairs.into_iter().enumerate() {
-        out.insert(
-            token_id.to_string(),
-            PromptLogprobEntry {
-                logprob,
+    let observed_top_rank = pairs
+        .iter()
+        .position(|(token_id, _)| *token_id == observed_token_id)
+        .map(|rank| rank + 1);
+    let observed_rank = observed_top_rank.unwrap_or_else(|| {
+        logits
+            .iter()
+            .filter(|&&logit| logit >= observed_logit)
+            .count()
+    });
+
+    // vLLM inserts the observed token first and then its top-K alternatives.
+    // A duplicate observed token in top-K overwrites the value at the same key;
+    // represent that final distinct-token result directly here.
+    let mut entries = Vec::with_capacity(top_k + usize::from(observed_top_rank.is_none()));
+    entries.push(CompactPromptLogprobEntry {
+        token_id: observed_token_id,
+        logprob: observed_logprob,
+        rank: observed_rank,
+    });
+    for (rank, (token_id, _)) in pairs.into_iter().enumerate() {
+        if token_id != observed_token_id {
+            entries.push(CompactPromptLogprobEntry {
+                token_id,
+                logprob: logprobs[token_id as usize],
                 rank: rank + 1,
-                decoded_token: decode_prompt_logprob_token(token_id, &mut *decode_token)?,
+            });
+        }
+    }
+
+    let expected_len = top_k + usize::from(observed_top_rank.is_none());
+    if entries.len() != expected_len {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "prompt-logprobs selection returned {} distinct candidates instead of {expected_len}",
+            entries.len()
+        )));
+    }
+    Ok(CompactPromptLogprobSelection { entries })
+}
+
+fn prompt_logprob_map_from_selection(
+    state: &AppState,
+    selection: &CompactPromptLogprobSelection,
+    preceding_actual_ids: &[TokenId],
+) -> Result<PromptLogprobMap, ApiError> {
+    let mut decode_token = |token_id, context: &[TokenId]| {
+        state
+            .tokenizer
+            .decode_token_for_display_with_context(token_id, context)
+    };
+    prompt_logprob_map_from_selection_with_decoder(
+        selection,
+        preceding_actual_ids,
+        &mut decode_token,
+    )
+}
+
+fn prompt_logprob_map_from_selection_with_decoder(
+    selection: &CompactPromptLogprobSelection,
+    preceding_actual_ids: &[TokenId],
+    decode_token: &mut impl FnMut(TokenId, &[TokenId]) -> Result<String, TokenizerError>,
+) -> Result<PromptLogprobMap, ApiError> {
+    let mut out = BTreeMap::new();
+    for entry in &selection.entries {
+        out.insert(
+            entry.token_id.to_string(),
+            PromptLogprobEntry {
+                logprob: entry.logprob,
+                rank: entry.rank,
+                decoded_token: decode_prompt_logprob_token(
+                    entry.token_id,
+                    preceding_actual_ids,
+                    &mut *decode_token,
+                )?,
             },
         );
     }
-    if out.len() != top_k {
+    if out.len() != selection.entries.len() {
         return Err(ApiError::generation_failed(anyhow::anyhow!(
-            "prompt-logprobs selection returned {} distinct candidates instead of the requested {top_k}",
-            out.len()
+            "prompt-logprobs rendering collapsed distinct token ids"
         )));
     }
     Ok(out)
 }
 
-fn prompt_logprobs_from_rows(
+fn prompt_logprobs_from_selections(
     state: &AppState,
     prompt_tokens: &[TokenId],
-    logprob_rows: &[Vec<f32>],
-    top_k: usize,
+    selections: &[CompactPromptLogprobSelection],
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<Vec<Option<PromptLogprobMap>>, ApiError> {
-    if logprob_rows.len() != prompt_tokens.len() {
+    let expected_selections = prompt_tokens.len().saturating_sub(1);
+    if selections.len() != expected_selections {
         return Err(ApiError::generation_failed(anyhow::anyhow!(
-            "prompt-logprobs row count {} did not match prompt token count {}",
-            logprob_rows.len(),
-            prompt_tokens.len()
+            "prompt-logprobs selection count {} did not match scored prompt position count {expected_selections}",
+            selections.len()
         )));
     }
 
+    let mut out = Vec::with_capacity(prompt_tokens.len());
+    out.push(None);
+    for (selection_index, selection) in selections.iter().enumerate() {
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Err(ApiError::request_timeout(state.request_timeout.as_secs()));
+        }
+        let prompt_position = selection_index + 1;
+        out.push(Some(prompt_logprob_map_from_selection(
+            state,
+            selection,
+            &prompt_tokens[..prompt_position],
+        )?));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+fn prompt_logprobs_from_rows(
+    state: &AppState,
+    prompt_tokens: &[TokenId],
+    logit_rows: &[Vec<f32>],
+    logprob_rows: &[Vec<f32>],
+    top_k: usize,
+) -> Result<Vec<Option<PromptLogprobMap>>, ApiError> {
+    let expected_rows = prompt_tokens.len().saturating_sub(1);
+    if logit_rows.len() != expected_rows || logprob_rows.len() != expected_rows {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "prompt-logprobs logits/log-probability row counts {}/{} did not match scored prompt position count {expected_rows}",
+            logit_rows.len(),
+            logprob_rows.len()
+        )));
+    }
+
+    let validated_logits = logit_rows
+        .iter()
+        .map(|row| validate_prompt_logprob_row(row, state.model_config.vocab_size))
+        .collect::<Result<Vec<_>, _>>()?;
     let validated_rows = logprob_rows
         .iter()
         .map(|row| validate_prompt_logprob_row(row, state.model_config.vocab_size))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut out = Vec::with_capacity(prompt_tokens.len());
-    out.push(None);
+    let mut selections = Vec::with_capacity(prompt_tokens.len().saturating_sub(1));
     for pos in 1..prompt_tokens.len() {
-        out.push(Some(top_k_logprob_map(
-            state,
+        selections.push(select_prompt_logprobs_from_validated_rows(
+            validated_logits[pos - 1],
             validated_rows[pos - 1],
+            prompt_tokens[pos],
             top_k,
-        )?));
+        )?);
     }
-    Ok(out)
+    prompt_logprobs_from_selections(state, prompt_tokens, &selections, None)
 }
 
 fn mock_prompt_logprobs(
@@ -4825,25 +5083,399 @@ fn mock_prompt_logprobs(
     top_k: usize,
 ) -> Result<Vec<Option<PromptLogprobMap>>, ApiError> {
     let vocab_size = state.model_config.vocab_size.max(1);
-    let mut out = Vec::with_capacity(prompt_tokens.len());
-    out.push(None);
+    let mut selections = Vec::with_capacity(prompt_tokens.len().saturating_sub(1));
     for pos in 1..prompt_tokens.len() {
-        let mut map = BTreeMap::new();
-        for rank in 0..top_k {
-            let token_id = prompt_tokens[pos].wrapping_add(rank as u32) as usize % vocab_size;
-            let token_id = token_id as TokenId;
-            map.insert(
-                token_id.to_string(),
-                PromptLogprobEntry {
-                    logprob: -(rank as f32),
+        // The mock distribution is score-descending in token-id order:
+        // logprob(token_id) = -token_id. This keeps behavior deterministic
+        // while exercising the same K/K+1 observed-token rule as real models.
+        let observed_token_id = prompt_tokens[pos];
+        let observed_in_top_k = (observed_token_id as usize) < top_k;
+        let mut entries = Vec::with_capacity(top_k + usize::from(!observed_in_top_k));
+        entries.push(CompactPromptLogprobEntry {
+            token_id: observed_token_id,
+            logprob: -(observed_token_id as f32),
+            rank: observed_token_id as usize + 1,
+        });
+        for rank in 0..top_k.min(vocab_size) {
+            let token_id = rank as TokenId;
+            if token_id != observed_token_id {
+                entries.push(CompactPromptLogprobEntry {
+                    token_id,
+                    logprob: -(token_id as f32),
                     rank: rank + 1,
-                    decoded_token: decoded_token_for_logprob(state, token_id)?,
-                },
+                });
+            }
+        }
+        selections.push(CompactPromptLogprobSelection { entries });
+    }
+    prompt_logprobs_from_selections(state, prompt_tokens, &selections, None)
+}
+
+fn prompt_logprob_tensor_rows_to_f32(
+    tensor: &kiln_tensor::Tensor,
+) -> anyhow::Result<Vec<Vec<f32>>> {
+    match tensor.dtype() {
+        kiln_tensor::DType::F32 => tensor.to_vec2::<f32>(),
+        kiln_tensor::DType::BF16 => tensor.to_vec2::<half::bf16>().map(|rows| {
+            rows.into_iter()
+                .map(|row| row.into_iter().map(half::bf16::to_f32).collect())
+                .collect()
+        }),
+        kiln_tensor::DType::F16 => tensor.to_vec2::<half::f16>().map(|rows| {
+            rows.into_iter()
+                .map(|row| row.into_iter().map(half::f16::to_f32).collect())
+                .collect()
+        }),
+        dtype => anyhow::bail!("prompt-logprobs logits had unsupported dtype {dtype}"),
+    }
+    .context("prompt-logprobs tensor rows to F32 host values")
+}
+
+fn ensure_prompt_logprob_scoring_active(cancel: &CancelHandle) -> anyhow::Result<()> {
+    if cancel.is_cancelled() {
+        anyhow::bail!("prompt-logprobs scoring cancelled");
+    }
+    Ok(())
+}
+
+async fn validate_prompt_logprob_runner_admission(
+    runner: &std::sync::RwLock<ModelRunner>,
+    deadline: tokio::time::Instant,
+    timeout: std::time::Duration,
+) -> Result<(), ApiError> {
+    loop {
+        match runner.try_read() {
+            Ok(runner_guard) => {
+                runner_guard
+                    .ensure_backend_healthy()
+                    .map_err(ApiError::generation_failed)?;
+                if runner_guard.active_lora().is_some() {
+                    return Err(ApiError::completion_invalid_request(
+                        "prompt-logprobs scoring is base-model only until adapter revision identity is pinned; unload the active adapter",
+                    ));
+                }
+                return Ok(());
+            }
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                return Err(ApiError::internal(format!(
+                    "prompt-logprobs runner lock poisoned: {error}"
+                )));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(ApiError::request_timeout(timeout.as_secs()));
+        }
+        tokio::time::sleep_until(std::cmp::min(
+            deadline,
+            now + std::time::Duration::from_millis(1),
+        ))
+        .await;
+    }
+}
+
+fn prompt_logprob_runner_read<'a>(
+    runner: &'a std::sync::RwLock<ModelRunner>,
+    cancel: &CancelHandle,
+) -> anyhow::Result<std::sync::RwLockReadGuard<'a, ModelRunner>> {
+    loop {
+        ensure_prompt_logprob_scoring_active(cancel)?;
+        match runner.try_read() {
+            Ok(runner_guard) => return Ok(runner_guard),
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                anyhow::bail!("prompt-logprobs runner lock poisoned: {error}")
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+}
+
+struct PromptLogprobWorkerOwnership {
+    _gpu_guard: tokio::sync::OwnedRwLockWriteGuard<()>,
+    linear_state: Option<kiln_model::forward::LinearAttentionState>,
+    normalized_hidden: Option<kiln_tensor::Tensor>,
+    hidden_chunk: Option<kiln_tensor::Tensor>,
+    logits: Option<kiln_tensor::Tensor>,
+    cpu_logits: Option<kiln_tensor::Tensor>,
+    logits_2d: Option<kiln_tensor::Tensor>,
+    log_probs: Option<kiln_tensor::Tensor>,
+    log_probs_2d: Option<kiln_tensor::Tensor>,
+}
+
+impl PromptLogprobWorkerOwnership {
+    fn new(gpu_guard: tokio::sync::OwnedRwLockWriteGuard<()>) -> Self {
+        Self {
+            _gpu_guard: gpu_guard,
+            linear_state: None,
+            normalized_hidden: None,
+            hidden_chunk: None,
+            logits: None,
+            cpu_logits: None,
+            logits_2d: None,
+            log_probs: None,
+            log_probs_2d: None,
+        }
+    }
+
+    fn clear_completed_chunk(&mut self) {
+        self.log_probs_2d = None;
+        self.log_probs = None;
+        self.logits_2d = None;
+        self.cpu_logits = None;
+        self.logits = None;
+        self.hidden_chunk = None;
+    }
+}
+
+fn run_prompt_logprob_worker_with_panic_fence<T, O>(
+    backend_health: &kiln_model::BackendHealthHandle,
+    mut ownership: O,
+    work: impl FnOnce(&mut O) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&mut ownership))) {
+        Ok(result) => {
+            if backend_health.snapshot().quarantined {
+                std::mem::forget(ownership);
+            }
+            result
+        }
+        Err(_) => {
+            let reason = "prompt-logprobs scorer or settlement panicked; backend completion and GPU ownership are unknown";
+            backend_health.quarantine(reason);
+            std::mem::forget(ownership);
+            Err(anyhow::anyhow!(reason))
+        }
+    }
+}
+
+fn score_real_prompt_logprob_rows(
+    runner: &ModelRunner,
+    prompt_tokens: &[TokenId],
+    scored_tokens: &[TokenId],
+    expected_vocab_size: usize,
+    top_k: usize,
+    cancel: &CancelHandle,
+    ownership: &mut PromptLogprobWorkerOwnership,
+) -> anyhow::Result<Vec<CompactPromptLogprobSelection>> {
+    runner.ensure_backend_healthy()?;
+    if runner.active_lora().is_some() {
+        anyhow::bail!("prompt-logprobs active adapter changed after base-model admission");
+    }
+
+    let device = runner.weights.device_kt();
+    let backend = runner.backend_runtime();
+    ownership.linear_state = Some(
+        kiln_model::forward::LinearAttentionState::new_with_batch_for_inference_runtime(
+            &runner.config,
+            1,
+            &device,
+            backend,
+        )?,
+    );
+    let normalized_hidden = kiln_model::forward::model_forward_no_head(
+        backend,
+        scored_tokens,
+        &runner.weights,
+        &runner.config,
+        ownership.linear_state.as_mut(),
+        None,
+    )
+    .context("prompt-logprobs forward pass")?;
+    ownership.normalized_hidden = Some(normalized_hidden);
+    ensure_prompt_logprob_scoring_active(cancel)?;
+
+    let (batch_size, scored_sequence_len, hidden_size) = ownership
+        .normalized_hidden
+        .as_ref()
+        .context("prompt-logprobs normalized hidden owner missing")?
+        .dims3()
+        .context("prompt-logprobs normalized hidden shape")?;
+    if batch_size != 1
+        || scored_sequence_len != scored_tokens.len()
+        || hidden_size != runner.config.hidden_size
+    {
+        anyhow::bail!(
+            "prompt-logprobs normalized hidden shape {:?} did not match expected [1, {}, {}]",
+            ownership
+                .normalized_hidden
+                .as_ref()
+                .context("prompt-logprobs normalized hidden owner missing")?
+                .dims(),
+            scored_tokens.len(),
+            runner.config.hidden_size
+        );
+    }
+
+    let mut selections = Vec::with_capacity(scored_sequence_len);
+    let mut validated_row_count = 0usize;
+    let projection_chunk_tokens = prompt_logprob_projection_chunk_tokens(expected_vocab_size);
+    for chunk_start in (0..scored_sequence_len).step_by(projection_chunk_tokens) {
+        ensure_prompt_logprob_scoring_active(cancel)?;
+        let chunk_len = (scored_sequence_len - chunk_start).min(projection_chunk_tokens);
+        ownership.hidden_chunk = Some(
+            ownership
+                .normalized_hidden
+                .as_ref()
+                .context("prompt-logprobs normalized hidden owner missing")?
+                .narrow(1, chunk_start, chunk_len)
+                .context("prompt-logprobs narrow normalized hidden chunk")?
+                .contiguous()
+                .context("prompt-logprobs normalized hidden chunk contiguous")?,
+        );
+        ownership.logits = Some(
+            kiln_model::forward::model_forward_project_normalized_hidden(
+                backend,
+                ownership
+                    .hidden_chunk
+                    .as_ref()
+                    .context("prompt-logprobs hidden chunk owner missing")?,
+                &runner.weights,
+            )
+            .with_context(|| {
+                format!(
+                    "prompt-logprobs LM-head projection for rows {chunk_start}..{}",
+                    chunk_start + chunk_len
+                )
+            })?,
+        );
+        let expected_logits_shape = [1, chunk_len, expected_vocab_size];
+        let logits = ownership
+            .logits
+            .as_ref()
+            .context("prompt-logprobs logits owner missing")?;
+        if logits.dims() != expected_logits_shape {
+            anyhow::bail!(
+                "prompt-logprobs logits shape {:?} did not match expected {:?}",
+                logits.dims(),
+                expected_logits_shape
             );
         }
-        out.push(Some(map));
+
+        // Selection and full rank use original logits. F32 log-softmax
+        // values can collapse distinct far-tail logits after the LSE
+        // subtraction, so ranking the rendered values is not equivalent.
+        // Vulkan's log-softmax is host-backed; keep that result on CPU
+        // instead of bouncing it back to the device and immediately out.
+        let host_logit_rows = if matches!(logits.device(), kiln_tensor::Device::Vulkan(_)) {
+            ownership.cpu_logits = Some(
+                logits
+                    .to_device(kiln_tensor::Device::Cpu)
+                    .context("prompt-logprobs Vulkan logits to host")?,
+            );
+            ownership.logits_2d = Some(
+                ownership
+                    .cpu_logits
+                    .as_ref()
+                    .context("prompt-logprobs CPU logits owner missing")?
+                    .squeeze(0)
+                    .context("prompt-logprobs squeeze CPU logits batch dim")?,
+            );
+            let host_rows = prompt_logprob_tensor_rows_to_f32(
+                ownership
+                    .logits_2d
+                    .as_ref()
+                    .context("prompt-logprobs logits view owner missing")?,
+            )?;
+            ownership.log_probs = Some(
+                kiln_tensor::ops::log_softmax_last_dim_f32(
+                    ownership
+                        .cpu_logits
+                        .as_ref()
+                        .context("prompt-logprobs CPU logits owner missing")?,
+                )
+                .context("prompt-logprobs host log_softmax_last_dim_f32")?,
+            );
+            host_rows
+        } else {
+            ownership.logits_2d = Some(
+                logits
+                    .squeeze(0)
+                    .context("prompt-logprobs squeeze logits batch dim")?,
+            );
+            let host_rows = prompt_logprob_tensor_rows_to_f32(
+                ownership
+                    .logits_2d
+                    .as_ref()
+                    .context("prompt-logprobs logits view owner missing")?,
+            )?;
+            ownership.log_probs = Some(
+                kiln_tensor::ops::log_softmax_last_dim_f32(logits)
+                    .context("prompt-logprobs log_softmax_last_dim_f32")?,
+            );
+            host_rows
+        };
+        let log_probs = ownership
+            .log_probs
+            .as_ref()
+            .context("prompt-logprobs log-probability owner missing")?;
+        if log_probs.dims() != expected_logits_shape || log_probs.dtype() != kiln_tensor::DType::F32
+        {
+            anyhow::bail!(
+                "prompt-logprobs F32 log-softmax produced shape {:?} and dtype {:?}; expected {:?} and F32",
+                log_probs.dims(),
+                log_probs.dtype(),
+                expected_logits_shape
+            );
+        }
+        ownership.log_probs_2d = Some(
+            log_probs
+                .squeeze(0)
+                .context("prompt-logprobs squeeze log-probability batch dim")?,
+        );
+        let host_logprob_rows = ownership
+            .log_probs_2d
+            .as_ref()
+            .context("prompt-logprobs log-probability view owner missing")?
+            .to_vec2::<f32>()
+            .context("prompt-logprobs F32 chunk to host")?;
+
+        ensure_prompt_logprob_scoring_active(cancel)?;
+
+        if host_logit_rows.len() != chunk_len || host_logprob_rows.len() != chunk_len {
+            anyhow::bail!(
+                "prompt-logprobs host chunks returned logits/log-probability row counts {}/{} instead of {chunk_len}",
+                host_logit_rows.len(),
+                host_logprob_rows.len()
+            );
+        }
+        for (chunk_row, (logit_row, logprob_row)) in
+            host_logit_rows.iter().zip(&host_logprob_rows).enumerate()
+        {
+            ensure_prompt_logprob_scoring_active(cancel)?;
+            let global_row = chunk_start + chunk_row;
+            let validated_logits = validate_prompt_logprob_row(logit_row, expected_vocab_size)
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            let validated_logprobs = validate_prompt_logprob_row(logprob_row, expected_vocab_size)
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            selections.push(
+                select_prompt_logprobs_from_validated_rows(
+                    validated_logits,
+                    validated_logprobs,
+                    prompt_tokens[global_row + 1],
+                    top_k,
+                )
+                .map_err(|error| anyhow::anyhow!(error.message))?,
+            );
+            validated_row_count += 1;
+        }
+        // Host readback proves the requested values are available, but the
+        // backend may own auxiliary stream/cache work. Use the repository's
+        // explicit external-yield fence before dropping this chunk's device
+        // owners and reusing their bounded memory budget.
+        runner.synchronize_external_yield("prompt-logprobs projection chunk")?;
+        ownership.clear_completed_chunk();
     }
-    Ok(out)
+
+    if validated_row_count != scored_sequence_len {
+        anyhow::bail!(
+            "prompt-logprobs validated {validated_row_count} rows instead of {scored_sequence_len}"
+        );
+    }
+    Ok(selections)
 }
 
 async fn real_prompt_logprobs(
@@ -4852,58 +5484,92 @@ async fn real_prompt_logprobs(
     prompt_tokens: &[TokenId],
     top_k: usize,
 ) -> Result<Vec<Option<PromptLogprobMap>>, ApiError> {
+    if prompt_tokens.len() == 1 {
+        return Ok(vec![None]);
+    }
+
+    let timeout = state.request_timeout;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let cancel = CancelHandle::new();
+    let _cancel_on_drop = CancelOnDrop::new(cancel.clone());
+    let backend_health = match state.backend.as_ref() {
+        ModelBackend::Real { backend_health, .. } => backend_health.clone(),
+        ModelBackend::Mock { .. } => {
+            return Err(ApiError::internal(
+                "real prompt-logprobs scorer received the mock backend",
+            ));
+        }
+    };
+    backend_health
+        .ensure_healthy()
+        .map_err(ApiError::backend_quarantined)?;
+    validate_prompt_logprob_runner_admission(runner, deadline, timeout).await?;
+    // Prompt scoring performs a full prefill plus vocabulary-wide projection.
+    // Take exclusive GPU admission so concurrent scoring/generation/training
+    // cannot multiply its bounded scratch residency into an OOM or a visible
+    // mid-inference allocator stall.
+    let gpu_guard = tokio::time::timeout_at(deadline, state.gpu_lock.clone().write_owned())
+        .await
+        .map_err(|_| ApiError::request_timeout(timeout.as_secs()))?;
+
     let runner = runner.clone();
     let prompt_tokens_owned = prompt_tokens.to_vec();
-    let gpu_lock = state.gpu_lock.clone();
-    let timeout = state.request_timeout;
-    let handle = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Vec<f32>>> {
-        let _gpu_guard = gpu_coordination_read_guard(&gpu_lock);
-        let runner_guard = runner.read().unwrap();
-        runner_guard.ensure_backend_healthy()?;
-        // #1082 candle-drop: candle `model_forward` was removed; route through
-        // the kt-native `model_forward_kt`, which returns a kt
-        // `kiln_tensor::Tensor` and serves every backend (CPU/Metal/Vulkan/CUDA)
-        // — it is the sole forward entry now. The old candle device bridge
-        // (`candle_device_from_kt`) and candle log-softmax math are gone; the
-        // whole path is kt.
-        let device_kt = runner_guard.weights.device_kt();
-        let backend = kiln_model::backend::for_device_kt(&device_kt);
-        let mut linear_state =
-            kiln_model::forward::LinearAttentionState::new(&runner_guard.config, &device_kt)?;
-        let logits = kiln_model::forward::model_forward_kt(
-            &*backend,
-            &prompt_tokens_owned,
-            &runner_guard.weights,
-            &runner_guard.config,
-            None,
-            Some(&mut linear_state),
-            runner_guard.active_lora(),
-        )
-        .context("prompt-logprobs forward pass")?;
-        // log-softmax over the trailing vocab axis via the kt op (numerically
-        // stable, with both CUDA and CPU/Metal fallbacks — replaces the inlined
-        // candle `log_sum_exp`/`unsqueeze`/`broadcast_as`/`sub` math). Logits
-        // are `[1, seq_len, vocab]`; squeeze the batch dim, force F32, copy to
-        // host. (#1082 candle-drop)
-        let log_probs = kiln_tensor::ops::log_softmax_last_dim(&logits)
-            .context("prompt-logprobs log_softmax_last_dim")?;
-        let log_probs_2d = log_probs
-            .squeeze(0)
-            .context("prompt-logprobs squeeze batch dim")?
-            .to_dtype(kiln_tensor::DType::F32)
-            .context("prompt-logprobs to_dtype f32")?;
-        log_probs_2d
-            .to_vec2::<f32>()
-            .context("prompt-logprobs to host")
-    });
+    let scored_tokens = prompt_tokens[..prompt_tokens.len() - 1].to_vec();
+    let expected_vocab_size = state.model_config.vocab_size;
+    let cancel_inner = cancel.clone();
+    let worker_backend_health = backend_health.clone();
+    let handle = tokio::task::spawn_blocking(
+        move || -> anyhow::Result<Vec<CompactPromptLogprobSelection>> {
+            run_prompt_logprob_worker_with_panic_fence(
+                &worker_backend_health,
+                PromptLogprobWorkerOwnership::new(gpu_guard),
+                |ownership| {
+                    ensure_prompt_logprob_scoring_active(&cancel_inner)?;
+                    let runner_guard = prompt_logprob_runner_read(&runner, &cancel_inner)?;
+                    let scoring_result = score_real_prompt_logprob_rows(
+                        &runner_guard,
+                        &prompt_tokens_owned,
+                        &scored_tokens,
+                        expected_vocab_size,
+                        top_k,
+                        &cancel_inner,
+                        ownership,
+                    );
 
-    let rows = match tokio::time::timeout(timeout, handle).await {
-        Ok(Ok(Ok(rows))) => rows,
+                    // Every ordinary result, including cancellation and
+                    // validation failure, must settle submitted backend work
+                    // before exclusive admission becomes reusable.
+                    let synchronized =
+                        runner_guard.synchronize_external_yield("prompt-logprobs scoring");
+                    drop(runner_guard);
+                    synchronized?;
+                    scoring_result
+                },
+            )
+        },
+    );
+
+    tokio::pin!(handle);
+    let selections = match tokio::time::timeout_at(deadline, &mut handle).await {
+        Ok(Ok(Ok(selections))) => selections,
         Ok(Ok(Err(err))) => return Err(ApiError::generation_failed(err)),
-        Ok(Err(err)) => return Err(ApiError::internal(format!("join error: {err}"))),
-        Err(_) => return Err(ApiError::request_timeout(timeout.as_secs())),
+        Ok(Err(err)) => {
+            backend_health.quarantine(format!(
+                "prompt-logprobs blocking worker terminated without settlement: {err}"
+            ));
+            return Err(ApiError::internal(format!("join error: {err}")));
+        }
+        Err(_) => {
+            cancel.cancel();
+            if let Err(err) = handle.await {
+                backend_health.quarantine(format!(
+                    "timed-out prompt-logprobs worker terminated without settlement: {err}"
+                ));
+            }
+            return Err(ApiError::request_timeout(timeout.as_secs()));
+        }
     };
-    prompt_logprobs_from_rows(state, prompt_tokens, &rows, top_k)
+    prompt_logprobs_from_selections(state, prompt_tokens, &selections, Some(deadline))
 }
 
 async fn chat_completions_inner(
@@ -10490,6 +11156,14 @@ mod tests {
     use crate::config::SpecMethod;
     use kiln_core::config::ModelConfig;
 
+    struct PromptLogprobDropProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for PromptLogprobDropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     fn parse_request(json: &str) -> ChatCompletionRequest {
         serde_json::from_str(json).expect("request should deserialize")
     }
@@ -13595,7 +14269,7 @@ mod tests {
     #[tokio::test]
     async fn completions_prompt_logprobs_accepts_token_id_prompt() {
         let body = serde_json::json!({
-            "model": "Qwen3.5-4B",
+            "model": "kiln-test",
             "prompt": [11, 22, 33],
             "max_tokens": 1,
             "temperature": 0.0,
@@ -13611,8 +14285,12 @@ mod tests {
         let prompt_logprobs = json["choices"][0]["prompt_logprobs"].as_array().unwrap();
         assert_eq!(prompt_logprobs.len(), 3);
         assert!(prompt_logprobs[0].is_null());
-        assert_eq!(prompt_logprobs[1].as_object().unwrap().len(), 3);
-        assert_eq!(prompt_logprobs[2].as_object().unwrap().len(), 3);
+        // Mock top-3 is token IDs 0, 1, 2. Actual prompt tokens 22 and 33
+        // are outside top-K, so vLLM compatibility requires K+1 entries.
+        assert_eq!(prompt_logprobs[1].as_object().unwrap().len(), 4);
+        assert_eq!(prompt_logprobs[2].as_object().unwrap().len(), 4);
+        assert_eq!(prompt_logprobs[1]["22"]["rank"], 23);
+        assert_eq!(prompt_logprobs[2]["33"]["rank"], 34);
         assert!(
             prompt_logprobs[1]
                 .as_object()
@@ -13622,15 +14300,62 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn completions_prompt_logprobs_zero_returns_only_observed_tokens() {
+        let body = serde_json::json!({
+            "prompt": [11, 22, 33],
+            "max_tokens": 0,
+            "prompt_logprobs": 0
+        })
+        .to_string();
+
+        let (status, json) = completion_post(make_prompt_logprobs_test_state(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{json}");
+        let prompt_logprobs = json["choices"][0]["prompt_logprobs"].as_array().unwrap();
+        assert!(prompt_logprobs[0].is_null());
+        assert_eq!(prompt_logprobs[1].as_object().unwrap().len(), 1);
+        assert_eq!(prompt_logprobs[2].as_object().unwrap().len(), 1);
+        assert_eq!(prompt_logprobs[1]["22"]["rank"], 23);
+        assert_eq!(prompt_logprobs[2]["33"]["rank"], 34);
+    }
+
+    #[tokio::test]
+    async fn mock_prompt_logprobs_obeys_k_or_k_plus_one_cardinality() {
+        let body = serde_json::json!({
+            "prompt": [9, 1, 4],
+            "max_tokens": 1,
+            "prompt_logprobs": 2
+        })
+        .to_string();
+
+        let (status, json) = completion_post(make_prompt_logprobs_test_state(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{json}");
+        let prompt_logprobs = json["choices"][0]["prompt_logprobs"].as_array().unwrap();
+        // Actual token 1 is top-2; actual token 4 is not.
+        assert_eq!(prompt_logprobs[1].as_object().unwrap().len(), 2);
+        assert_eq!(prompt_logprobs[1]["1"]["rank"], 2);
+        assert_eq!(prompt_logprobs[2].as_object().unwrap().len(), 3);
+        assert_eq!(prompt_logprobs[2]["4"]["rank"], 5);
+    }
+
     #[test]
     fn prompt_logprob_map_propagates_token_decode_failure() {
         let mut attempted_token_ids = Vec::new();
-        let err = top_k_logprob_map_with_decoder(&[-2.0, -0.5, -1.0], 3, 2, |token_id| {
-            attempted_token_ids.push(token_id);
-            Err(TokenizerError::Decode(
-                "injected decode failure".to_string(),
-            ))
-        })
+        let err = top_k_logprob_map_with_decoder(
+            &[-2.0, -0.5, -1.0],
+            &[-2.0, -0.5, -1.0],
+            3,
+            1,
+            2,
+            &[7, 8],
+            |token_id, context| {
+                assert_eq!(context, &[7, 8]);
+                attempted_token_ids.push(token_id);
+                Err(TokenizerError::Decode(
+                    "injected decode failure".to_string(),
+                ))
+            },
+        )
         .unwrap_err();
 
         assert_eq!(attempted_token_ids, vec![1]);
@@ -13644,7 +14369,7 @@ mod tests {
     fn prompt_logprob_map_rejects_non_model_vocab_width_before_decode() {
         for row in [vec![-1.0; 3], vec![-1.0; 5]] {
             let mut decode_attempts = 0;
-            let err = top_k_logprob_map_with_decoder(&row, 4, 2, |_| {
+            let err = top_k_logprob_map_with_decoder(&row, &row, 4, 0, 2, &[], |_, _| {
                 decode_attempts += 1;
                 Ok("unused".to_string())
             })
@@ -13664,7 +14389,7 @@ mod tests {
             // This position is outside top-1 for both finite and -Inf values.
             row[3] = value;
             let mut decode_attempts = 0;
-            let err = top_k_logprob_map_with_decoder(&row, 4, 1, |_| {
+            let err = top_k_logprob_map_with_decoder(&row, &row, 4, 0, 1, &[], |_, _| {
                 decode_attempts += 1;
                 Ok("unused".to_string())
             })
@@ -13678,18 +14403,30 @@ mod tests {
     }
 
     #[test]
-    fn prompt_logprob_map_ties_are_token_id_ordered_and_exactly_cardinal() {
+    fn prompt_logprob_map_ties_are_token_id_ordered_and_keep_duplicate_displays() {
         let row = [0.0, -0.0, -0.25, -0.25, -1.0];
 
         for top_k in 1..=row.len() {
-            let map = top_k_logprob_map_with_decoder(&row, row.len(), top_k, |_| {
-                Ok("same-display-token".to_string())
-            })
+            let map = top_k_logprob_map_with_decoder(
+                &row,
+                &row,
+                row.len(),
+                4,
+                top_k,
+                &[99],
+                |_, context| {
+                    assert_eq!(context, &[99]);
+                    Ok("same-display-token".to_string())
+                },
+            )
             .unwrap();
-            assert_eq!(map.len(), top_k);
+            let expected_len = top_k + usize::from(top_k < row.len());
+            assert_eq!(map.len(), expected_len);
+            assert_eq!(map["4"].rank, 5);
 
             let mut ranked = map
                 .iter()
+                .filter(|(token_id, _)| token_id.as_str() != "4")
                 .map(|(token_id, entry)| {
                     assert_eq!(entry.decoded_token, "same-display-token");
                     (entry.rank, token_id.parse::<TokenId>().unwrap())
@@ -13698,10 +14435,10 @@ mod tests {
             ranked.sort_unstable();
             assert_eq!(
                 ranked.iter().map(|(rank, _)| *rank).collect::<Vec<_>>(),
-                (1..=top_k).collect::<Vec<_>>()
+                (1..=top_k.min(4)).collect::<Vec<_>>()
             );
 
-            let expected_ids = [0, 1, 2, 3, 4][..top_k].to_vec();
+            let expected_ids = [0, 1, 2, 3][..top_k.min(4)].to_vec();
             assert_eq!(
                 ranked
                     .into_iter()
@@ -13713,16 +14450,202 @@ mod tests {
     }
 
     #[test]
-    fn prompt_logprob_rows_validate_the_unused_final_forward_row() {
+    fn prompt_logprob_observed_rank_is_ordinal_in_topk_and_full_rank_when_extra() {
+        let row = [0.0, -0.25, -0.25, -0.25, -1.0];
+
+        let selected_tie =
+            top_k_logprob_map_with_decoder(&row, &row, row.len(), 1, 2, &[], |token_id, _| {
+                Ok(format!("token-{token_id}"))
+            })
+            .unwrap();
+        assert_eq!(selected_tie.len(), 2);
+        assert_eq!(selected_tie["0"].rank, 1);
+        // Token-ID tie breaking selects token 1 and its full tie rank is
+        // overwritten by the top-K ordinal, matching vLLM's dictionary result.
+        assert_eq!(selected_tie["1"].rank, 2);
+
+        let extra_tie =
+            top_k_logprob_map_with_decoder(&row, &row, row.len(), 3, 2, &[], |token_id, _| {
+                Ok(format!("token-{token_id}"))
+            })
+            .unwrap();
+        assert_eq!(extra_tie.len(), 3);
+        // Four values are >= token 3's value: token IDs 0, 1, 2, and 3.
+        assert_eq!(extra_tie["3"].rank, 4);
+    }
+
+    #[test]
+    fn prompt_logprob_selection_ranks_logits_before_f32_logsoftmax_collapse() {
+        // Subtracting this large LSE in F32 collapses distinct tail logits 9
+        // and 8 to the same log-probability. vLLM selects and ranks from the
+        // original logits, then attaches the selected F32 log-probabilities.
+        let logits = [33_554_432.0, 10.0, 9.0, 8.0];
+        let logprobs = [0.0, -33_554_422.0, -33_554_424.0, -33_554_424.0];
+        let observed = top_k_logprob_map_with_decoder(
+            &logits,
+            &logprobs,
+            logits.len(),
+            2,
+            1,
+            &[],
+            |token_id, _| Ok(format!("token-{token_id}")),
+        )
+        .unwrap();
+        assert_eq!(observed["2"].rank, 3);
+        assert_eq!(observed["2"].logprob, logprobs[2]);
+
+        let reordered_logits = [33_554_432.0, 10.0, 8.0, 9.0];
+        let selected = top_k_logprob_map_with_decoder(
+            &reordered_logits,
+            &logprobs,
+            reordered_logits.len(),
+            0,
+            3,
+            &[],
+            |token_id, _| Ok(format!("token-{token_id}")),
+        )
+        .unwrap();
+        assert!(selected.contains_key("3"));
+        assert!(!selected.contains_key("2"));
+    }
+
+    #[test]
+    fn prompt_logprob_projection_chunks_respect_the_vocabulary_byte_budget() {
+        assert_eq!(prompt_logprob_projection_chunk_tokens(1), 32);
+        assert_eq!(prompt_logprob_projection_chunk_tokens(248_320), 32);
+        assert_eq!(prompt_logprob_projection_chunk_tokens(1_000_000), 8);
+        assert_eq!(prompt_logprob_projection_chunk_tokens(usize::MAX), 1);
+
+        for vocab_size in [1, 151_936, 248_320, 1_000_000] {
+            let rows = prompt_logprob_projection_chunk_tokens(vocab_size);
+            assert!((1..=MAX_PROMPT_LOGPROB_PROJECTION_CHUNK_TOKENS).contains(&rows));
+            assert!(
+                rows * vocab_size * 2 * std::mem::size_of::<f32>()
+                    <= PROMPT_LOGPROB_PROJECTION_BYTE_BUDGET
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_logprob_panic_fence_releases_settled_ownership() {
+        let backend_health = kiln_model::BackendHealthHandle::default();
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let value = run_prompt_logprob_worker_with_panic_fence(
+            &backend_health,
+            PromptLogprobDropProbe(drops.clone()),
+            |_| Ok(7usize),
+        )
+        .unwrap();
+        assert_eq!(value, 7);
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let error = run_prompt_logprob_worker_with_panic_fence(
+            &backend_health,
+            PromptLogprobDropProbe(drops.clone()),
+            |_| Err::<(), _>(anyhow::anyhow!("settled scoring error")),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("settled scoring error"));
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(!backend_health.snapshot().quarantined);
+    }
+
+    #[test]
+    fn prompt_logprob_panic_fence_quarantines_and_retains_unknown_ownership() {
+        let backend_health = kiln_model::BackendHealthHandle::default();
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let error = run_prompt_logprob_worker_with_panic_fence(
+            &backend_health,
+            PromptLogprobDropProbe(drops.clone()),
+            |_| -> anyhow::Result<()> { panic!("injected scorer panic") },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("GPU ownership are unknown"));
+        assert!(backend_health.snapshot().quarantined);
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn prompt_logprob_panic_fence_retains_ownership_after_sync_failure() {
+        let backend_health = kiln_model::BackendHealthHandle::default();
+        let health_for_work = backend_health.clone();
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let error = run_prompt_logprob_worker_with_panic_fence(
+            &backend_health,
+            PromptLogprobDropProbe(drops.clone()),
+            move |_| {
+                health_for_work.quarantine("injected prompt-logprobs sync failure");
+                Err::<(), _>(anyhow::anyhow!("sync failed"))
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("sync failed"));
+        assert!(backend_health.snapshot().quarantined);
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn prompt_logprob_candidates_share_only_preceding_actual_context() {
+        let row = [0.0, -1.0, -2.0, -3.0];
+        let mut calls = Vec::new();
+        let context = [41, 42, 43];
+        let map = top_k_logprob_map_with_decoder(
+            &row,
+            &row,
+            row.len(),
+            3,
+            2,
+            &context,
+            |token_id, received_context| {
+                calls.push((token_id, received_context.to_vec()));
+                Ok(format!("token-{token_id}"))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(map.len(), 3);
+        assert_eq!(calls.len(), 3);
+        assert!(calls.iter().all(|(_, seen)| seen == &context));
+        assert_eq!(
+            calls.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [3, 0, 1]
+        );
+    }
+
+    #[test]
+    fn prompt_logprob_rows_use_previous_row_for_each_observed_prompt_token() {
         let mut state = make_prompt_logprobs_test_state();
         state.model_config.vocab_size = 4;
-        let prompt_tokens = [0, 1];
+        let prompt_tokens = [0, 2, 3];
+        let rows = vec![vec![-0.1, -0.2, -3.0, -0.4], vec![-4.0, -0.1, -0.2, -2.0]];
 
-        for final_row in [vec![-1.0; 3], vec![-1.0, -2.0, f32::NAN, -4.0]] {
-            let rows = vec![vec![-0.1, -0.2, -0.3, -0.4], final_row];
-            let err = prompt_logprobs_from_rows(&state, &prompt_tokens, &rows, 1).unwrap_err();
-            assert_eq!(err.code, "generation_error");
-        }
+        let output = prompt_logprobs_from_rows(&state, &prompt_tokens, &rows, &rows, 1).unwrap();
+        assert!(output[0].is_none());
+        let position_one = output[1].as_ref().unwrap();
+        let position_two = output[2].as_ref().unwrap();
+        assert_eq!(position_one["2"].logprob, -3.0);
+        assert_eq!(position_one["2"].rank, 4);
+        assert_eq!(position_two["3"].logprob, -2.0);
+        assert_eq!(position_two["3"].rank, 3);
+    }
+
+    #[test]
+    fn prompt_logprob_rows_require_only_rows_that_predict_observed_tokens() {
+        let mut state = make_prompt_logprobs_test_state();
+        state.model_config.vocab_size = 4;
+        let one_token = prompt_logprobs_from_rows(&state, &[0], &[], &[], 1).unwrap();
+        assert_eq!(one_token.len(), 1);
+        assert!(one_token[0].is_none());
+
+        let prompt_tokens = [0, 1];
+        let rows = vec![vec![-0.1, -0.2, -0.3, -0.4]];
+        let output = prompt_logprobs_from_rows(&state, &prompt_tokens, &rows, &rows, 1).unwrap();
+        assert_eq!(output.len(), 2);
+        assert!(output[0].is_none());
+        assert!(output[1].is_some());
     }
 
     #[tokio::test]
@@ -13778,6 +14701,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completions_prompt_logprobs_rejects_mismatched_model_identity() {
+        let body = serde_json::json!({
+            "model": "not-the-served-model",
+            "prompt": [11, 22],
+            "max_tokens": 0,
+            "prompt_logprobs": 1
+        })
+        .to_string();
+
+        let (status, json) = completion_post(make_prompt_logprobs_test_state(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "completion_invalid_request");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not served")
+        );
+    }
+
+    #[tokio::test]
+    async fn completions_prompt_logprobs_caps_total_response_candidates() {
+        let tokens = vec![7u32; 300];
+        let body = serde_json::json!({
+            "prompt": tokens,
+            "max_tokens": 0,
+            "prompt_logprobs": MAX_COMPLETION_PROMPT_LOGPROBS
+        })
+        .to_string();
+
+        let (status, json) = completion_post(make_prompt_logprobs_test_state(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "completion_invalid_request");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("candidates")
+        );
+    }
+
+    #[tokio::test]
     async fn completions_prompt_logprobs_rejects_out_of_range_token_ids() {
         let state = make_batch_test_state();
         let vocab_size = state.model_config.vocab_size;
@@ -13818,6 +14783,29 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("capped"),
+            "{json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completions_prompt_logprobs_respects_served_model_context_window() {
+        let mut state = make_prompt_logprobs_test_state();
+        state.model_config.max_position_embeddings = 2;
+        let body = serde_json::json!({
+            "prompt": [11, 22, 33],
+            "max_tokens": 0,
+            "prompt_logprobs": 1
+        })
+        .to_string();
+
+        let (status, json) = completion_post(state, &body).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "context_length_exceeded");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("maximum context length is 2 tokens"),
             "{json}"
         );
     }

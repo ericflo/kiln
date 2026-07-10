@@ -92,6 +92,7 @@ flate2 = { workspace = true }
 filetime = "0.2"
 sha2 = { workspace = true }
 regex = "1"
+half = "2"
 
 [features]
 cuda = ["kiln-model/cuda", "kiln-tensor/cuda", "kiln-train/cuda", "kiln-kt-bridge/cuda"]

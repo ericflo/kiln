@@ -147,7 +147,7 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "completion_invalid_request",
             message: format!("Invalid completion request: {detail}"),
-            hint: "POST /v1/completions with {prompt, prompt_logprobs: K}. The prompt may be a string or a token-id array.",
+            hint: "POST /v1/completions with {prompt, max_tokens: 0, prompt_logprobs: K}. K must be 0..=256; prompt may be text or token IDs; real scoring currently requires the served base model with no active adapter.",
             retry_after_seconds: None,
         }
     }

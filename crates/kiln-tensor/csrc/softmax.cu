@@ -13,8 +13,9 @@
 //   4. out[c] = exp_x[c] / sum
 //
 // All arithmetic in F32 regardless of input dtype (matches the kt
-// "F32 accumulation always" convention). Output is cast back to the
-// input dtype.
+// "F32 accumulation always" convention). The original entry points cast
+// output back to the input dtype; the F32 log-softmax entry point writes
+// F32 directly without an input cast or an intermediate tensor.
 //
 // Log-softmax reuses the same max and exponential-sum reductions but writes
 // `(x - max) - log(sum(exp(x - max)))` directly. It never materializes the
@@ -128,21 +129,21 @@ __global__ void softmax_last_axis_kernel(
     }
 }
 
-template <typename T>
+template <typename InputT, typename OutputT>
 __global__ void log_softmax_last_axis_kernel(
-    const T* __restrict__ x,
-    T* __restrict__ out,
+    const InputT* __restrict__ x,
+    OutputT* __restrict__ out,
     int64_t n_cols) {
     int64_t row = blockIdx.x;
     int tid = threadIdx.x;
     int blk = blockDim.x;
 
-    const T* row_in = x + row * n_cols;
-    T* row_out = out + row * n_cols;
+    const InputT* row_in = x + row * n_cols;
+    OutputT* row_out = out + row * n_cols;
 
     float local_max = -INFINITY;
     for (int64_t c = tid; c < n_cols; c += blk) {
-        float v = to_f32<T>(row_in[c]);
+        float v = to_f32<InputT>(row_in[c]);
         if (v > local_max) local_max = v;
     }
 
@@ -151,7 +152,7 @@ __global__ void log_softmax_last_axis_kernel(
 
     float local_sum = 0.0f;
     for (int64_t c = tid; c < n_cols; c += blk) {
-        float v = to_f32<T>(row_in[c]);
+        float v = to_f32<InputT>(row_in[c]);
         local_sum += expf(v - row_max);
     }
 
@@ -161,8 +162,8 @@ __global__ void log_softmax_last_axis_kernel(
     // Form log-probabilities directly. Unlike softmax-then-log, exp underflow
     // cannot corrupt a log-probability that the output dtype can represent.
     for (int64_t c = tid; c < n_cols; c += blk) {
-        float v = to_f32<T>(row_in[c]);
-        row_out[c] = from_f32<T>((v - row_max) - log_sum);
+        float v = to_f32<InputT>(row_in[c]);
+        row_out[c] = from_f32<OutputT>((v - row_max) - log_sum);
     }
 }
 
@@ -238,21 +239,65 @@ extern "C" int kiln_log_softmax_last_axis_async(
 
     switch (dtype_tag) {
         case 0:
-            log_softmax_last_axis_kernel<float><<<grid, block, 0, stream>>>(
+            log_softmax_last_axis_kernel<float, float><<<grid, block, 0, stream>>>(
                 reinterpret_cast<const float*>(x),
                 reinterpret_cast<float*>(out),
                 n_cols);
             break;
         case 1:
-            log_softmax_last_axis_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
+            log_softmax_last_axis_kernel<__nv_bfloat16, __nv_bfloat16><<<grid, block, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(x),
                 reinterpret_cast<__nv_bfloat16*>(out),
                 n_cols);
             break;
         case 2:
-            log_softmax_last_axis_kernel<__half><<<grid, block, 0, stream>>>(
+            log_softmax_last_axis_kernel<__half, __half><<<grid, block, 0, stream>>>(
                 reinterpret_cast<const __half*>(x),
                 reinterpret_cast<__half*>(out),
+                n_cols);
+            break;
+        default:
+            return -2;
+    }
+    cudaError_t err = cudaGetLastError();
+    return err == cudaSuccess ? 0 : -1;
+}
+
+extern "C" int kiln_log_softmax_last_axis_f32_async(
+    const void* x,
+    void* out,
+    int64_t n_rows,
+    int64_t n_cols,
+    int32_t input_dtype_tag,  // 0=F32, 1=BF16, 2=F16
+    void* stream_raw) {
+    if (n_rows < 0 || n_cols < 0 || n_rows > MAX_GRID_X) return -3;
+    if (n_rows == 0 || n_cols == 0) return 0;
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_raw);
+
+    int threads = 64;
+    while (threads < n_cols && threads < MAX_THREADS) {
+        threads *= 2;
+    }
+    dim3 grid((unsigned int)n_rows);
+    dim3 block(threads);
+
+    switch (input_dtype_tag) {
+        case 0:
+            log_softmax_last_axis_kernel<float, float><<<grid, block, 0, stream>>>(
+                reinterpret_cast<const float*>(x),
+                reinterpret_cast<float*>(out),
+                n_cols);
+            break;
+        case 1:
+            log_softmax_last_axis_kernel<__nv_bfloat16, float><<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(x),
+                reinterpret_cast<float*>(out),
+                n_cols);
+            break;
+        case 2:
+            log_softmax_last_axis_kernel<__half, float><<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __half*>(x),
+                reinterpret_cast<float*>(out),
                 n_cols);
             break;
         default:

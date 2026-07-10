@@ -81,6 +81,65 @@ fn assert_extreme_tail_stays_finite(device: Device) {
     }
 }
 
+fn assert_f32_output_contract(device: Device) {
+    let cases = [
+        (DType::F32, vec![1000.0f32, 0.0, -1000.0], 1e-4),
+        (DType::BF16, vec![100.0f32, 0.0, -100.0], 1e-4),
+        (DType::F16, vec![20.0f32, 0.0, -20.0], 1e-4),
+    ];
+
+    for (dtype, data, tolerance) in cases {
+        let cpu_logits = Tensor::from_slice(&data, vec![1, data.len()])
+            .expect("allocate CPU logits")
+            .to_dtype(dtype)
+            .expect("cast CPU logits");
+        let expected = values_f32(
+            &ops::log_softmax_last_dim_f32(&cpu_logits).expect("CPU F32-output reference"),
+        );
+
+        let logits = Tensor::from_vec_on(device, data.clone(), vec![1, data.len()])
+            .expect("allocate device logits")
+            .to_dtype(dtype)
+            .expect("cast device logits");
+        let output = ops::log_softmax_last_dim_f32(&logits).expect("device F32-output log-softmax");
+        assert_eq!(output.dtype(), DType::F32);
+        assert_eq!(output.device(), device);
+        assert_eq!(output.shape(), logits.shape());
+
+        let values = values_f32(&output);
+        assert!(
+            values.iter().all(|value| value.is_finite()),
+            "{device} {dtype} produced non-finite F32 log-probabilities: {values:?}"
+        );
+        for (got, expected) in values.iter().zip(&expected) {
+            assert!(
+                (got - expected).abs() <= tolerance,
+                "{device} {dtype}: got {got}, expected {expected}; row={values:?}"
+            );
+        }
+    }
+
+    // Uniform BF16 input has an F32 log-softmax value that is not exactly
+    // representable in BF16. This distinguishes a direct F32 kernel output
+    // from a same-dtype result followed by a cast to F32.
+    let input = Tensor::from_vec_on(device, vec![half::bf16::from_f32(0.0); 3], vec![1, 3])
+        .expect("allocate BF16 precision probe");
+    let output = ops::log_softmax_last_dim_f32(&input).expect("F32 precision probe");
+    let values = values_f32(&output);
+    let expected = -(3.0f32).ln();
+    let bf16_round_trip = half::bf16::from_f32(expected).to_f32();
+    for value in values {
+        assert!(
+            (value - expected).abs() <= 1e-5,
+            "{device}: got {value}, expected {expected}"
+        );
+        assert!(
+            (value - bf16_round_trip).abs() > 1e-4,
+            "{device}: F32 output was rounded through BF16 ({value})"
+        );
+    }
+}
+
 fn assert_special_value_semantics(device: Device) {
     let cases = [
         (
@@ -97,15 +156,27 @@ fn assert_special_value_semantics(device: Device) {
     for (data, expected) in cases {
         let logits =
             Tensor::from_vec_on(device, data.clone(), vec![1, data.len()]).expect("device logits");
-        let values = values_f32(&ops::log_softmax_last_dim(&logits).expect("log-softmax"));
-        for (got, expected) in values.iter().zip(expected) {
-            if expected.is_nan() {
-                assert!(
-                    got.is_nan(),
-                    "{device}: expected NaN, got {got}; row={values:?}"
-                );
-            } else {
-                assert_eq!(*got, expected, "{device}: row={values:?}");
+        for (label, values) in [
+            (
+                "same-dtype",
+                values_f32(&ops::log_softmax_last_dim(&logits).expect("log-softmax")),
+            ),
+            (
+                "F32-output",
+                values_f32(
+                    &ops::log_softmax_last_dim_f32(&logits).expect("F32-output log-softmax"),
+                ),
+            ),
+        ] {
+            for (got, expected) in values.iter().zip(&expected) {
+                if expected.is_nan() {
+                    assert!(
+                        got.is_nan(),
+                        "{device} {label}: expected NaN, got {got}; row={values:?}"
+                    );
+                } else {
+                    assert_eq!(*got, *expected, "{device} {label}: row={values:?}");
+                }
             }
         }
     }
@@ -143,6 +214,20 @@ fn assert_width_and_row_sweep(device: Device) {
             max_abs_error <= 1e-4,
             "{device} width {width}: max_abs_error={max_abs_error:e}"
         );
+
+        let f32_output =
+            ops::log_softmax_last_dim_f32(&logits).expect("device F32-output sweep log-softmax");
+        assert_eq!(f32_output.dtype(), DType::F32);
+        let f32_values = values_f32(&f32_output);
+        let f32_max_abs_error = f32_values
+            .iter()
+            .zip(&expected)
+            .map(|(got, expected)| (got - expected).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            f32_max_abs_error <= 1e-4,
+            "{device} F32-output width {width}: max_abs_error={f32_max_abs_error:e}"
+        );
     }
 }
 
@@ -153,6 +238,7 @@ fn rocm_log_softmax_extreme_tail_stays_finite() {
         return;
     }
     assert_extreme_tail_stays_finite(Device::Rocm(0));
+    assert_f32_output_contract(Device::Rocm(0));
     assert_special_value_semantics(Device::Rocm(0));
     assert_width_and_row_sweep(Device::Rocm(0));
 }
@@ -164,6 +250,7 @@ fn cuda_log_softmax_extreme_tail_stays_finite() {
         return;
     }
     assert_extreme_tail_stays_finite(Device::Cuda(0));
+    assert_f32_output_contract(Device::Cuda(0));
     assert_special_value_semantics(Device::Cuda(0));
     assert_width_and_row_sweep(Device::Cuda(0));
 }

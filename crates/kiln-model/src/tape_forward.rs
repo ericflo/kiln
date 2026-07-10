@@ -264,6 +264,13 @@ fn summarize_tape_debug_values(tensor: &kiln_tensor::Tensor) -> Result<String> {
 }
 
 fn tape_forward_device_supported(device: kiln_tensor::Device) -> bool {
+    // Inference shares these forward helpers but never installs a tape. Check
+    // the thread-local scope before consulting backend capability policy: the
+    // Vulkan CPU-sentinel lookup used to construct a fresh logical device for
+    // every attempted recorder, only to discover `with_active_tape` was empty.
+    if !tape_scope_active() {
+        return false;
+    }
     matches!(
         crate::backend::training_tape_route_for_device_kt(device),
         crate::backend::TrainingTapeRoute::KtTapeAuthoritative

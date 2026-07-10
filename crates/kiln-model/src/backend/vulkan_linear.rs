@@ -70,6 +70,44 @@ pub(super) fn max_chunk_dim_for_flop(other_dim_product: usize) -> usize {
     chunk.max(1)
 }
 
+/// Request-only contract for the resident mixed projection route below.
+///
+/// `NativeWithConstraints` for this shape means the runtime operands must both
+/// be resident on the same Vulkan companion device. The backend-private
+/// CPU-staging and packed-weight-cache paths are intentionally excluded: they
+/// may make additional requests work at runtime, but they are not a resident
+/// native-matmul capability.
+pub(super) fn resident_mixed_rank2_request_supported(
+    req: &super::capability::MatmulRequest,
+) -> bool {
+    req.rank() == Some(2)
+        && req.to_blas_request(1).is_ok()
+        && matches!(req.logical_mnk(), Some((m, n, k)) if m > 0 && n > 0 && k > 0)
+        && req.lhs_layout == super::capability::MatmulOperandLayout::RowMajor
+        && req.rhs_layout == super::capability::MatmulOperandLayout::RowMajor
+        && req.out_layout == super::capability::MatmulOperandLayout::RowMajor
+        && req.epilogue == super::capability::MatmulEpilogue::Identity
+        && req.lhs_dtype == kiln_tensor::DType::F32
+        && req.rhs_dtype == kiln_tensor::DType::BF16
+        && req.out_dtype == kiln_tensor::DType::F32
+}
+
+pub(super) fn matmul_request_support(
+    req: &super::capability::MatmulRequest,
+) -> super::capability::Support {
+    if resident_mixed_rank2_request_supported(req) {
+        return super::capability::Support::NativeWithConstraints;
+    }
+    let Some(rank) = super::matmul_request_support_rank(req) else {
+        return super::capability::Support::Unsupported;
+    };
+    super::matmul_support_from_native(
+        matches!(req.epilogue, super::capability::MatmulEpilogue::Identity)
+            && (req.lhs_dtype == kiln_tensor::DType::F32
+                || req.lhs_dtype == kiln_tensor::DType::BF16 && rank > 2),
+    )
+}
+
 pub(super) fn matmul(
     backend: &VulkanBackend,
     req: &super::capability::MatmulRequest,
@@ -83,6 +121,16 @@ pub(super) fn matmul(
     if matches!(lhs.device(), kiln_tensor::Device::Vulkan(_))
         && matches!(rhs.device(), kiln_tensor::Device::Vulkan(_))
     {
+        if resident_mixed_rank2_request_supported(req) {
+            debug_assert_eq!(layout, BackendMatmulLayout::Plain);
+            let (rows, hidden) = lhs.dims2()?;
+            let (_, out_dim) = rhs.dims2()?;
+            let lhs_rank3 = lhs.reshape((1usize, rows, hidden))?;
+            let Some(out_rank3) = resident_linear_decode(&lhs_rank3, rhs)? else {
+                return Ok(None);
+            };
+            return Ok(Some(out_rank3.reshape((rows, out_dim))?));
+        }
         return resident_matmul(req, lhs, rhs, layout);
     }
 
@@ -196,6 +244,19 @@ pub(super) fn linear_decode(
     {
         return Ok(None);
     }
+    if matches!(x.device(), kiln_tensor::Device::Vulkan(_))
+        && matches!(weight_t.device(), kiln_tensor::Device::Vulkan(_))
+    {
+        return resident_linear_decode(x, weight_t);
+    }
+    if matches!(x.device(), kiln_tensor::Device::Cpu)
+        && matches!(weight_t.device(), kiln_tensor::Device::Vulkan(_))
+    {
+        let resident_x = x
+            .to_device(weight_t.device())
+            .context("upload linear activation to resident Vulkan weight device")?;
+        return resident_linear_decode(&resident_x, weight_t);
+    }
     if !matches!(x.device(), kiln_tensor::Device::Cpu)
         || !matches!(weight_t.device(), kiln_tensor::Device::Cpu)
     {
@@ -248,6 +309,125 @@ pub(super) fn linear_decode(
     )?))
 }
 
+fn resident_linear_shape_supported(
+    batch: usize,
+    seq_len: usize,
+    hidden: usize,
+    out_dim: usize,
+) -> bool {
+    batch > 0 && seq_len > 0 && hidden > 0 && out_dim > 0
+}
+
+fn resident_linear_decode(
+    x: &kiln_tensor::Tensor,
+    weight_t: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    use kiln_tensor::{DType, Device, kt_tensor_from_vk, vk_tensor_from_kt};
+    use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
+
+    if x.dtype() != DType::F32
+        || !matches!(weight_t.dtype(), DType::F32 | DType::BF16)
+        || x.device() != weight_t.device()
+    {
+        return Ok(None);
+    }
+    let Ok((batch, seq_len, hidden)) = x.dims3() else {
+        return Ok(None);
+    };
+    let Ok((weight_hidden, out_dim)) = weight_t.dims2() else {
+        return Ok(None);
+    };
+    if weight_hidden != hidden || !resident_linear_shape_supported(batch, seq_len, hidden, out_dim)
+    {
+        return Ok(None);
+    }
+    let Device::Vulkan(device_index) = x.device() else {
+        return Ok(None);
+    };
+    let rows = batch
+        .checked_mul(seq_len)
+        .context("resident linear row-count overflow")?;
+    let whole_contiguous = |tensor: &kiln_tensor::Tensor, name: &str| -> Result<_> {
+        if tensor.is_contiguous() && tensor.layout().start_offset() == 0 {
+            Ok(tensor.clone())
+        } else {
+            kiln_tensor::vulkan_contiguous(tensor)
+                .with_context(|| format!("resident linear {name} whole-buffer contiguous"))
+        }
+    };
+    let x_2d = whole_contiguous(x, "activation")?
+        .reshape((rows, hidden))
+        .context("resident linear activation flatten")?;
+    let weight_t = whole_contiguous(weight_t, "weight")?;
+    let vk_weight = vk_tensor_from_kt(&weight_t).context("resident linear weight bridge")?;
+    let dispatch_rows = |x_rows: &kiln_tensor::Tensor| -> Result<kiln_tensor::Tensor> {
+        let row_count = x_rows.dims2()?.0;
+        let x_rows = whole_contiguous(x_rows, "row chunk")?;
+        let vk_x = vk_tensor_from_kt(&x_rows).context("resident linear activation bridge")?;
+        anyhow::ensure!(
+            std::sync::Arc::ptr_eq(vk_x.device(), vk_weight.device()),
+            "resident linear activation and weight use different Vulkan logical devices"
+        );
+        let out_buffer = kiln_vulkan_kernel::buffer_pool::pool_alloc_f32(
+            vk_x.device(),
+            row_count
+                .checked_mul(out_dim)
+                .context("resident linear output-size overflow")?,
+        )
+        .context("resident linear output allocation")?;
+        if weight_t.dtype() == DType::BF16 {
+            kiln_vulkan_kernel::resident::dispatch_linear_decode_cached_bf16_weights_resident(
+                vk_x.device(),
+                vk_x.buffer(),
+                vk_weight.buffer(),
+                &out_buffer,
+                row_count,
+                hidden,
+                out_dim,
+            )
+            .context("resident BF16-weight linear dispatch")?;
+        } else {
+            kiln_vulkan_kernel::resident::dispatch_linear_decode_cached_resident(
+                vk_x.device(),
+                vk_x.buffer(),
+                vk_weight.buffer(),
+                &out_buffer,
+                row_count,
+                hidden,
+                out_dim,
+            )
+            .context("resident F32-weight linear dispatch")?;
+        }
+        let vk_out = VkTensor::from_buffer(
+            out_buffer,
+            vec![row_count, out_dim],
+            VkDType::F32,
+            std::sync::Arc::clone(vk_x.device()),
+        );
+        kt_tensor_from_vk(&vk_out, device_index).context("resident linear output bridge")
+    };
+
+    let max_rows = max_chunk_dim_for_flop(hidden.saturating_mul(out_dim)).min(rows);
+    let out_2d = if rows <= max_rows {
+        dispatch_rows(&x_2d)?
+    } else {
+        let mut chunks = Vec::with_capacity(rows.div_ceil(max_rows));
+        for row_start in (0..rows).step_by(max_rows) {
+            let row_count = (rows - row_start).min(max_rows);
+            let x_rows = x_2d
+                .narrow(0, row_start, row_count)
+                .context("resident linear row chunk")?;
+            chunks.push(dispatch_rows(&x_rows)?);
+        }
+        let refs: Vec<&kiln_tensor::Tensor> = chunks.iter().collect();
+        kiln_tensor::Tensor::cat(&refs, 0).context("resident linear output chunks concatenate")?
+    };
+    let out = out_2d
+        .reshape((batch, seq_len, out_dim))
+        .context("resident linear output reshape")?;
+    Ok(Some(out))
+}
+
 pub(super) fn linear_prefill_apply(
     _backend: &VulkanBackend,
     _x: &kiln_tensor::Tensor,
@@ -267,6 +447,216 @@ pub(super) fn linear_prefill_apply(
     // `linear_decode` (declines tracked tensors); only the
     // autograd-wrapping prefill path is removed here.
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{
+        LinearBackend,
+        capability::{MatmulEpilogue, MatmulOperandLayout, MatmulRequest, Support},
+    };
+    use kiln_tensor::{DType, Device, Tensor};
+
+    #[test]
+    fn resident_mixed_linear_declines_zero_dimensions_before_dispatch() {
+        assert!(resident_linear_shape_supported(1, 2, 4, 3));
+        assert!(!resident_linear_shape_supported(0, 2, 4, 3));
+        assert!(!resident_linear_shape_supported(1, 0, 4, 3));
+        assert!(!resident_linear_shape_supported(1, 2, 0, 3));
+        assert!(!resident_linear_shape_supported(1, 2, 4, 0));
+    }
+
+    fn mixed_rank2_request() -> MatmulRequest {
+        MatmulRequest::plain(vec![2, 4], vec![4, 3], DType::F32, false).with_dtypes(
+            DType::F32,
+            DType::BF16,
+            DType::F32,
+        )
+    }
+
+    #[test]
+    fn mixed_resident_rank2_matmul_capability_is_exact_and_preserves_homogeneous_routes() {
+        let supported = mixed_rank2_request();
+        assert!(resident_mixed_rank2_request_supported(&supported));
+        assert_eq!(
+            matmul_request_support(&supported),
+            Support::NativeWithConstraints
+        );
+
+        let mixed_batched = MatmulRequest::plain(vec![2, 2, 4], vec![2, 4, 3], DType::F32, false)
+            .with_dtypes(DType::F32, DType::BF16, DType::F32);
+        let mixed_transposed = MatmulRequest::plain(vec![2, 4], vec![3, 4], DType::F32, false)
+            .with_dtypes(DType::F32, DType::BF16, DType::F32)
+            .with_layouts(
+                MatmulOperandLayout::RowMajor,
+                MatmulOperandLayout::ColMajor,
+                MatmulOperandLayout::RowMajor,
+            );
+        let mixed_bias = mixed_rank2_request().with_epilogue(MatmulEpilogue::Bias);
+        let mixed_wrong_output =
+            mixed_rank2_request().with_dtypes(DType::F32, DType::BF16, DType::BF16);
+        let mixed_wrong_weight =
+            mixed_rank2_request().with_dtypes(DType::F32, DType::F16, DType::F32);
+        let mixed_zero_rows = MatmulRequest::plain(vec![0, 4], vec![4, 3], DType::F32, false)
+            .with_dtypes(DType::F32, DType::BF16, DType::F32);
+        let mixed_incompatible = MatmulRequest::plain(vec![2, 4], vec![5, 3], DType::F32, false)
+            .with_dtypes(DType::F32, DType::BF16, DType::F32);
+
+        for unsupported in [
+            mixed_batched,
+            mixed_transposed,
+            mixed_bias,
+            mixed_wrong_output,
+            mixed_wrong_weight,
+            mixed_zero_rows,
+            mixed_incompatible,
+        ] {
+            assert!(!resident_mixed_rank2_request_supported(&unsupported));
+            assert_eq!(matmul_request_support(&unsupported), Support::Unsupported);
+        }
+
+        let homogeneous_f32 = MatmulRequest::plain(vec![2, 4], vec![4, 3], DType::F32, false);
+        let homogeneous_bf16_rank2 =
+            MatmulRequest::plain(vec![2, 4], vec![4, 3], DType::BF16, false);
+        let homogeneous_bf16_batched =
+            MatmulRequest::plain(vec![2, 2, 4], vec![2, 4, 3], DType::BF16, false);
+        assert_eq!(
+            matmul_request_support(&homogeneous_f32),
+            Support::NativeWithConstraints
+        );
+        assert_eq!(
+            matmul_request_support(&homogeneous_bf16_rank2),
+            Support::HostFallbackAllowed
+        );
+        assert_eq!(
+            matmul_request_support(&homogeneous_bf16_batched),
+            Support::NativeWithConstraints
+        );
+    }
+
+    fn mixed_linear_fixture() -> (Tensor, Tensor) {
+        let x = Tensor::from_vec(
+            vec![0.25_f32, -0.5, 0.75, 1.0, -0.25, 0.5, -0.75, -1.0],
+            (1, 2, 4),
+        )
+        .expect("F32 activation fixture");
+        let weight = Tensor::from_vec(
+            vec![
+                0.5_f32, -0.25, 0.125, -0.5, 0.75, 0.25, 1.0, -0.125, 0.375, -0.75, 0.625, 0.5,
+            ],
+            (4, 3),
+        )
+        .expect("F32 weight fixture")
+        .to_dtype(DType::BF16)
+        .expect("BF16 weight fixture");
+        (x, weight)
+    }
+
+    fn assert_fixture_values(output: &Tensor, reversed: bool) {
+        let positive = [0.375_f32, 0.09375, 0.6875];
+        let negative = [-0.375_f32, -0.09375, -0.6875];
+        let expected = if reversed {
+            [negative, positive].concat()
+        } else {
+            [positive, negative].concat()
+        };
+        let actual = output
+            .to_device(Device::Cpu)
+            .expect("fixture output readback")
+            .flatten_all()
+            .expect("fixture output flatten")
+            .to_vec1::<f32>()
+            .expect("fixture output values");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn mixed_f32_bf16_linear_uses_runner_and_resident_backends() {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            return;
+        }
+        assert!(
+            crate::backend::vulkan::vulkan_is_available(),
+            "KILN_TENSOR_VULKAN_TEST=1 requires a working Vulkan device"
+        );
+        let backend = VulkanBackend::new(Device::Cpu);
+
+        // Hybrid CPU-storage route used by legacy Vulkan loading.
+        let (x, weight) = mixed_linear_fixture();
+        let output = LinearBackend::runtime_linear_decode(&backend, &x, &weight)
+            .expect("mixed Vulkan linear dispatch")
+            .expect("Vulkan backend must own F32 activation x BF16 weight");
+        assert_eq!(output.dims(), &[1, 2, 3]);
+        assert_eq!(output.dtype(), DType::F32);
+        assert_fixture_values(&output, false);
+
+        // The flattened matmul facade must preserve the same mixed contract.
+        let (x, weight) = mixed_linear_fixture();
+        let x = x.reshape((2, 4)).expect("flatten activation rows");
+        let request =
+            MatmulRequest::plain(x.dims().to_vec(), weight.dims().to_vec(), DType::F32, false)
+                .with_dtypes(DType::F32, DType::BF16, DType::F32);
+        let output = LinearBackend::runtime_matmul(&backend, &request, &x, &weight)
+            .expect("mixed Vulkan matmul dispatch")
+            .expect("Vulkan backend must own flattened F32 x BF16 matmul");
+        assert_eq!(output.dims(), &[2, 3]);
+        assert_eq!(output.dtype(), DType::F32);
+        assert_fixture_values(&output, false);
+
+        let x = x
+            .to_device(Device::Vulkan(0))
+            .expect("resident flattened activation");
+        let weight = weight
+            .to_device(Device::Vulkan(0))
+            .expect("resident flattened BF16 weight");
+        let request =
+            MatmulRequest::plain(x.dims().to_vec(), weight.dims().to_vec(), DType::F32, false)
+                .with_dtypes(DType::F32, DType::BF16, DType::F32);
+        let output = LinearBackend::runtime_matmul(&backend, &request, &x, &weight)
+            .expect("resident mixed Vulkan matmul dispatch")
+            .expect("Vulkan backend must own resident flattened F32 x BF16 matmul");
+        assert_eq!(output.dims(), &[2, 3]);
+        assert_eq!(output.dtype(), DType::F32);
+        assert_eq!(output.device(), Device::Vulkan(0));
+        assert_fixture_values(&output, false);
+
+        // GDN recurrence currently returns a CPU activation while the output
+        // projection stays resident. Only the small activation crosses the
+        // boundary; the BF16 base weight must remain on its companion device.
+        let (x, weight) = mixed_linear_fixture();
+        let weight = weight
+            .to_device(Device::Vulkan(0))
+            .expect("cross-resident BF16 weight");
+        let output = LinearBackend::runtime_linear_decode(&backend, &x, &weight)
+            .expect("cross-residency mixed Vulkan linear dispatch")
+            .expect("Vulkan backend must upload CPU activation to resident weight");
+        assert_eq!(output.dims(), &[1, 2, 3]);
+        assert_eq!(output.dtype(), DType::F32);
+        assert_eq!(output.device(), Device::Vulkan(0));
+        assert_fixture_values(&output, false);
+
+        // Current loading keeps weights and activations genuinely resident.
+        // Include a non-zero-offset sequence view: chunked LM-head scoring
+        // narrows normalized hidden rows before calling this same hook.
+        let (x, weight) = mixed_linear_fixture();
+        let x = Tensor::cat(&[&x, &x], 1)
+            .expect("extended activation")
+            .to_device(Device::Vulkan(0))
+            .expect("resident activation");
+        let x = x.narrow(1, 1, 2).expect("offset activation chunk");
+        assert_ne!(x.layout().start_offset(), 0);
+        let weight = weight
+            .to_device(Device::Vulkan(0))
+            .expect("resident BF16 weight");
+        let output = LinearBackend::runtime_linear_decode(&backend, &x, &weight)
+            .expect("resident mixed Vulkan linear dispatch")
+            .expect("Vulkan backend must own resident F32 x BF16 projection");
+        assert_eq!(output.dims(), &[1, 2, 3]);
+        assert_eq!(output.dtype(), DType::F32);
+        assert_eq!(output.device(), Device::Vulkan(0));
+        assert_fixture_values(&output, true);
+    }
 }
 
 pub(super) fn linear_prefill_apply_offset(

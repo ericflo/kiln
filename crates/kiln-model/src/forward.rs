@@ -9149,6 +9149,17 @@ fn residual_add(a: Tensor, b: Tensor) -> Result<Tensor> {
             }
         }
     }
+    #[cfg(feature = "vulkan")]
+    let b = if !crate::tape_forward::tape_scope_active()
+        && a.device() != b.device()
+        && matches!(a.device(), Device::Cpu | Device::Vulkan(_))
+        && matches!(b.device(), Device::Cpu | Device::Vulkan(_))
+    {
+        b.to_device(a.device())
+            .context("align Vulkan/CPU residual branch to residual-stream device")?
+    } else {
+        b
+    };
     Ok((a + b)?)
 }
 
@@ -24872,11 +24883,37 @@ pub fn transformer_block(
         &normed,
     )?;
 
-    // Feed-forward network
-    let ffn_out = if use_metal_decode_ffn {
+    // Feed-forward network. Inference must thread the active backend through
+    // every base projection: Vulkan's F32 activations and BF16 resident weights
+    // cannot use the portable equal-dtype matmul fallback. Keep the established
+    // tape-training route unchanged so its recorder remains authoritative.
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
+    let tape_scope_active = crate::tape_forward::tape_scope_active();
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    )))]
+    let tape_scope_active = false;
+    let ffn_out = if tape_scope_active && use_metal_decode_ffn {
         swiglu_ffn_metal_decode(&normed, &layer.mlp, lora)?
-    } else {
+    } else if tape_scope_active {
         swiglu_ffn(&normed, &layer.mlp, lora)?
+    } else {
+        swiglu_ffn_backend_profiled(
+            backend,
+            &normed,
+            &layer.mlp,
+            lora,
+            use_metal_decode_ffn,
+            None,
+        )?
     };
     ensure_full_attn_debug_finite(
         debug_finite,
@@ -28014,6 +28051,41 @@ pub fn model_forward_final_norm(
 ) -> Result<Tensor> {
     kiln_nvtx::range!(c"kiln/final_rmsnorm");
     rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)
+}
+
+/// Project post-final-RMSNorm hidden states through the tied LM head.
+///
+/// Unlike [`model_forward_head`], this function does not apply final RMSNorm.
+/// It is intended for callers that run [`model_forward_no_head`] once and then
+/// project bounded sequence chunks, avoiding simultaneous residency of the
+/// full `[sequence, vocabulary]` logits tensor. The leading dimensions are
+/// preserved and only the last dimension is projected from hidden size to
+/// vocabulary size.
+pub fn model_forward_project_normalized_hidden(
+    backend: &dyn BackendRuntime,
+    normalized_hidden: &Tensor,
+    weights: &GpuWeights,
+) -> Result<Tensor> {
+    let hidden_size = normalized_hidden
+        .dims()
+        .last()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("normalized hidden tensor must have rank >= 1"))?;
+    let projection_hidden_size = weights
+        .embed_tokens_t
+        .dims()
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("LM-head projection tensor must have rank >= 1"))?;
+    if hidden_size != projection_hidden_size {
+        anyhow::bail!(
+            "normalized hidden width {hidden_size} did not match LM-head input width \
+             {projection_hidden_size}"
+        );
+    }
+
+    kiln_nvtx::range!(c"kiln/lm_head_normalized_chunk");
+    lm_head_forward_backend_decode_if(Some(backend), normalized_hidden, &weights.embed_tokens_t)
 }
 
 /// Full training-path forward WITHOUT the LM head projection.
@@ -31330,6 +31402,77 @@ mod tests {
     /// `cfg(test)`-gated and only visible inside kiln-core's own test
     /// build — from another crate's tests it appears unresolved.
     static RESIDENCY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn residual_add_aligns_cpu_vulkan_inference_branches_to_lhs() -> Result<()> {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            return Ok(());
+        }
+        assert!(
+            crate::backend::vulkan::vulkan_is_available(),
+            "KILN_TENSOR_VULKAN_TEST=1 requires a working Vulkan device"
+        );
+        let cpu = Tensor::from_vec(vec![1.0_f32, -2.0, 3.0, -4.0], (1, 2, 2))?;
+        let vulkan = cpu.to_device(Device::Vulkan(0))?;
+
+        let resident = residual_add(vulkan.clone(), cpu.clone())?;
+        assert_eq!(resident.device(), Device::Vulkan(0));
+        assert_eq!(
+            resident
+                .to_device(Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            vec![2.0, -4.0, 6.0, -8.0]
+        );
+
+        let host = residual_add(cpu, vulkan)?;
+        assert_eq!(host.device(), Device::Cpu);
+        assert_eq!(
+            host.flatten_all()?.to_vec1::<f32>()?,
+            vec![2.0, -4.0, 6.0, -8.0]
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn disabled_vulkan_linear_decode_preserves_mixed_projection_fallback() -> Result<()> {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            return Ok(());
+        }
+        assert!(
+            crate::backend::vulkan::vulkan_is_available(),
+            "KILN_TENSOR_VULKAN_TEST=1 requires a working Vulkan device"
+        );
+        let backend = crate::backend::vulkan::VulkanBackend::new(Device::Cpu)
+            .with_linear_decode_enabled_for_test(false);
+
+        let x = Tensor::from_vec(
+            vec![0.25_f32, -0.5, 0.75, 1.0, -0.25, 0.5, -0.75, -1.0],
+            (1, 2, 4),
+        )?
+        .to_device(Device::Vulkan(0))?;
+        let weight = Tensor::from_vec(
+            vec![
+                0.5_f32, -0.25, 0.125, -0.5, 0.75, 0.25, 1.0, -0.125, 0.375, -0.75, 0.625, 0.5,
+            ],
+            (4, 3),
+        )?
+        .to_dtype(DType::BF16)?
+        .to_device(Device::Vulkan(0))?;
+        let output =
+            linear_with_lora_t_backend_decode_if(Some(&backend), false, &x, &weight, None, 0.0)?;
+        assert_eq!(output.device(), Device::Vulkan(0));
+        assert_eq!(
+            output
+                .to_device(Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            vec![0.375, 0.09375, 0.6875, -0.375, -0.09375, -0.6875]
+        );
+        Ok(())
+    }
 
     /// #1082 type-flip test shim. The tests below were written against
     /// candle's `new_cuda_device(0) -> Result<Device>`, which both

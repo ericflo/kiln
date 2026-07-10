@@ -2,6 +2,8 @@
 //! and verify /v1/chat/completions returns real generated text.
 
 use std::collections::HashMap;
+use std::sync::{Arc, TryLockError};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -15,13 +17,13 @@ use tower::ServiceExt; // for `oneshot`
 
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
-use kiln_model::ModelRunner;
 use kiln_model::forward::{
     GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
-    GpuLinearAttentionWeights, GpuWeights,
+    GpuLinearAttentionWeights, GpuWeights, LinearAttentionState,
 };
+use kiln_model::{LoraWeights, ModelRunner};
 use kiln_server::api;
-use kiln_server::state::AppState;
+use kiln_server::state::{AppState, ModelBackend};
 
 /// Create a tiny model config for testing.
 fn tiny_config() -> ModelConfig {
@@ -193,6 +195,51 @@ fn test_tokenizer() -> KilnTokenizer {
 
     let bytes = serde_json::to_vec(&json).unwrap();
     KilnTokenizer::from_bytes(&bytes).unwrap()
+}
+
+fn tiny_real_state_with_timeout(config: ModelConfig, request_timeout: Duration) -> AppState {
+    let device = Device::Cpu;
+    let weights = tiny_weights(&config, &device);
+    let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+    let mut state = AppState::new_real(
+        config,
+        runner,
+        test_tokenizer(),
+        device,
+        std::path::PathBuf::from("/tmp/kiln-test-adapters"),
+        &kiln_server::config::MemoryConfig::default(),
+        kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        request_timeout.as_secs().max(1),
+        "Qwen3.5-4B".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
+    );
+    // Production configuration is second-granularity. Integration tests use a
+    // shorter duration so lifecycle regressions fail quickly and locally.
+    state.request_timeout = request_timeout;
+    state
+}
+
+fn real_runner(state: &AppState) -> Arc<std::sync::RwLock<ModelRunner>> {
+    match state.backend.as_ref() {
+        ModelBackend::Real { runner, .. } => runner.clone(),
+        ModelBackend::Mock { .. } => panic!("expected real model backend"),
+    }
+}
+
+fn prompt_logprob_request(prompt: &[u32], top_k: usize) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "prompt": prompt,
+                "max_tokens": 0,
+                "prompt_logprobs": top_k
+            })
+            .to_string(),
+        ))
+        .unwrap()
 }
 
 #[cfg(feature = "vulkan")]
@@ -394,6 +441,544 @@ async fn test_real_model_chat_completion() {
     let usage = &resp["usage"];
     assert!(usage["completion_tokens"].as_u64().unwrap() > 0);
     assert!(usage["total_tokens"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn test_real_model_one_token_prompt_logprobs_is_exactly_null() {
+    let request_timeout = Duration::from_millis(40);
+    let state = tiny_real_state_with_timeout(tiny_config(), request_timeout);
+    let state_for_assert = state.clone();
+    let gpu_lock = state.gpu_lock.clone();
+    let runner = real_runner(&state);
+    let held_read = gpu_lock.clone().read_owned().await;
+    let app = api::router(state);
+    let runner_strong_count = Arc::strong_count(&runner);
+
+    // A one-token prompt has no predecessor to score. Holding a read permit
+    // proves this response takes the no-work path before exclusive admission.
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        app.oneshot(prompt_logprob_request(&[7], 2)),
+    )
+    .await
+    .expect("one-token prompt-logprobs request should not wait for admission")
+    .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let response_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        response_json["choices"][0]["prompt_logprobs"],
+        json!([null])
+    );
+    assert_eq!(
+        Arc::strong_count(&runner),
+        runner_strong_count,
+        "the no-work path must not clone a runner into a blocking scorer"
+    );
+    assert_eq!(
+        state_for_assert
+            .metrics
+            .active_requests
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+
+    drop(held_read);
+    drop(
+        gpu_lock
+            .try_write()
+            .expect("one-token response must leave GPU admission writable"),
+    );
+}
+
+#[tokio::test]
+async fn test_real_model_prompt_logprobs_times_out_before_exclusive_admission() {
+    let request_timeout = Duration::from_millis(40);
+    let state = tiny_real_state_with_timeout(tiny_config(), request_timeout);
+    let state_for_assert = state.clone();
+    let gpu_lock = state.gpu_lock.clone();
+    let runner = real_runner(&state);
+    let held_read = gpu_lock.clone().read_owned().await;
+    let app = api::router(state);
+    let runner_strong_count = Arc::strong_count(&runner);
+    let started = Instant::now();
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        app.oneshot(prompt_logprob_request(&[1, 2, 3], 2)),
+    )
+    .await
+    .expect("admission timeout response should settle promptly")
+    .unwrap();
+    let elapsed = started.elapsed();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::REQUEST_TIMEOUT,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(
+        elapsed >= request_timeout,
+        "408 arrived before the configured admission deadline: {elapsed:?}"
+    );
+    let response_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response_json["error"]["code"], "request_timeout");
+
+    assert_eq!(
+        Arc::strong_count(&runner),
+        runner_strong_count,
+        "timed-out admission must not clone a runner into spawn_blocking"
+    );
+    drop(
+        runner
+            .try_write()
+            .expect("no blocking scorer may hold the runner after admission timeout"),
+    );
+    assert_eq!(
+        state_for_assert
+            .metrics
+            .active_requests
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "timed-out request must leave no active HTTP lifecycle"
+    );
+    assert_eq!(
+        state_for_assert
+            .metrics
+            .requests_timeout
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    drop(held_read);
+    drop(
+        gpu_lock
+            .try_write()
+            .expect("timed-out exclusive waiter must be removed from GPU admission"),
+    );
+}
+
+#[tokio::test]
+async fn test_real_model_prompt_logprobs_rejects_active_adapter() {
+    let state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
+    let gpu_lock = state.gpu_lock.clone();
+    let runner = real_runner(&state);
+    runner.write().unwrap().swap_lora(Some(LoraWeights {
+        layers: Vec::new(),
+        mtp: None,
+        rank: 1,
+        alpha: 1.0,
+        scale: 1.0,
+    }));
+    let app = api::router(state);
+
+    let response = app
+        .oneshot(prompt_logprob_request(&[1, 2, 3], 2))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let response_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response_json["error"]["code"], "completion_invalid_request");
+    assert!(
+        response_json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("base-model only")
+    );
+    drop(
+        gpu_lock
+            .try_write()
+            .expect("adapter rejection must not leak exclusive GPU admission"),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_real_model_prompt_logprobs_timeout_drains_started_scorer() {
+    let request_timeout = Duration::from_millis(100);
+    let mut config = tiny_config();
+    config.max_position_embeddings = 2048;
+    let state = tiny_real_state_with_timeout(config, request_timeout);
+    let state_for_assert = state.clone();
+    let gpu_lock = state.gpu_lock.clone();
+    let runner = real_runner(&state);
+    let app = api::router(state);
+    let runner_strong_count = Arc::strong_count(&runner);
+    let prompt = (0..1024)
+        .map(|index| (index % 32) as u32)
+        .collect::<Vec<_>>();
+    let request_started = Instant::now();
+    let mut request_task = tokio::spawn(async move {
+        app.oneshot(prompt_logprob_request(&prompt, 0))
+            .await
+            .unwrap()
+    });
+
+    // `real_prompt_logprobs` clones the runner only after exclusive admission;
+    // the blocking closure then holds a runner read lock for the full forward.
+    // Requiring both observations distinguishes the worker from the brief
+    // pre-spawn health check and proves the timeout fires after work starts.
+    let worker_observed_at = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let worker_owns_runner_clone = Arc::strong_count(&runner) > runner_strong_count;
+            let worker_holds_runner_read = match runner.try_write() {
+                Ok(guard) => {
+                    drop(guard);
+                    false
+                }
+                Err(TryLockError::WouldBlock) => true,
+                Err(TryLockError::Poisoned(error)) => {
+                    panic!("runner lock poisoned while observing scorer: {error}")
+                }
+            };
+            if worker_owns_runner_clone && worker_holds_runner_read {
+                break Instant::now();
+            }
+            assert!(
+                !request_task.is_finished(),
+                "prompt-logprobs request settled before a blocking scorer was observed"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("blocking prompt-logprobs scorer should start before its deadline");
+
+    tokio::time::sleep_until(tokio::time::Instant::from_std(
+        request_started + request_timeout + Duration::from_millis(20),
+    ))
+    .await;
+    assert!(
+        !request_task.is_finished(),
+        "HTTP response must remain pending while the timed-out scorer settles"
+    );
+    assert_eq!(
+        state_for_assert
+            .metrics
+            .active_requests
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "request lifecycle must remain active during scorer settlement"
+    );
+    assert_eq!(
+        state_for_assert
+            .metrics
+            .requests_timeout
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "timeout metric is recorded only after scorer settlement"
+    );
+    assert!(
+        gpu_lock.try_read().is_err(),
+        "started scorer must retain exclusive admission during settlement"
+    );
+
+    let response = tokio::time::timeout(Duration::from_secs(10), &mut request_task)
+        .await
+        .expect("cancelled scorer should settle within the integration-test ceiling")
+        .expect("request task should join cleanly");
+    let response_elapsed = request_started.elapsed();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::REQUEST_TIMEOUT,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(worker_observed_at >= request_started);
+    assert!(
+        response_elapsed >= request_timeout,
+        "408 arrived before the configured scoring deadline: {response_elapsed:?}"
+    );
+
+    // The handler cannot make spawn_blocking stop synchronously. Its timeout
+    // branch must cancel and await the worker; immediate write access proves
+    // the 408 was withheld until the exclusive permit and runner read released.
+    drop(
+        gpu_lock
+            .try_write()
+            .expect("timeout response returned before blocking scorer settlement"),
+    );
+    drop(
+        runner
+            .try_write()
+            .expect("settled scorer must release its runner read lock"),
+    );
+    assert_eq!(
+        Arc::strong_count(&runner),
+        runner_strong_count,
+        "settled scorer must drop its captured runner clone"
+    );
+    assert_eq!(
+        state_for_assert
+            .metrics
+            .active_requests
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        state_for_assert
+            .metrics
+            .requests_timeout
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    let settlement = match state_for_assert.backend.as_ref() {
+        ModelBackend::Real { backend_health, .. } => backend_health
+            .external_yield_sync_stats()
+            .into_iter()
+            .find(|stats| stats.boundary == "prompt-logprobs scoring"),
+        ModelBackend::Mock { .. } => unreachable!("test constructed a real backend"),
+    }
+    .expect("timed-out scorer must settle the backend before returning 408");
+    assert_eq!(settlement.calls, 1);
+    assert_eq!(settlement.failures, 0);
+}
+
+#[tokio::test]
+async fn test_real_model_prompt_logprobs_match_full_forward_reference() {
+    const TOP_K: usize = 2;
+    // The production scorer projects 32 normalized-hidden rows at a time.
+    // Crossing that boundary proves the real no-head/chunked-LM-head path,
+    // including its final short chunk, rather than only its first iteration.
+    const PROMPT_LEN: usize = 35;
+
+    let config = tiny_config();
+    let device = Device::Cpu;
+    let weights = tiny_weights(&config, &device);
+    let reference_weights = weights.clone();
+
+    let full_forward_rows = |prompt_ids: &[u32]| -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        let backend = kiln_model::backend::for_device_kt(&device);
+        let mut linear_state = LinearAttentionState::new_with_batch_for_inference_runtime(
+            &config,
+            1,
+            &device,
+            backend.as_ref(),
+        )
+        .expect("reference inference linear state");
+        let logits = kiln_model::forward::model_forward_kt(
+            &*backend,
+            prompt_ids,
+            &reference_weights,
+            &config,
+            None,
+            Some(&mut linear_state),
+            None,
+        )
+        .expect("full-forward reference logits");
+        let logprobs = kiln_tensor::ops::log_softmax_last_dim_f32(&logits)
+            .expect("F32 reference log-softmax")
+            .squeeze(0)
+            .expect("reference batch squeeze")
+            .to_vec2::<f32>()
+            .expect("reference logprobs to host");
+        let logits = logits
+            .squeeze(0)
+            .expect("reference logits batch squeeze")
+            .to_vec2::<f32>()
+            .expect("reference logits to host");
+        (logits, logprobs)
+    };
+    let ranked_token_ids = |row: &[f32]| -> Vec<usize> {
+        let mut ids = (0..row.len()).collect::<Vec<_>>();
+        ids.sort_unstable_by(|&left, &right| {
+            row[right]
+                .partial_cmp(&row[left])
+                .expect("reference logits are finite")
+                .then_with(|| left.cmp(&right))
+        });
+        ids
+    };
+
+    // A token at position i cannot affect logits row i-1. Choose one observed
+    // token inside TOP_K and the next outside TOP_K, then retain those
+    // guarantees when the remaining causal suffix is appended.
+    let first_token = 1u32;
+    let (first_logits, _) = full_forward_rows(&[first_token]);
+    let observed_inside_top_k = ranked_token_ids(&first_logits[0])[0] as u32;
+    let (second_logits, _) = full_forward_rows(&[first_token, observed_inside_top_k]);
+    let second_row_top_k = ranked_token_ids(&second_logits[1]);
+    let observed_outside_top_k = (0..config.vocab_size)
+        .find(|token_id| !second_row_top_k[..TOP_K].contains(token_id))
+        .expect("tiny vocabulary has a token outside top-K")
+        as u32;
+
+    let mut prompt_ids = vec![first_token, observed_inside_top_k, observed_outside_top_k];
+    while prompt_ids.len() < PROMPT_LEN {
+        prompt_ids.push(((prompt_ids.len() * 7 + 3) % config.vocab_size) as u32);
+    }
+    let (reference_logits, reference_logprobs) = full_forward_rows(&prompt_ids);
+    assert_eq!(reference_logits.len(), prompt_ids.len());
+    assert_eq!(reference_logprobs.len(), prompt_ids.len());
+
+    let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+    let state = AppState::new_real(
+        config.clone(),
+        runner,
+        test_tokenizer(),
+        device,
+        std::path::PathBuf::from("/tmp/kiln-test-adapters"),
+        &kiln_server::config::MemoryConfig::default(),
+        kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        300,
+        "Qwen3.5-4B".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
+    );
+    let backend_health = match state.backend.as_ref() {
+        ModelBackend::Real { backend_health, .. } => backend_health.clone(),
+        ModelBackend::Mock { .. } => unreachable!("test constructed a real backend"),
+    };
+    let app = api::router(state);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "prompt": prompt_ids.clone(),
+                "max_tokens": 0,
+                "prompt_logprobs": TOP_K
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let response_json: Value = serde_json::from_slice(&body).unwrap();
+    let rows = response_json["choices"][0]["prompt_logprobs"]
+        .as_array()
+        .expect("prompt_logprobs array");
+    assert_eq!(rows.len(), prompt_ids.len());
+    assert!(
+        rows[0].is_null(),
+        "the first prompt token has no predecessor"
+    );
+
+    let mut saw_k = false;
+    let mut saw_k_plus_one = false;
+    for position in 1..prompt_ids.len() {
+        let reference_logits_row = &reference_logits[position - 1];
+        let reference_logprob_row = &reference_logprobs[position - 1];
+        let ranked = ranked_token_ids(reference_logits_row);
+        let observed_id = prompt_ids[position] as usize;
+        let observed_rank = ranked
+            .iter()
+            .position(|&token_id| token_id == observed_id)
+            .expect("observed token is in model vocabulary")
+            + 1;
+        let observed_in_top_k = ranked[..TOP_K].contains(&observed_id);
+        let expected_cardinality = TOP_K + usize::from(!observed_in_top_k);
+
+        let row = rows[position].as_object().expect("scored prompt row");
+        assert_eq!(row.len(), expected_cardinality, "position {position}");
+        saw_k |= row.len() == TOP_K;
+        saw_k_plus_one |= row.len() == TOP_K + 1;
+
+        let observed = row
+            .get(&observed_id.to_string())
+            .unwrap_or_else(|| panic!("position {position} omitted observed token {observed_id}"));
+        let actual_logprob = observed["logprob"].as_f64().unwrap() as f32;
+        let expected_logprob = reference_logprob_row[observed_id];
+        assert!(
+            (actual_logprob - expected_logprob).abs() <= 1e-5,
+            "position {position} observed token {observed_id}: got {actual_logprob}, expected {expected_logprob}"
+        );
+        assert_eq!(
+            observed["rank"].as_u64().unwrap() as usize,
+            observed_rank,
+            "position {position} observed-token rank"
+        );
+
+        for (rank_index, &top_token_id) in ranked[..TOP_K].iter().enumerate() {
+            let top = row.get(&top_token_id.to_string()).unwrap_or_else(|| {
+                panic!("position {position} omitted top-K token {top_token_id}")
+            });
+            assert_eq!(top["rank"].as_u64().unwrap() as usize, rank_index + 1);
+            let actual = top["logprob"].as_f64().unwrap() as f32;
+            assert!((actual - reference_logprob_row[top_token_id]).abs() <= 1e-5);
+        }
+    }
+    assert!(
+        saw_k,
+        "prompt must exercise observed-token top-K deduplication"
+    );
+    assert!(
+        saw_k_plus_one,
+        "prompt must exercise observed-token inclusion outside top-K"
+    );
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "prompt": prompt_ids.clone(),
+                "max_tokens": 0,
+                "prompt_logprobs": 0
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let response_json: Value = serde_json::from_slice(&body).unwrap();
+    let rows = response_json["choices"][0]["prompt_logprobs"]
+        .as_array()
+        .expect("prompt_logprobs array for K=0");
+    assert!(rows[0].is_null());
+    for position in 1..prompt_ids.len() {
+        let observed_id = prompt_ids[position] as usize;
+        let row = rows[position].as_object().expect("K=0 scored prompt row");
+        assert_eq!(row.len(), 1, "K=0 position {position}");
+        let observed = row
+            .get(&observed_id.to_string())
+            .unwrap_or_else(|| panic!("K=0 position {position} omitted token {observed_id}"));
+        let ranked = ranked_token_ids(&reference_logits[position - 1]);
+        let expected_rank = ranked
+            .iter()
+            .position(|&token_id| token_id == observed_id)
+            .unwrap()
+            + 1;
+        assert_eq!(observed["rank"].as_u64().unwrap() as usize, expected_rank);
+        let actual = observed["logprob"].as_f64().unwrap() as f32;
+        assert!((actual - reference_logprobs[position - 1][observed_id]).abs() <= 1e-5);
+    }
+    let settlement = backend_health
+        .external_yield_sync_stats()
+        .into_iter()
+        .find(|stats| stats.boundary == "prompt-logprobs scoring")
+        .expect("real prompt scoring must publish its backend settlement boundary");
+    assert_eq!(settlement.calls, 2);
+    assert_eq!(settlement.failures, 0);
 }
 
 #[tokio::test]
@@ -1512,7 +2097,7 @@ fn test_real_model_opd_metal() {
 // path); both run on the CPU backend so they execute on every CI runner.
 // ---------------------------------------------------------------------------
 
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Mutex, RwLock};
 
 use kiln_core::block::BlockManager;
 use kiln_core::sampling::{SamplingParams, ThinkingBudget};

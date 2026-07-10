@@ -2288,6 +2288,16 @@ impl ModelRunner {
         BackendIdentity::runtime_name(self.backend.as_ref())
     }
 
+    /// Borrow the runner-owned backend runtime.
+    ///
+    /// Callers performing auxiliary model forwards must reuse this instance:
+    /// accelerator backends own long-lived weight caches, resident tensor
+    /// registries, and inference policy state that a freshly constructed
+    /// backend would discard.
+    pub fn backend_runtime(&self) -> &dyn BackendRuntime {
+        self.backend.as_ref()
+    }
+
     pub fn backend_capabilities(&self) -> BackendCapabilities {
         BackendCapabilityQueries::backend_capabilities(self.backend.as_ref())
     }
@@ -2312,23 +2322,13 @@ impl ModelRunner {
         StartupBackend::runtime_precompile_startup_kernels(self.backend.as_ref())
     }
 
-    /// Preload backend-specific decode weights into any persistent device cache.
+    /// Preload backend-specific decode weights into persistent device caches.
     ///
-    /// After upload, on backends that opt in (Vulkan today), drop the
-    /// pre-transposed candle CPU storage of those weights so that the
-    /// device-resident buffer is the only canonical copy. Saves
-    /// ~6-7 GB peak RSS on Qwen3.5-4B at T=918 training shape — see
-    /// `docs/audits/candle_cpu_residency_2026-05-11.md`.
-    pub fn prewarm_backend_decode_weights(&mut self) -> Result<()> {
-        LinearBackend::runtime_prewarm_decode_weights(self.backend.as_ref(), &self.weights)?;
-        // (#1082) `drop_uploaded_bf16_weights` is kt-native — pass kt device.
-        let kt_device = self.weights.embed_tokens.device();
-        LinearBackend::runtime_drop_uploaded_bf16_weights(
-            self.backend.as_ref(),
-            &mut self.weights,
-            &kt_device,
-        )?;
-        Ok(())
+    /// Prewarm is deliberately non-destructive: serving and shared-tape
+    /// training retain the authoritative tensors because portable fallback and
+    /// backward both read them directly.
+    pub fn prewarm_backend_decode_weights(&self) -> Result<()> {
+        LinearBackend::runtime_prewarm_decode_weights(self.backend.as_ref(), &self.weights)
     }
 
     /// Load a LoRA adapter from a PEFT-compatible directory.

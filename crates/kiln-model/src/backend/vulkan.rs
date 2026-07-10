@@ -31,9 +31,8 @@ use super::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, ExternalYieldBackend,
     GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
     SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
-    TrainingPrecisionPolicy, matmul_request_support_rank, matmul_support_from_native,
-    vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
-    vulkan_training, vulkan_weights,
+    TrainingPrecisionPolicy, vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device,
+    vulkan_gdn, vulkan_linear, vulkan_training, vulkan_weights,
 };
 use crate::forward::GpuWeights;
 
@@ -236,6 +235,12 @@ impl VulkanBackend {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_linear_decode_enabled_for_test(mut self, enabled: bool) -> Self {
+        self.linear_decode_enabled = enabled;
+        self
+    }
+
     pub(super) fn has_vulkan(&self) -> bool {
         self.vulkan_device.is_some()
     }
@@ -306,7 +311,20 @@ impl ExternalYieldBackend for VulkanBackend {
         let Some(device) = self.vulkan_device.as_ref() else {
             return Ok(());
         };
-        device.synchronize_queue("external model yield")
+        let kiln_tensor::Device::Vulkan(device_index) = self.device_kt else {
+            anyhow::bail!(
+                "Vulkan external-yield synchronization has an owned backend device but no tensor companion device"
+            );
+        };
+
+        // Model tensors are owned by kiln_tensor's primary companion logical
+        // device, while resident decode also submits to this backend's private
+        // logical device. Both queues are part of the yield-settlement promise.
+        kiln_tensor::vulkan_synchronize_queue(device_index)
+            .context("synchronize Vulkan tensor companion queue before external yield")?;
+        device
+            .synchronize_queue("external model yield")
+            .context("synchronize Vulkan backend queue before external yield")
     }
 }
 
@@ -836,14 +854,7 @@ impl LinearBackend for VulkanBackend {
         &self,
         req: &super::capability::MatmulRequest,
     ) -> super::capability::Support {
-        let Some(rank) = matmul_request_support_rank(req) else {
-            return super::capability::Support::Unsupported;
-        };
-        matmul_support_from_native(
-            matches!(req.epilogue, super::capability::MatmulEpilogue::Identity)
-                && (req.lhs_dtype == kiln_tensor::DType::F32
-                    || req.lhs_dtype == kiln_tensor::DType::BF16 && rank > 2),
-        )
+        vulkan_linear::matmul_request_support(req)
     }
 
     fn runtime_matmul(
@@ -902,14 +913,6 @@ impl LinearBackend for VulkanBackend {
 
     fn runtime_prewarm_decode_weights(&self, weights: &GpuWeights) -> Result<()> {
         vulkan_weights::prewarm_decode_weights(self, weights)
-    }
-
-    fn runtime_drop_uploaded_bf16_weights(
-        &self,
-        weights: &mut crate::forward::GpuWeights,
-        device: &kiln_tensor::Device,
-    ) -> Result<usize> {
-        vulkan_weights::drop_uploaded_bf16_weights(self, weights, device)
     }
 
     fn runtime_full_attn_qkv_decode(

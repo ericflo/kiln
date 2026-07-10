@@ -473,9 +473,32 @@ kiln serve --config kiln.toml</code></pre>
         <h2 id="generation" class="text-2xl font-semibold mb-4">OpenAI-compatible generation</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/chat/completions</code> &mdash; chat completions with OpenAI-shaped request and response bodies, including SSE streaming and normalized tool-call deltas.</div>
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/completions</code> &mdash; vLLM-compatible prompt-logprobs scoring for remote OPD teachers (no generation-only mode, no streaming; prompts capped at 4096 tokens).</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/completions</code> &mdash; bounded, vLLM-shaped prompt-logprobs scoring for remote OPD teachers (no generation-only mode, no streaming; prompts capped at the smaller of 4096 tokens and the served model context).</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/completions/batch</code> &mdash; multi-prompt batch generation for efficient GRPO rollouts, with the same thinking-budget fields as chat.</div>
         </div>
+        <h3 id="prompt-logprobs" class="text-xl font-semibold mt-6 mb-3">Score prompt tokens</h3>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          Set <code>max_tokens</code> to <code>0</code> or <code>1</code> and request
+          <code>prompt_logprobs</code> from <code>0</code> through <code>256</code>. The first result is
+          <code>null</code>; each later position uses the preceding logits row and includes the observed
+          prompt token plus top K, so its map has K or K+1 entries. K=0 returns only the observed token.
+          Scores remain F32, extra observed tokens report full-vocabulary rank, and split UTF-8 display
+          tokens use preceding actual prompt context. Invalid token IDs, decoding failures, non-finite
+          values, and vocabulary-width mismatches fail closed. Text prompts default to
+          <code>add_special_tokens: true</code>; <code>-1</code> all-vocabulary requests are unsupported.
+          The model ID must match the served base model, active LoRAs are rejected until adapter revision
+          identity can be pinned, and the response is capped at 65,536 candidates. Scoring takes exclusive
+          GPU admission, explicitly settles each projection chunk and final scorer state, and drains a timed-out
+          worker before responding. Failed or panicked settlement quarantines the backend and retains admission.
+          The current path performs correctness-first O(TV) host readback rather than vLLM's selected-only O(TK)
+          transfer path.
+        </p>
+        <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>{
+  "prompt": [1, 42, 314],
+  "max_tokens": 0,
+  "prompt_logprobs": 5,
+  "add_special_tokens": true
+}</code></pre>
         <h3 id="thinking-budgets" class="text-xl font-semibold mt-6 mb-3">Bound thinking without disabling it</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
           Set <code>thinking_budget_tokens</code>, <code>thinking_budget_ms</code>, or both on a chat or

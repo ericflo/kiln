@@ -458,6 +458,52 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET | `/v1/health` | /v1 compatibility alias for health and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 
+### Prompt logprobs
+
+`POST /v1/completions` is a deliberately bounded vLLM-shaped scoring subset:
+set `max_tokens` to `0` or `1`, disable streaming, and request
+`prompt_logprobs` from `0` through `256`. Prompts may be text or token-ID
+arrays and are capped at the smaller of 4096 tokens and the served model's
+context window. Text prompts default to
+`add_special_tokens: true`, matching vLLM; set it to `false` explicitly when
+the supplied text already contains the required boundaries. Kiln does not
+support vLLM's `prompt_logprobs: -1` all-vocabulary extension.
+
+The first result is `null`. Position `i` scores the observed prompt token at
+`i` from logits row `i-1` and returns that token plus the requested top K. The
+map therefore contains K entries when the observed token is already top K and
+K+1 otherwise; K=0 returns only the observed token. Extra observed tokens carry
+their full-vocabulary rank. Scores remain F32, ties are deterministic by token
+ID, and split UTF-8 display tokens are decoded independently against preceding
+actual prompt context. Vocabulary drift, decoder failures, wrong-width rows,
+and non-finite logits or scores fail the request instead of producing partial
+JSON. The optional `model` must exactly match the one served model. Until the
+adapter-revision identity gate lands, scoring is base-model only and rejects an
+active LoRA instead of returning mutable teacher results under the base ID.
+
+The response is additionally capped at 65,536 candidate entries. Real scoring
+uses the runner's resident backend and inference recurrent-state policy, omits
+the unused final logits row, and takes exclusive GPU admission so it cannot
+multiply vocabulary scratch allocations alongside generation or training. The
+scorer explicitly settles backend work before recycling each projection chunk
+or releasing admission; a failed or panicked settlement quarantines the
+backend and retains ownership instead of admitting work against an unknown GPU
+state. Timeouts and dropped requests signal cancellation, and timeout responses
+wait for worker settlement. The
+current correctness-first implementation still reads each scored vocabulary
+row to the host, so its transfer work is O(TV), not vLLM's selected-only O(TK)
+path; use it for bounded teacher queries rather than high-throughput serving.
+
+```json
+{
+  "model": "Qwen3.5-4B",
+  "prompt": [1, 42, 314],
+  "max_tokens": 0,
+  "prompt_logprobs": 5,
+  "add_special_tokens": true
+}
+```
+
 ### Chat adapter selection
 
 `POST /v1/chat/completions` treats adapter selection as a per-request choice unless you call the adapter management endpoints:

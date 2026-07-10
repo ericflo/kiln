@@ -47,11 +47,35 @@
   display decode into an empty successful field.
 - prompt-logprob integrity: real forward rows must exactly match the configured
   vocabulary and contain only finite values before ranking or JSON
-  serialization. Selection has deterministic token-ID tie breaks and exact K
-  cardinality. CUDA and ROCm now use a fused, max-subtracted log-softmax kernel
+  serialization. Selection has deterministic token-ID tie breaks and an exact
+  requested top-K set. CUDA and ROCm now use a fused, max-subtracted log-softmax kernel
   that prevents softmax underflow from corrupting representable finite tails,
   with one same-dtype output allocation instead of low-precision
   softmax-then-log or full-vocabulary F32 temporaries.
+- prompt-logprob compatibility: position zero is null and each later position
+  uses the preceding logits row, always includes the observed prompt token,
+  returns K or K+1 distinct IDs, and reports the full-vocabulary observed rank
+  when it falls outside top K. K=0 is observed-only. Context-aware display
+  decoding completes split UTF-8 tokens without sharing context between
+  alternatives. Local scores now use direct mixed-input-to-F32 log-softmax;
+  ranks and top-K come from original logits so F32 tail collapse cannot change
+  them. Real inference reuses the runner-owned backend and inference recurrent
+  policy, omits the unused final row, and projects bounded chunks under a 64
+  MiB vocabulary-tensor target instead of materializing full-sequence logits.
+  Exclusive GPU admission prevents concurrent scratch amplification, timed-out
+  workers are cooperatively cancelled and drained, and dropped HTTP futures
+  signal the scorer. Projection chunks and final state cross an explicit
+  backend-settlement boundary before device owners or exclusive admission are
+  released; failed or panicked settlement quarantines the backend and retains
+  ownership. Prompts respect both the 4096-token endpoint cap and the served
+  model context window, and responses are capped at 65,536 candidates. CPU,
+  Vulkan fallback, and Metal log-softmax now preserve large common-offset
+  accuracy by subtracting the row maximum before subtracting log-sum-exp.
+  Vulkan keeps its host-fallback result on CPU rather than performing a
+  redundant round trip. Scoring is base-model only until adapter revision
+  identity can be pinned; mismatched model IDs and active LoRAs are rejected.
+  The remaining full-vocabulary host readback is documented as a
+  correctness-first O(TV) path pending a selected-only device kernel.
 
 ## kiln-v0.4.1 — 2026-06-12 — multi-turn prefix caching actually caches
 

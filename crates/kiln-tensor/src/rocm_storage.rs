@@ -142,6 +142,15 @@ unsafe extern "C" {
         dtype_tag: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_log_softmax_last_axis_f32_async(
+        x: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_rows: i64,
+        n_cols: i64,
+        input_dtype_tag: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// Owner of a ROCm byte buffer — either kt owns the allocation (`Owned`) or kt
@@ -1095,6 +1104,7 @@ fn rocm_last_axis_normalization(
     x: &crate::Tensor,
     label: &str,
     kernel: RocmLastAxisNormalizationKernel,
+    output_dtype: DType,
 ) -> Result<crate::Tensor> {
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {
@@ -1140,8 +1150,9 @@ fn rocm_last_axis_normalization(
         Device::Rocm(i) => i,
         _ => unreachable!("RocmStorage::device is always Rocm"),
     };
-    // Both kernels write every output element, so skip the zero-fill.
-    let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
+    // Normalization kernels write every output element, so skip the zero-fill.
+    let out_storage =
+        RocmStorage::alloc_uninit_ctx(&ctx, device_index, output_dtype, x.element_count())?;
 
     let raw_stream = x_storage.rocm_stream_raw();
     let (x_base, _) = x_storage.device_ptr_raw();
@@ -1167,7 +1178,12 @@ fn rocm_last_axis_normalization(
 /// `cuda_softmax_last_axis`, routing through the wave-size-fixed `softmax.cu`
 /// kernel (Phase R.5). F32 / BF16 / F16; F32 accumulation throughout.
 pub fn rocm_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
-    rocm_last_axis_normalization(x, "rocm_softmax_last_axis", kiln_softmax_last_axis_async)
+    rocm_last_axis_normalization(
+        x,
+        "rocm_softmax_last_axis",
+        kiln_softmax_last_axis_async,
+        x.dtype(),
+    )
 }
 
 /// Numerically stable ROCm log-softmax over the trailing axis.
@@ -1181,5 +1197,20 @@ pub fn rocm_log_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         x,
         "rocm_log_softmax_last_axis",
         kiln_log_softmax_last_axis_async,
+        x.dtype(),
+    )
+}
+
+/// Numerically stable ROCm log-softmax with direct F32 output.
+///
+/// The fused kernel reads F32/BF16/F16 input in place, accumulates in F32,
+/// and writes one freshly allocated F32 output. It does not allocate a casted
+/// input or round the result through the input dtype.
+pub fn rocm_log_softmax_last_axis_f32(x: &crate::Tensor) -> Result<crate::Tensor> {
+    rocm_last_axis_normalization(
+        x,
+        "rocm_log_softmax_last_axis_f32",
+        kiln_log_softmax_last_axis_f32_async,
+        DType::F32,
     )
 }

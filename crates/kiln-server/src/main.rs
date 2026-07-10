@@ -1054,16 +1054,13 @@ fn spawn_backend_prewarm(state: AppState) {
                 let runner_guard = runner.read().unwrap();
                 runner_guard.precompile_backend_startup_kernels()?;
             }
-            // Write lock — `prewarm_backend_decode_weights` now mutates
-            // `weights` to stub the pre-transposed bf16 caches after Vulkan
-            // upload (frees ~6-7 GB of local CPU residency). Prewarm runs
-            // once at startup so the brief exclusive lock is fine.
-            let mut runner_guard = runner.write().unwrap();
+            // Weight prewarm populates backend caches without replacing the
+            // serving tensors; shared-tape training and portable fallback keep
+            // the same authoritative values.
+            let runner_guard = runner.read().unwrap();
             runner_guard
                 .prewarm_backend_decode_weights()
                 .context("backend decode weight prewarm failed")?;
-            drop(runner_guard);
-            let runner_guard = runner.read().unwrap();
             let params = SamplingParams {
                 temperature: 0.0,
                 top_p: 1.0,
@@ -1153,7 +1150,7 @@ fn spawn_vulkan_decode_weight_prewarm(
                 let runner_guard = runner.read().unwrap();
                 runner_guard.precompile_backend_startup_kernels()?;
             }
-            let mut runner_guard = runner.write().unwrap();
+            let runner_guard = runner.read().unwrap();
             runner_guard
                 .prewarm_backend_decode_weights()
                 .context("Vulkan decode weight prewarm failed")?;

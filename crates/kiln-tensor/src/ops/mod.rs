@@ -151,7 +151,7 @@ pub use leaky_activations::{elu, leaky_relu, mish, softplus};
 pub use lerp::lerp;
 pub use like::{full_like, ones_like, zeros_like};
 pub use linear::linear;
-pub use log_softmax::log_softmax_last_dim;
+pub use log_softmax::{log_softmax_last_dim, log_softmax_last_dim_f32};
 pub use log_variants::{exp2, expm1, log1p, log2, log10};
 pub use losses::{
     bce_with_logits, hinge_loss, huber_loss, info_nce, kl_div_log_probs, l1_loss, margin_ranking,

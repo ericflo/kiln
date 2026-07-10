@@ -708,6 +708,15 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_log_softmax_last_axis_f32_async(
+        x: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_rows: i64,
+        n_cols: i64,
+        input_dtype_tag: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_sum_squared_last_axis_async(
         x: *const core::ffi::c_void,
         out: *mut core::ffi::c_void,
@@ -2584,6 +2593,7 @@ fn cuda_last_axis_normalization(
     x: &crate::Tensor,
     label: &str,
     kernel: CudaLastAxisNormalizationKernel,
+    output_dtype: crate::DType,
 ) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
 
@@ -2637,8 +2647,9 @@ fn cuda_last_axis_normalization(
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    // Both kernels write every output element, so skip the zero-fill.
-    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
+    // Normalization kernels write every output element, so skip the zero-fill.
+    let out_storage =
+        CudaStorage::alloc_uninit_ctx(&ctx, device_index, output_dtype, x.element_count())?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -2687,7 +2698,12 @@ fn cuda_last_axis_normalization(
 /// `csrc/softmax.cu`. F32/BF16/F16 supported.
 #[cfg(feature = "cuda")]
 pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
-    cuda_last_axis_normalization(x, "cuda_softmax_last_axis", kiln_softmax_last_axis_async)
+    cuda_last_axis_normalization(
+        x,
+        "cuda_softmax_last_axis",
+        kiln_softmax_last_axis_async,
+        x.dtype(),
+    )
 }
 
 /// Numerically stable CUDA log-softmax over the trailing axis.
@@ -2702,6 +2718,22 @@ pub fn cuda_log_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         x,
         "cuda_log_softmax_last_axis",
         kiln_log_softmax_last_axis_async,
+        x.dtype(),
+    )
+}
+
+/// Numerically stable CUDA log-softmax with direct F32 output.
+///
+/// The fused kernel reads F32/BF16/F16 input in place, accumulates in F32,
+/// and writes one freshly allocated F32 output. It does not allocate a casted
+/// input or round the result through the input dtype.
+#[cfg(feature = "cuda")]
+pub fn cuda_log_softmax_last_axis_f32(x: &crate::Tensor) -> Result<crate::Tensor> {
+    cuda_last_axis_normalization(
+        x,
+        "cuda_log_softmax_last_axis_f32",
+        kiln_log_softmax_last_axis_f32_async,
+        crate::DType::F32,
     )
 }
 

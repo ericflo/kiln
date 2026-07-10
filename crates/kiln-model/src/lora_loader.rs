@@ -452,9 +452,10 @@ fn matmul_last_dim_rhs_transposed(lhs: &KtTensor, rhs: &KtTensor) -> Result<KtTe
     Ok(out_2d.reshape(out_shape)?)
 }
 
-fn cpu_needs_f32_matmul(lhs: &KtTensor, rhs: &KtTensor) -> bool {
-    matches!(lhs.device(), kiln_tensor::Device::Cpu)
-        && (lhs.dtype() != kiln_tensor::DType::F32 || rhs.dtype() != kiln_tensor::DType::F32)
+fn needs_f32_matmul_fallback(lhs: &KtTensor, rhs: &KtTensor) -> bool {
+    lhs.dtype() != rhs.dtype()
+        || matches!(lhs.device(), kiln_tensor::Device::Cpu)
+            && (lhs.dtype() != kiln_tensor::DType::F32 || rhs.dtype() != kiln_tensor::DType::F32)
 }
 
 /// Apply a LoRA-augmented linear projection.
@@ -468,8 +469,8 @@ pub fn linear_with_lora(
     lora: Option<&LoraProjectionWeights>,
     scale: f32,
 ) -> Result<KtTensor> {
-    let cpu_f32_matmul = cpu_needs_f32_matmul(x, base_weight);
-    let base_output = if cpu_f32_matmul {
+    let f32_matmul_fallback = needs_f32_matmul_fallback(x, base_weight);
+    let base_output = if f32_matmul_fallback {
         let x_f32 = x.to_dtype(kiln_tensor::DType::F32)?;
         let w_f32 = base_weight.to_dtype(kiln_tensor::DType::F32)?;
         matmul_last_dim_rhs_transposed(&x_f32, &w_f32)?
@@ -517,13 +518,13 @@ pub fn linear_with_lora_t(
     } else {
         base_weight_t
     };
-    let cpu_f32_matmul = cpu_needs_f32_matmul(x, base_weight_t);
-    let base_output = if crate::mtp_debug::is_mtp_fp32_head_armed() || cpu_f32_matmul {
+    let f32_matmul_fallback = needs_f32_matmul_fallback(x, base_weight_t);
+    let base_output = if crate::mtp_debug::is_mtp_fp32_head_armed() || f32_matmul_fallback {
         let in_dtype = x.dtype();
         let x_f32 = x.to_dtype(kiln_tensor::DType::F32)?;
         let w_f32 = base_weight_t.to_dtype(kiln_tensor::DType::F32)?;
         let out = x_f32.broadcast_matmul(&w_f32)?;
-        if cpu_f32_matmul {
+        if f32_matmul_fallback {
             out
         } else {
             out.to_dtype(in_dtype)?
@@ -543,6 +544,28 @@ pub fn linear_with_lora_t(
 mod tests {
     use super::*;
     use kiln_tensor::Device;
+
+    #[test]
+    fn mixed_cpu_linear_fallback_promotes_without_backend_help() -> Result<()> {
+        let x = KtTensor::from_vec(
+            vec![0.25_f32, -0.5, 0.75, 1.0, -0.25, 0.5, -0.75, -1.0],
+            (1, 2, 4),
+        )?;
+        let weight = KtTensor::from_vec(
+            vec![
+                0.5_f32, -0.25, 0.125, -0.5, 0.75, 0.25, 1.0, -0.125, 0.375, -0.75, 0.625, 0.5,
+            ],
+            (4, 3),
+        )?
+        .to_dtype(kiln_tensor::DType::BF16)?;
+        let output = linear_with_lora_t(&x, &weight, None, 0.0)?;
+        assert_eq!(output.dtype(), kiln_tensor::DType::F32);
+        assert_eq!(
+            output.flatten_all()?.to_vec1::<f32>()?,
+            vec![0.375, 0.09375, 0.6875, -0.375, -0.09375, -0.6875]
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_parse_peft_key_self_attn() {

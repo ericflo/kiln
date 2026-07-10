@@ -14,17 +14,21 @@
 //! and read Metal outputs back via `Tensor::to_vec` — the host-I/O
 //! foundation this same PR adds. No `kiln_kt_bridge` dependency.
 //!
-//! Skips gracefully (prints + returns) when no Metal device is present,
-//! so the suite is a no-op on CI runners without a GPU.
+//! Skips gracefully (prints + returns) when no Metal device is present unless
+//! `KILN_QUALIFICATION=1`, which makes missing target hardware a test failure.
 
 use kiln_tensor::{DType, Device, Tensor, ops};
 
 /// `Device::Metal(0)` if a Metal device is reachable, else `None`.
 fn metal() -> Option<Device> {
     // `primary_metal_companion` enumerates `Device::all()`; Ok ⇒ present.
-    kiln_tensor::primary_metal_companion(0)
+    let device = kiln_tensor::primary_metal_companion(0)
         .ok()
-        .map(|_| Device::Metal(0))
+        .map(|_| Device::Metal(0));
+    if device.is_none() && std::env::var("KILN_QUALIFICATION").ok().as_deref() == Some("1") {
+        panic!("Metal device unavailable while KILN_QUALIFICATION=1");
+    }
+    device
 }
 
 /// Deterministic pseudo-random f32 pattern in roughly [-1, 1].
@@ -211,6 +215,108 @@ fn log_softmax_last_axis_bf16() {
         let d = max_abs_diff(&want, &got);
         // BF16 round-trips through float exp/log; loosen the tolerance.
         assert!(d < 5e-2, "log_softmax bf16 [{rows},{cols}] max|Δ|={d}");
+    }
+}
+
+#[test]
+fn log_softmax_last_axis_mixed_input_f32_output() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+
+    for dtype in [DType::F32, DType::BF16, DType::F16] {
+        let data = pattern(248_320, 18);
+        let cpu = Tensor::from_vec(data.clone(), vec![1, data.len()])
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap();
+        let metal = Tensor::from_vec_on(dev, data, vec![1, 248_320])
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap();
+        let expected = ops::log_softmax_last_dim_f32(&cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let output = ops::log_softmax_last_dim_f32(&metal).unwrap();
+        assert_eq!(output.dtype(), DType::F32);
+        assert_eq!(output.device(), dev);
+        let actual = output.to_vec::<f32>().unwrap();
+        let difference = max_abs_diff(&expected, &actual);
+        assert!(
+            difference <= 1e-4,
+            "mixed-input F32 log-softmax {dtype} max|difference|={difference}"
+        );
+    }
+
+    let uniform = Tensor::from_vec_on(dev, vec![half::bf16::from_f32(0.0); 3], vec![1, 3]).unwrap();
+    let uniform_values = ops::log_softmax_last_dim_f32(&uniform)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
+    let expected = -(3.0f32).ln();
+    let rounded = half::bf16::from_f32(expected).to_f32();
+    assert!(
+        uniform_values
+            .iter()
+            .all(|value| (value - expected).abs() <= 1e-5)
+    );
+    assert!(
+        uniform_values
+            .iter()
+            .all(|value| (value - rounded).abs() > 1e-4)
+    );
+
+    let special = Tensor::from_vec_on(dev, vec![f32::INFINITY, 0.0], vec![1, 2]).unwrap();
+    let special_values = ops::log_softmax_last_dim_f32(&special)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(special_values.iter().all(|value| value.is_nan()));
+}
+
+#[test]
+fn log_softmax_last_axis_preserves_large_offset_normalizer() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+
+    let expected = -(3.0_f32).ln();
+    for (dtype, offset, same_dtype_tolerance) in [
+        (DType::F32, 100_000_000.0_f32, 1e-6),
+        (DType::BF16, 100_000_000.0_f32, 5e-3),
+        (DType::F16, 65_504.0_f32, 5e-4),
+    ] {
+        let input = Tensor::from_vec_on(dev, vec![offset; 3], vec![1, 3])
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap();
+
+        let f32_values = ops::log_softmax_last_dim_f32(&input)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        assert!(
+            f32_values
+                .iter()
+                .all(|value| (value - expected).abs() <= 1e-5),
+            "Metal mixed-input log-softmax {dtype}: {f32_values:?}"
+        );
+
+        let same_dtype = ops::log_softmax_last_dim(&input).unwrap();
+        let same_dtype_values = same_dtype
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        assert!(
+            same_dtype_values
+                .iter()
+                .all(|value| (value - expected).abs() <= same_dtype_tolerance),
+            "Metal same-dtype log-softmax {dtype}: {same_dtype_values:?}"
+        );
     }
 }
 

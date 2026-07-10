@@ -140,9 +140,24 @@ impl KilnTokenizer {
 
     /// Encode text into token IDs.
     pub fn encode(&self, text: &str) -> Result<Vec<TokenId>, TokenizerError> {
+        self.encode_with_special_tokens(text, false)
+    }
+
+    /// Encode text into token IDs with an explicit tokenizer special-token
+    /// policy.
+    ///
+    /// Chat rendering and Kiln's internal callers normally use [`Self::encode`]
+    /// and therefore do not inject tokenizer-level special tokens. Protocols
+    /// such as vLLM text completions default to `add_special_tokens=true` and
+    /// must choose that behavior explicitly rather than silently diverging.
+    pub fn encode_with_special_tokens(
+        &self,
+        text: &str,
+        add_special_tokens: bool,
+    ) -> Result<Vec<TokenId>, TokenizerError> {
         let encoding = self
             .inner
-            .encode(text, false)
+            .encode(text, add_special_tokens)
             .map_err(|e| TokenizerError::Encode(e.to_string()))?;
         Ok(encoding.get_ids().to_vec())
     }
@@ -188,13 +203,96 @@ impl KilnTokenizer {
     /// API fields identify the vocabulary entry instead of displaying an
     /// ambiguous empty string.
     pub fn decode_token_for_display(&self, id: TokenId) -> Result<String, TokenizerError> {
-        self.inner.id_to_token(id).ok_or_else(|| {
-            TokenizerError::Decode(format!(
-                "token id {id} is absent from the tokenizer vocabulary"
-            ))
-        })?;
+        self.ensure_display_token_ids_known(&[id])?;
         self.inner
             .decode(&[id], false)
+            .map_err(|e| TokenizerError::Decode(e.to_string()))
+    }
+
+    /// Decode one token for a token-level API using preceding actual tokens
+    /// to finish a split UTF-8 sequence.
+    ///
+    /// Top-k alternatives at one position must each call this method with the
+    /// same `preceding_actual_ids`; alternatives are never context for one
+    /// another. Context is consulted only when isolated decoding ends in
+    /// U+FFFD, and at most the last four IDs are needed for UTF-8. A genuinely
+    /// incomplete sequence renders as an empty string until a later actual
+    /// token completes it. Known special tokens retain their display text.
+    pub fn decode_token_for_display_with_context(
+        &self,
+        id: TokenId,
+        preceding_actual_ids: &[TokenId],
+    ) -> Result<String, TokenizerError> {
+        let context_start = preceding_actual_ids.len().saturating_sub(4);
+        let relevant_context = &preceding_actual_ids[context_start..];
+        self.ensure_display_token_ids_known(relevant_context)?;
+
+        let isolated = self.decode_token_for_display(id)?;
+        if !isolated.ends_with('\u{FFFD}') {
+            return Ok(isolated);
+        }
+
+        for context_len in 1..=relevant_context.len() {
+            let context = &relevant_context[relevant_context.len() - context_len..];
+            let mut candidate_sequence = Vec::with_capacity(context.len() + 1);
+            candidate_sequence.extend_from_slice(context);
+            candidate_sequence.push(id);
+            let full_decoded = self.decode_display_token_ids(&candidate_sequence)?;
+            if full_decoded.ends_with('\u{FFFD}') {
+                continue;
+            }
+
+            // Trailing context tokens that individually end in U+FFFD belong
+            // to the same byte sequence as the candidate. Attribute their
+            // completed text to this candidate rather than the clean prefix.
+            let mut clean_end = context.len();
+            for index in (0..context.len()).rev() {
+                if self
+                    .decode_token_for_display(context[index])?
+                    .ends_with('\u{FFFD}')
+                {
+                    clean_end = index;
+                } else {
+                    break;
+                }
+            }
+
+            let clean_prefix = self.decode_display_token_ids(&context[..clean_end])?;
+            if let Some(completed_suffix) = full_decoded.strip_prefix(&clean_prefix) {
+                return Ok(completed_suffix.to_string());
+            }
+
+            // Some tokenizers normalize while decoding a sequence. Mirror
+            // vLLM's fallback by removing the longest common character prefix.
+            let common_prefix_bytes = clean_prefix
+                .chars()
+                .zip(full_decoded.chars())
+                .take_while(|(left, right)| left == right)
+                .map(|(ch, _)| ch.len_utf8())
+                .sum::<usize>();
+            return Ok(full_decoded[common_prefix_bytes..].to_string());
+        }
+
+        Ok(String::new())
+    }
+
+    fn ensure_display_token_ids_known(&self, ids: &[TokenId]) -> Result<(), TokenizerError> {
+        if let Some(id) = ids
+            .iter()
+            .copied()
+            .find(|id| self.inner.id_to_token(*id).is_none())
+        {
+            return Err(TokenizerError::Decode(format!(
+                "token id {id} is absent from the tokenizer vocabulary"
+            )));
+        }
+        Ok(())
+    }
+
+    fn decode_display_token_ids(&self, ids: &[TokenId]) -> Result<String, TokenizerError> {
+        self.ensure_display_token_ids_known(ids)?;
+        self.inner
+            .decode(ids, false)
             .map_err(|e| TokenizerError::Decode(e.to_string()))
     }
 
@@ -541,6 +639,102 @@ mod tests {
         }
     }
 
+    fn byte_level_display_tokenizer() -> KilnTokenizer {
+        // Byte-level BPE where ids 1+2 encode the three UTF-8 bytes of
+        // "好": E5 A5 BD. Id 3 is an independent alternative for the final
+        // byte, and id 4 covers the ordinary GPT-2 leading-space alphabet.
+        KilnTokenizer::from_bytes(
+            &serde_json::to_vec(&serde_json::json!({
+                "version": "1.0",
+                "model": {
+                    "type": "BPE",
+                    "vocab": {"A": 0, "å¥": 1, "½": 2, "¥": 3, "ĠB": 4},
+                    "merges": []
+                },
+                "decoder": {
+                    "type": "ByteLevel",
+                    "add_prefix_space": true,
+                    "trim_offsets": true,
+                    "use_regex": true
+                },
+                "added_tokens": []
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn sentencepiece_style_display_tokenizer() -> KilnTokenizer {
+        KilnTokenizer::from_bytes(
+            &serde_json::to_vec(&serde_json::json!({
+                "version": "1.0",
+                "model": {
+                    "type": "BPE",
+                    "vocab": {"▁hello": 0, "▁world": 1},
+                    "merges": []
+                },
+                "decoder": {
+                    "type": "Metaspace",
+                    "replacement": "▁",
+                    "prepend_scheme": "always",
+                    "split": true
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn template_processing_tokenizer() -> KilnTokenizer {
+        KilnTokenizer::from_bytes(
+            &serde_json::to_vec(&serde_json::json!({
+                "version": "1.0",
+                "truncation": null,
+                "padding": null,
+                "added_tokens": [
+                    {"id": 0, "content": "<s>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                    {"id": 2, "content": "</s>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+                ],
+                "normalizer": null,
+                "pre_tokenizer": null,
+                "post_processor": {
+                    "type": "TemplateProcessing",
+                    "single": [
+                        {"SpecialToken": {"id": "<s>", "type_id": 0}},
+                        {"Sequence": {"id": "A", "type_id": 0}},
+                        {"SpecialToken": {"id": "</s>", "type_id": 0}}
+                    ],
+                    "pair": [
+                        {"SpecialToken": {"id": "<s>", "type_id": 0}},
+                        {"Sequence": {"id": "A", "type_id": 0}},
+                        {"SpecialToken": {"id": "</s>", "type_id": 0}},
+                        {"Sequence": {"id": "B", "type_id": 1}},
+                        {"SpecialToken": {"id": "</s>", "type_id": 1}}
+                    ],
+                    "special_tokens": {
+                        "<s>": {"id": "<s>", "ids": [0], "tokens": ["<s>"]},
+                        "</s>": {"id": "</s>", "ids": [2], "tokens": ["</s>"]}
+                    }
+                },
+                "decoder": null,
+                "model": {
+                    "type": "BPE",
+                    "dropout": null,
+                    "unk_token": null,
+                    "continuing_subword_prefix": null,
+                    "end_of_word_suffix": null,
+                    "fuse_unk": false,
+                    "byte_fallback": false,
+                    "ignore_merges": false,
+                    "vocab": {"<s>": 0, "A": 1, "</s>": 2},
+                    "merges": []
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn encode_batch_matches_scalar_encode() {
         let tok = minimal_tokenizer();
@@ -551,6 +745,20 @@ mod tests {
             .map(|text| tok.encode(text).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(batched, scalar);
+    }
+
+    #[test]
+    fn encode_with_special_tokens_exposes_template_processing_policy() {
+        let tokenizer = template_processing_tokenizer();
+        assert_eq!(tokenizer.encode("A").unwrap(), vec![1]);
+        assert_eq!(
+            tokenizer.encode_with_special_tokens("A", false).unwrap(),
+            vec![1]
+        );
+        assert_eq!(
+            tokenizer.encode_with_special_tokens("A", true).unwrap(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
@@ -681,6 +889,75 @@ mod tests {
     }
 
     #[test]
+    fn context_display_decode_completes_split_utf8_independently() {
+        let tokenizer = byte_level_display_tokenizer();
+        assert!(
+            tokenizer
+                .decode_token_for_display(1)
+                .unwrap()
+                .ends_with('\u{FFFD}')
+        );
+
+        // The first fragment is incomplete even with clean context.
+        assert_eq!(
+            tokenizer
+                .decode_token_for_display_with_context(1, &[0])
+                .unwrap(),
+            ""
+        );
+
+        // Each same-position alternative gets the same actual-token context,
+        // never the preceding alternative.
+        assert_eq!(
+            tokenizer
+                .decode_token_for_display_with_context(2, &[0, 1])
+                .unwrap(),
+            "好"
+        );
+        let alternative = String::from_utf8(vec![0xE5, 0xA5, 0xA5]).unwrap();
+        assert_eq!(
+            tokenizer
+                .decode_token_for_display_with_context(3, &[0, 1])
+                .unwrap(),
+            alternative
+        );
+    }
+
+    #[test]
+    fn context_display_decode_preserves_valid_byte_bpe_and_sentencepiece_tokens() {
+        let byte_level = byte_level_display_tokenizer();
+        assert_eq!(byte_level.decode_token_for_display(4).unwrap(), " B");
+        assert_eq!(
+            byte_level
+                .decode_token_for_display_with_context(4, &[0])
+                .unwrap(),
+            " B"
+        );
+
+        let sentencepiece = sentencepiece_style_display_tokenizer();
+        let isolated = sentencepiece.decode_token_for_display(1).unwrap();
+        assert_eq!(isolated, "world");
+        assert_eq!(
+            sentencepiece
+                .decode_token_for_display_with_context(1, &[0])
+                .unwrap(),
+            isolated,
+            "valid SentencePiece-style tokens must not be context-rewritten"
+        );
+    }
+
+    #[test]
+    fn context_display_decode_rejects_unknown_relevant_context_id() {
+        let err = byte_level_display_tokenizer()
+            .decode_token_for_display_with_context(4, &[0, 99])
+            .unwrap_err();
+        assert!(
+            matches!(err, TokenizerError::Decode(ref detail) if detail.contains("token id 99")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn display_decode_preserves_special_token_text() {
         let tokenizer = KilnTokenizer::from_bytes(
             br#"{
@@ -704,6 +981,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(tokenizer.decode_token_for_display(2).unwrap(), "<special>");
+        assert_eq!(
+            tokenizer
+                .decode_token_for_display_with_context(2, &[0, 1])
+                .unwrap(),
+            "<special>"
+        );
     }
 
     #[test]

@@ -3050,18 +3050,21 @@ fn external_yield_synchronization_is_backend_owned_and_device_wide() {
     let vulkan_impl = compact_body(vulkan_impl);
     assert!(
         vulkan_impl.contains("self.vulkan_device.as_ref()")
+            && vulkan_impl.contains("kiln_tensor::Device::Vulkan(device_index)")
+            && vulkan_impl.contains("kiln_tensor::vulkan_synchronize_queue(device_index)")
             && vulkan_impl.contains("device.synchronize_queue(\"externalmodelyield\")"),
-        "Vulkan external yields must drain the logical device owned by VulkanBackend"
+        "Vulkan external yields must drain both the tensor companion queue and the logical device owned by VulkanBackend"
     );
-    for forbidden in [
-        "kiln_tensor::vulkan_synchronize_queue",
-        "kiln_tensor::primary_vulkan_device",
-    ] {
-        assert!(
-            !vulkan_impl.contains(forbidden),
-            "Vulkan external yields must not route through the global tensor device: {forbidden}"
-        );
-    }
+    let companion_pos = vulkan_impl
+        .find("kiln_tensor::vulkan_synchronize_queue(device_index)")
+        .expect("Vulkan tensor companion synchronization should be present");
+    let backend_pos = vulkan_impl
+        .find("device.synchronize_queue(\"externalmodelyield\")")
+        .expect("Vulkan backend synchronization should be present");
+    assert!(
+        companion_pos < backend_pos,
+        "Vulkan external yields must settle tensor companion work before the backend-private queue"
+    );
 
     let vulkan_device = fs::read_to_string(root.join("crates/kiln-vulkan-kernel/src/device.rs"))
         .expect("Vulkan device source should be readable");
@@ -3078,6 +3081,41 @@ fn external_yield_synchronization_is_backend_owned_and_device_wide() {
         assert!(
             compact_body(owned_queue_sync).contains(&compact_body(required)),
             "owned Vulkan queue synchronization should preserve {required}"
+        );
+    }
+}
+
+#[test]
+fn vulkan_decode_weight_prewarm_is_nondestructive() {
+    let root = workspace_root();
+    let backend_mod = fs::read_to_string(root.join("crates/kiln-model/src/backend/mod.rs"))
+        .expect("backend facade source should be readable");
+    let vulkan = fs::read_to_string(root.join("crates/kiln-model/src/backend/vulkan.rs"))
+        .expect("Vulkan backend source should be readable");
+    let weights = fs::read_to_string(root.join("crates/kiln-model/src/backend/vulkan_weights.rs"))
+        .expect("Vulkan weight-cache source should be readable");
+    let generate = fs::read_to_string(root.join("crates/kiln-model/src/generate.rs"))
+        .expect("model runner source should be readable");
+    let sources = format!("{backend_mod}\n{vulkan}\n{weights}\n{generate}");
+
+    assert!(
+        weights.contains("pub(super) fn prewarm_decode_weights(")
+            && weights.contains("weights: &GpuWeights"),
+        "Vulkan decode prewarm must borrow model weights immutably"
+    );
+    assert!(
+        generate.contains("pub fn prewarm_backend_decode_weights(&self)")
+            && generate.contains("LinearBackend::runtime_prewarm_decode_weights"),
+        "ModelRunner prewarm must be a non-mutating focused-backend call"
+    );
+    for forbidden in [
+        "runtime_drop_uploaded_bf16_weights",
+        "drop_uploaded_bf16_weights",
+        "dropped_bf16_weight_stub",
+    ] {
+        assert!(
+            !sources.contains(forbidden),
+            "authoritative serving/training weights must not be replaced after prewarm: {forbidden}"
         );
     }
 }
@@ -5225,7 +5263,6 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     let inference_linear_sources = format!("{generate_source}\n{forward_source}");
     for required in [
         "LinearBackend::runtime_prewarm_decode_weights",
-        "LinearBackend::runtime_drop_uploaded_bf16_weights",
         "LinearBackend::runtime_lora_decode_add",
         "LinearBackend::runtime_lora_delta_resident",
         "LinearBackend::runtime_linear_prefill_apply",
@@ -5242,7 +5279,6 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     }
     for forbidden in [
         ".prewarm_decode_weights(",
-        ".drop_uploaded_bf16_weights(",
         ".lora_decode_add(",
         ".lora_delta_resident(",
         ".linear_prefill_apply(",
@@ -5712,6 +5748,88 @@ fn forward_packed_mlp_prefill_routes_gate_up_through_matmul_request_contract() {
     assert!(
         request_idx < fallback_idx,
         "packed MLP gate+up prefill should try request routing before broadcast fallback"
+    );
+}
+
+#[test]
+fn forward_nonpaged_full_attention_mlp_routes_inference_through_backend() {
+    let forward_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))
+            .expect("forward source should be readable");
+    let transformer_block = source_between(
+        &forward_source,
+        "pub fn transformer_block(",
+        "fn transformer_block_detached_prefill_chunked(",
+    );
+
+    assert!(
+        transformer_block.contains("swiglu_ffn_backend_profiled(")
+            && transformer_block.contains("tape_scope_active"),
+        "nonpaged full-attention inference must route MLP projections through LinearBackend while preserving the tape-training route"
+    );
+}
+
+#[test]
+fn vulkan_mixed_matmul_capability_is_bound_to_the_resident_dispatch_contract() {
+    let root = workspace_root();
+    let vulkan_source = fs::read_to_string(root.join("crates/kiln-model/src/backend/vulkan.rs"))
+        .expect("Vulkan backend source should be readable");
+    let vulkan_linear_source =
+        fs::read_to_string(root.join("crates/kiln-model/src/backend/vulkan_linear.rs"))
+            .expect("Vulkan linear source should be readable");
+
+    let capability_impl = source_between(
+        &vulkan_source,
+        "fn runtime_supports_matmul_request(",
+        "fn runtime_matmul(",
+    );
+    assert!(
+        capability_impl.contains("vulkan_linear::matmul_request_support(req)"),
+        "Vulkan capability reporting should delegate to the linear route's request contract"
+    );
+
+    let mixed_predicate = source_between(
+        &vulkan_linear_source,
+        "pub(super) fn resident_mixed_rank2_request_supported(",
+        "pub(super) fn matmul_request_support(",
+    );
+    for required in [
+        "req.rank() == Some(2)",
+        "MatmulOperandLayout::RowMajor",
+        "MatmulEpilogue::Identity",
+        "req.lhs_dtype == kiln_tensor::DType::F32",
+        "req.rhs_dtype == kiln_tensor::DType::BF16",
+        "req.out_dtype == kiln_tensor::DType::F32",
+    ] {
+        assert!(
+            mixed_predicate.contains(required),
+            "resident mixed Vulkan request contract should contain {required}"
+        );
+    }
+    assert!(
+        !mixed_predicate.contains("std::env") && !mixed_predicate.contains("KILN_"),
+        "mixed Vulkan capability truth must not depend on a test or runtime environment gate"
+    );
+
+    let support_impl = source_between(
+        &vulkan_linear_source,
+        "pub(super) fn matmul_request_support(",
+        "pub(super) fn matmul(",
+    );
+    let dispatch_impl = source_between(
+        &vulkan_linear_source,
+        "pub(super) fn matmul(",
+        "fn resident_matmul(",
+    );
+    assert!(
+        support_impl.contains("resident_mixed_rank2_request_supported(req)")
+            && dispatch_impl.contains("resident_mixed_rank2_request_supported(req)"),
+        "capability reporting and resident dispatch should share the exact mixed request predicate"
+    );
+    assert!(
+        dispatch_impl.contains("kiln_tensor::Device::Vulkan(_)")
+            && dispatch_impl.contains("return resident_matmul(req, lhs, rhs, layout)"),
+        "mixed capability support must keep Vulkan residency checks and homogeneous-route rollback"
     );
 }
 

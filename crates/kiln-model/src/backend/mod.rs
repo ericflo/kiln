@@ -765,8 +765,9 @@ pub trait StartupBackend: BackendIdentity + Send + Sync + std::fmt::Debug {
 /// for the scheduler to publish partial progress, run another request, or
 /// discard resources owned by the yielded operation. This is deliberately a
 /// backend facet rather than a `kiln_tensor::Device` dispatch: some runtimes,
-/// most notably Vulkan, own a logical device that is distinct from the global
-/// tensor-device registry.
+/// most notably Vulkan, submit through both a tensor companion device and a
+/// backend-private logical device, and only the backend knows the complete set
+/// of queues that must be drained.
 ///
 /// The caller must hold its model/backend execution serialization guard from
 /// the final submission through this call and the subsequent progress commit.
@@ -1402,14 +1403,6 @@ pub trait LinearBackend: Send + Sync + std::fmt::Debug {
         Ok(())
     }
 
-    fn runtime_drop_uploaded_bf16_weights(
-        &self,
-        _weights: &mut crate::forward::GpuWeights,
-        _device: &kiln_tensor::Device,
-    ) -> Result<usize> {
-        Ok(0)
-    }
-
     fn runtime_full_attn_qkv_combined_decode(
         &self,
         _x: &kiln_tensor::Tensor,
@@ -1938,10 +1931,7 @@ pub fn training_precision_policy_for_device_kt(
             TrainingLossBackend::runtime_training_precision_policy(&backend)
         }
         #[cfg(feature = "vulkan")]
-        kiln_tensor::Device::Vulkan(_) => {
-            let backend = vulkan::VulkanBackend::new(kiln_tensor::Device::Cpu);
-            TrainingLossBackend::runtime_training_precision_policy(&backend)
-        }
+        kiln_tensor::Device::Vulkan(_) => TrainingPrecisionPolicy::vulkan(),
         _ => {
             // CPU-as-Vulkan-sentinel: see the doc comment above. Keyed on
             // the same runtime probe `for_device_kt` uses (NOT the
@@ -1982,8 +1972,7 @@ pub fn training_tape_route_for_device_kt(device: kiln_tensor::Device) -> Trainin
         }
         #[cfg(feature = "vulkan")]
         kiln_tensor::Device::Vulkan(_) => {
-            let backend = vulkan::VulkanBackend::new(kiln_tensor::Device::Cpu);
-            TrainingLossBackend::runtime_tape_forward_backward_route(&backend)
+            vulkan::VulkanBackend::training_capabilities_static().tape_forward_backward_route
         }
         _ => {
             // CPU-as-Vulkan-sentinel (matches `for_device_kt` and the
@@ -1992,8 +1981,8 @@ pub fn training_tape_route_for_device_kt(device: kiln_tensor::Device) -> Trainin
             // device gates must see the Vulkan route for them.
             #[cfg(feature = "vulkan")]
             if matches!(device, kiln_tensor::Device::Cpu) && vulkan::vulkan_is_available() {
-                let backend = vulkan::VulkanBackend::new(kiln_tensor::Device::Cpu);
-                return TrainingLossBackend::runtime_tape_forward_backward_route(&backend);
+                return vulkan::VulkanBackend::training_capabilities_static()
+                    .tape_forward_backward_route;
             }
             let backend = cpu::CpuBackend::new(device);
             TrainingLossBackend::runtime_tape_forward_backward_route(&backend)
@@ -2044,6 +2033,20 @@ mod tests {
             &self,
             req: &capability::MatmulRequest,
         ) -> capability::Support {
+            let vulkan_resident_mixed_rank2 = self.name == "vulkan"
+                && req.rank() == Some(2)
+                && req.to_blas_request(1).is_ok()
+                && matches!(req.logical_mnk(), Some((m, n, k)) if m > 0 && n > 0 && k > 0)
+                && req.lhs_layout == capability::MatmulOperandLayout::RowMajor
+                && req.rhs_layout == capability::MatmulOperandLayout::RowMajor
+                && req.out_layout == capability::MatmulOperandLayout::RowMajor
+                && req.epilogue == capability::MatmulEpilogue::Identity
+                && req.lhs_dtype == kiln_tensor::DType::F32
+                && req.rhs_dtype == kiln_tensor::DType::BF16
+                && req.out_dtype == kiln_tensor::DType::F32;
+            if vulkan_resident_mixed_rank2 {
+                return capability::Support::NativeWithConstraints;
+            }
             let Some(rank) = matmul_request_support_rank(req) else {
                 return capability::Support::Unsupported;
             };
@@ -2695,6 +2698,37 @@ mod tests {
                 &vulkan_batched_bf16
             ),
             capability::Support::NativeWithConstraints
+        );
+
+        let vulkan_mixed_rank2 = plain.clone().with_dtypes(
+            kiln_tensor::DType::F32,
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::F32,
+        );
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(
+                &vulkan,
+                &vulkan_mixed_rank2
+            ),
+            capability::Support::NativeWithConstraints
+        );
+        let vulkan_mixed_batched = capability::MatmulRequest::plain(
+            vec![2, 3, 4],
+            vec![2, 4, 5],
+            kiln_tensor::DType::F32,
+            false,
+        )
+        .with_dtypes(
+            kiln_tensor::DType::F32,
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::F32,
+        );
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(
+                &vulkan,
+                &vulkan_mixed_batched
+            ),
+            capability::Support::Unsupported
         );
     }
 

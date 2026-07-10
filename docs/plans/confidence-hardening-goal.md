@@ -292,16 +292,18 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
 - [x] Make prompt-logprob numerical rendering fail closed: require the exact
   model vocabulary width, reject non-finite values before JSON serialization,
   and return exactly the requested distinct top-ranked candidates.
-- [ ] Match vLLM prompt-logprob protocol semantics by including the observed
+- [x] Match vLLM prompt-logprob protocol semantics by including the observed
   prompt token (K or K+1 entries), reporting its full-vocabulary rank, and
-  rendering byte-fallback tokens with prompt context while preserving F32
-  log-probability precision.
+  rendering byte-fallback tokens with prompt context while preserving
+  shift-stable F32 log-probability precision. Enforce the served-model context
+  window and settle or quarantine every scorer-owned accelerator lifetime.
 - [ ] Make remote-teacher prompt-logprob parsing reject malformed or
   out-of-vocabulary entries instead of dropping them, and validate the
-  observed-token/rank contract before caching numeric results.
+  observed-token/rank contract plus logits-row/target-position alignment before
+  caching numeric results.
 - [ ] Establish an authoritative remote-teacher tokenizer identity handshake
-  and bind accepted/cached logits to that identity rather than trusting only
-  the locally configured tokenizer hash.
+  plus base-model/adapter content revision, then bind accepted/cached logits to
+  that identity rather than trusting only the locally configured tokenizer hash.
 - [ ] Extend the backend quarantine gate to every inference worker, adapter
   mutation, prewarm, training admission, and queued training transition. A
   quarantined backend must reject rather than wait forever on its retained GPU
@@ -558,6 +560,9 @@ and exact resume. Cross-backend agreement alone is insufficient.
   optimization.
 - [ ] Implement fused ROCm batched LM head, penalties, top-k/top-p, and sampling
   with one token readback if profiling confirms the current serialization.
+- [ ] Replace prompt-logprob full-vocabulary host readback with a device-side
+  selected-logprob/rank kernel so transfer and host work scale with O(TK), while
+  retaining exact finite-value validation and the bounded projection fallback.
 - [ ] Autotune supported decode width after fused sampling and graph correctness,
   rather than raising the cap blindly.
 - [ ] Add multi-batch graph capture only after eager parity and pool-generation
@@ -812,6 +817,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-10 | Settled legacy mutable paged streaming | `sha256:84c3cbb0f641` | this commit | portable + CPU integration; ROCm/Vulkan compile gates | exclusive reservation, error/receiver-drop/panic outcomes, owner retention, source invariant, and public API integration | passed | The earlier latent compatibility item was closed after the active direct-stream path. The synchronous mutable-`BlockManager` API and its shared CUDA-graph compatibility branch now allocate one retain-by-default reservation and converge every post-allocation exit through one backend-settlement epilogue. Success or settled error releases pages; failed or panicked settlement retains pages, linear state, logits, and result while releasing the CUDA coordination mutex. The API is documented as returning an already-populated receiver and deprecated toward threaded settlement. All 359 model tests, four focused reservation/panic tests, the source invariant, and a deterministic real CPU public-API integration passed, along with formatting and portable, ROCm, and Vulkan all-target checks; CUDA graph hardware execution remains assigned to the CUDA machine |
 | 2026-07-10 | Fallible prompt-logprob token display | `sha256:25cce8ae2883` | this commit | portable; ROCm/Vulkan compile gates | strict token-ID mapping, injected decoder failure, special-token display, HTTP vocabulary-drift response, and independent protocol review | passed | Prompt-logprob display rendering is fallible through both mock and real response paths. Unknown tokenizer IDs and decoder faults return contextual HTTP 500 `tokenization_error` responses instead of successful empty fields, while known special tokens retain their literal vocabulary text. All 73 runnable core and 686 server library tests passed, along with formatting and portable, ROCm, and Vulkan all-target checks. The audit also narrowed the public claim to a vLLM-shaped subset and recorded numerical integrity, K/K+1 rank semantics, strict remote parsing, and tokenizer-identity handshake as explicit follow-up gates; ROCm/Vulkan results here are compile gates, not runtime hardware evidence |
 | 2026-07-10 | Fail-closed prompt-logprob numerics | `sha256:c00979909bae` | this commit | portable + Strix Halo ROCm/Vulkan; CUDA deferred | exact-width and finite-value validation, deterministic K selection, fused log-softmax parity, wave/width sweep, and independent review | passed | Every local forward row, including the unused final row, is validated before ranking, decoding, or JSON; corruption returns `generation_error`, and ties resolve by token ID with exact K cardinality. CUDA/ROCm use one same-dtype output allocation and F32 fused accumulation instead of softmax-then-log or full-vocabulary F32 temporaries. All 981 tensor and 690 server library tests passed, as did portable, ROCm, and Vulkan all-target checks. Real ROCm qualification covered F32/BF16/F16 extremes, special values, multiple rows, wave boundaries, the strided path, widths through 248,320, and legacy softmax parity; real Vulkan covered extreme-range host-fallback parity. CUDA is source-mirrored but was neither compiled nor executed on this host and remains assigned to the CUDA-machine gate |
+| 2026-07-10 | vLLM prompt-logprob semantics and settled scoring | `sha256:2bf0182153d4` | this commit | portable + Strix Halo ROCm/Vulkan; CUDA/Metal deferred | vLLM `7614b88ebdd9` protocol cross-check, scorer lifecycle and panic ownership, fused log-softmax, non-destructive Vulkan prewarm, deterministic real endpoints, and independent review | passed | Position zero is null; row `i-1` scores observed token `i`; K=0 returns only the observed token, and K>0 returns K or K+1 entries with full-vocabulary ranks and contextual byte fallback. One absolute deadline now covers admission, runner-owned backend execution, bounded LM-head chunks, rendering, cancellation settlement, and quarantine-worthy panic/synchronization failure. Portable suites passed (77 core with 3 ignored, 359 model, 703 server, 985 tensor, and 12 real-model integrations with 1 ignored), strict ROCm and Vulkan log-softmax hardware tests passed, and portable/ROCm/Vulkan server all-target checks passed. Real ROCm served five successful Qwen3.5-4B requests. The final production-default Vulkan build completed immutable weight prewarm in 62.5s instead of the prior destructive 211.5s path, then served 9/9 raw-ID and text requests with byte-identical repeated K=5, single-row, and text payloads across two restarts; both external-yield boundaries settled 9/9 with zero failures, the backend remained healthy and unquarantined, and no request created a new Vulkan device. The full Vulkan hardware library suite passed 396/396 with eight test threads and all 55 capability contracts passed. CUDA and Metal execution remain assigned to their target machines; the current scorer deliberately uses correctness-first O(TV) host ranking pending the checked device-side top-K gate |
 | 2026-07-09 | First reduced-CI measurement | `sha256:cda13f3f84e5` | `3c71cc4002f8` | GitHub Actions | run `29049575526` | passed | Three active jobs completed in 3m52s wall and about 4m36s aggregate time; all GPU backend jobs were skipped |
 
 ## Known Starting Defects
