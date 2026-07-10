@@ -74,6 +74,7 @@ fn fill_queue(state: &AppState, n: usize) {
         q.push(QueueEntry {
             job_id: format!("placeholder-{i}"),
             reserved_bytes: 0,
+            teacher_bindings: Vec::new(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,

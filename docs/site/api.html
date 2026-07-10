@@ -302,6 +302,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#thinking-budgets">Thinking budgets</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-lifecycle">LoRA lifecycle</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#training">Training</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#remote-teachers">Remote teachers</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#training-data-safety">Training data safety</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#response-shapes">Response shapes</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
@@ -589,7 +590,43 @@ KILN_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
 JOB_ID=&lt;job-id&gt;
 curl -s -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json.tool</code></pre></div>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          DELETE only cancels jobs that are still queued; running or completed jobs return an error.
+          DELETE removes queued jobs or requests cooperative cancellation of a running job. Terminal jobs are removed through <code>/v1/train/jobs/{job_id}</code>.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Distillation</div>
+        <h2 id="remote-teachers" class="text-2xl font-semibold mb-4">Verified remote teachers and identity-bound cache</h2>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          Remote teachers use vLLM numeric-ID <code>prompt_logprobs</code> and must be launched with
+          <a href="https://github.com/ericflo/kiln/blob/main/scripts/vllm_teacher.py"><code>scripts/vllm_teacher.py</code></a>.
+          Registration probes K=1 and the advertised maximum K, verifies the complete tokenizer ID mapping
+          against the student, and persists a canonical identity for exact base and optional static-adapter
+          content, runtime, protocol, and scoring bounds. Kiln repeats that handshake at every job start before
+          GPU ownership or accepting a cache hit. Stock vLLM fingerprints and caller-supplied capability fields
+          are rejected.
+        </p>
+        <div class="endpoint-list" style="color: var(--fg-dim);">
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/teachers</code> &mdash; list status, usability, capabilities, full identity revision, and canonical off-policy manifest.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/teachers</code> &mdash; register and operationally verify a local, fixture, or explicit vLLM teacher.</div>
+          <div class="endpoint"><span class="method">DELETE</span> <code>/v1/teachers/{alias}</code> &mdash; explicitly remove an immutable alias.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/cache/stats</code> &mdash; validate and summarize canonical cache-v3 entries by teacher revision. Expensive cache operations are serialized and run off the async executor.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/cache/export</code> &mdash; stream a deterministic validated v3 export, bounded to one million scanned files and 16 GiB of source entries. A concurrent scan returns <code>cache_operation_busy</code>; archive import is intentionally unavailable.</div>
+        </div>
+        <div class="code-block mt-4"><pre><code>curl -X POST http://localhost:8420/v1/teachers \
+  -H 'content-type: application/json' \
+  -d '{
+    "alias": "qwen35@vllm",
+    "kind": "remote",
+    "provider": "vllm",
+    "model_id": "qwen35-teacher",
+    "url": "http://127.0.0.1:8000"
+  }'</code></pre></div>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          Plain HTTP and credential-free registration are loopback-only. Off-host endpoints require HTTPS and
+          a server-owned <code>credential_id</code> configured under <code>[teachers.credentials]</code>; API
+          callers never submit an environment-variable name or secret. See the
+          <a href="https://github.com/ericflo/kiln/blob/main/docs/VLLM_TEACHER_IDENTITY.md">immutable teacher guide</a>.
         </p>
       </article>
 

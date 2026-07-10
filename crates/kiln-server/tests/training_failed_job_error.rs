@@ -111,6 +111,7 @@ fn enqueue_sft_job(state: &AppState, job_id: &str) {
     state.training_queue.lock().unwrap().push(QueueEntry {
         job_id: job_id.to_string(),
         reserved_bytes: 0,
+        teacher_bindings: Vec::new(),
         job: QueuedJob::Sft(req),
     });
 }

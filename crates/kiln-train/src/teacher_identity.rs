@@ -21,6 +21,7 @@ pub const MAX_TEACHER_IMPLEMENTATION_BYTES: usize = 256;
 pub const MAX_TEACHER_VOCAB_SIZE: u32 = 16_777_216;
 pub const MAX_TEACHER_TOP_K: u32 = 65_536;
 pub const MAX_TEACHER_MODEL_LEN: u32 = 16_777_216;
+pub const MAX_TEACHER_PROMPT_LOGPROB_CANDIDATES: u32 = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TeacherIdentityError {
@@ -118,6 +119,7 @@ pub struct TeacherIdentityV1 {
     vocab_size: u32,
     max_top_k: u32,
     max_model_len: u32,
+    max_prompt_logprob_candidates: u32,
     logprobs_mode: String,
     implementation: String,
     inference_config_sha256: String,
@@ -136,6 +138,7 @@ struct TeacherIdentityV1Wire {
     vocab_size: u32,
     max_top_k: u32,
     max_model_len: u32,
+    max_prompt_logprob_candidates: u32,
     logprobs_mode: String,
     implementation: String,
     inference_config_sha256: String,
@@ -152,6 +155,7 @@ impl TeacherIdentityV1 {
         vocab_size: u32,
         max_top_k: u32,
         max_model_len: u32,
+        max_prompt_logprob_candidates: u32,
         implementation: impl Into<String>,
         inference_config_sha256: impl Into<String>,
     ) -> Result<Self, TeacherIdentityError> {
@@ -166,6 +170,7 @@ impl TeacherIdentityV1 {
             vocab_size,
             max_top_k,
             max_model_len,
+            max_prompt_logprob_candidates,
             logprobs_mode: TEACHER_IDENTITY_LOGPROBS_MODE_V1.to_owned(),
             implementation: implementation.into(),
             inference_config_sha256: inference_config_sha256.into(),
@@ -273,6 +278,29 @@ impl TeacherIdentityV1 {
         self.identity_digest_sha256()
     }
 
+    /// Derive the identity of the same loaded base/runtime with one static
+    /// adapter. The base identity remains immutable; only the adapter tuple is
+    /// replaced, so callers cannot accidentally drop a tokenizer, runtime, or
+    /// inference-contract field while publishing a loaded LoRA revision.
+    pub fn with_static_adapter(
+        &self,
+        adapter: TeacherAdapterIdentityV1,
+    ) -> Result<Self, TeacherIdentityError> {
+        Self::new(
+            self.served_model_id.clone(),
+            self.base_model_sha256.clone(),
+            self.tokenizer_vocab_sha256.clone(),
+            self.tokenizer_config_sha256.clone(),
+            Some(adapter),
+            self.vocab_size,
+            self.max_top_k,
+            self.max_model_len,
+            self.max_prompt_logprob_candidates,
+            self.implementation.clone(),
+            self.inference_config_sha256.clone(),
+        )
+    }
+
     pub fn schema(&self) -> &str {
         &self.schema
     }
@@ -313,6 +341,10 @@ impl TeacherIdentityV1 {
         self.max_model_len
     }
 
+    pub fn max_prompt_logprob_candidates(&self) -> u32 {
+        self.max_prompt_logprob_candidates
+    }
+
     pub fn logprobs_mode(&self) -> &str {
         &self.logprobs_mode
     }
@@ -350,6 +382,19 @@ impl TeacherIdentityV1 {
             1,
             MAX_TEACHER_MODEL_LEN,
         )?;
+        validate_range(
+            "max_prompt_logprob_candidates",
+            self.max_prompt_logprob_candidates,
+            1,
+            MAX_TEACHER_PROMPT_LOGPROB_CANDIDATES,
+        )?;
+        let one_row_max = self.max_top_k.saturating_add(1).min(self.vocab_size);
+        if self.max_prompt_logprob_candidates < one_row_max {
+            return Err(invalid_field(
+                "max_prompt_logprob_candidates",
+                format!("must fit one maximum-K response row ({one_row_max} candidates)"),
+            ));
+        }
         validate_exact(
             "logprobs_mode",
             &self.logprobs_mode,
@@ -392,6 +437,7 @@ impl<'de> Deserialize<'de> for TeacherIdentityV1 {
             vocab_size: wire.vocab_size,
             max_top_k: wire.max_top_k,
             max_model_len: wire.max_model_len,
+            max_prompt_logprob_candidates: wire.max_prompt_logprob_candidates,
             logprobs_mode: wire.logprobs_mode,
             implementation: wire.implementation,
             inference_config_sha256: wire.inference_config_sha256,
@@ -625,6 +671,7 @@ mod tests {
             248_320,
             20,
             262_144,
+            1_000_000,
             "vllm/0.10.2+kiln-identity/1",
             F,
         )
@@ -651,6 +698,7 @@ mod tests {
                 "\"tokenizer_config_sha256\":\"{}\",",
                 "\"adapter\":null,",
                 "\"vocab_size\":248320,\"max_top_k\":20,\"max_model_len\":262144,",
+                "\"max_prompt_logprob_candidates\":1000000,",
                 "\"logprobs_mode\":\"raw_logprobs\",",
                 "\"implementation\":\"vllm/0.10.2+kiln-identity/1\",",
                 "\"inference_config_sha256\":\"{}\"}}"
@@ -685,6 +733,38 @@ mod tests {
     }
 
     #[test]
+    fn static_adapter_derivation_preserves_every_base_runtime_field() {
+        let base = identity(false);
+        let adapter = TeacherAdapterIdentityV1::new("math-lora", D, E).unwrap();
+        let derived = base.with_static_adapter(adapter.clone()).unwrap();
+
+        assert_eq!(derived.adapter(), Some(&adapter));
+        assert_eq!(derived.served_model_id(), base.served_model_id());
+        assert_eq!(derived.base_model_sha256(), base.base_model_sha256());
+        assert_eq!(
+            derived.tokenizer_vocab_sha256(),
+            base.tokenizer_vocab_sha256()
+        );
+        assert_eq!(
+            derived.tokenizer_config_sha256(),
+            base.tokenizer_config_sha256()
+        );
+        assert_eq!(derived.vocab_size(), base.vocab_size());
+        assert_eq!(derived.max_top_k(), base.max_top_k());
+        assert_eq!(derived.max_model_len(), base.max_model_len());
+        assert_eq!(
+            derived.max_prompt_logprob_candidates(),
+            base.max_prompt_logprob_candidates()
+        );
+        assert_eq!(derived.implementation(), base.implementation());
+        assert_eq!(
+            derived.inference_config_sha256(),
+            base.inference_config_sha256()
+        );
+        assert_ne!(derived.content_revision(), base.content_revision());
+    }
+
+    #[test]
     fn all_accessors_report_the_authenticated_values() {
         let value = identity(false);
         assert_eq!(value.schema(), TEACHER_IDENTITY_SCHEMA_V1);
@@ -697,6 +777,7 @@ mod tests {
         assert_eq!(value.vocab_size(), 248_320);
         assert_eq!(value.max_top_k(), 20);
         assert_eq!(value.max_model_len(), 262_144);
+        assert_eq!(value.max_prompt_logprob_candidates(), 1_000_000);
         assert_eq!(value.logprobs_mode(), TEACHER_IDENTITY_LOGPROBS_MODE_V1);
         assert_eq!(value.implementation(), "vllm/0.10.2+kiln-identity/1");
         assert_eq!(value.inference_config_sha256(), F);
@@ -739,6 +820,10 @@ mod tests {
             ("\"vocab_size\":248320", "\"vocab_size\":248321"),
             ("\"max_top_k\":20", "\"max_top_k\":21"),
             ("\"max_model_len\":262144", "\"max_model_len\":262145"),
+            (
+                "\"max_prompt_logprob_candidates\":1000000",
+                "\"max_prompt_logprob_candidates\":1000001",
+            ),
             (
                 "\"logprobs_mode\":\"raw_logprobs\"",
                 "\"logprobs_mode\":\"normalized\"",
@@ -832,9 +917,11 @@ mod tests {
 
     #[test]
     fn validates_text_and_numeric_bounds() {
-        assert!(TeacherIdentityV1::new("", A, B, C, None, 10, 1, 1, "impl", F).is_err());
-        assert!(TeacherIdentityV1::new(" model", A, B, C, None, 10, 1, 1, "impl", F).is_err());
-        assert!(TeacherIdentityV1::new("model\nname", A, B, C, None, 10, 1, 1, "impl", F).is_err());
+        assert!(TeacherIdentityV1::new("", A, B, C, None, 10, 1, 1, 10, "impl", F).is_err());
+        assert!(TeacherIdentityV1::new(" model", A, B, C, None, 10, 1, 1, 10, "impl", F).is_err());
+        assert!(
+            TeacherIdentityV1::new("model\nname", A, B, C, None, 10, 1, 1, 10, "impl", F).is_err()
+        );
         assert!(
             TeacherIdentityV1::new(
                 "x".repeat(MAX_TEACHER_IDENTITY_NAME_BYTES + 1),
@@ -845,12 +932,13 @@ mod tests {
                 10,
                 1,
                 1,
+                10,
                 "impl",
                 F,
             )
             .is_err()
         );
-        assert!(TeacherIdentityV1::new("model", A, B, C, None, 10, 1, 1, "", F).is_err());
+        assert!(TeacherIdentityV1::new("model", A, B, C, None, 10, 1, 1, 10, "", F).is_err());
         assert!(
             TeacherIdentityV1::new(
                 "model",
@@ -861,25 +949,30 @@ mod tests {
                 10,
                 1,
                 1,
+                10,
                 "x".repeat(MAX_TEACHER_IMPLEMENTATION_BYTES + 1),
                 F,
             )
             .is_err()
         );
 
-        for (vocab, top_k, model_len) in [
-            (0, 1, 1),
-            (MAX_TEACHER_VOCAB_SIZE + 1, 1, 1),
-            (10, 0, 1),
-            (10, 11, 1),
-            (MAX_TEACHER_TOP_K + 1, MAX_TEACHER_TOP_K + 1, 1),
-            (10, 1, 0),
-            (10, 1, MAX_TEACHER_MODEL_LEN + 1),
+        for (vocab, top_k, model_len, candidates) in [
+            (0, 1, 1, 1),
+            (MAX_TEACHER_VOCAB_SIZE + 1, 1, 1, 1),
+            (10, 0, 1, 1),
+            (10, 11, 1, 1),
+            (MAX_TEACHER_TOP_K + 1, MAX_TEACHER_TOP_K + 1, 1, 1),
+            (10, 1, 0, 1),
+            (10, 1, MAX_TEACHER_MODEL_LEN + 1, 1),
+            (10, 1, 1, 0),
+            (10, 1, 1, MAX_TEACHER_PROMPT_LOGPROB_CANDIDATES + 1),
         ] {
             assert!(
-                TeacherIdentityV1::new("model", A, B, C, None, vocab, top_k, model_len, "impl", F,)
-                    .is_err(),
-                "must reject vocab={vocab}, top_k={top_k}, model_len={model_len}"
+                TeacherIdentityV1::new(
+                    "model", A, B, C, None, vocab, top_k, model_len, candidates, "impl", F,
+                )
+                .is_err(),
+                "must reject vocab={vocab}, top_k={top_k}, model_len={model_len}, candidates={candidates}"
             );
         }
     }

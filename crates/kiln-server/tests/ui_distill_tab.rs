@@ -123,6 +123,11 @@ async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
         html.contains(r#"id="teacher-form""#),
         "Teacher register form missing"
     );
+    assert!(html.contains(r#"id="teacher-credential-id""#));
+    assert!(html.contains(r#"id="teacher-register-status""#));
+    assert!(!html.contains(r#"id="teacher-api-key-env""#));
+    assert!(!html.contains(r#"id="teacher-max-top-k""#));
+    assert!(!html.contains(r#"id="teacher-vocab-size""#));
     assert!(
         html.contains(r#"id="distill-refresh-form""#),
         "distill_refresh form missing"
@@ -172,4 +177,9 @@ async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
         !app_js.contains("/v1/cache/import"),
         "Distill UI must not expose the removed unsafe cache import route"
     );
+    assert!(app_js.contains("t.usable !== true"));
+    assert!(app_js.contains("body.credential_id"));
+    assert!(!app_js.contains("form.api_key_env"));
+    assert!(!app_js.contains("body.max_top_k"));
+    assert!(!app_js.contains("body.vocab_size"));
 }

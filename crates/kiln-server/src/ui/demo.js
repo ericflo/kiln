@@ -85,9 +85,9 @@
   });
   const teachers = () => ({
     teachers: [
-      { spec: { alias: 'served-base', kind: 'local', model_id: 'Qwen/Qwen3.5-4B' }, capabilities: { teacher_id: 'served-base', vocab_size: 248_320, max_top_k: 32 } },
-      { spec: { alias: 'qwen-vllm', kind: 'remote', provider: 'vllm', model_id: 'Qwen/Qwen3.5-27B', url: 'http://127.0.0.1:8000' }, capabilities: { teacher_id: 'qwen-vllm', vocab_size: 248_320, max_top_k: 20 } },
-      { spec: { alias: 'deterministic-fixture', kind: 'fixture', model_id: 'fixture-v1' }, capabilities: { teacher_id: 'deterministic-fixture', vocab_size: 248_320, max_top_k: 32 } },
+      { spec: { alias: 'served-base', kind: 'local', model_id: 'Qwen/Qwen3.5-4B' }, capabilities: { teacher_id: 'served-base', vocab_size: 248_320, max_top_k: 32 }, status: 'configured', usable: true },
+      { spec: { alias: 'qwen-vllm', kind: 'remote', provider: 'vllm', model_id: 'qwen35-27b-teacher', url: 'http://127.0.0.1:8000', identity: { max_model_len: 32_768, max_prompt_logprob_candidates: 1_000_000 } }, capabilities: { teacher_id: 'qwen-vllm', vocab_size: 248_320, max_top_k: 20 }, status: 'verified', usable: true, identity_revision: 'sha256:8ef148923cb8b57955555ff4b57f875af6462f41818584bc573c869f40f1a0a7' },
+      { spec: { alias: 'deterministic-fixture', kind: 'fixture', model_id: 'fixture-v1' }, capabilities: { teacher_id: 'deterministic-fixture', vocab_size: 248_320, max_top_k: 32 }, status: 'configured', usable: true },
     ],
   });
   const recipes = () => ({

@@ -1946,6 +1946,11 @@ pub struct AppState {
     pub model_config: ModelConfig,
     /// Configured model directory path for real inference mode. `None` in mock mode.
     pub model_path: Option<PathBuf>,
+    /// Immutable content identity for this process's base prompt-logprob
+    /// teacher. Real production startup sets this exactly once after the
+    /// loader-owned model source survives its post-upload verification. Mock
+    /// and synthetic test states intentionally leave it absent.
+    pub base_teacher_identity: Option<Arc<kiln_train::TeacherIdentityV1>>,
     pub backend: Arc<ModelBackend>,
     pub tokenizer: Arc<KilnTokenizer>,
     /// Directory where LoRA adapter weights are stored on disk.
@@ -1994,6 +1999,10 @@ pub struct AppState {
     /// Consulted by every OPD / distill_* handler that takes a
     /// `teacher: alias` request field.
     pub teacher_registry: crate::api::teachers::SharedTeacherRegistry,
+    /// Immutable server-owned credential handles for remote teachers. API
+    /// requests and persisted teacher specs can name only an id from this map;
+    /// they never control or observe the backing environment-variable name.
+    pub teacher_credentials: Arc<crate::config::TeachersConfig>,
     /// Detected VRAM info for config/debug reporting.
     pub vram_info: kiln_memory::vram::GpuVramInfo,
     /// Shutdown flag — set to true when the server is shutting down.
@@ -2242,6 +2251,7 @@ impl AppState {
         Self {
             model_config,
             model_path: None,
+            base_teacher_identity: None,
             backend: Arc::new(ModelBackend::Mock {
                 scheduler: Arc::new(Mutex::new(scheduler)),
                 engine,
@@ -2263,6 +2273,7 @@ impl AppState {
             gpu_lock: Arc::new(RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
             teacher_registry: Arc::new(crate::api::teachers::TeacherRegistry::new()),
+            teacher_credentials: Arc::new(crate::config::TeachersConfig::default()),
             vram_info: kiln_memory::vram::GpuVramInfo {
                 total_bytes: 0,
                 source: kiln_memory::vram::VramSource::None,
@@ -2350,6 +2361,7 @@ impl AppState {
         request_timeout_secs: u64,
         served_model_id: String,
         prefix_cache_cfg: &crate::config::PrefixCacheConfig,
+        base_teacher_identity: Option<Arc<kiln_train::TeacherIdentityV1>>,
     ) -> Self {
         let block_size = DEFAULT_BLOCK_SIZE;
         // §3.2 teacher registry — loaded from `adapter_dir/teachers.json`
@@ -2912,6 +2924,7 @@ impl AppState {
         Self {
             model_config,
             model_path: None,
+            base_teacher_identity,
             backend: Arc::new(ModelBackend::Real {
                 runner,
                 backend_health,
@@ -2938,6 +2951,7 @@ impl AppState {
             gpu_lock,
             training_queue: crate::training_queue::new_shared_queue(),
             teacher_registry: teacher_registry_for_real.clone(),
+            teacher_credentials: Arc::new(crate::config::TeachersConfig::default()),
             vram_info,
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),

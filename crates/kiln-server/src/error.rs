@@ -420,6 +420,81 @@ impl ApiError {
         }
     }
 
+    // ── Teacher registry ───────────────────────────────────────────
+
+    pub fn teacher_registration_invalid(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "teacher_registration_invalid",
+            message: format!("Invalid teacher registration: {detail}"),
+            hint: "Remote registrations accept alias, kind=remote, provider=vllm, model_id, url, and an optional server-configured credential_id. Identity and capability fields are discovered by Kiln.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn teacher_identity_probe_failed(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "teacher_identity_probe_failed",
+            message: format!("Remote teacher identity probe failed: {detail}"),
+            hint: "Launch the endpoint with scripts/vllm_teacher.py, verify its URL and credential_id, then retry registration.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn teacher_identity_probe_busy() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "teacher_identity_probe_busy",
+            message: format!("Teacher identity verification is at its concurrency limit"),
+            hint: "Wait for an in-flight teacher registration to finish, then retry.",
+            retry_after_seconds: Some(5),
+        }
+    }
+
+    pub fn teacher_identity_mismatch(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "teacher_identity_mismatch",
+            message: format!("Teacher identity is incompatible with this student: {detail}"),
+            hint: "Use a teacher with the exact same numeric tokenizer vocabulary and vocabulary size as the loaded student.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn teacher_alias_exists(alias: impl std::fmt::Display) -> Self {
+        let alias = alias.to_string();
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "teacher_alias_exists",
+            message: format!("Teacher alias {alias:?} is already registered"),
+            hint: "Teacher aliases are immutable. Delete the existing alias explicitly before registering a different deployment.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn teacher_identity_required(alias: impl std::fmt::Display) -> Self {
+        let alias = alias.to_string();
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "teacher_identity_required",
+            message: format!("Teacher {alias:?} has no authoritative identity and cannot be used"),
+            hint: "Delete this legacy registry entry and register it again so Kiln can perform an operational identity probe.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn teacher_not_found(alias: impl std::fmt::Display) -> Self {
+        let alias = alias.to_string();
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "teacher_not_found",
+            message: format!("Teacher alias {alias:?} is not registered"),
+            hint: "List current aliases with GET /v1/teachers.",
+            retry_after_seconds: None,
+        }
+    }
+
     /// 400 returned when a training/agent endpoint references a teacher
     /// alias that isn't in the registry. Failing at submit time beats
     /// enqueueing a job that is guaranteed to fail at resolution time.
@@ -733,6 +808,16 @@ impl ApiError {
     }
 
     // ── Generic ─────────────────────────────────────────────────────
+
+    pub fn cache_operation_busy() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "cache_operation_busy",
+            message: "A cache scan or export is already running".to_string(),
+            hint: "Wait for the current cache operation to finish, then retry.",
+            retry_after_seconds: Some(5),
+        }
+    }
 
     pub fn internal(detail: impl std::fmt::Display) -> Self {
         Self {

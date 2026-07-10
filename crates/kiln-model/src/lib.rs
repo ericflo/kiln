@@ -88,7 +88,9 @@ pub use generate::{
     ThreadedStreamingOutput,
 };
 pub use kv_cache::KvCache;
-pub use loader::{LoadModelOptions, load_model, load_model_with_options};
+pub use loader::{
+    LoadModelOptions, load_model, load_model_with_options, load_model_with_options_and_snapshot_dir,
+};
 pub use lora_loader::LoraWeights;
 pub use paged_kv_cache_kt::PagedKvCacheKt;
 pub use rocm_graph::RocmGraphStats;

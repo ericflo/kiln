@@ -70,14 +70,16 @@ pub use receipt::{
     TeacherDescriptor,
 };
 pub use remote_teacher::{
-    RemoteProvider, RemoteTeacher, RemoteTeacherConfig, normalize_vllm_completions_url,
+    RemoteProvider, RemoteTeacher, RemoteTeacherConfig, discover_vllm_identity,
+    normalize_vllm_completions_url,
 };
 pub use teacher_identity::{
     MAX_TEACHER_IDENTITY_FINGERPRINT_BYTES, MAX_TEACHER_IDENTITY_JSON_BYTES,
     MAX_TEACHER_IDENTITY_NAME_BYTES, MAX_TEACHER_IMPLEMENTATION_BYTES, MAX_TEACHER_MODEL_LEN,
-    MAX_TEACHER_TOP_K, MAX_TEACHER_VOCAB_SIZE, TEACHER_IDENTITY_FINGERPRINT_PREFIX_V1,
-    TEACHER_IDENTITY_LOGPROBS_MODE_V1, TEACHER_IDENTITY_PROTOCOL_V1, TEACHER_IDENTITY_SCHEMA_V1,
-    TeacherAdapterIdentityV1, TeacherIdentityError, TeacherIdentityV1,
+    MAX_TEACHER_PROMPT_LOGPROB_CANDIDATES, MAX_TEACHER_TOP_K, MAX_TEACHER_VOCAB_SIZE,
+    TEACHER_IDENTITY_FINGERPRINT_PREFIX_V1, TEACHER_IDENTITY_LOGPROBS_MODE_V1,
+    TEACHER_IDENTITY_PROTOCOL_V1, TEACHER_IDENTITY_SCHEMA_V1, TeacherAdapterIdentityV1,
+    TeacherIdentityError, TeacherIdentityV1,
 };
 
 pub use adapter_output::{
@@ -109,17 +111,20 @@ pub use opd::{
     AgenticLossInputs, AgenticLossWeights, COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS,
     COLD_START_OVERLAP_THRESHOLD, ColdStartDecision, DistillMergeRequest, DistillMergeSource,
     DistillPumpMode, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest,
-    NewKnowledgeSource, OffPolicyDistillationExample, OffPolicyDistillationSummary,
-    OffPolicyLossBreakdown, OpdConfig, OpdLossGranularity, OpdObjective, OpdPrompt, OpdRequest,
-    OpdTrainingMode, PreparedOffPolicyDistillation, SelfDistillMode, StableOpdCoefficients,
-    StableOpdLossInputs, StableOpdLossOutputs, TeacherActionToken, TeacherTopLogprob,
-    TipTokenClass, cold_start_probe, cold_start_probe_default,
-    compose_off_policy_distillation_loss, compute_agentic_loss_weights, compute_initial_overlap,
-    compute_stable_opd_loss, default_beta_kl, default_lambda_sft, default_lambda_verifier,
-    default_opd_samples_per_prompt, default_opd_top_k, default_score_decay_steps,
-    default_score_earliest_weight, default_tip_tool_call_weight, default_tip_tool_name_weight,
-    load_off_policy_distillation_jsonl, parse_off_policy_distillation_jsonl_str,
-    prepare_off_policy_distillation_dataset, resolve_opd_top_k,
+    LoadedOffPolicyDistillationDataset, NewKnowledgeSource,
+    OFF_POLICY_DISTILLATION_MANIFEST_SCHEMA_V1, OffPolicyDistillationExample,
+    OffPolicyDistillationManifestV1, OffPolicyDistillationSummary, OffPolicyLossBreakdown,
+    OpdConfig, OpdLossGranularity, OpdObjective, OpdPrompt, OpdRequest, OpdTrainingMode,
+    PreparedOffPolicyDistillation, SelfDistillMode, StableOpdCoefficients, StableOpdLossInputs,
+    StableOpdLossOutputs, TeacherActionToken, TeacherTopLogprob, TipTokenClass, cold_start_probe,
+    cold_start_probe_default, compose_off_policy_distillation_loss, compute_agentic_loss_weights,
+    compute_initial_overlap, compute_stable_opd_loss, default_beta_kl, default_lambda_sft,
+    default_lambda_verifier, default_opd_samples_per_prompt, default_opd_top_k,
+    default_score_decay_steps, default_score_earliest_weight, default_tip_tool_call_weight,
+    default_tip_tool_name_weight, load_off_policy_distillation_dataset,
+    load_off_policy_distillation_jsonl, parse_off_policy_distillation_dataset_str,
+    parse_off_policy_distillation_jsonl_str, prepare_off_policy_distillation_dataset,
+    prepare_off_policy_distillation_dataset_with_identity, resolve_opd_top_k,
 };
 pub use train_receipt::{
     ADAPTER_CANARY_STATUS_FILENAME, AdapterCanaryCheckReceipt, AdapterCanaryState,

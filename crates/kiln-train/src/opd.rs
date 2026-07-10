@@ -29,7 +29,7 @@
 //!   structure but with `opd_step_loss` for the per-step loss.
 //! * `build_local_teacher_fixture` — in-process LocalTeacher path: run
 //!   the loaded model forward once per prompt, stash top-K teacher
-//!   logprobs in a `FixtureLogitSource` keyed by tokens_hash. Used by
+//!   logprobs in a `FixtureLogitSource` keyed by the exact token sequence. Used by
 //!   `run_distill_refresh` / `run_distill_pump` / `run_distill_self`
 //!   to materialise the §3.2 Local teacher when the registered alias
 //!   resolves to a Local kind.
@@ -96,7 +96,7 @@ use crate::cd_types::Device;
 use serde::{Deserialize, Serialize};
 
 use crate::logit_source::{
-    LogitSource, LogprobBatch, target_token_positions_to_logits_rows,
+    LogitSource, LogitSourceCaps, LogprobBatch, target_token_positions_to_logits_rows,
     validate_full_vocab_logprobs_batch, validate_logit_request, validate_topk_logprob_row,
     validate_topk_logprobs_batch,
 };
@@ -343,6 +343,51 @@ pub struct OffPolicyDistillationExample {
     pub metadata: Option<serde_json::Value>,
 }
 
+pub const OFF_POLICY_DISTILLATION_MANIFEST_SCHEMA_V1: &str =
+    "kiln.off-policy-distillation-manifest.v1";
+
+/// Canonical first record for JSONL containing pre-scored teacher logits.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OffPolicyDistillationManifestV1 {
+    schema: String,
+    teacher_identity: crate::TeacherIdentityV1,
+}
+
+impl OffPolicyDistillationManifestV1 {
+    pub fn new(teacher_identity: crate::TeacherIdentityV1) -> Self {
+        Self {
+            schema: OFF_POLICY_DISTILLATION_MANIFEST_SCHEMA_V1.to_string(),
+            teacher_identity,
+        }
+    }
+
+    pub fn teacher_identity(&self) -> &crate::TeacherIdentityV1 {
+        &self.teacher_identity
+    }
+
+    pub fn canonical_json(&self) -> String {
+        serde_json::to_string(self).expect("validated off-policy manifest serializes")
+    }
+
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.schema == OFF_POLICY_DISTILLATION_MANIFEST_SCHEMA_V1,
+            "unsupported off-policy distillation manifest schema {:?}",
+            self.schema
+        );
+        Ok(())
+    }
+}
+
+/// Load-once JSONL result. `source_sha256` covers the exact bytes parsed.
+#[derive(Debug, Clone)]
+pub struct LoadedOffPolicyDistillationDataset {
+    pub manifest: Option<OffPolicyDistillationManifestV1>,
+    pub examples: Vec<OffPolicyDistillationExample>,
+    pub source_sha256: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct OffPolicyDistillationSummary {
     pub examples: usize,
@@ -510,7 +555,10 @@ pub struct DistillMergeRequest {
     /// Per-job OPD config; loss granularity defaults to
     /// `teacher_top_k` so each source's distillation honours the §6
     /// fast path.
-    #[serde(default = "default_off_policy_opd_config")]
+    #[serde(
+        default = "default_off_policy_opd_config",
+        deserialize_with = "deserialize_off_policy_opd_config"
+    )]
     pub config: OpdConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval: Option<kiln_eval::PostEvalConfig>,
@@ -528,6 +576,22 @@ fn default_off_policy_opd_config() -> OpdConfig {
         training_mode: OpdTrainingMode::OffPolicy,
         ..OpdConfig::default()
     }
+}
+
+fn deserialize_off_policy_opd_config<'de, D>(deserializer: D) -> Result<OpdConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let mut value = serde_json::Value::deserialize(deserializer)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| D::Error::custom("OPD config must be a JSON object"))?;
+    object
+        .entry("training_mode")
+        .or_insert_with(|| serde_json::Value::String("off_policy".to_owned()));
+    serde_json::from_value(value).map_err(D::Error::custom)
 }
 
 // ---------------------------------------------------------------------------
@@ -617,7 +681,10 @@ pub struct DistillSelfRequest {
     /// string per explicit prompt.
     #[serde(default)]
     pub documents: Option<Vec<String>>,
-    #[serde(default = "default_off_policy_opd_config")]
+    #[serde(
+        default = "default_off_policy_opd_config",
+        deserialize_with = "deserialize_off_policy_opd_config"
+    )]
     pub config: OpdConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval: Option<kiln_eval::PostEvalConfig>,
@@ -929,32 +996,90 @@ pub(crate) fn tokenize_opd_prompt_for_training(
 pub fn parse_off_policy_distillation_jsonl_str(
     input: &str,
 ) -> Result<Vec<OffPolicyDistillationExample>> {
+    Ok(parse_off_policy_distillation_dataset_str(input)?.examples)
+}
+
+pub fn parse_off_policy_distillation_dataset_str(
+    input: &str,
+) -> Result<LoadedOffPolicyDistillationDataset> {
     let mut examples = Vec::new();
-    for (line_idx, line) in input.lines().enumerate() {
-        let line = line.trim();
+    let mut manifest = None;
+    for (line_idx, raw_line) in input.lines().enumerate() {
+        let line = raw_line.trim();
         if line.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line)
+            .with_context(|| format!("parse off-policy OPD JSONL line {}", line_idx + 1))?;
+        let is_manifest = value.get("schema").and_then(serde_json::Value::as_str)
+            == Some(OFF_POLICY_DISTILLATION_MANIFEST_SCHEMA_V1);
+        if is_manifest {
+            anyhow::ensure!(
+                manifest.is_none() && examples.is_empty(),
+                "off-policy distillation manifest must be the first non-empty JSONL record"
+            );
+            let parsed: OffPolicyDistillationManifestV1 = serde_json::from_value(value)
+                .with_context(|| {
+                    format!(
+                        "parse off-policy OPD JSONL manifest on line {}",
+                        line_idx + 1
+                    )
+                })?;
+            parsed.validate()?;
+            anyhow::ensure!(
+                parsed.canonical_json() == raw_line,
+                "off-policy distillation manifest on line {} is not canonical compact JSON",
+                line_idx + 1
+            );
+            manifest = Some(parsed);
             continue;
         }
         let example: OffPolicyDistillationExample = serde_json::from_str(line)
             .with_context(|| format!("parse off-policy OPD JSONL line {}", line_idx + 1))?;
         examples.push(example);
     }
-    Ok(examples)
+    Ok(LoadedOffPolicyDistillationDataset {
+        manifest,
+        examples,
+        source_sha256: crate::train_receipt::sha256_bytes(input.as_bytes()),
+    })
 }
 
 pub fn load_off_policy_distillation_jsonl(
     path: impl AsRef<std::path::Path>,
 ) -> Result<Vec<OffPolicyDistillationExample>> {
+    Ok(load_off_policy_distillation_dataset(path)?.examples)
+}
+
+pub fn load_off_policy_distillation_dataset(
+    path: impl AsRef<std::path::Path>,
+) -> Result<LoadedOffPolicyDistillationDataset> {
     let path = path.as_ref();
     let input = std::fs::read_to_string(path)
         .with_context(|| format!("reading off-policy OPD JSONL {}", path.display()))?;
-    parse_off_policy_distillation_jsonl_str(&input)
+    parse_off_policy_distillation_dataset_str(&input)
 }
 
 pub fn prepare_off_policy_distillation_dataset(
     examples: &[OffPolicyDistillationExample],
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     teacher_id: impl Into<String>,
+    vocab_size: usize,
+    top_k: usize,
+    objective: OpdObjective,
+    echo: Option<&crate::EchoConfig>,
+) -> Result<PreparedOffPolicyDistillation> {
+    prepare_off_policy_distillation_dataset_with_identity(
+        examples, tokenizer, teacher_id, None, vocab_size, top_k, objective, echo,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_off_policy_distillation_dataset_with_identity(
+    examples: &[OffPolicyDistillationExample],
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    teacher_id: impl Into<String>,
+    teacher_identity: Option<crate::TeacherIdentityV1>,
     vocab_size: usize,
     top_k: usize,
     objective: OpdObjective,
@@ -970,6 +1095,11 @@ pub fn prepare_off_policy_distillation_dataset(
     let mut prompts = Vec::with_capacity(examples.len());
     let mut fixture =
         crate::logit_source::FixtureLogitSource::uniform_topk(&teacher_id, vocab_size, top_k);
+    if let Some(identity) = teacher_identity {
+        fixture = fixture
+            .with_authoritative_identity(identity)
+            .context("bind off-policy fixture to teacher identity")?;
+    }
     let mut summary = OffPolicyDistillationSummary {
         examples: examples.len(),
         objective,
@@ -1030,8 +1160,29 @@ pub fn prepare_off_policy_distillation_dataset(
             .action_tokens
             .saturating_add(active_positions.len() as u64);
 
-        let tokens_hash =
-            crate::logit_source::FixtureLogitSource::hash_tokens(&tokenized.input_ids);
+        if !example.teacher_tokens.is_empty() {
+            anyhow::ensure!(
+                example.teacher_tokens.len() == active_positions.len(),
+                "off-policy OPD example {example_idx} has {} teacher_tokens but {} action tokens",
+                example.teacher_tokens.len(),
+                active_positions.len()
+            );
+            for (token_idx, (teacher_token, &position)) in example
+                .teacher_tokens
+                .iter()
+                .zip(active_positions.iter())
+                .enumerate()
+            {
+                if let Some(declared_token_id) = teacher_token.token_id {
+                    let tokenized_target = tokenized.input_ids[position];
+                    anyhow::ensure!(
+                        declared_token_id == tokenized_target,
+                        "off-policy OPD example {example_idx} token {token_idx} declares token_id {declared_token_id}, but tokenization produced active target {tokenized_target} at position {position}"
+                    );
+                }
+            }
+        }
+
         match objective {
             OpdObjective::ReverseKl => {
                 anyhow::ensure!(
@@ -1079,7 +1230,13 @@ pub fn prepare_off_policy_distillation_dataset(
                             "off-policy OPD example {example_idx} target position {position} has invalid teacher logprobs"
                         )
                     })?;
-                    fixture.insert(tokens_hash, logits_row, indices, logprobs);
+                    fixture
+                        .insert(&tokenized.input_ids, logits_row, indices, logprobs)
+                        .with_context(|| {
+                            format!(
+                                "off-policy OPD example {example_idx} target position {position} conflicts with another fixture row"
+                            )
+                        })?;
                 }
                 summary.examples_with_teacher_logprobs += 1;
             }
@@ -1104,7 +1261,13 @@ pub fn prepare_off_policy_distillation_dataset(
                     );
                     let mut logprobs = vec![-30.0_f32; top_k];
                     logprobs[0] = 0.0;
-                    fixture.insert(tokens_hash, logits_row, indices, logprobs);
+                    fixture
+                        .insert(&tokenized.input_ids, logits_row, indices, logprobs)
+                        .with_context(|| {
+                            format!(
+                                "off-policy OPD example {example_idx} CE target position {position} conflicts with another fixture row"
+                            )
+                        })?;
                 }
             }
         }
@@ -2123,7 +2286,6 @@ pub fn build_local_teacher_fixture(
         let log_probs_host: Vec<Vec<f32>> = log_probs_2d
             .to_vec2::<f32>()
             .context("local-teacher logprobs to host")?;
-        let tokens_hash = crate::logit_source::FixtureLogitSource::hash_tokens(tokens);
         let fixture_caps = fixture.capabilities();
         for (row_index, &logits_row) in logits_rows.iter().enumerate() {
             let row = &log_probs_host[logits_row];
@@ -2132,7 +2294,9 @@ pub fn build_local_teacher_fixture(
                     .context("build_local_teacher_fixture: model returned invalid logprob row")?;
             validate_topk_logprob_row(&fixture_caps, top_k, row_index, &indices, &logprobs)
                 .context("build_local_teacher_fixture: model returned invalid top-K logprobs")?;
-            fixture.insert(tokens_hash, logits_row, indices, logprobs);
+            fixture
+                .insert(tokens, logits_row, indices, logprobs)
+                .context("build_local_teacher_fixture: conflicting exact-sequence row")?;
         }
     }
 
@@ -2255,9 +2419,9 @@ fn select_validated_topk_logprob_row(
 
 /// In-process self-distillation teacher (#31): holds a shared (cheap, Arc-backed)
 /// handle to the loaded model and computes top-K teacher logprobs **live** for
-/// any token sequence. Unlike the pre-computed [`FixtureLogitSource`] — keyed by
-/// prompt-token hash, which only matches OFF-policy given turns — this scores the
-/// actual ON-policy rollouts the student generates, so `teacher: "self"` works in
+/// any token sequence. Unlike a pre-computed [`FixtureLogitSource`] containing
+/// exact fixed sequences, this scores the actual ON-policy rollouts the student
+/// generates, so `teacher: "self"` works in
 /// on-policy mode. `fetch_logprobs` runs in the OPD data-prep phase, OUTSIDE the
 /// student's tape-authoritative scope (no tape nesting — mirrors the fixture
 /// builder's detached forward).
@@ -2265,6 +2429,7 @@ pub struct LiveLocalTeacher {
     weights: kiln_model::forward::GpuWeights,
     model_config: kiln_core::config::ModelConfig,
     teacher_lora: Option<kiln_model::lora_loader::LoraWeights>,
+    identity: crate::TeacherIdentityV1,
     caps: crate::logit_source::LogitSourceCaps,
     default_top_k: usize,
 }
@@ -2286,32 +2451,46 @@ impl LiveLocalTeacher {
         weights: kiln_model::forward::GpuWeights,
         model_config: kiln_core::config::ModelConfig,
         teacher_lora: Option<kiln_model::lora_loader::LoraWeights>,
+        identity: crate::TeacherIdentityV1,
         top_k: usize,
-    ) -> Self {
+    ) -> Result<Self> {
         let vocab_size = model_config.vocab_size;
+        anyhow::ensure!(
+            identity.vocab_size() as usize == vocab_size,
+            "live local teacher identity vocab_size {} does not match model vocab_size {vocab_size}",
+            identity.vocab_size()
+        );
+        anyhow::ensure!(
+            identity.max_top_k() as usize >= top_k,
+            "live local teacher top_k {top_k} exceeds identity max_top_k {}",
+            identity.max_top_k()
+        );
         let caps = crate::logit_source::LogitSourceCaps {
             teacher_id: teacher_id.into(),
             vocab_size,
-            // Live forward yields full logits, so any K up to vocab is servable.
-            max_top_k: vocab_size,
+            max_top_k: identity.max_top_k() as usize,
             supports_full_vocab: false,
             supports_batched: true,
-            // Self-distillation: teacher IS the student model — same tokenizer.
-            tokenizer_hash: None,
+            tokenizer_hash: Some(identity.tokenizer_vocab_sha256().to_owned()),
         };
-        Self {
+        Ok(Self {
             weights,
             model_config,
             teacher_lora,
+            identity,
             caps,
             default_top_k: top_k,
-        }
+        })
     }
 }
 
 impl crate::logit_source::LogitSource for LiveLocalTeacher {
     fn capabilities(&self) -> crate::logit_source::LogitSourceCaps {
         self.caps.clone()
+    }
+
+    fn authoritative_teacher_identity(&self) -> Option<&crate::TeacherIdentityV1> {
+        Some(&self.identity)
     }
 
     fn fetch_logprobs(
@@ -2618,6 +2797,185 @@ fn render_teacher_prompt_tokens(
         .collect()
 }
 
+fn use_chat_template_rollout_prefixes() -> bool {
+    std::env::var("KILN_OPD_USE_CHAT_TEMPLATE_RENDER")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Eagerly score every fixed off-policy action row and return an in-memory
+/// fixture carrying the verified source identity.
+///
+/// Server workers call this before taking their actor-wide GPU write lock. A
+/// remote source is therefore never reachable from the training loop: cache
+/// misses, HTTP timeouts, and remote retries all complete (or fail the job)
+/// while inference is still allowed to use the GPU. On-policy distillation is
+/// deliberately rejected because its student-generated rollouts do not exist
+/// until GPU execution begins and cannot be prefetched without changing the
+/// algorithm.
+pub fn materialize_verified_off_policy_teacher(
+    prompts: &[OpdPrompt],
+    config: &OpdConfig,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    source: Arc<dyn LogitSource>,
+) -> Result<crate::logit_source::FixtureLogitSource> {
+    config
+        .validate_runtime_contract()
+        .context("materialize remote teacher: unsupported OPD configuration")?;
+    anyhow::ensure!(
+        matches!(config.training_mode, OpdTrainingMode::OffPolicy),
+        "remote teacher scoring cannot run on-policy while GPU coordination is job-wide; use training_mode=\"off_policy\" with fixed assistant actions"
+    );
+    anyhow::ensure!(
+        matches!(config.loss, OpdLossGranularity::TeacherTopK),
+        "remote teacher materialization currently requires loss=\"teacher_top_k\""
+    );
+    anyhow::ensure!(
+        !prompts.is_empty(),
+        "remote teacher materialization requires at least one prompt"
+    );
+
+    let caps = source.capabilities();
+    let identity = source
+        .authoritative_teacher_identity()
+        .cloned()
+        .ok_or_else(|| {
+            anyhow!(
+                "remote teacher {:?} has no authoritative identity; refusing to materialize unverified logits",
+                caps.teacher_id
+            )
+        })?;
+    let top_k = resolve_opd_top_k(config.top_k, caps.max_top_k.min(caps.vocab_size))
+        .context("materialize remote teacher: cannot resolve an executable top-K")?;
+    let use_rendered_prefix = use_chat_template_rollout_prefixes();
+    let rollout_prefixes = if use_rendered_prefix {
+        render_rollout_prompt_prefixes(prompts, tokenizer)?
+    } else {
+        vec![Vec::new(); prompts.len()]
+    };
+    let teacher_prefixes = render_teacher_prompt_tokens(prompts, tokenizer)?;
+
+    let mut fixture = crate::logit_source::FixtureLogitSource::uniform_topk(
+        caps.teacher_id.clone(),
+        caps.vocab_size,
+        top_k,
+    )
+    .with_authoritative_identity(identity)
+    .context("materialize remote teacher: bind fixture identity")?;
+
+    for (prompt_index, prompt) in prompts.iter().enumerate() {
+        let tokenized =
+            tokenize_opd_prompt_for_training(prompt, tokenizer, config.echo.as_ref())
+                .with_context(|| format!("materialize remote teacher prompt {prompt_index}"))?;
+        let active_positions: Vec<usize> = tokenized
+            .action_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &active)| active.then_some(position))
+            .collect();
+        anyhow::ensure!(
+            !active_positions.is_empty(),
+            "materialize remote teacher prompt {prompt_index} produced no assistant action tokens"
+        );
+
+        let (query_tokens, query_targets) = if teacher_prefixes[prompt_index].is_empty() {
+            (tokenized.input_ids, active_positions)
+        } else {
+            let rollout_prefix_len = if use_rendered_prefix {
+                rollout_prefixes[prompt_index].len()
+            } else {
+                active_positions[0]
+            };
+            anyhow::ensure!(
+                rollout_prefix_len > 0 && rollout_prefix_len < tokenized.input_ids.len(),
+                "materialize remote teacher prompt {prompt_index} has invalid rollout prefix length {rollout_prefix_len} for {} tokens",
+                tokenized.input_ids.len()
+            );
+            anyhow::ensure!(
+                active_positions
+                    .iter()
+                    .all(|&position| position >= rollout_prefix_len),
+                "materialize remote teacher prompt {prompt_index} has an action before its rollout prefix boundary"
+            );
+
+            let teacher_prefix = &teacher_prefixes[prompt_index];
+            let mut tokens = Vec::with_capacity(
+                teacher_prefix.len() + tokenized.input_ids.len() - rollout_prefix_len,
+            );
+            tokens.extend_from_slice(teacher_prefix);
+            tokens.extend_from_slice(&tokenized.input_ids[rollout_prefix_len..]);
+            let targets = active_positions
+                .iter()
+                .map(|position| teacher_prefix.len() + position - rollout_prefix_len)
+                .collect();
+            (tokens, targets)
+        };
+        let logits_rows = target_token_positions_to_logits_rows(
+            &caps.teacher_id,
+            query_tokens.len(),
+            &query_targets,
+        )
+        .with_context(|| {
+            format!("materialize remote teacher prompt {prompt_index} target alignment")
+        })?;
+        let batch = source
+            .fetch_logprobs(&query_tokens, &logits_rows, Some(top_k))
+            .with_context(|| {
+                format!(
+                    "materialize remote teacher {:?} prompt {prompt_index} ({} rows)",
+                    caps.teacher_id,
+                    logits_rows.len()
+                )
+            })?;
+        let crate::logit_source::LogprobBatch::TopK(topk) = batch else {
+            anyhow::bail!(
+                "materialize remote teacher {:?} returned full-vocabulary logits for a top-K request",
+                caps.teacher_id
+            );
+        };
+        for (row_index, &logits_row) in logits_rows.iter().enumerate() {
+            let start = row_index * top_k;
+            let end = start + top_k;
+            fixture
+                .insert(
+                    &query_tokens,
+                    logits_row,
+                    topk.indices[start..end].to_vec(),
+                    topk.logprobs[start..end].to_vec(),
+                )
+                .with_context(|| {
+                    format!(
+                        "materialize remote teacher prompt {prompt_index} logits row {logits_row}"
+                    )
+                })?;
+        }
+    }
+
+    Ok(fixture)
+}
+
+#[derive(Debug, Clone)]
+struct OpdTeacherProvenance {
+    teacher_id: String,
+    identity: Option<crate::TeacherIdentityV1>,
+}
+
+impl OpdTeacherProvenance {
+    fn from_source(source: &dyn LogitSource, capabilities: &LogitSourceCaps) -> Self {
+        Self {
+            teacher_id: capabilities.teacher_id.clone(),
+            identity: source.authoritative_teacher_identity().cloned(),
+        }
+    }
+
+    fn content_revision(&self) -> Option<String> {
+        self.identity
+            .as_ref()
+            .map(|identity| format!("sha256:{}", identity.content_revision()))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn opd_train(
     prompts: &[OpdPrompt],
@@ -2634,6 +2992,7 @@ pub fn opd_train(
         .validate_runtime_contract()
         .context("opd_train: unsupported configuration")?;
     let teacher_caps = teacher.capabilities();
+    let teacher_provenance = OpdTeacherProvenance::from_source(teacher.as_ref(), &teacher_caps);
     let effective_top_k = match config.loss {
         OpdLossGranularity::SampledToken => unreachable!("unsupported loss rejected above"),
         OpdLossGranularity::TeacherTopK => resolve_opd_top_k(
@@ -2685,16 +3044,15 @@ pub fn opd_train(
     // are imported locally in those functions, so `opd_train`'s body no longer
     // references them directly.
     use kiln_model::backend;
-    use std::collections::HashMap;
-
     if prompts.is_empty() {
         let message = "opd_train: prompts must be non-empty";
-        write_opd_train_receipt_best_effort(
+        if let Err(receipt_error) = write_opd_train_receipt(
             adapter_name,
             model_config,
             tokenizer,
             config,
             effective_top_k,
+            &teacher_provenance,
             &output_dir,
             requested_base_adapter_dir.as_deref(),
             training_data_sha256,
@@ -2706,7 +3064,13 @@ pub fn opd_train(
             None,
             Vec::new(),
             Some(message.to_string()),
-        );
+        ) {
+            tracing::warn!(
+                adapter = adapter_name,
+                error = %receipt_error,
+                "failed to persist OPD failure receipt"
+            );
+        }
         anyhow::bail!(
             "{}",
             crate::train_receipt::training_failure_error_message(message)
@@ -2796,12 +3160,13 @@ pub fn opd_train(
     ) {
         Ok(value) => value,
         Err(err) => {
-            write_opd_train_receipt_best_effort(
+            if let Err(receipt_error) = write_opd_train_receipt(
                 adapter_name,
                 model_config,
                 tokenizer,
                 config,
                 effective_top_k,
+                &teacher_provenance,
                 &output_dir,
                 requested_base_adapter_dir.as_deref(),
                 training_data_sha256,
@@ -2813,7 +3178,13 @@ pub fn opd_train(
                 None,
                 Vec::new(),
                 Some(format!("{err:#}")),
-            );
+            ) {
+                tracing::warn!(
+                    adapter = adapter_name,
+                    error = %receipt_error,
+                    "failed to persist OPD failure receipt"
+                );
+            }
             return Err(crate::train_receipt::annotate_training_error(err));
         }
     };
@@ -2900,12 +3271,13 @@ pub fn opd_train(
     if tokenized.is_empty() {
         data_stats.examples_filtered = prompts.len();
         let message = "opd_train: no valid prompts after tokenization";
-        write_opd_train_receipt_best_effort(
+        if let Err(receipt_error) = write_opd_train_receipt(
             adapter_name,
             model_config,
             tokenizer,
             config,
             effective_top_k,
+            &teacher_provenance,
             &output_dir,
             requested_base_adapter_dir.as_deref(),
             training_data_sha256,
@@ -2917,7 +3289,13 @@ pub fn opd_train(
             None,
             Vec::new(),
             Some(message.to_string()),
-        );
+        ) {
+            tracing::warn!(
+                adapter = adapter_name,
+                error = %receipt_error,
+                "failed to persist OPD failure receipt"
+            );
+        }
         anyhow::bail!(
             "{}",
             crate::train_receipt::training_failure_error_message(message)
@@ -2957,12 +3335,12 @@ pub fn opd_train(
 
     // Resolve EOS token ids once for rollout termination.
     let eos_token_ids: Vec<u32> = tokenizer.eos_token_ids();
-    let configured_on_policy = matches!(config.training_mode, OpdTrainingMode::OnPolicy);
-    let on_policy_enabled = std::env::var("KILN_OPD_OFF_POLICY")
-        .ok()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .map(|off| !off)
-        .unwrap_or(configured_on_policy);
+    // The serialized request is the sole authority for the training mode.
+    // A process-global environment override used to be able to turn an
+    // admitted, fully materialized off-policy remote job back into a dynamic
+    // on-policy job after queue admission. Besides making receipts dishonest,
+    // that made the trainer query a live source while the server owned the GPU.
+    let on_policy_enabled = matches!(config.training_mode, OpdTrainingMode::OnPolicy);
 
     // Generation-prompt suffix that turns the prompt boundary into the
     // same context the model sees at inference under
@@ -2999,10 +3377,7 @@ pub fn opd_train(
     // failure_mode.md). Probably a kernel-vs-prompt-length interaction the
     // root cause isn't fully understood for. Default to legacy
     // orig_input_ids[..first_label] path until the kernel side is audited.
-    let use_chat_template_render = std::env::var("KILN_OPD_USE_CHAT_TEMPLATE_RENDER")
-        .ok()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let use_chat_template_render = use_chat_template_rollout_prefixes();
     let rollout_prompt_prefixes: Vec<Vec<u32>> = if !use_chat_template_render {
         // Empty → fallback path uses orig_input_ids[..first_label_mask_true]
         // per the legacy behavior. Same as pre-fix.
@@ -3492,12 +3867,13 @@ pub fn opd_train(
         "OPD training complete"
     );
 
-    write_opd_train_receipt_best_effort(
+    write_opd_train_receipt(
         adapter_name,
         model_config,
         tokenizer,
         config,
         effective_top_k,
+        &teacher_provenance,
         &output_dir,
         requested_base_adapter_dir.as_deref(),
         training_data_sha256,
@@ -3509,7 +3885,7 @@ pub fn opd_train(
         run_env_ce,
         lora_grad_norms.finish(),
         None,
-    );
+    )?;
 
     Ok(output_dir)
 }
@@ -4109,12 +4485,13 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_opd_train_receipt_best_effort(
+fn write_opd_train_receipt(
     adapter_name: &str,
     model_config: &kiln_core::config::ModelConfig,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     config: &OpdConfig,
     effective_top_k: usize,
+    teacher: &OpdTeacherProvenance,
     output_dir: &std::path::Path,
     base_adapter_dir: Option<&std::path::Path>,
     training_data_sha256: Option<String>,
@@ -4126,8 +4503,10 @@ fn write_opd_train_receipt_best_effort(
     run_env_ce: Option<f64>,
     lora_grad_norms: Vec<crate::train_receipt::LoraGradNormSummary>,
     status_error: Option<String>,
-) {
+) -> Result<()> {
     let effective_config = opd_config_for_receipt(config, effective_top_k);
+    let effective_config_json = serde_json::to_value(&effective_config)
+        .context("serialize effective OPD configuration for train receipt")?;
     let mut receipt = crate::train_receipt::TrainReceipt::new(
         adapter_name,
         "opd",
@@ -4145,7 +4524,7 @@ fn write_opd_train_receipt_best_effort(
             shuffle: false,
             seed: config.seed,
         },
-        serde_json::to_value(&effective_config).unwrap_or(serde_json::Value::Null),
+        effective_config_json,
     );
     receipt.training_data = crate::train_receipt::TrainingDataReceipt {
         source: "inline_opd_prompts".to_string(),
@@ -4166,7 +4545,9 @@ fn write_opd_train_receipt_best_effort(
             .ok()
             .and_then(|value| value.as_str().map(ToString::to_string))
             .unwrap_or_else(|| "teacher_top_k".to_string()),
-        teacher_id: None,
+        teacher_id: Some(teacher.teacher_id.clone()),
+        teacher_content_revision: teacher.content_revision(),
+        teacher_identity: teacher.identity.clone(),
         top_k: matches!(
             config.loss,
             OpdLossGranularity::TeacherTopK | OpdLossGranularity::FullVocab
@@ -4227,9 +4608,10 @@ fn write_opd_train_receipt_best_effort(
     if let Some(err) = status_error {
         receipt = receipt.mark_failed(err);
     }
-    if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
-        tracing::warn!(adapter = adapter_name, error = %err, "failed to write OPD train receipt");
-    }
+    receipt
+        .write_to_adapter_dir(output_dir)
+        .with_context(|| format!("write OPD train receipt for adapter {adapter_name:?}"))?;
+    Ok(())
 }
 
 fn opd_config_for_receipt(config: &OpdConfig, effective_top_k: usize) -> OpdConfig {
@@ -4302,6 +4684,86 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct VerifiedDynamicLogitSource {
+        caps: LogitSourceCaps,
+        identity: crate::TeacherIdentityV1,
+        calls: std::sync::Mutex<Vec<(Vec<u32>, Vec<usize>)>>,
+    }
+
+    impl VerifiedDynamicLogitSource {
+        fn new() -> Arc<Self> {
+            let identity = crate::TeacherIdentityV1::new(
+                "verified-dynamic-model",
+                "a".repeat(64),
+                "b".repeat(64),
+                "c".repeat(64),
+                None,
+                64,
+                32,
+                4096,
+                1_000_000,
+                "test-runtime",
+                "d".repeat(64),
+            )
+            .unwrap();
+            Arc::new(Self {
+                caps: LogitSourceCaps {
+                    teacher_id: "verified-dynamic".into(),
+                    vocab_size: 64,
+                    max_top_k: 32,
+                    supports_full_vocab: false,
+                    supports_batched: true,
+                    tokenizer_hash: Some(identity.tokenizer_vocab_sha256().to_string()),
+                },
+                identity,
+                calls: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl LogitSource for VerifiedDynamicLogitSource {
+        fn capabilities(&self) -> LogitSourceCaps {
+            self.caps.clone()
+        }
+
+        fn authoritative_teacher_identity(&self) -> Option<&crate::TeacherIdentityV1> {
+            Some(&self.identity)
+        }
+
+        fn fetch_logprobs(
+            &self,
+            tokens: &[u32],
+            positions: &[usize],
+            top_k: Option<usize>,
+        ) -> std::result::Result<LogprobBatch, LogitSourceError> {
+            let top_k = top_k.ok_or_else(|| LogitSourceError::FullVocabUnsupported {
+                teacher_id: self.caps.teacher_id.clone(),
+            })?;
+            crate::logit_source::validate_logit_request(
+                &self.caps,
+                tokens,
+                positions,
+                Some(top_k),
+            )?;
+            self.calls
+                .lock()
+                .unwrap()
+                .push((tokens.to_vec(), positions.to_vec()));
+            let mut indices = Vec::with_capacity(positions.len() * top_k);
+            let mut logprobs = Vec::with_capacity(positions.len() * top_k);
+            for _ in positions {
+                indices.extend((0..top_k).map(|token| token as u32));
+                logprobs.extend((0..top_k).map(|rank| -4.0 - rank as f32 * 0.1));
+            }
+            Ok(LogprobBatch::TopK(TopKLogprobs {
+                indices,
+                logprobs,
+                top_k,
+            }))
+        }
+    }
+
     fn off_policy_smoke_tokenizer() -> Result<KilnTokenizer> {
         let mut vocab = String::from("{");
         let chars = "userassistanttoolokhiresult<|im_start|><|im_end|>\n ";
@@ -4353,6 +4815,55 @@ mod tests {
             }],
             trajectory: Vec::new(),
         }
+    }
+
+    #[test]
+    fn remote_materialization_rejects_on_policy_before_teacher_fetch() -> Result<()> {
+        let source = VerifiedDynamicLogitSource::new();
+        let error = materialize_verified_off_policy_teacher(
+            &[smoke_opd_prompt_with_teacher_context()],
+            &OpdConfig::default(),
+            &off_policy_smoke_tokenizer()?,
+            source.clone(),
+        )
+        .err()
+        .expect("on-policy remote materialization must be rejected");
+
+        assert!(
+            error.to_string().contains("cannot run on-policy"),
+            "{error:#}"
+        );
+        assert!(source.calls.lock().unwrap().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn remote_materialization_eagerly_seals_exact_queries_and_identity() -> Result<()> {
+        let source = VerifiedDynamicLogitSource::new();
+        let identity = source.identity.clone();
+        let prompt = smoke_opd_prompt_with_teacher_context();
+        let config = OpdConfig {
+            training_mode: OpdTrainingMode::OffPolicy,
+            top_k: 16,
+            ..OpdConfig::default()
+        };
+
+        let fixture = materialize_verified_off_policy_teacher(
+            std::slice::from_ref(&prompt),
+            &config,
+            &off_policy_smoke_tokenizer()?,
+            source.clone(),
+        )?;
+        assert_eq!(fixture.authoritative_teacher_identity(), Some(&identity));
+
+        let calls = source.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        let (query_tokens, query_rows) = &calls[0];
+        assert!(!query_rows.is_empty());
+        let fetched = fixture.fetch_logprobs(query_tokens, query_rows, Some(16))?;
+        assert_eq!(fetched.flat_len(), query_rows.len() * 16);
+        assert_eq!(source.calls.lock().unwrap().len(), 1);
+        Ok(())
     }
 
     #[test]
@@ -4435,7 +4946,6 @@ mod tests {
 
         // Build a fixture teacher at each causal row that predicts an active target.
         let mut fixture = FixtureLogitSource::uniform_topk("test", vocab_size, top_k);
-        let h = FixtureLogitSource::hash_tokens(&tokens);
         for &pos in &active_positions {
             let idx: Vec<u32> = (0..top_k as u32)
                 .map(|k| (pos as u32 * 5 + k * 11) % vocab_size as u32)
@@ -4443,7 +4953,7 @@ mod tests {
             let lp: Vec<f32> = (0..top_k)
                 .map(|k| -((pos + 1) as f32).ln() - (k as f32) * 0.3)
                 .collect();
-            fixture.insert(h, pos - 1, idx, lp);
+            fixture.insert(&tokens, pos - 1, idx, lp)?;
         }
         let teacher: Arc<dyn LogitSource> = Arc::new(fixture);
 
@@ -4490,7 +5000,8 @@ mod tests {
             OpdLossGranularity::TeacherTopK,
             4,
         )
-        .unwrap_err();
+        .err()
+        .expect("an empty active-position set must be rejected");
         assert!(err.to_string().contains("no active positions"));
     }
 
@@ -4706,7 +5217,6 @@ mod tests {
         // OPD kernel must hand the fixture the teacher_tokens (not the
         // student tokens) and the causal rows preceding the shifted targets.
         let mut fixture = FixtureLogitSource::uniform_topk("asym-test", vocab_size, top_k);
-        let h = FixtureLogitSource::hash_tokens(&teacher_tokens);
         for &pos in &teacher_active {
             let idx: Vec<u32> = (0..top_k as u32)
                 .map(|k| (pos as u32 * 5 + k * 11) % vocab_size as u32)
@@ -4714,7 +5224,7 @@ mod tests {
             let lp: Vec<f32> = (0..top_k)
                 .map(|k| -((pos + 1) as f32).ln() - (k as f32) * 0.3)
                 .collect();
-            fixture.insert(h, pos - 1, idx, lp);
+            fixture.insert(&teacher_tokens, pos - 1, idx, lp)?;
         }
         let teacher: Arc<dyn LogitSource> = Arc::new(fixture);
 
@@ -4857,6 +5367,132 @@ mod tests {
     }
 
     #[test]
+    fn off_policy_teacher_token_id_must_match_tokenized_active_target() -> Result<()> {
+        let jsonl = r#"{"messages":[{"role":"user","content":"hi"}],"teacher_response":"ok"}"#;
+        let mut examples = parse_off_policy_distillation_jsonl_str(jsonl)?;
+        let tokenizer = off_policy_smoke_tokenizer()?;
+        let mut messages = examples[0].messages.clone();
+        messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: examples[0].teacher_response.clone(),
+        });
+        let prompt = OpdPrompt {
+            messages,
+            teacher_extra_messages: Vec::new(),
+            trajectory: Vec::new(),
+        };
+        let tokenized = tokenize_opd_prompt_for_training(&prompt, &tokenizer, None)?;
+        let active: Vec<usize> = tokenized
+            .action_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &is_active)| is_active.then_some(position))
+            .collect();
+        examples[0].teacher_tokens = active
+            .iter()
+            .map(|&position| TeacherActionToken {
+                token_id: Some(tokenized.input_ids[position]),
+                token: None,
+                logprob: None,
+                top_logprobs: vec![
+                    TeacherTopLogprob {
+                        token_id: 0,
+                        logprob: -1.0,
+                    },
+                    TeacherTopLogprob {
+                        token_id: 1,
+                        logprob: -2.0,
+                    },
+                ],
+            })
+            .collect();
+        let actual = examples[0].teacher_tokens[0].token_id.unwrap();
+        examples[0].teacher_tokens[0].token_id = Some((actual + 1) % 32);
+
+        let error = prepare_off_policy_distillation_dataset(
+            &examples,
+            &tokenizer,
+            "teacher-fixture",
+            32,
+            2,
+            OpdObjective::ReverseKl,
+            None,
+        )
+        .err()
+        .expect("mismatched declared teacher token must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("tokenization produced active target"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn off_policy_duplicate_exact_sequence_rejects_conflicting_logits() -> Result<()> {
+        let jsonl = concat!(
+            "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"teacher_response\":\"ok\"}\n",
+            "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"teacher_response\":\"ok\"}"
+        );
+        let mut examples = parse_off_policy_distillation_jsonl_str(jsonl)?;
+        let tokenizer = off_policy_smoke_tokenizer()?;
+        for (example_index, example) in examples.iter_mut().enumerate() {
+            let mut messages = example.messages.clone();
+            messages.push(ChatMessage {
+                role: "assistant".into(),
+                content: example.teacher_response.clone(),
+            });
+            let tokenized = tokenize_opd_prompt_for_training(
+                &OpdPrompt {
+                    messages,
+                    teacher_extra_messages: Vec::new(),
+                    trajectory: Vec::new(),
+                },
+                &tokenizer,
+                None,
+            )?;
+            let first_candidate = (example_index * 2) as u32;
+            example.teacher_tokens = tokenized
+                .action_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(position, &is_active)| {
+                    is_active.then(|| TeacherActionToken {
+                        token_id: Some(tokenized.input_ids[position]),
+                        token: None,
+                        logprob: None,
+                        top_logprobs: vec![
+                            TeacherTopLogprob {
+                                token_id: first_candidate,
+                                logprob: -1.0,
+                            },
+                            TeacherTopLogprob {
+                                token_id: first_candidate + 1,
+                                logprob: -2.0,
+                            },
+                        ],
+                    })
+                })
+                .collect();
+        }
+
+        let error = prepare_off_policy_distillation_dataset(
+            &examples,
+            &tokenizer,
+            "teacher-fixture",
+            32,
+            2,
+            OpdObjective::ReverseKl,
+            None,
+        )
+        .err()
+        .expect("conflicting duplicate fixture rows must be rejected");
+        assert!(error.to_string().contains("conflict"), "{error:#}");
+        Ok(())
+    }
+
+    #[test]
     fn off_policy_teacher_jsonl_cross_entropy_does_not_require_logprobs() -> Result<()> {
         let jsonl = r#"{"messages":[{"role":"user","content":"hi"}],"teacher_response":"ok"}"#;
         let examples = parse_off_policy_distillation_jsonl_str(jsonl)?;
@@ -4900,6 +5536,80 @@ mod tests {
         assert_eq!(topk.indices.len(), active_positions.len() * 2);
         assert_eq!(topk.logprobs[0], 0.0);
         Ok(())
+    }
+
+    #[test]
+    fn off_policy_manifest_binds_loaded_fixture_and_exact_source_bytes() -> Result<()> {
+        let identity = crate::TeacherIdentityV1::new(
+            "teacher-model",
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            None,
+            32,
+            2,
+            4096,
+            32,
+            "vllm-test",
+            "d".repeat(64),
+        )?;
+        let manifest = OffPolicyDistillationManifestV1::new(identity.clone());
+        let example = r#"{"messages":[{"role":"user","content":"hi"}],"teacher_response":"ok"}"#;
+        let jsonl = format!("{}\n{example}\n", manifest.canonical_json());
+        let loaded = parse_off_policy_distillation_dataset_str(&jsonl)?;
+
+        assert_eq!(loaded.manifest.as_ref(), Some(&manifest));
+        assert_eq!(
+            loaded.source_sha256,
+            crate::train_receipt::sha256_bytes(jsonl.as_bytes())
+        );
+        let prepared = prepare_off_policy_distillation_dataset_with_identity(
+            &loaded.examples,
+            &off_policy_smoke_tokenizer()?,
+            "teacher-alias",
+            Some(identity.clone()),
+            32,
+            2,
+            OpdObjective::CrossEntropy,
+            None,
+        )?;
+        assert_eq!(
+            prepared.teacher.authoritative_teacher_identity(),
+            Some(&identity)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn off_policy_manifest_must_be_canonical_and_first() {
+        let identity = crate::TeacherIdentityV1::new(
+            "teacher-model",
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            None,
+            32,
+            2,
+            4096,
+            32,
+            "vllm-test",
+            "d".repeat(64),
+        )
+        .unwrap();
+        let canonical = OffPolicyDistillationManifestV1::new(identity).canonical_json();
+        let example = r#"{"messages":[{"role":"user","content":"hi"}],"teacher_response":"ok"}"#;
+
+        let noncanonical = format!(" {}\n{example}", canonical);
+        let error = parse_off_policy_distillation_dataset_str(&noncanonical)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not canonical"), "{error}");
+
+        let late = format!("{example}\n{canonical}");
+        let error = parse_off_policy_distillation_dataset_str(&late)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must be the first"), "{error}");
     }
 
     #[test]
@@ -5278,6 +5988,29 @@ mod tests {
         assert_eq!(parsed.sources.len(), 3);
         assert!((parsed.sources[2].weight - 0.7).abs() < 1e-9);
         assert_eq!(parsed.rollout_budget, 5000);
+    }
+
+    #[test]
+    fn fixed_fixture_partial_configs_default_to_off_policy() {
+        let merge: DistillMergeRequest =
+            serde_json::from_str(r#"{"name":"merged","sources":[],"config":{"lora_rank":4}}"#)
+                .unwrap();
+        assert_eq!(merge.config.training_mode, OpdTrainingMode::OffPolicy);
+
+        let self_distill: DistillSelfRequest = serde_json::from_str(
+            r#"{"name":"selfy","mode":"conciseness","config":{"lora_rank":4}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            self_distill.config.training_mode,
+            OpdTrainingMode::OffPolicy
+        );
+
+        let explicit: DistillMergeRequest = serde_json::from_str(
+            r#"{"name":"merged","sources":[],"config":{"training_mode":"on_policy"}}"#,
+        )
+        .unwrap();
+        assert_eq!(explicit.config.training_mode, OpdTrainingMode::OnPolicy);
     }
 
     #[test]

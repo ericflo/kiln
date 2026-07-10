@@ -25,6 +25,7 @@ pub(crate) mod response_delivery;
 pub mod rollout_generate_cli;
 pub(crate) mod sft_dataset;
 pub mod state;
+pub mod teacher_identity;
 pub mod training_history;
 pub mod training_preflight;
 pub mod training_queue;

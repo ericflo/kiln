@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import struct
 import sys
 import tempfile
@@ -28,6 +29,27 @@ A_HASH = "a" * 64
 B_HASH = "b" * 64
 C_HASH = "c" * 64
 D_HASH = "d" * 64
+E_HASH = "e" * 64
+RUNTIME_VERSIONS = {
+    "python": "3.12.7",
+    "python_implementation": "CPython",
+    "vllm": "0.25.0",
+    "torch": "2.9.1+rocm7.1",
+    "transformers": "5.0.0",
+    "tokenizers": "0.22.2",
+}
+ACCELERATOR = {
+    "type": "rocm",
+    "driver": "amdgpu:6.14.0;hip-runtime:7.1",
+    "devices": [
+        {
+            "index": 0,
+            "name": "AMD Radeon 8060S",
+            "architecture": "gfx1151",
+            "total_memory_bytes": 128 * 1024**3,
+        }
+    ],
+}
 
 
 def _identity(adapter: dict[str, object] | None = None) -> dict[str, object]:
@@ -40,6 +62,7 @@ def _identity(adapter: dict[str, object] | None = None) -> dict[str, object]:
         vocab_size=8,
         max_top_k=5,
         max_model_len=4096,
+        max_prompt_logprob_candidates=20_000,
         implementation="vllm:0.25.1+cu129",
         inference_config_sha256=D_HASH,
     )
@@ -49,6 +72,7 @@ def _manifest(adapter: dict[str, object] | None = None) -> dict[str, object]:
     return {
         "schema": vllm_teacher.INPUT_MANIFEST_SCHEMA,
         "base_model_sha256": A_HASH,
+        "snapshot_content_sha256": A_HASH,
         "model_config_sha256": D_HASH,
         "tokenizer_vocab_sha256": B_HASH,
         "tokenizer_config_sha256": C_HASH,
@@ -56,6 +80,12 @@ def _manifest(adapter: dict[str, object] | None = None) -> dict[str, object]:
         "adapter_max_rank": 32 if adapter is not None else None,
         "vocab_size": 8,
         "implementation": "vllm:0.25.0",
+        "runtime_versions": dict(RUNTIME_VERSIONS),
+        "runtime_content_sha256": E_HASH,
+        "accelerator": {
+            **ACCELERATOR,
+            "devices": [dict(device) for device in ACCELERATOR["devices"]],
+        },
     }
 
 
@@ -204,6 +234,7 @@ class IdentityTests(unittest.TestCase):
             "vocab_size": 8,
             "max_top_k": 5,
             "max_model_len": 4096,
+            "max_prompt_logprob_candidates": 20_000,
             "implementation": "vllm:0.25.0",
             "inference_config_sha256": D_HASH,
         }
@@ -212,6 +243,9 @@ class IdentityTests(unittest.TestCase):
             ({"base_model_sha256": "sha256:" + A_HASH}, "64 lowercase"),
             ({"max_top_k": 9}, "max_top_k"),
             ({"max_model_len": 0}, "max_model_len"),
+            ({"max_prompt_logprob_candidates": 5}, "one maximum-K row"),
+            ({"max_prompt_logprob_candidates": 24_577}, "one maximum-K row"),
+            ({"max_prompt_logprob_candidates": 1_000_001}, "one maximum-K row"),
             ({"implementation": "vllm:0.24.9"}, "0.25.0 or newer"),
         )
         for update, message in cases:
@@ -303,6 +337,18 @@ class FilesystemFingerprintTests(unittest.TestCase):
         )
         self.assertEqual(vllm_teacher.fingerprint_base_model(self.root), indexed)
 
+    def test_alternate_bin_is_bound_by_snapshot_while_base_load_stays_safetensors(self) -> None:
+        base_hash = vllm_teacher.fingerprint_base_model(self.root)
+        (self.root / "pytorch_model.bin").write_bytes(b"alternate-v1")
+        first_snapshot_hash = vllm_teacher.snapshot_content_fingerprint(self.root, None)
+        self.assertEqual(vllm_teacher.fingerprint_base_model(self.root), base_hash)
+
+        (self.root / "pytorch_model.bin").write_bytes(b"alternate-v2")
+        self.assertNotEqual(
+            vllm_teacher.snapshot_content_fingerprint(self.root, None),
+            first_snapshot_hash,
+        )
+
     def test_tokenizer_config_hashes_canonical_backend_json_and_root_symlinks_fail(self) -> None:
         backend_json = '{"version":"1.0","model":{"type":"BPE"}}'
         self.assertEqual(
@@ -382,6 +428,246 @@ class FilesystemFingerprintTests(unittest.TestCase):
                     vllm_teacher.adapter_max_rank(adapter)
 
 
+class ImmutableSnapshotTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.model = self.base / "model"
+        self.model.mkdir()
+        (self.model / "weights.safetensors").write_bytes(b"weights-v1")
+        (self.model / "config.json").write_text('{"vocab_size":3}')
+        (self.model / "nested").mkdir()
+        (self.model / "nested" / "tokenizer.json").write_bytes(b"tokenizer-v1")
+        (self.model / "empty").mkdir()
+        self.snapshot_root = self.base / "snapshots"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _snapshot(self) -> object:
+        with mock.patch.object(vllm_teacher, "_try_reflink", return_value=False):
+            return vllm_teacher.create_immutable_snapshot(
+                self.model, None, self.snapshot_root
+            )
+
+    def test_copy_fallback_publishes_complete_read_only_snapshot_and_cleans_up(self) -> None:
+        expected_hash = vllm_teacher.snapshot_content_fingerprint(self.model, None)
+        snapshot = self._snapshot()
+        try:
+            self.assertTrue(snapshot.path.name.startswith("ready-"))
+            self.assertEqual(snapshot.manifest_sha256, expected_hash)
+            self.assertIn("model/empty", snapshot.directories)
+            self.assertEqual(
+                (snapshot.model_path / "weights.safetensors").read_bytes(), b"weights-v1"
+            )
+            self.assertEqual(snapshot.path.stat().st_mode & 0o777, 0o500)
+            self.assertEqual(
+                (snapshot.model_path / "weights.safetensors").stat().st_mode & 0o777,
+                0o400,
+            )
+            snapshot.verify()
+            (self.model / "weights.safetensors").write_bytes(b"mutated-source")
+            snapshot.verify()
+            self.assertEqual(
+                (snapshot.model_path / "weights.safetensors").read_bytes(), b"weights-v1"
+            )
+        finally:
+            snapshot.cleanup()
+        self.assertFalse(snapshot.path.exists())
+        self.assertEqual(list(self.snapshot_root.iterdir()), [])
+
+    def test_staged_file_and_empty_directory_mutation_are_detected(self) -> None:
+        snapshot = self._snapshot()
+        try:
+            weight = snapshot.model_path / "weights.safetensors"
+            weight.chmod(0o600)
+            weight.write_bytes(b"mutated")
+            with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "writable|content"):
+                snapshot.verify()
+        finally:
+            snapshot.cleanup()
+
+        snapshot = self._snapshot()
+        try:
+            empty = snapshot.model_path / "empty"
+            empty.chmod(0o700)
+            (empty / "new-empty").mkdir()
+            (empty / "new-empty").chmod(0o500)
+            empty.chmod(0o500)
+            with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "content"):
+                snapshot.verify()
+        finally:
+            snapshot.cleanup()
+
+    def test_symlinks_special_files_bounds_and_capacity_fail_without_partial_snapshot(self) -> None:
+        target = self.base / "outside"
+        target.write_bytes(b"outside")
+        (self.model / "link").symlink_to(target)
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "symlink"):
+            self._snapshot()
+        (self.model / "link").unlink()
+
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(self.model / "fifo")
+            with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "special file"):
+                self._snapshot()
+            (self.model / "fifo").unlink()
+
+        with mock.patch.object(vllm_teacher, "MAX_SNAPSHOT_FILES", 1):
+            with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "file safety limit"):
+                self._snapshot()
+        with mock.patch.object(vllm_teacher, "MAX_SNAPSHOT_PATH_METADATA_BYTES", 1):
+            with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "path metadata"):
+                self._snapshot()
+        with mock.patch.object(
+            vllm_teacher,
+            "_snapshot_filesystem_capacity",
+            return_value=(0, 1_000_000, 4096),
+        ):
+            with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "free space"):
+                self._snapshot()
+        self.assertFalse(self.snapshot_root.exists() and any(self.snapshot_root.iterdir()))
+
+    def test_growth_after_inventory_is_rejected_before_copying_unchecked_bytes(self) -> None:
+        original = vllm_teacher._inventory_source_tree
+
+        def mutate_after_inventory(
+            path: Path,
+            logical_path: str,
+            budget: object,
+            *,
+            depth: int = 0,
+        ) -> tuple[int, int]:
+            result = original(path, logical_path, budget, depth=depth)
+            if logical_path == "model":
+                (self.model / "weights.safetensors").write_bytes(b"x" * 4096)
+            return result
+
+        with mock.patch.object(
+            vllm_teacher, "_inventory_source_tree", side_effect=mutate_after_inventory
+        ), mock.patch.object(vllm_teacher, "_try_reflink", return_value=False):
+            with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "grew"):
+                vllm_teacher.create_immutable_snapshot(
+                    self.model, None, self.snapshot_root
+                )
+        self.assertEqual(list(self.snapshot_root.iterdir()), [])
+
+    def test_cross_file_mutation_cannot_publish_a_torn_checkpoint(self) -> None:
+        coherent = self.base / "coherent-model"
+        coherent.mkdir()
+        (coherent / "a.safetensors").write_bytes(b"old-a")
+        (coherent / "b.safetensors").write_bytes(b"old-b")
+        original = vllm_teacher._copy_regular_file
+
+        def mutate_between_files(
+            source: Path,
+            destination: Path,
+            relative_path: str,
+            budget: object,
+            depth: int,
+        ) -> object:
+            result = original(source, destination, relative_path, budget, depth)
+            if relative_path == "model/a.safetensors":
+                (coherent / "a.safetensors").write_bytes(b"new-a")
+                (coherent / "b.safetensors").write_bytes(b"new-b")
+            return result
+
+        with mock.patch.object(
+            vllm_teacher, "_copy_regular_file", side_effect=mutate_between_files
+        ), mock.patch.object(vllm_teacher, "_try_reflink", return_value=False):
+            with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "multi-file copy"):
+                vllm_teacher.create_immutable_snapshot(
+                    coherent, None, self.snapshot_root
+                )
+        self.assertEqual(list(self.snapshot_root.iterdir()), [])
+
+    def test_snapshot_root_symlink_has_no_creation_side_effect(self) -> None:
+        victim = self.base / "victim"
+        victim.mkdir()
+        link = self.base / "link"
+        link.symlink_to(victim, target_is_directory=True)
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "symlink"):
+            vllm_teacher.create_immutable_snapshot(
+                self.model, None, link / "must-not-exist"
+            )
+        self.assertFalse((victim / "must-not-exist").exists())
+
+    def test_world_writable_nonsticky_snapshot_parent_is_rejected(self) -> None:
+        unsafe_parent = self.base / "unsafe-parent"
+        unsafe_parent.mkdir()
+        unsafe_parent.chmod(0o777)
+        try:
+            with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "untrusted rename"):
+                vllm_teacher.create_immutable_snapshot(
+                    self.model, None, unsafe_parent / "snapshots"
+                )
+            self.assertFalse((unsafe_parent / "snapshots").exists())
+        finally:
+            unsafe_parent.chmod(0o700)
+
+    def test_snapshot_ancestry_owner_must_be_current_user_or_root(self) -> None:
+        if not hasattr(os, "getuid"):
+            self.skipTest("POSIX ownership is required")
+        self.assertTrue(
+            vllm_teacher._trusted_snapshot_directory_owner(
+                types.SimpleNamespace(st_uid=os.getuid())
+            )
+        )
+        self.assertTrue(
+            vllm_teacher._trusted_snapshot_directory_owner(
+                types.SimpleNamespace(st_uid=0)
+            )
+        )
+        self.assertFalse(
+            vllm_teacher._trusted_snapshot_directory_owner(
+                types.SimpleNamespace(st_uid=max(os.getuid(), 0) + 1000)
+            )
+        )
+
+    def test_existing_nonprivate_snapshot_root_is_rejected_without_chmod(self) -> None:
+        existing = self.base / "existing-root"
+        existing.mkdir(mode=0o755)
+        sentinel = existing / "keep"
+        sentinel.write_text("keep")
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "mode 0700"):
+            vllm_teacher.create_immutable_snapshot(self.model, None, existing)
+        self.assertEqual(existing.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(sentinel.read_text(), "keep")
+
+    def test_dynamic_inode_filesystem_does_not_report_false_exhaustion(self) -> None:
+        statvfs = types.SimpleNamespace(
+            f_bavail=100,
+            f_frsize=0,
+            f_bsize=4096,
+            f_files=0,
+            f_favail=0,
+        )
+        with mock.patch.object(vllm_teacher.os, "statvfs", return_value=statvfs):
+            capacity = vllm_teacher._snapshot_filesystem_capacity(self.base)
+        self.assertEqual(capacity, (409_600, None, 4096))
+
+    def test_root_fd_cleanup_cannot_follow_replaced_root_or_escape(self) -> None:
+        snapshot = self._snapshot()
+        original_root = self.base / "renamed-snapshot-root"
+        self.snapshot_root.rename(original_root)
+        victim = self.base / "victim"
+        victim.mkdir()
+        victim_entry = victim / snapshot.path.name
+        victim_entry.mkdir()
+        (victim_entry / "keep").write_text("keep")
+        self.snapshot_root.symlink_to(victim, target_is_directory=True)
+
+        snapshot.cleanup()
+        self.assertFalse((original_root / snapshot.path.name).exists())
+        self.assertEqual((victim_entry / "keep").read_text(), "keep")
+
+    def test_snapshot_root_inside_model_is_rejected_before_creation(self) -> None:
+        nested_root = self.model / "snapshots"
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "non-nested"):
+            vllm_teacher.create_immutable_snapshot(self.model, None, nested_root)
+        self.assertFalse(nested_root.exists())
+
+
 class ManifestTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -399,6 +685,8 @@ class ManifestTests(unittest.TestCase):
             vllm_teacher, "_load_tokenizer_contract", side_effect=AssertionError("must not import")
         ), mock.patch.object(
             vllm_teacher, "_installed_vllm_version", side_effect=AssertionError("must not inspect")
+        ), mock.patch.object(
+            vllm_teacher, "probe_accelerator", side_effect=AssertionError("must not inspect")
         ):
             result = vllm_teacher.load_identity_input(self.path)
         self.assertEqual(result["base_model_sha256"], A_HASH)
@@ -440,6 +728,298 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "wrong fields"):
             vllm_teacher.load_identity_input(self.path)
 
+    def test_manifest_runtime_and_accelerator_contracts_are_strict(self) -> None:
+        value = _manifest()
+        del value["runtime_versions"]["torch"]
+        self._write(value)
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "runtime_versions"):
+            vllm_teacher.load_identity_input(self.path)
+
+        value = _manifest()
+        value["runtime_versions"]["vllm"] = "0.25.1"
+        self._write(value)
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "must match"):
+            vllm_teacher.load_identity_input(self.path)
+
+        value = _manifest()
+        value["accelerator"]["devices"][0]["index"] = 1
+        self._write(value)
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "contiguous"):
+            vllm_teacher.load_identity_input(self.path)
+
+
+class RuntimeContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.model = Path(self.tmp.name) / "model"
+        self.model.mkdir()
+        (self.model / "config.json").write_text('{"vocab_size":3}')
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _args(model: Path) -> object:
+        return types.SimpleNamespace(
+            identity_input=None,
+            manifest_only=False,
+            dry_run=False,
+            model_path=model,
+            adapter_path=None,
+            served_model_id="teacher-qwen",
+        )
+
+    def _identity_inputs(self, vocab: dict[str, int], backend_size: int) -> dict[str, object]:
+        with mock.patch.object(
+            vllm_teacher, "snapshot_content_fingerprint", return_value=A_HASH
+        ), mock.patch.object(
+            vllm_teacher,
+            "fingerprint_base_model_details",
+            return_value=(B_HASH, C_HASH),
+        ), mock.patch.object(
+            vllm_teacher,
+            "_load_tokenizer_contract",
+            return_value=(vocab, '{"version":"1.0"}', backend_size),
+        ), mock.patch.object(
+            vllm_teacher, "_installed_vllm_version", return_value="0.25.0"
+        ), mock.patch.object(
+            vllm_teacher,
+            "installed_runtime_versions",
+            return_value=RUNTIME_VERSIONS,
+        ), mock.patch.object(
+            vllm_teacher,
+            "capture_runtime_content",
+            return_value=vllm_teacher.RuntimeContentSnapshot(
+                sha256=E_HASH,
+                python_executable=Path("/resolved/python"),
+                file_count=5,
+                directory_count=4,
+                logical_bytes=100,
+            ),
+        ), mock.patch.object(
+            vllm_teacher, "probe_accelerator", return_value=ACCELERATOR
+        ):
+            return vllm_teacher._identity_inputs(self._args(self.model))
+
+    def test_identity_inputs_require_vocab_map_backend_and_model_config_agreement(self) -> None:
+        inputs = self._identity_inputs({"a": 0, "b": 1, "c": 2}, 3)
+        self.assertEqual(inputs["vocab_size"], 3)
+        self.assertEqual(inputs["runtime_versions"], RUNTIME_VERSIONS)
+        self.assertEqual(inputs["runtime_content_sha256"], E_HASH)
+
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "pair count"):
+            self._identity_inputs({"a": 0, "b": 1}, 3)
+
+        (self.model / "config.json").write_text('{"vocab_size":4}')
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "does not match"):
+            self._identity_inputs({"a": 0, "b": 1, "c": 2}, 3)
+
+    def test_installed_runtime_versions_bind_exact_package_versions(self) -> None:
+        versions = {
+            "vllm": "0.25.2",
+            "torch": "2.9.1+cu129",
+            "transformers": "5.0.1",
+            "tokenizers": "0.22.2",
+        }
+        with mock.patch.object(
+            vllm_teacher.importlib.metadata,
+            "version",
+            side_effect=lambda package: versions[package],
+        ):
+            result = vllm_teacher.installed_runtime_versions()
+        self.assertEqual(result["vllm"], "0.25.2")
+        self.assertEqual(result["torch"], "2.9.1+cu129")
+        self.assertEqual(result["python"], vllm_teacher.platform.python_version())
+
+    def test_runtime_content_binds_resolved_executable_editable_source_and_native_extension(
+        self,
+    ) -> None:
+        executable = Path(self.tmp.name) / "python-real"
+        executable.write_bytes(b"python-executable")
+        executable_link = Path(self.tmp.name) / "python"
+        executable_link.symlink_to(executable)
+
+        source_root = Path(self.tmp.name) / "editable" / "vllm"
+        source_root.mkdir(parents=True)
+        source = source_root / "__init__.py"
+        source.write_text("VALUE = 'first'\n")
+        native = source_root / "_C.native.so"
+        native.write_bytes(b"native-v1")
+
+        site = Path(self.tmp.name) / "site"
+        metadata = site / "vllm-0.25.0.dist-info"
+        metadata.mkdir(parents=True)
+        (metadata / "METADATA").write_text("Name: vllm\nVersion: 0.25.0\n")
+        editable_pointer = site / "__editable__.vllm.pth"
+        editable_pointer.write_text(str(source_root.parent) + "\n")
+        distribution = types.SimpleNamespace(
+            _path=metadata,
+            files=[
+                Path("__editable__.vllm.pth"),
+                Path("vllm-0.25.0.dist-info/METADATA"),
+            ],
+            locate_file=lambda item: site / item,
+        )
+        package_spec = types.SimpleNamespace(
+            submodule_search_locations=[str(source_root)],
+            origin=str(source),
+        )
+
+        with mock.patch.object(
+            vllm_teacher.importlib.util, "find_spec", return_value=package_spec
+        ), mock.patch.object(
+            vllm_teacher.importlib.metadata, "distribution", return_value=distribution
+        ):
+            first = vllm_teacher.capture_runtime_content(
+                python_executable=executable_link,
+                package_names=("vllm",),
+            )
+            repeated = vllm_teacher.capture_runtime_content(
+                python_executable=executable_link,
+                package_names=("vllm",),
+            )
+            source.write_text("VALUE = 'other'\n")
+            changed_source = vllm_teacher.capture_runtime_content(
+                python_executable=executable_link,
+                package_names=("vllm",),
+            )
+            source.write_text("VALUE = 'first'\n")
+            native.write_bytes(b"native-v2")
+            changed_native = vllm_teacher.capture_runtime_content(
+                python_executable=executable_link,
+                package_names=("vllm",),
+            )
+            native.write_bytes(b"native-v1")
+            executable.write_bytes(b"python-executablE")
+            changed_executable = vllm_teacher.capture_runtime_content(
+                python_executable=executable_link,
+                package_names=("vllm",),
+            )
+
+        self.assertEqual(first, repeated)
+        self.assertEqual(first.python_executable, executable.resolve())
+        self.assertNotEqual(first.sha256, changed_source.sha256)
+        self.assertNotEqual(first.sha256, changed_native.sha256)
+        self.assertNotEqual(first.sha256, changed_executable.sha256)
+        self.assertGreaterEqual(first.file_count, 5)
+
+    def test_runtime_content_enforces_inventory_bounds(self) -> None:
+        executable = Path(self.tmp.name) / "python"
+        executable.write_bytes(b"python")
+        package_root = Path(self.tmp.name) / "package"
+        package_root.mkdir()
+        origin = package_root / "__init__.py"
+        origin.write_bytes(b"package")
+        metadata = Path(self.tmp.name) / "package.dist-info"
+        metadata.mkdir()
+        distribution = types.SimpleNamespace(_path=metadata, files=[], locate_file=lambda item: item)
+        package_spec = types.SimpleNamespace(
+            submodule_search_locations=[str(package_root)],
+            origin=str(origin),
+        )
+        limits = (
+            ("MAX_RUNTIME_CONTENT_BYTES", 5, "logical-size"),
+            ("MAX_RUNTIME_CONTENT_FILES", 1, "file safety limit"),
+            ("MAX_RUNTIME_CONTENT_DIRECTORIES", 0, "directory safety limit"),
+            ("MAX_RUNTIME_CONTENT_DEPTH", 0, "nesting limit"),
+            ("MAX_RUNTIME_CONTENT_PATH_BYTES", 1, "path exceeds"),
+            ("MAX_RUNTIME_CONTENT_PATH_METADATA_BYTES", 1, "path metadata"),
+        )
+        with mock.patch.object(
+            vllm_teacher.importlib.util, "find_spec", return_value=package_spec
+        ), mock.patch.object(
+            vllm_teacher.importlib.metadata, "distribution", return_value=distribution
+        ):
+            for constant, maximum, message in limits:
+                with self.subTest(constant=constant), mock.patch.object(
+                    vllm_teacher, constant, maximum
+                ), self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, message):
+                    vllm_teacher.capture_runtime_content(
+                        python_executable=executable,
+                        package_names=("package",),
+                    )
+
+    def test_rocm_probe_binds_driver_name_architecture_and_memory(self) -> None:
+        properties = types.SimpleNamespace(
+            name="AMD Radeon 8060S",
+            gcnArchName="gfx1151",
+            total_memory=64 * 1024**3,
+        )
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            device_count=lambda: 1,
+            get_device_properties=lambda index: properties,
+        )
+        torch = types.ModuleType("torch")
+        torch.cuda = cuda
+        torch.version = types.SimpleNamespace(hip="7.1", cuda=None)
+        with mock.patch.dict(sys.modules, {"torch": torch}), mock.patch.object(
+            vllm_teacher, "_read_bounded_text", return_value="6.14.0"
+        ):
+            result = vllm_teacher.probe_accelerator()
+        self.assertEqual(result["type"], "rocm")
+        self.assertIn("hip-runtime:7.1", result["driver"])
+        self.assertEqual(result["devices"][0]["name"], "AMD Radeon 8060S")
+        self.assertEqual(result["devices"][0]["architecture"], "gfx1151")
+        self.assertEqual(result["devices"][0]["total_memory_bytes"], 64 * 1024**3)
+
+    def test_child_runtime_preflight_rejects_resolution_mismatch(self) -> None:
+        observed = {
+            "schema": vllm_teacher.RUNTIME_CONTENT_SCHEMA,
+            "runtime_versions": {
+                **RUNTIME_VERSIONS,
+                "torch": "2.9.2+rocm7.1",
+            },
+            "runtime_content_sha256": E_HASH,
+            "file_count": 10,
+            "directory_count": 5,
+            "logical_bytes": 1000,
+        }
+        completed = vllm_teacher.subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(observed).encode(),
+            stderr=b"",
+        )
+        with mock.patch.object(
+            vllm_teacher.subprocess, "run", return_value=completed
+        ) as run:
+            with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "differ"):
+                vllm_teacher.verify_child_runtime_contract(
+                    RUNTIME_VERSIONS,
+                    E_HASH,
+                    {"PYTHONDONTWRITEBYTECODE": "1"},
+                )
+        self.assertFalse(run.call_args.kwargs["shell"])
+        self.assertEqual(run.call_args.kwargs["cwd"], os.path.abspath(os.sep))
+
+    def test_child_runtime_revalidation_rejects_same_version_content_mutation(self) -> None:
+        observed = {
+            "schema": vllm_teacher.RUNTIME_CONTENT_SCHEMA,
+            "runtime_versions": RUNTIME_VERSIONS,
+            "runtime_content_sha256": A_HASH,
+            "file_count": 10,
+            "directory_count": 5,
+            "logical_bytes": 1000,
+        }
+        completed = vllm_teacher.subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(observed).encode(),
+            stderr=b"",
+        )
+        with mock.patch.object(
+            vllm_teacher.subprocess, "run", return_value=completed
+        ) as run:
+            with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "content changed"):
+                vllm_teacher.verify_child_runtime_contract(
+                    RUNTIME_VERSIONS,
+                    E_HASH,
+                    {"PYTHONDONTWRITEBYTECODE": "1"},
+                )
+        self.assertFalse(run.call_args.kwargs["shell"])
+        self.assertEqual(run.call_args.kwargs["cwd"], os.path.abspath(os.sep))
+
 
 class ArgumentAndCommandTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -465,7 +1045,12 @@ class ArgumentAndCommandTests(unittest.TestCase):
             (["--enable-lora"], "owns or forbids"),
             (["--enable-prompt-adapter"], "owns or forbids"),
             (["--middleware=x:y"], "owns or forbids"),
-            (["--load-format=dummy"], "auto or safetensors"),
+            (["--load-format=dummy"], "owns or forbids"),
+            (["--quantization-param-path=/tmp/q.json"], "unbound file or path"),
+            (["--speculative-model=/tmp/draft"], "not been identity-reviewed"),
+            (["--compilation-config={\"cache_dir\":\"/tmp/cache\"}"], "not been identity-reviewed"),
+            (["--attention-backend=package.CustomBackend"], "not been identity-reviewed"),
+            (["--brand-new-option=value"], "not been identity-reviewed"),
         )
         for args, message in cases:
             with self.subTest(args=args):
@@ -474,11 +1059,16 @@ class ArgumentAndCommandTests(unittest.TestCase):
 
     def test_inference_hash_canonicalizes_args_ignores_transport_and_tracks_runtime(self) -> None:
         kwargs = {
+            "snapshot_content_sha256": D_HASH,
             "model_config_sha256": A_HASH,
             "max_top_k": 20,
             "max_model_len": 4096,
+            "max_prompt_logprob_candidates": 20_000,
             "adapter_enabled": False,
             "adapter_max_rank": None,
+            "runtime_versions": RUNTIME_VERSIONS,
+            "runtime_content_sha256": E_HASH,
+            "accelerator": ACCELERATOR,
         }
         first = vllm_teacher.inference_config_fingerprint(
             **kwargs,
@@ -506,9 +1096,59 @@ class ArgumentAndCommandTests(unittest.TestCase):
             extra_args=["--dtype=bfloat16", "--tensor-parallel-size=2"],
             environment={"CUDA_VISIBLE_DEVICES": "0,1"},
         )
+        changed_runtime = vllm_teacher.inference_config_fingerprint(
+            **{
+                **kwargs,
+                "runtime_versions": {**RUNTIME_VERSIONS, "torch": "2.9.2+rocm7.1"},
+            },
+            extra_args=["--dtype=bfloat16", "--tensor-parallel-size=2"],
+            environment={"CUDA_VISIBLE_DEVICES": "0,1"},
+        )
+        changed_runtime_content = vllm_teacher.inference_config_fingerprint(
+            **{**kwargs, "runtime_content_sha256": A_HASH},
+            extra_args=["--dtype=bfloat16", "--tensor-parallel-size=2"],
+            environment={"CUDA_VISIBLE_DEVICES": "0,1"},
+        )
+        changed_accelerator = vllm_teacher.inference_config_fingerprint(
+            **{
+                **kwargs,
+                "accelerator": {
+                    **ACCELERATOR,
+                    "devices": [
+                        {**ACCELERATOR["devices"][0], "architecture": "gfx1201"}
+                    ],
+                },
+            },
+            extra_args=["--dtype=bfloat16", "--tensor-parallel-size=2"],
+            environment={"CUDA_VISIBLE_DEVICES": "0,1"},
+        )
+        changed_determinism = vllm_teacher.inference_config_fingerprint(
+            **kwargs,
+            extra_args=["--dtype=bfloat16", "--tensor-parallel-size=2", "--seed=7"],
+            environment={
+                "CUDA_VISIBLE_DEVICES": "0,1",
+                "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+            },
+        )
+        changed_rocm_visibility = vllm_teacher.inference_config_fingerprint(
+            **kwargs,
+            extra_args=["--dtype=bfloat16", "--tensor-parallel-size=2"],
+            environment={"ROCR_VISIBLE_DEVICES": "1"},
+        )
+        changed_tool_path = vllm_teacher.inference_config_fingerprint(
+            **kwargs,
+            extra_args=["--dtype=bfloat16", "--tensor-parallel-size=2"],
+            environment={"CUDA_VISIBLE_DEVICES": "0,1", "PATH": "/opt/toolchain/bin"},
+        )
         self.assertNotEqual(changed_dtype, first)
         self.assertNotEqual(changed_gpu, first)
         self.assertNotEqual(changed_model_config, first)
+        self.assertNotEqual(changed_runtime, first)
+        self.assertNotEqual(changed_runtime_content, first)
+        self.assertNotEqual(changed_accelerator, first)
+        self.assertNotEqual(changed_determinism, first)
+        self.assertNotEqual(changed_rocm_visibility, first)
+        self.assertNotEqual(changed_tool_path, first)
 
     def test_base_command_uses_native_custom_fingerprint_and_no_shell_or_middleware(self) -> None:
         fingerprint = vllm_teacher.encode_system_fingerprint(_identity())
@@ -526,6 +1166,7 @@ class ArgumentAndCommandTests(unittest.TestCase):
         self.assertIn("--fingerprint-mode=custom", command)
         self.assertIn(f"--fingerprint-value={fingerprint}", command)
         self.assertIn("--served-model-name=teacher-qwen", command)
+        self.assertEqual(command.count("--load-format=safetensors"), 1)
         self.assertNotIn("--enable-lora", command)
         self.assertFalse(any(item.startswith("--middleware") for item in command))
         self.assertIn("--api-key=$(touch /tmp/nope)", command)
@@ -572,9 +1213,19 @@ class ArgumentAndCommandTests(unittest.TestCase):
         )
 
     def test_launch_environment_disables_mutation_and_rejects_resolver_plugins(self) -> None:
-        with mock.patch.dict(os.environ, {"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}, clear=True):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
+                "PYTHONPATH": "/tmp/shadow",
+                "LD_PRELOAD": "/tmp/inject.so",
+            },
+            clear=True,
+        ):
             environment = vllm_teacher.launch_environment()
         self.assertEqual(environment["VLLM_ALLOW_RUNTIME_LORA_UPDATING"], "0")
+        self.assertNotIn("PYTHONPATH", environment)
+        self.assertNotIn("LD_PRELOAD", environment)
         vllm_teacher.validate_launch_environment({})
         with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "VLLM_PLUGINS"):
             vllm_teacher.validate_launch_environment(
@@ -584,6 +1235,105 @@ class ArgumentAndCommandTests(unittest.TestCase):
             vllm_teacher.validate_launch_environment(
                 {"VLLM_SKIP_MODEL_NAME_VALIDATION": "true"}
             )
+        for key in (
+            "PYTHONPATH",
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+            "HIPBLASLT_TUNING_OVERRIDE_FILE",
+            "CC",
+            "LIBRARY_PATH",
+            "NVCC",
+            "VLLM_NCCL_SO_PATH",
+            "VLLM_LOGGING_CONFIG_PATH",
+            "TRITON_CACHE_DIR",
+        ):
+            with self.subTest(key=key), self.assertRaisesRegex(
+                vllm_teacher.TeacherLaunchError, key
+            ):
+                vllm_teacher.validate_launch_environment({key: "/tmp/unbound"})
+
+
+class ProcessSupervisionTests(unittest.TestCase):
+    def test_child_uses_no_shell_new_session_fixed_cwd_and_maps_signal_exit(self) -> None:
+        child = mock.Mock(pid=4242)
+        child.wait.return_value = -signal.SIGTERM
+        child.poll.return_value = -signal.SIGTERM
+        with mock.patch.object(
+            vllm_teacher.subprocess, "Popen", return_value=child
+        ) as popen, mock.patch.object(
+            vllm_teacher, "_process_group_exists", return_value=False
+        ):
+            code = vllm_teacher.run_vllm_child(["python", "-m", "vllm"], {"A": "B"})
+        self.assertEqual(code, 128 + signal.SIGTERM)
+        kwargs = popen.call_args.kwargs
+        self.assertFalse(kwargs["shell"])
+        self.assertTrue(kwargs["start_new_session"])
+        self.assertEqual(kwargs["cwd"], os.path.abspath(os.sep))
+
+    def test_forwarded_signal_is_sent_once_to_detached_process_group(self) -> None:
+        handlers: dict[int, object] = {}
+        child = mock.Mock(pid=4242)
+
+        def wait(*, timeout: float | None = None) -> int:
+            self.assertIsNone(timeout)
+            handlers[signal.SIGINT](signal.SIGINT, None)
+            return 0
+
+        child.wait.side_effect = wait
+        child.poll.return_value = None
+
+        def install(signum: int, handler: object) -> None:
+            if callable(handler):
+                handlers[signum] = handler
+
+        with mock.patch.object(
+            vllm_teacher.subprocess, "Popen", return_value=child
+        ), mock.patch.object(
+            vllm_teacher.signal, "getsignal", return_value="previous"
+        ), mock.patch.object(
+            vllm_teacher.signal, "signal", side_effect=install
+        ), mock.patch.object(
+            vllm_teacher, "_process_group_exists", return_value=False
+        ), mock.patch.object(vllm_teacher.os, "killpg") as killpg:
+            self.assertEqual(vllm_teacher.run_vllm_child(["vllm"], {}), 0)
+        self.assertEqual(killpg.call_args_list, [mock.call(4242, signal.SIGINT)])
+
+    def test_leftover_descendants_are_terminated_before_return(self) -> None:
+        child = mock.Mock(pid=4242)
+        child.wait.return_value = 0
+        child.poll.return_value = 0
+        group_states = iter((True, False))
+        with mock.patch.object(
+            vllm_teacher.subprocess, "Popen", return_value=child
+        ), mock.patch.object(
+            vllm_teacher,
+            "_process_group_exists",
+            side_effect=lambda _pid: next(group_states),
+        ), mock.patch.object(vllm_teacher.os, "killpg") as killpg:
+            self.assertEqual(vllm_teacher.run_vllm_child(["vllm"], {}), 0)
+        killpg.assert_called_once_with(4242, signal.SIGTERM)
+
+    def test_wait_exception_terminates_group_and_restores_handlers(self) -> None:
+        child = mock.Mock(pid=4242)
+        child.poll.return_value = None
+        child.wait.side_effect = [KeyboardInterrupt(), 0]
+        with mock.patch.object(
+            vllm_teacher.subprocess, "Popen", return_value=child
+        ), mock.patch.object(
+            vllm_teacher, "_process_group_exists", return_value=False
+        ), mock.patch.object(vllm_teacher.os, "killpg") as killpg:
+            with self.assertRaises(KeyboardInterrupt):
+                vllm_teacher.run_vllm_child(["vllm"], {})
+        killpg.assert_called_once_with(4242, signal.SIGTERM)
+        self.assertEqual(child.wait.call_args_list[-1], mock.call(timeout=10.0))
+
+    def test_signal_handler_failure_prevents_spawn(self) -> None:
+        with mock.patch.object(
+            vllm_teacher.signal, "signal", side_effect=ValueError("not main thread")
+        ), mock.patch.object(vllm_teacher.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "main thread"):
+                vllm_teacher.run_vllm_child(["vllm"], {})
+        popen.assert_not_called()
 
 
 class MainTests(unittest.TestCase):
@@ -622,6 +1372,7 @@ class MainTests(unittest.TestCase):
             vllm_teacher.decode_system_fingerprint(output["system_fingerprint"]),
             output["identity"],
         )
+        self.assertEqual(output["runtime_content_sha256"], E_HASH)
         self.assertNotIn("command", output)
 
     def test_dry_run_is_dependency_free_and_redacts_api_key(self) -> None:
@@ -660,22 +1411,43 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("conflicts with the null manifest adapter", stderr.getvalue())
 
-    def test_real_launch_uses_execve_directly(self) -> None:
-        inputs = {
-            "base_model_sha256": A_HASH,
-            "model_config_sha256": D_HASH,
-            "tokenizer_vocab_sha256": B_HASH,
-            "tokenizer_config_sha256": C_HASH,
-            "adapter": None,
-            "adapter_max_rank": None,
-            "vocab_size": 8,
-            "implementation": "vllm:0.25.0",
-        }
+    def test_real_launch_uses_verified_snapshot_until_supervised_child_exits(self) -> None:
         called: dict[str, object] = {}
 
-        def fake_execve(executable: str, command: list[str], environment: dict[str, str]) -> None:
-            called.update(executable=executable, command=command, environment=environment)
-            raise RuntimeError("exec sentinel")
+        def fake_inputs(args: object) -> dict[str, object]:
+            called["staged_model"] = args.model_path
+            self.assertTrue(args.model_path.parent.name.startswith("ready-"))
+            self.assertNotEqual(args.model_path, self.model)
+            return {
+                "base_model_sha256": A_HASH,
+                "snapshot_content_sha256": args.snapshot_content_sha256,
+                "model_config_sha256": D_HASH,
+                "tokenizer_vocab_sha256": B_HASH,
+                "tokenizer_config_sha256": C_HASH,
+                "adapter": None,
+                "adapter_max_rank": None,
+                "vocab_size": 8,
+                "implementation": "vllm:0.25.0",
+                "runtime_versions": RUNTIME_VERSIONS,
+                "runtime_content_sha256": E_HASH,
+                "accelerator": ACCELERATOR,
+            }
+
+        def fake_run(command: list[str], environment: dict[str, str]) -> int:
+            staged_model = called["staged_model"]
+            self.assertTrue(staged_model.exists())
+            self.assertIn(str(staged_model), command)
+            self.assertTrue(called.get("runtime_verified"))
+            called.update(command=command, environment=environment)
+            return 23
+
+        def fake_verify(
+            versions: dict[str, str], digest: str, environment: dict[str, str]
+        ) -> None:
+            self.assertEqual(versions, RUNTIME_VERSIONS)
+            self.assertEqual(digest, E_HASH)
+            self.assertEqual(environment["PYTHONDONTWRITEBYTECODE"], "1")
+            called["runtime_verified"] = True
 
         args = [
             "--model-path",
@@ -686,22 +1458,48 @@ class MainTests(unittest.TestCase):
             "5",
             "--max-model-len",
             "4096",
+            "--snapshot-root",
+            str(Path(self.tmp.name) / "snapshots"),
             "--",
             "--api-key=$(touch /tmp/must-not-run)",
         ]
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
-            vllm_teacher, "_identity_inputs", return_value=inputs
+            vllm_teacher, "_identity_inputs", side_effect=fake_inputs
         ), mock.patch.object(
-            vllm_teacher.os, "execve", side_effect=fake_execve
+            vllm_teacher, "run_vllm_child", side_effect=fake_run
+        ), mock.patch.object(
+            vllm_teacher, "verify_child_runtime_contract", side_effect=fake_verify
         ), contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaisesRegex(RuntimeError, "exec sentinel"):
-                vllm_teacher.main(args)
-        self.assertEqual(called["executable"], sys.executable)
+            code = vllm_teacher.main(args)
+        self.assertEqual(code, 23)
         self.assertIsInstance(called["command"], list)
         self.assertIn("--api-key=$(touch /tmp/must-not-run)", called["command"])
         self.assertEqual(
             called["environment"]["VLLM_ALLOW_RUNTIME_LORA_UPDATING"], "0"
         )
+        self.assertFalse(called["staged_model"].exists())
+
+    def test_invalid_limits_fail_before_snapshot_work(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.object(
+            vllm_teacher,
+            "create_immutable_snapshot",
+            side_effect=AssertionError("must not stage"),
+        ), mock.patch.dict(os.environ, {}, clear=True), contextlib.redirect_stderr(stderr):
+            code = vllm_teacher.main(
+                [
+                    "--model-path",
+                    str(self.model),
+                    "--served-model-id",
+                    "teacher-qwen",
+                    "--max-top-k",
+                    "5",
+                    "--max-model-len",
+                    "0",
+                ]
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("--max-model-len", stderr.getvalue())
 
 
 if __name__ == "__main__":

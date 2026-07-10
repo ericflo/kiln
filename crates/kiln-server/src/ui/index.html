@@ -1341,7 +1341,7 @@
           <div class="form-row">
             <div class="form-group">
               <label for="teacher-model-id">Model id</label>
-              <input type="text" id="teacher-model-id" name="model_id" placeholder="Qwen/Qwen3.5-27B">
+              <input type="text" id="teacher-model-id" name="model_id" required placeholder="Qwen/Qwen3.5-27B">
             </div>
             <div class="form-group" data-teacher-kind-field="remote">
               <label for="teacher-url">URL <span class="hint">(Remote)</span></label>
@@ -1355,21 +1355,13 @@
           </div>
           <div class="form-row">
             <div class="form-group" data-teacher-kind-field="remote">
-              <label for="teacher-api-key-env">API-key env var <span class="hint">(Remote)</span></label>
-              <input type="text" id="teacher-api-key-env" name="api_key_env" placeholder="VLLM_API_KEY (optional)">
-              <div class="form-help">Kiln stores only the environment-variable name, never the secret value.</div>
-            </div>
-            <div class="form-group">
-              <label for="teacher-max-top-k">Max top-K</label>
-              <input type="number" id="teacher-max-top-k" name="max_top_k" value="20" min="1" max="1024">
-            </div>
-            <div class="form-group">
-              <label for="teacher-vocab-size">Vocab size</label>
-              <input type="number" id="teacher-vocab-size" name="vocab_size" value="152064" min="1">
+              <label for="teacher-credential-id">Credential <span class="hint">(Remote, optional)</span></label>
+              <input type="text" id="teacher-credential-id" name="credential_id" placeholder="primary-vllm" title="Credential id from [teachers.credentials]; leave blank only for a loopback endpoint">
             </div>
           </div>
           <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Register teacher</button>
+            <span class="form-help" id="teacher-register-status" role="status" aria-live="polite"></span>
+            <button type="submit" class="btn btn-primary" id="teacher-register-btn" style="margin-left: auto;">Register teacher</button>
           </div>
         </form>
       </div>

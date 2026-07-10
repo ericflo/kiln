@@ -576,6 +576,21 @@ fn require_off_policy_fixture_mode(
     Ok(())
 }
 
+fn require_remote_teacher_off_policy(
+    surface: &str,
+    spec: &super::teachers::TeacherSpec,
+    config: &kiln_train::OpdConfig,
+) -> Result<(), ApiError> {
+    if matches!(spec.kind, super::teachers::TeacherKind::Remote) {
+        require_off_policy_fixture_mode(surface, config).map_err(|_| {
+            ApiError::training_invalid_request(format!(
+                "{surface} cannot use a remote teacher with training_mode=\"on_policy\": remote logits must be prefetched before GPU coordination; use training_mode=\"off_policy\" with fixed assistant actions"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn registered_teacher_top_k_limit(
     spec: &super::teachers::TeacherSpec,
     requested_top_k: usize,
@@ -759,6 +774,11 @@ fn validate_distill_merge_at_submit(
     }
     validate_opd_config_at_submit(&req.config)?;
     require_off_policy_fixture_mode("distill_merge", &req.config)?;
+    validate_lora_scale_at_submit(
+        req.config.lora_rank,
+        req.config.lora_alpha,
+        req.config.allow_high_lora_scale,
+    )?;
     for source in &req.sources {
         super::adapters::validate_adapter_name(&source.adapter)?;
         let dir = state.adapter_dir.join(&source.adapter);
@@ -787,6 +807,11 @@ fn validate_distill_self_at_submit(req: &kiln_train::DistillSelfRequest) -> Resu
     }
     validate_opd_config_at_submit(&req.config)?;
     require_off_policy_fixture_mode("distill/self", &req.config)?;
+    validate_lora_scale_at_submit(
+        req.config.lora_rank,
+        req.config.lora_alpha,
+        req.config.allow_high_lora_scale,
+    )?;
     let prompts = req.prompts.as_deref().ok_or_else(|| {
         ApiError::training_invalid_request(
             "distill/self requires explicit off-policy prompts with assistant actions".to_string(),
@@ -859,6 +884,7 @@ pub(crate) fn normalize_queued_opd_top_k(
                 .dataset_path
                 .as_deref()
                 .is_some_and(|path| !crate::dataset_resolve::is_agent_traces_selector(path));
+            require_remote_teacher_off_policy("OPD", &spec, &req.config)?;
             let source_limit = if prescored {
                 req.config.top_k
             } else {
@@ -876,6 +902,7 @@ pub(crate) fn normalize_queued_opd_top_k(
                     req.behavioural_teacher
                 ),
             )?;
+            require_remote_teacher_off_policy("DistillRefresh", &spec, &req.config)?;
             let source_limit = registered_teacher_top_k_limit(&spec, req.config.top_k);
             resolve_opd_top_k_at_submit(&mut req.config, source_limit)
         }
@@ -889,6 +916,7 @@ pub(crate) fn normalize_queued_opd_top_k(
                     req.teacher
                 ),
             )?;
+            require_remote_teacher_off_policy("distill/pump", &spec, &req.config)?;
             let source_limit = registered_teacher_top_k_limit(&spec, req.config.top_k);
             resolve_opd_top_k_at_submit(&mut req.config, source_limit)
         }
@@ -1134,6 +1162,7 @@ async fn submit_sft(
             QueueEntry {
                 job_id: job_id.clone(),
                 reserved_bytes,
+                teacher_bindings: Vec::new(),
                 job: QueuedJob::Sft(req),
             },
         )],
@@ -1309,6 +1338,7 @@ async fn submit_grpo(
             QueueEntry {
                 job_id: job_id.clone(),
                 reserved_bytes,
+                teacher_bindings: Vec::new(),
                 job: QueuedJob::Grpo(req),
             },
         )],
@@ -1448,6 +1478,7 @@ async fn submit_opd(
         .dataset_path
         .as_deref()
         .is_some_and(|path| !crate::dataset_resolve::is_agent_traces_selector(path));
+    require_remote_teacher_off_policy("OPD", &teacher_spec, &req.config)?;
     let source_max_top_k = if uses_prescored_dataset {
         req.config.top_k
     } else {
@@ -1536,6 +1567,7 @@ async fn submit_opd(
             QueueEntry {
                 job_id: job_id.clone(),
                 reserved_bytes, // #36: OPD working-set reservation (preflight estimate)
+                teacher_bindings: Vec::new(),
                 job: QueuedJob::Opd(req),
             },
         )],
@@ -1604,6 +1636,7 @@ async fn submit_distill_refresh(
             req.behavioural_teacher
         ),
     )?;
+    require_remote_teacher_off_policy("DistillRefresh", &teacher_spec, &req.config)?;
     let source_max_top_k = registered_teacher_top_k_limit(&teacher_spec, req.config.top_k);
     let top_k_adjustment = resolve_opd_top_k_at_submit(&mut req.config, source_max_top_k)?;
     if !(0.0..=1.0).contains(&req.require_if_eval_recovery) {
@@ -1673,6 +1706,7 @@ async fn submit_distill_refresh(
             QueueEntry {
                 job_id: job_id.clone(),
                 reserved_bytes,
+                teacher_bindings: Vec::new(),
                 job: QueuedJob::DistillRefresh(req),
             },
         )],
@@ -1712,11 +1746,6 @@ async fn submit_distill_merge(
     super::adapters::validate_adapter_name(&req.name)?;
     validate_opd_config_at_submit(&req.config)?;
     require_off_policy_fixture_mode("distill_merge", &req.config)?;
-    validate_lora_scale_at_submit(
-        req.config.lora_rank,
-        req.config.lora_alpha,
-        req.config.allow_high_lora_scale,
-    )?;
     let requested_top_k = req.config.top_k;
     let top_k_adjustment = resolve_opd_top_k_at_submit(&mut req.config, requested_top_k)?;
     // A source adapter that doesn't exist on disk is a typo — fail now,
@@ -1780,6 +1809,7 @@ async fn submit_distill_pump(
             req.teacher
         ),
     )?;
+    require_remote_teacher_off_policy("distill/pump", &teacher_spec, &req.config)?;
     super::adapters::validate_adapter_name(&req.name)?;
     validate_opd_config_at_submit(&req.config)?;
     // The worker overrides config.lora_rank with the request's top-level
@@ -1847,11 +1877,6 @@ async fn submit_distill_self(
     validate_opd_config_at_submit(&req.config)?;
     require_off_policy_fixture_mode("distill/self", &req.config)?;
     super::adapters::validate_adapter_name(&req.name)?;
-    validate_lora_scale_at_submit(
-        req.config.lora_rank,
-        req.config.lora_alpha,
-        req.config.allow_high_lora_scale,
-    )?;
     let requested_top_k = req.config.top_k;
     let top_k_adjustment = resolve_opd_top_k_at_submit(&mut req.config, requested_top_k)?;
     enforce_queue_caps(&state)?;
@@ -2003,12 +2028,55 @@ fn admit_training_jobs_into(
     Ok(queue.len())
 }
 
+/// Attach authoritative submit-time teacher snapshots before queue
+/// publication. A failure leaves all shared admission state untouched.
+fn pin_registered_teachers(
+    state: &AppState,
+    pending: &mut [(TrainingJobInfo, QueueEntry)],
+) -> Result<(), ApiError> {
+    // Snapshot every registry-backed teacher immediately before publication.
+    // All product entry points route through this function, so recipes and
+    // scheduled/intent-driven submissions receive the same identity binding as
+    // the dedicated endpoints. Reject caller-supplied bindings to keep this
+    // boundary authoritative.
+    for (_, entry) in pending.iter_mut() {
+        if !entry.teacher_bindings.is_empty() {
+            return Err(ApiError::internal(format!(
+                "training admission received pre-populated teacher bindings for job {}",
+                entry.job_id
+            )));
+        }
+        if let Some(alias) = entry.job.registered_teacher_alias() {
+            let spec = super::teachers::require_registered_teacher(
+                state,
+                alias,
+                format!("teacher alias {alias:?} is not registered"),
+            )?;
+            let (surface, config) = match &entry.job {
+                QueuedJob::Opd(req) => ("OPD", &req.config),
+                QueuedJob::DistillRefresh(req) => ("DistillRefresh", &req.config),
+                QueuedJob::DistillPump(req) => ("distill/pump", &req.config),
+                QueuedJob::Sft(_)
+                | QueuedJob::Grpo(_)
+                | QueuedJob::DistillMerge(_)
+                | QueuedJob::DistillSelf(_) => {
+                    unreachable!("registered_teacher_alias returned Some for a teacher-free job")
+                }
+            };
+            require_remote_teacher_off_policy(surface, &spec, config)?;
+            entry.teacher_bindings.push(spec);
+        }
+    }
+    Ok(())
+}
+
 /// Atomically reserve queue/tracking capacity and publish a complete batch.
 /// A rejected batch leaves both the tracking map and FIFO unchanged.
 pub(crate) fn admit_training_jobs(
     state: &AppState,
-    pending: Vec<(TrainingJobInfo, QueueEntry)>,
+    mut pending: Vec<(TrainingJobInfo, QueueEntry)>,
 ) -> Result<usize, ApiError> {
+    pin_registered_teachers(state, &mut pending)?;
     admit_training_jobs_into(
         &state.training_jobs,
         &state.training_queue,
@@ -2090,6 +2158,7 @@ fn register_and_enqueue_distill(
             QueueEntry {
                 job_id: job_id.to_string(),
                 reserved_bytes,
+                teacher_bindings: Vec::new(),
                 job,
             },
         )],
@@ -2605,9 +2674,239 @@ mod tests {
             QueueEntry {
                 job_id,
                 reserved_bytes: 0,
+                teacher_bindings: Vec::new(),
                 job: QueuedJob::Sft(request),
             },
         )
+    }
+
+    fn teacher_binding_test_state() -> AppState {
+        let mut config = kiln_core::config::ModelConfig::qwen3_5_4b();
+        config.vocab_size = 2;
+        let scheduler = kiln_scheduler::Scheduler::new(
+            kiln_scheduler::SchedulerConfig {
+                max_batch_tokens: 1024,
+                max_batch_size: 1,
+                block_size: 16,
+                ..Default::default()
+            },
+            32,
+        );
+        let engine = kiln_model::engine::MockEngine::new(config.clone());
+        let tokenizer = kiln_core::tokenizer::KilnTokenizer::from_bytes(
+            br#"{
+                "version":"1.0",
+                "model":{"type":"BPE","vocab":{"a":0,"b":1},"merges":[]}
+            }"#,
+        )
+        .unwrap();
+        AppState::new_mock(
+            config,
+            scheduler,
+            Arc::new(engine),
+            tokenizer,
+            60,
+            "binding-test".into(),
+        )
+    }
+
+    fn fixture_teacher_spec(alias: &str) -> super::super::teachers::TeacherSpec {
+        super::super::teachers::TeacherSpec {
+            alias: alias.into(),
+            kind: super::super::teachers::TeacherKind::Fixture,
+            provider: None,
+            model_id: "fixture-model".into(),
+            max_top_k: Some(32),
+            vocab_size: Some(1024),
+            supports_full_vocab: Some(false),
+            tokenizer_hash: None,
+            identity: None,
+            url: None,
+            credential_id: None,
+            notes: None,
+            adapter: None,
+        }
+    }
+
+    fn remote_teacher_spec(
+        alias: &str,
+        tokenizer_vocab_sha256: &str,
+    ) -> super::super::teachers::TeacherSpec {
+        const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let mut spec = fixture_teacher_spec(alias);
+        spec.kind = super::super::teachers::TeacherKind::Remote;
+        spec.provider = Some(kiln_train::RemoteProvider::Vllm);
+        spec.url = Some("http://127.0.0.1:8000".into());
+        spec.max_top_k = Some(2);
+        spec.vocab_size = Some(2);
+        spec.tokenizer_hash = Some(tokenizer_vocab_sha256.into());
+        spec.identity = Some(
+            kiln_train::TeacherIdentityV1::new(
+                "fixture-model",
+                A,
+                tokenizer_vocab_sha256,
+                C,
+                None,
+                2,
+                2,
+                4096,
+                65_536,
+                "test-runtime",
+                A,
+            )
+            .unwrap(),
+        );
+        spec
+    }
+
+    fn pending_job(job_id: &str, job: QueuedJob) -> (TrainingJobInfo, QueueEntry) {
+        let (info, mut entry) = pending_sft_job(job_id);
+        entry.job = job;
+        (info, entry)
+    }
+
+    #[test]
+    fn central_admission_pins_every_registered_teacher_job_shape_only() {
+        let state = teacher_binding_test_state();
+        let spec = fixture_teacher_spec("teacher");
+        state.teacher_registry.insert(spec.clone());
+
+        let opd =
+            serde_json::from_str::<OpdRequest>(r#"{"prompts":[],"teacher":"teacher"}"#).unwrap();
+        let refresh = serde_json::from_str::<DistillRefreshRequest>(
+            r#"{"name":"refresh","new_data":{"dataset":"new"},"behavioural_teacher":"teacher"}"#,
+        )
+        .unwrap();
+        let pump = serde_json::from_str::<DistillPumpRequest>(
+            r#"{"name":"pump","teacher":"teacher","mode":{"wide":true}}"#,
+        )
+        .unwrap();
+        let merge = serde_json::from_str::<DistillMergeRequest>(r#"{"name":"merge","sources":[]}"#)
+            .unwrap();
+        let distill_self =
+            serde_json::from_str::<DistillSelfRequest>(r#"{"name":"self","mode":"conciseness"}"#)
+                .unwrap();
+        let grpo = GrpoRequest {
+            groups: Vec::new(),
+            dataset_path: None,
+            dataset: None,
+            config: GrpoConfig::default(),
+            post_eval: None,
+        };
+        let sft = SftRequest {
+            examples: Vec::new(),
+            dataset_path: None,
+            dataset: None,
+            config: SftConfig::default(),
+            post_eval: None,
+        };
+        let mut pending = vec![
+            pending_job("opd", QueuedJob::Opd(opd)),
+            pending_job("refresh", QueuedJob::DistillRefresh(refresh)),
+            pending_job("pump", QueuedJob::DistillPump(pump)),
+            pending_job("sft", QueuedJob::Sft(sft)),
+            pending_job("grpo", QueuedJob::Grpo(grpo)),
+            pending_job("merge", QueuedJob::DistillMerge(merge)),
+            pending_job("self", QueuedJob::DistillSelf(distill_self)),
+        ];
+
+        pin_registered_teachers(&state, &mut pending).unwrap();
+
+        for (_, entry) in &pending[..3] {
+            assert_eq!(entry.teacher_bindings, vec![spec.clone()]);
+        }
+        for (_, entry) in &pending[3..] {
+            assert!(
+                entry.teacher_bindings.is_empty(),
+                "unrelated job {} must not acquire a teacher binding",
+                entry.job_id
+            );
+        }
+    }
+
+    #[test]
+    fn teacher_pinning_failure_does_not_publish_partial_batch() {
+        let state = teacher_binding_test_state();
+        state
+            .teacher_registry
+            .insert(fixture_teacher_spec("registered"));
+        let registered: OpdRequest =
+            serde_json::from_str(r#"{"prompts":[],"teacher":"registered"}"#).unwrap();
+        let missing: OpdRequest =
+            serde_json::from_str(r#"{"prompts":[],"teacher":"missing"}"#).unwrap();
+
+        let error = admit_training_jobs(
+            &state,
+            vec![
+                pending_job("first", QueuedJob::Opd(registered)),
+                pending_job("second", QueuedJob::Opd(missing)),
+            ],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "teacher_not_registered");
+        assert!(state.training_jobs.read().unwrap().is_empty());
+        assert_eq!(state.training_queue.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn central_admission_rejects_caller_supplied_teacher_bindings() {
+        let state = teacher_binding_test_state();
+        let spec = fixture_teacher_spec("teacher");
+        state.teacher_registry.insert(spec.clone());
+        let opd: OpdRequest =
+            serde_json::from_str(r#"{"prompts":[],"teacher":"teacher"}"#).unwrap();
+        let mut pending = vec![pending_job("opd", QueuedJob::Opd(opd))];
+        pending[0].1.teacher_bindings.push(spec);
+
+        let error = pin_registered_teachers(&state, &mut pending).unwrap_err();
+        assert_eq!(error.code, "internal_error");
+    }
+
+    #[test]
+    fn central_admission_rejects_every_remote_on_policy_job_before_publication() {
+        let state = teacher_binding_test_state();
+        let tokenizer_vocab_sha256 = state
+            .tokenizer
+            .vocab_identity_sha256()
+            .strip_prefix("sha256:")
+            .unwrap()
+            .to_string();
+        state
+            .teacher_registry
+            .insert(remote_teacher_spec("remote", &tokenizer_vocab_sha256));
+
+        let opd = serde_json::from_str::<OpdRequest>(
+            r#"{"prompts":[],"teacher":"remote","config":{"training_mode":"on_policy"}}"#,
+        )
+        .unwrap();
+        let refresh = serde_json::from_str::<DistillRefreshRequest>(
+            r#"{"name":"refresh","new_data":{"dataset":"new"},"behavioural_teacher":"remote","config":{"training_mode":"on_policy"}}"#,
+        )
+        .unwrap();
+        let pump = serde_json::from_str::<DistillPumpRequest>(
+            r#"{"name":"pump","teacher":"remote","mode":{"wide":true},"config":{"training_mode":"on_policy"}}"#,
+        )
+        .unwrap();
+
+        for (job_id, job) in [
+            ("opd", QueuedJob::Opd(opd)),
+            ("refresh", QueuedJob::DistillRefresh(refresh)),
+            ("pump", QueuedJob::DistillPump(pump)),
+        ] {
+            let error = admit_training_jobs(&state, vec![pending_job(job_id, job)]).unwrap_err();
+            assert_eq!(error.code, "training_invalid_request");
+            assert!(
+                error
+                    .message
+                    .contains("use training_mode=\"off_policy\" with fixed assistant actions"),
+                "{}",
+                error.message
+            );
+            assert!(state.training_jobs.read().unwrap().is_empty());
+            assert_eq!(state.training_queue.lock().unwrap().len(), 0);
+        }
     }
 
     #[test]
@@ -2887,8 +3186,9 @@ mod tests {
             vocab_size: Some(1024),
             supports_full_vocab: Some(false),
             tokenizer_hash: None,
+            identity: None,
             url: Some("http://vllm.local".into()),
-            api_key_env: None,
+            credential_id: None,
             notes: None,
             adapter: None,
         };

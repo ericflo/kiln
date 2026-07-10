@@ -13,11 +13,15 @@
 //! same pattern the base-model weights use.
 
 use crate::backend::{BackendRuntime, ResidencyBackend};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use kiln_tensor::Tensor as KtTensor;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
+
+const ADAPTER_WEIGHTS_IDENTITY_DOMAIN: &[u8] = b"kiln.adapter-weights.v1\0";
+const PEFT_SAFETENSORS_FILENAME: &str = "adapter_model.safetensors";
 
 /// Configuration from PEFT's adapter_config.json.
 #[derive(Debug, Deserialize)]
@@ -110,9 +114,71 @@ pub struct LoraWeights {
     pub alpha: f32,
     /// Precomputed scale = alpha / rank.
     pub scale: f32,
+    /// Exact source-byte identity when these weights came from
+    /// [`LoraWeights::load`]. Training-time tensor views have no disk source
+    /// and therefore carry `None` until they are serialized and loaded again.
+    pub source_identity: Option<LoraSourceIdentity>,
+}
+
+/// Loader-owned identity of the exact PEFT files used to construct a LoRA.
+///
+/// Both digests are raw lowercase SHA-256. `weights_sha256` uses Kiln's
+/// versioned adapter-weight framing contract, shared with
+/// `scripts/vllm_teacher.py`, rather than naming or rescanning a mutable path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoraSourceIdentity {
+    weights_sha256: String,
+    config_sha256: String,
+}
+
+impl LoraSourceIdentity {
+    pub fn new(
+        weights_sha256: impl Into<String>,
+        config_sha256: impl Into<String>,
+    ) -> Result<Self> {
+        let value = Self {
+            weights_sha256: weights_sha256.into(),
+            config_sha256: config_sha256.into(),
+        };
+        for (field, digest) in [
+            ("adapter weights", value.weights_sha256.as_str()),
+            ("adapter config", value.config_sha256.as_str()),
+        ] {
+            ensure!(
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "{field} SHA-256 must contain exactly 64 lowercase hexadecimal characters"
+            );
+        }
+        Ok(value)
+    }
+
+    /// Fingerprint and validate the exact PEFT files currently present in an
+    /// adapter directory without uploading tensors to a device. Registration
+    /// can pin this value; the production load later publishes its own value
+    /// from the bytes it actually consumed and must match exactly.
+    pub fn from_adapter_dir(adapter_dir: &Path) -> Result<Self> {
+        let source = read_lora_source(adapter_dir)?;
+        Ok(source.identity)
+    }
+
+    pub fn weights_sha256(&self) -> &str {
+        &self.weights_sha256
+    }
+
+    pub fn config_sha256(&self) -> &str {
+        &self.config_sha256
+    }
 }
 
 impl LoraWeights {
+    /// Identity of the exact PEFT source bytes, when loaded from disk.
+    pub fn source_identity(&self) -> Option<&LoraSourceIdentity> {
+        self.source_identity.as_ref()
+    }
+
     /// Phase 4.1: register every LoRA A and B tensor in the backend's
     /// resident activation registry. After this, the inference path's
     /// `add_lora_delta_to_base` will dispatch through
@@ -193,21 +259,47 @@ impl LoraWeights {
         num_layers: usize,
         device: kiln_tensor::Device,
     ) -> Result<Self> {
-        // Load adapter config
-        let config_path = adapter_dir.join("adapter_config.json");
-        let config_str = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("failed to read {}", config_path.display()))?;
-        let config: AdapterConfig =
-            serde_json::from_str(&config_str).context("failed to parse adapter_config.json")?;
+        Self::load_from_source(adapter_dir, num_layers, device, None)
+    }
+
+    /// Load only when the exact PEFT bytes match a registration-time identity.
+    /// The comparison happens after both files are read but before any tensor
+    /// is deserialized or copied to the target device, so mutable adapter paths
+    /// cannot silently change a queued teacher.
+    pub fn load_pinned(
+        adapter_dir: &Path,
+        num_layers: usize,
+        device: kiln_tensor::Device,
+        expected_source: &LoraSourceIdentity,
+    ) -> Result<Self> {
+        Self::load_from_source(adapter_dir, num_layers, device, Some(expected_source))
+    }
+
+    fn load_from_source(
+        adapter_dir: &Path,
+        num_layers: usize,
+        device: kiln_tensor::Device,
+        expected_source: Option<&LoraSourceIdentity>,
+    ) -> Result<Self> {
+        let source = read_lora_source(adapter_dir)?;
+        if let Some(expected) = expected_source {
+            ensure!(
+                &source.identity == expected,
+                "adapter source identity changed: expected weights sha256:{} and config sha256:{}, observed weights sha256:{} and config sha256:{}",
+                expected.weights_sha256(),
+                expected.config_sha256(),
+                source.identity.weights_sha256(),
+                source.identity.config_sha256()
+            );
+        }
+        let config = source.config;
 
         let rank = config.r;
         let alpha = config.lora_alpha;
         let scale = alpha / rank as f32;
 
         // Load safetensors
-        let st_path = adapter_dir.join("adapter_model.safetensors");
-        let st_data = std::fs::read(&st_path)
-            .with_context(|| format!("failed to read {}", st_path.display()))?;
+        let st_data = source.weights;
         let tensors = safetensors::SafeTensors::deserialize(&st_data)
             .context("failed to deserialize safetensors")?;
 
@@ -319,8 +411,66 @@ impl LoraWeights {
             rank,
             alpha,
             scale,
+            source_identity: Some(source.identity),
         })
     }
+}
+
+struct LoadedLoraSource {
+    config: AdapterConfig,
+    weights: Vec<u8>,
+    identity: LoraSourceIdentity,
+}
+
+fn read_lora_source(adapter_dir: &Path) -> Result<LoadedLoraSource> {
+    let config_path = adapter_dir.join("adapter_config.json");
+    let config_bytes = std::fs::read(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let config: AdapterConfig =
+        serde_json::from_slice(&config_bytes).context("failed to parse adapter_config.json")?;
+
+    let weights_path = adapter_dir.join(PEFT_SAFETENSORS_FILENAME);
+    let weights = std::fs::read(&weights_path)
+        .with_context(|| format!("failed to read {}", weights_path.display()))?;
+    safetensors::SafeTensors::deserialize(&weights).context("failed to deserialize safetensors")?;
+    let identity = LoraSourceIdentity {
+        weights_sha256: adapter_weights_identity_sha256(PEFT_SAFETENSORS_FILENAME, &weights),
+        config_sha256: sha256_hex(&config_bytes),
+    };
+    Ok(LoadedLoraSource {
+        config,
+        weights,
+        identity,
+    })
+}
+
+fn adapter_weights_identity_sha256(filename: &str, bytes: &[u8]) -> String {
+    let raw_weights_sha256 = Sha256::digest(bytes);
+    let mut aggregate = Sha256::new();
+    aggregate.update(ADAPTER_WEIGHTS_IDENTITY_DOMAIN);
+    aggregate.update(1u64.to_le_bytes());
+    feed_len_prefixed(&mut aggregate, filename.as_bytes());
+    aggregate.update((bytes.len() as u64).to_le_bytes());
+    aggregate.update(raw_weights_sha256);
+    hex_digest(&aggregate.finalize())
+}
+
+fn feed_len_prefixed(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update((bytes.len() as u64).to_le_bytes());
+    digest.update(bytes);
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex_digest(&Sha256::digest(bytes))
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
 }
 
 /// Parsed PEFT weight key components.
@@ -544,6 +694,14 @@ pub fn linear_with_lora_t(
 mod tests {
     use super::*;
     use kiln_tensor::Device;
+
+    #[test]
+    fn adapter_weight_identity_matches_cross_runtime_golden() {
+        assert_eq!(
+            adapter_weights_identity_sha256(PEFT_SAFETENSORS_FILENAME, b"weights"),
+            "f9cf9b7ba0de3353dc9baf8047675fe8e5077518c16b293d50a2f23e50aa5c15"
+        );
+    }
 
     #[test]
     fn mixed_cpu_linear_fallback_promotes_without_backend_help() -> Result<()> {
@@ -778,10 +936,8 @@ mod tests {
             "target_modules": ["q_proj", "v_proj"],
             "task_type": "CAUSAL_LM"
         });
-        std::fs::write(
-            adapter_dir.join("adapter_config.json"),
-            serde_json::to_string_pretty(&config)?,
-        )?;
+        let config_bytes = serde_json::to_vec_pretty(&config)?;
+        std::fs::write(adapter_dir.join("adapter_config.json"), &config_bytes)?;
 
         // Create minimal safetensors with A/B for layer 0 q_proj and v_proj
         let rank = 4usize;
@@ -851,6 +1007,39 @@ mod tests {
         assert!((weights.alpha - 8.0).abs() < 1e-5);
         assert!((weights.scale - 2.0).abs() < 1e-5);
         assert_eq!(weights.layers.len(), 1);
+        let source_identity = weights
+            .source_identity
+            .as_ref()
+            .expect("disk-loaded LoRA publishes exact source identity");
+        assert_eq!(source_identity.config_sha256(), sha256_hex(&config_bytes));
+        assert_eq!(
+            source_identity.weights_sha256(),
+            adapter_weights_identity_sha256(PEFT_SAFETENSORS_FILENAME, &serialized)
+        );
+        LoraWeights::load_pinned(adapter_dir, 1, device, source_identity)?;
+
+        let mut changed_config = config.clone();
+        changed_config["lora_alpha"] = serde_json::json!(9.0);
+        std::fs::write(
+            adapter_dir.join("adapter_config.json"),
+            serde_json::to_vec_pretty(&changed_config)?,
+        )?;
+        let error = match LoraWeights::load_pinned(adapter_dir, 1, device, source_identity) {
+            Ok(_) => panic!("changed adapter config must not satisfy the pinned identity"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("adapter source identity changed")
+        );
+
+        // The identity belongs to the bytes already parsed, not to the mutable
+        // directory name. Later replacement cannot silently rewrite it.
+        let loaded_identity = source_identity.clone();
+        std::fs::write(adapter_dir.join("adapter_config.json"), b"{}")?;
+        std::fs::write(adapter_dir.join(PEFT_SAFETENSORS_FILENAME), b"replaced")?;
+        assert_eq!(weights.source_identity.as_ref(), Some(&loaded_identity));
 
         let layer = &weights.layers[0];
         assert!(layer.q_proj.is_some());

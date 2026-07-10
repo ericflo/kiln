@@ -347,6 +347,16 @@ pub struct DeferredMtpSource {
     pub model_dir: PathBuf,
     pub mtp_prefix: String,
     pub config: kiln_core::config::ModelConfig,
+    /// Keeps the private immutable checkpoint snapshot alive until lazy MTP
+    /// materialization has either completed or the runner is dropped.
+    pub(crate) _snapshot_lease: Arc<ModelSnapshotLease>,
+}
+
+/// Lifetime owner for a private model snapshot. The directory is deleted when
+/// the last CPU source guard or deferred-MTP source releases it.
+#[derive(Debug)]
+pub(crate) struct ModelSnapshotLease {
+    pub(crate) directory: tempfile::TempDir,
 }
 
 /// Loader-owned proof that the bytes used to construct CPU weights remain the
@@ -361,6 +371,9 @@ pub(crate) struct SourceContentGuard {
     shards: Vec<SourceContentShard>,
     initial_shard_count: usize,
     initial_sha256: String,
+    /// Declared after retained files so Windows closes mappings/handles before
+    /// `TempDir` attempts recursive cleanup.
+    _snapshot_lease: Arc<ModelSnapshotLease>,
 }
 
 #[derive(Debug)]
@@ -370,7 +383,10 @@ struct SourceContentShard {
 }
 
 impl SourceContentGuard {
-    pub(crate) fn new(shards: Vec<(Arc<File>, Arc<Mmap>)>) -> Self {
+    pub(crate) fn new(
+        shards: Vec<(Arc<File>, Arc<Mmap>)>,
+        snapshot_lease: Arc<ModelSnapshotLease>,
+    ) -> Self {
         let shards = shards
             .into_iter()
             .map(|(file, mmap)| SourceContentShard { file, mmap })
@@ -388,11 +404,17 @@ impl SourceContentGuard {
             shards,
             initial_shard_count,
             initial_sha256,
+            _snapshot_lease: snapshot_lease,
         }
     }
 
     pub(crate) fn initial_sha256(&self) -> &str {
         &self.initial_sha256
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_root(&self) -> &std::path::Path {
+        self._snapshot_lease.directory.path()
     }
 
     fn verify_unchanged(&self) -> Result<()> {

@@ -36,6 +36,9 @@ Required top-level fields:
 - `training_data`: source type, path when applicable, and SHA-256.
 - `hyperparameters`: mode, rank, alpha, learning rate, epochs, and seed.
 - `grpo`: GRPO-specific settings, or `null` for non-GRPO runs.
+- `opd`: OPD-specific settings, or `null` for non-OPD runs. Identity-aware
+  runs include `teacher_id`, `teacher_content_revision`, and the complete
+  canonical `teacher_identity` used for scoring.
 - `echo`: ECHO settings in effect for the run.
 - `no_policy_loss`: verifier-free env-only GRPO flag.
 - `data`: examples/groups/completions read, filtered, and trained.
@@ -49,6 +52,13 @@ Required top-level fields:
 - `config`: full serialized effective trainer config.
 
 Hashes are lowercase hex SHA-256 strings prefixed with `sha256:`.
+
+For OPD, `teacher_content_revision` is the SHA-256 of the complete canonical
+teacher identity. It therefore changes with base or adapter content, numeric
+tokenizer vocabulary/config, implementation/runtime contract, or scoring
+bounds. The nested identity is retained so a receipt is independently
+auditable instead of relying on a mutable registry alias. Pre-scored JSONL also
+records the SHA-256 of the exact loaded source bytes under `training_data`.
 
 ## Failed Receipts
 

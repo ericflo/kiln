@@ -182,6 +182,20 @@ pub enum QueuedJob {
     DistillSelf(DistillSelfRequest),
 }
 
+impl QueuedJob {
+    /// The registered teacher alias whose exact spec must be pinned when this
+    /// job is admitted. Other job kinds either do not use a teacher or build
+    /// their source directly from local adapter state.
+    pub(crate) fn registered_teacher_alias(&self) -> Option<&str> {
+        match self {
+            Self::Opd(req) => Some(&req.teacher),
+            Self::DistillRefresh(req) => Some(&req.behavioural_teacher),
+            Self::DistillPump(req) => Some(&req.teacher),
+            Self::Sft(_) | Self::Grpo(_) | Self::DistillMerge(_) | Self::DistillSelf(_) => None,
+        }
+    }
+}
+
 /// Entry in the training queue.
 pub struct QueueEntry {
     pub job_id: String,
@@ -190,7 +204,59 @@ pub struct QueueEntry {
     /// job so the KV autoscaler proactively shrinks inference KV before training
     /// allocates. `0` when no estimate was available (skips the reservation).
     pub reserved_bytes: u64,
+    /// Submit-time snapshots of registered teachers used by this job. The
+    /// worker requires exactly one matching snapshot for teacher-backed jobs
+    /// and refuses to run if the alias was deleted or replaced while queued.
+    pub teacher_bindings: Vec<crate::api::teachers::TeacherSpec>,
     pub job: QueuedJob,
+}
+
+fn resolve_pinned_teacher_for_job(
+    job: &QueuedJob,
+    bindings: &[crate::api::teachers::TeacherSpec],
+    registry: &crate::api::teachers::TeacherRegistry,
+) -> std::result::Result<Option<crate::api::teachers::TeacherSpec>, String> {
+    let Some(alias) = job.registered_teacher_alias() else {
+        if bindings.is_empty() {
+            return Ok(None);
+        }
+        return Err(format!(
+            "queued job does not use a registered teacher but carries {} pinned teacher binding(s)",
+            bindings.len()
+        ));
+    };
+
+    let matching: Vec<_> = bindings.iter().filter(|spec| spec.alias == alias).collect();
+    if matching.is_empty() {
+        return Err(format!(
+            "queued teacher alias {alias:?} has no submit-time pinned binding; refuse to resolve mutable registry state"
+        ));
+    }
+    if matching.len() > 1 {
+        return Err(format!(
+            "queued teacher alias {alias:?} has {} duplicate submit-time bindings; expected exactly one",
+            matching.len()
+        ));
+    }
+    if bindings.len() != 1 {
+        return Err(format!(
+            "queued teacher alias {alias:?} has {} total submit-time bindings; expected exactly one with no extras",
+            bindings.len()
+        ));
+    }
+
+    let pinned = matching[0];
+    let current = registry.get(alias).ok_or_else(|| {
+        format!(
+            "queued teacher alias {alias:?} was deleted after submission; re-register it and submit a new job"
+        )
+    })?;
+    if current != *pinned {
+        return Err(format!(
+            "queued teacher alias {alias:?} was replaced after submission; refusing to switch teacher identity (submit a new job)"
+        ));
+    }
+    Ok(Some(pinned.clone()))
 }
 
 /// Thread-safe training queue.
@@ -592,6 +658,76 @@ fn run_grpo(
 /// hot-swap) with `grpo_train`, and the refactor that factors those
 /// pieces out so OPD can call them is its own diff; doing it here would
 /// produce a much larger PR than this milestone wants.
+fn registered_teacher_descriptor(
+    spec: &crate::api::teachers::TeacherSpec,
+) -> kiln_train::TeacherDescriptor {
+    let identity = spec.identity.clone();
+    let model_version_hash = identity
+        .as_ref()
+        .map(|identity| format!("sha256:{}", identity.content_revision()));
+    kiln_train::TeacherDescriptor {
+        alias: spec.alias.clone(),
+        model_id: spec.model_id.clone(),
+        model_version_hash,
+        identity,
+        snapshot_url: None,
+    }
+}
+
+fn build_remote_teacher_for(
+    spec: &crate::api::teachers::TeacherSpec,
+    credentials: &crate::config::TeachersConfig,
+    cache_root: Option<&std::path::Path>,
+) -> std::result::Result<std::sync::Arc<dyn kiln_train::LogitSource>, String> {
+    let config = crate::api::teachers::remote_teacher_config(spec, credentials)
+        .map_err(|error| format!("resolve remote teacher credential: {error}"))?;
+    let remote = kiln_train::RemoteTeacher::connect_pinned(config)
+        .map_err(|error| format!("job-start remote teacher identity handshake: {error}"))?;
+    tracing::info!(
+        teacher = %spec.alias,
+        identity_revision = %spec
+            .identity
+            .as_ref()
+            .map(kiln_train::TeacherIdentityV1::content_revision)
+            .unwrap_or_default(),
+        cache_enabled = cache_root.is_some(),
+        "verified pinned remote teacher at job start"
+    );
+    if let Some(cache_root) = cache_root {
+        let cached =
+            kiln_train::CachedLogitSource::new(kiln_train::LogitCache::new(cache_root), remote)
+                .map_err(|error| format!("bind remote teacher cache to identity: {error}"))?;
+        Ok(std::sync::Arc::new(cached))
+    } else {
+        Ok(std::sync::Arc::new(remote))
+    }
+}
+
+fn materialize_remote_teacher_for_off_policy(
+    operation: &str,
+    prompts: &[kiln_train::opd::OpdPrompt],
+    config: &kiln_train::opd::OpdConfig,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    prepared_remote_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
+) -> std::result::Result<std::sync::Arc<dyn kiln_train::LogitSource>, String> {
+    let remote = prepared_remote_teacher
+        .ok_or_else(|| format!("{operation}: remote teacher was not verified at job start"))?;
+    let fixture = kiln_train::opd::materialize_verified_off_policy_teacher(
+        prompts, config, tokenizer, remote,
+    )
+    .map_err(|error| format!("{operation}: prefetch remote teacher logits: {error:#}"))?;
+    tracing::info!(
+        operation,
+        prompts = prompts.len(),
+        identity_revision = %fixture
+            .authoritative_teacher_identity()
+            .map(kiln_train::TeacherIdentityV1::content_revision)
+            .unwrap_or_default(),
+        "materialized remote teacher before acquiring GPU coordination lock"
+    );
+    Ok(std::sync::Arc::new(fixture))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_opd(
     req: &OpdRequest,
@@ -601,8 +737,10 @@ fn run_opd(
     adapter_dir: &std::path::Path,
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
-    teacher_registry: &crate::api::teachers::TeacherRegistry,
+    teacher_spec: &crate::api::teachers::TeacherSpec,
+    prepared_remote_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
     job_id: &str,
+    gpu_lock: &crate::state::GpuCoordinationLock,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -616,6 +754,8 @@ fn run_opd(
 
     let mut dataset_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>> = None;
     let mut dataset_summary: Option<kiln_train::OffPolicyDistillationSummary> = None;
+    let mut dataset_source_sha256: Option<String> = None;
+    let mut dataset_identity: Option<kiln_train::TeacherIdentityV1> = None;
     let mut owned_prompts: Option<Vec<kiln_train::opd::OpdPrompt>> = None;
     if let Some(path) = req.dataset_path.as_deref() {
         // `agent_traces:<filter>` selectors resolve to live prompt
@@ -648,12 +788,45 @@ fn run_opd(
                     .into(),
             );
             }
-            let examples = kiln_train::load_off_policy_distillation_jsonl(path)
+            let loaded = kiln_train::load_off_policy_distillation_dataset(path)
                 .map_err(|e| format!("load off-policy OPD dataset_path {path:?}: {e:#}"))?;
-            let prepared = kiln_train::prepare_off_policy_distillation_dataset(
-                &examples,
+            let contains_numeric_teacher_logits = loaded.examples.iter().any(|example| {
+                example
+                    .teacher_tokens
+                    .iter()
+                    .any(|token| token.logprob.is_some() || !token.top_logprobs.is_empty())
+            });
+            let manifest_identity = loaded
+                .manifest
+                .as_ref()
+                .map(|manifest| manifest.teacher_identity().clone());
+            if contains_numeric_teacher_logits && manifest_identity.is_none() {
+                return Err(format!(
+                    "off-policy OPD dataset_path {path:?} contains numeric teacher logits but has no canonical {} first record",
+                    kiln_train::OFF_POLICY_DISTILLATION_MANIFEST_SCHEMA_V1
+                ));
+            }
+            if let Some(identity) = manifest_identity.as_ref() {
+                let expected = teacher_spec.identity.as_ref().ok_or_else(|| {
+                    format!(
+                        "off-policy OPD dataset_path {path:?} declares teacher revision sha256:{}, but registered teacher {:?} has no authoritative identity",
+                        identity.content_revision(),
+                        teacher_spec.alias
+                    )
+                })?;
+                if identity != expected {
+                    return Err(format!(
+                        "off-policy OPD dataset_path {path:?} teacher revision sha256:{} does not match pinned registered teacher revision sha256:{}",
+                        identity.content_revision(),
+                        expected.content_revision()
+                    ));
+                }
+            }
+            let prepared = kiln_train::prepare_off_policy_distillation_dataset_with_identity(
+                &loaded.examples,
                 tokenizer,
                 req.teacher.clone(),
+                manifest_identity.clone(),
                 model_config.vocab_size,
                 req.config.top_k,
                 req.config.objective,
@@ -672,6 +845,8 @@ fn run_opd(
             );
             dataset_teacher = Some(std::sync::Arc::new(prepared.teacher));
             dataset_summary = Some(prepared.summary);
+            dataset_source_sha256 = Some(loaded.source_sha256);
+            dataset_identity = manifest_identity;
             owned_prompts = Some(prepared.prompts);
         }
     }
@@ -683,6 +858,26 @@ fn run_opd(
             return Err(format!("OPD prompt {i} has no messages"));
         }
     }
+
+    // A live remote source must never cross the GPU coordination boundary.
+    // Fixed off-policy rows are fetched eagerly while inference still holds
+    // read access; the trainer receives only an in-memory, identity-bound
+    // fixture. Pre-scored datasets already supply their own fixture.
+    let materialized_remote_teacher = if dataset_teacher.is_none()
+        && matches!(teacher_spec.kind, crate::api::teachers::TeacherKind::Remote)
+    {
+        Some(materialize_remote_teacher_for_off_policy(
+            "OPD",
+            prompts,
+            &req.config,
+            tokenizer,
+            prepared_remote_teacher,
+        )?)
+    } else {
+        None
+    };
+
+    let _gpu_guard = gpu_coordination_write_guard(gpu_lock);
 
     tracing::info!(
         job_id = %job_id,
@@ -702,74 +897,38 @@ fn run_opd(
     //               populate a FixtureLogitSource with the real
     //               top-K teacher logprobs (§3.2 in-process local
     //               teacher).
-    //   • Remote  → RemoteTeacher with provider guessed from the URL.
-    let spec = teacher_registry.get(&req.teacher);
-    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = if let Some(teacher) =
-        dataset_teacher
-    {
-        teacher
-    } else {
-        let spec = spec.as_ref().ok_or_else(|| {
-            format!(
-                "teacher alias {:?} not registered (POST /v1/teachers first)",
-                req.teacher
-            )
-        })?;
-        let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
-        let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
-        match spec.kind {
-            crate::api::teachers::TeacherKind::Fixture => {
-                std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
-                    spec.alias.clone(),
-                    resolved_vocab,
-                    resolved_max_top_k.max(req.config.top_k),
-                ))
+    //   • Remote  → job-start reverified RemoteTeacher, optionally wrapped
+    //               by the identity-bound v3 cache.
+    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> =
+        if let Some(teacher) = dataset_teacher {
+            teacher
+        } else {
+            let spec = teacher_spec;
+            let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
+            let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
+            match spec.kind {
+                crate::api::teachers::TeacherKind::Fixture => {
+                    std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
+                        spec.alias.clone(),
+                        resolved_vocab,
+                        resolved_max_top_k.max(req.config.top_k),
+                    ))
+                }
+                crate::api::teachers::TeacherKind::Local => build_local_teacher_for(
+                    &spec,
+                    prompts,
+                    tokenizer,
+                    weights,
+                    model_config,
+                    adapter_dir,
+                    req.config.top_k,
+                    req.config.training_mode,
+                )?,
+                crate::api::teachers::TeacherKind::Remote => materialized_remote_teacher
+                    .clone()
+                    .ok_or_else(|| "OPD remote teacher was not materialized".to_string())?,
             }
-            crate::api::teachers::TeacherKind::Local => build_local_teacher_for(
-                &spec,
-                prompts,
-                tokenizer,
-                weights,
-                model_config,
-                adapter_dir,
-                req.config.top_k,
-                req.config.training_mode,
-            )?,
-            crate::api::teachers::TeacherKind::Remote => {
-                let url = spec.url.clone().ok_or_else(|| {
-                        format!(
-                            "teacher {:?} is Remote but has no `url` field — re-register with `url` set",
-                            spec.alias
-                        )
-                    })?;
-                let provider = spec.provider.ok_or_else(|| {
-                    format!(
-                        "teacher {:?} is Remote but has no explicit provider — re-register with provider=\"vllm\"",
-                        spec.alias
-                    )
-                })?;
-                let cfg = kiln_train::RemoteTeacherConfig {
-                    provider,
-                    model: spec.model_id.clone(),
-                    url,
-                    api_key_env: spec.api_key_env.clone(),
-                    teacher_id: spec.alias.clone(),
-                    tokenizer_hash: spec.tokenizer_hash.clone(),
-                    // Zero selects vLLM's upstream default (20). A registry
-                    // value is an explicit assertion that --max-logprobs was
-                    // raised on this server.
-                    max_top_k: spec.max_top_k.unwrap_or(0),
-                    vocab_size: resolved_vocab,
-                    max_cost_usd: None,
-                    timeout_ms: 60_000,
-                };
-                std::sync::Arc::new(
-                    kiln_train::RemoteTeacher::new(cfg)
-                        .map_err(|e| format!("construct remote teacher: {e}"))?,
-                )
-            }
-        }
-    };
+        };
 
     let trainer_progress_cb: trainer::ProgressCallback = progress_cb;
 
@@ -786,53 +945,52 @@ fn run_opd(
     )
     .map_err(|e| format!("opd_train failed: {e:#}"))?;
 
-    if let Some(path) = req.dataset_path.as_deref() {
-        match kiln_train::TrainReceipt::read_from_adapter_dir(&output_dir) {
-            Ok(Some(mut receipt)) => {
-                receipt.training_data = kiln_train::train_receipt::TrainingDataReceipt {
-                    source: "jsonl_off_policy_opd_teacher".to_string(),
-                    path: Some(path.to_string()),
-                    sha256: kiln_train::train_receipt::sha256_file(std::path::Path::new(path)).ok(),
-                };
-                if let Some(opd) = receipt.opd.as_mut() {
-                    opd.teacher_id = Some(req.teacher.clone());
-                }
-                if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
-                    tracing::warn!(job_id = %job_id, "failed to update OPD dataset receipt: {e}");
-                }
-            }
-            Ok(None) => {
-                tracing::warn!(job_id = %job_id, "OPD dataset receipt missing after training");
-            }
-            Err(e) => {
-                tracing::warn!(job_id = %job_id, "failed to read OPD dataset receipt: {e}");
-            }
-        }
+    if let (Some(path), Some(source_sha256)) =
+        (req.dataset_path.as_deref(), dataset_source_sha256.as_ref())
+    {
+        let mut receipt = kiln_train::TrainReceipt::read_from_adapter_dir(&output_dir)
+            .map_err(|error| format!("read OPD dataset provenance receipt: {error:#}"))?
+            .ok_or_else(|| {
+                "OPD trainer completed without its required train_receipt.json".to_string()
+            })?;
+        receipt.training_data = kiln_train::train_receipt::TrainingDataReceipt {
+            source: "jsonl_off_policy_opd_teacher".to_string(),
+            path: Some(path.to_string()),
+            sha256: Some(source_sha256.clone()),
+        };
+        let opd = receipt.opd.as_mut().ok_or_else(|| {
+            "OPD trainer receipt is missing its required OPD provenance section".to_string()
+        })?;
+        opd.teacher_id = Some(req.teacher.clone());
+        receipt
+            .write_to_adapter_dir(&output_dir)
+            .map_err(|error| format!("persist OPD dataset provenance receipt: {error:#}"))?;
     }
 
     // §8.11 reproducibility receipt — every adapter ships with one.
     let seed = req.config.seed.unwrap_or(0);
     let hyperparameters = serde_json::to_value(&req.config)
-        .unwrap_or_else(|_| serde_json::json!({"error": "failed to serialize OpdConfig"}));
-    let teacher_descriptor = spec
-        .map(|spec| kiln_train::TeacherDescriptor {
-            alias: spec.alias.clone(),
-            model_id: spec.model_id.clone(),
-            model_version_hash: None,
+        .map_err(|error| format!("serialize OPD receipt hyperparameters: {error}"))?;
+    let teacher_descriptor = if dataset_summary.is_some() {
+        let model_version_hash = dataset_identity
+            .as_ref()
+            .map(|identity| format!("sha256:{}", identity.content_revision()));
+        kiln_train::TeacherDescriptor {
+            alias: teacher_spec.alias.clone(),
+            model_id: teacher_spec.model_id.clone(),
+            model_version_hash,
+            identity: dataset_identity,
             snapshot_url: None,
-        })
-        .unwrap_or_else(|| kiln_train::TeacherDescriptor {
-            alias: req.teacher.clone(),
-            model_id: req.teacher.clone(),
-            model_version_hash: None,
-            snapshot_url: None,
-        });
+        }
+    } else {
+        registered_teacher_descriptor(teacher_spec)
+    };
     let receipt = kiln_train::AdapterReceipt::new(adapter_name, "opd", seed)
         .with_teacher(teacher_descriptor)
         .with_hyperparameters(hyperparameters);
-    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
-        tracing::warn!(job_id = %job_id, "failed to write OPD receipt: {e}");
-    }
+    receipt
+        .write_to_adapter_dir(&output_dir)
+        .map_err(|error| format!("persist OPD provenance receipt: {error:#}"))?;
 
     if let Some(summary) = dataset_summary {
         tracing::info!(
@@ -907,7 +1065,7 @@ fn tokenize_teacher_prompts(
 /// prompts with the source LoRA applied (so the logits reflect "what
 /// the model behaves like when wearing that LoRA"), and stashes the
 /// top-K teacher logprobs into a single `FixtureLogitSource` keyed by
-/// (tokens_hash, position).
+/// (exact token sequence, position).
 ///
 /// Each source contributes only its own prompts' entries, so the
 /// trainer's `opd_step_loss` call queries the *correct* source's
@@ -978,8 +1136,13 @@ fn build_multi_tenant_merge_teacher(
                 let kiln_train::LogprobBatch::TopK(topk) = batch else {
                     return Err("distill_merge top-K fixture returned full-vocab logits".into());
                 };
-                let key = kiln_train::logit_source::FixtureLogitSource::hash_tokens(tokens);
-                unified.insert(key, logits_row, topk.indices, topk.logprobs);
+                unified
+                    .insert(tokens, logits_row, topk.indices, topk.logprobs)
+                    .map_err(|e| {
+                        format!(
+                            "distill_merge conflicting exact-sequence fixture row at {logits_row}: {e}"
+                        )
+                    })?;
             }
         }
     }
@@ -1236,10 +1399,10 @@ fn build_self_distill_teacher(
         prepare_self_distill_prompts(prompts, mode, ground_truth, documents, tokenizer)?;
 
     // Run the teacher forwards on the shaped teacher_only sequences
-    // and build a FixtureLogitSource keyed by the *student* tokens
-    // hash so opd_train's queries match. We compute the teacher's
+    // and build a FixtureLogitSource keyed by the exact *student* token
+    // sequence so opd_train's queries match. We compute the teacher's
     // top-K at teacher_only positions, then re-insert under the
-    // student tokens hash at the student positions — same logprob
+    // exact student sequence at the student positions — same logprob
     // values, different key.
     let teacher_fixture = kiln_train::opd::build_local_teacher_fixture(
         teacher_id.to_string(),
@@ -1262,7 +1425,6 @@ fn build_self_distill_teacher(
     for ((s_tokens, s_active), (t_tokens, t_active)) in
         student_active.iter().zip(teacher_only.iter())
     {
-        let s_hash = kiln_train::logit_source::FixtureLogitSource::hash_tokens(s_tokens);
         let student_rows = kiln_train::logit_source::target_token_positions_to_logits_rows(
             teacher_id,
             s_tokens.len(),
@@ -1282,7 +1444,13 @@ fn build_self_distill_teacher(
             let kiln_train::LogprobBatch::TopK(topk) = batch else {
                 return Err("self-distill top-K fixture returned full-vocab logits".into());
             };
-            student_fixture.insert(s_hash, student_row, topk.indices, topk.logprobs);
+            student_fixture
+                .insert(s_tokens, student_row, topk.indices, topk.logprobs)
+                .map_err(|e| {
+                    format!(
+                        "self-distill conflicting exact-sequence fixture row at {student_row}: {e}"
+                    )
+                })?;
         }
     }
 
@@ -1295,7 +1463,7 @@ fn build_self_distill_teacher(
 /// marked), the model is run forward once per prompt — wearing the
 /// spec's `adapter` LoRA when one is registered, base model otherwise —
 /// and the top-K logprobs at active positions are inserted into the
-/// fixture keyed by tokens_hash. Off-policy precomputation requires every
+/// fixture keyed by the exact token sequence. Off-policy precomputation requires every
 /// prompt to tokenize with active assistant targets; it never changes the
 /// requested dataset by skipping an invalid prompt.
 #[allow(clippy::too_many_arguments)]
@@ -1309,6 +1477,12 @@ fn build_local_teacher_for(
     top_k: usize,
     training_mode: kiln_train::opd::OpdTrainingMode,
 ) -> std::result::Result<std::sync::Arc<dyn kiln_train::logit_source::LogitSource>, String> {
+    let pinned_identity = spec.identity.as_ref().ok_or_else(|| {
+        format!(
+            "local teacher '{}' has no authoritative pinned identity; delete and re-register it",
+            spec.alias
+        )
+    })?;
     // The teacher's LoRA. A spec that names an adapter MUST wear it —
     // the silent fall-through to `None` here is what made
     // `distill_refresh` toward a prior self and `self_improve`'s
@@ -1319,38 +1493,78 @@ fn build_local_teacher_for(
         Some(name) => {
             let dir = adapter_dir.join(name);
             let device = weights.embed_tokens.device().clone();
+            let pinned_adapter = pinned_identity.adapter().ok_or_else(|| {
+                format!(
+                    "local teacher '{}' names adapter '{name}' but its pinned identity is the bare base model",
+                    spec.alias
+                )
+            })?;
+            if pinned_adapter.name() != name {
+                return Err(format!(
+                    "local teacher '{}' names adapter '{name}' but its pinned identity names '{}'",
+                    spec.alias,
+                    pinned_adapter.name()
+                ));
+            }
+            let expected_source = kiln_model::lora_loader::LoraSourceIdentity::new(
+                pinned_adapter.weights_sha256(),
+                pinned_adapter.config_sha256(),
+            )
+            .map_err(|e| {
+                format!(
+                    "local teacher '{}' has invalid adapter identity: {e:#}",
+                    spec.alias
+                )
+            })?;
             Some(
-                kiln_model::lora_loader::LoraWeights::load(&dir, model_config.num_layers, device)
-                    .map_err(|e| {
+                kiln_model::lora_loader::LoraWeights::load_pinned(
+                    &dir,
+                    model_config.num_layers,
+                    device,
+                    &expected_source,
+                )
+                .map_err(|e| {
                     format!(
-                        "teacher '{}' is registered to wear adapter '{name}' but it \
-                             failed to load from {}: {e}",
+                        "teacher '{}' is pinned to adapter '{name}', but the exact registered content \
+                         could not be loaded from {}: {e:#}; re-register after any adapter rewrite",
                         spec.alias,
                         dir.display()
                     )
                 })?,
             )
         }
-        None => None,
+        None => {
+            if let Some(adapter) = pinned_identity.adapter() {
+                return Err(format!(
+                    "local teacher '{}' is configured for the bare base model but its pinned identity names adapter '{}'",
+                    spec.alias,
+                    adapter.name()
+                ));
+            }
+            None
+        }
     };
 
     // ON-POLICY self-distillation (#31): the student generates fresh rollouts, so
-    // the teacher must score ARBITRARY token sequences live — a prompt-hash
+    // the teacher must score ARBITRARY token sequences live — a fixed-sequence
     // fixture would miss every rollout. Return a LiveLocalTeacher that holds a
     // cheap (Arc-backed) clone of the loaded model and runs a detached forward on
     // demand.
     if matches!(training_mode, kiln_train::opd::OpdTrainingMode::OnPolicy) {
-        return Ok(std::sync::Arc::new(kiln_train::opd::LiveLocalTeacher::new(
+        let teacher = kiln_train::opd::LiveLocalTeacher::new(
             spec.alias.clone(),
             weights.clone(),
             model_config.clone(),
             teacher_lora,
+            pinned_identity.clone(),
             top_k,
-        )));
+        )
+        .map_err(|e| format!("construct pinned live local teacher: {e:#}"))?;
+        return Ok(std::sync::Arc::new(teacher));
     }
 
     // OFF-POLICY: the assistant turns are fixed, so pre-compute the fixture keyed
-    // by tokens_hash (cheaper — one forward per prompt up front).
+    // by exact sequence (cheaper — one forward per prompt up front).
     let prompts_and_active =
         tokenize_teacher_prompts("local-teacher", &spec.alias, prompts, tokenizer)?;
     let fixture = kiln_train::opd::build_local_teacher_fixture(
@@ -1363,6 +1577,9 @@ fn build_local_teacher_for(
         spec.tokenizer_hash.clone(),
     )
     .map_err(|e| format!("build_local_teacher_fixture failed: {e:#}"))?;
+    let fixture = fixture
+        .with_authoritative_identity(pinned_identity.clone())
+        .map_err(|e| format!("bind local teacher fixture to pinned identity: {e}"))?;
     Ok(std::sync::Arc::new(fixture))
 }
 
@@ -1397,9 +1614,11 @@ fn run_distill_refresh(
     adapter_dir: &std::path::Path,
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
-    teacher_registry: &crate::api::teachers::TeacherRegistry,
+    teacher_spec: &crate::api::teachers::TeacherSpec,
+    prepared_remote_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
     dataset_registry: Option<&crate::eval::DatasetRegistry>,
     job_id: &str,
+    gpu_lock: &crate::state::GpuCoordinationLock,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -1430,6 +1649,24 @@ fn run_distill_refresh(
     if prompts.is_empty() {
         return Err("DistillRefresh: new_data resolved to zero prompts".into());
     }
+
+    let materialized_remote_teacher =
+        if matches!(teacher_spec.kind, crate::api::teachers::TeacherKind::Remote) {
+            Some(materialize_remote_teacher_for_off_policy(
+                "DistillRefresh",
+                &prompts,
+                &req.config,
+                tokenizer,
+                prepared_remote_teacher,
+            )?)
+        } else {
+            None
+        };
+
+    // Local fixture construction and both GPU phases retain the existing
+    // job-wide exclusion. All remote I/O above has completed before this
+    // guard can block inference.
+    let _gpu_guard = gpu_coordination_write_guard(gpu_lock);
 
     tracing::info!(
         job_id = %job_id,
@@ -1506,12 +1743,7 @@ fn run_distill_refresh(
     // the reverse-KL signal pulls the LoRA back toward the
     // behavioural-teacher's distribution.
     // -----------------------------------------------------------------
-    let spec = teacher_registry.get(&req.behavioural_teacher).ok_or_else(|| {
-        format!(
-            "DistillRefresh phase 2: teacher alias {:?} not registered (POST /v1/teachers first)",
-            req.behavioural_teacher
-        )
-    })?;
+    let spec = teacher_spec;
     let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
     let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
     let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = match spec.kind {
@@ -1533,32 +1765,9 @@ fn run_distill_refresh(
             req.config.training_mode,
         )
         .map_err(|e| format!("distill_refresh phase 2 local-teacher build: {e}"))?,
-        crate::api::teachers::TeacherKind::Remote => {
-            let url = spec.url.clone().ok_or_else(|| {
-                format!("teacher {:?} is Remote but has no `url` field", spec.alias)
-            })?;
-            let cfg = kiln_train::RemoteTeacherConfig {
-                provider: spec.provider.ok_or_else(|| {
-                    format!(
-                        "teacher {:?} is Remote but has no explicit provider — re-register with provider=\"vllm\"",
-                        spec.alias
-                    )
-                })?,
-                model: spec.model_id.clone(),
-                url,
-                api_key_env: spec.api_key_env.clone(),
-                teacher_id: spec.alias.clone(),
-                tokenizer_hash: spec.tokenizer_hash.clone(),
-                max_top_k: spec.max_top_k.unwrap_or(0),
-                vocab_size: resolved_vocab,
-                max_cost_usd: None,
-                timeout_ms: 60_000,
-            };
-            std::sync::Arc::new(
-                kiln_train::RemoteTeacher::new(cfg)
-                    .map_err(|e| format!("construct remote teacher: {e}"))?,
-            )
-        }
+        crate::api::teachers::TeacherKind::Remote => materialized_remote_teacher
+            .clone()
+            .ok_or_else(|| "DistillRefresh remote teacher was not materialized".to_string())?,
     };
 
     // Recover-phase config inherits from req.config but anchors the
@@ -1591,19 +1800,14 @@ fn run_distill_refresh(
     // §8.11 receipt — records the two-phase pipeline + behavioural-
     // teacher metadata + the recover config.
     let seed = req.config.seed.unwrap_or(0);
+    let receipt_hyperparameters = serde_json::to_value(req)
+        .map_err(|error| format!("serialize distill_refresh receipt: {error}"))?;
     let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_refresh", seed)
-        .with_teacher(kiln_train::TeacherDescriptor {
-            alias: spec.alias.clone(),
-            model_id: spec.model_id.clone(),
-            model_version_hash: None,
-            snapshot_url: None,
-        })
-        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(
-            |_| serde_json::json!({"error": "failed to serialize DistillRefreshRequest"}),
-        ));
-    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
-        tracing::warn!(job_id = %job_id, "failed to write distill_refresh receipt: {e}");
-    }
+        .with_teacher(registered_teacher_descriptor(spec))
+        .with_hyperparameters(receipt_hyperparameters);
+    receipt
+        .write_to_adapter_dir(&output_dir)
+        .map_err(|error| format!("persist distill_refresh provenance receipt: {error:#}"))?;
 
     tracing::info!(
         job_id = %job_id,
@@ -1699,10 +1903,10 @@ fn run_distill_merge(
     // (still hot-swappable on a single weight matrix because each
     // source is small relative to the GPU), extract top-K teacher
     // logprobs at active positions, and stash them into a unified
-    // FixtureLogitSource keyed by student-side tokens_hash.
+    // FixtureLogitSource keyed by the exact student-side sequence.
     //
     // Per-source weighting: each source contributes its share of
-    // prompts; the per-prompt logprob lookup keys on tokens_hash so
+    // prompts; the per-prompt logprob lookup keys on exact tokens so
     // the trainer queries the *correct* source's teacher for each
     // prompt, with no per-step LoRA swaps needed.
     //
@@ -1742,17 +1946,20 @@ fn run_distill_merge(
     .map_err(|e| format!("distill_merge opd_train failed: {e:#}"))?;
 
     let seed = req.config.seed.unwrap_or(0);
+    let receipt_hyperparameters = serde_json::to_value(req)
+        .map_err(|error| format!("serialize distill_merge receipt: {error}"))?;
     let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_merge", seed)
         .with_teacher(kiln_train::TeacherDescriptor {
             alias: teacher_id.clone(),
             model_id: teacher_id,
             model_version_hash: None,
+            identity: None,
             snapshot_url: None,
         })
-        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({})));
-    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
-        tracing::warn!(job_id = %job_id, "failed to write distill_merge receipt: {e}");
-    }
+        .with_hyperparameters(receipt_hyperparameters);
+    receipt
+        .write_to_adapter_dir(&output_dir)
+        .map_err(|error| format!("persist distill_merge provenance receipt: {error:#}"))?;
     Ok(output_dir)
 }
 
@@ -1838,8 +2045,10 @@ fn run_distill_pump(
     adapter_dir: &std::path::Path,
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
-    teacher_registry: &crate::api::teachers::TeacherRegistry,
+    teacher_spec: &crate::api::teachers::TeacherSpec,
+    prepared_remote_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
     job_id: &str,
+    gpu_lock: &crate::state::GpuCoordinationLock,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -1868,6 +2077,21 @@ fn run_distill_pump(
         ));
     }
 
+    let materialized_remote_teacher =
+        if matches!(teacher_spec.kind, crate::api::teachers::TeacherKind::Remote) {
+            Some(materialize_remote_teacher_for_off_policy(
+                "distill_pump",
+                &prompts,
+                &req.config,
+                tokenizer,
+                prepared_remote_teacher,
+            )?)
+        } else {
+            None
+        };
+
+    let _gpu_guard = gpu_coordination_write_guard(gpu_lock);
+
     tracing::info!(
         job_id = %job_id,
         name = %req.name,
@@ -1878,12 +2102,7 @@ fn run_distill_pump(
     );
 
     // Resolve teacher alias.
-    let spec = teacher_registry.get(&req.teacher).ok_or_else(|| {
-        format!(
-            "distill_pump: teacher alias {:?} not registered (POST /v1/teachers first)",
-            req.teacher
-        )
-    })?;
+    let spec = teacher_spec;
     let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
     let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
     let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = match spec.kind {
@@ -1905,32 +2124,9 @@ fn run_distill_pump(
             req.config.training_mode,
         )
         .map_err(|e| format!("distill_pump local-teacher build: {e}"))?,
-        crate::api::teachers::TeacherKind::Remote => {
-            let url = spec.url.clone().ok_or_else(|| {
-                format!("teacher {:?} is Remote but has no `url` field", spec.alias)
-            })?;
-            let cfg = kiln_train::RemoteTeacherConfig {
-                provider: spec.provider.ok_or_else(|| {
-                    format!(
-                        "teacher {:?} is Remote but has no explicit provider — re-register with provider=\"vllm\"",
-                        spec.alias
-                    )
-                })?,
-                model: spec.model_id.clone(),
-                url,
-                api_key_env: spec.api_key_env.clone(),
-                teacher_id: spec.alias.clone(),
-                tokenizer_hash: spec.tokenizer_hash.clone(),
-                max_top_k: spec.max_top_k.unwrap_or(0),
-                vocab_size: resolved_vocab,
-                max_cost_usd: None,
-                timeout_ms: 60_000,
-            };
-            std::sync::Arc::new(
-                kiln_train::RemoteTeacher::new(cfg)
-                    .map_err(|e| format!("construct remote teacher: {e}"))?,
-            )
-        }
+        crate::api::teachers::TeacherKind::Remote => materialized_remote_teacher
+            .clone()
+            .ok_or_else(|| "distill_pump remote teacher was not materialized".to_string())?,
     };
 
     let mut pump_config = req.config.clone();
@@ -1955,17 +2151,14 @@ fn run_distill_pump(
 
     // §8.11 receipt.
     let seed = req.config.seed.unwrap_or(0);
+    let receipt_hyperparameters = serde_json::to_value(req)
+        .map_err(|error| format!("serialize distill_pump receipt: {error}"))?;
     let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_pump", seed)
-        .with_teacher(kiln_train::TeacherDescriptor {
-            alias: spec.alias.clone(),
-            model_id: spec.model_id.clone(),
-            model_version_hash: None,
-            snapshot_url: None,
-        })
-        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({})));
-    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
-        tracing::warn!(job_id = %job_id, "failed to write distill_pump receipt: {e}");
-    }
+        .with_teacher(registered_teacher_descriptor(spec))
+        .with_hyperparameters(receipt_hyperparameters);
+    receipt
+        .write_to_adapter_dir(&output_dir)
+        .map_err(|error| format!("persist distill_pump provenance receipt: {error:#}"))?;
     Ok(output_dir)
 }
 
@@ -2199,17 +2392,20 @@ fn run_distill_self(
     .map_err(|e| format!("distill_self opd_train failed: {e:#}"))?;
 
     let seed = req.config.seed.unwrap_or(0);
+    let receipt_hyperparameters = serde_json::to_value(req)
+        .map_err(|error| format!("serialize distill_self receipt: {error}"))?;
     let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_self", seed)
         .with_teacher(kiln_train::TeacherDescriptor {
             alias: teacher_id.clone(),
             model_id: teacher_id,
             model_version_hash: None,
+            identity: None,
             snapshot_url: None,
         })
-        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({})));
-    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
-        tracing::warn!(job_id = %job_id, "failed to write distill_self receipt: {e}");
-    }
+        .with_hyperparameters(receipt_hyperparameters);
+    receipt
+        .write_to_adapter_dir(&output_dir)
+        .map_err(|error| format!("persist distill_self provenance receipt: {error:#}"))?;
     Ok(output_dir)
 }
 
@@ -2476,6 +2672,40 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         _ => None,
     };
 
+    // Resolve only the immutable submit-time binding. Registry deletion or
+    // replacement while this job waited in the FIFO is a terminal failure,
+    // never permission to silently train against a different teacher.
+    let pinned_teacher = resolve_pinned_teacher_for_job(
+        &entry.job,
+        &entry.teacher_bindings,
+        &state.teacher_registry,
+    );
+
+    // A registration-time probe is stale by definition once a job has waited
+    // in the queue. Revalidate a pinned remote deployment before memory
+    // reclamation, GPU coordination, or any cache lookup. The pump's existing
+    // cache flag wraps only this freshly verified source.
+    let remote_cache_root = matches!(
+        &entry.job,
+        QueuedJob::DistillPump(request) if request.use_cache
+    )
+    .then(|| crate::api::cache::cache_root(&state));
+    let prepared_remote_teacher: std::result::Result<
+        Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
+        String,
+    > = match pinned_teacher.as_ref() {
+        Ok(Some(spec)) if matches!(spec.kind, crate::api::teachers::TeacherKind::Remote) => {
+            build_remote_teacher_for(
+                spec,
+                &state.teacher_credentials,
+                remote_cache_root.as_deref(),
+            )
+            .map(Some)
+        }
+        Ok(_) => Ok(None),
+        Err(error) => Err(error.clone()),
+    };
+
     // #24: hold a governor soft-reservation for this job's estimated working set
     // across its entire execution. This lowers `MemoryGovernor::available_bytes()`
     // so the KV autoscaler proactively shrinks inference KV BEFORE the trainer
@@ -2484,7 +2714,8 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     // the autoscaler's floor). RAII: drops at the end of this function scope —
     // after the match AND finalize — releasing the budget back to inference.
     // Read `reserved_bytes` (Copy) here, before `match entry.job` moves the job.
-    let _mem_reservation = (entry.reserved_bytes > 0).then(|| {
+    let binding_is_valid = pinned_teacher.is_ok() && prepared_remote_teacher.is_ok();
+    let _mem_reservation = (binding_is_valid && entry.reserved_bytes > 0).then(|| {
         let total = kiln_memory::vram::detect_vram().total_bytes;
         let bytes = if total > 0 {
             entry.reserved_bytes.min(total)
@@ -2498,10 +2729,21 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         kiln_memory::MemoryGovernor::global().reserve(bytes)
     });
 
-    let memory_ready = prepare_training_memory_for_job(&state, entry.reserved_bytes);
-    let result: std::result::Result<PathBuf, String> = if let Err(err) = memory_ready {
+    let memory_ready = if binding_is_valid {
+        prepare_training_memory_for_job(&state, entry.reserved_bytes)
+    } else {
+        Ok(())
+    };
+    let result: std::result::Result<PathBuf, String> = if let Err(err) = pinned_teacher.as_ref() {
+        Err(err.clone())
+    } else if let Err(err) = prepared_remote_teacher.as_ref() {
+        Err(err.clone())
+    } else if let Err(err) = memory_ready {
         Err(err)
     } else {
+        let pinned_teacher = pinned_teacher.expect("pinned teacher checked above");
+        let prepared_remote_teacher =
+            prepared_remote_teacher.expect("remote teacher handshake checked above");
         match entry.job {
             QueuedJob::Sft(mut req) => {
                 if req.config.checkpoint_interval.is_none() {
@@ -2575,8 +2817,10 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 if req.config.checkpoint_interval.is_none() {
                     req.config.checkpoint_interval = server_checkpoint_interval;
                 }
-                let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
                 let guard = runner_arc.read().unwrap();
+                let teacher_spec = pinned_teacher
+                    .as_ref()
+                    .expect("OPD admission requires a pinned teacher");
                 run_opd(
                     &req,
                     &state.model_config,
@@ -2585,13 +2829,17 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     &state.adapter_dir,
                     &adapter_name,
                     progress_cb,
-                    &state.teacher_registry,
+                    teacher_spec,
+                    prepared_remote_teacher.clone(),
                     &job_id,
+                    &state.gpu_lock,
                 )
             }
             QueuedJob::DistillRefresh(req) => {
-                let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
                 let guard = runner_arc.read().unwrap();
+                let teacher_spec = pinned_teacher
+                    .as_ref()
+                    .expect("DistillRefresh admission requires a pinned teacher");
                 run_distill_refresh(
                     &req,
                     &state.model_config,
@@ -2600,9 +2848,11 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     &state.adapter_dir,
                     &adapter_name,
                     progress_cb,
-                    &state.teacher_registry,
+                    teacher_spec,
+                    prepared_remote_teacher.clone(),
                     state.dataset_registry.as_deref(),
                     &job_id,
+                    &state.gpu_lock,
                 )
             }
             QueuedJob::DistillMerge(req) => {
@@ -2620,8 +2870,10 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 )
             }
             QueuedJob::DistillPump(req) => {
-                let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
                 let guard = runner_arc.read().unwrap();
+                let teacher_spec = pinned_teacher
+                    .as_ref()
+                    .expect("DistillPump admission requires a pinned teacher");
                 run_distill_pump(
                     &req,
                     &state.model_config,
@@ -2630,8 +2882,10 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     &state.adapter_dir,
                     &adapter_name,
                     progress_cb,
-                    &state.teacher_registry,
+                    teacher_spec,
+                    prepared_remote_teacher.clone(),
                     &job_id,
+                    &state.gpu_lock,
                 )
             }
             QueuedJob::DistillSelf(req) => {
@@ -3011,9 +3265,78 @@ mod tests {
     use super::*;
     use crate::state::TrainingJobInfo;
     use kiln_model::{ServerTrainingDispatchPolicy, ServerTrainingNativeRoute};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct BlockingVerifiedTeacher {
+        identity: kiln_train::TeacherIdentityV1,
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl std::fmt::Debug for BlockingVerifiedTeacher {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("BlockingVerifiedTeacher")
+                .field("identity", &self.identity)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl kiln_train::LogitSource for BlockingVerifiedTeacher {
+        fn capabilities(&self) -> kiln_train::LogitSourceCaps {
+            kiln_train::LogitSourceCaps {
+                teacher_id: "blocking-verified-remote".into(),
+                vocab_size: 32,
+                max_top_k: 16,
+                supports_full_vocab: false,
+                supports_batched: true,
+                tokenizer_hash: Some(self.identity.tokenizer_vocab_sha256().to_string()),
+            }
+        }
+
+        fn authoritative_teacher_identity(&self) -> Option<&kiln_train::TeacherIdentityV1> {
+            Some(&self.identity)
+        }
+
+        fn fetch_logprobs(
+            &self,
+            tokens: &[u32],
+            positions: &[usize],
+            top_k: Option<usize>,
+        ) -> Result<kiln_train::LogprobBatch, kiln_train::LogitSourceError> {
+            let caps = self.capabilities();
+            kiln_train::logit_source::validate_logit_request(&caps, tokens, positions, top_k)?;
+            let top_k = top_k.expect("materialization always requests top-K");
+            self.entered.send(()).map_err(|error| {
+                kiln_train::LogitSourceError::invalid(
+                    &caps.teacher_id,
+                    format!("signal blocked teacher entry: {error}"),
+                )
+            })?;
+            self.release.lock().unwrap().recv().map_err(|error| {
+                kiln_train::LogitSourceError::invalid(
+                    &caps.teacher_id,
+                    format!("wait for blocked teacher release: {error}"),
+                )
+            })?;
+
+            let mut indices = Vec::with_capacity(positions.len() * top_k);
+            let mut logprobs = Vec::with_capacity(positions.len() * top_k);
+            for _ in positions {
+                indices.extend(0..top_k as u32);
+                logprobs.extend(std::iter::repeat(-(top_k as f32).ln()).take(top_k));
+            }
+            Ok(kiln_train::LogprobBatch::TopK(kiln_train::TopKLogprobs {
+                indices,
+                logprobs,
+                top_k,
+            }))
+        }
+    }
 
     fn mock_state_in(dir: &std::path::Path) -> AppState {
         let config = kiln_core::config::ModelConfig::qwen3_5_4b();
@@ -3055,6 +3378,299 @@ mod tests {
         );
         state.adapter_dir = dir.to_path_buf();
         state
+    }
+
+    fn pinned_teacher_spec(alias: &str, model_id: &str) -> crate::api::teachers::TeacherSpec {
+        crate::api::teachers::TeacherSpec {
+            alias: alias.into(),
+            kind: crate::api::teachers::TeacherKind::Fixture,
+            provider: None,
+            model_id: model_id.into(),
+            max_top_k: Some(32),
+            vocab_size: Some(1024),
+            supports_full_vocab: Some(false),
+            tokenizer_hash: None,
+            identity: None,
+            url: None,
+            credential_id: None,
+            notes: None,
+            adapter: None,
+        }
+    }
+
+    fn read_teacher_probe(stream: &TcpStream) -> serde_json::Value {
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        assert_eq!(request_line.trim_end(), "POST /v1/completions HTTP/1.1");
+        let mut content_length = None;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line
+                .strip_prefix("content-length:")
+                .or_else(|| line.strip_prefix("Content-Length:"))
+            {
+                content_length = Some(value.trim().parse::<usize>().unwrap());
+            }
+        }
+        let mut body = vec![0; content_length.unwrap()];
+        reader.read_exact(&mut body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn spawn_pinned_teacher(
+        identity: kiln_train::TeacherIdentityV1,
+        request_count: usize,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let fingerprint = identity.fingerprint();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_teacher_probe(&stream);
+                let top_k = request["prompt_logprobs"].as_u64().unwrap() as usize;
+                assert_eq!(request["prompt"], serde_json::json!([0, 0]));
+                let mut row = serde_json::Map::new();
+                row.insert("0".into(), serde_json::json!({"logprob": -1.0, "rank": 1}));
+                if top_k == 2 {
+                    row.insert("1".into(), serde_json::json!({"logprob": -2.0, "rank": 2}));
+                }
+                let response = serde_json::json!({
+                    "object": "text_completion",
+                    "model": "teacher-model",
+                    "system_fingerprint": fingerprint,
+                    "choices": [{
+                        "index": 0,
+                        "prompt_logprobs": [null, serde_json::Value::Object(row)]
+                    }],
+                    "usage": {"prompt_tokens": 2, "completion_tokens": 0, "total_tokens": 2}
+                });
+                let body = serde_json::to_vec(&response).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[test]
+    fn every_cached_remote_job_rehandshakes_before_accepting_a_hit() {
+        const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let identity = kiln_train::TeacherIdentityV1::new(
+            "teacher-model",
+            A,
+            B,
+            C,
+            None,
+            3,
+            2,
+            64,
+            3,
+            "vllm-test",
+            A,
+        )
+        .unwrap();
+        // First job: two identity probes plus one scoring miss. Second job:
+        // two identity probes, followed by a cache hit with no sixth request.
+        let (url, server) = spawn_pinned_teacher(identity.clone(), 5);
+        let spec = crate::api::teachers::TeacherSpec {
+            alias: "remote@test".into(),
+            kind: crate::api::teachers::TeacherKind::Remote,
+            provider: Some(kiln_train::RemoteProvider::Vllm),
+            model_id: "teacher-model".into(),
+            max_top_k: Some(2),
+            vocab_size: Some(3),
+            supports_full_vocab: Some(false),
+            tokenizer_hash: Some(B.into()),
+            identity: Some(identity),
+            url: Some(url),
+            credential_id: None,
+            notes: None,
+            adapter: None,
+        };
+        let cache_dir = tempfile::tempdir().unwrap();
+        let credentials = crate::config::TeachersConfig::default();
+
+        let first = build_remote_teacher_for(&spec, &credentials, Some(cache_dir.path())).unwrap();
+        first.fetch_logprobs(&[0, 0], &[0], Some(2)).unwrap();
+        let second = build_remote_teacher_for(&spec, &credentials, Some(cache_dir.path())).unwrap();
+        let hit = second.fetch_logprobs(&[0, 0], &[0], Some(2)).unwrap();
+        assert_eq!(hit.flat_len(), 2);
+        server.join().unwrap();
+
+        let stats = kiln_train::LogitCache::new(cache_dir.path())
+            .stats()
+            .unwrap();
+        assert_eq!(stats.total_entries, 1);
+    }
+
+    #[test]
+    fn slow_remote_materialization_does_not_block_inference_gpu_ownership() {
+        const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let identity = kiln_train::TeacherIdentityV1::new(
+            "blocking-verified-remote",
+            A,
+            B,
+            C,
+            None,
+            32,
+            16,
+            4096,
+            65_536,
+            "test-runtime",
+            A,
+        )
+        .unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let source: Arc<dyn kiln_train::LogitSource> = Arc::new(BlockingVerifiedTeacher {
+            identity,
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        });
+        let gpu_lock: crate::state::GpuCoordinationLock = Arc::new(tokio::sync::RwLock::new(()));
+        let worker_gpu_lock = gpu_lock.clone();
+        let (write_acquired_tx, write_acquired_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let config = kiln_train::OpdConfig {
+                training_mode: kiln_train::opd::OpdTrainingMode::OffPolicy,
+                top_k: 16,
+                ..kiln_train::OpdConfig::default()
+            };
+            let fixture = materialize_remote_teacher_for_off_policy(
+                "scheduling-contract-test",
+                &[self_distill_test_prompt(true)],
+                &config,
+                &merge_teacher_test_tokenizer(),
+                Some(source),
+            )
+            .unwrap();
+            let _gpu_guard = gpu_coordination_write_guard(&worker_gpu_lock);
+            write_acquired_tx.send(()).unwrap();
+            fixture
+        });
+
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("slow teacher reached its blocking fetch");
+        let inference_guard = crate::state::gpu_coordination_read_guard(&gpu_lock);
+        release_tx.send(()).unwrap();
+        assert!(
+            write_acquired_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "training must acquire GPU ownership only after remote materialization and current inference"
+        );
+        drop(inference_guard);
+        write_acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("training acquired GPU ownership after materialization completed");
+        let fixture = worker.join().unwrap();
+        assert!(fixture.authoritative_teacher_identity().is_some());
+    }
+
+    fn pinned_opd_job(alias: &str) -> QueuedJob {
+        QueuedJob::Opd(OpdRequest {
+            prompts: Vec::new(),
+            dataset_path: None,
+            teacher: alias.into(),
+            config: Default::default(),
+            post_eval: None,
+        })
+    }
+
+    fn unrelated_sft_job() -> QueuedJob {
+        QueuedJob::Sft(SftRequest {
+            examples: Vec::new(),
+            dataset_path: None,
+            dataset: None,
+            config: Default::default(),
+            post_eval: None,
+        })
+    }
+
+    #[test]
+    fn queued_teacher_binding_rejects_alias_replacement_and_deletion() {
+        let registry = crate::api::teachers::TeacherRegistry::new();
+        let pinned = pinned_teacher_spec("teacher", "model-v1");
+        registry.insert(pinned.clone());
+        let job = pinned_opd_job("teacher");
+
+        assert_eq!(
+            resolve_pinned_teacher_for_job(&job, std::slice::from_ref(&pinned), &registry).unwrap(),
+            Some(pinned.clone())
+        );
+
+        registry.insert(pinned_teacher_spec("teacher", "model-v2"));
+        let replaced =
+            resolve_pinned_teacher_for_job(&job, std::slice::from_ref(&pinned), &registry)
+                .unwrap_err();
+        assert!(replaced.contains("replaced after submission"), "{replaced}");
+
+        registry.remove("teacher");
+        let deleted =
+            resolve_pinned_teacher_for_job(&job, std::slice::from_ref(&pinned), &registry)
+                .unwrap_err();
+        assert!(deleted.contains("deleted after submission"), "{deleted}");
+    }
+
+    #[test]
+    fn queued_teacher_binding_requires_one_exact_binding_and_no_extras() {
+        let registry = crate::api::teachers::TeacherRegistry::new();
+        let pinned = pinned_teacher_spec("teacher", "model-v1");
+        registry.insert(pinned.clone());
+        let job = pinned_opd_job("teacher");
+
+        let missing = resolve_pinned_teacher_for_job(&job, &[], &registry).unwrap_err();
+        assert!(
+            missing.contains("no submit-time pinned binding"),
+            "{missing}"
+        );
+
+        let duplicate =
+            resolve_pinned_teacher_for_job(&job, &[pinned.clone(), pinned.clone()], &registry)
+                .unwrap_err();
+        assert!(
+            duplicate.contains("duplicate submit-time bindings"),
+            "{duplicate}"
+        );
+
+        let extra = resolve_pinned_teacher_for_job(
+            &job,
+            &[pinned.clone(), pinned_teacher_spec("other", "other-model")],
+            &registry,
+        )
+        .unwrap_err();
+        assert!(extra.contains("no extras"), "{extra}");
+
+        assert_eq!(
+            resolve_pinned_teacher_for_job(&unrelated_sft_job(), &[], &registry).unwrap(),
+            None
+        );
+        let unrelated = resolve_pinned_teacher_for_job(
+            &unrelated_sft_job(),
+            std::slice::from_ref(&pinned),
+            &registry,
+        )
+        .unwrap_err();
+        assert!(
+            unrelated.contains("does not use a registered teacher"),
+            "{unrelated}"
+        );
     }
 
     fn merge_teacher_test_tokenizer() -> kiln_core::tokenizer::KilnTokenizer {
@@ -3526,6 +4142,7 @@ mod tests {
         q.push(QueueEntry {
             job_id: "job-1".into(),
             reserved_bytes: 0,
+            teacher_bindings: Vec::new(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
@@ -3537,6 +4154,7 @@ mod tests {
         q.push(QueueEntry {
             job_id: "job-2".into(),
             reserved_bytes: 0,
+            teacher_bindings: Vec::new(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
@@ -3548,6 +4166,7 @@ mod tests {
         q.push(QueueEntry {
             job_id: "job-3".into(),
             reserved_bytes: 0,
+            teacher_bindings: Vec::new(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
@@ -3570,6 +4189,7 @@ mod tests {
         q.push(QueueEntry {
             job_id: "job-1".into(),
             reserved_bytes: 0,
+            teacher_bindings: Vec::new(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
@@ -3581,6 +4201,7 @@ mod tests {
         q.push(QueueEntry {
             job_id: "job-2".into(),
             reserved_bytes: 0,
+            teacher_bindings: Vec::new(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
@@ -3592,6 +4213,7 @@ mod tests {
         q.push(QueueEntry {
             job_id: "job-3".into(),
             reserved_bytes: 0,
+            teacher_bindings: Vec::new(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,

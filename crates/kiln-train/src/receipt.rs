@@ -110,11 +110,15 @@ pub struct TeacherDescriptor {
     pub alias: String,
     /// Provider's model id (e.g. `qwen/qwen-3.6-27b`).
     pub model_id: String,
-    /// SHA256 hash of the teacher's weights or provider snapshot
-    /// fingerprint. `None` when running against a hosted endpoint
-    /// that doesn't expose this.
+    /// SHA-256 revision of the complete canonical teacher identity when one is
+    /// available, otherwise a legacy weights/provider snapshot hash.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_version_hash: Option<String>,
+    /// Canonical content and protocol identity used for the run. This binds
+    /// the receipt to base weights, tokenizer vocabulary/config, optional
+    /// adapter, inference settings, and advertised scoring bounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<crate::teacher_identity::TeacherIdentityV1>,
     /// URL pointing at the teacher snapshot (HuggingFace, internal
     /// blob store, etc.). `None` when not applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -316,6 +320,7 @@ mod tests {
                 alias: "qwen3.6-27b@vllm".into(),
                 model_id: "qwen/qwen-3.6-27b".into(),
                 model_version_hash: Some("sha256:dead".into()),
+                identity: None,
                 snapshot_url: None,
             })
             .with_prompts(PromptSourceDescriptor {

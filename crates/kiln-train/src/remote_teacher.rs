@@ -5,14 +5,13 @@
 //! Other provider names remain representable in configuration but fail before
 //! HTTP until they have dedicated request/response adapters and pinned fixtures.
 //!
-//! - **URL conventions** (path layout, header names).
-//! - **top_logprobs cap** — vLLM defaults to 20; an explicit higher config
-//!   asserts a matching operator-raised `--max-logprobs` setting.
-//! - **API-key header** vs **bearer-token** vs **query-param**.
-//! - **Request-shape check** — raw token-ID requests require the provider's
-//!   `usage.prompt_tokens` to match exactly. This does not establish tokenizer
-//!   or model-content identity; identity-bound caching requires a separate
-//!   authoritative handshake.
+//! Before a teacher can be used, [`discover_vllm_identity`] makes strict
+//! numeric-ID prompt-logprob requests, parses the canonical identity carried in
+//! `system_fingerprint`, and proves the advertised top-K cap operationally.
+//! [`RemoteTeacher`] then pins that complete identity. Every scoring response
+//! must repeat it exactly before any logits are accepted. Redirects are
+//! disabled so bearer credentials and prompt bodies cannot be replayed to a
+//! different endpoint.
 //!
 //! Paid-provider cost accounting is intentionally absent: the only wired
 //! provider is self-hosted vLLM. A configured dollar cap is rejected rather
@@ -30,6 +29,7 @@ use crate::logit_source::{
     LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch, TopKLogprobs,
     validate_logit_request, validate_topk_logprob_row, validate_topk_logprobs_batch,
 };
+use crate::teacher_identity::TeacherIdentityV1;
 
 /// Provider identities for remote teachers. Only `Vllm` currently has a
 /// protocol adapter; all other variants are rejected before network I/O.
@@ -104,16 +104,20 @@ pub struct RemoteTeacherConfig {
     /// User-facing teacher id (alias). Mirrors
     /// `LogitSourceCaps.teacher_id`.
     pub teacher_id: String,
-    /// Expected tokenizer hash. This becomes authoritative only after the
-    /// remote identity handshake; prompt-token usage counts validate request
-    /// shape but cannot prove that equal numeric IDs have equal semantics.
+    /// Authoritative identity pinned during registration. Runtime teachers
+    /// fail closed when this is absent; legacy capability fields below are
+    /// retained only so older serialized configurations can be diagnosed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_identity: Option<TeacherIdentityV1>,
+    /// Legacy tokenizer-vocabulary assertion. `None` or an empty value means
+    /// unspecified; otherwise it must exactly match `expected_identity`.
     pub tokenizer_hash: Option<String>,
-    /// Cap on top-K. When 0, defaults to
-    /// `provider.default_max_top_k()`.
+    /// Legacy top-K assertion. Zero means unspecified; otherwise it must
+    /// exactly match `expected_identity`.
     #[serde(default)]
     pub max_top_k: usize,
-    /// Full vocabulary size — used by capabilities reporting and
-    /// kernel dispatch.
+    /// Legacy vocabulary-size assertion. Zero means unspecified; otherwise it
+    /// must exactly match `expected_identity`.
     #[serde(default)]
     pub vocab_size: usize,
     /// Reserved paid-provider cost cap. Must be `None` while vLLM is the only
@@ -134,6 +138,7 @@ fn default_timeout_ms() -> u64 {
 #[derive(Debug)]
 pub struct RemoteTeacher {
     config: RemoteTeacherConfig,
+    client: std::sync::OnceLock<reqwest::blocking::Client>,
 }
 
 impl RemoteTeacher {
@@ -141,75 +146,157 @@ impl RemoteTeacher {
     /// bounds are usable. Unsupported providers fail here, before capabilities
     /// can be observed or any job can be queued.
     pub fn new(config: RemoteTeacherConfig) -> Result<Self, LogitSourceError> {
-        if !matches!(config.provider, RemoteProvider::Vllm) {
-            return Err(LogitSourceError::invalid(
+        validate_remote_config_base(&config)?;
+        let identity = config.expected_identity.as_ref().ok_or_else(|| {
+            LogitSourceError::invalid(
                 &config.teacher_id,
-                format!(
-                    "RemoteTeacher provider {:?} is not wired; only vLLM numeric-ID prompt_logprobs is supported",
-                    config.provider
-                ),
-            ));
-        }
-        if config.teacher_id.trim().is_empty() {
-            return Err(LogitSourceError::invalid(
-                &config.teacher_id,
-                "teacher_id must be non-empty",
-            ));
-        }
-        if config.model.trim().is_empty() {
-            return Err(LogitSourceError::invalid(
-                &config.teacher_id,
-                "model must be non-empty",
-            ));
-        }
-        if config.vocab_size == 0 {
-            return Err(LogitSourceError::invalid(
-                &config.teacher_id,
-                "vocab_size must be greater than zero",
-            ));
-        }
-        if config.timeout_ms == 0 {
-            return Err(LogitSourceError::invalid(
-                &config.teacher_id,
-                "timeout_ms must be greater than zero",
-            ));
-        }
-        if config.max_cost_usd.is_some() {
-            return Err(LogitSourceError::invalid(
-                &config.teacher_id,
-                "max_cost_usd is unavailable: vLLM is self-hosted and no metered billing source is wired",
-            ));
-        }
-        vllm_completions_url(&config)?;
-        Ok(Self { config })
+                "expected_identity is required; discover and pin the authoritative remote teacher identity before use",
+            )
+        })?;
+        validate_config_identity_contract(&config, identity)?;
+        Ok(Self {
+            config,
+            client: std::sync::OnceLock::new(),
+        })
     }
 
-    /// Resolved capabilities including post-default max_top_k.
-    pub fn capabilities(&self) -> LogitSourceCaps {
-        let configured_top_k = if self.config.max_top_k == 0 {
-            self.config.provider.default_max_top_k()
-        } else {
-            // A nonzero value is an explicit assertion that the vLLM server
-            // was launched with a raised --max-logprobs setting. The identity
-            // handshake will replace this trust with a probed capability.
-            self.config.max_top_k
-        };
-        let max_top_k = configured_top_k.min(self.config.vocab_size);
-        LogitSourceCaps {
-            teacher_id: self.config.teacher_id.clone(),
-            vocab_size: self.config.vocab_size,
-            max_top_k,
-            // No wired remote adapter currently returns LogprobBatch::FullVocab.
-            supports_full_vocab: false,
-            supports_batched: true,
-            tokenizer_hash: self.config.tokenizer_hash.clone(),
+    /// Re-probe a previously pinned deployment, then construct its scoring
+    /// source. This must run at the start of every job, before consulting a
+    /// persistent cache: a registration-time probe cannot prove that the
+    /// endpoint still serves the same bytes and protocol hours later.
+    pub fn connect_pinned(config: RemoteTeacherConfig) -> Result<Self, LogitSourceError> {
+        // Validate the required pinned identity before performing network I/O.
+        let offline = Self::new(config.clone())?;
+        let expected = offline
+            .authoritative_teacher_identity()
+            .expect("RemoteTeacher::new requires a pinned identity")
+            .clone();
+        let discovered = discover_vllm_identity(&config)?;
+        if discovered != expected {
+            return Err(LogitSourceError::invalid(
+                &config.teacher_id,
+                "job-start identity probe did not match the pinned teacher identity",
+            ));
         }
+        Ok(offline)
     }
+
+    /// Capabilities derived exclusively from the pinned identity.
+    pub fn capabilities(&self) -> LogitSourceCaps {
+        let identity = self
+            .config
+            .expected_identity
+            .as_ref()
+            .expect("RemoteTeacher::new requires expected_identity");
+        capabilities_from_identity(&self.config, identity)
+    }
+}
+
+fn validate_remote_config_base(config: &RemoteTeacherConfig) -> Result<(), LogitSourceError> {
+    if !matches!(config.provider, RemoteProvider::Vllm) {
+        return Err(LogitSourceError::invalid(
+            &config.teacher_id,
+            format!(
+                "RemoteTeacher provider {:?} is not wired; only vLLM numeric-ID prompt_logprobs is supported",
+                config.provider
+            ),
+        ));
+    }
+    if config.teacher_id.trim().is_empty() {
+        return Err(LogitSourceError::invalid(
+            &config.teacher_id,
+            "teacher_id must be non-empty",
+        ));
+    }
+    if config.model.trim().is_empty() {
+        return Err(LogitSourceError::invalid(
+            &config.teacher_id,
+            "model must be non-empty",
+        ));
+    }
+    if config.timeout_ms == 0 {
+        return Err(LogitSourceError::invalid(
+            &config.teacher_id,
+            "timeout_ms must be greater than zero",
+        ));
+    }
+    if config.max_cost_usd.is_some() {
+        return Err(LogitSourceError::invalid(
+            &config.teacher_id,
+            "max_cost_usd is unavailable: vLLM is self-hosted and no metered billing source is wired",
+        ));
+    }
+    vllm_completions_url(config)?;
+    Ok(())
+}
+
+fn validate_config_identity_contract(
+    config: &RemoteTeacherConfig,
+    identity: &TeacherIdentityV1,
+) -> Result<(), LogitSourceError> {
+    if config.model != identity.served_model_id() {
+        return Err(LogitSourceError::invalid(
+            &config.teacher_id,
+            format!(
+                "configured model {:?} does not match authoritative served_model_id {:?}",
+                config.model,
+                identity.served_model_id()
+            ),
+        ));
+    }
+    if identity.max_model_len() < 3 {
+        return Err(LogitSourceError::invalid(
+            &config.teacher_id,
+            format!(
+                "authoritative max_model_len {} cannot fit the two-token identity probe plus one generation token",
+                identity.max_model_len()
+            ),
+        ));
+    }
+    if let Some(tokenizer_hash) = config
+        .tokenizer_hash
+        .as_deref()
+        .filter(|claim| !claim.is_empty())
+        && tokenizer_hash != identity.tokenizer_vocab_sha256()
+    {
+        return Err(LogitSourceError::invalid(
+            &config.teacher_id,
+            format!(
+                "legacy tokenizer_hash {tokenizer_hash:?} does not match authoritative tokenizer vocab hash {:?}",
+                identity.tokenizer_vocab_sha256()
+            ),
+        ));
+    }
+    if config.vocab_size != 0 && config.vocab_size != identity.vocab_size() as usize {
+        return Err(LogitSourceError::invalid(
+            &config.teacher_id,
+            format!(
+                "legacy vocab_size {} does not match authoritative vocab_size {}",
+                config.vocab_size,
+                identity.vocab_size()
+            ),
+        ));
+    }
+    if config.max_top_k != 0 && config.max_top_k != identity.max_top_k() as usize {
+        return Err(LogitSourceError::invalid(
+            &config.teacher_id,
+            format!(
+                "legacy max_top_k {} does not match authoritative max_top_k {}",
+                config.max_top_k,
+                identity.max_top_k()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 impl LogitSource for RemoteTeacher {
     fn capabilities(&self) -> LogitSourceCaps {
         self.capabilities()
+    }
+
+    fn authoritative_teacher_identity(&self) -> Option<&TeacherIdentityV1> {
+        self.config.expected_identity.as_ref()
     }
 
     fn fetch_logprobs(
@@ -225,7 +312,18 @@ impl LogitSource for RemoteTeacher {
         validate_logit_request(&caps, tokens, positions, Some(requested_k))?;
         match self.config.provider {
             RemoteProvider::Vllm => {
-                fetch_logprobs_vllm(&self.config, &caps, tokens, positions, requested_k)
+                let client = if let Some(client) = self.client.get() {
+                    client
+                } else {
+                    let candidate = build_vllm_http_client(&self.config)?;
+                    // A concurrent first fetch may win this race. The losing
+                    // client is dropped on this blocking worker thread.
+                    let _ = self.client.set(candidate);
+                    self.client
+                        .get()
+                        .expect("a remote teacher HTTP client was initialized")
+                };
+                fetch_logprobs_vllm(&self.config, client, &caps, tokens, positions, requested_k)
             }
             _ => Err(LogitSourceError::invalid(
                 &caps.teacher_id,
@@ -371,15 +469,56 @@ fn build_vllm_prompt_logprob_request(
                 .expect("request validation rejected empty tokens"),
         );
     }
-    // vLLM also requires the one generated-token slot below. The authoritative
-    // remote-capability handshake must enforce `sent_tokens.len() + 1` against
-    // its model context; until then, a provider context rejection is surfaced.
-    sent_tokens.len().checked_add(1).ok_or_else(|| {
+    // vLLM also requires the one generated-token slot below. Enforce the
+    // authoritative context cap after the causal final-row probe is appended.
+    let required_context = sent_tokens.len().checked_add(1).ok_or_else(|| {
         LogitSourceError::invalid(
             &caps.teacher_id,
             "vllm prompt length overflowed while reserving its required generation slot",
         )
     })?;
+    let max_model_len = cfg
+        .expected_identity
+        .as_ref()
+        .ok_or_else(|| {
+            LogitSourceError::invalid(
+                &caps.teacher_id,
+                "expected_identity is required before constructing a vllm scoring request",
+            )
+        })?
+        .max_model_len() as usize;
+    if required_context > max_model_len {
+        return Err(LogitSourceError::invalid(
+            &caps.teacher_id,
+            format!(
+                "vllm scoring request requires context length {required_context} after its causal final-row probe and generation slot; authoritative max_model_len is {max_model_len}"
+            ),
+        ));
+    }
+    let identity = cfg
+        .expected_identity
+        .as_ref()
+        .expect("pinned identity was required above");
+    let candidates_per_row = top_k.saturating_add(1).min(caps.vocab_size);
+    let response_candidates = sent_tokens
+        .len()
+        .saturating_sub(1)
+        .checked_mul(candidates_per_row)
+        .ok_or_else(|| {
+            LogitSourceError::invalid(
+                &caps.teacher_id,
+                "vllm prompt-logprob response candidate count overflowed usize",
+            )
+        })?;
+    let max_candidates = identity.max_prompt_logprob_candidates() as usize;
+    if response_candidates > max_candidates {
+        return Err(LogitSourceError::invalid(
+            &caps.teacher_id,
+            format!(
+                "vllm scoring response may contain {response_candidates} prompt-logprob candidates; authoritative max_prompt_logprob_candidates is {max_candidates}"
+            ),
+        ));
+    }
     let body = serde_json::json!({
         "model": cfg.model,
         "prompt": sent_tokens,
@@ -411,6 +550,39 @@ fn invalid_response(cfg: &RemoteTeacherConfig, message: impl Into<String>) -> Lo
     )
 }
 
+fn parse_vllm_response_identity(
+    cfg: &RemoteTeacherConfig,
+    parsed: &serde_json::Value,
+) -> Result<TeacherIdentityV1, LogitSourceError> {
+    let fingerprint = parsed
+        .get("system_fingerprint")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_response(cfg, "missing string `system_fingerprint`"))?;
+    let identity = TeacherIdentityV1::parse_fingerprint(fingerprint).map_err(|error| {
+        invalid_response(cfg, format!("malformed `system_fingerprint`: {error}"))
+    })?;
+    if identity.fingerprint() != fingerprint {
+        return Err(invalid_response(
+            cfg,
+            "`system_fingerprint` is not the canonical identity fingerprint",
+        ));
+    }
+    validate_config_identity_contract(cfg, &identity)?;
+    if let Some(expected) = cfg.expected_identity.as_ref()
+        && &identity != expected
+    {
+        return Err(invalid_response(
+            cfg,
+            format!(
+                "system_fingerprint identity {} does not match pinned identity {}",
+                identity.content_revision(),
+                expected.content_revision()
+            ),
+        ));
+    }
+    Ok(identity)
+}
+
 /// Validate a vLLM base URL and return the canonical completions endpoint.
 ///
 /// This is public so API admission and persisted-registry validation use the
@@ -421,9 +593,22 @@ pub fn normalize_vllm_completions_url(url: &str) -> Result<String, String> {
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("remote teacher URL must use http or https and include a host".to_string());
     }
+    if url.scheme() == "http" {
+        let host = url.host_str().expect("validated URL has a host");
+        let is_loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
+        if !is_loopback {
+            return Err(
+                "remote teacher URL must use HTTPS unless its host is loopback; plaintext identity and bearer credentials are not trusted over a network"
+                    .to_string(),
+            );
+        }
+    }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(
-            "remote teacher URL must not embed credentials; configure api_key_env instead"
+            "remote teacher URL must not embed credentials; use a server-configured credential handle instead"
                 .to_string(),
         );
     }
@@ -450,8 +635,79 @@ fn vllm_completions_url(cfg: &RemoteTeacherConfig) -> Result<String, LogitSource
         .map_err(|message| LogitSourceError::invalid(&cfg.teacher_id, message))
 }
 
+fn build_vllm_http_client(
+    cfg: &RemoteTeacherConfig,
+) -> Result<reqwest::blocking::Client, LogitSourceError> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(cfg.timeout_ms))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| LogitSourceError::transport(&cfg.teacher_id, error.to_string()))
+}
+
+fn authenticate_vllm_request(
+    cfg: &RemoteTeacherConfig,
+    mut request: reqwest::blocking::RequestBuilder,
+) -> Result<reqwest::blocking::RequestBuilder, LogitSourceError> {
+    if let Some(env_name) = cfg.api_key_env.as_deref() {
+        let key = std::env::var(env_name).map_err(|_| {
+            LogitSourceError::invalid(
+                &cfg.teacher_id,
+                "configured remote-teacher credential is unavailable",
+            )
+        })?;
+        if key.trim().is_empty() {
+            return Err(LogitSourceError::invalid(
+                &cfg.teacher_id,
+                "configured remote-teacher credential is empty",
+            ));
+        }
+        request = request.bearer_auth(key);
+    }
+    Ok(request)
+}
+
+fn post_vllm_json(
+    cfg: &RemoteTeacherConfig,
+    client: &reqwest::blocking::Client,
+    url: &str,
+    body: &serde_json::Value,
+    sent_prompt_tokens: usize,
+    top_k: usize,
+) -> Result<serde_json::Value, LogitSourceError> {
+    let request = authenticate_vllm_request(cfg, client.post(url).json(body))?;
+    let response = request
+        .send()
+        .map_err(|error| LogitSourceError::transport(&cfg.teacher_id, error.to_string()))?;
+    let status = response.status();
+    let body_limit = vllm_response_body_limit(sent_prompt_tokens, top_k);
+    if response
+        .content_length()
+        .is_some_and(|content_length| content_length > body_limit as u64)
+    {
+        return Err(LogitSourceError::invalid(
+            &cfg.teacher_id,
+            format!("vllm response Content-Length exceeds bounded limit of {body_limit} bytes"),
+        ));
+    }
+    let body_text = read_bounded_utf8_body(response, body_limit, &cfg.teacher_id)?;
+    if !status.is_success() {
+        let detail = if cfg.api_key_env.is_some() {
+            "authenticated response body redacted".to_string()
+        } else {
+            body_text.chars().take(400).collect::<String>()
+        };
+        return Err(LogitSourceError::invalid(
+            &cfg.teacher_id,
+            format!("vllm {url} -> {status}: {detail}"),
+        ));
+    }
+    parse_vllm_json_response(cfg, &body_text)
+}
+
 fn parse_prompt_logprob_candidate(
     cfg: &RemoteTeacherConfig,
+    vocab_size: usize,
     target_pos: usize,
     raw_id: &str,
     value: &serde_json::Value,
@@ -468,12 +724,12 @@ fn parse_prompt_logprob_candidate(
             format!("prompt_logprobs[{target_pos}] token key {raw_id:?} is not canonical decimal"),
         ));
     }
-    if token_id as usize >= cfg.vocab_size {
+    if token_id as usize >= vocab_size {
         return Err(invalid_response(
             cfg,
             format!(
                 "prompt_logprobs[{target_pos}] token id {token_id} is outside vocab size {}",
-                cfg.vocab_size
+                vocab_size
             ),
         ));
     }
@@ -536,12 +792,12 @@ fn parse_prompt_logprob_candidate(
             format!("prompt_logprobs[{target_pos}][{raw_id:?}].rank {rank_u64} does not fit usize"),
         )
     })?;
-    if rank == 0 || rank > cfg.vocab_size {
+    if rank == 0 || rank > vocab_size {
         return Err(invalid_response(
             cfg,
             format!(
                 "prompt_logprobs[{target_pos}][{raw_id:?}].rank {rank} is outside 1..={}",
-                cfg.vocab_size
+                vocab_size
             ),
         ));
     }
@@ -599,7 +855,8 @@ fn parse_prompt_logprob_target(
     let mut observed = None;
     let mut response_probability_mass = 0.0f64;
     for (raw_id, value) in object {
-        let candidate = parse_prompt_logprob_candidate(cfg, target_pos, raw_id, value)?;
+        let candidate =
+            parse_prompt_logprob_candidate(cfg, caps.vocab_size, target_pos, raw_id, value)?;
         response_probability_mass += candidate.source_logprob.exp();
         if !seen_ids.insert(candidate.token_id) {
             return Err(invalid_response(
@@ -747,6 +1004,19 @@ fn parse_vllm_prompt_logprob_response(
     parsed: &serde_json::Value,
 ) -> Result<TopKLogprobs, LogitSourceError> {
     validate_logit_request(caps, sent_tokens, positions, Some(top_k))?;
+    let expected_identity = cfg.expected_identity.as_ref().ok_or_else(|| {
+        LogitSourceError::invalid(
+            &cfg.teacher_id,
+            "expected_identity is required before accepting a vllm scoring response",
+        )
+    })?;
+    let response_identity = parse_vllm_response_identity(cfg, parsed)?;
+    if &response_identity != expected_identity {
+        return Err(invalid_response(
+            cfg,
+            "system_fingerprint changed while validating the scoring response",
+        ));
+    }
     if parsed.get("object").and_then(serde_json::Value::as_str) != Some("text_completion") {
         return Err(invalid_response(
             cfg,
@@ -864,6 +1134,98 @@ fn parse_vllm_prompt_logprob_response(
     Ok(batch)
 }
 
+fn identity_probe_request(cfg: &RemoteTeacherConfig, top_k: usize) -> VllmPromptLogprobRequest {
+    let sent_tokens = vec![0, 0];
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "prompt": sent_tokens,
+        "max_tokens": 1,
+        "temperature": 0.0,
+        "prompt_logprobs": top_k,
+        "n": 1,
+        "stream": false,
+        "add_special_tokens": false,
+    });
+    VllmPromptLogprobRequest { body, sent_tokens }
+}
+
+fn capabilities_from_identity(
+    cfg: &RemoteTeacherConfig,
+    identity: &TeacherIdentityV1,
+) -> LogitSourceCaps {
+    LogitSourceCaps {
+        teacher_id: cfg.teacher_id.clone(),
+        vocab_size: identity.vocab_size() as usize,
+        max_top_k: identity.max_top_k() as usize,
+        supports_full_vocab: false,
+        supports_batched: true,
+        tokenizer_hash: Some(identity.tokenizer_vocab_sha256().to_owned()),
+    }
+}
+
+/// Discover and operationally verify a vLLM teacher's authoritative identity.
+///
+/// Discovery is deliberately a prompt-logprob request, not a metadata-only
+/// endpoint: the first response establishes the canonical identity and the
+/// second requests exactly its advertised maximum top-K. Both responses must
+/// carry the same `system_fingerprint`, so registration cannot pin a capability
+/// document that the scoring path does not actually honor.
+pub fn discover_vllm_identity(
+    config: &RemoteTeacherConfig,
+) -> Result<TeacherIdentityV1, LogitSourceError> {
+    validate_remote_config_base(config)?;
+    if let Some(expected) = config.expected_identity.as_ref() {
+        validate_config_identity_contract(config, expected)?;
+    }
+    let url = vllm_completions_url(config)?;
+    let client = build_vllm_http_client(config)?;
+
+    let discovery_probe = identity_probe_request(config, 1);
+    let discovery_response = post_vllm_json(
+        config,
+        &client,
+        &url,
+        &discovery_probe.body,
+        discovery_probe.sent_tokens.len(),
+        1,
+    )?;
+    let identity = parse_vllm_response_identity(config, &discovery_response)?;
+
+    let mut pinned_config = config.clone();
+    pinned_config.expected_identity = Some(identity.clone());
+    validate_config_identity_contract(&pinned_config, &identity)?;
+    let caps = capabilities_from_identity(&pinned_config, &identity);
+    parse_vllm_prompt_logprob_response(
+        &pinned_config,
+        &caps,
+        &discovery_probe.sent_tokens,
+        &[0],
+        1,
+        &discovery_response,
+    )?;
+
+    let advertised_top_k = identity.max_top_k() as usize;
+    let capability_probe = identity_probe_request(&pinned_config, advertised_top_k);
+    let capability_response = post_vllm_json(
+        &pinned_config,
+        &client,
+        &url,
+        &capability_probe.body,
+        capability_probe.sent_tokens.len(),
+        advertised_top_k,
+    )?;
+    parse_vllm_prompt_logprob_response(
+        &pinned_config,
+        &caps,
+        &capability_probe.sent_tokens,
+        &[0],
+        advertised_top_k,
+        &capability_response,
+    )?;
+
+    Ok(identity)
+}
+
 /// vLLM `/v1/completions` `prompt_logprobs` implementation.
 ///
 /// vLLM exposes top-K logprobs at every prompt position via:
@@ -878,6 +1240,7 @@ fn parse_vllm_prompt_logprob_response(
 /// The first entry is `null` (no logprob for the BOS token).
 fn fetch_logprobs_vllm(
     cfg: &RemoteTeacherConfig,
+    client: &reqwest::blocking::Client,
     caps: &LogitSourceCaps,
     tokens: &[u32],
     positions: &[usize],
@@ -894,53 +1257,14 @@ fn fetch_logprobs_vllm(
         return Ok(LogprobBatch::TopK(batch));
     }
     let url = vllm_completions_url(cfg)?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_millis(cfg.timeout_ms))
-        .build()
-        .map_err(|e| LogitSourceError::transport(&cfg.teacher_id, e.to_string()))?;
-    let mut req = client.post(&url).json(&prepared.body);
-    if let Some(env_name) = cfg.api_key_env.as_deref() {
-        let key = std::env::var(env_name).map_err(|_| {
-            LogitSourceError::invalid(
-                &cfg.teacher_id,
-                format!("configured API-key environment variable {env_name:?} is not set"),
-            )
-        })?;
-        if key.trim().is_empty() {
-            return Err(LogitSourceError::invalid(
-                &cfg.teacher_id,
-                format!("configured API-key environment variable {env_name:?} is empty"),
-            ));
-        }
-        req = req.bearer_auth(key);
-    }
-    let resp = req
-        .send()
-        .map_err(|e| LogitSourceError::transport(&cfg.teacher_id, e.to_string()))?;
-    let status = resp.status();
-    let body_limit = vllm_response_body_limit(prepared.sent_tokens.len(), top_k);
-    if resp
-        .content_length()
-        .is_some_and(|content_length| content_length > body_limit as u64)
-    {
-        return Err(LogitSourceError::invalid(
-            &cfg.teacher_id,
-            format!("vllm response Content-Length exceeds bounded limit of {body_limit} bytes"),
-        ));
-    }
-    let body_text = read_bounded_utf8_body(resp, body_limit, &cfg.teacher_id)?;
-    if !status.is_success() {
-        return Err(LogitSourceError::invalid(
-            &cfg.teacher_id,
-            format!(
-                "vllm {} → {}: {}",
-                url,
-                status,
-                body_text.chars().take(400).collect::<String>()
-            ),
-        ));
-    }
-    let parsed = parse_vllm_json_response(cfg, &body_text)?;
+    let parsed = post_vllm_json(
+        cfg,
+        client,
+        &url,
+        &prepared.body,
+        prepared.sent_tokens.len(),
+        top_k,
+    )?;
     parse_vllm_prompt_logprob_response(cfg, caps, &prepared.sent_tokens, positions, top_k, &parsed)
         .map(LogprobBatch::TopK)
 }
@@ -988,20 +1312,418 @@ fn read_bounded_utf8_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc;
+    use std::thread;
+
+    const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const HASH_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    fn teacher_identity(model: &str, max_top_k: u32) -> TeacherIdentityV1 {
+        TeacherIdentityV1::new(
+            model,
+            HASH_A,
+            HASH_B,
+            HASH_C,
+            None,
+            128,
+            max_top_k,
+            4096,
+            1_000_000,
+            "vllm-test",
+            HASH_A,
+        )
+        .unwrap()
+    }
+
+    fn teacher_identity_with_inference_hash(
+        model: &str,
+        max_top_k: u32,
+        inference_hash: &str,
+    ) -> TeacherIdentityV1 {
+        TeacherIdentityV1::new(
+            model,
+            HASH_A,
+            HASH_B,
+            HASH_C,
+            None,
+            128,
+            max_top_k,
+            4096,
+            1_000_000,
+            "vllm-test",
+            inference_hash,
+        )
+        .unwrap()
+    }
+
+    #[derive(Debug)]
+    struct CapturedHttpRequest {
+        request_line: String,
+        headers: HashMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    #[derive(Debug)]
+    struct TestHttpResponse {
+        status: &'static str,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    fn read_http_request(stream: &TcpStream) -> CapturedHttpRequest {
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut headers = HashMap::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            let (name, value) = line.split_once(':').unwrap();
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+        }
+        let content_length = headers
+            .get("content-length")
+            .map(|value| value.parse::<usize>().unwrap())
+            .unwrap_or(0);
+        let mut body = vec![0; content_length];
+        std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+        CapturedHttpRequest {
+            request_line: request_line.trim_end().to_owned(),
+            headers,
+            body,
+        }
+    }
+
+    fn spawn_http_sequence(
+        responses: Vec<TestHttpResponse>,
+    ) -> (
+        String,
+        mpsc::Receiver<CapturedHttpRequest>,
+        thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                sender.send(read_http_request(&stream)).unwrap();
+                let mut headers = response.headers;
+                headers.push(("Content-Length".into(), response.body.len().to_string()));
+                headers.push(("Connection".into(), "close".into()));
+                write!(stream, "HTTP/1.1 {}\r\n", response.status).unwrap();
+                for (name, value) in headers {
+                    write!(stream, "{name}: {value}\r\n").unwrap();
+                }
+                write!(stream, "\r\n{}", response.body).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        (format!("http://{address}"), receiver, handle)
+    }
+
+    fn json_response(body: serde_json::Value) -> TestHttpResponse {
+        TestHttpResponse {
+            status: "200 OK",
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: serde_json::to_string(&body).unwrap(),
+        }
+    }
+
+    fn probe_response(
+        identity: &TeacherIdentityV1,
+        top_k: usize,
+        fingerprint: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut entries = Vec::with_capacity(top_k);
+        for token_id in 0..top_k {
+            entries.push((token_id as u32, -2.0 - token_id as f64, token_id as u64 + 1));
+        }
+        serde_json::json!({
+            "object": "text_completion",
+            "model": identity.served_model_id(),
+            "system_fingerprint": fingerprint,
+            "choices": [{
+                "index": 0,
+                "prompt_logprobs": [null, prompt_row(&entries)],
+            }],
+            "usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 1,
+                "total_tokens": 3,
+            },
+        })
+    }
+
+    fn pinned_loopback_config(url: String, identity: TeacherIdentityV1) -> RemoteTeacherConfig {
+        RemoteTeacherConfig {
+            provider: RemoteProvider::Vllm,
+            model: identity.served_model_id().to_owned(),
+            url,
+            api_key_env: None,
+            teacher_id: "loopback@test".into(),
+            expected_identity: Some(identity),
+            tokenizer_hash: None,
+            max_top_k: 0,
+            vocab_size: 0,
+            max_cost_usd: None,
+            timeout_ms: 5_000,
+        }
+    }
 
     fn vllm_config() -> RemoteTeacherConfig {
+        let identity = teacher_identity("teacher-model", 8);
         RemoteTeacherConfig {
             provider: RemoteProvider::Vllm,
             model: "teacher-model".into(),
             url: "http://127.0.0.1:9".into(),
             api_key_env: None,
             teacher_id: "teacher@test".into(),
-            tokenizer_hash: Some("tokenizer-test".into()),
+            expected_identity: Some(identity),
+            tokenizer_hash: Some(HASH_B.into()),
             max_top_k: 8,
             vocab_size: 128,
             max_cost_usd: None,
             timeout_ms: 10,
         }
+    }
+
+    #[test]
+    fn discovery_pins_canonical_identity_and_probes_advertised_top_k() {
+        let identity = teacher_identity("teacher-model", 3);
+        let fingerprint = serde_json::Value::String(identity.fingerprint());
+        let responses = vec![
+            json_response(probe_response(&identity, 1, fingerprint.clone())),
+            json_response(probe_response(&identity, 3, fingerprint)),
+        ];
+        let (url, requests, server) = spawn_http_sequence(responses);
+        let mut config = pinned_loopback_config(url, identity.clone());
+        config.expected_identity = None;
+
+        let discovered = discover_vllm_identity(&config).unwrap();
+        assert_eq!(discovered, identity);
+        let first = requests.recv().unwrap();
+        let second = requests.recv().unwrap();
+        server.join().unwrap();
+
+        assert_eq!(first.request_line, "POST /v1/completions HTTP/1.1");
+        assert_eq!(second.request_line, "POST /v1/completions HTTP/1.1");
+        for request in [&first, &second] {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["prompt"], serde_json::json!([0, 0]));
+            assert_eq!(body["add_special_tokens"], false);
+            assert_eq!(body["max_tokens"], 1);
+        }
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&first.body).unwrap()["prompt_logprobs"],
+            1
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&second.body).unwrap()["prompt_logprobs"],
+            3
+        );
+    }
+
+    #[test]
+    fn discovery_rejects_identity_drift_between_probe_requests() {
+        let first_identity = teacher_identity_with_inference_hash("teacher-model", 3, HASH_A);
+        let drifted_identity = teacher_identity_with_inference_hash("teacher-model", 3, HASH_C);
+        let responses = vec![
+            json_response(probe_response(
+                &first_identity,
+                1,
+                serde_json::Value::String(first_identity.fingerprint()),
+            )),
+            json_response(probe_response(
+                &drifted_identity,
+                3,
+                serde_json::Value::String(drifted_identity.fingerprint()),
+            )),
+        ];
+        let (url, requests, server) = spawn_http_sequence(responses);
+        let mut config = pinned_loopback_config(url, first_identity);
+        config.expected_identity = None;
+
+        let error = discover_vllm_identity(&config).unwrap_err().to_string();
+        assert!(error.contains("does not match pinned identity"), "{error}");
+        requests.recv().unwrap();
+        requests.recv().unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn discovery_rejects_a_response_that_differs_from_preconfigured_identity() {
+        let expected = teacher_identity_with_inference_hash("teacher-model", 3, HASH_A);
+        let observed = teacher_identity_with_inference_hash("teacher-model", 3, HASH_C);
+        let response = json_response(probe_response(
+            &observed,
+            1,
+            serde_json::Value::String(observed.fingerprint()),
+        ));
+        let (url, requests, server) = spawn_http_sequence(vec![response]);
+        let config = pinned_loopback_config(url, expected);
+
+        let error = discover_vllm_identity(&config).unwrap_err().to_string();
+        assert!(error.contains("does not match pinned identity"), "{error}");
+        requests.recv().unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn connect_pinned_revalidates_before_returning_a_source() {
+        let identity = teacher_identity("teacher-model", 3);
+        let fingerprint = serde_json::Value::String(identity.fingerprint());
+        let responses = vec![
+            json_response(probe_response(&identity, 1, fingerprint.clone())),
+            json_response(probe_response(&identity, 3, fingerprint)),
+        ];
+        let (url, requests, server) = spawn_http_sequence(responses);
+        let config = pinned_loopback_config(url, identity.clone());
+
+        let connected = RemoteTeacher::connect_pinned(config).unwrap();
+        assert_eq!(connected.authoritative_teacher_identity(), Some(&identity));
+        requests.recv().unwrap();
+        requests.recv().unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn scoring_rejects_missing_malformed_stock_and_mismatched_fingerprints() {
+        let identity = teacher_identity("teacher-model", 3);
+        let mismatch = teacher_identity_with_inference_hash("teacher-model", 3, HASH_C);
+        let cases = [
+            ("missing", None, "missing string `system_fingerprint`"),
+            (
+                "null",
+                Some(serde_json::Value::Null),
+                "missing string `system_fingerprint`",
+            ),
+            (
+                "default",
+                Some(serde_json::Value::String("default".into())),
+                "malformed `system_fingerprint`",
+            ),
+            (
+                "stock",
+                Some(serde_json::Value::String("vllm".into())),
+                "malformed `system_fingerprint`",
+            ),
+            (
+                "malformed",
+                Some(serde_json::Value::String(
+                    "kiln-teacher-v1.invalid.invalid".into(),
+                )),
+                "malformed `system_fingerprint`",
+            ),
+            (
+                "mismatch",
+                Some(serde_json::Value::String(mismatch.fingerprint())),
+                "does not match pinned identity",
+            ),
+        ];
+
+        for (name, fingerprint, needle) in cases {
+            let mut body = probe_response(
+                &identity,
+                1,
+                fingerprint.clone().unwrap_or(serde_json::Value::Null),
+            );
+            if fingerprint.is_none() {
+                body.as_object_mut().unwrap().remove("system_fingerprint");
+            }
+            let (url, requests, server) = spawn_http_sequence(vec![json_response(body)]);
+            let teacher =
+                RemoteTeacher::new(pinned_loopback_config(url, identity.clone())).unwrap();
+            let error = teacher
+                .fetch_logprobs(&[0, 0], &[0], Some(1))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(needle),
+                "{name}: {error:?} did not contain {needle:?}"
+            );
+            requests.recv().unwrap();
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn scoring_accepts_only_the_exact_pinned_fingerprint() {
+        let identity = teacher_identity("teacher-model", 3);
+        let body = probe_response(
+            &identity,
+            1,
+            serde_json::Value::String(identity.fingerprint()),
+        );
+        let (url, requests, server) = spawn_http_sequence(vec![json_response(body)]);
+        let teacher = RemoteTeacher::new(pinned_loopback_config(url, identity)).unwrap();
+        let LogprobBatch::TopK(batch) = teacher.fetch_logprobs(&[0, 0], &[0], Some(1)).unwrap()
+        else {
+            panic!("expected top-K response")
+        };
+        assert_eq!(batch.indices, [0]);
+        requests.recv().unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn discovery_refuses_redirects_without_replaying_credentials_or_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let first = read_http_request(&stream);
+            write!(
+                stream,
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{address}/redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            drop(stream);
+
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            let mut redirected = None;
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        redirected = Some(read_http_request(&stream));
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("redirect listener failed: {error}"),
+                }
+            }
+            sender.send((first, redirected)).unwrap();
+        });
+
+        let identity = teacher_identity("teacher-model", 3);
+        let mut config = pinned_loopback_config(format!("http://{address}"), identity);
+        config.expected_identity = None;
+        config.api_key_env = Some("HOME".into());
+        let error = discover_vllm_identity(&config).unwrap_err().to_string();
+        assert!(error.contains("307 Temporary Redirect"), "{error}");
+
+        let (first, redirected) = receiver.recv().unwrap();
+        server.join().unwrap();
+        assert!(first.headers.contains_key("authorization"));
+        assert!(!first.body.is_empty());
+        assert!(
+            redirected.is_none(),
+            "redirect target received a replayed request: {redirected:?}"
+        );
     }
 
     fn candidate(logprob: serde_json::Value, rank: serde_json::Value) -> serde_json::Value {
@@ -1028,6 +1750,7 @@ mod tests {
         serde_json::json!({
             "object": "text_completion",
             "model": cfg.model,
+            "system_fingerprint": cfg.expected_identity.as_ref().unwrap().fingerprint(),
             "choices": [{
                 "index": 0,
                 "prompt_logprobs": [
@@ -1103,6 +1826,68 @@ mod tests {
     }
 
     #[test]
+    fn request_builder_enforces_identity_context_after_causal_probe() {
+        let mut cfg = vllm_config();
+        cfg.expected_identity = Some(
+            TeacherIdentityV1::new(
+                &cfg.model,
+                HASH_A,
+                HASH_B,
+                HASH_C,
+                None,
+                128,
+                8,
+                4,
+                128,
+                "vllm-test",
+                HASH_A,
+            )
+            .unwrap(),
+        );
+        let caps = RemoteTeacher::new(cfg.clone()).unwrap().capabilities();
+        let tokens = [10, 20, 30];
+
+        build_vllm_prompt_logprob_request(&cfg, &caps, &tokens, &[0], 2).unwrap();
+        let error = build_vllm_prompt_logprob_request(&cfg, &caps, &tokens, &[2], 2)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires context length 5"), "{error}");
+        assert!(error.contains("max_model_len is 4"), "{error}");
+    }
+
+    #[test]
+    fn request_builder_enforces_identity_response_candidate_cap() {
+        let mut cfg = vllm_config();
+        cfg.expected_identity = Some(
+            TeacherIdentityV1::new(
+                &cfg.model,
+                HASH_A,
+                HASH_B,
+                HASH_C,
+                None,
+                128,
+                8,
+                4096,
+                9,
+                "vllm-test",
+                HASH_A,
+            )
+            .unwrap(),
+        );
+        let caps = RemoteTeacher::new(cfg.clone()).unwrap().capabilities();
+
+        build_vllm_prompt_logprob_request(&cfg, &caps, &[10, 20], &[0], 8).unwrap();
+        let error = build_vllm_prompt_logprob_request(&cfg, &caps, &[10, 20, 30], &[0], 8)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("may contain 18"), "{error}");
+        assert!(
+            error.contains("max_prompt_logprob_candidates is 9"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn request_builder_rejects_invalid_tokens_positions_vocab_and_k() {
         let cfg = vllm_config();
         let caps = RemoteTeacher::new(cfg.clone()).unwrap().capabilities();
@@ -1119,10 +1904,10 @@ mod tests {
             assert!(err.contains(needle), "{err:?} did not contain {needle:?}");
         }
 
-        let mut zero_vocab_cfg = cfg.clone();
-        zero_vocab_cfg.vocab_size = 0;
-        let err = RemoteTeacher::new(zero_vocab_cfg).unwrap_err().to_string();
-        assert!(err.contains("vocab"), "{err}");
+        let mut unpinned_cfg = cfg.clone();
+        unpinned_cfg.expected_identity = None;
+        let err = RemoteTeacher::new(unpinned_cfg).unwrap_err().to_string();
+        assert!(err.contains("expected_identity"), "{err}");
     }
 
     #[test]
@@ -1193,6 +1978,10 @@ mod tests {
                 "http://localhost:8000/v1/completions",
                 "http://localhost:8000/v1/completions",
             ),
+            (
+                "https://teacher.example.com",
+                "https://teacher.example.com/v1/completions",
+            ),
         ] {
             cfg.url = base.into();
             assert_eq!(vllm_completions_url(&cfg).unwrap(), expected);
@@ -1206,6 +1995,8 @@ mod tests {
             "ftp://localhost/model",
             "http://",
             "http://user:secret@localhost:8000",
+            "http://teacher.example.com",
+            "http://192.0.2.1:8000",
         ] {
             cfg.url = invalid.into();
             assert!(
@@ -1250,8 +2041,37 @@ mod tests {
             .fetch_logprobs(&[10, 20], &[0], Some(2))
             .unwrap_err()
             .to_string();
-        assert!(error.contains(&env_name), "{error}");
-        assert!(error.contains("is not set"), "{error}");
+        assert!(!error.contains(&env_name), "{error}");
+        assert!(error.contains("credential is unavailable"), "{error}");
+    }
+
+    #[test]
+    fn authenticated_error_never_reflects_response_body_or_env_name() {
+        let secret = "kiln-test-secret-must-not-escape";
+        let env_name = format!("KILN_TEST_REMOTE_TEACHER_REFLECTION_{}", std::process::id());
+        // SAFETY: the unique process-scoped test name is removed before return.
+        unsafe { std::env::set_var(&env_name, secret) };
+        let (url, _requests, server) = spawn_http_sequence(vec![TestHttpResponse {
+            status: "401 Unauthorized",
+            headers: vec![("Content-Type".into(), "text/plain".into())],
+            body: format!("Authorization: Bearer {secret}"),
+        }]);
+        let mut cfg = pinned_loopback_config(url, teacher_identity("teacher-model", 8));
+        cfg.api_key_env = Some(env_name.clone());
+        let error = RemoteTeacher::new(cfg)
+            .unwrap()
+            .fetch_logprobs(&[10, 20], &[0], Some(2))
+            .unwrap_err()
+            .to_string();
+        server.join().unwrap();
+        unsafe { std::env::remove_var(&env_name) };
+
+        assert!(
+            error.contains("authenticated response body redacted"),
+            "{error}"
+        );
+        assert!(!error.contains(secret), "{error}");
+        assert!(!error.contains(&env_name), "{error}");
     }
 
     #[test]
@@ -1364,6 +2184,22 @@ mod tests {
     }
 
     #[test]
+    fn strict_json_parser_rejects_duplicate_identity_fingerprints() {
+        let cfg = vllm_config();
+        let fingerprint = cfg.expected_identity.as_ref().unwrap().fingerprint();
+        let raw = format!(
+            r#"{{"system_fingerprint":{fingerprint:?},"system_fingerprint":{fingerprint:?}}}"#
+        );
+        let error = parse_vllm_json_response(&cfg, &raw)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("duplicate JSON object key \"system_fingerprint\""),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn parser_accepts_the_causal_probe_for_the_original_final_logits_row() {
         let cfg = vllm_config();
         let caps = RemoteTeacher::new(cfg.clone()).unwrap().capabilities();
@@ -1372,6 +2208,7 @@ mod tests {
         let response = serde_json::json!({
             "object": "text_completion",
             "model": cfg.model,
+            "system_fingerprint": cfg.expected_identity.as_ref().unwrap().fingerprint(),
             "choices": [{
                 "index": 0,
                 "prompt_logprobs": [
@@ -1652,55 +2489,55 @@ mod tests {
 
     #[test]
     fn caps_honor_explicit_operator_raised_vllm_cap() {
-        // Explicit vLLM configuration records an operator-raised server cap.
-        let cfg = RemoteTeacherConfig {
-            provider: RemoteProvider::Vllm,
-            model: "any".into(),
-            url: "http://127.0.0.1:8000".into(),
-            api_key_env: None,
-            teacher_id: "vllm@test".into(),
-            tokenizer_hash: None,
-            max_top_k: 32,
-            vocab_size: 50000,
-            max_cost_usd: None,
-            timeout_ms: 30_000,
-        };
+        let mut cfg = vllm_config();
+        cfg.expected_identity = Some(teacher_identity("teacher-model", 32));
+        cfg.max_top_k = 32;
         let t = RemoteTeacher::new(cfg).unwrap();
         assert_eq!(t.capabilities().max_top_k, 32);
     }
 
     #[test]
-    fn caps_use_provider_default_when_user_unspecified() {
-        let cfg = RemoteTeacherConfig {
-            provider: RemoteProvider::Vllm,
-            model: "any".into(),
-            url: "http://127.0.0.1:8000".into(),
-            api_key_env: None,
-            teacher_id: "vllm@test".into(),
-            tokenizer_hash: None,
-            max_top_k: 0, // unspecified
-            vocab_size: 152064,
-            max_cost_usd: None,
-            timeout_ms: 30_000,
-        };
+    fn caps_use_identity_when_legacy_claims_are_unspecified() {
+        let mut cfg = vllm_config();
+        cfg.max_top_k = 0;
+        cfg.vocab_size = 0;
+        cfg.tokenizer_hash = None;
         let t = RemoteTeacher::new(cfg).unwrap();
-        assert_eq!(t.capabilities().max_top_k, 20);
+        assert_eq!(t.capabilities().max_top_k, 8);
+        assert_eq!(t.capabilities().vocab_size, 128);
+        assert_eq!(t.capabilities().tokenizer_hash.as_deref(), Some(HASH_B));
+    }
+
+    #[test]
+    fn constructor_rejects_legacy_capability_claims_that_conflict_with_identity() {
+        let mut cases = Vec::new();
+
+        let mut cfg = vllm_config();
+        cfg.tokenizer_hash = Some(HASH_C.into());
+        cases.push((cfg, "legacy tokenizer_hash"));
+
+        let mut cfg = vllm_config();
+        cfg.vocab_size = 127;
+        cases.push((cfg, "legacy vocab_size"));
+
+        let mut cfg = vllm_config();
+        cfg.max_top_k = 7;
+        cases.push((cfg, "legacy max_top_k"));
+
+        for (cfg, needle) in cases {
+            let error = RemoteTeacher::new(cfg).unwrap_err().to_string();
+            assert!(
+                error.contains(needle),
+                "{error:?} did not contain {needle:?}"
+            );
+        }
     }
 
     #[test]
     fn constructor_rejects_unenforceable_cost_cap() {
-        let cfg = RemoteTeacherConfig {
-            provider: RemoteProvider::Vllm,
-            model: "any".into(),
-            url: "http://127.0.0.1:8000".into(),
-            api_key_env: None,
-            teacher_id: "vllm@costtest".into(),
-            tokenizer_hash: None,
-            max_top_k: 20,
-            vocab_size: 152064,
-            max_cost_usd: Some(1.00),
-            timeout_ms: 30_000,
-        };
+        let mut cfg = vllm_config();
+        cfg.teacher_id = "vllm@costtest".into();
+        cfg.max_cost_usd = Some(1.00);
         let err = RemoteTeacher::new(cfg).unwrap_err();
         match err {
             LogitSourceError::Invalid {
@@ -1717,24 +2554,17 @@ mod tests {
 
     #[test]
     fn fetch_rejects_topk_above_caps_cap() {
-        let cfg = RemoteTeacherConfig {
-            provider: RemoteProvider::Vllm,
-            model: "any".into(),
-            url: "http://127.0.0.1:8000".into(),
-            api_key_env: None,
-            teacher_id: "vllm@cap".into(),
-            tokenizer_hash: None,
-            max_top_k: 0,
-            vocab_size: 50000,
-            max_cost_usd: None,
-            timeout_ms: 30_000,
-        };
+        let mut cfg = vllm_config();
+        cfg.teacher_id = "vllm@cap".into();
+        cfg.max_top_k = 0;
+        cfg.vocab_size = 0;
+        cfg.tokenizer_hash = None;
         let t = RemoteTeacher::new(cfg).unwrap();
         let err = t.fetch_logprobs(&[1, 2, 3], &[1], Some(32)).unwrap_err();
         match err {
             LogitSourceError::TopKExceedsCap { requested, cap, .. } => {
                 assert_eq!(requested, 32);
-                assert_eq!(cap, 20);
+                assert_eq!(cap, 8);
             }
             other => panic!("expected TopKExceedsCap, got {other:?}"),
         }

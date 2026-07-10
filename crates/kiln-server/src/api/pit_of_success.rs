@@ -214,6 +214,7 @@ async fn submit_front_door(
             QueueEntry {
                 job_id: job_id.clone(),
                 reserved_bytes: 0,
+                teacher_bindings: Vec::new(),
                 job: queued,
             },
         )],

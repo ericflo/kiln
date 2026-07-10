@@ -11,6 +11,7 @@
 //! 3. `./kiln.toml` in the current working directory (if it exists)
 //! 4. No file — use defaults only
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -137,6 +138,10 @@ pub struct KilnConfig {
     pub speculative: SpeculativeDecodingConfig,
     pub streaming_prefill: StreamingPrefillConfig,
     pub adapters: AdaptersConfig,
+    /// Remote-teacher credentials. API clients refer to these entries by
+    /// opaque id; only this server-owned configuration can name a secret
+    /// environment variable or authorize the origin that receives it.
+    pub teachers: TeachersConfig,
     /// Eval subsystem configuration. `None` means "use defaults" — the
     /// server still wires the eval API; only the on-disk suite registry
     /// location is left at its default `<adapter_dir>/.eval/suites`.
@@ -150,6 +155,162 @@ pub struct KilnConfig {
     /// the weekly loop stays manual (`kiln self-improve`).
     #[serde(default)]
     pub agent: Option<AgentConfig>,
+}
+
+/// `[teachers]` remote-teacher trust configuration.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TeachersConfig {
+    /// Credential handles keyed by the id accepted by `POST /v1/teachers`.
+    pub credentials: BTreeMap<String, TeacherCredentialConfig>,
+}
+
+/// One server-owned bearer credential and its exact authorized origin.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TeacherCredentialConfig {
+    /// Canonical `scheme://host[:port]` origin. HTTPS is required unless the
+    /// host is loopback.
+    pub origin: String,
+    /// Trusted environment-variable name. The secret itself is never stored in
+    /// config, AppState, the teacher registry, responses, or receipts.
+    pub api_key_env: String,
+}
+
+impl TeachersConfig {
+    /// Resolve an API-visible credential handle to the trusted environment
+    /// variable for one teacher URL. A handle can never be replayed to a
+    /// different origin. Credential-free teachers are intentionally restricted
+    /// to loopback.
+    pub fn resolve_api_key_env(
+        &self,
+        credential_id: Option<&str>,
+        teacher_url: &str,
+    ) -> std::result::Result<Option<String>, String> {
+        let requested_origin = canonical_teacher_origin(teacher_url)?;
+        let Some(credential_id) = credential_id else {
+            if teacher_url_is_loopback(teacher_url)? {
+                return Ok(None);
+            }
+            return Err(
+                "non-loopback remote teachers require a server-configured credential_id"
+                    .to_string(),
+            );
+        };
+        validate_teacher_credential_id(credential_id)?;
+        let credential = self.credentials.get(credential_id).ok_or_else(|| {
+            format!("teacher credential_id {credential_id:?} is not configured on this server")
+        })?;
+        credential.validate_definition(credential_id)?;
+        if credential.origin != requested_origin {
+            return Err(format!(
+                "teacher credential_id {credential_id:?} is not authorized for origin {requested_origin:?}"
+            ));
+        }
+        let secret_available =
+            std::env::var(&credential.api_key_env).is_ok_and(|value| !value.trim().is_empty());
+        if !secret_available {
+            return Err(format!(
+                "teacher credential_id {credential_id:?} is unavailable because its server-configured secret is missing or empty"
+            ));
+        }
+        Ok(Some(credential.api_key_env.clone()))
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (credential_id, credential) in &self.credentials {
+            validate_teacher_credential_id(credential_id)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| {
+                    format!("invalid teachers.credentials.{credential_id} credential id")
+                })?;
+            credential
+                .validate_definition(credential_id)
+                .map_err(anyhow::Error::msg)?;
+            let secret = std::env::var(&credential.api_key_env).with_context(|| {
+                format!(
+                    "teachers.credentials.{credential_id}.api_key_env names an environment variable that is not set"
+                )
+            })?;
+            if secret.trim().is_empty() {
+                anyhow::bail!(
+                    "teachers.credentials.{credential_id}.api_key_env names an environment variable whose value is empty"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl TeacherCredentialConfig {
+    fn validate_definition(&self, credential_id: &str) -> std::result::Result<(), String> {
+        validate_teacher_api_key_env_name(&self.api_key_env).map_err(|message| {
+            format!("teachers.credentials.{credential_id}.api_key_env {message}")
+        })?;
+        let canonical = canonical_teacher_origin(&self.origin)?;
+        if self.origin != canonical {
+            return Err(format!(
+                "teachers.credentials.{credential_id}.origin must be the exact canonical origin {canonical:?}"
+            ));
+        }
+        let parsed = reqwest::Url::parse(&self.origin)
+            .map_err(|error| format!("invalid teacher credential origin: {error}"))?;
+        if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(format!(
+                "teachers.credentials.{credential_id}.origin must not contain a path, query, or fragment"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Canonical origin used for exact credential scoping.
+pub fn canonical_teacher_origin(url: &str) -> std::result::Result<String, String> {
+    kiln_train::normalize_vllm_completions_url(url)?;
+    let parsed = reqwest::Url::parse(url.trim())
+        .map_err(|error| format!("remote teacher URL {url:?} is invalid: {error}"))?;
+    Ok(parsed.origin().ascii_serialization())
+}
+
+fn teacher_url_is_loopback(url: &str) -> std::result::Result<bool, String> {
+    let parsed = reqwest::Url::parse(url.trim())
+        .map_err(|error| format!("remote teacher URL {url:?} is invalid: {error}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "remote teacher URL must include a host".to_string())?;
+    Ok(host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback()))
+}
+
+pub fn validate_teacher_credential_id(id: &str) -> std::result::Result<(), String> {
+    let valid = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+    if !valid {
+        return Err(
+            "teacher credential_id must be 1..=64 ASCII letters, digits, '_' or '-'".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_teacher_api_key_env_name(name: &str) -> std::result::Result<(), String> {
+    let mut bytes = name.bytes();
+    let valid_start = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+    let valid_rest = bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    if !valid_start || !valid_rest || name.len() > 128 {
+        return Err(
+            "must be a 1..=128 character environment-variable name matching [A-Za-z_][A-Za-z0-9_]*"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// `[agent]` — the self-improvement flywheel scheduler and the
@@ -285,6 +446,11 @@ pub struct ModelConfig {
     pub model_id: String,
     pub tokenizer_path: Option<String>,
     pub adapter_dir: Option<String>,
+    /// Parent directory for Kiln's private immutable model snapshot. When
+    /// omitted, Kiln first tries beside the model and then the system temp
+    /// directory. `KILN_MODEL_SNAPSHOT_DIR` is the explicit environment
+    /// override.
+    pub snapshot_dir: Option<String>,
     /// Override the string exposed at `/v1/models` and echoed in chat completion responses.
     /// When `None`, derived from `model_id` by stripping up to the last `/`.
     pub served_model_id: Option<String>,
@@ -628,6 +794,7 @@ impl Default for KilnConfig {
             speculative: SpeculativeDecodingConfig::default(),
             streaming_prefill: StreamingPrefillConfig::default(),
             adapters: AdaptersConfig::default(),
+            teachers: TeachersConfig::default(),
             eval: None,
             request_log: crate::request_log::RequestLogConfig::default(),
             agent: None,
@@ -667,6 +834,7 @@ impl Default for ModelConfig {
             model_id: "Qwen/Qwen3.5-4B".into(),
             tokenizer_path: None,
             adapter_dir: None,
+            snapshot_dir: None,
             served_model_id: None,
         }
     }
@@ -941,6 +1109,9 @@ impl KilnConfig {
         if let Ok(v) = std::env::var("KILN_ADAPTER_DIR") {
             self.model.adapter_dir = Some(v);
         }
+        if let Ok(v) = std::env::var("KILN_MODEL_SNAPSHOT_DIR") {
+            self.model.snapshot_dir = if v.trim().is_empty() { None } else { Some(v) };
+        }
         if let Ok(v) = std::env::var("KILN_SERVED_MODEL_ID") {
             self.model.served_model_id = Some(v);
         }
@@ -1186,6 +1357,8 @@ impl KilnConfig {
             );
         }
 
+        self.teachers.validate()?;
+
         Ok(())
     }
 }
@@ -1320,6 +1493,131 @@ mod tests {
             Some(64),
             "default composed-cache entry cap should be 64"
         );
+        assert!(config.teachers.credentials.is_empty());
+    }
+
+    #[test]
+    fn teacher_credentials_parse_and_resolve_only_for_the_exact_origin() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        const ENV: &str = "KILN_TEST_SCOPED_TEACHER_SECRET";
+        unsafe {
+            std::env::set_var(ENV, "test-secret");
+        }
+        let config: KilnConfig = toml::from_str(&format!(
+            r#"
+[teachers.credentials.primary-vllm]
+origin = "https://vllm.example.com:8443"
+api_key_env = "{ENV}"
+"#
+        ))
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            config
+                .teachers
+                .resolve_api_key_env(
+                    Some("primary-vllm"),
+                    "https://vllm.example.com:8443/tenant/a"
+                )
+                .unwrap()
+                .as_deref(),
+            Some(ENV)
+        );
+        let error = config
+            .teachers
+            .resolve_api_key_env(Some("primary-vllm"), "https://other.example.com:8443")
+            .unwrap_err();
+        assert!(error.contains("not authorized"), "{error}");
+        assert!(!error.contains(ENV), "credential internals leaked: {error}");
+
+        assert_eq!(
+            config
+                .teachers
+                .resolve_api_key_env(None, "http://127.0.0.1:8000")
+                .unwrap(),
+            None
+        );
+        assert!(
+            config
+                .teachers
+                .resolve_api_key_env(None, "https://vllm.example.com")
+                .unwrap_err()
+                .contains("credential_id")
+        );
+        unsafe {
+            std::env::remove_var(ENV);
+        }
+    }
+
+    #[test]
+    fn teacher_credentials_reject_invalid_definitions_and_missing_secrets() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        const ENV: &str = "KILN_TEST_MISSING_TEACHER_SECRET";
+        unsafe {
+            std::env::remove_var(ENV);
+        }
+
+        let mut config = KilnConfig::default();
+        config.teachers.credentials.insert(
+            "bad.id".into(),
+            TeacherCredentialConfig {
+                origin: "https://vllm.example.com".into(),
+                api_key_env: ENV.into(),
+            },
+        );
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("credential id")
+        );
+
+        config.teachers.credentials.clear();
+        config.teachers.credentials.insert(
+            "valid-id".into(),
+            TeacherCredentialConfig {
+                origin: "https://vllm.example.com/".into(),
+                api_key_env: ENV.into(),
+            },
+        );
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("canonical")
+        );
+
+        config
+            .teachers
+            .credentials
+            .get_mut("valid-id")
+            .unwrap()
+            .origin = "https://vllm.example.com".into();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("not set"), "{error}");
+
+        unsafe {
+            std::env::set_var(ENV, "   ");
+        }
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("empty"), "{error}");
+
+        unsafe {
+            std::env::set_var(ENV, "secret");
+        }
+        config
+            .teachers
+            .credentials
+            .get_mut("valid-id")
+            .unwrap()
+            .api_key_env = "1INVALID".into();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("[A-Za-z_]"), "{error}");
+        unsafe {
+            std::env::remove_var(ENV);
+        }
     }
 
     #[test]

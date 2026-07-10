@@ -67,6 +67,13 @@ stream_stall_grace_ms = 2000             # Maximum continuous time a full 64-eve
 model_id = "Qwen/Qwen3.5-4B"
 # tokenizer_path = "/path/to/tokenizer.json"
 # adapter_dir = "/path/to/adapters"  # Qwen3.5-4B profile default: <model_path>/adapters
+# snapshot_dir = "/fast/private/path" # Parent for the private immutable weight
+                                      # snapshot. Reflink/clonefile is used when
+                                      # available; otherwise startup needs room
+                                      # for a full copy. KILN_MODEL_SNAPSHOT_DIR
+                                      # overrides this value. The snapshot lives
+                                      # until deferred MTP no longer needs it
+                                      # (normally process exit) and is cleaned.
 # served_model_id = "Qwen3.5-4B" # ID exposed at /v1/models and echoed in chat completion
                                       # responses. Default: derived from `model_id` by stripping
                                       # everything up to and including the last "/" (so
@@ -91,6 +98,20 @@ inference_memory_fraction = 0.7       # Fraction of VRAM for inference (rest for
 # training_memory_gb = 4.0           # Override auto-calculated training budget
 # kv_cache_fp8 = true                # FP8 (E4M3) KV cache quantization — halves memory, ~2x longer context
                                       # Also settable via KILN_KV_CACHE_FP8=1 env var
+
+[teachers]
+# Remote API credentials are server-owned handles. A registration submits only
+# `"credential_id": "primary-vllm"`; it cannot choose an environment variable.
+# The origin must be canonical and exact (no trailing slash or path). HTTPS is
+# required off-host. Kiln fails startup when a configured secret is missing or
+# empty, and refuses to send it to any other origin.
+#
+# [teachers.credentials.primary-vllm]
+# origin = "https://vllm.example.com:8443"
+# api_key_env = "KILN_VLLM_API_KEY"
+#
+# Loopback vLLM may be registered without a credential_id. Add a scoped handle
+# here instead when the loopback server itself requires authentication.
 
 [training]
 # grad_checkpoint_segments = 4       # Segments for gradient checkpointing

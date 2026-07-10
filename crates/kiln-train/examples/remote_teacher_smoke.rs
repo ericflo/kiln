@@ -5,13 +5,15 @@
 //! Run with:
 //! ```bash
 //! cargo run -p kiln-train --release --example remote_teacher_smoke -- \
-//!   http://localhost:8002 qwen3.6-27b-fp8 8 <vocab-size>
+//!   http://localhost:8002 qwen3.6-27b-fp8 8
 //! ```
 //!
-//! Args: <vllm_url> <model_id> <top_k> <vocab_size>
+//! Args: `[vllm_url] [model_id] [top_k]`. The authoritative vocabulary size,
+//! top-K cap, tokenizer identity, and model revision are discovered from the
+//! server rather than supplied by the operator.
 
 use kiln_train::logit_source::{LogitSource, LogprobBatch};
-use kiln_train::{RemoteProvider, RemoteTeacher, RemoteTeacherConfig};
+use kiln_train::{RemoteProvider, RemoteTeacher, RemoteTeacherConfig, discover_vllm_identity};
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -19,32 +21,51 @@ fn main() -> anyhow::Result<()> {
         .next()
         .unwrap_or_else(|| "http://localhost:8002".to_string());
     let model = args.next().unwrap_or_else(|| "qwen3.6-27b-fp8".to_string());
-    let top_k: usize = args.next().unwrap_or_else(|| "8".to_string()).parse()?;
-    let vocab_size: usize = args
+    let requested_top_k = args
         .next()
-        .ok_or_else(|| anyhow::anyhow!("missing required <vocab_size> argument"))?
-        .parse()?;
+        .map(|value| value.parse::<usize>())
+        .transpose()?;
+    anyhow::ensure!(args.next().is_none(), "expected at most three arguments");
 
-    let cfg = RemoteTeacherConfig {
+    let mut cfg = RemoteTeacherConfig {
         provider: RemoteProvider::Vllm,
         model: model.clone(),
         url: url.clone(),
         api_key_env: None,
         teacher_id: format!("vllm/{model}"),
+        expected_identity: None,
         tokenizer_hash: None,
-        max_top_k: top_k,
-        vocab_size,
+        max_top_k: 0,
+        vocab_size: 0,
         max_cost_usd: None,
         timeout_ms: 60_000,
     };
+
+    let identity = discover_vllm_identity(&cfg)?;
+    let top_k = requested_top_k.unwrap_or_else(|| (identity.max_top_k() as usize).min(8));
+    anyhow::ensure!(top_k > 0, "top_k must be greater than zero");
+    anyhow::ensure!(
+        top_k <= identity.max_top_k() as usize,
+        "requested top_k {top_k} exceeds the verified server cap {}",
+        identity.max_top_k()
+    );
+    println!("Verified teacher revision: {}", identity.content_revision());
+    println!("  served model:      {}", identity.served_model_id());
+    println!("  implementation:    {}", identity.implementation());
+    println!("  vocabulary size:   {}", identity.vocab_size());
+    println!("  tokenizer SHA-256: {}", identity.tokenizer_vocab_sha256());
+    println!("  maximum top-K:     {}", identity.max_top_k());
+    println!("  maximum model len: {}", identity.max_model_len());
+
+    cfg.expected_identity = Some(identity);
     let teacher = RemoteTeacher::new(cfg)?;
     let caps = teacher.capabilities();
     println!("RemoteTeacher capabilities: {caps:?}");
 
-    // A few arbitrary Qwen vocab ids — "Hello world<assistant turn marker>"-ish.
-    // The point isn't semantics, just that vLLM produces top-K logprobs
-    // at every prompt position we ask about.
-    let tokens: Vec<u32> = vec![9707, 1879, 2, 30246, 11, 1246, 525];
+    // Token ID zero is valid for the numeric model-input protocol and keeps
+    // this transport smoke independent of any one model's natural-language
+    // vocabulary.
+    let tokens: Vec<u32> = vec![0; 7];
     let positions: Vec<usize> = vec![0, 3, tokens.len() - 1];
 
     let batch = teacher.fetch_logprobs(&tokens, &positions, Some(top_k))?;
@@ -66,7 +87,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        other => println!("unexpected batch variant: {other:?}"),
+        other => anyhow::bail!("unexpected batch variant: {other:?}"),
     }
 
     Ok(())

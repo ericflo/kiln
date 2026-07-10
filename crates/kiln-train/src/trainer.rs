@@ -1456,6 +1456,7 @@ impl TrainableLoraParams {
             rank: self.rank,
             alpha: self.alpha,
             scale: self.scale,
+            source_identity: None,
         }
     }
 
@@ -6803,6 +6804,7 @@ fn lora_snapshot_capture_or_blend(
         rank: current.rank,
         alpha: current.alpha,
         scale: current.scale,
+        source_identity: None,
     })
 }
 
@@ -9319,6 +9321,7 @@ pub(crate) fn lora_weights_detached(params: &TrainableLoraParams) -> LoraWeights
         rank: params.rank,
         alpha: params.alpha,
         scale: params.scale,
+        source_identity: None,
     }
 }
 

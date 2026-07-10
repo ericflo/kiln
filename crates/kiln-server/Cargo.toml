@@ -91,6 +91,7 @@ flate2 = { workspace = true }
 # explicit.
 filetime = "0.2"
 sha2 = { workspace = true }
+libc = "0.2"
 regex = "1"
 half = "2"
 

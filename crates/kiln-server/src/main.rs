@@ -443,18 +443,29 @@ async fn main() -> Result<()> {
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message(format!("loading model weights from {mp}"));
         }
-        let model_weights = kiln_model::load_model_with_options(
+        let model_weights = kiln_model::load_model_with_options_and_snapshot_dir(
             Path::new(mp),
             &model_config,
             kiln_model::LoadModelOptions { load_mtp: false },
+            config.model.snapshot_dir.as_deref().map(Path::new),
         )?;
+        let base_model_source_sha256 = model_weights
+            .source_content_sha256
+            .clone()
+            .context("loaded model is missing its loader-owned source content revision")?;
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message("uploading weights to GPU");
         }
         let gpu_weights =
             GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)?;
+        model_weights
+            .verify_source_content_unchanged()
+            .context("model source changed between load and completed GPU upload")?;
         drop(model_weights);
-        tracing::info!("CPU model weights dropped after GPU upload");
+        tracing::info!(
+            base_model_source_sha256,
+            "CPU model weights dropped after verified GPU upload"
+        );
 
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message("initializing inference runtime");
@@ -464,6 +475,30 @@ async fn main() -> Result<()> {
             tokenizer.clone(),
             model_config.clone(),
             config.memory.cuda_graphs,
+        );
+        let executable_sha256 = kiln_server::teacher_identity::current_executable_sha256()
+            .context("failed to fingerprint the running server executable")?;
+        let numerical_runtime_sha256 =
+            kiln_server::teacher_identity::numerical_runtime_sha256(device_kt);
+        let base_teacher_identity = Arc::new(
+            kiln_server::teacher_identity::build_base_teacher_identity(
+                &served_model_id,
+                &base_model_source_sha256,
+                &tokenizer,
+                &model_config,
+                runner.backend_name(),
+                &executable_sha256,
+                &numerical_runtime_sha256,
+            )
+            .context("failed to construct immutable base teacher identity")?,
+        );
+        tracing::info!(
+            revision = %base_teacher_identity.content_revision(),
+            base_model_sha256 = %base_teacher_identity.base_model_sha256(),
+            tokenizer_vocab_sha256 = %base_teacher_identity.tokenizer_vocab_sha256(),
+            implementation = %base_teacher_identity.implementation(),
+            numerical_runtime_sha256,
+            "base prompt-logprob teacher identity initialized"
         );
         if let Some(pb) = load_spinner.as_ref() {
             pb.finish_and_clear();
@@ -492,6 +527,7 @@ async fn main() -> Result<()> {
             config.server.request_timeout_secs,
             served_model_id,
             &config.prefix_cache,
+            Some(base_teacher_identity),
         )
     } else {
         // Mock mode: use scheduler + mock engine.
@@ -523,6 +559,7 @@ async fn main() -> Result<()> {
     state.max_queued_training_jobs = config.training.max_queued_jobs;
     state.max_tracked_jobs = config.training.max_tracked_jobs;
     state.tracked_job_ttl = std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
+    state.teacher_credentials = Arc::new(config.teachers.clone());
     state.eval_mode = config.server.eval_mode;
     state.default_thinking_enabled = config.server.default_thinking_enabled;
     state.default_thinking_budget_tokens = config.server.default_thinking_budget_tokens;

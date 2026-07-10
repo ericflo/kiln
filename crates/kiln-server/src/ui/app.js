@@ -9831,14 +9831,29 @@ async function refreshTeachersList() {
       node.innerHTML = '<div class="empty">No teachers registered. Add one below.</div>';
     } else {
       const rows = teachers.map(t => {
-        const caps = t.capabilities ? `<span class="hint">${t.capabilities.max_top_k || '?'} top-K · ${t.capabilities.vocab_size || '?'} vocab</span>` : '';
+        const identity = t.spec?.identity;
+        const caps = t.capabilities
+          ? `${t.capabilities.max_top_k || '?'} top-K · ${(t.capabilities.vocab_size || 0).toLocaleString()} vocab`
+          : 'capabilities unavailable';
+        const bounds = identity
+          ? ` · ${identity.max_model_len.toLocaleString()} context · ${identity.max_prompt_logprob_candidates.toLocaleString()} candidates`
+          : '';
         const adapter = t.spec?.adapter ? ` · adapter ${escapeHtml(t.spec.adapter)}` : '';
+        const statusClass = t.usable ? 'completed' : 'failed';
+        const status = String(t.status || (t.usable ? 'configured' : 'unavailable')).replaceAll('_', ' ');
+        const revision = t.identity_revision
+          ? `<span class="hint" title="${escapeHtml(t.identity_revision)}">revision ${escapeHtml(t.identity_revision.replace('sha256:', '').slice(0, 12))}</span>`
+          : '';
+        const problem = t.status_message
+          ? `<div class="training-card-error">${icon('warning', 'icn-sm')} ${escapeHtml(t.status_message)}</div>`
+          : '';
         return `<div class="adapter-card" style="display:flex; align-items:center; gap:var(--space-3);">
           <div style="flex:1; min-width:0;">
-            <div style="font-weight:600;">${escapeHtml(t.spec?.alias || '?')}</div>
+            <div style="display:flex; align-items:center; gap:var(--space-2); font-weight:600;">${escapeHtml(t.spec?.alias || '?')}<span class="job-state-pill ${statusClass}">${escapeHtml(status)}</span></div>
             <div style="font-size:var(--text-xs); color:var(--text-muted);">${escapeHtml(t.spec?.kind || '?')} · ${escapeHtml(t.spec?.model_id || '?')}${adapter}</div>
+            <div style="font-size:var(--text-xs); color:var(--text-muted);">${escapeHtml(caps)}${escapeHtml(bounds)}${revision ? ' · ' + revision : ''}</div>
+            ${problem}
           </div>
-          ${caps}
           <button class="btn btn-sm" data-teacher-delete="${escapeHtml(t.spec?.alias || '')}">Delete</button>
         </div>`;
       }).join('');
@@ -9863,11 +9878,11 @@ async function refreshTeacherDropdowns(prefetched) {
       const opts = ['<option value="">— pick a registered teacher —</option>'];
       for (const t of teachers) {
         const alias = t.spec?.alias || '';
-        if (!alias) continue;
+        if (!alias || t.usable !== true) continue;
         opts.push(`<option value="${escapeHtml(alias)}">${escapeHtml(alias)}</option>`);
       }
       node.innerHTML = opts.join('');
-      if (prev && teachers.some(t => t.spec?.alias === prev)) node.value = prev;
+      if (prev && teachers.some(t => t.spec?.alias === prev && t.usable === true)) node.value = prev;
     });
   }
 }
@@ -9889,6 +9904,8 @@ document.querySelectorAll('#teacher-form select[name="kind"]').forEach(select =>
     document.querySelectorAll('#teacher-form [data-teacher-kind-field]').forEach(node => {
       node.hidden = node.getAttribute('data-teacher-kind-field') !== select.value;
     });
+    const url = document.getElementById('teacher-url');
+    if (url) url.required = select.value === 'remote';
   };
   select.addEventListener('change', sync);
   sync();
@@ -9897,24 +9914,44 @@ document.querySelectorAll('#teacher-form select[name="kind"]').forEach(select =>
 document.getElementById('teacher-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target;
+  const submit = document.getElementById('teacher-register-btn');
+  const status = document.getElementById('teacher-register-status');
+  const originalLabel = submit?.textContent || 'Register teacher';
+  if (submit) {
+    submit.disabled = true;
+    submit.textContent = form.kind.value === 'remote' ? 'Verifying teacher…' : 'Registering…';
+  }
+  if (status) status.textContent = form.kind.value === 'remote' ? 'Running identity and capability probes…' : '';
   try {
     const body = {
       alias: form.alias.value.trim(),
       kind: form.kind.value,
       model_id: form.model_id.value.trim(),
     };
-    if (body.kind === 'remote') body.provider = 'vllm';
-    if (form.url.value.trim()) body.url = form.url.value.trim();
-    if (form.api_key_env.value.trim()) body.api_key_env = form.api_key_env.value.trim();
+    if (body.kind === 'remote') {
+      body.provider = 'vllm';
+      body.url = form.url.value.trim();
+      if (form.credential_id.value.trim()) body.credential_id = form.credential_id.value.trim();
+    }
     if (body.kind === 'local' && form.adapter.value.trim()) body.adapter = form.adapter.value.trim();
-    if (form.max_top_k.value) body.max_top_k = parseInt(form.max_top_k.value, 10);
-    if (form.vocab_size.value) body.vocab_size = parseInt(form.vocab_size.value, 10);
-    await api('/v1/teachers', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const registered = await api('/v1/teachers', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toast(`Registered teacher ${body.alias}`);
+    if (status) {
+      const revision = registered.identity_revision ? ` · ${registered.identity_revision.replace('sha256:', '').slice(0, 12)}` : '';
+      status.textContent = `${registered.status || 'configured'}${revision}`;
+    }
     form.reset();
     form.kind.dispatchEvent(new Event('change'));
     refreshTeachersList();
-  } catch (err) { toast('Register failed: ' + err.message, 'err'); }
+  } catch (err) {
+    if (status) status.textContent = err.message;
+    toast('Register failed: ' + err.message, 'err');
+  } finally {
+    if (submit) {
+      submit.disabled = false;
+      submit.textContent = originalLabel;
+    }
+  }
 });
 
 // --- Recipes (/v1/recipes + /v1/recipes/run) ------------------------

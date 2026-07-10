@@ -114,6 +114,12 @@ fn seed_trace_index(state: &AppState) {
     .unwrap();
 }
 
+fn seed_merge_sources(state: &AppState) {
+    for name in ["a", "b"] {
+        std::fs::create_dir_all(state.adapter_dir.join(name)).unwrap();
+    }
+}
+
 /// Register a fixture teacher alias through the API so endpoints with
 /// teacher-resolvability validation get past that gate.
 async fn register_teacher(app: &axum::Router, alias: &str) {
@@ -275,11 +281,11 @@ fn front_door_bodies(name: &str) -> Vec<(&'static str, Value)> {
         ),
         (
             "opd",
-            json!({"kind": "opd", "teacher": "qwen3.6-27b@local", "prompts": opd_body(name)["prompts"], "config": {"output_name": name}}),
+            json!({"kind": "opd", "teacher": "fixture@t", "prompts": opd_body(name)["prompts"], "config": {"output_name": name}}),
         ),
         (
             "distill_refresh",
-            json!({"kind": "distill_refresh", "name": name, "new_data": {"dataset": "q4"}, "behavioural_teacher": "t@v1"}),
+            json!({"kind": "distill_refresh", "name": name, "new_data": {"dataset": "q4"}, "behavioural_teacher": "fixture@t"}),
         ),
         (
             "distill_merge",
@@ -287,7 +293,7 @@ fn front_door_bodies(name: &str) -> Vec<(&'static str, Value)> {
         ),
         (
             "distill_pump",
-            json!({"kind": "distill_pump", "name": name, "teacher": "t@v1", "mode": {"domain": "math_reasoning"}}),
+            json!({"kind": "distill_pump", "name": name, "teacher": "fixture@t", "mode": {"domain": "math_reasoning"}}),
         ),
     ]
 }
@@ -380,6 +386,7 @@ async fn missed_endpoints_enforce_queue_cap() {
     let app = api::router(state.clone());
     register_teacher(&app, "fixture@t").await;
     seed_trace_index(&state);
+    seed_merge_sources(&state);
 
     let full = StatusCode::SERVICE_UNAVAILABLE;
     let fd_sft = front_door_bodies("ok-name").remove(0).1;
@@ -417,6 +424,7 @@ async fn missed_endpoints_reject_mock_mode() {
     let app = api::router(state.clone());
     register_teacher(&app, "fixture@t").await;
     seed_trace_index(&state);
+    seed_merge_sources(&state);
 
     let unavailable = StatusCode::SERVICE_UNAVAILABLE;
     for (variant, body) in front_door_bodies("ok-name") {

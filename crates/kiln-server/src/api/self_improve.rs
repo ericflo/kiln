@@ -508,6 +508,7 @@ fn prepare_agent_job(
         QueueEntry {
             job_id: job_id.to_string(),
             reserved_bytes: 0,
+            teacher_bindings: Vec::new(),
             job,
         },
     )

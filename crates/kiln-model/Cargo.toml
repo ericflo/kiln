@@ -17,6 +17,8 @@ serde_json = { workspace = true }
 safetensors = { workspace = true }
 memmap2 = { workspace = true }
 sha2 = { workspace = true }
+tempfile = { workspace = true }
+libc = "0.2"
 # (#1082) candle-core is fully dropped from kiln-model. The last activator
 # was the `legacy-candle-parity` opt-in feature (candle-typed `for_device`
 # shim + candle-bridge parity-oracle tests); both are gone, so no `cuda` /
@@ -107,6 +109,3 @@ nvtx = ["kiln-nvtx/nvtx"]
 # device, so the Vulkan backend manages its own vk::Device and copies tensor
 # data through the CPU path at kernel boundaries.
 vulkan = ["dep:kiln-vulkan-kernel", "dep:kiln-tensor-id", "kiln-core/vulkan", "dep:half", "dep:bytemuck", "dep:kiln-autograd", "kiln-tensor/vulkan", "kiln-kt-bridge/vulkan"]
-
-[dev-dependencies]
-tempfile = { workspace = true }

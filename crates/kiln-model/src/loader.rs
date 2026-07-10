@@ -1,6 +1,8 @@
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::ffi::CString;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -19,6 +21,23 @@ const LM_PREFIX: &str = "model.language_model.";
 
 /// Safetensors index file for sharded checkpoints.
 const INDEX_FILENAME: &str = "model.safetensors.index.json";
+const GPTQ_CONFIG_FILENAME: &str = "quantize_config.json";
+const MAX_SHARD_COUNT: usize = 4096;
+const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SNAPSHOT_INPUT_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
+const SNAPSHOT_COPY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+const SNAPSHOT_FREE_SPACE_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug)]
+struct ImmutableModelSnapshot {
+    lease: Arc<ModelSnapshotLease>,
+}
+
+impl ImmutableModelSnapshot {
+    fn root(&self) -> &Path {
+        self.lease.directory.path()
+    }
+}
 
 #[derive(Debug)]
 struct ShardMetadata {
@@ -100,18 +119,49 @@ pub fn load_model_with_options(
     config: &ModelConfig,
     options: LoadModelOptions,
 ) -> Result<ModelWeights> {
+    load_model_with_options_and_snapshot_dir(model_dir, config, options, None)
+}
+
+/// Load from a private immutable snapshot, optionally placing that snapshot
+/// under an operator-selected directory. Server configuration resolves any
+/// environment override before this boundary; the model crate does not read
+/// ambient placement state.
+pub fn load_model_with_options_and_snapshot_dir(
+    model_dir: &Path,
+    config: &ModelConfig,
+    options: LoadModelOptions,
+    snapshot_dir: Option<&Path>,
+) -> Result<ModelWeights> {
+    let snapshot = create_immutable_model_snapshot(model_dir, snapshot_dir).with_context(|| {
+        format!(
+            "failed to create immutable model snapshot from {}; configure a private snapshot directory on a filesystem with sufficient free space",
+            model_dir.display()
+        )
+    })?;
+
     // Auto-detect GPTQ quantization.
-    if let Some(gptq_config) = quantized::load_gptq_config(model_dir)? {
+    if let Some(gptq_config) = quantized::load_gptq_config(snapshot.root())? {
         tracing::info!(
             bits = gptq_config.bits,
             group_size = gptq_config.group_size,
             sym = gptq_config.sym,
             "Detected GPTQ quantization — loading quantized weights"
         );
-        return load_model_gptq(model_dir, config, &gptq_config, options);
+        return load_model_gptq(
+            snapshot.root(),
+            config,
+            &gptq_config,
+            options,
+            Arc::clone(&snapshot.lease),
+        );
     }
 
-    load_model_dense(model_dir, config, options)
+    load_model_dense(
+        snapshot.root(),
+        config,
+        options,
+        Arc::clone(&snapshot.lease),
+    )
 }
 
 /// Load dense (unquantized) BF16/FP16 model weights.
@@ -119,6 +169,7 @@ fn load_model_dense(
     model_dir: &Path,
     config: &ModelConfig,
     options: LoadModelOptions,
+    snapshot_lease: Arc<ModelSnapshotLease>,
 ) -> Result<ModelWeights> {
     let shards = discover_shards(model_dir)?;
     tracing::info!(
@@ -130,7 +181,8 @@ fn load_model_dense(
 
     // Memory-map all shards and parse safetensors headers.
     let loaded_shards = mmap_shards(&shards)?;
-    let source_content_guard = loaded_shard_content_guard(&loaded_shards);
+    let source_content_guard =
+        loaded_shard_content_guard(&loaded_shards, Arc::clone(&snapshot_lease));
     let source_content_sha256 = source_content_guard.initial_sha256().to_string();
     let parsed: Vec<SafeTensors<'_>> = loaded_shards
         .iter()
@@ -189,6 +241,7 @@ fn load_model_dense(
             model_dir: model_dir.to_path_buf(),
             mtp_prefix,
             config: config.clone(),
+            _snapshot_lease: Arc::clone(&snapshot_lease),
         })
     };
     if mtp.is_some() {
@@ -237,6 +290,7 @@ fn load_model_gptq(
     config: &ModelConfig,
     gptq_config: &GptqConfig,
     _options: LoadModelOptions,
+    snapshot_lease: Arc<ModelSnapshotLease>,
 ) -> Result<ModelWeights> {
     let shards = discover_shards(model_dir)?;
     tracing::info!(
@@ -247,7 +301,7 @@ fn load_model_gptq(
     );
 
     let loaded_shards = mmap_shards(&shards)?;
-    let source_content_guard = loaded_shard_content_guard(&loaded_shards);
+    let source_content_guard = loaded_shard_content_guard(&loaded_shards, snapshot_lease);
     let source_content_sha256 = source_content_guard.initial_sha256().to_string();
     let parsed: Vec<SafeTensors<'_>> = loaded_shards
         .iter()
@@ -321,14 +375,466 @@ fn load_model_gptq(
     Ok(weights)
 }
 
-/// Discover safetensors shard files in the model directory.
-fn discover_shards(model_dir: &Path) -> Result<Vec<std::path::PathBuf>> {
-    let index_path = model_dir.join(INDEX_FILENAME);
+fn create_immutable_model_snapshot(
+    model_dir: &Path,
+    configured_snapshot_root: Option<&Path>,
+) -> Result<ImmutableModelSnapshot> {
+    let source_root = model_dir
+        .canonicalize()
+        .with_context(|| format!("resolve model directory {}", model_dir.display()))?;
+    ensure_directory(&source_root, "model directory")?;
+    let shards = discover_shards(&source_root)?;
 
-    if index_path.exists() {
+    let mut inputs = shards
+        .into_iter()
+        .map(|path| {
+            let filename = path
+                .file_name()
+                .context("model shard path has no filename")?
+                .to_owned();
+            Ok((path, PathBuf::from(filename)))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let gptq_config = source_root.join(GPTQ_CONFIG_FILENAME);
+    match fs::symlink_metadata(&gptq_config) {
+        Ok(metadata) => {
+            ensure_regular_metadata(&gptq_config, &metadata, "GPTQ config")?;
+            inputs.push((gptq_config, PathBuf::from(GPTQ_CONFIG_FILENAME)));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect {}", gptq_config.display()));
+        }
+    }
+
+    let total_bytes = inputs.iter().try_fold(0u64, |total, (path, _)| {
+        let metadata = fs::symlink_metadata(path)
+            .with_context(|| format!("inspect snapshot input {}", path.display()))?;
+        ensure_regular_metadata(path, &metadata, "model snapshot input")?;
+        total
+            .checked_add(metadata.len())
+            .context("model snapshot byte count overflow")
+    })?;
+    if total_bytes > MAX_SNAPSHOT_INPUT_BYTES {
+        bail!(
+            "model snapshot inputs require {total_bytes} bytes, exceeding the {MAX_SNAPSHOT_INPUT_BYTES}-byte safety limit"
+        );
+    }
+
+    let directory = create_snapshot_directory(&source_root, configured_snapshot_root)?;
+    set_private_directory_permissions(directory.path())?;
+    let mut remaining_bytes = total_bytes;
+    let mut cloned_files = 0usize;
+    let mut copied_files = 0usize;
+    for (source, relative) in &inputs {
+        let destination = directory.path().join(relative);
+        let copied = copy_snapshot_input(source, &destination, remaining_bytes, directory.path())?;
+        if copied {
+            copied_files += 1;
+        } else {
+            cloned_files += 1;
+        }
+        remaining_bytes = remaining_bytes.saturating_sub(
+            fs::metadata(&destination)
+                .with_context(|| format!("stat copied snapshot input {}", destination.display()))?
+                .len(),
+        );
+    }
+    #[cfg(unix)]
+    File::open(directory.path())
+        .and_then(|file| file.sync_all())
+        .with_context(|| {
+            format!(
+                "sync model snapshot directory {}",
+                directory.path().display()
+            )
+        })?;
+
+    tracing::info!(
+        source = %source_root.display(),
+        snapshot = %directory.path().display(),
+        files = inputs.len(),
+        logical_bytes = total_bytes,
+        cloned_files,
+        copied_files,
+        "created private immutable model snapshot"
+    );
+    Ok(ImmutableModelSnapshot {
+        lease: Arc::new(ModelSnapshotLease { directory }),
+    })
+}
+
+fn create_snapshot_directory(
+    source_root: &Path,
+    configured_snapshot_root: Option<&Path>,
+) -> Result<tempfile::TempDir> {
+    let builder = || {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(".kiln-model-snapshot-");
+        builder
+    };
+    if let Some(root) = configured_snapshot_root {
+        fs::create_dir_all(&root)
+            .with_context(|| format!("create configured snapshot root {}", root.display()))?;
+        ensure_directory(&root, "configured model snapshot root")?;
+        return builder()
+            .tempdir_in(&root)
+            .with_context(|| format!("create private snapshot under {}", root.display()));
+    }
+
+    if let Some(parent) = source_root.parent() {
+        match builder().tempdir_in(parent) {
+            Ok(directory) => return Ok(directory),
+            Err(error) => tracing::warn!(
+                parent = %parent.display(),
+                error = %error,
+                "could not create model snapshot beside source; falling back to system temp"
+            ),
+        }
+    }
+    builder()
+        .tempdir()
+        .context("create private model snapshot in system temp")
+}
+
+fn copy_snapshot_input(
+    source_path: &Path,
+    destination_path: &Path,
+    remaining_logical_bytes: u64,
+    snapshot_root: &Path,
+) -> Result<bool> {
+    let mut source = open_regular_source(source_path, "model snapshot input")?;
+    let expected_len = source
+        .metadata()
+        .with_context(|| format!("stat opened snapshot input {}", source_path.display()))?
+        .len();
+    let (mut destination, cloned) =
+        create_or_clone_destination(source_path, &source, destination_path)?;
+
+    if !cloned {
+        ensure_snapshot_copy_capacity(snapshot_root, remaining_logical_bytes)?;
+        source
+            .seek(SeekFrom::Start(0))
+            .with_context(|| format!("seek snapshot input {}", source_path.display()))?;
+        destination
+            .seek(SeekFrom::Start(0))
+            .with_context(|| format!("seek snapshot destination {}", destination_path.display()))?;
+        let mut remaining = expected_len;
+        let mut buffer = vec![0u8; SNAPSHOT_COPY_BUFFER_BYTES];
+        while remaining > 0 {
+            let request = usize::try_from(remaining.min(buffer.len() as u64))
+                .expect("bounded snapshot read length fits usize");
+            let read = source
+                .read(&mut buffer[..request])
+                .with_context(|| format!("read snapshot input {}", source_path.display()))?;
+            if read == 0 {
+                bail!(
+                    "model snapshot input {} became shorter while copied: expected {expected_len} bytes",
+                    source_path.display()
+                );
+            }
+            destination.write_all(&buffer[..read]).map_err(|error| {
+                snapshot_write_error(error, destination_path, remaining_logical_bytes)
+            })?;
+            remaining -= read as u64;
+        }
+        let mut extra = [0u8; 1];
+        if source
+            .read(&mut extra)
+            .with_context(|| format!("check snapshot input length {}", source_path.display()))?
+            != 0
+        {
+            bail!(
+                "model snapshot input {} grew while copied beyond {expected_len} bytes",
+                source_path.display()
+            );
+        }
+    }
+
+    destination
+        .sync_all()
+        .map_err(|error| snapshot_write_error(error, destination_path, remaining_logical_bytes))?;
+    let observed_len = destination
+        .metadata()
+        .with_context(|| format!("stat snapshot destination {}", destination_path.display()))?
+        .len();
+    if observed_len != expected_len {
+        bail!(
+            "model snapshot destination {} has {observed_len} bytes, expected {expected_len}",
+            destination_path.display()
+        );
+    }
+    set_read_only_file_permissions(destination_path)?;
+    Ok(!cloned)
+}
+
+fn snapshot_write_error(error: io::Error, path: &Path, required: u64) -> anyhow::Error {
+    let storage_full = error.kind() == io::ErrorKind::StorageFull
+        || matches!(error.raw_os_error(), Some(28) | Some(112));
+    if storage_full {
+        anyhow::anyhow!(
+            "model snapshot filesystem ran out of space while writing {} (up to {required} additional bytes required); configure the model snapshot directory on a filesystem with sufficient capacity: {error}",
+            path.display()
+        )
+    } else {
+        anyhow::anyhow!("write model snapshot file {}: {error}", path.display())
+    }
+}
+
+fn ensure_snapshot_copy_capacity(path: &Path, required: u64) -> Result<()> {
+    let Some(available) = available_space(path)? else {
+        return Ok(());
+    };
+    let reserve = SNAPSHOT_FREE_SPACE_RESERVE_BYTES.max(required / 100);
+    let required_with_reserve = required.saturating_add(reserve);
+    if available < required_with_reserve {
+        bail!(
+            "model snapshot copy requires {required} bytes plus {reserve} bytes reserve, but only {available} bytes are available on {}; configure the model snapshot directory on a filesystem with sufficient capacity",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn available_space(path: &Path) -> Result<Option<u64>> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(path.as_os_str().as_bytes())
+        .context("model snapshot path contains a NUL byte")?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL terminated and `stat` points to writable storage.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error()).context("inspect snapshot filesystem capacity");
+    }
+    // SAFETY: successful `statvfs` initialized the structure.
+    let stat = unsafe { stat.assume_init() };
+    let fragment_size = if stat.f_frsize == 0 {
+        stat.f_bsize
+    } else {
+        stat.f_frsize
+    };
+    Ok(Some(
+        (stat.f_bavail as u64).saturating_mul(fragment_size as u64),
+    ))
+}
+
+#[cfg(not(unix))]
+fn available_space(_path: &Path) -> Result<Option<u64>> {
+    Ok(None)
+}
+
+fn create_or_clone_destination(
+    _source_path: &Path,
+    source: &File,
+    destination_path: &Path,
+) -> Result<(File, bool)> {
+    #[cfg(target_os = "macos")]
+    if try_macos_clone(_source_path, destination_path)? {
+        let destination = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(destination_path)
+            .with_context(|| format!("open cloned snapshot {}", destination_path.display()))?;
+        return Ok((destination, true));
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let destination = options
+        .open(destination_path)
+        .with_context(|| format!("create snapshot destination {}", destination_path.display()))?;
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: both descriptors are live regular files. FICLONE either
+        // creates an independent CoW extent mapping or leaves the destination
+        // available for the explicit-copy fallback below.
+        let result = unsafe {
+            libc::ioctl(
+                destination.as_raw_fd(),
+                libc::FICLONE as _,
+                source.as_raw_fd(),
+            )
+        };
+        if result == 0 {
+            return Ok((destination, true));
+        }
+        let error = io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EXDEV)
+                | Some(libc::EOPNOTSUPP)
+                | Some(libc::ENOTTY)
+                | Some(libc::EINVAL)
+                | Some(libc::EPERM)
+                | Some(libc::ENOSYS)
+        ) {
+            return Err(error).with_context(|| {
+                format!("reflink model snapshot to {}", destination_path.display())
+            });
+        }
+        destination
+            .set_len(0)
+            .with_context(|| format!("reset reflink fallback {}", destination_path.display()))?;
+    }
+
+    Ok((destination, false))
+}
+
+#[cfg(target_os = "macos")]
+fn try_macos_clone(source: &Path, destination: &Path) -> Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let source = CString::new(source.as_os_str().as_bytes())
+        .context("model source path contains a NUL byte")?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .context("model snapshot path contains a NUL byte")?;
+    // SAFETY: both C strings are live for this call; destination does not yet
+    // exist and resides inside the private snapshot directory.
+    if unsafe { libc::clonefile(source.as_ptr(), destination.as_ptr(), 0) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::EXDEV)
+            | Some(libc::ENOTSUP)
+            | Some(libc::EINVAL)
+            | Some(libc::EPERM)
+            | Some(libc::ENOSYS)
+    ) {
+        Ok(false)
+    } else {
+        Err(error).with_context(|| "clone model snapshot with clonefile")
+    }
+}
+
+fn set_private_directory_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("set private permissions on {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn set_read_only_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    let permissions = {
+        use std::os::unix::fs::PermissionsExt;
+        fs::Permissions::from_mode(0o400)
+    };
+    #[cfg(not(unix))]
+    let permissions = {
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_readonly(true);
+        permissions
+    };
+    fs::set_permissions(path, permissions)
+        .with_context(|| format!("make snapshot input read-only {}", path.display()))
+}
+
+fn ensure_directory(path: &Path, label: &str) -> Result<()> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("inspect {label} {}", path.display()))?;
+    if !metadata.is_dir() {
+        bail!("{label} is not a directory: {}", path.display());
+    }
+    Ok(())
+}
+
+fn ensure_regular_metadata(path: &Path, metadata: &fs::Metadata, label: &str) -> Result<()> {
+    if metadata.file_type().is_symlink() {
+        bail!("{label} must not be a symlink: {}", path.display());
+    }
+    if !metadata.is_file() {
+        bail!("{label} is not a regular file: {}", path.display());
+    }
+    Ok(())
+}
+
+fn open_regular_source(path: &Path, label: &str) -> Result<File> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect {label} {}", path.display()))?;
+    ensure_regular_metadata(path, &metadata, label)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("open {label} {}", path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("stat opened {label} {}", path.display()))?;
+    if !opened.is_file() {
+        bail!("opened {label} is not a regular file: {}", path.display());
+    }
+    Ok(file)
+}
+
+fn read_bounded_regular_file(path: &Path, label: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    let file = open_regular_source(path, label)?;
+    let length = file.metadata()?.len();
+    if length > max_bytes {
+        bail!(
+            "{label} {} is {length} bytes, exceeding the {max_bytes}-byte safety limit",
+            path.display()
+        );
+    }
+    let capacity = usize::try_from(length).context("bounded file length does not fit usize")?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {label} {}", path.display()))?;
+    if bytes.len() as u64 > max_bytes {
+        bail!("{label} {} grew beyond the safety limit", path.display());
+    }
+    Ok(bytes)
+}
+
+fn validate_shard_filename(filename: &str) -> Result<&str> {
+    let path = Path::new(filename);
+    let mut components = path.components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => {}
+        _ => bail!(
+            "safetensors index shard path must be one relative filename without traversal: {filename:?}"
+        ),
+    }
+    if filename.as_bytes().len() > 255 || !filename.ends_with(".safetensors") {
+        bail!("invalid safetensors shard filename in index: {filename:?}");
+    }
+    Ok(filename)
+}
+
+/// Discover a bounded, path-safe set of regular safetensors shard files.
+fn discover_shards(model_dir: &Path) -> Result<Vec<PathBuf>> {
+    let index_path = model_dir.join(INDEX_FILENAME);
+    let has_index = match fs::symlink_metadata(&index_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect safetensors index {}", index_path.display()));
+        }
+    };
+
+    if has_index {
         // Sharded model: read index to find shard filenames.
-        let index_bytes = fs::read(&index_path)
-            .with_context(|| format!("Failed to read {}", index_path.display()))?;
+        let index_bytes =
+            read_bounded_regular_file(&index_path, "safetensors index", MAX_INDEX_BYTES)?;
         let index: serde_json::Value = serde_json::from_slice(&index_bytes)
             .context("Failed to parse safetensors index JSON")?;
 
@@ -338,21 +844,23 @@ fn discover_shards(model_dir: &Path) -> Result<Vec<std::path::PathBuf>> {
             .context("Index file missing 'weight_map' object")?;
 
         // Collect unique shard filenames, preserving order.
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         let mut shard_files = Vec::new();
         for filename in weight_map.values() {
             let filename = filename
                 .as_str()
                 .context("weight_map value is not a string")?;
+            let filename = validate_shard_filename(filename)?;
             if seen.insert(filename.to_string()) {
                 let shard_path = model_dir.join(filename);
-                if !shard_path.exists() {
-                    bail!(
-                        "Shard file {} referenced in index but not found on disk",
-                        shard_path.display()
-                    );
-                }
+                let metadata = fs::symlink_metadata(&shard_path).with_context(|| {
+                    format!("inspect shard referenced by index {}", shard_path.display())
+                })?;
+                ensure_regular_metadata(&shard_path, &metadata, "model shard")?;
                 shard_files.push(shard_path);
+                if shard_files.len() > MAX_SHARD_COUNT {
+                    bail!("model index exceeds the {MAX_SHARD_COUNT}-shard safety limit");
+                }
             }
         }
 
@@ -360,25 +868,48 @@ fn discover_shards(model_dir: &Path) -> Result<Vec<std::path::PathBuf>> {
             bail!("Index file has an empty weight_map");
         }
 
+        shard_files.sort();
         Ok(shard_files)
     } else {
         // Single-file model.
         let single = model_dir.join("model.safetensors");
-        if single.exists() {
-            Ok(vec![single])
-        } else {
-            // Try glob for sharded files without index.
-            let mut shards: Vec<_> = fs::read_dir(model_dir)?
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|ext| ext == "safetensors"))
-                .collect();
-            shards.sort();
-
-            if shards.is_empty() {
-                bail!("No .safetensors files found in {}", model_dir.display());
+        match fs::symlink_metadata(&single) {
+            Ok(metadata) => {
+                ensure_regular_metadata(&single, &metadata, "model shard")?;
+                Ok(vec![single])
             }
-            Ok(shards)
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // Try glob for sharded files without index.
+                let mut shards = Vec::new();
+                for entry in fs::read_dir(model_dir)
+                    .with_context(|| format!("enumerate model directory {}", model_dir.display()))?
+                {
+                    let entry = entry.with_context(|| {
+                        format!("enumerate model directory {}", model_dir.display())
+                    })?;
+                    let path = entry.path();
+                    if path.extension().is_some_and(|ext| ext == "safetensors") {
+                        let metadata = fs::symlink_metadata(&path)
+                            .with_context(|| format!("inspect model shard {}", path.display()))?;
+                        ensure_regular_metadata(&path, &metadata, "model shard")?;
+                        shards.push(path);
+                        if shards.len() > MAX_SHARD_COUNT {
+                            bail!(
+                                "model directory exceeds the {MAX_SHARD_COUNT}-shard safety limit"
+                            );
+                        }
+                    }
+                }
+                shards.sort();
+
+                if shards.is_empty() {
+                    bail!("No .safetensors files found in {}", model_dir.display());
+                }
+                Ok(shards)
+            }
+            Err(error) => {
+                Err(error).with_context(|| format!("inspect model shard {}", single.display()))
+            }
         }
     }
 }
@@ -388,10 +919,7 @@ fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<LoadedShard>> {
     paths
         .iter()
         .map(|path| {
-            let file = Arc::new(
-                fs::File::open(path)
-                    .with_context(|| format!("Failed to open {}", path.display()))?,
-            );
+            let file = Arc::new(open_regular_source(path, "model snapshot shard")?);
             let meta = file
                 .metadata()
                 .with_context(|| format!("Failed to stat {}", path.display()))?;
@@ -419,18 +947,24 @@ fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<LoadedShard>> {
         .collect()
 }
 
-fn loaded_shard_content_guard(shards: &[LoadedShard]) -> SourceContentGuard {
+fn loaded_shard_content_guard(
+    shards: &[LoadedShard],
+    snapshot_lease: Arc<ModelSnapshotLease>,
+) -> SourceContentGuard {
     SourceContentGuard::new(
         shards
             .iter()
             .map(|shard| (Arc::clone(&shard.file), Arc::clone(&shard.mmap)))
             .collect(),
+        snapshot_lease,
     )
 }
 
 #[cfg(test)]
 fn loaded_shard_content_sha256(shards: &[LoadedShard]) -> String {
-    loaded_shard_content_guard(shards)
+    let directory = tempfile::tempdir().unwrap();
+    let lease = Arc::new(ModelSnapshotLease { directory });
+    loaded_shard_content_guard(shards, lease)
         .initial_sha256()
         .to_string()
 }
@@ -1570,32 +2104,74 @@ mod tests {
     }
 
     #[test]
-    fn source_content_guard_rejects_same_length_source_mutation() {
+    fn private_snapshot_is_cleaned_after_last_owner_drops() {
+        let (_dir, _source, weights) = load_tiny_source_guard_fixture();
+        let snapshot_root = weights
+            .source_content_guard
+            .as_ref()
+            .unwrap()
+            .snapshot_root()
+            .to_path_buf();
+        assert!(snapshot_root.is_dir());
+        drop(weights);
+        assert!(!snapshot_root.exists());
+    }
+
+    #[test]
+    fn shard_discovery_rejects_index_traversal_and_oversize() {
+        let traversal = tempfile::tempdir().unwrap();
+        fs::write(
+            traversal.path().join(INDEX_FILENAME),
+            br#"{"weight_map":{"tensor":"../outside.safetensors"}}"#,
+        )
+        .unwrap();
+        let error = discover_shards(traversal.path()).unwrap_err();
+        assert!(error.to_string().contains("without traversal"), "{error:#}");
+
+        let oversized = tempfile::tempdir().unwrap();
+        let index = File::create(oversized.path().join(INDEX_FILENAME)).unwrap();
+        index.set_len(MAX_INDEX_BYTES + 1).unwrap();
+        let error = discover_shards(oversized.path()).unwrap_err();
+        assert!(error.to_string().contains("safety limit"), "{error:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shard_discovery_rejects_symlink_inputs() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.safetensors");
+        fs::write(&target, b"target").unwrap();
+        symlink(&target, dir.path().join("model.safetensors")).unwrap();
+
+        let error = discover_shards(dir.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("must not be a symlink"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn private_snapshot_is_stable_across_same_length_original_mutation() {
         let (_dir, source, weights) = load_tiny_source_guard_fixture();
+        let revision = weights.source_content_sha256.clone();
         let mut file = fs::OpenOptions::new().write(true).open(source).unwrap();
         file.seek(SeekFrom::End(-1)).unwrap();
         file.write_all(&[0xa5]).unwrap();
         file.sync_all().unwrap();
 
-        let error = weights.verify_source_content_unchanged().unwrap_err();
-        assert!(
-            error.to_string().contains("source content changed"),
-            "unexpected verification error: {error:#}"
-        );
+        weights.verify_source_content_unchanged().unwrap();
+        assert_eq!(weights.source_content_sha256, revision);
     }
 
     #[test]
-    fn source_content_guard_rejects_truncated_source_without_reading_past_eof() {
+    fn private_snapshot_is_stable_across_original_truncation() {
         let (_dir, source, weights) = load_tiny_source_guard_fixture();
         let file = fs::OpenOptions::new().write(true).open(source).unwrap();
         let original_len = file.metadata().unwrap().len();
         file.set_len(original_len - 1).unwrap();
 
-        let error = weights.verify_source_content_unchanged().unwrap_err();
-        assert!(
-            error.to_string().contains("length changed after load"),
-            "unexpected verification error: {error:#}"
-        );
+        weights.verify_source_content_unchanged().unwrap();
     }
 
     #[test]
@@ -1640,6 +2216,36 @@ mod tests {
         file.write_all(&[0xa5]).unwrap();
         file.sync_all().unwrap();
 
+        // Original replacement is irrelevant after the private copy.
+        weights.verify_source_content_unchanged().unwrap();
+
+        // The post-upload guard still covers every copied shard, including
+        // shards from which no model tensor was extracted.
+        let snapshot_root = weights
+            .source_content_guard
+            .as_ref()
+            .unwrap()
+            .snapshot_root()
+            .to_path_buf();
+        let snapshot_ignored = snapshot_root.join("model-00002-of-00002.safetensors");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&snapshot_ignored, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let mut permissions = fs::metadata(&snapshot_ignored).unwrap().permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(&snapshot_ignored, permissions).unwrap();
+        }
+        let mut snapshot_file = fs::OpenOptions::new()
+            .write(true)
+            .open(snapshot_ignored)
+            .unwrap();
+        snapshot_file.seek(SeekFrom::End(-1)).unwrap();
+        snapshot_file.write_all(&[0xa5]).unwrap();
+        snapshot_file.sync_all().unwrap();
         assert!(weights.verify_source_content_unchanged().is_err());
     }
 

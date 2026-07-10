@@ -1,58 +1,93 @@
 # Immutable vLLM teachers
 
-Kiln accepts remote prompt logprobs only when the response carries an
-authoritative `TeacherIdentityV1`. For vLLM 0.25 or newer, launch the teacher
-through [`scripts/vllm_teacher.py`](../scripts/vllm_teacher.py). The launcher
-fingerprints local inputs, puts the canonical identity in vLLM's native custom
-`system_fingerprint`, disables runtime adapter updates, and starts vLLM without
-a shell. See vLLM's official
-[fingerprint API](https://docs.vllm.ai/en/latest/api/vllm/entrypoints/openai/fingerprint/)
-for the custom mode this launcher uses.
+Kiln accepts remote prompt logprobs only when each response carries an
+authoritative `TeacherIdentityV1`. Launch vLLM 0.25 or newer through
+[`scripts/vllm_teacher.py`](../scripts/vllm_teacher.py). The launcher stages a
+private content-verified snapshot, fingerprints only that snapshot, binds the
+runtime and accelerator into the identity, disables mutable model surfaces,
+and supervises vLLM until its entire process group exits.
 
-A stock vLLM fingerprint is not sufficient. Its default fingerprint describes
-vLLM's runtime configuration; a served model name is an alias. Neither proves
-the exact tokenizer ID mapping, selected weight bytes, static adapter content,
-or the limits Kiln relies on. Kiln therefore rejects stock `vllm-*` fingerprints
-for remote teachers.
+A stock vLLM fingerprint is not sufficient. Its default fingerprint does not
+prove the exact weight bytes, tokenizer ID map, static adapter, runtime
+packages, accelerator, or response limits Kiln relies on. A served model name
+is also only an alias. Kiln therefore rejects stock `vllm-*` fingerprints for
+remote teachers.
 
 ## Requirements
 
-- vLLM 0.25.0 or newer and Transformers in the same Python environment.
-- A local Hugging Face model directory. Hub IDs, revisions, custom tokenizers,
-  `trust_remote_code`, alternate model arguments, and shell commands are not
-  accepted by the launcher.
-- Safetensors base weights discoverable by
-  `scripts/qualification/model_fingerprint.py`.
-- For an adapter process, one local PEFT adapter containing exactly one of
-  `adapter_model.safetensors` or `adapter_model.bin`, plus
-  `adapter_config.json`. Prefer safetensors; treat a pickle-based `.bin` file as
-  executable input and use it only from a trusted source.
-- Immutable model and adapter storage for the lifetime of the process. The
-  launcher detects symlinks and changes during individual reads, but it cannot
-  prevent a privileged operator from rewriting files after the process starts.
+- vLLM 0.25.0 or newer, PyTorch, Transformers, and tokenizers installed in the
+  Python environment used to run the launcher.
+- A local Hugging Face model directory with safetensors base weights. Hub IDs,
+  revisions, `trust_remote_code`, alternate tokenizers, and alternate base
+  model inputs are not accepted.
+- A materialized model directory containing only intended deployment files.
+  Symlinks and special files anywhere below the model or adapter root are
+  rejected. In particular, do not pass a symlink-based Hugging Face cache
+  checkout directly.
+- A dedicated snapshot root owned by the launcher UID with mode `0700`. It may
+  not be a filesystem root, an ancestor or descendant of the model, or an
+  ancestor or descendant of the adapter. Existing directory permissions are
+  validated and never changed by the launcher. Its ancestry must not be
+  group/world writable unless the writable ancestor has sticky-directory
+  rename protection, as `/tmp` normally does, and every component must be owned
+  by the launcher UID or root.
+- Enough free bytes and inodes for a full copy plus bounded metadata headroom,
+  even when the filesystem supports reflinks.
 
-Use one process for a base teacher or one static adapter. Do not configure
-multiple static adapters, resolver plugins, or runtime load/unload. The
-launcher owns all LoRA, model, tokenizer, logprob, fingerprint, generation
-config, and middleware arguments. It forces
-`VLLM_ALLOW_RUNTIME_LORA_UPDATING=0`, rejects `VLLM_PLUGINS`, and rejects every
-caller-supplied option containing `lora`.
+For a static adapter, provide one local PEFT directory containing
+`adapter_config.json` and exactly one of `adapter_model.safetensors` or
+`adapter_model.bin`. Prefer safetensors. A pickle-based `.bin` is executable
+input and must come from a trusted source.
 
-vLLM documents the runtime mutation boundary in its
-[security guide](https://docs.vllm.ai/en/stable/usage/security/).
+## Snapshot lifecycle
+
+The fingerprint-to-load race is closed by making the staged snapshot the only
+model tree vLLM can load:
+
+1. Validate requested limits, environment variables, and extra vLLM options
+   before copying model data.
+2. Inventory the complete model and optional adapter trees. Enforce aggregate
+   file, directory, byte, path, depth, manifest, free-space, and inode bounds.
+3. Create a private `.building-*` directory under an open snapshot-root file
+   descriptor. Reflink each regular file where supported, otherwise copy it.
+   Hash source and destination for the exact initially observed length and
+   reject growth, truncation, replacement, links, or special files.
+4. Record every directory and every file `(path, byte length, SHA-256)` in a
+   canonical manifest. Make files `0400`, directories `0500`, then re-enumerate
+   and re-hash the complete tree.
+5. Atomically rename the directory to `ready-*`, synchronize the snapshot root,
+   and verify it again. Only then compute the tokenizer, adapter, model, and
+   inference identities from the staged paths.
+6. Verify the snapshot immediately before spawning vLLM. The vLLM argv points
+   only at `ready-*/model` and, when present, `ready-*/adapter`.
+7. Start vLLM without a shell in a new session. Forward `SIGINT`, `SIGTERM`,
+   `SIGHUP`, and `SIGQUIT` once to that process group, terminate descendants
+   left after the leader exits, then remove the snapshot through the anchored
+   root descriptor without following links or crossing filesystems.
+
+Source files may change after a successful copy without affecting the running
+teacher. Mutation during copy or verification fails the launch. Reflinks are
+copy-on-write snapshots; source writes do not change the staged extents.
+
+The default snapshot root is
+`~/.cache/kiln/teacher-snapshots`. Override it with
+`--snapshot-root=/dedicated/path` or `KILN_VLLM_SNAPSHOT_ROOT`. A same-filesystem
+root gives reflinks the best chance to succeed, but capacity checks always
+assume copy fallback.
 
 ## Base teacher
 
-Run from the Kiln repository. Additional vLLM arguments come after `--` and use
-one unambiguous `--key=value` token each. The launcher allows a small set of
-documented valueless boolean switches such as `--enforce-eager`.
+Additional vLLM arguments follow `--` and use one `--key=value` token each,
+except for the launcher's small set of vetted valueless switches.
 
 ```bash
 python3 scripts/vllm_teacher.py \
   --model-path=/models/Qwen3.5-4B \
+  --snapshot-root=/var/tmp/kiln-teacher-snapshots \
   --served-model-id=qwen35-4b-teacher \
   --max-top-k=20 \
   --max-model-len=32768 \
+  --max-prompt-logprob-candidates=500000 \
   -- \
   --host=127.0.0.1 \
   --port=8000 \
@@ -60,54 +95,84 @@ python3 scripts/vllm_teacher.py \
   --api-key=replace-with-a-random-secret
 ```
 
-The executed command uses the same Python interpreter as the launcher:
+The generated command uses the same Python interpreter, a fixed `/` working
+directory, no shell, and a staged path:
 
 ```text
-python3 -m vllm.entrypoints.cli.main serve /models/Qwen3.5-4B \
+python3 -m vllm.entrypoints.cli.main serve \
+  /var/tmp/kiln-teacher-snapshots/ready-.../model \
   --served-model-name=qwen35-4b-teacher \
   --max-model-len=32768 \
   --max-logprobs=20 \
   --logprobs-mode=raw_logprobs \
   --generation-config=vllm \
+  --load-format=safetensors \
   --fingerprint-mode=custom \
   --fingerprint-value=kiln-teacher-v1.<base64url-json>.<sha256>
 ```
 
-The launcher prints the complete system fingerprint immediately before
-`execve`. Kiln must receive that same value in every scoring response.
+The base loader is always forced to safetensors. Caller-supplied `--load-format`
+is rejected. Alternate `.bin` files cannot win loader selection, and every
+extra file is still included in the full snapshot digest.
+
+The launcher prints the fingerprint and snapshot path immediately before
+spawn. Kiln must receive that exact fingerprint in every scoring response.
 
 ## Static adapter teacher
 
-Add one adapter path. The API model ID is also the static adapter name:
+Add one adapter path. The API model ID is also the only static adapter name:
 
 ```bash
 python3 scripts/vllm_teacher.py \
   --model-path=/models/Qwen3.5-4B \
   --adapter-path=/adapters/math-v7 \
+  --snapshot-root=/var/tmp/kiln-teacher-snapshots \
   --served-model-id=qwen35-4b-math-v7 \
   --max-top-k=20 \
   --max-model-len=32768 \
+  --max-prompt-logprob-candidates=500000 \
   -- \
   --host=127.0.0.1 \
   --port=8000 \
-  --dtype=bfloat16 \
-  --api-key=replace-with-a-random-secret
+  --dtype=bfloat16
 ```
 
-The launcher adds exactly one vLLM 0.25 JSON module argument:
+The launcher adds exactly one static module using its staged adapter path:
 
 ```text
---enable-lora --max-loras=1 --max-cpu-loras=1 --max-lora-rank=<config-derived-cap> \
---lora-modules={"name":"qwen35-4b-math-v7","path":"/adapters/math-v7","base_model_name":"kiln-base-<base-hash-prefix>"}
+--enable-lora --max-loras=1 --max-cpu-loras=1 \
+--max-lora-rank=<config-derived-cap> \
+--lora-modules={"name":"qwen35-4b-math-v7","path":".../ready-.../adapter","base_model_name":"kiln-base-..."}
 ```
 
-This is vLLM's documented [JSON `--lora-modules`
-form](https://docs.vllm.ai/en/stable/features/lora/#new-format-for---lora-modules).
+Runtime adapter load/unload, resolver plugins, prompt adapters, multiple LoRAs,
+and caller-supplied adapter options are rejected. Configure Kiln only with the
+adapter model ID, never vLLM's internal base alias.
 
-vLLM lists the internal base alias as well as the adapter. Configure Kiln only
-with `qwen35-4b-math-v7`; the identity and every Kiln request name that adapter.
-The process fingerprint is not a valid identity for requests made directly to
-the internal base alias.
+vLLM necessarily lists and accepts its internal base alias when serving a
+LoRA. Its custom fingerprint is process-wide, so the base response carries the
+same fingerprint even though it does not carry adapter logits. The fingerprint
+alone is therefore insufficient for an adapter request. Kiln requires the
+configured request model and response `model` to equal the identity's
+`served_model_id`, which rejects this bypass. Any non-Kiln client must enforce
+the same check. If the endpoint itself must expose only the adapter name, put it
+behind an authenticated proxy that rejects the internal base ID.
+
+## Response budget
+
+`max_prompt_logprob_candidates` is an aggregate response-allocation ceiling,
+not a per-position top-K. One position can contain up to
+`min(max_top_k + 1, vocab_size)` candidates because the sampled token may be in
+addition to the requested top-K.
+
+The configured ceiling must fit at least one maximum-width row and may not
+exceed either `1,000,000` candidates or
+`max_model_len * min(max_top_k + 1, vocab_size)`. If omitted, the launcher uses
+the smaller of `1,000,000` and that theoretical response maximum. The value is
+part of the canonical teacher identity and Kiln rejects oversized responses
+before allocating their full candidate payload. The explicit one-million cap
+also prevents an identity from advertising multi-gigabyte responses that the
+client's bounded HTTP transport could never accept.
 
 ## Identity contract
 
@@ -116,8 +181,8 @@ The compact JSON field order is normative:
 ```text
 schema, protocol, served_model_id, base_model_sha256,
 tokenizer_vocab_sha256, tokenizer_config_sha256, adapter, vocab_size,
-max_top_k, max_model_len, logprobs_mode, implementation,
-inference_config_sha256
+max_top_k, max_model_len, max_prompt_logprob_candidates, logprobs_mode,
+implementation, inference_config_sha256
 ```
 
 The constants are:
@@ -129,55 +194,125 @@ logprobs_mode:  raw_logprobs
 fingerprint:    kiln-teacher-v1.<base64url without padding>.<sha256 of JSON>
 ```
 
-All SHA fields inside the identity are exactly 64 lowercase hexadecimal
-characters without a `sha256:` prefix.
+All SHA fields are exactly 64 lowercase hexadecimal characters without a
+`sha256:` prefix.
 
-`base_model_sha256` matches Kiln's Rust loader. For each selected shard, hash
-the raw bytes and record `(digest, byte_length)`. Sort records by digest and
-then length. Hash the domain `kiln.base-model-content.v1\0`, a little-endian
-`u64` record count, then a little-endian `u64` length and the raw 32-byte digest
-for each record. Paths, mtimes, `config.json`, and the shard index are excluded.
+`base_model_sha256` matches Kiln's Rust loader. For each safetensors shard,
+hash the raw bytes and record `(digest, byte_length)`. Sort by digest and then
+length. Hash the domain `kiln.base-model-content.v1\0`, a little-endian `u64`
+record count, then each little-endian `u64` length and raw 32-byte digest.
 
 `tokenizer_vocab_sha256` hashes the complete Transformers `get_vocab()` map.
-After the domain `kiln.tokenizer-vocab.v1\0` and little-endian `u64` pair
-count, pairs are sorted by `(u32 ID, raw UTF-8 token bytes)` and encoded as
-little-endian ID, little-endian `u64` byte length, and token bytes. This is the
-same golden byte contract as `KilnTokenizer::vocab_identity_sha256()`.
+Pairs are sorted by `(u32 ID, raw UTF-8 token bytes)` and encoded under the
+`kiln.tokenizer-vocab.v1\0` domain. The map pair count, backend tokenizer
+`get_vocab_size(with_added_tokens=true)`, and `config.json.vocab_size` must all
+agree before launch.
 
-`tokenizer_config_sha256` hashes the exact UTF-8 string returned by the fast
-tokenizer's `backend_tokenizer.to_str()`. This corresponds to Rust
-`Tokenizer::to_string(false)`. It is deliberately not a hash of
-`tokenizer_config.json`.
+`tokenizer_config_sha256` hashes the exact UTF-8 fast-tokenizer backend JSON
+returned by `backend_tokenizer.to_str()`, corresponding to Rust
+`Tokenizer::to_string(false)`.
 
 For a static adapter, `weights_sha256` is a domain-separated digest over the
-selected filename, byte length, and raw weight-file digest. `config_sha256` is
-the raw `adapter_config.json` digest. The adapter field is `null` for a base
-teacher. The launcher reads `r` and every `rank_pattern` value, then selects the
-smallest vLLM-supported maximum rank that fits. That derived cap is folded into
-`inference_config_sha256`; it is not an additional identity field.
+selected filename, byte length, and raw weight digest. `config_sha256` is the
+raw `adapter_config.json` digest. Adapter rank and every `rank_pattern` value
+select the smallest supported vLLM rank cap, which is bound into the inference
+digest.
 
-`inference_config_sha256` binds the exact model `config.json` digest, owned
-logprob and context settings, adapter mode, non-transport vLLM arguments, and
-relevant `VLLM_`, CUDA, ROCm/HIP, NCCL, Torch, and PyTorch environment values.
-Host, port, API key, and TLS arguments are excluded because they do not change
-logits. The API key itself is never embedded in the identity.
+`inference_config_sha256` binds:
+
+- the canonical full-tree snapshot manifest digest and exact `config.json`;
+- top-K, context, aggregate response budget, raw-logprob mode, safetensors
+  format, adapter mode, and every vetted non-transport vLLM option;
+- exact Python implementation/version, the resolved interpreter executable,
+  and the vLLM, torch, Transformers, and tokenizers package versions and
+  installed content. The content digest covers each actual import tree,
+  distribution metadata and recorded files, Python/native-extension files,
+  and editable-install source. A fresh child re-hashes this contract under the
+  exact launch environment immediately before vLLM is spawned;
+- accelerator type, driver/runtime identity, visible device names,
+  architectures, and total memory;
+- inference-affecting vLLM, CUDA, ROCm/HIP, RCCL/NCCL, Torch, Triton, HF, and
+  native-library environment values; and
+- deterministic policy inputs including `--seed`, eager mode,
+  `PYTHONHASHSEED`, TF32 overrides, cuBLAS workspace policy, and cuDNN policy.
+
+This records determinism inputs; it does not claim that a given vLLM/kernel
+combination is numerically deterministic.
+
+Transport settings such as host, port, API key, TLS, and CORS are excluded
+because they do not alter logits. The API key is never embedded in the
+identity and is redacted from dry-run output.
+
+## Fail-closed options and environment
+
+The launcher owns all model, tokenizer, weight-format, generation-config,
+logprob, fingerprint, middleware, LoRA, and adapter arguments. Transport
+options and a versioned allowlist of reviewed scalar inference options are
+accepted. Unknown vLLM options fail closed. Options containing file, path,
+directory, or template inputs are rejected because a path string does not bind
+the referenced bytes. Add and test a new option in the launcher before relying
+on it.
+
+`PYTHONPATH`, `PYTHONHOME`, Python safe/user-site overrides, `LD_PRELOAD`, and
+`LD_LIBRARY_PATH` are rejected for real launches so the child cannot resolve
+shadow Python or native code under an unchanged package-version identity.
+Environment names that identify files, paths, plugin modules, executables,
+homes, roots, or cache directories are also rejected across the vLLM, CUDA,
+ROCm, Torch, Triton, and HF namespaces. This includes vLLM shared-library and
+logging-config paths plus `HIPBLASLT_TUNING_OVERRIDE_FILE`. Device-visibility
+variables including `ROCR_VISIBLE_DEVICES` are allowed but identity-bound.
+
+Runtime hashing is intentionally bounded and fail-closed: at most 250,000
+files, 100,000 directories, 64 GiB of logical file content, 128 directory
+levels, 4,096 bytes per canonical label, and 64 MiB of aggregate label data.
+Missing files named by distribution metadata, ambiguous namespace roots,
+unreadable files, special files, path changes, and content mutation during a
+hash abort launch.
+The launcher forces `PYTHONDONTWRITEBYTECODE=1` in the child so its own import
+does not mutate an identity-bound package tree by creating bytecode caches.
+
+`VLLM_ALLOW_RUNTIME_LORA_UPDATING` is forced to `0`. `VLLM_PLUGINS`, LoRA
+resolver configuration, and skipped model-name validation fail before spawn.
 
 ## Inspect without vLLM
 
-Tests and tooling can use a strict input manifest without importing vLLM,
-Transformers, or touching model weights. This mode can never launch a server.
+Tests and tooling can provide a strict input manifest without importing vLLM,
+Transformers, torch, or touching model weights. This mode can never launch a
+server.
 
 ```json
 {
-  "schema": "kiln.vllm-teacher-input.v1",
+  "schema": "kiln.vllm-teacher-input.v2",
   "base_model_sha256": "<64 lowercase hex>",
+  "snapshot_content_sha256": "<64 lowercase hex>",
   "model_config_sha256": "<64 lowercase hex>",
   "tokenizer_vocab_sha256": "<64 lowercase hex>",
   "tokenizer_config_sha256": "<64 lowercase hex>",
   "adapter": null,
   "adapter_max_rank": null,
   "vocab_size": 248320,
-  "implementation": "vllm:0.25.0"
+  "implementation": "vllm:0.25.0",
+  "runtime_versions": {
+    "python": "3.12.7",
+    "python_implementation": "CPython",
+    "vllm": "0.25.0",
+    "torch": "2.9.1+cu129",
+    "transformers": "5.0.0",
+    "tokenizers": "0.22.2"
+  },
+  "runtime_content_sha256": "<64 lowercase hex>",
+  "accelerator": {
+    "type": "cuda",
+    "driver": "nvidia:580.65;cuda-runtime:12.9",
+    "devices": [
+      {
+        "index": 0,
+        "name": "NVIDIA GeForce RTX 4090",
+        "architecture": "sm_89",
+        "total_memory_bytes": 25757220864
+      }
+    ]
+  }
 }
 ```
 
@@ -192,53 +327,114 @@ python3 scripts/vllm_teacher.py \
   --manifest-only
 ```
 
-Add `--model-path` and use `--dry-run` to emit the redacted argv as JSON. A
-manifest supplied through `--identity-input` is never trusted for a real
-launch; a real launch always fingerprints local content itself.
+Add `--model-path` and `--dry-run` to emit a redacted command preview. Dry-run
+uses source paths only and clearly labels that fact; it does not allocate a
+snapshot. A precomputed manifest is forbidden for a real launch.
 
-## Network trust boundary
+## Crash recovery and residual trust
 
-The fingerprint makes the identity document self-consistent. It does not prove
-which server sent it. A malicious endpoint can fabricate or replay a valid
-document. Use verified TLS to authenticate a remote server, keep certificate
-verification enabled, and pin the expected identity when registering it with
-Kiln. An API key authorizes a client but does not authenticate the server.
+Normal exits, forwarded signals, spawn failures, and Python exceptions remove
+the snapshot. `SIGKILL`, host reset, kernel panic, or power loss cannot run
+cleanup and may leave `.building-*` or `ready-*` directories. After confirming
+that no launcher or vLLM process references that dedicated root, remove stale
+entries manually. Never run generic recursive cleanup against a shared path.
 
-Bind plain HTTP to loopback only. For remote access, terminate TLS at a trusted
-reverse proxy or pass vLLM's `--ssl-keyfile`, `--ssl-certfile`, and CA options.
-Restrict the process and model directories to trusted operators. The vLLM API
-key is present in process argv; the launcher's dry-run output redacts it, but a
-reverse proxy is preferable when process-list visibility is a concern.
+Mode bits are an operational guard, not cryptographic immutability. The
+launcher assumes the process UID, root, kernel, and snapshot filesystem are
+trusted. The same UID or root can chmod or replace staged files between the
+last verification and a loader read, and can replace an interpreter or package
+file after the fresh-child runtime revalidation but before vLLM imports it.
+Protect against a hostile local operator with a separately owned read-only
+mount, filesystem verification such as fs-verity, and a constrained service
+account. Hardware faults and malicious kernel/filesystem behavior are outside
+this contract.
 
-## CUDA handoff
+The identity hashes the interpreter plus the vLLM, torch, Transformers, and
+tokenizers import/distribution content. It does not recursively hash every
+transitive distribution, system shared library, driver library, or JIT tool
+binary outside those trees. Auto-selected Triton, flash-attention, FlashInfer,
+xFormers, rocBLAS, hipBLASLt, compilers, and system-library bytes remain part of
+the trusted machine image unless their files reside in one of the four bound
+package trees. Keep that image immutable, record the detected attention/kernel
+backend in the machine qualification receipt, and expect an identity change
+only when one of the explicitly bound inputs changes.
 
-Run the following on the 16 GB and 24 GB CUDA machines before treating the
-vLLM path as qualified:
+The fingerprint also does not authenticate a network peer. Use verified TLS,
+pin the expected teacher identity in Kiln, and keep certificate verification
+enabled. Bind plain HTTP to loopback only. An API key authorizes a client but
+does not authenticate the server.
 
-1. Install the intended vLLM 0.25+ build and matching Transformers/tokenizers
-   versions, then run the Python unit tests below.
-2. Run `--manifest-only` and `--dry-run`; archive the identity and redacted
-   argv with the machine receipt.
-3. Launch the base teacher. Send a non-streaming `/v1/completions` request with
-   numeric prompt IDs, `prompt_logprobs`, `max_tokens: 1`, and the exact model
-   ID. Confirm the response fingerprint is byte-for-byte identical to the
-   printed value.
-4. Register the teacher in Kiln and run the remote-teacher prompt-logprob smoke
-   across first, interior, and final causal positions.
-5. Restart without changes and confirm the fingerprint is stable. Change a
-   copy of one shard, `config.json`, tokenizer backend JSON, and each adapter
-   input in turn; confirm the appropriate identity digest changes.
-6. Launch the static adapter process and prove requests named for the adapter
-   use it. Confirm a request using the internal base alias is never accepted as
-   that adapter by Kiln.
-7. Confirm the runtime LoRA load/unload endpoints reject mutation and that a
-   `VLLM_PLUGINS` resolver configuration fails before launch.
-8. Record correctness and throughput at the intended batch sizes. Identity
-   qualification establishes provenance; it does not substitute for numerical
-   parity, pause analysis, or large-batch performance measurements.
+## Register with Kiln
 
-Portable tests:
+Credential-free registration is limited to an exact loopback URL. For an
+off-host teacher, configure an exact canonical HTTPS origin and a server-owned
+secret environment variable before Kiln starts:
+
+```toml
+# kiln.toml
+[teachers.credentials.primary-vllm]
+origin = "https://teacher.example.com:8443"
+api_key_env = "KILN_VLLM_API_KEY"
+```
+
+```bash
+export KILN_VLLM_API_KEY='replace-with-the-teacher-secret'
+kiln serve --config kiln.toml
+
+curl -X POST http://localhost:8420/v1/teachers \
+  -H 'content-type: application/json' \
+  -d '{
+    "alias": "qwen35@vllm",
+    "kind": "remote",
+    "provider": "vllm",
+    "model_id": "qwen35-4b-teacher",
+    "url": "https://teacher.example.com:8443",
+    "credential_id": "primary-vllm"
+  }'
+```
+
+The request cannot set identity, tokenizer hash, vocabulary size, top-K,
+full-vocabulary support, or a secret environment-variable name. Kiln sends two
+operational probes, verifies the complete numeric vocabulary against its
+student, persists the returned canonical identity before publishing the alias,
+and returns `status`, `usable`, `identity_revision`, bounds, and an exact
+`off_policy_manifest`. Aliases are immutable; delete and re-register to change
+a deployment. Every queued job pins the complete spec and repeats the two
+probes before GPU ownership or a cache lookup. Every scoring response must
+continue carrying the same fingerprint.
+
+Registries created by the older API may contain `api_key_env`. On first load,
+Kiln removes that field without trusting it and atomically rewrites the file.
+The migrated remote alias remains unusable until it is deleted and registered
+again with `credential_id` and a fresh identity probe.
+
+## Per-machine qualification
+
+GPU CI is not required for this contract. Run portable tests on every checkout:
 
 ```bash
 python3 -m unittest scripts/qualification/tests/test_vllm_teacher.py -v
 ```
+
+Then qualify each ROCm, CUDA, and other intended machine locally:
+
+1. Record package versions, runtime-content digest, driver, visible devices,
+   model snapshot digest, identity, and redacted argv.
+2. Launch a base teacher and send a non-streaming `/v1/completions` request
+   with numeric prompt IDs, `prompt_logprobs`, `max_tokens: 1`, and the exact
+   model ID. Confirm the response fingerprint exactly matches launcher output.
+3. Run Kiln's remote-teacher smoke over first, interior, and final causal
+   positions and at both one-row and aggregate candidate-budget boundaries.
+4. Restart unchanged and confirm identity stability. Change a copied shard,
+   auxiliary file, tokenizer backend, editable package source file, native
+   extension, runtime version, accelerator selection, and adapter input one at
+   a time; confirm the identity changes or launch fails. Also mutate a bound
+   package after identity construction and confirm the final child
+   revalidation refuses to spawn vLLM.
+5. Confirm runtime LoRA endpoints, resolver plugins, unknown vLLM options,
+   unbound file options, and shadow-code environment variables fail closed.
+6. Interrupt the launcher and confirm the process group exits and its snapshot
+   disappears. Exercise a child-start failure and stale-snapshot recovery.
+7. Measure numerical parity, latency pauses, VRAM behavior, and throughput at
+   intended batch sizes. Identity qualification proves provenance and limits;
+   it does not prove numerical parity or performance.

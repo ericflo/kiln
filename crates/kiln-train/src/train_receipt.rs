@@ -213,6 +213,10 @@ pub struct OpdReceipt {
     pub objective: String,
     pub loss_granularity: String,
     pub teacher_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teacher_content_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teacher_identity: Option<crate::TeacherIdentityV1>,
     pub top_k: Option<usize>,
     pub samples_per_prompt: usize,
     pub action_tokens: u64,
@@ -1273,6 +1277,11 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         h.update(&buf[..n]);
     }
     Ok(format!("sha256:{}", hex_digest(h.finalize().as_slice())))
+}
+
+pub fn sha256_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("sha256:{}", hex_digest(digest.as_slice()))
 }
 
 pub fn sha256_json_value(value: &serde_json::Value) -> String {

@@ -197,14 +197,51 @@ fn test_tokenizer() -> KilnTokenizer {
     KilnTokenizer::from_bytes(&bytes).unwrap()
 }
 
+fn synthetic_base_teacher_identity(
+    config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    backend: &str,
+) -> Arc<kiln_train::TeacherIdentityV1> {
+    let tokenizer_vocab_sha256 = tokenizer
+        .vocab_identity_sha256()
+        .strip_prefix("sha256:")
+        .unwrap()
+        .to_string();
+    let tokenizer_config_sha256 = tokenizer
+        .tokenizer_config_sha256()
+        .unwrap()
+        .strip_prefix("sha256:")
+        .unwrap()
+        .to_string();
+    Arc::new(
+        kiln_train::TeacherIdentityV1::new(
+            "Qwen3.5-4B",
+            "a".repeat(64),
+            tokenizer_vocab_sha256,
+            tokenizer_config_sha256,
+            None,
+            config.vocab_size as u32,
+            config.vocab_size.min(256) as u32,
+            config.max_position_embeddings as u32,
+            65_536,
+            format!("kiln-test/{backend}"),
+            "d".repeat(64),
+        )
+        .unwrap(),
+    )
+}
+
 fn tiny_real_state_with_timeout(config: ModelConfig, request_timeout: Duration) -> AppState {
     let device = Device::Cpu;
     let weights = tiny_weights(&config, &device);
     let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+    let state_tokenizer = test_tokenizer();
+    let base_teacher_identity =
+        synthetic_base_teacher_identity(&config, &state_tokenizer, runner.backend_name());
     let mut state = AppState::new_real(
         config,
         runner,
-        test_tokenizer(),
+        state_tokenizer,
         device,
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
@@ -212,6 +249,7 @@ fn tiny_real_state_with_timeout(config: ModelConfig, request_timeout: Duration) 
         request_timeout.as_secs().max(1),
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
+        Some(base_teacher_identity),
     );
     // Production configuration is second-granularity. Integration tests use a
     // shorter duration so lifecycle regressions fail quickly and locally.
@@ -278,6 +316,7 @@ async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
+        None,
     );
     let state_for_assert = state.clone();
     let app = api::router(state);
@@ -388,6 +427,7 @@ async fn test_real_model_chat_completion() {
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
+        None,
     );
 
     let app = api::router(state);
@@ -448,6 +488,7 @@ async fn test_real_model_one_token_prompt_logprobs_is_exactly_null() {
     let request_timeout = Duration::from_millis(40);
     let state = tiny_real_state_with_timeout(tiny_config(), request_timeout);
     let state_for_assert = state.clone();
+    let expected_fingerprint = state.base_teacher_identity.as_ref().unwrap().fingerprint();
     let gpu_lock = state.gpu_lock.clone();
     let runner = real_runner(&state);
     let held_read = gpu_lock.clone().read_owned().await;
@@ -469,6 +510,7 @@ async fn test_real_model_one_token_prompt_logprobs_is_exactly_null() {
         .unwrap();
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let response_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response_json["system_fingerprint"], expected_fingerprint);
     assert_eq!(
         response_json["choices"][0]["prompt_logprobs"],
         json!([null])
@@ -491,6 +533,39 @@ async fn test_real_model_one_token_prompt_logprobs_is_exactly_null() {
         gpu_lock
             .try_write()
             .expect("one-token response must leave GPU admission writable"),
+    );
+}
+
+#[tokio::test]
+async fn test_real_model_prompt_logprobs_requires_verified_identity() {
+    let mut state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
+    state.base_teacher_identity = None;
+    let gpu_lock = state.gpu_lock.clone();
+    let app = api::router(state);
+
+    let response = app.oneshot(prompt_logprob_request(&[7], 2)).await.unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let response_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response_json["error"]["code"], "internal_error");
+    assert!(
+        response_json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no verified base teacher identity")
+    );
+    drop(
+        gpu_lock
+            .try_write()
+            .expect("identity rejection must happen before GPU admission"),
     );
 }
 
@@ -576,6 +651,7 @@ async fn test_real_model_prompt_logprobs_rejects_active_adapter() {
         rank: 1,
         alpha: 1.0,
         scale: 1.0,
+        source_identity: None,
     }));
     let app = api::router(state);
 
@@ -831,10 +907,13 @@ async fn test_real_model_prompt_logprobs_match_full_forward_reference() {
     assert_eq!(reference_logprobs.len(), prompt_ids.len());
 
     let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+    let state_tokenizer = test_tokenizer();
+    let base_teacher_identity =
+        synthetic_base_teacher_identity(&config, &state_tokenizer, runner.backend_name());
     let state = AppState::new_real(
         config.clone(),
         runner,
-        test_tokenizer(),
+        state_tokenizer,
         device,
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
@@ -842,6 +921,7 @@ async fn test_real_model_prompt_logprobs_match_full_forward_reference() {
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
+        Some(base_teacher_identity),
     );
     let backend_health = match state.backend.as_ref() {
         ModelBackend::Real { backend_health, .. } => backend_health.clone(),
@@ -1002,6 +1082,7 @@ async fn test_real_model_streaming_chat_completion() {
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
+        None,
     );
 
     let app = api::router(state);
@@ -1122,6 +1203,7 @@ async fn test_request_timeout_configurable() {
         42,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
+        None,
     );
 
     assert_eq!(state.request_timeout.as_secs(), 42);
@@ -1149,6 +1231,7 @@ async fn test_default_request_timeout() {
         600,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
+        None,
     );
 
     assert_eq!(state.request_timeout.as_secs(), 600);
@@ -1176,6 +1259,7 @@ async fn test_health_with_real_backend() {
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
+        None,
     );
 
     let app = api::router(state);
@@ -1245,6 +1329,7 @@ async fn test_real_model_chat_completion_metal() {
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
+        None,
     );
 
     let app = api::router(state);
@@ -1344,6 +1429,7 @@ async fn test_real_model_chat_completion_metal_bf16_fused() {
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
+        None,
     );
     let app = api::router(state);
     let body = json!({

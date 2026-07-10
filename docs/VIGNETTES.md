@@ -16,27 +16,36 @@ vLLM teacher. The current remote-teacher protocol is vLLM-only; the hosted
 OpenRouter version of this vignette remains aspirational until it has a
 dedicated, qualified adapter.
 
+The teacher must expose the exact same numeric tokenizer vocabulary as the
+loaded student. Registration probes and compares the complete token-to-ID map;
+a related model family or matching vocabulary size is not sufficient.
+
 **Reproduction:**
 
 ```bash
 # 1. Boot kiln (any backend; Metal on a MacBook, CUDA on a 4090).
 kiln serve
 
-# 2. Start vLLM for the teacher on another device/process. Raising
-#    --max-logprobs to 32 is an explicit operator contract; stock vLLM caps
-#    at 20 and Kiln will resolve the executable OPD width to 16.
-vllm serve Qwen/Qwen3.6-27B --port 8000 --max-logprobs 32
+# 2. On the teacher host, launch only through Kiln's immutable launcher.
+#    It snapshots local content and owns the identity-bearing vLLM options.
+python3 scripts/vllm_teacher.py \
+  --model-path=/models/Qwen3.6-27B \
+  --served-model-id=qwen36-27b-teacher \
+  --max-top-k=32 \
+  --max-model-len=32768 \
+  --max-prompt-logprob-candidates=1000000 \
+  -- --host=127.0.0.1 --port=8000
 
-# 3. Register the explicit vLLM protocol. Kiln never infers a provider from
-#    a hostname or port.
+# 3. On the student host, use an authenticated SSH tunnel so the teacher
+#    remains loopback-only, then register the explicit vLLM protocol.
+ssh -N -L 8000:127.0.0.1:8000 teacher-host
+
 curl -X POST localhost:8420/v1/teachers -H content-type:application/json -d '{
   "alias":         "qwen3.6-27b@vllm",
   "kind":          "remote",
   "provider":      "vllm",
-  "model_id":      "Qwen/Qwen3.6-27B",
-  "url":           "http://teacher-host:8000",
-  "max_top_k":     32,
-  "vocab_size":    152064
+  "model_id":      "qwen36-27b-teacher",
+  "url":           "http://127.0.0.1:8000"
 }'
 
 # 4. Drop the writing corpus as a JSONL dataset on disk (one
@@ -65,7 +74,8 @@ curl -X POST localhost:8420/v1/library/publish/alice-writes-like-her
 
 **Pillars exercised:**
 - §3.2 `RemoteTeacher` + `/v1/teachers`.
-- §3.3 `LogitCache` (cache hits for popular `(prompt, teacher)` prefixes).
+- §3.3 `LogitCache` (v3 keys bind the full teacher identity and causal token
+  prefix; each job re-handshakes before accepting a hit).
 - §3.5 knowledge-pump recipe.
 - §3.7 recipe runtime with auto-chained `base_adapter`.
 - §3.10 adapter library publish.
@@ -76,7 +86,7 @@ curl -X POST localhost:8420/v1/library/publish/alice-writes-like-her
 - §8.13 tier-aware defaults (rank 16/32/128 per laptop/prosumer/corporate tier).
 - §11 12-trigger guardrail cascade (`LengthInflationGuardrail`).
 
-**Reproducibility receipt format:** `<adapter_dir>/.kiln-receipt.json` (schema v1, `kiln_train::AdapterReceipt`). Records seed, teacher alias + model id, hyperparameters, prompt source descriptor, diagnostic summary.
+**Reproducibility receipt format:** `<adapter_dir>/.kiln-receipt.json` (schema v1, `kiln_train::AdapterReceipt`) plus `train_receipt.json`. The teacher descriptor and OPD receipt retain the complete canonical identity and its content revision, not only the alias and model id.
 
 ---
 
@@ -172,7 +182,8 @@ done
 # 2. Consolidate via §3.4 behaviour-space multi-tenant merge. Each
 #    source LoRA is loaded in turn, the model is run forward with
 #    that LoRA applied, top-K teacher logprobs at active positions
-#    are stashed in a unified FixtureLogitSource keyed by tokens_hash.
+#    are stashed in a unified FixtureLogitSource keyed by the exact token
+#    sequence and causal row.
 #    The trainer queries the *correct* source's teacher for each
 #    prompt — no per-step LoRA swap, no multi-tenant inference server.
 curl -X POST localhost:8420/v1/adapters/distill_merge -d '{

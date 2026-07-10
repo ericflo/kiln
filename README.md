@@ -170,12 +170,51 @@ For saturated tasks where reward-only GRPO is low signal, kiln-train also
 accepts off-policy teacher distillation data: prompt messages plus a teacher
 response, optionally with per-token teacher top-logprobs for reverse-KL. The
 same agentic `trajectory` shape can be attached so action tokens receive OPD
-supervision while observation tokens stay masked out of it. Note the ECHO
-env-CE term is not yet wired into the OPD path — OPD receipts record
-`echo_combined: false`.
+supervision while observation tokens stay masked out of it. Numeric teacher
+logits require a canonical first-line manifest copied from the registered
+teacher's `off_policy_manifest`; Kiln rejects a missing or different identity.
+ECHO env-CE can be composed with OPD and receipts count action and environment
+tokens separately.
 
 See [docs/OPD_TEACHER_JSONL.md](docs/OPD_TEACHER_JSONL.md) for the JSONL
 schema and the `reverse_kl` vs `cross_entropy` objective contract.
+
+### Remote vLLM teachers
+
+Remote numeric prompt-logprobs are accepted only from an identity-aware vLLM
+process launched with [`scripts/vllm_teacher.py`](scripts/vllm_teacher.py).
+The launcher snapshots the model and optional static adapter, binds their exact
+content plus tokenizer/runtime limits, the resolved Python executable, and the
+installed vLLM/torch/Transformers/tokenizers content into
+`system_fingerprint`, then re-hashes the runtime in a fresh child immediately
+before spawn. Dynamic LoRA mutation is disabled and stock `vllm-*`
+fingerprints are rejected.
+
+```bash
+python3 scripts/vllm_teacher.py \
+  --model-path=/models/Qwen3.5-4B \
+  --served-model-id=qwen35-teacher \
+  --max-top-k=32 \
+  --max-model-len=32768 \
+  --max-prompt-logprob-candidates=1000000 \
+  -- --host=127.0.0.1 --port=8000
+
+curl -X POST http://localhost:8420/v1/teachers \
+  -H 'content-type: application/json' \
+  -d '{"alias":"qwen35@vllm","kind":"remote","provider":"vllm","model_id":"qwen35-teacher","url":"http://127.0.0.1:8000"}'
+```
+
+Kiln probes K=1 and the advertised maximum K during registration, verifies the
+complete numeric vocabulary against the loaded student, persists the canonical
+identity, and repeats the probe at every job start before GPU ownership or a
+cache lookup. Off-host URLs require HTTPS and a server-owned `credential_id`
+configured under `[teachers.credentials]`; API callers can never choose the
+secret environment-variable name. `GET /v1/teachers` reports `status`,
+`usable`, `identity_revision`, bounds, and the exact off-policy manifest.
+On first startup after upgrading, Kiln removes legacy `api_key_env` fields from
+`teachers.json`; those entries stay unusable until they are explicitly deleted
+and re-registered with a configured credential handle and fresh identity.
+See [docs/VLLM_TEACHER_IDENTITY.md](docs/VLLM_TEACHER_IDENTITY.md).
 
 ## The Eval Loop
 
@@ -390,7 +429,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | Method | Path | Description |
 |---|---|---|
 | POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets |
-| POST | `/v1/completions` | vLLM-shaped prompt-logprob subset for remote OPD teachers |
+| POST | `/v1/completions` | vLLM-shaped prompt-logprob subset with a canonical base-teacher identity fingerprint |
 | POST | `/v1/completions/batch` | Batch generation API for GRPO (up to 64 prompts per request), with the same thinking-budget controls |
 | POST | `/v1/train/sft` | Submit SFT training examples (optionally with a `post_eval` hook) |
 | POST | `/v1/train/grpo` | Submit GRPO scored completions (optionally with a `post_eval` hook). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
@@ -407,8 +446,10 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET / POST | `/v1/corrections` | Durable corrections store — the basket survives the browser; pi can file corrections |
 | DELETE | `/v1/corrections/{request_id}` | Remove a correction |
 | POST | `/v1/corrections/mark_trained` | Mark correction rows as trained into an adapter (kept as history) |
-| GET / POST | `/v1/teachers` | Teacher registry for OPD/distillation (local teachers may wear an adapter) |
+| GET / POST | `/v1/teachers` | Teacher registry; remote registration performs authoritative identity and capability probes |
 | DELETE | `/v1/teachers/{alias}` | Remove a registered teacher |
+| GET | `/v1/cache/stats` | Off-thread, serialized validation and summary of identity-bound cache-v3 entries |
+| GET | `/v1/cache/export` | Stream a deterministic validated export (16 GiB source / 1M-file limit); concurrent scans and archive import are rejected |
 | POST | `/v1/agent/traces/discover` | Index pi/agent session traces for training |
 | GET | `/v1/agent/traces` | List discovered agent session traces |
 | POST | `/v1/agent/self_improve` | One-call agentic self-improvement (traces → OPD + judge distill) |
@@ -477,9 +518,27 @@ their full-vocabulary rank. Scores remain F32, ties are deterministic by token
 ID, and split UTF-8 display tokens are decoded independently against preceding
 actual prompt context. Vocabulary drift, decoder failures, wrong-width rows,
 and non-finite logits or scores fail the request instead of producing partial
-JSON. The optional `model` must exactly match the one served model. Until the
-adapter-revision identity gate lands, scoring is base-model only and rejects an
-active LoRA instead of returning mutable teacher results under the base ID.
+JSON. The optional `model` must exactly match the one served model. Every real
+response carries a canonical identity binding the loader-owned base bytes,
+numeric tokenizer vocabulary/config, executable, numerical runtime, backend,
+and scoring limits. Scoring remains base-model only and rejects an active LoRA
+until the loaded-adapter revision barrier is implemented.
+The runtime digest includes OS/kernel build, stable CPU model/features and
+microcode, loaded numerical-library mappings, and accelerator/driver evidence.
+External probes have a five-second deadline, bounded output, process-group
+cleanup, and explicit missing/timeout markers in the digest.
+
+Before parsing weights, Kiln creates a private read-only checkpoint snapshot and
+loads only from that snapshot. Linux reflink and macOS clonefile make this
+copy-on-write when the filesystem supports it; otherwise startup performs a
+full bounded copy and requires enough free space plus a reserve. Set
+`model.snapshot_dir` (or its `KILN_MODEL_SNAPSHOT_DIR` override) to a private
+filesystem with suitable capacity when the model directory's parent is not
+appropriate. The snapshot stays alive for
+deferred MTP loading and is removed when the runner exits. Mutating the original
+checkpoint after startup cannot change loaded bytes or their revision. A user
+with the same UID (or root) can still discover and rewrite process-owned files;
+Kiln treats that as part of the trusted host boundary.
 
 The response is additionally capped at 65,536 candidate entries. Real scoring
 uses the runner's resident backend and inference recurrent-state policy, omits

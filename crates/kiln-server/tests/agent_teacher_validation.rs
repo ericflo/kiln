@@ -40,7 +40,9 @@ fn test_tokenizer() -> KilnTokenizer {
 /// Mock state with adapter_dir on a tempdir (drift-check probes it for the
 /// judge LoRA; teacher registration persists `teachers.json` into it).
 fn make_state() -> (AppState, tempfile::TempDir) {
-    let config = ModelConfig::qwen3_5_4b();
+    let tokenizer = test_tokenizer();
+    let mut config = ModelConfig::qwen3_5_4b();
+    config.vocab_size = tokenizer.vocab_size();
     let scheduler = Scheduler::new(
         SchedulerConfig {
             max_batch_tokens: 8192,
@@ -56,13 +58,43 @@ fn make_state() -> (AppState, tempfile::TempDir) {
         config,
         scheduler,
         Arc::new(engine),
-        test_tokenizer(),
+        tokenizer,
         300,
         "Qwen3.5-4B".to_string(),
     );
     let dir = tempfile::tempdir().unwrap();
     state.adapter_dir = dir.path().to_path_buf();
+    let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    state.base_teacher_identity = Some(Arc::new(
+        kiln_server::teacher_identity::build_base_teacher_identity(
+            &state.served_model_id,
+            &format!("sha256:{hash}"),
+            &state.tokenizer,
+            &state.model_config,
+            "cpu",
+            hash,
+            hash,
+        )
+        .unwrap(),
+    ));
     (state, dir)
+}
+
+fn write_minimal_adapter(root: &std::path::Path, name: &str) {
+    let adapter = root.join(name);
+    std::fs::create_dir_all(&adapter).unwrap();
+    std::fs::write(
+        adapter.join("adapter_config.json"),
+        br#"{"r":1,"lora_alpha":1.0,"target_modules":[]}"#,
+    )
+    .unwrap();
+    let tensor_bytes = 1.0f32.to_le_bytes();
+    let tensor =
+        safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![1], &tensor_bytes)
+            .unwrap();
+    let weights =
+        safetensors::tensor::serialize([("ignored.weight", tensor)].into_iter(), None).unwrap();
+    std::fs::write(adapter.join("adapter_model.safetensors"), weights).unwrap();
 }
 
 async fn post(app: &axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
@@ -386,7 +418,7 @@ async fn teacher_registration_validates_adapter_field() {
     );
 
     // Local teacher wearing an adapter that exists: accepted, echoed back.
-    std::fs::create_dir(state.adapter_dir.join("prior-self")).unwrap();
+    write_minimal_adapter(&state.adapter_dir, "prior-self");
     let (status, response) = post(
         &app,
         "/v1/teachers",
@@ -432,6 +464,7 @@ async fn teacher_registration_rejects_unwired_remote_providers() {
         "{response}"
     );
 
+    let attacker_env = "KILN_TEST_REMOTE_KEY_INTENTIONALLY_UNSET";
     let (status, response) = post(
         &app,
         "/v1/teachers",
@@ -441,8 +474,21 @@ async fn teacher_registration_rejects_unwired_remote_providers() {
             "provider": "vllm",
             "model_id": "m",
             "url": "https://vllm.example.com",
-            "api_key_env": "KILN_TEST_REMOTE_KEY_INTENTIONALLY_UNSET"
+            "api_key_env": attacker_env
         }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    let rendered = response.to_string();
+    assert!(rendered.contains("api_key_env"), "{response}");
+    assert!(!rendered.contains(attacker_env), "{response}");
+
+    // Network vLLM registrations require a server-configured, origin-scoped
+    // credential handle. The server never probes an unauthenticated URL here.
+    let (status, response) = post(
+        &app,
+        "/v1/teachers",
+        json!({"alias": "t@vllm", "kind": "remote", "provider": "vllm", "model_id": "m", "url": "https://vllm.example.com"}),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
@@ -450,18 +496,9 @@ async fn teacher_registration_rejects_unwired_remote_providers() {
         response["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("not set"),
+            .contains("credential_id"),
         "{response}"
     );
-
-    // An explicit vLLM registration is accepted on any valid HTTP(S) URL.
-    let (status, response) = post(
-        &app,
-        "/v1/teachers",
-        json!({"alias": "t@vllm", "kind": "remote", "provider": "vllm", "model_id": "m", "url": "https://vllm.example.com"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{response}");
 }
 
 // ── OPD / distill submission fail-fast ───────────────────────────────

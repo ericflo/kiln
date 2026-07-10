@@ -497,6 +497,13 @@ pub trait LogitSource: Send + Sync + Debug {
     /// OPD run to pick the loss granularity.
     fn capabilities(&self) -> LogitSourceCaps;
 
+    /// Complete content/protocol identity when this source can prove one.
+    /// Cache and receipt code must treat `None` as unverified rather than
+    /// reconstructing an identity from aliases or legacy capability fields.
+    fn authoritative_teacher_identity(&self) -> Option<&crate::TeacherIdentityV1> {
+        None
+    }
+
     /// Fetch teacher logprobs at the given positions in the given
     /// sequence.
     ///
@@ -547,10 +554,15 @@ pub trait LogitSource: Send + Sync + Debug {
 #[derive(Debug, Clone)]
 pub struct FixtureLogitSource {
     caps: LogitSourceCaps,
-    /// For each (tokens hash, position) we precompute the answer.
+    identity: Option<crate::TeacherIdentityV1>,
+    /// For each exact token sequence and position we precompute the answer.
     /// Indexing convention: the trainer queries `(tokens, positions)` and
-    /// we look up each `positions[i]` keyed by `(hash, positions[i])`.
-    entries: std::collections::HashMap<(u64, usize), (Vec<u32>, Vec<f32>)>,
+    /// we look up each `positions[i]` under the complete sequence. A digest
+    /// alone is not sufficient here: fixtures may carry externally supplied
+    /// numeric training targets, so even a deliberate hash collision must not
+    /// alias two examples.
+    entries:
+        std::collections::HashMap<Vec<u32>, std::collections::HashMap<usize, (Vec<u32>, Vec<f32>)>>,
     top_k: usize,
 }
 
@@ -568,35 +580,87 @@ impl FixtureLogitSource {
                 supports_batched: true,
                 tokenizer_hash: None,
             },
+            identity: None,
             entries: std::collections::HashMap::new(),
             top_k,
         }
     }
 
-    /// Insert an entry: at position `pos` of any tokens whose hash is
-    /// `tokens_hash`, return the given top-K indices and logprobs.
-    pub fn insert(&mut self, tokens_hash: u64, pos: usize, indices: Vec<u32>, logprobs: Vec<f32>) {
-        assert_eq!(indices.len(), self.top_k);
-        assert_eq!(logprobs.len(), self.top_k);
-        self.entries.insert((tokens_hash, pos), (indices, logprobs));
+    /// Attach provenance to a fixture loaded from a verified, pre-scored
+    /// artifact. Ordinary synthetic fixtures remain explicitly unverified.
+    pub fn with_authoritative_identity(
+        mut self,
+        identity: crate::TeacherIdentityV1,
+    ) -> Result<Self, LogitSourceError> {
+        if identity.vocab_size() as usize != self.caps.vocab_size {
+            return Err(LogitSourceError::invalid(
+                &self.caps.teacher_id,
+                format!(
+                    "fixture identity vocab_size {} does not match fixture vocab_size {}",
+                    identity.vocab_size(),
+                    self.caps.vocab_size
+                ),
+            ));
+        }
+        if (identity.max_top_k() as usize) < self.top_k {
+            return Err(LogitSourceError::invalid(
+                &self.caps.teacher_id,
+                format!(
+                    "fixture top_k {} exceeds identity max_top_k {}",
+                    self.top_k,
+                    identity.max_top_k()
+                ),
+            ));
+        }
+        self.caps.tokenizer_hash = Some(identity.tokenizer_vocab_sha256().to_owned());
+        self.identity = Some(identity);
+        Ok(self)
     }
 
-    /// Compute the simple FNV-style hash of a `&[u32]` we use as the
-    /// fixture key. Public so tests can produce the same hash.
-    pub fn hash_tokens(tokens: &[u32]) -> u64 {
-        // FNV-1a 64-bit
-        let mut h: u64 = 0xcbf29ce484222325;
-        for &t in tokens {
-            h ^= t as u64;
-            h = h.wrapping_mul(0x100000001b3);
+    /// Insert one exact-sequence fixture row.
+    ///
+    /// Repeating an identical row is idempotent. Reusing the same sequence and
+    /// position with different numeric targets is rejected so duplicate
+    /// examples cannot silently replace provenance-bound training data.
+    pub fn insert(
+        &mut self,
+        tokens: &[u32],
+        pos: usize,
+        indices: Vec<u32>,
+        logprobs: Vec<f32>,
+    ) -> Result<(), LogitSourceError> {
+        validate_logit_request(&self.caps, tokens, &[pos], Some(self.top_k))?;
+        validate_topk_logprob_row(&self.caps, self.top_k, pos, &indices, &logprobs)?;
+
+        let rows = self.entries.entry(tokens.to_vec()).or_default();
+        if let Some((existing_indices, existing_logprobs)) = rows.get(&pos) {
+            let same_logprobs = existing_logprobs.len() == logprobs.len()
+                && existing_logprobs
+                    .iter()
+                    .zip(&logprobs)
+                    .all(|(left, right)| left.to_bits() == right.to_bits());
+            if existing_indices == &indices && same_logprobs {
+                return Ok(());
+            }
+            return Err(LogitSourceError::invalid(
+                &self.caps.teacher_id,
+                format!(
+                    "conflicting fixture rows for the same exact token sequence at position {pos}"
+                ),
+            ));
         }
-        h
+        rows.insert(pos, (indices, logprobs));
+        Ok(())
     }
 }
 
 impl LogitSource for FixtureLogitSource {
     fn capabilities(&self) -> LogitSourceCaps {
         self.caps.clone()
+    }
+
+    fn authoritative_teacher_identity(&self) -> Option<&crate::TeacherIdentityV1> {
+        self.identity.as_ref()
     }
 
     fn fetch_logprobs(
@@ -609,14 +673,19 @@ impl LogitSource for FixtureLogitSource {
         validate_logit_request(&self.caps, tokens, positions, top_k)?;
         let requested_k = top_k.unwrap_or(self.top_k);
 
-        let tokens_hash = Self::hash_tokens(tokens);
+        let rows = self.entries.get(tokens).ok_or_else(|| {
+            LogitSourceError::invalid(
+                &teacher_id,
+                "no fixture entries for the exact token sequence",
+            )
+        })?;
         let mut indices = Vec::with_capacity(positions.len() * requested_k);
         let mut logprobs = Vec::with_capacity(positions.len() * requested_k);
         for &pos in positions {
-            let entry = self.entries.get(&(tokens_hash, pos)).ok_or_else(|| {
+            let entry = rows.get(&pos).ok_or_else(|| {
                 LogitSourceError::invalid(
                     &teacher_id,
-                    format!("no fixture entry for (hash={tokens_hash:#x}, pos={pos})"),
+                    format!("no fixture entry for the exact token sequence at position {pos}"),
                 )
             })?;
             validate_topk_logprob_row(&self.caps, self.top_k, pos, &entry.0, &entry.1)?;
@@ -874,9 +943,15 @@ mod tests {
     fn fixture_returns_inserted_entries() {
         let mut src = FixtureLogitSource::uniform_topk("test-teacher", 64, 4);
         let tokens = vec![10u32, 20, 30, 40];
-        let h = FixtureLogitSource::hash_tokens(&tokens);
-        src.insert(h, 1, vec![5, 6, 7, 8], vec![-1.5, -1.6, -1.7, -1.8]);
-        src.insert(h, 2, vec![9, 10, 11, 12], vec![-2.0, -2.1, -2.2, -2.3]);
+        src.insert(&tokens, 1, vec![5, 6, 7, 8], vec![-1.5, -1.6, -1.7, -1.8])
+            .unwrap();
+        src.insert(
+            &tokens,
+            2,
+            vec![9, 10, 11, 12],
+            vec![-2.0, -2.1, -2.2, -2.3],
+        )
+        .unwrap();
 
         let batch = src.fetch_logprobs(&tokens, &[1, 2], Some(4)).unwrap();
         match batch {
@@ -890,6 +965,47 @@ mod tests {
             }
             _ => panic!("expected top-k batch"),
         }
+    }
+
+    #[test]
+    fn fixture_rejects_conflicting_duplicate_rows() {
+        let mut src = FixtureLogitSource::uniform_topk("test-teacher", 64, 2);
+        let tokens = [10u32, 20, 30];
+        src.insert(&tokens, 1, vec![5, 6], vec![-1.0, -2.0])
+            .unwrap();
+        src.insert(&tokens, 1, vec![5, 6], vec![-1.0, -2.0])
+            .unwrap();
+
+        let error = src
+            .insert(&tokens, 1, vec![5, 7], vec![-1.0, -2.0])
+            .unwrap_err();
+        assert!(error.to_string().contains("conflicting fixture rows"));
+        let batch = src.fetch_logprobs(&tokens, &[1], Some(2)).unwrap();
+        let LogprobBatch::TopK(batch) = batch else {
+            panic!("expected top-K fixture row")
+        };
+        assert_eq!(batch.indices, vec![5, 6]);
+    }
+
+    #[test]
+    fn fixture_keys_rows_by_exact_tokens() {
+        let mut src = FixtureLogitSource::uniform_topk("test-teacher", 64, 2);
+        let first = [1u32, 2, 3];
+        let second = [1u32, 2, 4];
+        src.insert(&first, 1, vec![5, 6], vec![-1.0, -2.0]).unwrap();
+        src.insert(&second, 1, vec![7, 8], vec![-1.0, -2.0])
+            .unwrap();
+
+        let LogprobBatch::TopK(first_row) = src.fetch_logprobs(&first, &[1], Some(2)).unwrap()
+        else {
+            panic!("expected top-K fixture row")
+        };
+        let LogprobBatch::TopK(second_row) = src.fetch_logprobs(&second, &[1], Some(2)).unwrap()
+        else {
+            panic!("expected top-K fixture row")
+        };
+        assert_eq!(first_row.indices, vec![5, 6]);
+        assert_eq!(second_row.indices, vec![7, 8]);
     }
 
     #[test]

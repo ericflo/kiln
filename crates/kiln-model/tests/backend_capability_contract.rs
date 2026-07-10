@@ -3222,6 +3222,7 @@ fn lora_residency_call_sites_consume_residency_backend_facet() {
         .expect("trainer.rs should be readable");
     let lora_source = fs::read_to_string(root.join("crates/kiln-model/src/lora_loader.rs"))
         .expect("lora_loader.rs should be readable");
+    let lora_functions = parse_functions(&root.join("crates/kiln-model/src/lora_loader.rs"));
 
     assert!(
         trainer_source.contains("ResidencyBackend"),
@@ -3247,11 +3248,17 @@ fn lora_residency_call_sites_consume_residency_backend_facet() {
         "fn sgd_step(",
         "/// Gradient checkpointing configuration.",
     );
-    let lora_loader_section = source_between(
-        &lora_source,
-        "impl LoraWeights {\n    /// Phase 4.1",
-        "impl LoraWeights {\n    /// Load",
-    );
+    let lora_loader_section = ["register_with_backend", "evict_from_backend"]
+        .into_iter()
+        .map(|name| {
+            lora_functions
+                .get(name)
+                .unwrap_or_else(|| panic!("lora_loader.rs should define {name}"))
+                .body
+                .as_str()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let trainer_residency_sections =
         format!("{trainer_lora_section}\n{trainer_optimizer_section}\n{trainer_optimizer_updates}");
@@ -3308,8 +3315,9 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         .expect("trainer.rs should be readable");
     let grpo_tape_source = fs::read_to_string(root.join("crates/kiln-train/src/grpo_tape_shim.rs"))
         .expect("grpo_tape_shim.rs should be readable");
-    let opd_source = fs::read_to_string(root.join("crates/kiln-train/src/opd.rs"))
-        .expect("opd.rs should be readable");
+    let opd_path = root.join("crates/kiln-train/src/opd.rs");
+    let opd_source = fs::read_to_string(&opd_path).expect("opd.rs should be readable");
+    let opd_functions = parse_functions(&opd_path);
     let generate_source = fs::read_to_string(root.join("crates/kiln-model/src/generate.rs"))
         .expect("generate.rs should be readable");
     let lora_source = fs::read_to_string(root.join("crates/kiln-model/src/lora_loader.rs"))
@@ -3345,9 +3353,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             .expect("kiln-server api/completions.rs should be readable");
     let server_bench_source = fs::read_to_string(root.join("crates/kiln-server/src/bench.rs"))
         .expect("kiln-server bench.rs should be readable");
-    let server_training_queue_source =
-        fs::read_to_string(root.join("crates/kiln-server/src/training_queue.rs"))
-            .expect("kiln-server training_queue.rs should be readable");
+    let server_training_queue_path = root.join("crates/kiln-server/src/training_queue.rs");
+    let server_training_queue_source = fs::read_to_string(&server_training_queue_path)
+        .expect("kiln-server training_queue.rs should be readable");
+    let server_training_queue_functions = parse_functions(&server_training_queue_path);
 
     assert_no_broad_backend_runtime_calls(
         &backend_source,
@@ -4275,11 +4284,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "kiln-server prewarm routing should not branch locally on backend/device policy: {forbidden}"
         );
     }
-    let server_training_dispatch_section = source_between(
-        &server_training_queue_source,
-        "let result: std::result::Result<PathBuf, String> = if let Err(err) = memory_ready {",
-        "QueuedJob::Opd",
-    );
+    let server_training_dispatch_section = &server_training_queue_functions
+        .get("execute_job")
+        .expect("kiln-server training_queue.rs should define execute_job")
+        .body;
     assert!(
         server_training_dispatch_section
             .contains("backend_capabilities().training.server_dispatch")
@@ -5134,11 +5142,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !checkpointed_grpo_section.contains("if is_vulkan_device(device)"),
         "checkpointed GRPO tail should not hard-code Vulkan loss routing"
     );
-    let opd_step_section = source_between(
-        &opd_source,
-        "fn opd_step_forward_backward_tape_authoritative(",
-        "fn checkpointed_opd_step_forward_backward_tape_authoritative(",
-    );
+    let opd_step_section = &opd_functions
+        .get("opd_step_forward_backward_tape_authoritative")
+        .expect("opd.rs should define opd_step_forward_backward_tape_authoritative")
+        .body;
     assert!(
         opd_step_section.contains("TrainingLossBackend::runtime_opd_loss_route"),
         "OPD tape-authoritative step should route fused loss roots through TrainingLossBackend"
@@ -5147,11 +5154,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !opd_step_section.contains("matches!(normed.device(), kiln_tensor::Device::Vulkan(_))"),
         "OPD tape-authoritative step should not hard-code Vulkan loss routing"
     );
-    let checkpointed_opd_section = source_between(
-        &opd_source,
-        "fn checkpointed_opd_step_forward_backward_tape_authoritative(",
-        "fn write_opd_train_receipt_best_effort(",
-    );
+    let checkpointed_opd_section = &opd_functions
+        .get("checkpointed_opd_step_forward_backward_tape_authoritative")
+        .expect("opd.rs should define checkpointed_opd_step_forward_backward_tape_authoritative")
+        .body;
     assert!(
         checkpointed_opd_section.contains("TrainingLossBackend::runtime_opd_loss_route"),
         "checkpointed OPD tail should route fused loss roots through TrainingLossBackend"

@@ -45,6 +45,11 @@ use crate::state::{
     DeterministicCompletionInFlightState, ModelBackend, RealPrefixCache, RealPrefixCacheRequest,
     gpu_coordination_read_guard,
 };
+use crate::teacher_identity::{
+    MAX_COMPLETION_PROMPT_LOGPROB_CANDIDATES, MAX_COMPLETION_PROMPT_LOGPROBS,
+    MAX_COMPLETION_PROMPT_TOKENS, MAX_PROMPT_LOGPROB_PROJECTION_CHUNK_TOKENS,
+    PROMPT_LOGPROB_PROJECTION_BYTE_BUDGET,
+};
 
 /// Max characters retained in the prompt preview for the recent-requests panel.
 const PROMPT_PREVIEW_MAX_CHARS: usize = 120;
@@ -4324,6 +4329,10 @@ pub struct TextCompletionResponse {
     pub object: &'static str,
     pub created: u64,
     pub model: String,
+    /// Canonical, content-addressed teacher identity. Mock responses retain
+    /// the field as JSON null so clients cannot mistake a model alias for an
+    /// authoritative identity.
+    pub system_fingerprint: Option<String>,
     pub choices: Vec<TextCompletionChoice>,
     pub usage: Usage,
 }
@@ -4670,6 +4679,7 @@ async fn completions_inner(
         )));
     }
 
+    let system_fingerprint = completion_system_fingerprint(state)?;
     let prompt_logprobs = match state.backend.as_ref() {
         ModelBackend::Mock { .. } => mock_prompt_logprobs(state, &prompt_tokens, top_k)?,
         ModelBackend::Real { runner, .. } => {
@@ -4683,6 +4693,7 @@ async fn completions_inner(
         object: "text_completion",
         created: now_epoch(),
         model,
+        system_fingerprint,
         choices: vec![TextCompletionChoice {
             index: 0,
             text: String::new(),
@@ -4698,14 +4709,25 @@ async fn completions_inner(
     Ok(Json(response).into_response())
 }
 
-const MAX_COMPLETION_PROMPT_LOGPROBS: usize = 256;
-const MAX_COMPLETION_PROMPT_LOGPROB_CANDIDATES: usize = 65_536;
-/// Bound the combined logits plus F32 log-softmax storage for one projection
-/// chunk. Eight bytes per vocabulary entry pessimistically covers F32 logits
-/// plus F32 output; reduced-precision logits use less. The 32-row cap keeps
-/// tiny-vocabulary models from growing an excessively long projection.
-const PROMPT_LOGPROB_PROJECTION_BYTE_BUDGET: usize = 64 * 1024 * 1024;
-const MAX_PROMPT_LOGPROB_PROJECTION_CHUNK_TOKENS: usize = 32;
+fn completion_system_fingerprint(state: &AppState) -> Result<Option<String>, ApiError> {
+    canonical_completion_fingerprint(
+        state.base_teacher_identity.as_deref(),
+        matches!(state.backend.as_ref(), ModelBackend::Real { .. }),
+    )
+}
+
+fn canonical_completion_fingerprint(
+    identity: Option<&kiln_train::TeacherIdentityV1>,
+    required: bool,
+) -> Result<Option<String>, ApiError> {
+    match (identity, required) {
+        (Some(identity), _) => Ok(Some(identity.fingerprint())),
+        (None, false) => Ok(None),
+        (None, true) => Err(ApiError::internal(
+            "real prompt-logprob backend has no verified base teacher identity; restart with a loader-owned model source revision",
+        )),
+    }
+}
 
 fn prompt_logprob_projection_chunk_tokens(vocab_size: usize) -> usize {
     let bytes_per_row = vocab_size
@@ -4714,11 +4736,6 @@ fn prompt_logprob_projection_chunk_tokens(vocab_size: usize) -> usize {
     (PROMPT_LOGPROB_PROJECTION_BYTE_BUDGET / bytes_per_row)
         .clamp(1, MAX_PROMPT_LOGPROB_PROJECTION_CHUNK_TOKENS)
 }
-
-/// Cap on prompt length for prompt-logprobs requests. OPD teachers score
-/// student rollouts in chunks well under this; the cap exists because each
-/// prompt token materializes a top-k logprob map in the JSON response.
-const MAX_COMPLETION_PROMPT_TOKENS: usize = 4096;
 
 fn validate_prompt_logprobs_top_k(state: &AppState, top_k: usize) -> Result<(), ApiError> {
     if top_k > MAX_COMPLETION_PROMPT_LOGPROBS {
@@ -14090,6 +14107,80 @@ mod tests {
         state
     }
 
+    fn test_teacher_identity() -> kiln_train::TeacherIdentityV1 {
+        kiln_train::TeacherIdentityV1::new(
+            "kiln-test",
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            None,
+            512,
+            256,
+            4096,
+            65_536,
+            "kiln-test/cpu",
+            "d".repeat(64),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn completion_fingerprint_requires_identity_for_real_backends() {
+        let error = canonical_completion_fingerprint(None, true).unwrap_err();
+        assert_eq!(error.code, "internal_error");
+        assert!(error.message.contains("no verified base teacher identity"));
+        assert_eq!(canonical_completion_fingerprint(None, false).unwrap(), None);
+
+        let identity = test_teacher_identity();
+        let fingerprint = canonical_completion_fingerprint(Some(&identity), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fingerprint, identity.fingerprint());
+        assert_eq!(
+            kiln_train::TeacherIdentityV1::parse_fingerprint(&fingerprint).unwrap(),
+            identity
+        );
+    }
+
+    #[test]
+    fn text_completion_response_serializes_fingerprint_and_mock_null() {
+        let identity = test_teacher_identity();
+        let response = TextCompletionResponse {
+            id: "cmpl-test".to_string(),
+            object: "text_completion",
+            created: 1,
+            model: "kiln-test".to_string(),
+            system_fingerprint: Some(identity.fingerprint()),
+            choices: Vec::new(),
+            usage: Usage {
+                prompt_tokens: 1,
+                completion_tokens: 0,
+                total_tokens: 1,
+            },
+        };
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            json["system_fingerprint"],
+            serde_json::Value::String(identity.fingerprint())
+        );
+
+        let mock = serde_json::to_value(TextCompletionResponse {
+            id: "cmpl-mock".to_string(),
+            object: "text_completion",
+            created: 1,
+            model: "kiln-test".to_string(),
+            system_fingerprint: None,
+            choices: Vec::new(),
+            usage: Usage {
+                prompt_tokens: 1,
+                completion_tokens: 0,
+                total_tokens: 1,
+            },
+        })
+        .unwrap();
+        assert!(mock["system_fingerprint"].is_null());
+    }
+
     #[test]
     fn slow_request_log_values_respect_threshold_and_redact_prompt_text() {
         let mut state = make_batch_test_state();
@@ -14280,6 +14371,7 @@ mod tests {
         let (status, json) = completion_post(make_prompt_logprobs_test_state(), &body).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{json}");
         assert_eq!(json["object"], "text_completion");
+        assert!(json["system_fingerprint"].is_null());
         assert_eq!(json["usage"]["prompt_tokens"], 3);
         assert_eq!(json["usage"]["completion_tokens"], 0);
         let prompt_logprobs = json["choices"][0]["prompt_logprobs"].as_array().unwrap();

@@ -193,11 +193,19 @@ Implementations:
    unwired provider enum variants fail closed. The parser verifies the exact
    response model, prompt-token count, row count, observed token, rank and
    cardinality contract, vocabulary bounds, finite logprobs, and causal row
-   alignment before returning data. The authoritative tokenizer/model/adapter
-   content handshake is the next qualification gate; `usage.prompt_tokens`
-   proves request shape, not token-ID semantics.
+   alignment before returning data. Registration operationally probes K=1 and
+   the advertised maximum K, pins a canonical identity covering exact base and
+   optional static-adapter content, numeric tokenizer vocabulary/config,
+   runtime implementation, inference configuration, context, K, vocabulary,
+   and response-candidate bounds, then compares the complete token-ID mapping
+   with the student. Every scoring response repeats that identity, and every
+   queued job re-handshakes before GPU ownership or a cache lookup.
 
-3. **`CachedTeacher`** — a wrapper that satisfies queries from the local JSON-on-disk logit cache (§3.3) before falling through to an inner `LogitSource`. Cache paths use bounded identity digests and entries retain and verify the exact logical identity.
+3. **`CachedTeacher`** — a fallible wrapper that accepts only an inner source
+   with a complete authoritative identity. It satisfies queries from local
+   cache v3 before falling through, then atomically writes validated results.
+   Cache paths and file contents bind the full identity and exact causal token
+   prefix; conflicting same-identity logits are errors, not silent overwrites.
 
 The library trait remains independent of loss granularity, but the server currently admits only `teacher_top_k`; no server-built source truthfully supports `full_vocab` yet.
 
@@ -207,16 +215,28 @@ The library trait remains independent of loss granularity, but the server curren
 
 **Where:** `kiln-train::logit_cache`, currently a versioned JSON-on-disk store.
 
-**Key:** `(teacher_id, tokenizer_hash, prefix_hash, position_offset_within_response)`.
-**Value:** top-K logprobs, with K being the maximum K the source ever returned for that key (so a later request asking for fewer K is satisfied trivially, and a later request asking for more K *misses* and re-fetches at the wider K).
+**Key:** `(teacher_identity_revision, causal_prefix_sha256, logits_row)` where
+the prefix digest covers `tokens[..=logits_row]` with a versioned,
+length-framed SHA-256 contract.
 
-**Why this destroys the cost objection:**
+**Value:** strict canonical JSON containing the complete teacher identity,
+derived revision and prefix digest, row, K, token IDs, finite full-vocabulary
+logprobs, and production timestamp. The widest consistent K wins atomically;
+a narrower request slices it, while a wider request fetches and upgrades it.
 
-- A typical "distil a domain into a LoRA" job re-uses the same prompt set across 5–20 epochs of student rollouts. With prefix-keyed caching, the *teacher* logits for fixed prefixes are computed once and reused forever.
-- For canonical seed corpora (math: OpenThoughts3, GSM8K; code: BigCodeBench; instruction: Tulu3) we ship the cache *prepopulated* — the kiln distribution comes with a tarball of ~50M cached top-32 logits from Qwen3.6-27B against a curated 100K-prompt seed set. That tarball is ~12 GB. Users get reproducible OPD against frontier teachers **with zero API spend**.
-- For everyone-else cases, the cache is local and personal; no privacy concern.
+Current operational boundary:
 
-**Optional: shared community cache.** A flagged-off, opt-in mode that uploads only `(prefix_hash, top_K_logprobs)` tuples — never the prompt or response text — to a community-run cache. First user to OPD against `(Qwen3.6-27B, "Solve the integral...")` pays the API call; the next million don't. **This is the Hugging Face datasets pattern, applied to teacher logits.** The privacy model is strong: one-way prefix hashes, no plaintext, no metadata about the requester.
+- `DistillPumpRequest.use_cache=true` wraps only a freshly re-handshaken remote
+  source. A complete hit still cannot bypass job-start deployment validation.
+- v1/v2 files are permanent cold misses. Reads are bounded; writes use a
+  cross-process lock and atomic replacement; malformed, misplaced, conflicting,
+  or oversized v3 entries fail visibly.
+- `GET /v1/cache/export` emits a deterministic archive from the exact bytes
+  that were validated. Import is disabled: no untrusted archive is extracted
+  into the live cache, and no prepopulated or community cache is shipped.
+- A prefix digest is a cache key, not a privacy guarantee. Cache storage and
+  exports remain trusted local artifacts and may reveal information through
+  dictionary attacks or their numeric logits.
 
 ### 3.4. Behaviour-space adapter merge — `kiln-server::api::adapters::distill_merge`
 
@@ -284,7 +304,10 @@ POST /v1/distill/pump
 }
 ```
 
-`domain` resolves to a kiln-curated seed corpus — for `math_reasoning`, that's a deduplicated mix of DeepMath, GSM8K, MATH, OpenThoughts3 prompts (~100K prompts). The cache is prepopulated against the canonical teacher list. **For canonical (domain × teacher) pairs, the user pays $0 and waits hours, not days, for a frontier-quality math LoRA.**
+The current `domain` mode resolves to a small built-in smoke seed set. A
+curated, licensed corpus registry and qualified precomputed teacher artifacts
+remain future work; Kiln does not ship prepopulated cache tarballs or promise a
+zero-cost frontier-quality adapter.
 
 Canonical domains shipped on day one:
 
@@ -446,7 +469,7 @@ Live, per-step metrics emitted to the existing `/metrics` Prometheus endpoint an
 
 The dashboard (the existing kiln `/ui`) gets a new **Distillation** tab with these as live charts, side-by-side with the loss curve. Same UX as the existing Training tab.
 
-**Beyond passive display: kiln pushes.** Every diagnostic state change with user-actionable consequence triggers a desktop notification (via the existing kiln-desktop tray channel), an email if configured, and a webhook event. The notifications are exhaustively enumerated in §8.12 — there are exactly four, designed to be the bare minimum signal a user needs to act on a real change.
+**Beyond passive display: kiln pushes.** Every diagnostic state change with user-actionable consequence triggers a desktop notification (via the existing kiln-desktop tray channel), an email if configured, and a webhook event. The notifications are exhaustively enumerated in §8.12 and are designed to be the bare minimum signal a user needs to act on a real change.
 
 **Every metric in the dashboard has a "Why does this matter?" link** opening a one-paragraph plain-English explanation citing the originating paper. Overlap ratio links to Li et al. §4. Repetition rate links to Luo et al. §3.4. Per-position KL links to Li et al. §6.1. The user becomes an OPD expert by clicking around their own runs.
 
@@ -476,7 +499,7 @@ These run continuously and are visible in the dashboard. Every mitigation logs a
 
 **The user can leave a kiln OPD job running unattended and trust they will not return to a broken adapter.** The single most important UX guarantee in the plan, elaborated in §8.7.
 
-### 3.10. The Adapter Library and the Logit-Cache CDN — `kiln-server::api::library`
+### 3.10. The Adapter Library and a future Logit-Cache CDN — `kiln-server::api::library`
 
 Two layered network artefacts.
 
@@ -486,9 +509,14 @@ Two layered network artefacts.
 - Eval suite results (kiln eval format).
 - A reproducibility receipt: `kiln distill reproduce <adapter>` reconstructs it from the same teacher + same seed + same hyperparameters. When the source teacher is reachable (cached, hosted, or local), the receipt is *verifiable*.
 
-**Logit-Cache CDN** — see §3.3. The shared community store that drives the cost of canonical-pump runs to zero.
+**Future Logit-Cache CDN** — see §3.3. This is product research, not a shipped
+surface. Kiln currently refuses cache imports because a third-party archive
+cannot prove that its numeric rows came from the identity it declares.
 
-Both are *opt-in* both ways: opt-in to download from, opt-in to upload to. We make uploading attractive by giving uploaders priority access to the latest pump runs / Adapter Library entries.
+Any future distribution surface must be opt-in in both directions and must land
+only after it has a reviewable provenance and trust model. The current local
+cache supports validated export for operator inspection but no import or remote
+distribution.
 
 ### 3.11. The Self-Hosted Teacher Marketplace (P2P, optional, Phase 5+)
 
@@ -500,7 +528,8 @@ Privacy model:
 - Optional: prompts go through a kiln-side **token-redaction stage** (PII, secrets) before being sent.
 - Aspirational (Phase 6+): **logit-only oblivious inference** — a homomorphic / MPC-flavoured protocol where the provider returns logits without seeing the prompt. Out of scope for v1; mentioned because the literature is moving fast and we should not foreclose this option in the API design.
 
-Pricing optional. The default mode is *gift economy*, modelled on the BitTorrent / Folding@Home ethos. Teacher providers earn priority on community cache pulls and Adapter Library access.
+Pricing and provider incentives are product research. No community cache pull,
+teacher-provider priority, or billing mechanism is implemented.
 
 ### 3.12. Privileged-Information self-distillation — `kiln-server::api::distill::self`
 
@@ -535,9 +564,8 @@ The complete list of new endpoints, in keeping with kiln's `POST /v1/<verb>/<nou
 | `GET`  | `/v1/library` | Browse the public Adapter Library (§3.10) |
 | `POST` | `/v1/library/install/{adapter_id}` | Download and register a public adapter |
 | `POST` | `/v1/library/publish/{adapter_name}` | Publish an adapter to the library (with reproducibility receipt) |
-| `GET`  | `/v1/cache/stats` | Logit cache size, hit rate, hottest prefixes |
-| `POST` | `/v1/cache/import` | Import a prebuilt cache tarball |
-| `POST` | `/v1/cache/export` | Export the local cache (for sharing or backup) |
+| `GET`  | `/v1/cache/stats` | Validated v3 entry count, bytes, and per-identity distribution |
+| `GET`  | `/v1/cache/export` | Export validated identity-bound v3 entries for backup/audit; import is unavailable |
 
 The shape of `POST /v1/train/opd`:
 
@@ -602,7 +630,8 @@ The minimum that makes "OPD with a local teacher" work end-to-end.
 
 ### Phase 3 — Knowledge Pump + Adapter Library (8 weeks)
 
-- All canonical domains shipped with seed corpora and prepopulated cache tarballs.
+- All canonical domains shipped with licensed seed corpora and independently
+  validated, identity-bound teacher artifacts. This remains unimplemented.
 - `POST /v1/distill/pump` with all three modes (targeted / wide / auto-domain).
 - Adapter Library hosting (initially a kiln-managed S3 bucket with a CDN; longer term, a federated index).
 - `/v1/library/{install,publish}` flows.
@@ -618,7 +647,9 @@ The minimum that makes "OPD with a local teacher" work end-to-end.
 
 ### Phase 5 — Network effects (continuous after Phase 3)
 
-- Community Logit Cache CDN. **Non-goal for this branch** — needs the kiln-managed S3 + CDN deployment, which is org-side infrastructure work. The on-disk logit cache (§3.3) ships; the CDN deploys it.
+- Community Logit Cache CDN and archive import. **Non-goal for this branch** —
+  the local v3 store and validated export ship, but no remote distribution or
+  trust/verification system exists.
 - Self-Hosted Teacher Marketplace (the discovery directory + the gift-economy layer). **Non-goal for this branch** — discovery / federated index is a separate service, not a code feature.
 - Public benchmark leaderboard for distilled adapters: cost-per-eval-point as the primary metric, not raw score. **Non-goal for this branch** — leaderboard infrastructure is a website, not in the repo. The reproducibility-receipt (§8.11) is what feeds it.
 
@@ -680,16 +711,26 @@ When a default is wrong for a given user, kiln tells them which paper says so, a
 ### 7.1. "Pump frontier brilliance into a domain LoRA" (laptop student + vLLM teacher)
 
 ```bash
-# 1. Register an already-running vLLM teacher (one-time). Stock vLLM's cap
-#    of 20 resolves to executable K=16; max_top_k=32 asserts that the operator
-#    started vLLM with --max-logprobs 32.
+# 1. Start an immutable, identity-aware vLLM teacher. The launcher owns every
+#    identity-bearing option, snapshots the exact model content, and publishes
+#    the canonical fingerprint that Kiln requires.
+python3 scripts/vllm_teacher.py \
+  --model-path=/models/Qwen3.6-27B \
+  --served-model-id=qwen36-27b-teacher \
+  --max-top-k=32 \
+  --max-model-len=32768 \
+  --max-prompt-logprob-candidates=1000000 \
+  -- --host=127.0.0.1 --port=8000
+
+# 2. Register only the endpoint and expected served-model name. Kiln probes
+#    the authoritative capabilities and content identity; callers cannot
+#    assert vocab_size, max_top_k, tokenizer hashes, or secret env names.
 curl -X POST http://localhost:8420/v1/teachers \
   -H 'content-type: application/json' \
   -d '{"alias":"qwen3.6-27b@vllm","kind":"remote","provider":"vllm",
-       "model_id":"Qwen/Qwen3.6-27B","url":"http://teacher-host:8000",
-       "max_top_k":32,"vocab_size":152064}'
+       "model_id":"qwen36-27b-teacher","url":"http://127.0.0.1:8000"}'
 
-# 2. Pump.
+# 3. Pump.
 curl -X POST http://localhost:8420/v1/distill/pump \
   -H 'content-type: application/json' \
   -d '{"name":"math-frontier","teacher":"qwen3.6-27b@vllm",
@@ -698,8 +739,8 @@ curl -X POST http://localhost:8420/v1/distill/pump \
        "config":{"top_k":32},
        "post_eval":{"suite":"math-frontier-eval"}}'
 
-# 3. Wait. Watch the diagnostic dashboard. Approve the post-eval.
-# 4. The next inference uses the new LoRA.
+# 4. Wait. Watch the diagnostic dashboard. Approve the post-eval.
+# 5. The next inference uses the new LoRA.
 curl http://localhost:8420/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"messages":[{"role":"user","content":"Evaluate ∫_0^∞ e^{-x²} dx"}],
@@ -952,9 +993,11 @@ These are the only push channels kiln uses by default. All are dismissable and d
 1. **"Training collapsing — kiln will auto-rollback at step N if it doesn't recover. Click for details."** Pre-collapse warning; user has time to override or accept the rollback plan.
 2. **"Cost cap reached on `<teacher>` — paused. Cache hit rate is N% — resume in cache-only mode?"** Cost-pause with a one-click resume option.
 3. **"Adapter `<name>` is ready and improved your eval by N points — click to A/B against the current adapter."** Post-eval notification; the user is one click from a side-by-side comparison.
-4. **"Cache update available: +N new logits for the canonical `<domain>` corpus from the community CDN — pull?"** Opt-in cache refresh; declining is silent.
-
-**The user receives no other notifications by default.** No "training has started" pings, no metric churn updates. Every notification represents an action the user could take that materially affects outcome.
+**The user receives no other notifications by default.** No "training has started"
+pings, metric churn updates, or downloadable third-party logit-cache prompts.
+Cache files are identity-bound local derivatives and Kiln has no cache-import
+surface. Every notification represents an action the user could take that
+materially affects outcome.
 
 ### 8.13. Tier-aware defaults — the concrete table
 
@@ -963,7 +1006,7 @@ For engineering reference. These are the values kiln picks per tier when the use
 | Setting | Laptop tier | Prosumer tier | Corporate tier |
 |---|---|---|---|
 | Default `LogitSource` | Best-cached → `RemoteTeacher` | `LocalTeacher(qwen3.6-27b, fp8)` | `LocalTeacher(qwen3.6-27b, full)` ×N |
-| Default loss | `teacher_top_k`, K=16 (fits stock vLLM's cap of 20) | `teacher_top_k`, K=32 | `teacher_top_k`, K=32 (`full_vocab` remains aspirational until a qualified source exists) |
+| Default loss | `teacher_top_k`, K=16 (must fit the verified identity cap) | `teacher_top_k`, K=32 | `teacher_top_k`, K=32 (`full_vocab` remains aspirational until a qualified source exists) |
 | LoRA rank | 16 | 32 | 64–256 (capacity-calculator-set) |
 | Batch size | 8 | 16 | 32–64 |
 | `samples_per_prompt` (default-data path) | 4 | 4 | 4 |
@@ -1064,7 +1107,9 @@ When the teacher is an HTTP API, the bottleneck is request overhead and rate lim
 
 2. **Concurrent requests with backoff.** Per-provider rate-limit tracking with token-bucket backoff; users see steady throughput rather than oscillating crashes.
 
-3. **Cache-pull-then-fill.** Local + community cache consulted first. For canonical-domain runs against popular teachers, 60–95% of positions hit cache. **The "fast" experience is cache hit; the "slow but cached for next time" experience is the miss.**
+3. **Proposed cache-pull-then-fill.** Current pump jobs can consult the local
+   identity-bound cache and fill misses. Community pulls and the projected
+   60-95% hit rates are unvalidated future work.
 
 4. **Speculative-style prefetching** (survey §6.3 SKD inspiration). Trainer issues teacher requests for the next batch's prompts in the background while the current batch's gradient compute runs.
 
