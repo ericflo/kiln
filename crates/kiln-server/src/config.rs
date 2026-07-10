@@ -42,6 +42,8 @@ pub const STREAM_STALL_GRACE_MAX_MS: u64 = DEFAULT_STREAM_STALL_GRACE_MS;
 /// the remainder.
 pub const MAX_BATCH_TOKENS_MIN: usize = 2;
 pub const MAX_BATCH_TOKENS_MAX: usize = 65_536;
+/// Strict startup selector for the serving-safety contract.
+pub const SERVING_PROFILE_ENV: &str = "KILN_SERVING_PROFILE";
 
 /// Provenance of a resolved startup configuration value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -59,6 +61,159 @@ impl fmt::Display for ConfigValueSource {
             Self::Default => "default",
             Self::ConfigFile => "config_file",
             Self::Environment => "environment",
+        })
+    }
+}
+
+/// Process-lifetime serving policy.
+///
+/// The profile is immutable after startup. That keeps GPU ownership policy out
+/// of individual requests and makes a restart the explicit boundary between
+/// ordinary serving, development concurrency, and drained maintenance work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServingProfile {
+    /// Predictable inference. Dynamic physical memory operations, live graph
+    /// capture, training GPU writers, and live adapter weight transitions are
+    /// prohibited.
+    #[default]
+    Stable,
+    /// Developer profile preserving concurrent inference/training and dynamic
+    /// runtime mutation for controlled experiments.
+    Experimental,
+    /// Drained exclusive work. Inference admission is disabled while training,
+    /// adapter activation, and physical memory maintenance are allowed.
+    Maintenance,
+}
+
+impl ServingProfile {
+    fn parse(raw: &str, label: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "stable" => Ok(Self::Stable),
+            "experimental" => Ok(Self::Experimental),
+            "maintenance" => Ok(Self::Maintenance),
+            _ => anyhow::bail!(
+                "{label} must be one of stable, experimental, maintenance; got {raw:?}"
+            ),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Experimental => "experimental",
+            Self::Maintenance => "maintenance",
+        }
+    }
+
+    pub const fn runtime_policy(self) -> ServingRuntimePolicy {
+        match self {
+            Self::Stable => ServingRuntimePolicy {
+                inference_admission: true,
+                training_gpu_ownership: false,
+                adapter_weight_transitions: false,
+                dynamic_kv_resize: false,
+                allocator_reclaim: false,
+                live_graph_capture: false,
+                exclusive_gpu_behavior: "reject",
+            },
+            Self::Experimental => ServingRuntimePolicy {
+                inference_admission: true,
+                training_gpu_ownership: true,
+                adapter_weight_transitions: true,
+                dynamic_kv_resize: true,
+                allocator_reclaim: true,
+                live_graph_capture: true,
+                exclusive_gpu_behavior: "writer_priority",
+            },
+            Self::Maintenance => ServingRuntimePolicy {
+                inference_admission: false,
+                training_gpu_ownership: true,
+                adapter_weight_transitions: true,
+                dynamic_kv_resize: true,
+                allocator_reclaim: true,
+                live_graph_capture: false,
+                exclusive_gpu_behavior: "inference_disabled_drain_then_exclusive",
+            },
+        }
+    }
+}
+
+impl fmt::Display for ServingProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Fully resolved behavior derived only from [`ServingProfile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ServingRuntimePolicy {
+    pub inference_admission: bool,
+    pub training_gpu_ownership: bool,
+    pub adapter_weight_transitions: bool,
+    pub dynamic_kv_resize: bool,
+    pub allocator_reclaim: bool,
+    pub live_graph_capture: bool,
+    pub exclusive_gpu_behavior: &'static str,
+}
+
+/// Validated serving profile plus the startup source that selected it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServingProfileSetting {
+    profile: ServingProfile,
+    source: ConfigValueSource,
+}
+
+impl ServingProfileSetting {
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        Ok(Self {
+            profile: ServingProfile::parse(raw, SERVING_PROFILE_ENV)?,
+            source: ConfigValueSource::Environment,
+        })
+    }
+
+    pub const fn profile(self) -> ServingProfile {
+        self.profile
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+
+    pub const fn runtime_policy(self) -> ServingRuntimePolicy {
+        self.profile.runtime_policy()
+    }
+}
+
+impl Default for ServingProfileSetting {
+    fn default() -> Self {
+        Self {
+            profile: ServingProfile::Stable,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for ServingProfileSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.profile.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ServingProfileSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let profile = ServingProfile::parse(&raw, "server.serving_profile")
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            profile,
+            source: ConfigValueSource::ConfigFile,
         })
     }
 }
@@ -465,6 +620,10 @@ impl Default for EvalConfig {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ServerConfig {
+    /// Immutable serving-safety profile. Stable is the default; switching to
+    /// experimental or maintenance requires an explicit file/env setting and
+    /// a process restart.
+    pub serving_profile: ServingProfileSetting,
     pub host: String,
     pub port: u16,
     pub request_timeout_secs: u64,
@@ -876,6 +1035,7 @@ impl Default for KilnConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            serving_profile: ServingProfileSetting::default(),
             host: "127.0.0.1".into(),
             port: 8420,
             request_timeout_secs: 600,
@@ -1091,11 +1251,32 @@ impl KilnConfig {
 
         config.apply_env_overrides();
         config.apply_http_send_buffer_env_override()?;
+        config.apply_serving_profile_env_override()?;
         config.apply_stream_stall_grace_env_override()?;
         config.apply_max_batch_tokens_env_override()?;
         config.request_log.apply_env_overrides();
         config.validate()?;
         Ok(config)
+    }
+
+    /// Resolve the process-lifetime serving profile strictly. Unlike legacy
+    /// permissive overrides, a present malformed value is always fatal.
+    fn apply_serving_profile_env_override(&mut self) -> Result<()> {
+        let raw = match std::env::var(SERVING_PROFILE_ENV) {
+            Ok(raw) => raw,
+            Err(std::env::VarError::NotPresent) => return Ok(()),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("{SERVING_PROFILE_ENV} must be valid UTF-8")
+            }
+        };
+        self.apply_serving_profile_env_value(Some(&raw))
+    }
+
+    fn apply_serving_profile_env_value(&mut self, raw: Option<&str>) -> Result<()> {
+        if let Some(raw) = raw {
+            self.server.serving_profile = ServingProfileSetting::from_environment_value(raw)?;
+        }
+        Ok(())
     }
 
     /// Override config values with KILN_* environment variables (if set).
@@ -1538,6 +1719,14 @@ mod tests {
     #[test]
     fn test_defaults() {
         let config = KilnConfig::default();
+        assert_eq!(
+            config.server.serving_profile.profile(),
+            ServingProfile::Stable
+        );
+        assert_eq!(
+            config.server.serving_profile.source(),
+            ConfigValueSource::Default
+        );
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8420);
         assert_eq!(config.server.request_timeout_secs, 600);
@@ -1958,6 +2147,114 @@ port = 3000
         let mut config2 = KilnConfig::default();
         config2.server.shutdown_timeout_secs = 0;
         assert!(config2.validate().is_err());
+    }
+
+    #[test]
+    fn serving_profile_policy_matrix_is_fail_closed() {
+        assert_eq!(
+            ServingProfile::Stable.runtime_policy(),
+            ServingRuntimePolicy {
+                inference_admission: true,
+                training_gpu_ownership: false,
+                adapter_weight_transitions: false,
+                dynamic_kv_resize: false,
+                allocator_reclaim: false,
+                live_graph_capture: false,
+                exclusive_gpu_behavior: "reject",
+            }
+        );
+        assert_eq!(
+            ServingProfile::Experimental.runtime_policy(),
+            ServingRuntimePolicy {
+                inference_admission: true,
+                training_gpu_ownership: true,
+                adapter_weight_transitions: true,
+                dynamic_kv_resize: true,
+                allocator_reclaim: true,
+                live_graph_capture: true,
+                exclusive_gpu_behavior: "writer_priority",
+            }
+        );
+        assert_eq!(
+            ServingProfile::Maintenance.runtime_policy(),
+            ServingRuntimePolicy {
+                inference_admission: false,
+                training_gpu_ownership: true,
+                adapter_weight_transitions: true,
+                dynamic_kv_resize: true,
+                allocator_reclaim: true,
+                live_graph_capture: false,
+                exclusive_gpu_behavior: "inference_disabled_drain_then_exclusive",
+            }
+        );
+    }
+
+    #[test]
+    fn serving_profile_toml_is_typed_and_source_tracked() {
+        for (raw, expected) in [
+            ("stable", ServingProfile::Stable),
+            ("experimental", ServingProfile::Experimental),
+            ("maintenance", ServingProfile::Maintenance),
+        ] {
+            let config: KilnConfig =
+                toml::from_str(&format!("[server]\nserving_profile = {raw:?}\n")).unwrap();
+            assert_eq!(config.server.serving_profile.profile(), expected);
+            assert_eq!(
+                config.server.serving_profile.source(),
+                ConfigValueSource::ConfigFile
+            );
+            let serialized = toml::to_string(&config).unwrap();
+            assert!(serialized.contains(&format!("serving_profile = {raw:?}")));
+        }
+
+        let error =
+            toml::from_str::<KilnConfig>("[server]\nserving_profile = \"fast\"\n").unwrap_err();
+        assert!(
+            error.to_string().contains("server.serving_profile"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn serving_profile_env_override_is_strict_and_source_tracked() {
+        let mut config: KilnConfig =
+            toml::from_str("[server]\nserving_profile = \"experimental\"\n").unwrap();
+        config
+            .apply_serving_profile_env_value(Some(" maintenance "))
+            .unwrap();
+        assert_eq!(
+            config.server.serving_profile.profile(),
+            ServingProfile::Maintenance
+        );
+        assert_eq!(
+            config.server.serving_profile.source(),
+            ConfigValueSource::Environment
+        );
+
+        for invalid in ["", "fast", "prod", "maintenance-now"] {
+            let error = ServingProfileSetting::from_environment_value(invalid).unwrap_err();
+            let detail = format!("{error:#}");
+            assert!(detail.contains(SERVING_PROFILE_ENV), "{detail}");
+            assert!(detail.contains(&format!("{invalid:?}")), "{detail}");
+        }
+    }
+
+    #[test]
+    fn load_rejects_malformed_serving_profile_environment() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("kiln.toml");
+        std::fs::write(&path, "").unwrap();
+        unsafe {
+            std::env::set_var(SERVING_PROFILE_ENV, "prod-ish");
+        }
+        let error = KilnConfig::load(Some(path.to_str().unwrap())).unwrap_err();
+        unsafe {
+            std::env::remove_var(SERVING_PROFILE_ENV);
+        }
+        let detail = format!("{error:#}");
+        assert!(detail.contains(SERVING_PROFILE_ENV), "{detail}");
+        assert!(detail.contains("prod-ish"), "{detail}");
     }
 
     #[test]
