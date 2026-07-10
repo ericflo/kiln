@@ -351,6 +351,11 @@ pub struct DeferredMtpSource {
 /// so we don't store it separately.
 #[derive(Debug)]
 pub struct ModelWeights {
+    /// Content revision of the exact safetensors shard bytes memory-mapped by
+    /// the loader, independent of checkpoint path, shard order, and mtimes.
+    /// Test-constructed weights that did not pass through the file loader have
+    /// no authoritative source revision.
+    pub source_content_sha256: Option<String>,
     pub embedding: EmbeddingWeights,
     pub layers: Vec<LayerWeights>,
     /// Final RMSNorm. [hidden_size]

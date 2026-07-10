@@ -16,6 +16,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 safetensors = { workspace = true }
 memmap2 = { workspace = true }
+sha2 = { workspace = true }
 # (#1082) candle-core is fully dropped from kiln-model. The last activator
 # was the `legacy-candle-parity` opt-in feature (candle-typed `for_device`
 # shim + candle-bridge parity-oracle tests); both are gone, so no `cuda` /

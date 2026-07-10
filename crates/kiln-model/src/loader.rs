@@ -7,6 +7,7 @@ use std::time::UNIX_EPOCH;
 use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 use safetensors::SafeTensors;
+use sha2::{Digest, Sha256};
 
 use kiln_core::config::ModelConfig;
 
@@ -129,6 +130,7 @@ fn load_model_dense(
 
     // Memory-map all shards and parse safetensors headers.
     let loaded_shards = mmap_shards(&shards)?;
+    let source_content_sha256 = loaded_shard_content_sha256(&loaded_shards);
     let parsed: Vec<SafeTensors<'_>> = loaded_shards
         .iter()
         .map(|shard| {
@@ -200,6 +202,7 @@ fn load_model_dense(
     }
 
     let weights = ModelWeights {
+        source_content_sha256: Some(source_content_sha256),
         embedding: EmbeddingWeights { embed_tokens },
         layers,
         final_norm,
@@ -242,6 +245,7 @@ fn load_model_gptq(
     );
 
     let loaded_shards = mmap_shards(&shards)?;
+    let source_content_sha256 = loaded_shard_content_sha256(&loaded_shards);
     let parsed: Vec<SafeTensors<'_>> = loaded_shards
         .iter()
         .map(|shard| {
@@ -292,6 +296,7 @@ fn load_model_gptq(
     }
 
     let weights = ModelWeights {
+        source_content_sha256: Some(source_content_sha256),
         embedding: EmbeddingWeights { embed_tokens },
         layers,
         final_norm,
@@ -405,6 +410,40 @@ fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<LoadedShard>> {
             })
         })
         .collect()
+}
+
+/// Hash the exact checkpoint bytes held by the loader's read-only mappings.
+///
+/// Each shard first receives its own SHA-256 digest. The model revision hashes
+/// the sorted `(digest, byte length)` multiset with a versioned domain, so
+/// moving a checkpoint or changing index iteration order does not change its
+/// identity while any byte change does. Duplicate shard content remains
+/// represented twice by the count and repeated records.
+fn loaded_shard_content_sha256(shards: &[LoadedShard]) -> String {
+    let mut records = shards
+        .iter()
+        .map(|shard| {
+            let digest: [u8; 32] = Sha256::digest(&shard.mmap[..]).into();
+            (digest, shard.mmap.len() as u64)
+        })
+        .collect::<Vec<_>>();
+    records.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"kiln.base-model-content.v1\0");
+    hasher.update((records.len() as u64).to_le_bytes());
+    for (digest, byte_len) in records {
+        hasher.update(byte_len.to_le_bytes());
+        hasher.update(digest);
+    }
+    let digest = hasher.finalize();
+    format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
 }
 
 /// Detect the weight name prefix by checking which keys exist.
@@ -1308,6 +1347,51 @@ mod tests {
             .collect();
 
         safetensors::tensor::serialize(refs, None).unwrap()
+    }
+
+    #[test]
+    fn loaded_content_revision_is_path_and_shard_order_independent() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        fs::write(first.path().join("a.safetensors"), b"first shard").unwrap();
+        fs::write(first.path().join("b.safetensors"), b"second shard").unwrap();
+        fs::write(second.path().join("renamed-2.safetensors"), b"second shard").unwrap();
+        fs::write(second.path().join("renamed-1.safetensors"), b"first shard").unwrap();
+
+        let first_mmaps = mmap_shards(&[
+            first.path().join("a.safetensors"),
+            first.path().join("b.safetensors"),
+        ])
+        .unwrap();
+        let reversed_renamed_mmaps = mmap_shards(&[
+            second.path().join("renamed-2.safetensors"),
+            second.path().join("renamed-1.safetensors"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            loaded_shard_content_sha256(&first_mmaps),
+            loaded_shard_content_sha256(&reversed_renamed_mmaps)
+        );
+    }
+
+    #[test]
+    fn loaded_content_revision_changes_with_bytes_or_shard_multiplicity() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("a.safetensors");
+        let second = dir.path().join("b.safetensors");
+        let changed = dir.path().join("changed.safetensors");
+        fs::write(&first, b"first shard").unwrap();
+        fs::write(&second, b"second shard").unwrap();
+        fs::write(&changed, b"second shard changed").unwrap();
+
+        let base = mmap_shards(&[first.clone(), second.clone()]).unwrap();
+        let changed_bytes = mmap_shards(&[first.clone(), changed]).unwrap();
+        let duplicated = mmap_shards(&[first, second.clone(), second]).unwrap();
+
+        let base_revision = loaded_shard_content_sha256(&base);
+        assert_ne!(base_revision, loaded_shard_content_sha256(&changed_bytes));
+        assert_ne!(base_revision, loaded_shard_content_sha256(&duplicated));
     }
 
     /// Build a list of tensor specs for a tiny test model.
