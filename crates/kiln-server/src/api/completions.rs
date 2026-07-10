@@ -6506,7 +6506,7 @@ async fn generate_real(
                         let mut cache = prefix_cache.lock().unwrap();
                         let should_lookup = cache.should_lookup_prompt(&prompt_tokens);
                         let hit = if should_lookup {
-                            cache.lookup(&adapter, &prompt_tokens)?
+                            cache.lookup(&adapter, &prompt_tokens, &params)?
                         } else {
                             None
                         };
@@ -7008,7 +7008,7 @@ async fn generate_real_streaming(
                                 let mut cache = prefix_cache.lock().unwrap();
                                 let should_lookup = cache.should_lookup_prompt(&prompt_tokens);
                                 let hit = if should_lookup {
-                                    cache.lookup(&adapter, &prompt_tokens)?
+                                    cache.lookup(&adapter, &prompt_tokens, &params)?
                                 } else {
                                     None
                                 };

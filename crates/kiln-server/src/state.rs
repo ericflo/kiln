@@ -8,7 +8,7 @@ use kiln_core::block::BlockManager;
 use kiln_core::config::ModelConfig;
 use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::prefix_cache::default_prefix_cache_max_blocks;
-use kiln_core::sampling::ThinkingBudgetStatus;
+use kiln_core::sampling::{SamplingParams, ThinkingBudgetStatus};
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
@@ -1053,6 +1053,7 @@ impl RealPrefixCache {
         &mut self,
         adapter: &Option<String>,
         prompt_tokens: &[TokenId],
+        sampling: &SamplingParams,
     ) -> anyhow::Result<Option<RealPrefixCacheHit>> {
         if !self.is_enabled() {
             return Ok(None);
@@ -1067,8 +1068,18 @@ impl RealPrefixCache {
                     self.block_size > 0 && entry.prompt_tokens.len() % self.block_size == 0;
                 let block_shape_valid = block_aligned
                     && entry.block_ids.len() == entry.prompt_tokens.len() / self.block_size;
+                let exact_source_compatible =
+                    entry
+                        .next_token
+                        .as_ref()
+                        .is_some_and(|source| match source {
+                            PagedPrefixNextToken::Logits(_) => true,
+                            PagedPrefixNextToken::GreedyToken(_) => {
+                                sampling.is_effectively_greedy()
+                            }
+                        });
                 let exact_hit = prompt_tokens.len() == entry.prompt_tokens.len()
-                    && entry.next_token.is_some()
+                    && exact_source_compatible
                     && block_shape_valid;
                 let strict_prefix_hit =
                     prompt_tokens.len() > entry.prompt_tokens.len() && block_shape_valid;
@@ -1084,19 +1095,27 @@ impl RealPrefixCache {
             return Ok(None);
         };
 
+        // Snapshot before mutating accounting or pinning the entry. Device
+        // allocation/copy can fail, and a failed lookup has no hit handle the
+        // caller could use to release an incremented `active_uses` count.
+        let hit = {
+            let entry = &self.entries[idx];
+            RealPrefixCacheHit {
+                entry_id: entry.id,
+                cached_tokens: entry.prompt_tokens.len(),
+                block_ids: entry.block_ids.clone(),
+                linear_state: entry.linear_state.snapshot()?,
+                next_token: entry.next_token.clone(),
+            }
+        };
+
         self.stats.lookup_hits += 1;
-        self.stats.hit_tokens += self.entries[idx].prompt_tokens.len() as u64;
-        self.stats.hit_blocks += self.entries[idx].block_ids.len() as u64;
+        self.stats.hit_tokens += hit.cached_tokens as u64;
+        self.stats.hit_blocks += hit.block_ids.len() as u64;
         self.entries[idx].last_used = self.stats.lookup_hits + self.stats.lookup_misses;
         self.entries[idx].active_uses += 1;
 
-        Ok(Some(RealPrefixCacheHit {
-            entry_id: self.entries[idx].id,
-            cached_tokens: self.entries[idx].prompt_tokens.len(),
-            block_ids: self.entries[idx].block_ids.clone(),
-            linear_state: self.entries[idx].linear_state.snapshot()?,
-            next_token: self.entries[idx].next_token.clone(),
-        }))
+        Ok(Some(hit))
     }
 
     pub fn release_hit(&mut self, entry_id: u64) {
@@ -3026,6 +3045,40 @@ fn format_oom_remediation_message(
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct SnapshotFailureStorage;
+
+    impl kiln_tensor::StorageBackend for SnapshotFailureStorage {
+        fn device(&self) -> kiln_tensor::Device {
+            kiln_tensor::Device::Vulkan(0)
+        }
+
+        fn dtype(&self) -> kiln_tensor::DType {
+            kiln_tensor::DType::F32
+        }
+
+        fn byte_len(&self) -> usize {
+            std::mem::size_of::<f32>()
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    fn snapshot_failing_linear_state() -> anyhow::Result<LinearAttentionState> {
+        let storage: kiln_tensor::Storage = std::sync::Arc::new(SnapshotFailureStorage);
+        let recurrent_state = kiln_tensor::Tensor::from_parts(
+            storage,
+            kiln_tensor::Layout::contiguous([1]),
+            kiln_tensor::TensorId::next(),
+        )?;
+        Ok(LinearAttentionState {
+            recurrent_states: vec![recurrent_state],
+            conv_states: Vec::new(),
+        })
+    }
+
     #[test]
     fn pool_trim_target_skips_empty_spare_and_honors_requested_bytes() {
         assert_eq!(pool_trim_min_keep(8_000, 8_000, u64::MAX), None);
@@ -3360,10 +3413,12 @@ mod tests {
 
         assert!(
             cache
-                .lookup(&None, &[7, 8, 9, 10, 11])
+                .lookup(&None, &[7, 8, 9, 10, 11], &SamplingParams::greedy())
                 .is_ok_and(|hit| hit.is_none())
         );
-        let hit = cache.lookup(&None, &[1, 2, 3, 4, 5])?.expect("prefix hit");
+        let hit = cache
+            .lookup(&None, &[1, 2, 3, 4, 5], &SamplingParams::greedy())?
+            .expect("prefix hit");
         assert_eq!(hit.cached_tokens, 4);
         assert_eq!(hit.block_ids, vec![9]);
         cache.release_hit(hit.entry_id);
@@ -3422,7 +3477,7 @@ mod tests {
         // Turn 2 prompt: turn-1 transcript + new user input.
         let turn2_prompt: Vec<u32> = vec![10, 11, 12, 13, 14, 200, 201, 202, 50, 51];
         let hit = cache
-            .lookup(&None, &turn2_prompt)?
+            .lookup(&None, &turn2_prompt, &SamplingParams::greedy())?
             .expect("turn 2 must hit the cache on the extended entry");
         assert_eq!(
             hit.cached_tokens, 8,
@@ -3474,7 +3529,11 @@ mod tests {
         );
         assert!(
             cache
-                .lookup(&None, &[10u32, 11, 12, 13, 14, 15, 16, 17, 50, 51])?
+                .lookup(
+                    &None,
+                    &[10u32, 11, 12, 13, 14, 15, 16, 17, 50, 51],
+                    &SamplingParams::greedy(),
+                )?
                 .is_some(),
             "resident entry must still be hittable after the unfittable attempt"
         );
@@ -3504,7 +3563,11 @@ mod tests {
         );
         assert!(outcome.retained_blocks.is_empty());
         assert!(outcome.evicted_blocks.is_empty());
-        assert!(cache.lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8])?.is_none());
+        assert!(
+            cache
+                .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8], &SamplingParams::greedy(),)?
+                .is_none()
+        );
 
         let stats = cache.stats();
         assert_eq!(stats.lookup_hits, 0);
@@ -3531,7 +3594,9 @@ mod tests {
             },
         );
         assert!(
-            cache.lookup(&None, &[1, 2, 3, 4])?.is_none(),
+            cache
+                .lookup(&None, &[1, 2, 3, 4], &SamplingParams::greedy())?
+                .is_none(),
             "an exact prompt hit without a saved next-token source cannot skip prefill"
         );
 
@@ -3547,7 +3612,9 @@ mod tests {
         );
         assert_eq!(outcome.retained_blocks, vec![9]);
         assert!(outcome.evicted_blocks.is_empty());
-        let hit = cache.lookup(&None, &[1, 2, 3, 4])?.expect("exact hit");
+        let hit = cache
+            .lookup(&None, &[1, 2, 3, 4], &SamplingParams::greedy())?
+            .expect("exact hit");
         assert_eq!(hit.cached_tokens, 4);
         assert_eq!(hit.block_ids, vec![9]);
         assert!(matches!(
@@ -3556,6 +3623,113 @@ mod tests {
         ));
         cache.release_hit(hit.entry_id);
 
+        Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_ranks_exact_hits_by_sampling_compatibility() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = cpu_device!();
+        let mut cache = RealPrefixCache::new(true, 4, 8, 1024, 49);
+
+        cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: vec![10],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+        cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                block_ids: vec![10, 11],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: Some(PagedPrefixNextToken::GreedyToken(123)),
+            },
+        );
+
+        let sampled = SamplingParams::default();
+        assert!(!sampled.is_effectively_greedy());
+        let sampled_hit = cache
+            .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8], &sampled)?
+            .expect("sampled lookup must fall back to the strict prefix");
+        assert_eq!(sampled_hit.cached_tokens, 4);
+        assert!(sampled_hit.next_token.is_none());
+        assert_eq!(cache.entries[0].active_uses, 1);
+        assert_eq!(cache.entries[1].active_uses, 0);
+        cache.release_hit(sampled_hit.entry_id);
+
+        let greedy_hit = cache
+            .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8], &SamplingParams::greedy())?
+            .expect("greedy lookup must use the longer exact entry");
+        assert_eq!(greedy_hit.cached_tokens, 8);
+        assert!(matches!(
+            greedy_hit.next_token,
+            Some(PagedPrefixNextToken::GreedyToken(123))
+        ));
+        assert_eq!(cache.entries[0].active_uses, 0);
+        assert_eq!(cache.entries[1].active_uses, 1);
+        cache.release_hit(greedy_hit.entry_id);
+
+        let logits_adapter = Some("logits".to_string());
+        cache.register(
+            logits_adapter.clone(),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                block_ids: vec![20, 21],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: Some(PagedPrefixNextToken::Logits(kiln_tensor::Tensor::from_vec(
+                    vec![0.0f32; 4],
+                    (1, 4),
+                )?)),
+            },
+        );
+        let logits_hit = cache
+            .lookup(&logits_adapter, &[1, 2, 3, 4, 5, 6, 7, 8], &sampled)?
+            .expect("full logits must support sampled exact reuse");
+        assert_eq!(logits_hit.cached_tokens, 8);
+        assert!(matches!(
+            logits_hit.next_token,
+            Some(PagedPrefixNextToken::Logits(_))
+        ));
+        cache.release_hit(logits_hit.entry_id);
+
+        let stats = cache.stats();
+        assert_eq!(stats.lookup_hits, 3);
+        assert_eq!(stats.lookup_misses, 0);
+        assert_eq!(stats.hit_tokens, 20);
+        assert_eq!(stats.hit_blocks, 5);
+        assert!(cache.entries.iter().all(|entry| entry.active_uses == 0));
+        Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_snapshot_failure_does_not_commit_hit_state() -> anyhow::Result<()> {
+        let mut cache = RealPrefixCache::new(true, 4, 4, 1024, 49);
+        cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: vec![10],
+                linear_state: snapshot_failing_linear_state()?,
+                next_token: Some(PagedPrefixNextToken::GreedyToken(123)),
+            },
+        );
+
+        let stats_before = cache.stats();
+        let last_used_before = cache.entries[0].last_used;
+        let active_uses_before = cache.entries[0].active_uses;
+        let error = match cache.lookup(&None, &[1, 2, 3, 4], &SamplingParams::greedy()) {
+            Err(error) => error,
+            Ok(_) => anyhow::bail!("unsupported Vulkan deep copy unexpectedly succeeded"),
+        };
+        assert!(error.to_string().contains("snapshot recurrent state"));
+        assert_eq!(cache.stats(), stats_before);
+        assert_eq!(cache.entries[0].last_used, last_used_before);
+        assert_eq!(cache.entries[0].active_uses, active_uses_before);
         Ok(())
     }
 
@@ -3610,7 +3784,7 @@ mod tests {
         assert!(!cache.block_refcounts.contains_key(&12));
 
         let hit = cache
-            .lookup(&None, &[1, 2, 3, 4, 5])?
+            .lookup(&None, &[1, 2, 3, 4, 5], &SamplingParams::greedy())?
             .expect("safe strict-prefix fallback");
         assert_eq!(hit.cached_tokens, 4);
         assert_eq!(hit.block_ids, vec![10]);
@@ -3658,7 +3832,7 @@ mod tests {
         });
 
         let hit = cache
-            .lookup(&None, &[1, 2, 3, 4, 5])?
+            .lookup(&None, &[1, 2, 3, 4, 5], &SamplingParams::greedy())?
             .expect("safe strict-prefix fallback");
         assert_ne!(hit.entry_id, legacy_id);
         assert_eq!(hit.cached_tokens, 4);
@@ -3701,9 +3875,21 @@ mod tests {
         assert_eq!(stats.cached_state_bytes, 98);
         assert_eq!(stats.max_state_bytes, 98);
         assert_eq!(stats.cached_blocks, 2);
-        assert!(cache.lookup(&None, &[1, 2, 3, 4, 99])?.is_none());
-        assert!(cache.lookup(&None, &[5, 6, 7, 8, 99])?.is_some());
-        assert!(cache.lookup(&None, &[9, 10, 11, 12, 99])?.is_some());
+        assert!(
+            cache
+                .lookup(&None, &[1, 2, 3, 4, 99], &SamplingParams::greedy())?
+                .is_none()
+        );
+        assert!(
+            cache
+                .lookup(&None, &[5, 6, 7, 8, 99], &SamplingParams::greedy())?
+                .is_some()
+        );
+        assert!(
+            cache
+                .lookup(&None, &[9, 10, 11, 12, 99], &SamplingParams::greedy())?
+                .is_some()
+        );
         Ok(())
     }
 
@@ -3737,15 +3923,27 @@ mod tests {
             },
         );
 
-        assert!(cache.lookup(&None, &[1, 2, 3, 4, 5])?.is_none());
         assert!(
             cache
-                .lookup(&Some("adapter-b".to_string()), &[1, 2, 3, 4, 5])?
+                .lookup(&None, &[1, 2, 3, 4, 5], &SamplingParams::greedy())?
                 .is_none()
         );
         assert!(
             cache
-                .lookup(&Some("adapter-a".to_string()), &[1, 2, 3, 4, 5])?
+                .lookup(
+                    &Some("adapter-b".to_string()),
+                    &[1, 2, 3, 4, 5],
+                    &SamplingParams::greedy(),
+                )?
+                .is_none()
+        );
+        assert!(
+            cache
+                .lookup(
+                    &Some("adapter-a".to_string()),
+                    &[1, 2, 3, 4, 5],
+                    &SamplingParams::greedy(),
+                )?
                 .is_some()
         );
         Ok(())
@@ -3794,13 +3992,21 @@ mod tests {
 
         assert!(
             cache
-                .lookup(&Some("retrained".to_string()), &[1, 2, 3, 4, 5])?
+                .lookup(
+                    &Some("retrained".to_string()),
+                    &[1, 2, 3, 4, 5],
+                    &SamplingParams::greedy(),
+                )?
                 .is_none(),
             "retrained adapter's entries are gone"
         );
         assert!(
             cache
-                .lookup(&Some("untouched".to_string()), &[9, 9, 9, 9, 1])?
+                .lookup(
+                    &Some("untouched".to_string()),
+                    &[9, 9, 9, 9, 1],
+                    &SamplingParams::greedy(),
+                )?
                 .is_some(),
             "other adapters' entries survive — a background eval/training \
              swap must not cost the serving agent its prefix cache"

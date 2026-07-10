@@ -603,7 +603,7 @@ impl DecodeForward for RealDecodeForward {
             let mut cache = self.prefix_cache_guard()?;
             let enabled = cache.is_enabled();
             let hit = if enabled {
-                cache.lookup(&req.adapter, &req.prompt_tokens)?
+                cache.lookup(&req.adapter, &req.prompt_tokens, &req.sampling)?
             } else {
                 None
             };
