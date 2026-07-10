@@ -139,15 +139,7 @@ impl RocmGraphKey {
 #[cfg(feature = "rocm")]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum RocmGraphOwner {
-    Anonymous,
     DecodeRow(u64),
-}
-
-#[cfg(feature = "rocm")]
-impl RocmGraphOwner {
-    fn from_row_id(row_id: Option<u64>) -> Self {
-        row_id.map_or(Self::Anonymous, Self::DecodeRow)
-    }
 }
 
 #[cfg(feature = "rocm")]
@@ -492,11 +484,12 @@ impl RocmGraphRunner {
         }
     }
 
-    /// Release graph state owned by a finished batching-engine decode row.
+    /// Release graph state owned by a finished logical decode row.
     ///
-    /// `PagedBatchedDecodeState` row ids are unique for the process lifetime.
-    /// Retaining their graphs or continuity timelines after request completion
-    /// would permanently fill the bounded graph cache and grow the timeline map.
+    /// Batching-engine rows and direct generations share one process-wide id
+    /// namespace. Retaining their graphs or continuity timelines after request
+    /// completion would permanently fill the bounded graph cache and grow the
+    /// timeline map.
     pub fn release_decode_row(&mut self, row_id: u64) {
         #[cfg(feature = "rocm")]
         {
@@ -525,7 +518,7 @@ impl RocmGraphRunner {
         owner: RocmGraphOwner,
         block_table: &BlockTable,
         seq_len: usize,
-    ) {
+    ) -> bool {
         let block0 = block_table.blocks.first().copied();
         let timeline = self.decode_timelines.entry(owner).or_default();
         let continues = block0.is_some()
@@ -543,6 +536,7 @@ impl RocmGraphRunner {
         }
         timeline.last_decode_seq_len = Some(seq_len);
         timeline.last_decode_block0 = block0;
+        continues
     }
 
     #[cfg(feature = "rocm")]
@@ -567,7 +561,7 @@ impl RocmGraphRunner {
         seq_len: usize,
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
-        graph_row_id: Option<u64>,
+        graph_row_id: u64,
     ) -> Result<Tensor> {
         if !self.enabled || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
             return Self::eager_forward(
@@ -594,7 +588,7 @@ impl RocmGraphRunner {
             // host round-trip is still caught by the warm-pass htod check below
             // (graceful eager), so no explicit FP8 guard is needed here.
 
-            let owner = RocmGraphOwner::from_row_id(graph_row_id);
+            let owner = RocmGraphOwner::DecodeRow(graph_row_id);
             self.prepare_owner_decode(owner, block_table, seq_len);
 
             // Warmup: first decode step runs eagerly (graph-shaped position
@@ -826,7 +820,7 @@ impl RocmGraphRunner {
         seq_len: usize,
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
-        graph_row_id: Option<u64>,
+        graph_row_id: u64,
     ) -> Result<Tensor> {
         if !self.enabled || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
             return Self::eager_forward_hidden(
@@ -844,7 +838,7 @@ impl RocmGraphRunner {
 
         #[cfg(feature = "rocm")]
         {
-            let owner = RocmGraphOwner::from_row_id(graph_row_id);
+            let owner = RocmGraphOwner::DecodeRow(graph_row_id);
             self.prepare_owner_decode(owner, block_table, seq_len);
 
             if !self.warmup_done {
@@ -1072,7 +1066,7 @@ impl RocmGraphRunner {
         seq_len: usize,
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
-        graph_row_id: Option<u64>,
+        graph_row_id: u64,
     ) -> Result<u32> {
         if !self.enabled || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
             return Self::eager_forward_greedy(
@@ -1090,7 +1084,7 @@ impl RocmGraphRunner {
 
         #[cfg(feature = "rocm")]
         {
-            let owner = RocmGraphOwner::from_row_id(graph_row_id);
+            let owner = RocmGraphOwner::DecodeRow(graph_row_id);
             self.prepare_owner_decode(owner, block_table, seq_len);
 
             if !self.warmup_done {
@@ -2352,30 +2346,53 @@ mod tests {
 
         let target = RocmGraphOwner::DecodeRow(7);
         let survivor = RocmGraphOwner::DecodeRow(8);
-        let anonymous = RocmGraphOwner::Anonymous;
+        let second_survivor = RocmGraphOwner::DecodeRow(9);
         let mut captured = HashMap::from([
             (RocmGraphCacheKey::new(target, graph_key(1)), "target-a"),
             (RocmGraphCacheKey::new(target, graph_key(2)), "target-b"),
             (RocmGraphCacheKey::new(survivor, graph_key(1)), "survivor"),
-            (RocmGraphCacheKey::new(anonymous, graph_key(1)), "anonymous"),
+            (
+                RocmGraphCacheKey::new(second_survivor, graph_key(1)),
+                "second-survivor",
+            ),
         ]);
         assert_eq!(remove_graphs_owned_by(&mut captured, target), 2);
         assert_eq!(captured.len(), 2);
         assert!(captured.keys().all(|key| key.owner != target));
         assert!(captured.keys().any(|key| key.owner == survivor));
-        assert!(captured.keys().any(|key| key.owner == anonymous));
+        assert!(captured.keys().any(|key| key.owner == second_survivor));
 
         let mut runner = RocmGraphRunner::new(&Device::Cpu, true);
         runner.decode_timelines.insert(target, Default::default());
         runner.decode_timelines.insert(survivor, Default::default());
         runner
             .decode_timelines
-            .insert(anonymous, Default::default());
+            .insert(second_survivor, Default::default());
         runner.release_decode_row(7);
 
         assert!(!runner.decode_timelines.contains_key(&target));
         assert!(runner.decode_timelines.contains_key(&survivor));
-        assert!(runner.decode_timelines.contains_key(&anonymous));
+        assert!(runner.decode_timelines.contains_key(&second_survivor));
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn recycled_block_continuity_never_crosses_decode_owners() {
+        let mut runner = RocmGraphRunner::new(&Device::Cpu, true);
+        let recycled_table = BlockTable { blocks: vec![11] };
+        let first = RocmGraphOwner::DecodeRow(41);
+        let second = RocmGraphOwner::DecodeRow(42);
+
+        assert!(!runner.prepare_owner_decode(first, &recycled_table, 63));
+        assert!(runner.prepare_owner_decode(first, &recycled_table, 64));
+
+        // Even though both block zero and sequence continuity match the prior
+        // call, a different generation must start a fresh recurrent timeline.
+        assert!(!runner.prepare_owner_decode(second, &recycled_table, 65));
+        assert!(runner.prepare_owner_decode(second, &recycled_table, 66));
+
+        runner.release_decode_row(42);
+        assert!(!runner.prepare_owner_decode(second, &recycled_table, 67));
     }
 
     #[test]

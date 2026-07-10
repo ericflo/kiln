@@ -164,7 +164,7 @@ fn rocm_graph_state_is_decode_row_owned() {
         "captured: HashMap<RocmGraphCacheKey, CapturedDecodeGraphRocm>",
         "decode_timelines: HashMap<RocmGraphOwner, RocmGraphOwnerTimeline>",
         "fn prepare_owner_decode",
-        "self.captured.retain(|key, _| key.owner != owner)",
+        "remove_graphs_owned_by(&mut self.captured, owner)",
         "RocmGraphCacheKey::new(owner, requested_key.clone())",
         "RocmGraphCacheKey::new(owner, key)",
     ] {
@@ -178,6 +178,9 @@ fn rocm_graph_state_is_decode_row_owned() {
         "captured: HashMap<RocmGraphKey, CapturedDecodeGraphRocm>",
         "last_decode_seq_len: None",
         "last_decode_block0: None",
+        "Anonymous",
+        "graph_row_id: Option<u64>",
+        "RocmGraphOwner::from_row_id",
     ] {
         assert!(
             !rocm_graph.contains(forbidden),
@@ -185,9 +188,110 @@ fn rocm_graph_state_is_decode_row_owned() {
         );
     }
 
+    let batched_rocm = source_between(
+        &generate,
+        "// R.9: ROCm HIP-graph single-row decode",
+        "let sampled = if let Some(tokens)",
+    );
+    assert_eq!(
+        batched_rocm.matches("row_ids[0],").count(),
+        2,
+        "greedy and sampled ROCm serving decode must pass a concrete stable row id"
+    );
     assert!(
-        generate.contains("Some(row_ids[0])"),
-        "batched serving decode must pass the stable row id into the ROCm graph owner key"
+        !batched_rocm.contains("Some(row_ids[0])"),
+        "ROCm graph APIs must require a concrete row id instead of an optional owner"
+    );
+}
+
+#[test]
+fn direct_rocm_graph_decode_uses_scoped_process_unique_owners() {
+    let generate = read("crates/kiln-model/src/generate.rs");
+    let rocm_graph = read("crates/kiln-model/src/rocm_graph.rs");
+    let bench = read("crates/kiln-server/src/bench.rs");
+
+    for required in [
+        "static DECODE_ROW_NEXT_ID",
+        "fn allocate_decode_row_id(",
+        "fn next_decode_row_id() -> u64",
+        "struct RocmDecodeOwnerLease",
+        "impl Drop for RocmDecodeOwnerLease",
+    ] {
+        assert!(
+            generate.contains(required),
+            "direct and batched ROCm decode must share one owner namespace: {required}"
+        );
+    }
+    assert_eq!(
+        generate.matches("id: next_decode_row_id(),").count(),
+        3,
+        "the direct lease and both batching-state paths must use the shared owner allocator"
+    );
+    assert!(generate.contains("0 => None"));
+    assert!(generate.contains("u64::MAX => Some(0)"));
+
+    let lease_drop = source_between(
+        &generate,
+        "impl Drop for RocmDecodeOwnerLease",
+        "/// Build a strict-prefix prefix-cache registration",
+    );
+    assert!(lease_drop.contains("graph.release_decode_row(self.row_id)"));
+    assert!(lease_drop.contains("poisoned.into_inner().release_decode_row(self.row_id)"));
+    for forbidden in [".unwrap()", ".expect(", "panic!("] {
+        assert!(
+            !lease_drop.contains(forbidden),
+            "decode-owner cleanup must not panic while unwinding: {forbidden}"
+        );
+    }
+
+    for (start, end) in [
+        (
+            "fn decode_from_prefill_token(",
+            "/// Decode one greedy token for multiple compatible paged requests",
+        ),
+        (
+            "fn generate_from_tokens_paged_interleaved(",
+            "/// CUDA-graph variant of the interleaved decode path",
+        ),
+        (
+            "pub(crate) fn run_stream_decode_loop_with_first(",
+            "fn generate_from_tokens_streaming_paged_speculative_interleaved(",
+        ),
+    ] {
+        let decode_loop = source_between(&generate, start, end);
+        let lease = decode_loop
+            .find("RocmDecodeOwnerLease::new(&self.rocm_graph)")
+            .unwrap_or_else(|| panic!("direct decode loop lacks scoped owner: {start}"));
+        let loop_start = decode_loop
+            .find("for _step in 0..params.max_tokens")
+            .unwrap_or_else(|| panic!("direct decode loop lacks token loop: {start}"));
+        assert!(
+            lease < loop_start,
+            "owner lease must cover every early success/error/cancel/drop exit in {start}"
+        );
+        assert!(decode_loop.contains("rocm_owner.row_id()"));
+    }
+
+    let direct_dispatch = source_between(
+        &generate,
+        "fn decode_next_token_paged_interleaved(",
+        "fn decode_next_token_paged_interleaved_or_batched(",
+    );
+    assert!(direct_dispatch.contains("graph_row_id: u64"));
+    assert!(direct_dispatch.contains("graph_row_id,"));
+
+    assert_eq!(
+        rocm_graph.matches("graph_row_id: u64").count(),
+        3,
+        "all three ROCm bs=1 graph APIs must require a concrete owner"
+    );
+    assert!(!rocm_graph.contains("graph_row_id: Option<u64>"));
+    assert!(!rocm_graph.contains("Anonymous"));
+    assert!(bench.contains("let rocm_graph_row_id = 1_u64;"));
+    assert_eq!(
+        bench.matches("rocm_graph_row_id,").count(),
+        2,
+        "the single-generation latency runner must pass its explicit fixed owner"
     );
 }
 

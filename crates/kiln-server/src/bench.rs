@@ -989,6 +989,9 @@ fn bench_latency_paged(
     let greedy_token_decode_enabled = backend_capabilities.decode.linear_argmax.is_native()
         || backend_capabilities.decode_batcher.use_greedy_token_decode;
     let mut rocm_graph = kiln_model::rocm_graph::RocmGraphRunner::new(&device_kt, true);
+    // This runner is scoped to exactly one benchmark generation, so a fixed
+    // concrete owner is unique for its entire lifetime.
+    let rocm_graph_row_id = 1_u64;
     let hip_graph_decode_enabled = bench_paged_decode_replay_primitive_enabled(
         backend.as_ref(),
         config,
@@ -1158,7 +1161,7 @@ fn bench_latency_paged(
                         current_pos,
                         &mut linear_state,
                         None,
-                        None,
+                        rocm_graph_row_id,
                     )
                     .context("paged sampled ROCm graph hidden pass failed")?
             } else {
@@ -1214,7 +1217,7 @@ fn bench_latency_paged(
                     current_pos,
                     &mut linear_state,
                     None,
-                    None,
+                    rocm_graph_row_id,
                 )
                 .context("paged ROCm graph greedy decode forward pass failed")?
         } else if greedy_token_decode_enabled {

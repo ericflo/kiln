@@ -433,8 +433,9 @@ pub struct PagedBatchedDecodeState {
     /// during decode. None until decode first crosses a block boundary;
     /// replaced (drop+alloc) at each subsequent boundary.
     pub rolling_snapshot: Option<RollingPrefixSnapshot>,
-    /// Stable per-request identity used for caching keys. Assigned at
-    /// construction from a process-global atomic counter so the value is
+    /// Stable per-generation identity used for decode graph and state caching
+    /// keys. Assigned from the same process-global namespace as direct
+    /// generation owners so no two live decode rows can alias. The value is
     /// independent of where the `PagedBatchedDecodeState` happens to live
     /// in memory — important because the batching-engine actor's
     /// `Vec<ActiveRequest>` shifts elements down via `Vec::remove` when a
@@ -445,11 +446,63 @@ pub struct PagedBatchedDecodeState {
     pub id: u64,
 }
 
-static PAGED_BATCHED_DECODE_STATE_NEXT_ID: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
+static DECODE_ROW_NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-pub(crate) fn next_paged_batched_decode_state_id() -> u64 {
-    PAGED_BATCHED_DECODE_STATE_NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+fn allocate_decode_row_id(counter: &std::sync::atomic::AtomicU64) -> u64 {
+    counter
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| match current {
+                0 => None,
+                u64::MAX => Some(0),
+                _ => Some(current + 1),
+            },
+        )
+        .unwrap_or_else(|_| panic!("decode row id namespace exhausted"))
+}
+
+pub(crate) fn next_decode_row_id() -> u64 {
+    allocate_decode_row_id(&DECODE_ROW_NEXT_ID)
+}
+
+/// Owns one direct generation's ROCm graph row until its decode loop exits.
+///
+/// Direct generation has many early exits (EOS, stop sequences, cancellation,
+/// receiver disconnects, and forward errors). Tying cleanup to the stack scope
+/// ensures all of them release captured graphs and continuity state before the
+/// caller can recycle this generation's KV blocks.
+struct RocmDecodeOwnerLease<'a> {
+    graph: &'a Mutex<RocmGraphRunner>,
+    row_id: u64,
+}
+
+impl<'a> RocmDecodeOwnerLease<'a> {
+    fn new(graph: &'a Mutex<RocmGraphRunner>) -> Self {
+        Self {
+            graph,
+            row_id: next_decode_row_id(),
+        }
+    }
+
+    fn row_id(&self) -> u64 {
+        self.row_id
+    }
+}
+
+impl Drop for RocmDecodeOwnerLease<'_> {
+    fn drop(&mut self) {
+        match self.graph.lock() {
+            Ok(mut graph) => graph.release_decode_row(self.row_id),
+            Err(poisoned) => {
+                tracing::warn!(
+                    row_id = self.row_id,
+                    "recovering poisoned ROCm graph lock to release direct decode owner"
+                );
+                poisoned.into_inner().release_decode_row(self.row_id);
+            }
+        }
+    }
 }
 
 /// Build a strict-prefix prefix-cache registration covering the prompt plus
@@ -3050,7 +3103,7 @@ impl ModelRunner {
                 block_size,
                 prefill_split_snapshot: None,
                 rolling_snapshot: None,
-                id: next_paged_batched_decode_state_id(),
+                id: next_decode_row_id(),
             });
         }
 
@@ -3249,7 +3302,7 @@ impl ModelRunner {
             block_size,
             prefill_split_snapshot,
             rolling_snapshot: None,
-            id: next_paged_batched_decode_state_id(),
+            id: next_decode_row_id(),
         })
     }
 
@@ -3835,7 +3888,7 @@ impl ModelRunner {
                         sequence_lengths[0],
                         &mut *linear_states[0],
                         self.active_lora.as_ref(),
-                        Some(row_ids[0]),
+                        row_ids[0],
                     )
                     .context("batched decode ROCm graph greedy row failed")?;
                 sampled = Some(vec![token]);
@@ -3857,7 +3910,7 @@ impl ModelRunner {
                         sequence_lengths[0],
                         &mut *linear_states[0],
                         self.active_lora.as_ref(),
-                        Some(row_ids[0]),
+                        row_ids[0],
                     )
                     .context("batched decode ROCm graph hidden row failed")?;
                 let token = if let Some(token) = lm_head_sample_backend_decode_if(
@@ -4178,6 +4231,7 @@ impl ModelRunner {
         mut step_seed: Option<u64>,
         cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
+        let rocm_owner = RocmDecodeOwnerLease::new(&self.rocm_graph);
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         for _step in 0..params.max_tokens {
             check_cancelled(cancel)?;
@@ -4230,6 +4284,7 @@ impl ModelRunner {
                 linear_state,
                 step_seed,
                 &generated_tokens,
+                rocm_owner.row_id(),
                 skip_gdn_state_readback,
             )?;
             seq_len += 1;
@@ -5391,6 +5446,7 @@ impl ModelRunner {
         linear_state: &mut LinearAttentionState,
         step_seed: Option<u64>,
         history: &[TokenId],
+        graph_row_id: u64,
         skip_gdn_state_readback: bool,
     ) -> Result<TokenId> {
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
@@ -5519,7 +5575,7 @@ impl ModelRunner {
                                 seq_len,
                                 linear_state,
                                 self.active_lora.as_ref(),
-                                None,
+                                graph_row_id,
                             )
                             .context("ROCm graph decode step failed")?,
                     )
@@ -5580,6 +5636,7 @@ impl ModelRunner {
         step_seed: Option<u64>,
         decode_batcher: Option<&DecodeBatcher>,
         history: &[TokenId],
+        graph_row_id: u64,
         skip_gdn_state_readback: bool,
     ) -> Result<TokenId> {
         if params.is_effectively_greedy()
@@ -5606,6 +5663,7 @@ impl ModelRunner {
             linear_state,
             step_seed,
             history,
+            graph_row_id,
             skip_gdn_state_readback,
         )
     }
@@ -5745,6 +5803,7 @@ impl ModelRunner {
         } else {
             sample_step(&logits, params, step_seed, &[])?
         };
+        let rocm_owner = RocmDecodeOwnerLease::new(&self.rocm_graph);
 
         for _step in 0..params.max_tokens {
             check_cancelled(cancel)?;
@@ -5797,6 +5856,7 @@ impl ModelRunner {
                 &mut linear_state,
                 step_seed,
                 &generated_tokens,
+                rocm_owner.row_id(),
                 skip_gdn_state_readback,
             )?;
             seq_len += 1;
@@ -8353,6 +8413,7 @@ impl ModelRunner {
         linear_state: &mut LinearAttentionState,
         decode_batcher: Option<&DecodeBatcher>,
     ) -> Result<()> {
+        let rocm_owner = RocmDecodeOwnerLease::new(&self.rocm_graph);
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
@@ -8400,6 +8461,7 @@ impl ModelRunner {
                 step_seed,
                 decode_batcher,
                 &generated_tokens,
+                rocm_owner.row_id(),
                 skip_gdn_state_readback,
             )?;
             seq_len += 1;
@@ -8838,6 +8900,48 @@ mod tests {
         "KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK",
         "KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK",
     ];
+
+    #[test]
+    fn decode_row_ids_are_process_unique_across_threads() {
+        const THREADS: usize = 8;
+        const IDS_PER_THREAD: usize = 128;
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..IDS_PER_THREAD)
+                        .map(|_| next_decode_row_id())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let ids: Vec<u64> = workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .expect("decode owner allocator worker panicked")
+            })
+            .collect();
+        let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
+
+        assert_eq!(ids.len(), THREADS * IDS_PER_THREAD);
+        assert_eq!(unique.len(), ids.len());
+        assert!(ids.into_iter().all(|id| id != 0));
+    }
+
+    #[test]
+    fn decode_row_id_exhaustion_never_wraps_or_reuses_zero() {
+        let counter = std::sync::atomic::AtomicU64::new(u64::MAX);
+        assert_eq!(allocate_decode_row_id(&counter), u64::MAX);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        let exhausted = std::panic::catch_unwind(|| allocate_decode_row_id(&counter));
+        assert!(
+            exhausted.is_err(),
+            "exhausted owner namespace must fail closed"
+        );
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
     const DECODE_BATCHER_ROWWISE_ENV: &[&str] = &["KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"];
 
     struct EnvRestore(Vec<(&'static str, Option<String>)>);
