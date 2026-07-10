@@ -2788,6 +2788,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
     for (facet, required_method) in [
         ("BackendIdentity", "runtime_name"),
         ("StartupBackend", "runtime_precompile_startup_kernels"),
+        ("ExternalYieldBackend", "runtime_synchronize_external_yield"),
         ("AttentionBackend", "runtime_flash_attn_prefill"),
         ("PagedKvBackend", "runtime_paged_kv_head_major_read"),
         ("GdnBackend", "runtime_gdn_recurrent_step"),
@@ -2815,6 +2816,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
             facet,
             "BackendIdentity"
                 | "StartupBackend"
+                | "ExternalYieldBackend"
                 | "AttentionBackend"
                 | "GdnBackend"
                 | "ConvBackend"
@@ -2854,6 +2856,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
     for facet in [
         "BackendIdentity",
         "StartupBackend",
+        "ExternalYieldBackend",
         "AttentionBackend",
         "GdnBackend",
         "ConvBackend",
@@ -2897,6 +2900,10 @@ fn generated_capability_report_lists_focused_backend_facets() {
     assert!(
         !backend_source.contains("impl<T: BackendRuntime + ?Sized> StartupBackend for T"),
         "StartupBackend should not regress to a blanket BackendRuntime forwarding impl"
+    );
+    assert!(
+        !backend_source.contains("impl<T: BackendRuntime + ?Sized> ExternalYieldBackend for T"),
+        "ExternalYieldBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
     assert!(
         !backend_source.contains("impl<T: BackendRuntime + ?Sized> AttentionBackend for T"),
@@ -2946,6 +2953,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
     for supertrait in [
         "BackendIdentity",
         "StartupBackend",
+        "ExternalYieldBackend",
         "AttentionBackend",
         "GdnBackend",
         "ConvBackend",
@@ -2969,6 +2977,109 @@ fn generated_capability_report_lists_focused_backend_facets() {
         report_md.contains("## Focused Backend Facets"),
         "Markdown report should expose Phase 1 focused backend facets"
     );
+}
+
+#[test]
+fn external_yield_synchronization_is_backend_owned_and_device_wide() {
+    let root = workspace_root();
+    let backend_dir = root.join("crates/kiln-model/src/backend");
+    let read = |name: &str| {
+        fs::read_to_string(backend_dir.join(name))
+            .unwrap_or_else(|err| panic!("{name} should be readable: {err}"))
+    };
+
+    let cpu = read("cpu.rs");
+    let cpu_impl = source_between(
+        &cpu,
+        "impl ExternalYieldBackend for CpuBackend",
+        "impl AttentionBackend for CpuBackend",
+    );
+    assert!(
+        compact_body(cpu_impl).contains("Ok(())"),
+        "CPU external-yield synchronization should remain a synchronous no-op"
+    );
+
+    let cuda = read("cuda.rs");
+    let cuda_impl = source_between(
+        &cuda,
+        "impl ExternalYieldBackend for CudaBackend",
+        "impl AttentionBackend for CudaBackend",
+    );
+    let cuda_impl = compact_body(cuda_impl);
+    assert!(
+        cuda_impl.contains("kiln_tensor::primary_cuda_context(device_index)")
+            && cuda_impl.contains("context.synchronize()"),
+        "CUDA external yields must drain the complete CUDA context"
+    );
+    assert!(
+        !cuda_impl.contains("cuda_synchronize_default_stream"),
+        "CUDA external yields must not drain only the default stream"
+    );
+
+    let rocm = read("rocm.rs");
+    let rocm_impl = source_between(
+        &rocm,
+        "impl ExternalYieldBackend for RocmBackend",
+        "impl AttentionBackend for RocmBackend",
+    );
+    assert!(
+        compact_body(rocm_impl)
+            .contains("kiln_tensor::rocm_synchronize_default_stream(device_index)"),
+        "ROCm external yields must use the device-wide hipDeviceSynchronize wrapper"
+    );
+
+    let metal = read("metal_runtime.rs");
+    let metal_impl = source_between(
+        &metal,
+        "impl ExternalYieldBackend for MetalBackend",
+        "impl ConvBackend for MetalBackend",
+    );
+    let metal_impl = compact_body(metal_impl);
+    assert!(
+        metal_impl.contains("kiln_tensor::primary_metal_companion(device_index)")
+            && metal_impl.contains("companion.wait_until_completed()"),
+        "Metal external yields must commit and drain the backend command queue"
+    );
+
+    let vulkan = read("vulkan.rs");
+    let vulkan_impl = source_between(
+        &vulkan,
+        "impl ExternalYieldBackend for VulkanBackend",
+        "impl ConvBackend for VulkanBackend",
+    );
+    let vulkan_impl = compact_body(vulkan_impl);
+    assert!(
+        vulkan_impl.contains("self.vulkan_device.as_ref()")
+            && vulkan_impl.contains("device.synchronize_queue(\"externalmodelyield\")"),
+        "Vulkan external yields must drain the logical device owned by VulkanBackend"
+    );
+    for forbidden in [
+        "kiln_tensor::vulkan_synchronize_queue",
+        "kiln_tensor::primary_vulkan_device",
+    ] {
+        assert!(
+            !vulkan_impl.contains(forbidden),
+            "Vulkan external yields must not route through the global tensor device: {forbidden}"
+        );
+    }
+
+    let vulkan_device = fs::read_to_string(root.join("crates/kiln-vulkan-kernel/src/device.rs"))
+        .expect("Vulkan device source should be readable");
+    let owned_queue_sync = source_between(
+        &vulkan_device,
+        "pub fn synchronize_queue(&self, label: &str)",
+        "fn terminally_lost_message",
+    );
+    for required in [
+        "self.check_alive()?",
+        "self.device.queue_wait_idle(self.queue)",
+        "self.mark_terminally_lost()",
+    ] {
+        assert!(
+            compact_body(owned_queue_sync).contains(&compact_body(required)),
+            "owned Vulkan queue synchronization should preserve {required}"
+        );
+    }
 }
 
 #[test]

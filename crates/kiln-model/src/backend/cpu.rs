@@ -5,9 +5,10 @@
 
 use super::{
     AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
-    GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
-    SamplingBackend, StartupBackend, TrainingLossBackend, TrainingPrecisionPolicy,
-    matmul_request_support_rank, matmul_support_from_native, requested_matmul_layout,
+    ExternalYieldBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend,
+    ReplayBackend, ResidencyBackend, SamplingBackend, StartupBackend, TrainingLossBackend,
+    TrainingPrecisionPolicy, matmul_request_support_rank, matmul_support_from_native,
+    requested_matmul_layout,
 };
 
 #[derive(Debug)]
@@ -48,6 +49,12 @@ impl BackendIdentity for CpuBackend {
 }
 
 impl StartupBackend for CpuBackend {}
+
+impl ExternalYieldBackend for CpuBackend {
+    fn runtime_synchronize_external_yield(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
 impl AttentionBackend for CpuBackend {}
 

@@ -12758,6 +12758,12 @@ pub(crate) mod tests {
 
     impl kiln_model::backend::StartupBackend for NamedTestBackend {}
 
+    impl kiln_model::backend::ExternalYieldBackend for NamedTestBackend {
+        fn runtime_synchronize_external_yield(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     impl kiln_model::backend::AttentionBackend for NamedTestBackend {}
 
     impl kiln_model::backend::GdnBackend for NamedTestBackend {}

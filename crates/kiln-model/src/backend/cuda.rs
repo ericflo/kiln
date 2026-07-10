@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
-    GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
-    SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
-    TrainingPrecisionPolicy, matmul_request_support_rank, matmul_support_from_native,
-    requested_matmul_layout,
+    ExternalYieldBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend,
+    ReplayBackend, ResidencyBackend, SamplingBackend, StartupBackend, TrainingCapabilities,
+    TrainingLossBackend, TrainingPrecisionPolicy, matmul_request_support_rank,
+    matmul_support_from_native, requested_matmul_layout,
 };
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
@@ -299,6 +299,22 @@ impl BackendIdentity for CudaBackend {
 }
 
 impl StartupBackend for CudaBackend {}
+
+impl ExternalYieldBackend for CudaBackend {
+    fn runtime_synchronize_external_yield(&self) -> Result<()> {
+        let kiln_tensor::Device::Cuda(device_index) = self.device_kt else {
+            anyhow::bail!("CUDA external-yield synchronization requires a CUDA device");
+        };
+        let context = kiln_tensor::primary_cuda_context(device_index)
+            .context("acquire CUDA context for external-yield synchronization")?;
+        context
+            .bind_to_thread()
+            .context("bind CUDA context for external-yield synchronization")?;
+        context
+            .synchronize()
+            .context("synchronize CUDA context before external yield")
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 impl AttentionBackend for CudaBackend {

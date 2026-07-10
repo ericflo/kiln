@@ -9034,6 +9034,12 @@ mod tests {
 
     impl StartupBackend for NamedTestBackend {}
 
+    impl crate::backend::ExternalYieldBackend for NamedTestBackend {
+        fn runtime_synchronize_external_yield(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     impl crate::backend::AttentionBackend for NamedTestBackend {}
 
     impl crate::backend::GdnBackend for NamedTestBackend {}

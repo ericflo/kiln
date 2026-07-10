@@ -31565,6 +31565,12 @@ mod tests {
 
     impl crate::backend::StartupBackend for FixedLinearBackend {}
 
+    impl crate::backend::ExternalYieldBackend for FixedLinearBackend {
+        fn runtime_synchronize_external_yield(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
     impl crate::backend::AttentionBackend for FixedLinearBackend {}
 
     impl crate::backend::GdnBackend for FixedLinearBackend {}
@@ -31622,6 +31628,12 @@ mod tests {
     }
 
     impl crate::backend::StartupBackend for FixedMlpBackend {}
+
+    impl crate::backend::ExternalYieldBackend for FixedMlpBackend {
+        fn runtime_synchronize_external_yield(&self) -> Result<()> {
+            Ok(())
+        }
+    }
 
     impl crate::backend::AttentionBackend for FixedMlpBackend {}
 

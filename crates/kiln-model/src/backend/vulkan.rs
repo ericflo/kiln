@@ -28,11 +28,12 @@ use super::vulkan_tensor_bridge::{
     kt_tensor_to_packed_bf16_bytes_with_shape,
 };
 use super::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
-    OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
-    StartupBackend, TrainingCapabilities, TrainingLossBackend, TrainingPrecisionPolicy,
-    matmul_request_support_rank, matmul_support_from_native, vulkan_attention, vulkan_conv1d,
-    vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear, vulkan_training, vulkan_weights,
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, ExternalYieldBackend,
+    GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
+    SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
+    TrainingPrecisionPolicy, matmul_request_support_rank, matmul_support_from_native,
+    vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
+    vulkan_training, vulkan_weights,
 };
 use crate::forward::GpuWeights;
 
@@ -299,6 +300,15 @@ impl BackendIdentity for VulkanBackend {
 }
 
 impl StartupBackend for VulkanBackend {}
+
+impl ExternalYieldBackend for VulkanBackend {
+    fn runtime_synchronize_external_yield(&self) -> Result<()> {
+        let Some(device) = self.vulkan_device.as_ref() else {
+            return Ok(());
+        };
+        device.synchronize_queue("external model yield")
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 impl ConvBackend for VulkanBackend {

@@ -279,17 +279,29 @@ impl Commands {
                 cb.wait_until_completed();
             }
             MTLCommandBufferStatus::Completed => {}
-            MTLCommandBufferStatus::Error => {
-                let msg = cb
-                    .error()
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "unknown error".to_string());
-                return Err(MetalRtError::CommandBufferError(msg));
-            }
+            MTLCommandBufferStatus::Error => {}
             _ => unreachable!(),
         }
 
-        Ok(())
+        // `waitUntilCompleted` returns for both success and failure. Inspect
+        // the terminal status after waiting so a GPU command-buffer error can
+        // never be reported as a safe host/model handoff boundary.
+        Self::completion_status_result(cb.status(), cb.error().map(|error| error.to_string()))
+    }
+
+    fn completion_status_result(
+        status: MTLCommandBufferStatus,
+        error: Option<String>,
+    ) -> Result<(), MetalRtError> {
+        match status {
+            MTLCommandBufferStatus::Completed => Ok(()),
+            MTLCommandBufferStatus::Error => Err(MetalRtError::CommandBufferError(
+                error.unwrap_or_else(|| "unknown error".to_string()),
+            )),
+            other => Err(MetalRtError::CommandBufferError(format!(
+                "command buffer wait returned before terminal completion: {other:?}"
+            ))),
+        }
     }
 }
 
@@ -297,5 +309,30 @@ impl Drop for Commands {
     fn drop(&mut self) {
         // TODO: Avoid redundant allocation before drop
         let _ = self.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_status_rejects_gpu_error_after_wait() {
+        let error = Commands::completion_status_result(
+            MTLCommandBufferStatus::Error,
+            Some("injected Metal failure".to_string()),
+        )
+        .expect_err("Metal command-buffer errors must fail the synchronization boundary");
+        assert!(error.to_string().contains("injected Metal failure"));
+    }
+
+    #[test]
+    fn completion_status_accepts_only_completed() {
+        Commands::completion_status_result(MTLCommandBufferStatus::Completed, None)
+            .expect("completed Metal command buffer should pass");
+        assert!(
+            Commands::completion_status_result(MTLCommandBufferStatus::Scheduled, None).is_err(),
+            "a non-terminal status after wait must fail closed"
+        );
     }
 }

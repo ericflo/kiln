@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
-    GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
-    SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
-    TrainingPrecisionPolicy, matmul_request_support_rank, matmul_support_from_native,
-    requested_matmul_layout,
+    ExternalYieldBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend,
+    ReplayBackend, ResidencyBackend, SamplingBackend, StartupBackend, TrainingCapabilities,
+    TrainingLossBackend, TrainingPrecisionPolicy, matmul_request_support_rank,
+    matmul_support_from_native, requested_matmul_layout,
 };
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
@@ -327,6 +327,18 @@ impl BackendIdentity for RocmBackend {
 }
 
 impl StartupBackend for RocmBackend {}
+
+impl ExternalYieldBackend for RocmBackend {
+    fn runtime_synchronize_external_yield(&self) -> Result<()> {
+        let kiln_tensor::Device::Rocm(device_index) = self.device_kt else {
+            anyhow::bail!("ROCm external-yield synchronization requires a ROCm device");
+        };
+        // Despite its legacy name this calls hipDeviceSynchronize, so it also
+        // drains hipBLASLt and any other backend-owned auxiliary streams.
+        kiln_tensor::rocm_synchronize_default_stream(device_index)
+            .context("synchronize ROCm device before external yield")
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 impl AttentionBackend for RocmBackend {

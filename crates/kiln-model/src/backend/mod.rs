@@ -694,6 +694,7 @@ fn precompile_startup_kernels_for_backend(name: &str, device: kiln_tensor::Devic
 pub trait BackendRuntime:
     BackendIdentity
     + StartupBackend
+    + ExternalYieldBackend
     + AttentionBackend
     + GdnBackend
     + ConvBackend
@@ -754,6 +755,27 @@ pub trait StartupBackend: BackendIdentity + Send + Sync + std::fmt::Debug {
     fn runtime_precompile_startup_kernels(&self) -> Result<()> {
         precompile_startup_kernels_for_backend(self.runtime_name(), self.runtime_device())
     }
+}
+
+/// Synchronization boundary required before model execution yields control to
+/// an external scheduler such as the serving actor.
+///
+/// Implementations must wait for every backend-owned queue or stream that may
+/// still be reading or mutating model state. A successful return makes it safe
+/// for the scheduler to publish partial progress, run another request, or
+/// discard resources owned by the yielded operation. This is deliberately a
+/// backend facet rather than a `kiln_tensor::Device` dispatch: some runtimes,
+/// most notably Vulkan, own a logical device that is distinct from the global
+/// tensor-device registry.
+///
+/// The caller must hold its model/backend execution serialization guard from
+/// the final submission through this call and the subsequent progress commit.
+/// The boundary covers work submitted before the call; it is not itself a
+/// scheduling mutex for concurrent submissions.
+pub trait ExternalYieldBackend: BackendIdentity + Send + Sync + std::fmt::Debug {
+    /// On error, completion is unknown. Callers must stop or quarantine the
+    /// runtime rather than publish progress or recycle mutable device state.
+    fn runtime_synchronize_external_yield(&self) -> Result<()>;
 }
 
 /// Focused `AttentionBackend` facet delegated by the current `BackendRuntime` facade.
@@ -2005,6 +2027,12 @@ mod tests {
 
     impl StartupBackend for ResidentActivationProbeBackend {}
 
+    impl ExternalYieldBackend for ResidentActivationProbeBackend {
+        fn runtime_synchronize_external_yield(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
     impl AttentionBackend for ResidentActivationProbeBackend {}
 
     impl GdnBackend for ResidentActivationProbeBackend {}
@@ -2097,6 +2125,35 @@ mod tests {
     impl TrainingLossBackend for ResidentActivationProbeBackend {}
 
     impl BackendRuntime for ResidentActivationProbeBackend {}
+
+    #[test]
+    fn cpu_external_yield_boundary_is_synchronous_noop() {
+        let backend = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
+        ExternalYieldBackend::runtime_synchronize_external_yield(&backend)
+            .expect("CPU external-yield synchronization should succeed");
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_external_yield_boundary_reaches_the_real_context() {
+        if kiln_tensor::primary_cuda_context(0).is_err() {
+            return;
+        }
+        let backend = cuda::CudaBackend::new(kiln_tensor::Device::Cuda(0));
+        ExternalYieldBackend::runtime_synchronize_external_yield(&backend)
+            .expect("CUDA external-yield synchronization should drain the device context");
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn rocm_external_yield_boundary_reaches_the_real_device() {
+        if kiln_tensor::primary_rocm_context(0).is_err() {
+            return;
+        }
+        let backend = rocm::RocmBackend::new(kiln_tensor::Device::Rocm(0));
+        ExternalYieldBackend::runtime_synchronize_external_yield(&backend)
+            .expect("ROCm external-yield synchronization should drain the device");
+    }
 
     #[test]
     fn portable_training_capabilities_are_conservative() {

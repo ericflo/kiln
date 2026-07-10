@@ -70,9 +70,10 @@ pub use backend::residency::{
     resident_ownership_for_backend,
 };
 pub use backend::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, FallbackPolicy, GdnBackend,
-    LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
-    SamplingBackend, StartupBackend, TrainingLossBackend, TrainingPrecisionPolicy,
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, ExternalYieldBackend,
+    FallbackPolicy, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend,
+    ResidencyBackend, SamplingBackend, StartupBackend, TrainingLossBackend,
+    TrainingPrecisionPolicy,
 };
 // (#1082 candle removal) `backend::for_device` (candle-typed shim) was deleted
 // with the candle-parity opt-in feature; production uses `for_device_kt`.

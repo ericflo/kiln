@@ -14,10 +14,10 @@ use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
     AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
-    GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
-    SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
-    TrainingPrecisionPolicy, matmul_request_support_rank, matmul_support_from_native,
-    metal_residency, metal_training, requested_matmul_layout,
+    ExternalYieldBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend,
+    ReplayBackend, ResidencyBackend, SamplingBackend, StartupBackend, TrainingCapabilities,
+    TrainingLossBackend, TrainingPrecisionPolicy, matmul_request_support_rank,
+    matmul_support_from_native, metal_residency, metal_training, requested_matmul_layout,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -35,6 +35,17 @@ impl BackendIdentity for MetalBackend {
 }
 
 impl StartupBackend for MetalBackend {}
+
+impl ExternalYieldBackend for MetalBackend {
+    fn runtime_synchronize_external_yield(&self) -> Result<()> {
+        let kiln_tensor::Device::Metal(device_index) = self.device_kt else {
+            anyhow::bail!("Metal external-yield synchronization requires a Metal device");
+        };
+        kiln_tensor::primary_metal_companion(device_index)
+            .and_then(|companion| companion.wait_until_completed())
+            .context("synchronize Metal command queue before external yield")
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 impl ConvBackend for MetalBackend {

@@ -872,6 +872,14 @@ impl VulkanDevice {
                 return Err(anyhow!("vulkan queue_submit failed ({label}): {:?}", e));
             }
         }
+        self.synchronize_queue(label)
+    }
+
+    /// Wait until all work submitted to this device's owned compute queue has
+    /// completed, preserving the sticky device-lost state used by every other
+    /// dispatch on this logical device.
+    pub fn synchronize_queue(&self, label: &str) -> Result<()> {
+        self.check_alive()?;
         let wait_res = unsafe { self.device.queue_wait_idle(self.queue) };
         match wait_res {
             Ok(()) => {}
@@ -1030,6 +1038,14 @@ mod tests {
         assert!(
             err.contains("terminally lost"),
             "expected check_alive error to mention 'terminally lost', got: {err}"
+        );
+        let sync_err = dev
+            .synchronize_queue("terminally-lost synchronization test")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            sync_err.contains("terminally lost"),
+            "owned queue synchronization must preserve sticky device loss: {sync_err}"
         );
         // transient_command_pool / transient_descriptor_pool must also
         // short-circuit, otherwise dispatches that go straight through them
