@@ -2642,6 +2642,7 @@ struct PublishedTrainingOutput {
 fn prepare_training_publication(
     state: &AppState,
     adapter_name: &str,
+    allow_loaded_reload: bool,
 ) -> Result<PreparedTrainingPublication, String> {
     let staging_root = tempfile::Builder::new()
         .prefix(".training-tmp-")
@@ -2649,6 +2650,11 @@ fn prepare_training_publication(
         .map_err(|error| format!("create training staging root: {error}"))?;
     let final_path = state.adapter_dir.join(adapter_name);
     let serial = crate::adapter_swap::adapter_mutation_guard_blocking(state)?;
+    if !allow_loaded_reload && state.loaded_adapter_name().as_deref() == Some(adapter_name) {
+        return Err(format!(
+            "adapter_revision_conflict: gated training cannot rewrite physically loaded adapter `{adapter_name}` before its post-eval gate runs; unload it or choose a different config.output_name, then resubmit (no weights were changed)"
+        ));
+    }
     let expected_revision =
         crate::adapter_swap::capture_adapter_disk_revision_locked(&final_path, &serial)?;
     snapshot_starting_adapter_locked(
@@ -2880,7 +2886,24 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         let job = jobs.get(&job_id).unwrap();
         (job.auto_load, job.adapter_name.clone(), job.job_type)
     };
-    let publication = prepare_training_publication(&state, &adapter_name);
+    // Capture the post-eval hook before the job request is consumed by the
+    // trainer. A gated same-name rewrite of physically loaded bytes must be
+    // rejected before GPU work: reloading would violate the gate, while
+    // replacing disk behind the old loaded identity would violate the
+    // revision barrier.
+    let post_eval: Option<kiln_eval::PostEvalConfig> = match &entry.job {
+        QueuedJob::Sft(req) => req.post_eval.clone(),
+        QueuedJob::Grpo(req) => req.post_eval.clone(),
+        QueuedJob::Opd(req) => req.post_eval.clone(),
+        QueuedJob::DistillRefresh(req) => req.post_eval.clone(),
+        QueuedJob::DistillMerge(req) => req.post_eval.clone(),
+        QueuedJob::DistillPump(req) => req.post_eval.clone(),
+        QueuedJob::DistillSelf(req) => req.post_eval.clone(),
+    };
+    let promotion_gate_pending = post_eval
+        .as_ref()
+        .is_some_and(|cfg| cfg.min_accuracy.is_some());
+    let publication = prepare_training_publication(&state, &adapter_name, !promotion_gate_pending);
 
     let metric_type = match job_type {
         TrainingJobType::Sft => TrainingMetricType::Sft,
@@ -2928,19 +2951,6 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     let server_checkpoint_interval = state.checkpoint_interval;
 
     let base_model = trainer::default_base_model(&state.model_config);
-
-    // Run the actual training under GPU write lock
-    // Capture the post-eval hook before the job request is consumed by the
-    // trainer.
-    let post_eval: Option<kiln_eval::PostEvalConfig> = match &entry.job {
-        QueuedJob::Sft(req) => req.post_eval.clone(),
-        QueuedJob::Grpo(req) => req.post_eval.clone(),
-        QueuedJob::Opd(req) => req.post_eval.clone(),
-        QueuedJob::DistillRefresh(req) => req.post_eval.clone(),
-        QueuedJob::DistillMerge(req) => req.post_eval.clone(),
-        QueuedJob::DistillPump(req) => req.post_eval.clone(),
-        QueuedJob::DistillSelf(req) => req.post_eval.clone(),
-    };
 
     // §8.7 distill_refresh dual eval gate: capture the IF-eval and
     // new-knowledge suite names so we can enqueue dual evals after
@@ -3269,9 +3279,6 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             // the eval that would catch it is still in the queue. (The old
             // order hot-swapped the fresh adapter BEFORE the eval was even
             // enqueued.)
-            let promotion_gate_pending = post_eval
-                .as_ref()
-                .is_some_and(|cfg| cfg.min_accuracy.is_some());
             let canary_ok = adapter_canary_allows_auto_load(&adapter_path, &adapter_name, &job_id);
             if auto_load && canary_ok && !promotion_gate_pending {
                 if let Err(e) = auto_load_adapter(
@@ -3736,7 +3743,7 @@ mod tests {
         )
         .unwrap()
         .content_revision();
-        let publication = prepare_training_publication(&state, "target").unwrap();
+        let publication = prepare_training_publication(&state, "target", true).unwrap();
         write_revisioned_adapter(publication.output_root(), "target", 2.0);
 
         // Simulate a delete/upload or another serialized publisher winning
@@ -3787,7 +3794,7 @@ mod tests {
         write_revisioned_adapter(tmp.path(), "target", 1.0);
         std::fs::create_dir_all(tmp.path().join("target-checkpoint-1")).unwrap();
         std::fs::write(tmp.path().join("target-checkpoint-1/marker"), b"old").unwrap();
-        let publication = prepare_training_publication(&state, "target").unwrap();
+        let publication = prepare_training_publication(&state, "target", true).unwrap();
         write_revisioned_adapter(publication.output_root(), "target", 2.0);
         std::fs::create_dir_all(publication.output_root().join("target-checkpoint-2")).unwrap();
         std::fs::write(
@@ -3836,7 +3843,7 @@ mod tests {
         *state.loaded_adapter.write().unwrap() = Some(
             crate::state::LoadedAdapterIdentity::from_source("target", &old_source),
         );
-        let publication = prepare_training_publication(&state, "target").unwrap();
+        let publication = prepare_training_publication(&state, "target", true).unwrap();
         write_revisioned_adapter(publication.output_root(), "target", 2.0);
 
         let error = publish_training_output(
@@ -3857,6 +3864,45 @@ mod tests {
             old_revision
         );
         assert!(publication.output_root().join("target").is_dir());
+    }
+
+    #[test]
+    fn gated_training_rejects_a_loaded_same_name_before_staging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = mock_state_in(tmp.path());
+        write_revisioned_adapter(tmp.path(), "target", 1.0);
+        let old_source = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(
+            &tmp.path().join("target"),
+        )
+        .unwrap();
+        let old_revision = old_source.content_revision();
+        *state.loaded_adapter.write().unwrap() = Some(
+            crate::state::LoadedAdapterIdentity::from_source("target", &old_source),
+        );
+
+        let error = prepare_training_publication(&state, "target", false)
+            .err()
+            .expect("a gated rewrite cannot reload unapproved bytes");
+        assert!(error.contains("adapter_revision_conflict"), "{error}");
+        assert!(error.contains("different config.output_name"), "{error}");
+        assert_eq!(
+            kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(
+                &tmp.path().join("target")
+            )
+            .unwrap()
+            .content_revision(),
+            old_revision
+        );
+        assert!(
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".training-tmp-")),
+            "the rejected job must clean its empty staging root"
+        );
     }
 
     fn pinned_teacher_spec(alias: &str, model_id: &str) -> crate::api::teachers::TeacherSpec {
