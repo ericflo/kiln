@@ -20,6 +20,7 @@ struct HealthResponse {
     uptime_seconds: u64,
     model: String,
     backend: &'static str,
+    backend_runtime: BackendRuntimeInfo,
     http: HttpRuntimeInfo,
     model_defaults_profile: ModelDefaultsProfile,
     eval_mode: bool,
@@ -45,6 +46,15 @@ struct HealthResponse {
     decode_runtime: DecodeRuntimeInfo,
     training: TrainingInfo,
     checks: Vec<HealthCheck>,
+}
+
+#[derive(Serialize)]
+struct BackendRuntimeInfo {
+    healthy: bool,
+    quarantined: bool,
+    reason: Option<String>,
+    restart_required: bool,
+    external_yield_sync: Vec<kiln_model::ExternalYieldSyncStats>,
 }
 
 #[derive(Serialize)]
@@ -164,6 +174,8 @@ struct PrefixCacheInfo {
     max_entries: usize,
     cached_state_bytes: u64,
     max_state_bytes: u64,
+    active_leases: usize,
+    pending_release_entries: usize,
     block_utilization: f64,
     entry_utilization: f64,
     state_utilization: f64,
@@ -362,6 +374,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     // Scheduler stats (works for both Mock and Real backends)
     let (
         backend_name,
+        backend_runtime,
         scheduler_stats,
         prefix_cache,
         decode_batcher,
@@ -376,6 +389,13 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             let bm = sched.block_manager();
             (
                 "mock",
+                BackendRuntimeInfo {
+                    healthy: true,
+                    quarantined: false,
+                    reason: None,
+                    restart_required: false,
+                    external_yield_sync: Vec::new(),
+                },
                 Some(SchedulerStats {
                     waiting: sched.num_waiting(),
                     running: sched.num_running(),
@@ -394,12 +414,22 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         }
         ModelBackend::Real {
             runner,
+            backend_health,
             block_manager,
             prefix_cache,
             batching_engine,
             decode_batcher,
             ..
         } => {
+            let external_yield_sync = backend_health.external_yield_sync_stats();
+            let backend_health = backend_health.snapshot();
+            let backend_runtime = BackendRuntimeInfo {
+                healthy: !backend_health.quarantined,
+                quarantined: backend_health.quarantined,
+                reason: backend_health.reason,
+                restart_required: backend_health.quarantined,
+                external_yield_sync,
+            };
             let scheduler_stats = {
                 let bm = block_manager.lock().unwrap();
                 Some(SchedulerStats {
@@ -432,6 +462,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 };
             (
                 "model",
+                backend_runtime,
                 scheduler_stats,
                 prefix_cache,
                 decode_batcher,
@@ -536,12 +567,16 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             pass: scheduler_responsive,
         },
         HealthCheck {
+            name: "backend_runtime_healthy",
+            pass: backend_runtime.healthy,
+        },
+        HealthCheck {
             name: "inference_prewarm_complete",
             pass: inference_prewarm_complete,
         },
     ];
 
-    let serving_ready = model_loaded && scheduler_responsive;
+    let serving_ready = model_loaded && scheduler_responsive && backend_runtime.healthy;
     let status = if serving_ready { "ok" } else { "degraded" };
 
     let response = HealthResponse {
@@ -556,6 +591,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             state.model_config.num_kv_heads,
         ),
         backend: backend_name,
+        backend_runtime,
         http: HttpRuntimeInfo {
             send_buffer_requested_bytes: state.http_send_buffer_bytes,
             send_buffer_kernel_readback_bytes: state.http_send_buffer_preflight_actual_bytes,
@@ -745,6 +781,8 @@ impl From<PrefixCacheStats> for PrefixCacheInfo {
             max_entries: stats.max_entries,
             cached_state_bytes: stats.cached_state_bytes,
             max_state_bytes: stats.max_state_bytes,
+            active_leases: stats.active_leases,
+            pending_release_entries: stats.pending_release_entries,
             block_utilization: utilization(stats.cached_blocks as u64, stats.max_blocks as u64),
             entry_utilization: utilization(stats.cached_entries as u64, stats.max_entries as u64),
             state_utilization: utilization(stats.cached_state_bytes, stats.max_state_bytes),
@@ -997,6 +1035,8 @@ mod tests {
         assert!(json["recent_requests"].is_object());
         assert!(json["scheduler"].is_object());
         assert!(json["prefix_cache"].is_object());
+        assert_eq!(json["prefix_cache"]["active_leases"], 0);
+        assert_eq!(json["prefix_cache"]["pending_release_entries"], 0);
         assert!(json["prompt_caches"].is_object());
         assert!(json["decode_runtime"].is_object());
         for backend in ["cuda_graphs", "rocm_graphs", "metal_graphs"] {

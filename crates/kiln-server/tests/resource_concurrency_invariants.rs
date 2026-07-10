@@ -152,6 +152,57 @@ fn process_shared_persistence_uses_resource_layer() {
 }
 
 #[test]
+fn prefix_cache_ownership_is_request_scoped_through_stream_cleanup() {
+    let state = read("crates/kiln-server/src/state.rs");
+    let batching = read("crates/kiln-server/src/batching_engine.rs");
+    let completions = read("crates/kiln-server/src/api/completions.rs");
+    let generate = read("crates/kiln-model/src/generate.rs");
+
+    for required in [
+        "pub struct RealPrefixCacheRequest",
+        "impl Drop for RealPrefixCacheRequest",
+        "global_generation",
+        "adapter_generations",
+        "pending_release_entries",
+    ] {
+        assert!(
+            state.contains(required),
+            "prefix cache must retain its request/generation ownership contract: {required}"
+        );
+    }
+    for (path, source) in [
+        ("batching_engine.rs", batching.as_str()),
+        ("api/completions.rs", completions.as_str()),
+    ] {
+        assert!(
+            !source.contains("hit_entry_id"),
+            "{path}: raw cache entry IDs must not escape the move-only request owner"
+        );
+        assert!(
+            !source.contains("release_hit("),
+            "{path}: production callers must not manually release prefix hits"
+        );
+    }
+    for required in [
+        "run_prefix_cached_stream_worker",
+        "post_decode: F",
+        "PrefixCachedStreamingCleanup",
+        "prefix_stream_decode_panicked",
+    ] {
+        assert!(
+            generate.contains(required),
+            "threaded prefix streaming must keep worker-owned cleanup: {required}"
+        );
+    }
+    for forbidden in ["block_free_signal", "free_rx.recv()"] {
+        assert!(
+            !generate.contains(forbidden),
+            "split prefix-stream cleanup ownership must not return: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn rocm_graph_state_is_decode_row_owned() {
     let rocm_graph = read("crates/kiln-model/src/rocm_graph.rs");
     let generate = read("crates/kiln-model/src/generate.rs");
@@ -260,7 +311,7 @@ fn direct_rocm_graph_decode_uses_scoped_process_unique_owners() {
     ] {
         let decode_loop = source_between(&generate, start, end);
         let lease = decode_loop
-            .find("RocmDecodeOwnerLease::new(&self.rocm_graph)")
+            .find("RocmDecodeOwnerLease::new(&self.rocm_graph")
             .unwrap_or_else(|| panic!("direct decode loop lacks scoped owner: {start}"));
         let loop_start = decode_loop
             .find("for _step in 0..params.max_tokens")

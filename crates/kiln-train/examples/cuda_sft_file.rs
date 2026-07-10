@@ -443,6 +443,7 @@ fn main() -> Result<()> {
             &layout.adapter_dir,
             &layout.adapter_name,
             progress,
+            None,
         ),
         TrainerKind::Generic => kiln_train::trainer::sft_train(
             &examples,
@@ -453,6 +454,7 @@ fn main() -> Result<()> {
             &layout.adapter_dir,
             &layout.adapter_name,
             progress,
+            None,
             None,
         ),
     };

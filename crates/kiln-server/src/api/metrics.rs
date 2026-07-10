@@ -25,6 +25,8 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         decode_batcher,
         batching_engine_enabled,
         batching_engine,
+        backend_quarantined,
+        external_yield_sync,
     ) = match state.backend.as_ref() {
         ModelBackend::Mock { scheduler, .. } => {
             let sched = scheduler.lock().await;
@@ -39,11 +41,14 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 kiln_model::DecodeBatcherStats::default(),
                 false,
                 BatchingEngineSnapshot::default(),
+                false,
+                Vec::new(),
             )
         }
         ModelBackend::Real {
             block_manager,
             prefix_cache,
+            backend_health,
             batching_engine,
             decode_batcher,
             ..
@@ -64,6 +69,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 Some(engine) => engine.cached_snapshot(),
                 None => BatchingEngineSnapshot::default(),
             };
+            let backend_health_snapshot = backend_health.snapshot();
             (
                 0,
                 0,
@@ -74,6 +80,8 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 batcher_stats,
                 batching_engine.is_some(),
                 batching_engine_snapshot,
+                backend_health_snapshot.quarantined,
+                backend_health.external_yield_sync_stats(),
             )
         }
     };
@@ -95,6 +103,8 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         state.prompt_token_cache.lock().unwrap().stats();
 
     let gauges = SnapshotGauges {
+        backend_quarantined,
+        external_yield_sync,
         scheduler_waiting,
         scheduler_running,
         blocks_used,

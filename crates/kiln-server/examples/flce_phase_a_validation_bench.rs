@@ -324,6 +324,7 @@ fn run_one(
         &format!("flce-phaseA-T{target_t}-{tag}"),
         Some(progress_cb),
         None,
+        None,
     );
     let step_secs = start.elapsed().as_secs_f64();
 

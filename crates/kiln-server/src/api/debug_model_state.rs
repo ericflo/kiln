@@ -45,6 +45,16 @@ struct ModelDebugState {
     num_attention_heads: usize,
     num_kv_heads: usize,
     max_position_embeddings: usize,
+    backend_runtime: BackendRuntimeDebugState,
+}
+
+#[derive(Serialize)]
+struct BackendRuntimeDebugState {
+    healthy: bool,
+    quarantined: bool,
+    reason: Option<String>,
+    restart_required: bool,
+    external_yield_sync: Vec<kiln_model::ExternalYieldSyncStats>,
 }
 
 #[derive(Serialize)]
@@ -178,6 +188,8 @@ struct PrefixCacheDebugState {
     max_entries: usize,
     cached_state_bytes: u64,
     max_state_bytes: u64,
+    active_leases: usize,
+    pending_release_entries: usize,
 }
 
 async fn model_state(State(state): State<AppState>) -> Response {
@@ -228,6 +240,25 @@ async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
 }
 
 fn model_debug_state(state: &AppState) -> ModelDebugState {
+    let backend_runtime = match state.backend.as_ref() {
+        ModelBackend::Mock { .. } => BackendRuntimeDebugState {
+            healthy: true,
+            quarantined: false,
+            reason: None,
+            restart_required: false,
+            external_yield_sync: Vec::new(),
+        },
+        ModelBackend::Real { backend_health, .. } => {
+            let snapshot = backend_health.snapshot();
+            BackendRuntimeDebugState {
+                healthy: !snapshot.quarantined,
+                quarantined: snapshot.quarantined,
+                reason: snapshot.reason,
+                restart_required: snapshot.quarantined,
+                external_yield_sync: backend_health.external_yield_sync_stats(),
+            }
+        }
+    };
     ModelDebugState {
         path: state
             .model_path
@@ -239,6 +270,7 @@ fn model_debug_state(state: &AppState) -> ModelDebugState {
         num_attention_heads: state.model_config.num_attention_heads,
         num_kv_heads: state.model_config.num_kv_heads,
         max_position_embeddings: state.model_config.max_position_embeddings,
+        backend_runtime,
     }
 }
 
@@ -465,6 +497,8 @@ impl From<PrefixCacheStats> for PrefixCacheDebugState {
             max_entries: stats.max_entries,
             cached_state_bytes: stats.cached_state_bytes,
             max_state_bytes: stats.max_state_bytes,
+            active_leases: stats.active_leases,
+            pending_release_entries: stats.pending_release_entries,
         }
     }
 }
@@ -659,6 +693,8 @@ mod tests {
         assert_eq!(json["http"]["send_buffer_effective_bytes"], 4096);
         assert!(json["caches"]["rendered_prompt"].is_object());
         assert!(json["caches"]["prefix_cache"].is_object());
+        assert_eq!(json["caches"]["prefix_cache"]["active_leases"], 0);
+        assert_eq!(json["caches"]["prefix_cache"]["pending_release_entries"], 0);
 
         let serialized = serde_json::to_string(&json).unwrap();
         assert!(!serialized.contains("secret prompt"));

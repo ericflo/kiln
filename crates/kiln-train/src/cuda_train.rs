@@ -51,6 +51,7 @@ pub fn cuda_native_sft_train(
     adapter_dir: &Path,
     adapter_name: &str,
     progress_cb: Option<ProgressCallback>,
+    gpu_step_lock: Option<std::sync::Arc<tokio::sync::RwLock<()>>>,
 ) -> Result<PathBuf> {
     tracing::info!(
         num_examples = examples.len(),
@@ -72,7 +73,7 @@ pub fn cuda_native_sft_train(
         adapter_name,
         progress_cb,
         None,
-        None,
+        gpu_step_lock,
     )
 }
 

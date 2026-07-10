@@ -3029,7 +3029,7 @@ pub fn sft_train(
     adapter_name: &str,
     progress_cb: Option<ProgressCallback>,
     replay_ctx: Option<ReplayContext>,
-    gpu_step_lock: Option<std::sync::Arc<std::sync::RwLock<()>>>,
+    gpu_step_lock: Option<std::sync::Arc<tokio::sync::RwLock<()>>>,
 ) -> Result<PathBuf> {
     let run_started = Instant::now();
     let output_dir = adapter_dir.join(adapter_name);
@@ -3329,9 +3329,7 @@ pub fn sft_train(
                 // in-flight inference streams interleave between steps
                 // instead of freezing mid-token for the whole job.
                 // Tokenization above runs lock-free (CPU work).
-                let _step_gpu = gpu_step_lock
-                    .as_ref()
-                    .map(|l| l.write().unwrap_or_else(|p| p.into_inner()));
+                let _step_gpu = gpu_step_lock.as_ref().map(|lock| lock.blocking_write());
 
                 // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
                 // kt tape-authoritative — the candle checkpointed reverse + candle
@@ -3409,6 +3407,7 @@ pub fn sft_train(
                     config.optimizer,
                     opt_state.as_mut(),
                 )?;
+                drop(_step_gpu);
 
                 epoch_loss += loss_val;
                 last_loss = loss_val;

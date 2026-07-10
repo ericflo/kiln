@@ -3,7 +3,7 @@
 //! Uses atomic counters and gauges — no external dependencies.
 //! The `/metrics` endpoint renders all metrics in Prometheus text exposition format.
 
-use kiln_model::DecodeBatcherStats;
+use kiln_model::{DecodeBatcherStats, ExternalYieldSyncStats};
 use kiln_scheduler::PrefixCacheStats;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -229,6 +229,65 @@ impl Metrics {
             "ok",
             self.requests_ok.load(Ordering::Relaxed),
         );
+
+        out.push_str("# HELP kiln_backend_quarantined Whether inference is disabled because backend completion became unknown.\n");
+        out.push_str("# TYPE kiln_backend_quarantined gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_backend_quarantined {}",
+                u8::from(gauges.backend_quarantined)
+            ),
+        );
+        out.push_str("# HELP kiln_backend_external_yield_sync_calls_total Device-wide synchronization calls before external progress or resource reuse.\n");
+        out.push_str("# TYPE kiln_backend_external_yield_sync_calls_total counter\n");
+        out.push_str("# HELP kiln_backend_external_yield_sync_failures_total Failed device-wide synchronization calls.\n");
+        out.push_str("# TYPE kiln_backend_external_yield_sync_failures_total counter\n");
+        out.push_str("# HELP kiln_backend_external_yield_sync_seconds_total Total wall time spent in device-wide synchronization.\n");
+        out.push_str("# TYPE kiln_backend_external_yield_sync_seconds_total counter\n");
+        out.push_str("# HELP kiln_backend_external_yield_sync_max_seconds Maximum observed device-wide synchronization time.\n");
+        out.push_str("# TYPE kiln_backend_external_yield_sync_max_seconds gauge\n");
+        out.push_str("# HELP kiln_backend_external_yield_sync_slow_total Synchronization calls taking at least 100 milliseconds.\n");
+        out.push_str("# TYPE kiln_backend_external_yield_sync_slow_total counter\n");
+        for stats in &gauges.external_yield_sync {
+            prom_counter(
+                &mut out,
+                "kiln_backend_external_yield_sync_calls_total",
+                "boundary",
+                &stats.boundary,
+                stats.calls,
+            );
+            prom_counter(
+                &mut out,
+                "kiln_backend_external_yield_sync_failures_total",
+                "boundary",
+                &stats.boundary,
+                stats.failures,
+            );
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_backend_external_yield_sync_seconds_total{{boundary=\"{}\"}} {}",
+                    stats.boundary,
+                    stats.total_micros as f64 / 1_000_000.0
+                ),
+            );
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_backend_external_yield_sync_max_seconds{{boundary=\"{}\"}} {}",
+                    stats.boundary,
+                    stats.max_micros as f64 / 1_000_000.0
+                ),
+            );
+            prom_counter(
+                &mut out,
+                "kiln_backend_external_yield_sync_slow_total",
+                "boundary",
+                &stats.boundary,
+                stats.slow_calls,
+            );
+        }
         prom_counter(
             &mut out,
             "kiln_requests_total",
@@ -970,6 +1029,26 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_prefix_cache_active_leases In-flight requests currently pinning prefix-cache entries.\n");
+        out.push_str("# TYPE kiln_prefix_cache_active_leases gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prefix_cache_active_leases {}",
+                gauges.prefix_cache.active_leases
+            ),
+        );
+
+        out.push_str("# HELP kiln_prefix_cache_pending_release_entries Invalidated prefix-cache entries awaiting their final active lease.\n");
+        out.push_str("# TYPE kiln_prefix_cache_pending_release_entries gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prefix_cache_pending_release_entries {}",
+                gauges.prefix_cache.pending_release_entries
+            ),
+        );
+
         out.push_str("# HELP kiln_prefix_cache_state_bytes Device memory retained by cached GDN state snapshots.\n");
         out.push_str("# TYPE kiln_prefix_cache_state_bytes gauge\n");
         push_line(
@@ -1154,6 +1233,8 @@ impl Metrics {
 
 /// Dynamic gauge values snapshotted at render time.
 pub struct SnapshotGauges {
+    pub backend_quarantined: bool,
+    pub external_yield_sync: Vec<ExternalYieldSyncStats>,
     pub scheduler_waiting: usize,
     pub scheduler_running: usize,
     pub blocks_used: usize,
@@ -1271,6 +1352,15 @@ mod tests {
             .store(8192, std::sync::atomic::Ordering::Relaxed);
 
         let gauges = SnapshotGauges {
+            backend_quarantined: true,
+            external_yield_sync: vec![ExternalYieldSyncStats {
+                boundary: "batched decode step".to_string(),
+                calls: 4,
+                failures: 1,
+                total_micros: 250_000,
+                max_micros: 125_000,
+                slow_calls: 1,
+            }],
             scheduler_waiting: 3,
             scheduler_running: 1,
             blocks_used: 10,
@@ -1293,6 +1383,8 @@ mod tests {
                 max_entries: 8,
                 cached_state_bytes: 196,
                 max_state_bytes: 392,
+                active_leases: 2,
+                pending_release_entries: 1,
             },
             rendered_prompt_cache_hits: 6,
             rendered_prompt_cache_misses: 3,
@@ -1358,6 +1450,22 @@ mod tests {
         assert!(output.contains("kiln_vram_model_estimated_bytes 8000000000"));
         assert!(output.contains("kiln_vram_post_load_used_bytes 9000000000"));
         assert!(output.contains("kiln_vram_prefill_peak_used_bytes 19000000000"));
+        assert!(output.contains("kiln_backend_quarantined 1"));
+        assert!(output.contains(
+            "kiln_backend_external_yield_sync_calls_total{boundary=\"batched decode step\"} 4"
+        ));
+        assert!(output.contains(
+            "kiln_backend_external_yield_sync_failures_total{boundary=\"batched decode step\"} 1"
+        ));
+        assert!(output.contains(
+            "kiln_backend_external_yield_sync_seconds_total{boundary=\"batched decode step\"} 0.25"
+        ));
+        assert!(output.contains(
+            "kiln_backend_external_yield_sync_max_seconds{boundary=\"batched decode step\"} 0.125"
+        ));
+        assert!(output.contains(
+            "kiln_backend_external_yield_sync_slow_total{boundary=\"batched decode step\"} 1"
+        ));
         assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"hit\"} 7"));
         assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"miss\"} 3"));
         assert!(output.contains("kiln_prefix_cache_hit_tokens_total 112"));
@@ -1366,6 +1474,8 @@ mod tests {
         assert!(output.contains("kiln_prefix_cache_max_blocks 128"));
         assert!(output.contains("kiln_prefix_cache_cached_entries 4"));
         assert!(output.contains("kiln_prefix_cache_max_entries 8"));
+        assert!(output.contains("kiln_prefix_cache_active_leases 2"));
+        assert!(output.contains("kiln_prefix_cache_pending_release_entries 1"));
         assert!(output.contains("kiln_prefix_cache_state_bytes 196"));
         assert!(output.contains("kiln_prefix_cache_max_state_bytes 392"));
         assert!(output.contains("kiln_rendered_prompt_cache_lookups_total{result=\"hit\"} 6"));
@@ -1431,6 +1541,8 @@ mod tests {
     fn test_base_adapter_rendering() {
         let m = Metrics::new();
         let gauges = SnapshotGauges {
+            backend_quarantined: false,
+            external_yield_sync: Vec::new(),
             scheduler_waiting: 0,
             scheduler_running: 0,
             blocks_used: 0,

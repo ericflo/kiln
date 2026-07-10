@@ -370,7 +370,7 @@ fn run_sft(
     progress_cb: trainer::ProgressCallback,
     replay_ctx: trainer::ReplayContext,
     job_id: &str,
-    gpu_step_lock: Option<std::sync::Arc<std::sync::RwLock<()>>>,
+    gpu_step_lock: Option<crate::state::GpuCoordinationLock>,
 ) -> std::result::Result<PathBuf, String> {
     let loaded_examples;
     let examples = if let Some(dataset_path) = req.dataset_path.as_deref() {
@@ -414,6 +414,7 @@ fn run_sft(
                 adapter_dir,
                 adapter_name,
                 Some(progress_cb),
+                gpu_step_lock,
             )
             .map_err(|e| format!("{e:#}"));
         }

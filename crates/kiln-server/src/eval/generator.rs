@@ -35,7 +35,7 @@ use crate::api::completions::{
     Message, encode_prompt_tokens, render_prompt_text, stop_sequence_conflicts_with_thinking_close,
 };
 use crate::batching_engine::{EngineEvent, EngineRequest};
-use crate::state::{AppState, ModelBackend, gpu_coordination_read_guard};
+use crate::state::{AppState, ModelBackend};
 
 /// Result of a single generation call — what the executor needs to score
 /// the example and record cost metadata.
@@ -525,11 +525,10 @@ impl EvalGenerator for LiveEvalGenerator {
             let started = Instant::now();
             // Inference-side gpu_lock — read lock so concurrent eval calls
             // can fan out across batching slots. Held only across the
-            // synchronous enqueue scheduling step (the `RwLockReadGuard`
-            // is `!Send` and can't cross an await).
+            // synchronous enqueue scheduling step.
             let active_adapter = state.active_adapter_name.read().unwrap().clone();
             let enqueue_fut = {
-                let _gpu_guard = gpu_coordination_read_guard(&state.gpu_lock);
+                let _gpu_guard = state.gpu_lock.clone().read_owned().await;
                 batching_engine.enqueue(EngineRequest {
                     request_id,
                     prompt_tokens: prompt_tokens.clone(),

@@ -80,6 +80,16 @@ impl ApiError {
         }
     }
 
+    pub fn backend_quarantined(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "backend_quarantined",
+            message: format!("Inference backend is quarantined: {detail}"),
+            hint: "Restart the server before sending more inference or training requests. The backend reported an unknown GPU completion state.",
+            retry_after_seconds: None,
+        }
+    }
+
     /// OpenAI-compatible context overflow: agent harnesses (pi included)
     /// key their auto-compaction off HTTP 400 + this exact code, so both
     /// must match the convention.

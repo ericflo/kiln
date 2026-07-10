@@ -233,6 +233,9 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
   automatic pressure response.
 - [ ] Attribute each synchronization, allocation, trim, and resize with reason,
   bytes, wait time, and duration.
+- [x] Attribute backend external-yield synchronization with a bounded boundary
+  label, call/failure/slow counts, and total/max duration in health, debug
+  state, Prometheus, and the 100 ms slow-sync log.
 - [ ] Add a pressure test where free memory stays below 10 percent without
   producing a two-second periodic inference stall.
 
@@ -243,15 +246,54 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
 - [x] Add deterministic slow-consumer and closed-socket tests.
 - [x] Prevent exact non-block-aligned prefix-cache hits from sharing a mutable
   final KV block with decode; prove cached pages remain immutable across reuse.
-- [x] Make prefix-cache lookup failure-atomic so snapshot failures cannot mutate
-  hit accounting, LRU order, or active-use pins.
+- [x] Make prefix-cache lookup visibility and accounting failure-atomic: pin
+  the source entry before snapshot copies, leave hit counters and LRU unchanged
+  on failure, settle the provisional lease while the GPU read permit is held,
+  and quarantine rather than recycle partial snapshot destinations.
 - [x] Rank exact prefix-cache hits by next-token compatibility before pinning an
   entry, while allowing a shorter compatible strict-prefix fallback.
 - [x] Make prefix-cache registration capacity-correct and failure-atomic across
   overlapping blocks, LRU eviction, pinned entries, and invalid block tables.
-- [ ] Hold each prefix-cache hit lease until decode cleanup and finish-time
+- [x] Hold each prefix-cache hit lease until decode cleanup and finish-time
   registrations are complete.
-- [ ] Make eviction, clear, and adapter purge honor active prefix-cache leases.
+- [x] Make eviction, clear, and adapter purge honor active prefix-cache leases.
+- [x] Fence late hit and miss completion with global and cache-local per-adapter
+  generations so clear or purge cannot resurrect invalidated registrations.
+- [x] Synchronize paged streaming, direct paged/interleaved, and batching-actor
+  decode at their external-yield boundaries before publishing progress or
+  recycling KV ownership; on these paths, latch an observable,
+  restart-required quarantine when completion cannot be proven.
+- [x] Make successful prefix-hit snapshots opaque until an explicit backend
+  settlement, and make shared KV reservations retain pages by default unless a
+  settlement boundary explicitly releases them.
+- [x] Make paged stream workers own cleanup through the terminal event: run the
+  sole finalizer before `Done` or `Error`, and retain GPU state plus the movable
+  read permit when decode completion cannot be proven.
+- [x] Carry a movable GPU read owner from threaded prefill through decode and
+  cleanup, and use the same Tokio writer exclusion for portable and CUDA-native
+  SFT optimizer steps.
+- [x] Emit structured `generation_error` SSE payloads before `[DONE]` when a
+  threaded prefill, its blocking task, or an explicit decode worker fails.
+- [x] Prevent probe-only streaming completion from failing or overwriting a
+  concurrently claimed deterministic-cache owner.
+- [ ] Make incremental detokenization and unexpected worker-channel termination
+  fallible end to end; never turn tokenizer decode failure or a missing
+  terminal event into empty text followed by a normal-looking `[DONE]`.
+- [ ] Propagate cooperative cancellation into direct threaded streaming so
+  timeout and disconnect stop the model worker rather than only abandoning the
+  async receiver task.
+- [ ] Extend the backend quarantine gate to every inference worker, adapter
+  mutation, prewarm, training admission, and queued training transition. A
+  quarantined backend must reject rather than wait forever on its retained GPU
+  read owner.
+- [ ] Publish one authoritative loaded-adapter tuple containing name and content
+  revision atomically with the weight flip. Bind queued requests and all
+  deterministic-cache owners to that revision so late completion cannot
+  resurrect results invalidated by purge.
+- [ ] Serialize adapter upload, delete, training rewrite, gate demotion, and
+  loaded-weight transitions under the same revision/barrier contract. Reject
+  deletion or rewrite of physically loaded content unless the barrier swaps it
+  away or reloads it first.
 - [ ] Implement token-budgeted/chunked prefill so a 16K prompt cannot monopolize
   the actor while other rows are decoding.
 - [ ] Add fair admission tests mixing short decode, 1K prefill, and 16K prefill.
@@ -743,6 +785,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Immutable prefix-cache block reuse | `sha256:cc754bd8dc77` | `f4956fc5` | portable + ROCm + Vulkan | model validation, cache selection/registration, legacy-entry compatibility, and real batching integration | passed | Only block-aligned, shape-valid KV tables can cross request boundaries; non-aligned exact entries are neither produced nor retained, manually supplied unsafe hits are rejected in every exact-capable model path, and lookup skips legacy unsafe candidates before ranking so the longest safe strict prefix wins. An identical 81-token retry reproduced the first token, allocated a private suffix block, retained only the five complete cached blocks, and released the suffix on finish. All 339 model and 658 server library tests, focused integration tests, formatting, and portable, ROCm, and Vulkan server all-target checks passed |
 | 2026-07-09 | Failure-atomic compatible prefix lookup | `sha256:9d147fe68f9d` | `eb386f41` | portable + ROCm + Vulkan | exact-hit sampling compatibility, strict-prefix fallback, injected snapshot failure, and all-target compile gates | passed | Exact cached logits remain reusable for sampled requests, while cached greedy tokens are eligible only for effectively greedy requests and cannot hide a shorter compatible strict prefix. State snapshots complete before hit counters, LRU order, or active-use pins mutate; an injected Vulkan-storage copy failure proved all accounting remains unchanged. All 11 focused prefix-cache tests and 660 server library tests passed, along with formatting and portable, ROCm, and Vulkan server all-target checks |
 | 2026-07-09 | Atomic prefix-cache admission | `sha256:f214c03d9215` | this commit | portable + ROCm + Vulkan | overlap-capacity, pinned-LRU, duplicate-page, refcount, and all-target compile gates | passed | Registration now simulates the complete final refcount union and every required LRU removal before mutating resident state. Intrinsically oversized and duplicate-page tables are rejected, a late pinned-entry blockade cannot leave partial evictions, and successful shared-prefix admission preserves exact refcounts with disjoint retained and released block sets. Six focused adversarial tests and all 662 server library tests passed, along with formatting and portable, ROCm, and Vulkan server all-target checks |
+| 2026-07-10 | Leased prefix ownership and generation fencing | `sha256:da76c63f4cc7` | this commit | portable + CPU integration | move-only request/provisional leases, tombstones, generation fences, and real batching integration | passed | Prefix sources are pinned before snapshot copies; hit counters and LRU commit only after success, while partial snapshot failure settles under the GPU permit and quarantines. Clear and purge hide live entries and defer reclamation; cache-local generations reject late registrations. This supersedes the earlier pre-pin snapshot ordering. All 669 server library tests and the real CPU multi-turn integration passed |
+| 2026-07-10 | Settled paged streaming and GPU synchronization | `sha256:da76c63f4cc7` | this commit | portable; ROCm/Vulkan compile gates | worker finalizers, movable permit/writer exclusion, health/debug/Prometheus, SSE, reservation, and cache-owner contracts | passed | Paged workers run their sole cleanup before `Done` or `Error`. Decode panic or external-yield sync failure retains unknown GPU state/read ownership and latches quarantine for covered completion APIs; shared KV pages recycle only after settlement. SFT, including CUDA-native dispatch, uses the per-step writer. Bounded sync telemetry is exported, prefill and explicit worker failures emit structured errors, and probe-only completion cannot replace a concurrent cache owner. All 347 model and 669 server library tests, 19 concurrency contracts, formatting, and portable, ROCm, and Vulkan all-target checks passed |
 | 2026-07-09 | First reduced-CI measurement | `sha256:cda13f3f84e5` | `3c71cc4002f8` | GitHub Actions | run `29049575526` | passed | Three active jobs completed in 3m52s wall and about 4m36s aggregate time; all GPU backend jobs were skipped |
 
 ## Known Starting Defects

@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::sync::{
     Arc, Mutex, OnceLock,
@@ -319,6 +319,124 @@ pub struct ModelRunner {
     /// mismatch.
     batched_state_cache: Mutex<Option<CachedBatchedState>>,
     backend: Arc<dyn BackendRuntime>,
+    backend_health: BackendHealthHandle,
+}
+
+/// Process-lifetime health gate for a backend whose asynchronous completion
+/// can no longer be proven. Once quarantined, inference must remain disabled
+/// until the process is restarted; reusing mutable GPU state would be unsafe.
+#[derive(Clone, Debug, Default)]
+pub struct BackendHealthHandle {
+    inner: Arc<BackendHealthState>,
+}
+
+#[derive(Debug, Default)]
+struct BackendHealthState {
+    reason: Mutex<Option<String>>,
+    external_yield_sync: Mutex<BTreeMap<&'static str, ExternalYieldSyncStats>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackendHealthSnapshot {
+    pub quarantined: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ExternalYieldSyncStats {
+    pub boundary: String,
+    pub calls: u64,
+    pub failures: u64,
+    pub total_micros: u64,
+    pub max_micros: u64,
+    pub slow_calls: u64,
+}
+
+const SLOW_EXTERNAL_YIELD_SYNC: std::time::Duration = std::time::Duration::from_millis(100);
+
+impl BackendHealthHandle {
+    pub fn quarantine(&self, reason: impl Into<String>) {
+        let reason = reason.into();
+        let mut stored = self
+            .inner
+            .reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if stored.is_none() {
+            *stored = Some(reason.clone());
+        }
+        drop(stored);
+        tracing::error!(
+            event = "backend_quarantined",
+            reason,
+            "backend quarantined; restart is required before inference can resume"
+        );
+    }
+
+    pub fn snapshot(&self) -> BackendHealthSnapshot {
+        let reason = self
+            .inner
+            .reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        BackendHealthSnapshot {
+            quarantined: reason.is_some(),
+            reason,
+        }
+    }
+
+    pub fn ensure_healthy(&self) -> Result<()> {
+        let snapshot = self.snapshot();
+        anyhow::ensure!(
+            !snapshot.quarantined,
+            "backend is quarantined and requires restart: {}",
+            snapshot
+                .reason
+                .as_deref()
+                .unwrap_or("unknown completion state")
+        );
+        Ok(())
+    }
+
+    fn record_external_yield_sync(
+        &self,
+        boundary: &'static str,
+        elapsed: std::time::Duration,
+        failed: bool,
+    ) {
+        let elapsed_micros = elapsed.as_micros().min(u64::MAX as u128) as u64;
+        let mut stats = self
+            .inner
+            .external_yield_sync
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = stats
+            .entry(boundary)
+            .or_insert_with(|| ExternalYieldSyncStats {
+                boundary: boundary.to_string(),
+                ..ExternalYieldSyncStats::default()
+            });
+        entry.calls = entry.calls.saturating_add(1);
+        entry.total_micros = entry.total_micros.saturating_add(elapsed_micros);
+        entry.max_micros = entry.max_micros.max(elapsed_micros);
+        if failed {
+            entry.failures = entry.failures.saturating_add(1);
+        }
+        if elapsed >= SLOW_EXTERNAL_YIELD_SYNC {
+            entry.slow_calls = entry.slow_calls.saturating_add(1);
+        }
+    }
+
+    pub fn external_yield_sync_stats(&self) -> Vec<ExternalYieldSyncStats> {
+        self.inner
+            .external_yield_sync
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect()
+    }
 }
 
 /// Persistent batched-state cache entry. The fingerprint is the set of
@@ -474,13 +592,15 @@ pub(crate) fn next_decode_row_id() -> u64 {
 /// caller can recycle this generation's KV blocks.
 struct RocmDecodeOwnerLease<'a> {
     graph: &'a Mutex<RocmGraphRunner>,
+    backend_health: BackendHealthHandle,
     row_id: u64,
 }
 
 impl<'a> RocmDecodeOwnerLease<'a> {
-    fn new(graph: &'a Mutex<RocmGraphRunner>) -> Self {
+    fn new(graph: &'a Mutex<RocmGraphRunner>, backend_health: &BackendHealthHandle) -> Self {
         Self {
             graph,
+            backend_health: backend_health.clone(),
             row_id: next_decode_row_id(),
         }
     }
@@ -492,6 +612,20 @@ impl<'a> RocmDecodeOwnerLease<'a> {
 
 impl Drop for RocmDecodeOwnerLease<'_> {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.backend_health.quarantine(format!(
+                "direct decode row {} panicked before completion was proven",
+                self.row_id
+            ));
+        }
+        if self.backend_health.snapshot().quarantined {
+            tracing::error!(
+                event = "rocm_decode_owner_quarantined",
+                row_id = self.row_id,
+                "retaining ROCm graph ownership because backend completion is unknown"
+            );
+            return;
+        }
         match self.graph.lock() {
             Ok(mut graph) => graph.release_decode_row(self.row_id),
             Err(poisoned) => {
@@ -503,6 +637,11 @@ impl Drop for RocmDecodeOwnerLease<'_> {
             }
         }
     }
+}
+
+fn quarantine_linear_attention_state(state: &mut LinearAttentionState) {
+    std::mem::forget(std::mem::take(&mut state.recurrent_states));
+    std::mem::forget(std::mem::take(&mut state.conv_states));
 }
 
 /// Build a strict-prefix prefix-cache registration covering the prompt plus
@@ -614,19 +753,105 @@ pub struct PrefixCachedStreamingOutput {
     pub registration: Option<PagedPrefixRegistration>,
     pub extra_registrations: Vec<PagedPrefixRegistration>,
     pub allocated_blocks: Vec<u32>,
-    /// Channel the API layer uses to hand the *final* "blocks to free" list
-    /// to the spawned decode thread, AFTER prefix-cache registration has
-    /// computed which of `allocated_blocks` were retained vs evicted. The
-    /// decode thread waits on this channel after the decode loop finishes
-    /// before freeing, which closes a race where the API layer would call
-    /// `bm.free_all(...)` immediately on return — *while* the decode worker
-    /// was still reading those same blocks for KV. The visible symptom of
-    /// that race was second-and-later same-prompt streaming requests
-    /// regressing to a degenerate token loop ("毎回毎回..."). Send `vec![]`
-    /// when nothing should be freed (e.g. if the cache retained all blocks).
-    /// Drop without sending only on caller failure — the worker then frees
-    /// `allocated_blocks` itself as a safe fallback.
-    pub block_free_signal: Option<mpsc::Sender<Vec<u32>>>,
+}
+
+/// Prefix-cache metadata transferred to the sole post-decode cleanup owner.
+/// The threaded worker invokes its finalizer only after all model/GPU work has
+/// quiesced and before publishing the terminal stream event.
+pub struct PrefixCachedStreamingCleanup {
+    pub registration: Option<PagedPrefixRegistration>,
+    pub extra_registrations: Vec<PagedPrefixRegistration>,
+    pub allocated_blocks: Vec<u32>,
+}
+
+enum PrefixStreamDecodeOutcome {
+    Settled(Result<Option<StreamDone>>),
+    Quarantined(String),
+}
+
+fn run_prefix_cached_stream_worker<D, F>(
+    tx: mpsc::Sender<StreamEvent>,
+    decode: D,
+    post_decode: F,
+    cleanup: PrefixCachedStreamingCleanup,
+    backend_health: &BackendHealthHandle,
+) -> bool
+where
+    D: FnMut(&mpsc::Sender<StreamEvent>) -> PrefixStreamDecodeOutcome,
+    F: FnOnce(PrefixCachedStreamingCleanup) -> Result<()>,
+{
+    let mut decode = decode;
+    let mut post_decode = Some(post_decode);
+    let mut cleanup = Some(cleanup);
+    let decode_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode(&tx)));
+
+    let quarantine_reason = match &decode_result {
+        Ok(PrefixStreamDecodeOutcome::Quarantined(reason)) => Some(reason.clone()),
+        Err(_) => Some("prefix streaming decode panicked".to_string()),
+        Ok(PrefixStreamDecodeOutcome::Settled(_)) => None,
+    };
+    let terminal = match decode_result {
+        Ok(PrefixStreamDecodeOutcome::Settled(result)) => {
+            let finalize = post_decode.take().expect("post-decode finalizer present");
+            let cleanup = cleanup.take().expect("post-decode cleanup present");
+            let finalized =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| finalize(cleanup)));
+            match finalized {
+                Ok(Ok(())) => result,
+                Ok(Err(err)) => Err(err.context("prefix streaming cleanup failed")),
+                Err(_) => {
+                    tracing::error!(
+                        event = "prefix_stream_cleanup_panicked",
+                        "prefix streaming cleanup panicked; no fallback free was attempted"
+                    );
+                    Err(anyhow::anyhow!("prefix streaming cleanup panicked"))
+                }
+            }
+        }
+        Ok(PrefixStreamDecodeOutcome::Quarantined(reason)) => {
+            // GPU completion is unknown. Leak the request owner and allocation
+            // metadata rather than making any physical pages reusable.
+            std::mem::forget(post_decode.take().expect("post-decode finalizer present"));
+            std::mem::forget(cleanup.take().expect("post-decode cleanup present"));
+            std::mem::forget(decode);
+            tracing::error!(
+                event = "prefix_stream_decode_quarantined",
+                reason,
+                "prefix streaming decode completion is unknown; cache lease and blocks quarantined"
+            );
+            Err(anyhow::anyhow!(reason))
+        }
+        Err(_) => {
+            std::mem::forget(post_decode.take().expect("post-decode finalizer present"));
+            std::mem::forget(cleanup.take().expect("post-decode cleanup present"));
+            std::mem::forget(decode);
+            tracing::error!(
+                event = "prefix_stream_decode_panicked",
+                "prefix streaming decode panicked; cache lease and blocks quarantined"
+            );
+            Err(anyhow::anyhow!("prefix streaming decode panicked"))
+        }
+    };
+
+    let quarantined = if let Some(reason) = quarantine_reason {
+        backend_health.quarantine(reason);
+        true
+    } else {
+        false
+    };
+
+    match terminal {
+        Ok(Some(done)) => {
+            let _ = tx.send(StreamEvent::Done(done));
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::error!(error = %err, "spawn_streaming_paged_shared_tokens_with_prefix_cache decode thread failed");
+            let _ = tx.send(StreamEvent::Error(err.to_string()));
+        }
+    }
+
+    quarantined
 }
 
 /// Output from a native MTP speculative generation call.
@@ -677,6 +902,8 @@ pub enum StreamEvent {
     Token(StreamToken),
     /// Generation is complete.
     Done(StreamDone),
+    /// Generation failed and no successful completion may be cached.
+    Error(String),
 }
 
 enum StreamTokenDisposition {
@@ -1355,15 +1582,62 @@ struct SharedBlockReservation<'a> {
     block_ids: Vec<u32>,
 }
 
+impl SharedBlockReservation<'_> {
+    fn release_after_settlement<T>(
+        self,
+        runner: &ModelRunner,
+        boundary: &'static str,
+        result: Result<T>,
+    ) -> Result<T> {
+        self.release_after_settlement_with(boundary, result, || {
+            runner.synchronize_external_yield(boundary)
+        })
+    }
+
+    fn release_after_settlement_with<T>(
+        mut self,
+        boundary: &'static str,
+        result: Result<T>,
+        synchronize: impl FnOnce() -> Result<()>,
+    ) -> Result<T> {
+        match synchronize() {
+            Ok(()) => {
+                let block_ids = std::mem::take(&mut self.block_ids);
+                if !block_ids.is_empty() {
+                    match self.block_manager.lock() {
+                        Ok(mut guard) => guard.free_all(&block_ids),
+                        Err(error) => tracing::error!(
+                            %error,
+                            boundary,
+                            "failed to lock block manager after settled shared reservation"
+                        ),
+                    }
+                }
+                result
+            }
+            Err(sync_error) => {
+                let prior_error = result.as_ref().err().map(|error| format!("{error:#}"));
+                std::mem::forget(result);
+                match prior_error {
+                    Some(prior_error) => Err(sync_error.context(format!(
+                        "generation also failed before shared KV release: {prior_error}"
+                    ))),
+                    None => Err(sync_error),
+                }
+            }
+        }
+    }
+}
+
 impl Drop for SharedBlockReservation<'_> {
     fn drop(&mut self) {
         if self.block_ids.is_empty() {
             return;
         }
-        match self.block_manager.lock() {
-            Ok(mut guard) => guard.free_all(&self.block_ids),
-            Err(e) => tracing::error!("failed to lock block manager to free blocks: {e}"),
-        }
+        tracing::error!(
+            blocks = self.block_ids.len(),
+            "unsettled shared KV reservation dropped; retaining its pages"
+        );
     }
 }
 
@@ -1768,7 +2042,48 @@ impl ModelRunner {
             decode_buffer_config: OnceLock::new(),
             batched_state_cache: Mutex::new(None),
             backend,
+            backend_health: BackendHealthHandle::default(),
         }
+    }
+
+    pub fn backend_health_handle(&self) -> BackendHealthHandle {
+        self.backend_health.clone()
+    }
+
+    pub fn backend_health_snapshot(&self) -> BackendHealthSnapshot {
+        self.backend_health.snapshot()
+    }
+
+    pub fn ensure_backend_healthy(&self) -> Result<()> {
+        self.backend_health.ensure_healthy()
+    }
+
+    /// Prove that all backend work submitted so far has completed before
+    /// publishing progress or recycling mutable device resources.
+    pub fn synchronize_external_yield(&self, boundary: &'static str) -> Result<()> {
+        self.ensure_backend_healthy()?;
+        let started = std::time::Instant::now();
+        let synchronized = self.backend.runtime_synchronize_external_yield();
+        let elapsed = started.elapsed();
+        self.backend_health
+            .record_external_yield_sync(boundary, elapsed, synchronized.is_err());
+        if elapsed >= SLOW_EXTERNAL_YIELD_SYNC {
+            tracing::warn!(
+                event = "slow_backend_external_yield_sync",
+                backend = self.backend_name(),
+                boundary,
+                elapsed_ms = elapsed.as_millis() as u64,
+                failed = synchronized.is_err(),
+                "backend external-yield synchronization was slow"
+            );
+        }
+        if let Err(err) = synchronized {
+            let reason = format!("backend synchronization failed at {boundary}: {err:#}");
+            self.backend_health.quarantine(reason.clone());
+            anyhow::bail!(reason);
+        }
+        self.ensure_backend_healthy()?;
+        Ok(())
     }
 
     pub fn backend_name(&self) -> &'static str {
@@ -2464,11 +2779,29 @@ impl ModelRunner {
             cancel,
         )?;
 
-        let text = self
+        let text = match self
             .tokenizer
             .decode(&output.output.token_ids)
             .map_err(|e| anyhow::anyhow!("{e}"))
-            .context("failed to decode output tokens")?;
+            .context("failed to decode output tokens")
+        {
+            Ok(text) => text,
+            Err(decode_err) => {
+                if let Err(sync_err) =
+                    self.synchronize_external_yield("prefix generation tokenizer failure")
+                {
+                    std::mem::forget(output);
+                    return Err(sync_err.context(format!(
+                        "tokenizer decode also failed before synchronization: {decode_err:#}"
+                    )));
+                }
+                if !output.allocated_blocks.is_empty() {
+                    let mut bm_guard = lock_block_manager(block_manager)?;
+                    bm_guard.free_all(&output.allocated_blocks);
+                }
+                return Err(decode_err);
+            }
+        };
 
         Ok(PrefixCachedGenerationOutput {
             output: GenerationOutput {
@@ -2536,12 +2869,23 @@ impl ModelRunner {
             cancel,
         );
 
-        if prepared.is_err() && !allocated_blocks.is_empty() {
-            let mut bm_guard = lock_block_manager(block_manager)?;
-            bm_guard.free_all(&allocated_blocks);
+        match prepared {
+            Ok(state) => Ok(state),
+            Err(prepare_err) => {
+                if let Err(sync_err) =
+                    self.synchronize_external_yield("batched prefill failure cleanup")
+                {
+                    return Err(sync_err.context(format!(
+                        "batched prefill also failed before synchronization: {prepare_err:#}"
+                    )));
+                }
+                if !allocated_blocks.is_empty() {
+                    let mut bm_guard = lock_block_manager(block_manager)?;
+                    bm_guard.free_all(&allocated_blocks);
+                }
+                Err(prepare_err)
+            }
         }
-
-        prepared
     }
 
     /// Same as [`generate_paged_shared`], but accepts an already-tokenized
@@ -2646,8 +2990,7 @@ impl ModelRunner {
             )
         };
 
-        drop(reservation);
-        result
+        reservation.release_after_settlement(self, "direct shared KV release", result)
     }
 
     fn generate_from_tokens_paged_interleaved_with_prefix_cache(
@@ -2702,6 +3045,13 @@ impl ModelRunner {
                 Ok(output)
             }
             Err(err) => {
+                if let Err(sync_err) =
+                    self.synchronize_external_yield("prefix generation failure cleanup")
+                {
+                    return Err(sync_err.context(format!(
+                        "prefix generation also failed before synchronization: {err:#}"
+                    )));
+                }
                 if !allocated_blocks.is_empty() {
                     let mut bm_guard = lock_block_manager(block_manager)?;
                     bm_guard.free_all(&allocated_blocks);
@@ -4188,12 +4538,27 @@ impl ModelRunner {
     ) -> Result<GenerationOutput> {
         let step_seed = params.seed;
 
-        let next_token = if params.is_effectively_greedy() {
-            greedy_sample(&logits)?
+        let sampled = if params.is_effectively_greedy() {
+            greedy_sample(&logits)
         } else {
-            sample_step(&logits, params, step_seed, &[])?
+            sample_step(&logits, params, step_seed, &[])
         };
-        self.decode_from_prefill_token(
+        let next_token = match sampled {
+            Ok(token) => token,
+            Err(sample_error) => {
+                if let Err(sync_error) =
+                    self.synchronize_external_yield("direct prefill sampling failure")
+                {
+                    quarantine_linear_attention_state(linear_state);
+                    std::mem::forget(logits);
+                    return Err(sync_error.context(format!(
+                        "prefill sampling also failed before synchronization: {sample_error:#}"
+                    )));
+                }
+                return Err(sample_error);
+            }
+        };
+        let result = self.decode_from_prefill_token(
             next_token,
             seq_len,
             params,
@@ -4202,7 +4567,11 @@ impl ModelRunner {
             linear_state,
             step_seed,
             cancel,
-        )
+        );
+        if result.is_err() && self.backend_health.snapshot().quarantined {
+            std::mem::forget(logits);
+        }
+        result
     }
 
     fn decode_from_prefill_token(
@@ -4216,70 +4585,80 @@ impl ModelRunner {
         mut step_seed: Option<u64>,
         cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
-        let rocm_owner = RocmDecodeOwnerLease::new(&self.rocm_graph);
-        let mut generated_tokens: Vec<TokenId> = Vec::new();
-        for _step in 0..params.max_tokens {
-            check_cancelled(cancel)?;
-            if let Some(s) = step_seed.as_mut() {
-                *s = s.wrapping_add(1);
-            }
+        let rocm_owner = RocmDecodeOwnerLease::new(&self.rocm_graph, &self.backend_health);
+        let result = (|| -> Result<GenerationOutput> {
+            let mut generated_tokens: Vec<TokenId> = Vec::new();
+            for _step in 0..params.max_tokens {
+                check_cancelled(cancel)?;
+                if let Some(s) = step_seed.as_mut() {
+                    *s = s.wrapping_add(1);
+                }
 
-            next_token = params.apply_thinking_budget(&generated_tokens, next_token);
-            if self.eos_token_ids.contains(&next_token) {
-                return Ok(GenerationOutput {
-                    text: String::new(),
-                    token_ids: generated_tokens,
-                    finish_reason: FinishReason::Eos,
-                });
-            }
+                next_token = params.apply_thinking_budget(&generated_tokens, next_token);
+                if self.eos_token_ids.contains(&next_token) {
+                    return Ok(GenerationOutput {
+                        text: String::new(),
+                        token_ids: generated_tokens,
+                        finish_reason: FinishReason::Eos,
+                    });
+                }
 
-            generated_tokens.push(next_token);
+                generated_tokens.push(next_token);
 
-            if !params.stop.is_empty() {
-                let decoded_so_far = self
-                    .tokenizer
-                    .decode(&generated_tokens)
-                    .map_err(|e| anyhow::anyhow!("{e}"))
-                    .ok();
-                if let Some(text) = &decoded_so_far {
-                    for stop_seq in &params.stop {
-                        if text.contains(stop_seq.as_str()) {
-                            return Ok(GenerationOutput {
-                                text: String::new(),
-                                token_ids: generated_tokens,
-                                finish_reason: FinishReason::StopSequence(stop_seq.clone()),
-                            });
+                if !params.stop.is_empty() {
+                    let decoded_so_far = self
+                        .tokenizer
+                        .decode(&generated_tokens)
+                        .map_err(|e| anyhow::anyhow!("{e}"))
+                        .ok();
+                    if let Some(text) = &decoded_so_far {
+                        for stop_seq in &params.stop {
+                            if text.contains(stop_seq.as_str()) {
+                                return Ok(GenerationOutput {
+                                    text: String::new(),
+                                    token_ids: generated_tokens,
+                                    finish_reason: FinishReason::StopSequence(stop_seq.clone()),
+                                });
+                            }
                         }
                     }
                 }
+
+                if generated_tokens.len() >= params.max_tokens {
+                    break;
+                }
+
+                let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
+                    && generated_tokens.len() + 1 >= params.max_tokens;
+                next_token = self.decode_next_token_paged_interleaved(
+                    params,
+                    next_token,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    step_seed,
+                    &generated_tokens,
+                    rocm_owner.row_id(),
+                    skip_gdn_state_readback,
+                )?;
+                seq_len += 1;
             }
 
-            if generated_tokens.len() >= params.max_tokens {
-                break;
+            Ok(GenerationOutput {
+                text: String::new(),
+                token_ids: generated_tokens,
+                finish_reason: FinishReason::MaxTokens,
+            })
+        })();
+        match self.synchronize_external_yield("direct paged decode completion") {
+            Ok(()) => result,
+            Err(sync_err) => {
+                quarantine_linear_attention_state(linear_state);
+                std::mem::forget(result);
+                Err(sync_err)
             }
-
-            let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
-                && generated_tokens.len() + 1 >= params.max_tokens;
-            next_token = self.decode_next_token_paged_interleaved(
-                params,
-                next_token,
-                paged_cache,
-                block_table,
-                seq_len,
-                linear_state,
-                step_seed,
-                &generated_tokens,
-                rocm_owner.row_id(),
-                skip_gdn_state_readback,
-            )?;
-            seq_len += 1;
         }
-
-        Ok(GenerationOutput {
-            text: String::new(),
-            token_ids: generated_tokens,
-            finish_reason: FinishReason::MaxTokens,
-        })
     }
 
     /// Decode one greedy token for multiple compatible paged requests in one
@@ -5712,9 +6091,11 @@ impl ModelRunner {
             cancel,
         );
 
-        drop(reservation);
-
-        let output = output?;
+        let output = reservation.release_after_settlement(
+            self,
+            "paged speculative shared KV release",
+            output,
+        )?;
         let text = self
             .tokenizer
             .decode(&output.token_ids)
@@ -5788,70 +6169,81 @@ impl ModelRunner {
         } else {
             sample_step(&logits, params, step_seed, &[])?
         };
-        let rocm_owner = RocmDecodeOwnerLease::new(&self.rocm_graph);
+        let rocm_owner = RocmDecodeOwnerLease::new(&self.rocm_graph, &self.backend_health);
 
-        for _step in 0..params.max_tokens {
-            check_cancelled(cancel)?;
-            if let Some(s) = step_seed.as_mut() {
-                *s = s.wrapping_add(1);
-            }
+        let result = (|| -> Result<GenerationOutput> {
+            for _step in 0..params.max_tokens {
+                check_cancelled(cancel)?;
+                if let Some(s) = step_seed.as_mut() {
+                    *s = s.wrapping_add(1);
+                }
 
-            next_token = params.apply_thinking_budget(&generated_tokens, next_token);
-            if self.eos_token_ids.contains(&next_token) {
-                return Ok(GenerationOutput {
-                    text: String::new(),
-                    token_ids: generated_tokens,
-                    finish_reason: FinishReason::Eos,
-                });
-            }
+                next_token = params.apply_thinking_budget(&generated_tokens, next_token);
+                if self.eos_token_ids.contains(&next_token) {
+                    return Ok(GenerationOutput {
+                        text: String::new(),
+                        token_ids: generated_tokens,
+                        finish_reason: FinishReason::Eos,
+                    });
+                }
 
-            generated_tokens.push(next_token);
+                generated_tokens.push(next_token);
 
-            if !params.stop.is_empty() {
-                let decoded_so_far = self
-                    .tokenizer
-                    .decode(&generated_tokens)
-                    .map_err(|e| anyhow::anyhow!("{e}"))
-                    .ok();
-                if let Some(text) = &decoded_so_far {
-                    for stop_seq in &params.stop {
-                        if text.contains(stop_seq.as_str()) {
-                            return Ok(GenerationOutput {
-                                text: String::new(),
-                                token_ids: generated_tokens,
-                                finish_reason: FinishReason::StopSequence(stop_seq.clone()),
-                            });
+                if !params.stop.is_empty() {
+                    let decoded_so_far = self
+                        .tokenizer
+                        .decode(&generated_tokens)
+                        .map_err(|e| anyhow::anyhow!("{e}"))
+                        .ok();
+                    if let Some(text) = &decoded_so_far {
+                        for stop_seq in &params.stop {
+                            if text.contains(stop_seq.as_str()) {
+                                return Ok(GenerationOutput {
+                                    text: String::new(),
+                                    token_ids: generated_tokens,
+                                    finish_reason: FinishReason::StopSequence(stop_seq.clone()),
+                                });
+                            }
                         }
                     }
                 }
+
+                if generated_tokens.len() >= params.max_tokens {
+                    break;
+                }
+
+                let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
+                    && generated_tokens.len() + 1 >= params.max_tokens;
+                next_token = self.decode_next_token_paged_interleaved(
+                    params,
+                    next_token,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    &mut linear_state,
+                    step_seed,
+                    &generated_tokens,
+                    rocm_owner.row_id(),
+                    skip_gdn_state_readback,
+                )?;
+                seq_len += 1;
             }
 
-            if generated_tokens.len() >= params.max_tokens {
-                break;
+            Ok(GenerationOutput {
+                text: String::new(),
+                token_ids: generated_tokens,
+                finish_reason: FinishReason::MaxTokens,
+            })
+        })();
+        match self.synchronize_external_yield("direct interleaved decode completion") {
+            Ok(()) => result,
+            Err(sync_err) => {
+                quarantine_linear_attention_state(&mut linear_state);
+                std::mem::forget(logits);
+                std::mem::forget(result);
+                Err(sync_err)
             }
-
-            let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
-                && generated_tokens.len() + 1 >= params.max_tokens;
-            next_token = self.decode_next_token_paged_interleaved(
-                params,
-                next_token,
-                paged_cache,
-                block_table,
-                seq_len,
-                &mut linear_state,
-                step_seed,
-                &generated_tokens,
-                rocm_owner.row_id(),
-                skip_gdn_state_readback,
-            )?;
-            seq_len += 1;
         }
-
-        Ok(GenerationOutput {
-            text: String::new(),
-            token_ids: generated_tokens,
-            finish_reason: FinishReason::MaxTokens,
-        })
     }
 
     /// CUDA-graph variant of the interleaved decode path (Phase 12-B'').
@@ -7516,15 +7908,27 @@ impl ModelRunner {
     /// Holds an `Arc<RwLock<Self>>` so the spawned worker can re-acquire a
     /// read lock for decode steps without keeping the lock guard alive across
     /// thread boundaries (which `RwLockReadGuard` cannot do).
-    pub fn spawn_streaming_paged_shared_tokens(
+    pub fn spawn_streaming_paged_shared_tokens<L>(
         runner_lock: Arc<std::sync::RwLock<Self>>,
         prompt_tokens: Vec<TokenId>,
         params: SamplingParams,
         block_manager: Arc<Mutex<BlockManager>>,
         paged_cache: Arc<PagedKvCache>,
         decode_batcher: Option<Arc<DecodeBatcher>>,
-    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        worker_lifetime: L,
+    ) -> Result<mpsc::Receiver<StreamEvent>>
+    where
+        L: Send + 'static,
+    {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        let backend_health = {
+            let runner = runner_lock
+                .read()
+                .map_err(|err| anyhow::anyhow!("failed to acquire runner read lock: {err}"))?;
+            runner.ensure_backend_healthy()?;
+            runner.backend_health_handle()
+        };
 
         // Allocate the full block reservation up front so the prompt + decode
         // window has its KV cache pages laid out before we hand the receiver
@@ -7545,103 +7949,151 @@ impl ModelRunner {
             }
             block_table
         };
+        let allocated_blocks = block_table.blocks.clone();
 
         // Run prefill on the calling thread so a malformed prompt fails the
         // request synchronously rather than via an SSE error chunk. The decode
         // loop is what actually benefits from being threaded.
-        let (logits, mut linear_state) = {
+        let prefill_result = {
             let runner_guard = runner_lock
                 .read()
                 .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
-            let mut linear_state = runner_guard.new_linear_state()?;
-            let logits = {
-                let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
-                if streaming_prefill_enabled_for(
-                    &runner_guard.weights.embed_tokens.device(),
-                    prompt_tokens.len(),
-                ) {
-                    model_forward_paged_streaming(
-                        &*runner_guard.backend,
-                        &prompt_tokens,
-                        &runner_guard.weights,
-                        &runner_guard.config,
-                        pc_guard,
-                        &block_table,
-                        0,
-                        Some(&mut linear_state),
-                        runner_guard.active_lora.as_ref(),
-                    )
-                    .context("prefill forward pass (paged, streaming) failed")?
-                } else {
-                    model_forward_paged_last_token(
-                        &*runner_guard.backend,
-                        &prompt_tokens,
-                        &runner_guard.weights,
-                        &runner_guard.config,
-                        pc_guard,
-                        &block_table,
-                        0,
-                        Some(&mut linear_state),
-                        runner_guard.active_lora.as_ref(),
-                        None,
-                    )
-                    .context("prefill forward pass (paged) failed")?
+            let result = (|| -> Result<_> {
+                runner_guard.ensure_backend_healthy()?;
+                let mut linear_state = runner_guard.new_linear_state()?;
+                let logits = {
+                    let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
+                    if streaming_prefill_enabled_for(
+                        &runner_guard.weights.embed_tokens.device(),
+                        prompt_tokens.len(),
+                    ) {
+                        model_forward_paged_streaming(
+                            &*runner_guard.backend,
+                            &prompt_tokens,
+                            &runner_guard.weights,
+                            &runner_guard.config,
+                            pc_guard,
+                            &block_table,
+                            0,
+                            Some(&mut linear_state),
+                            runner_guard.active_lora.as_ref(),
+                        )
+                        .context("prefill forward pass (paged, streaming) failed")?
+                    } else {
+                        model_forward_paged_last_token(
+                            &*runner_guard.backend,
+                            &prompt_tokens,
+                            &runner_guard.weights,
+                            &runner_guard.config,
+                            pc_guard,
+                            &block_table,
+                            0,
+                            Some(&mut linear_state),
+                            runner_guard.active_lora.as_ref(),
+                            None,
+                        )
+                        .context("prefill forward pass (paged) failed")?
+                    }
+                };
+                let next_token = sample_first_decode_token(&logits, &params)?;
+                Ok((next_token, linear_state, logits))
+            })();
+            let synchronized =
+                runner_guard.synchronize_external_yield("threaded streaming prefill");
+            drop(runner_guard);
+            match synchronized {
+                Ok(()) => result,
+                Err(err) => {
+                    std::mem::forget(result);
+                    Err(err)
                 }
-            };
-            // (#1082) forward returns kt logits; sampler is kt — no bridge.
-            (logits, linear_state)
+            }
         };
-
-        let next_token = sample_first_decode_token(&logits, &params)?;
+        let (next_token, mut linear_state, logits) = match prefill_result {
+            Ok(result) => result,
+            Err(err) => {
+                if backend_health.snapshot().quarantined {
+                    std::mem::forget(worker_lifetime);
+                } else if !allocated_blocks.is_empty() {
+                    lock_block_manager(block_manager.as_ref())?.free_all(&allocated_blocks);
+                }
+                return Err(err);
+            }
+        };
         drop(logits);
 
         let (tx, rx) = mpsc::channel();
         let seq_len = prompt_tokens.len();
         let runner_for_thread = runner_lock;
-        let bm_for_thread = block_manager;
+        let bm_for_thread = block_manager.clone();
         let pc_for_thread = paged_cache;
         let decode_batcher_for_thread = decode_batcher;
-        let block_ids_to_free: Vec<u32> = block_table.blocks.clone();
-
-        std::thread::Builder::new()
+        let cleanup = PrefixCachedStreamingCleanup {
+            registration: None,
+            extra_registrations: Vec::new(),
+            allocated_blocks: allocated_blocks.clone(),
+        };
+        let blocks_for_spawn_failure = allocated_blocks;
+        let backend_health_for_thread = backend_health.clone();
+        let spawn_result = std::thread::Builder::new()
             .name("kiln-stream-decode".to_string())
             .spawn(move || {
-                let result = (|| -> Result<()> {
-                    let runner_guard = runner_for_thread
-                        .read()
-                        .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock in decode thread: {e}"))?;
-                    runner_guard.run_stream_decode_loop_with_first(
-                        &tx,
-                        next_token,
-                        seq_len,
-                        &params,
-                        pc_for_thread.as_ref(),
-                        &block_table,
-                        &mut linear_state,
-                        decode_batcher_for_thread.as_deref(),
-                    )
-                })();
-                if let Err(err) = result {
-                    tracing::error!(error = %err, "spawn_streaming_paged_shared_tokens decode thread failed");
-                    let _ = tx.send(StreamEvent::Done(StreamDone {
-                        finish_reason: FinishReason::MaxTokens,
-                        completion_tokens: 0,
-                        trailing_text: String::new(),
-                    }));
+                let worker_lifetime = worker_lifetime;
+                let quarantined = run_prefix_cached_stream_worker(
+                    tx,
+                    move |tx| {
+                        let runner_guard = match runner_for_thread.read() {
+                            Ok(guard) => guard,
+                            Err(err) => {
+                                return PrefixStreamDecodeOutcome::Quarantined(format!(
+                                    "failed to acquire runner read lock in decode thread: {err}"
+                                ));
+                            }
+                        };
+                        if let Err(err) = runner_guard.ensure_backend_healthy() {
+                            return PrefixStreamDecodeOutcome::Quarantined(err.to_string());
+                        }
+                        let result = runner_guard.run_stream_decode_loop_with_first(
+                            tx,
+                            next_token,
+                            seq_len,
+                            &params,
+                            pc_for_thread.as_ref(),
+                            &block_table,
+                            &mut linear_state,
+                            decode_batcher_for_thread.as_deref(),
+                        );
+                        match runner_guard.ensure_backend_healthy() {
+                            Ok(()) => PrefixStreamDecodeOutcome::Settled(result),
+                            Err(err) => PrefixStreamDecodeOutcome::Quarantined(format!(
+                                "backend became unhealthy during streaming decode: {err:#}"
+                            )),
+                        }
+                    },
+                    move |cleanup| {
+                        if cleanup.allocated_blocks.is_empty() {
+                            return Ok(());
+                        }
+                        let mut guard = lock_block_manager(bm_for_thread.as_ref())?;
+                        guard.free_all(&cleanup.allocated_blocks);
+                        Ok(())
+                    },
+                    cleanup,
+                    &backend_health_for_thread,
+                );
+                if quarantined {
+                    std::mem::forget(worker_lifetime);
                 }
-                drop(tx);
-                if !block_ids_to_free.is_empty() {
-                    match bm_for_thread.lock() {
-                        Ok(mut guard) => guard.free_all(&block_ids_to_free),
-                        Err(e) => tracing::error!(
-                            error = %e,
-                            "failed to lock block manager to free blocks after streaming decode"
-                        ),
-                    }
-                }
-            })
-            .map_err(|e| anyhow::anyhow!("failed to spawn streaming decode thread: {e}"))?;
+            });
 
+        if let Err(err) = spawn_result {
+            if !blocks_for_spawn_failure.is_empty() {
+                lock_block_manager(block_manager.as_ref())?.free_all(&blocks_for_spawn_failure);
+            }
+            return Err(anyhow::anyhow!(
+                "failed to spawn streaming decode thread: {err}"
+            ));
+        }
         Ok(rx)
     }
 
@@ -7650,7 +8102,7 @@ impl ModelRunner {
     /// motivation as [`spawn_streaming_paged_shared_tokens`]: hand the
     /// receiver back before decode starts so the SSE layer can stream tokens
     /// in real time.
-    pub fn spawn_streaming_paged_shared_tokens_with_prefix_cache(
+    pub fn spawn_streaming_paged_shared_tokens_with_prefix_cache<F, L>(
         runner_lock: Arc<std::sync::RwLock<Self>>,
         prompt_tokens: Vec<TokenId>,
         params: SamplingParams,
@@ -7658,8 +8110,22 @@ impl ModelRunner {
         paged_cache: Arc<PagedKvCache>,
         cached_prefix: Option<PagedPrefixReuse>,
         decode_batcher: Option<Arc<DecodeBatcher>>,
-    ) -> Result<PrefixCachedStreamingOutput> {
+        worker_lifetime: L,
+        post_decode: F,
+    ) -> Result<mpsc::Receiver<StreamEvent>>
+    where
+        F: FnOnce(PrefixCachedStreamingCleanup) -> Result<()> + Send + 'static,
+        L: Send + 'static,
+    {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        let backend_health = {
+            let runner = runner_lock
+                .read()
+                .map_err(|err| anyhow::anyhow!("failed to acquire runner read lock: {err}"))?;
+            runner.ensure_backend_healthy()?;
+            runner.backend_health_handle()
+        };
 
         let block_size = {
             let bm_guard = lock_block_manager(block_manager.as_ref())?;
@@ -7716,52 +8182,55 @@ impl ModelRunner {
                 (exact_next_token, prefix.linear_state)
             }
             None => {
-                let runner_guard = runner_lock
-                    .read()
-                    .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
-                (None, runner_guard.new_linear_state()?)
-            }
-        };
-
-        let (next_token, registration, extra_registrations) = if let Some(next_token) =
-            exact_next_token
-        {
-            let next_token = match next_token {
-                PagedPrefixNextToken::Logits(logits) => {
-                    match sample_first_decode_token(&logits, &params) {
-                        Ok(token) => token,
-                        Err(err) => {
-                            free_allocated(&allocated_blocks);
-                            return Err(err);
-                        }
-                    }
-                }
-                PagedPrefixNextToken::GreedyToken(token) => {
-                    if params.temperature != 0.0 {
-                        free_allocated(&allocated_blocks);
-                        anyhow::bail!("greedy cached first token cannot serve non-greedy sampling");
-                    }
-                    token
-                }
-            };
-            (next_token, None, Vec::new())
-        } else {
-            let prefill_result =
-                (|| -> Result<(
-                    // (#1082) kt-native logits — store + sampler are kt now.
-                    kiln_tensor::Tensor,
-                    Option<PagedPrefixRegistration>,
-                    Vec<PagedPrefixRegistration>,
-                )> {
-                    let prefill_tokens = &prompt_tokens[cached_tokens..];
-                    anyhow::ensure!(
-                        !prefill_tokens.is_empty(),
-                        "non-exact streaming prefix cache hit must leave at least one suffix token"
-                    );
-
+                let state = (|| -> Result<LinearAttentionState> {
                     let runner_guard = runner_lock
                         .read()
                         .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
+                    runner_guard.new_linear_state()
+                })();
+                match state {
+                    Ok(state) => (None, state),
+                    Err(err) => {
+                        free_allocated(&allocated_blocks);
+                        return Err(err);
+                    }
+                }
+            }
+        };
+
+        let prepared = {
+            let runner_guard = runner_lock
+                .read()
+                .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
+            let result = (|| -> Result<(
+                TokenId,
+                Option<PagedPrefixRegistration>,
+                Vec<PagedPrefixRegistration>,
+                Option<kiln_tensor::Tensor>,
+            )> {
+                runner_guard.ensure_backend_healthy()?;
+                if let Some(next_token) = exact_next_token {
+                    return match next_token {
+                        PagedPrefixNextToken::Logits(logits) => {
+                            let token = sample_first_decode_token(&logits, &params)?;
+                            Ok((token, None, Vec::new(), Some(logits)))
+                        }
+                        PagedPrefixNextToken::GreedyToken(token) => {
+                            anyhow::ensure!(
+                                params.temperature == 0.0,
+                                "greedy cached first token cannot serve non-greedy sampling"
+                            );
+                            Ok((token, None, Vec::new(), None))
+                        }
+                    };
+                }
+
+                let prefill_tokens = &prompt_tokens[cached_tokens..];
+                anyhow::ensure!(
+                    !prefill_tokens.is_empty(),
+                    "non-exact streaming prefix cache hit must leave at least one suffix token"
+                );
+
                     let split_pos =
                         strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size);
                     let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
@@ -7859,105 +8328,106 @@ impl ModelRunner {
                     ) {
                         extra_registrations.push(reg);
                     }
-                    Ok((logits, registration, extra_registrations))
-                })();
-
-            let (logits, registration, extra_registrations) = match prefill_result {
-                Ok(t) => t,
+                let next_token = sample_first_decode_token(&logits, &params)?;
+                Ok((
+                    next_token,
+                    registration,
+                    extra_registrations,
+                    Some(logits),
+                ))
+            })();
+            let synchronized = runner_guard
+                .synchronize_external_yield("prefix streaming prefill and first-token sample");
+            drop(runner_guard);
+            match synchronized {
+                Ok(()) => result,
                 Err(err) => {
-                    free_allocated(&allocated_blocks);
-                    return Err(err);
+                    std::mem::forget(result);
+                    Err(err)
                 }
-            };
-            let next_token = match sample_first_decode_token(&logits, &params) {
-                Ok(t) => t,
-                Err(err) => {
-                    free_allocated(&allocated_blocks);
-                    return Err(err);
-                }
-            };
-            drop(logits);
-            (next_token, registration, extra_registrations)
+            }
         };
+        let (next_token, registration, extra_registrations, logits_keepalive) = match prepared {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                if backend_health.snapshot().quarantined {
+                    std::mem::forget(worker_lifetime);
+                    std::mem::forget(post_decode);
+                } else {
+                    free_allocated(&allocated_blocks);
+                }
+                return Err(err);
+            }
+        };
+        drop(logits_keepalive);
 
         let (tx, rx) = mpsc::channel();
-        // Rendezvous channel for the final "blocks to free" list. The API
-        // layer sends `(allocated - retained) ∪ evicted` here as soon as
-        // prefix-cache registration is done; the decode thread `recv()`s
-        // this AFTER the decode loop completes, then frees. If the API
-        // layer drops the sender without sending (panic / error path), the
-        // thread falls back to freeing `allocated_blocks` so we don't leak.
-        let (free_tx, free_rx) = mpsc::channel::<Vec<u32>>();
         let seq_len = prompt_tokens.len();
         let runner_for_thread = runner_lock;
-        let bm_for_thread = block_manager;
         let pc_for_thread = paged_cache;
         let decode_batcher_for_thread = decode_batcher;
         let block_table_for_thread = block_table.clone();
-        let allocated_for_fallback: Vec<u32> = allocated_blocks.clone();
-
-        std::thread::Builder::new()
-            .name("kiln-stream-decode-prefix".to_string())
-            .spawn(move || {
-                let result = (|| -> Result<()> {
-                    let runner_guard = runner_for_thread
-                        .read()
-                        .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock in decode thread: {e}"))?;
-                    runner_guard.run_stream_decode_loop_with_first(
-                        &tx,
-                        next_token,
-                        seq_len,
-                        &params,
-                        pc_for_thread.as_ref(),
-                        &block_table_for_thread,
-                        &mut linear_state,
-                        decode_batcher_for_thread.as_deref(),
-                    )
-                })();
-                if let Err(err) = result {
-                    tracing::error!(error = %err, "spawn_streaming_paged_shared_tokens_with_prefix_cache decode thread failed");
-                    let _ = tx.send(StreamEvent::Done(StreamDone {
-                        finish_reason: FinishReason::MaxTokens,
-                        completion_tokens: 0,
-                        trailing_text: String::new(),
-                    }));
-                }
-                drop(tx);
-
-                // Decode is fully drained by here — the SSE side has either
-                // received `Done` or the receiver was dropped. Now and only
-                // now is it safe to release physical blocks back to the
-                // BlockManager. Wait for the API layer to tell us the
-                // exact set; fall back to the full allocation on error.
-                let blocks_to_free = match free_rx.recv() {
-                    Ok(list) => list,
-                    Err(_) => {
-                        tracing::warn!(
-                            "decode thread did not receive a free list from the API layer; \
-                             falling back to freeing all allocated blocks"
-                        );
-                        allocated_for_fallback
-                    }
-                };
-                if !blocks_to_free.is_empty() {
-                    match bm_for_thread.lock() {
-                        Ok(mut guard) => guard.free_all(&blocks_to_free),
-                        Err(e) => tracing::error!(
-                            error = %e,
-                            "failed to lock block manager to free blocks after streaming decode (prefix cache)"
-                        ),
-                    }
-                }
-            })
-            .map_err(|e| anyhow::anyhow!("failed to spawn streaming decode thread: {e}"))?;
-
-        Ok(PrefixCachedStreamingOutput {
-            receiver: rx,
+        let cleanup = PrefixCachedStreamingCleanup {
             registration,
             extra_registrations,
-            allocated_blocks,
-            block_free_signal: Some(free_tx),
-        })
+            allocated_blocks: allocated_blocks.clone(),
+        };
+        let backend_health_for_thread = backend_health.clone();
+
+        let spawn_result = std::thread::Builder::new()
+            .name("kiln-stream-decode-prefix".to_string())
+            .spawn(move || {
+                let worker_lifetime = worker_lifetime;
+                let quarantined = run_prefix_cached_stream_worker(
+                    tx,
+                    move |tx| {
+                        let runner_guard = match runner_for_thread.read() {
+                            Ok(guard) => guard,
+                            Err(err) => {
+                                return PrefixStreamDecodeOutcome::Quarantined(format!(
+                                    "failed to acquire runner read lock in decode thread: {err}"
+                                ));
+                            }
+                        };
+                        if let Err(err) = runner_guard.ensure_backend_healthy() {
+                            return PrefixStreamDecodeOutcome::Quarantined(err.to_string());
+                        }
+                        let result = runner_guard.run_stream_decode_loop_with_first(
+                            tx,
+                            next_token,
+                            seq_len,
+                            &params,
+                            pc_for_thread.as_ref(),
+                            &block_table_for_thread,
+                            &mut linear_state,
+                            decode_batcher_for_thread.as_deref(),
+                        );
+                        match runner_guard.ensure_backend_healthy() {
+                            Ok(()) => PrefixStreamDecodeOutcome::Settled(result),
+                            Err(err) => PrefixStreamDecodeOutcome::Quarantined(format!(
+                                "backend became unhealthy during prefix streaming decode: {err:#}"
+                            )),
+                        }
+                    },
+                    post_decode,
+                    cleanup,
+                    &backend_health_for_thread,
+                );
+                if quarantined {
+                    // Unknown completion means exclusive GPU mutation must
+                    // remain blocked for the lifetime of this process.
+                    std::mem::forget(worker_lifetime);
+                }
+            });
+
+        if let Err(err) = spawn_result {
+            free_allocated(&allocated_blocks);
+            return Err(anyhow::anyhow!(
+                "failed to spawn streaming decode thread: {err}"
+            ));
+        }
+
+        Ok(rx)
     }
 
     pub fn generate_streaming_paged_speculative_shared_tokens(
@@ -8016,8 +8486,11 @@ impl ModelRunner {
             spec_config,
         );
 
-        drop(reservation);
-        result
+        reservation.release_after_settlement(
+            self,
+            "streaming speculative shared KV release",
+            result,
+        )
     }
 
     fn generate_from_tokens_streaming_paged_shared(
@@ -8073,8 +8546,7 @@ impl ModelRunner {
             &block_table,
         );
 
-        drop(reservation);
-        result
+        reservation.release_after_settlement(self, "streaming shared KV release", result)
     }
 
     fn generate_from_tokens_streaming_paged_interleaved_with_prefix_cache(
@@ -8130,6 +8602,13 @@ impl ModelRunner {
                 Ok(output)
             }
             Err(err) => {
+                if let Err(sync_err) =
+                    self.synchronize_external_yield("direct streaming failure cleanup")
+                {
+                    return Err(sync_err.context(format!(
+                        "direct streaming generation also failed before synchronization: {err:#}"
+                    )));
+                }
                 if !allocated_blocks.is_empty() {
                     let mut bm_guard = lock_block_manager(block_manager)?;
                     bm_guard.free_all(&allocated_blocks);
@@ -8274,7 +8753,6 @@ impl ModelRunner {
             registration,
             extra_registrations,
             allocated_blocks: Vec::new(),
-            block_free_signal: None,
         })
     }
 
@@ -8349,8 +8827,14 @@ impl ModelRunner {
         // entry points. The receiver is fully populated by the time we return.
         // Threaded callers should use [`run_stream_decode_loop_with_first`]
         // directly so they can sample the first token before spawning.
-        let next_token = sample_first_decode_token(&logits, params)?;
-        self.run_stream_decode_loop_with_first(
+        let sampled = sample_first_decode_token(&logits, params);
+        if let Err(sync_err) = self.synchronize_external_yield("direct streaming prefill") {
+            std::mem::forget(logits);
+            std::mem::forget(sampled);
+            return Err(sync_err);
+        }
+        let next_token = sampled?;
+        let done = self.run_stream_decode_loop_with_first(
             &tx,
             next_token,
             seq_len,
@@ -8360,6 +8844,9 @@ impl ModelRunner {
             linear_state,
             None,
         )?;
+        if let Some(done) = done {
+            let _ = tx.send(StreamEvent::Done(done));
+        }
         Ok(rx)
     }
 
@@ -8379,8 +8866,8 @@ impl ModelRunner {
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
         decode_batcher: Option<&DecodeBatcher>,
-    ) -> Result<()> {
-        let rocm_owner = RocmDecodeOwnerLease::new(&self.rocm_graph);
+    ) -> Result<Option<StreamDone>> {
+        let rocm_owner = RocmDecodeOwnerLease::new(&self.rocm_graph, &self.backend_health);
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
@@ -8416,7 +8903,7 @@ impl ModelRunner {
                         generated_tokens = generated_tokens.len(),
                         "direct_decode_receiver_dropped"
                     );
-                    return Ok(());
+                    return Ok(None);
                 }
             }
 
@@ -8426,7 +8913,7 @@ impl ModelRunner {
 
             let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
                 && generated_tokens.len() + 1 >= params.max_tokens;
-            next_token = self.decode_next_token_paged_interleaved_or_batched(
+            let decode_result = self.decode_next_token_paged_interleaved_or_batched(
                 params,
                 next_token,
                 paged_cache,
@@ -8438,7 +8925,9 @@ impl ModelRunner {
                 &generated_tokens,
                 rocm_owner.row_id(),
                 skip_gdn_state_readback,
-            )?;
+            );
+            self.synchronize_external_yield("direct streaming decode step")?;
+            next_token = decode_result?;
             seq_len += 1;
         }
 
@@ -8447,13 +8936,11 @@ impl ModelRunner {
             Some(stop) => (FinishReason::StopSequence(stop), String::new()),
             None => (finish_reason, gate_trailing),
         };
-        let _ = tx.send(StreamEvent::Done(StreamDone {
+        Ok(Some(StreamDone {
             finish_reason,
             completion_tokens: generated_tokens.len(),
             trailing_text: gate_trailing,
-        }));
-
-        Ok(())
+        }))
     }
 
     fn generate_from_tokens_streaming_paged_speculative_interleaved(
@@ -8875,6 +9362,267 @@ mod tests {
         "KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK",
         "KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK",
     ];
+
+    fn empty_prefix_stream_cleanup() -> PrefixCachedStreamingCleanup {
+        PrefixCachedStreamingCleanup {
+            registration: None,
+            extra_registrations: Vec::new(),
+            allocated_blocks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn prefix_stream_worker_finalizes_before_terminal_event() {
+        let finalized = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finalized_in_cleanup = Arc::clone(&finalized);
+        let backend_health = BackendHealthHandle::default();
+        let (tx, rx) = mpsc::channel();
+        run_prefix_cached_stream_worker(
+            tx,
+            |_| {
+                PrefixStreamDecodeOutcome::Settled(Ok(Some(StreamDone {
+                    finish_reason: FinishReason::Eos,
+                    completion_tokens: 3,
+                    trailing_text: "tail".to_string(),
+                })))
+            },
+            move |_| {
+                finalized_in_cleanup.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+            empty_prefix_stream_cleanup(),
+            &backend_health,
+        );
+
+        let StreamEvent::Done(done) = rx.recv().expect("terminal event") else {
+            panic!("expected terminal event");
+        };
+        assert!(finalized.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(done.completion_tokens, 3);
+        assert_eq!(done.trailing_text, "tail");
+    }
+
+    #[test]
+    fn shared_block_reservation_retains_pages_when_settlement_fails() -> anyhow::Result<()> {
+        let block_manager = Mutex::new(BlockManager::new(4, 4));
+        let block_ids = block_manager.lock().unwrap().allocate(1)?;
+        let reservation = SharedBlockReservation {
+            block_manager: &block_manager,
+            block_ids,
+        };
+
+        let error = reservation
+            .release_after_settlement_with("injected shared reservation settlement", Ok(()), || {
+                anyhow::bail!("injected sync failure")
+            })
+            .expect_err("settlement failure must fail the request");
+        assert!(error.to_string().contains("injected sync failure"));
+        assert_eq!(block_manager.lock().unwrap().num_used(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_stream_worker_finalizes_on_disconnect_and_decode_error() {
+        for decode_error in [false, true] {
+            let finalized = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let finalized_in_cleanup = Arc::clone(&finalized);
+            let backend_health = BackendHealthHandle::default();
+            let (tx, rx) = mpsc::channel();
+            let rx = if decode_error {
+                Some(rx)
+            } else {
+                drop(rx);
+                None
+            };
+            run_prefix_cached_stream_worker(
+                tx,
+                move |_| {
+                    if decode_error {
+                        PrefixStreamDecodeOutcome::Settled(Err(anyhow::anyhow!(
+                            "injected decode failure"
+                        )))
+                    } else {
+                        PrefixStreamDecodeOutcome::Settled(Ok(None))
+                    }
+                },
+                move |_| {
+                    finalized_in_cleanup.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+                empty_prefix_stream_cleanup(),
+                &backend_health,
+            );
+            assert_eq!(finalized.load(std::sync::atomic::Ordering::SeqCst), 1);
+            if decode_error {
+                assert!(matches!(rx.unwrap().recv(), Ok(StreamEvent::Error(_))));
+            }
+            assert!(!backend_health.snapshot().quarantined);
+        }
+    }
+
+    #[test]
+    fn prefix_stream_worker_quarantines_cleanup_after_decode_panic() {
+        struct DropProbe(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let finalized = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let finalized_in_cleanup = Arc::clone(&finalized);
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cleanup_owner = DropProbe(Arc::clone(&dropped));
+        let backend_health = BackendHealthHandle::default();
+        let (tx, rx) = mpsc::channel();
+        run_prefix_cached_stream_worker(
+            tx,
+            |_| -> PrefixStreamDecodeOutcome { panic!("injected decode panic") },
+            move |_| {
+                let _keep_alive = &cleanup_owner;
+                finalized_in_cleanup.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+            empty_prefix_stream_cleanup(),
+            &backend_health,
+        );
+        assert_eq!(finalized.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(matches!(rx.recv(), Ok(StreamEvent::Error(_))));
+        assert!(backend_health.snapshot().quarantined);
+    }
+
+    #[test]
+    fn prefix_stream_worker_latches_quarantine_before_error_and_leaks_decode_state() {
+        struct DropProbe(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let backend_health = BackendHealthHandle::default();
+        let health_for_worker = backend_health.clone();
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe = DropProbe(Arc::clone(&dropped));
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_prefix_cached_stream_worker(
+                tx,
+                move |_| {
+                    let _keep_alive = &probe;
+                    PrefixStreamDecodeOutcome::Quarantined("injected unknown completion".into())
+                },
+                |_| Ok(()),
+                empty_prefix_stream_cleanup(),
+                &health_for_worker,
+            )
+        });
+
+        assert!(matches!(rx.recv(), Ok(StreamEvent::Error(_))));
+        let snapshot = backend_health.snapshot();
+        assert!(snapshot.quarantined);
+        assert_eq!(
+            snapshot.reason.as_deref(),
+            Some("injected unknown completion")
+        );
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(worker.join().unwrap());
+    }
+
+    #[test]
+    fn external_yield_sync_stats_are_bounded_by_static_boundary() {
+        let health = BackendHealthHandle::default();
+        health.record_external_yield_sync(
+            "batched decode step",
+            std::time::Duration::from_millis(40),
+            false,
+        );
+        health.record_external_yield_sync(
+            "batched decode step",
+            std::time::Duration::from_millis(125),
+            true,
+        );
+
+        assert_eq!(
+            health.external_yield_sync_stats(),
+            vec![ExternalYieldSyncStats {
+                boundary: "batched decode step".to_string(),
+                calls: 2,
+                failures: 1,
+                total_micros: 165_000,
+                max_micros: 125_000,
+                slow_calls: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn backend_quarantine_latches_first_reason_across_clones() {
+        let health = BackendHealthHandle::default();
+        let clone = health.clone();
+        clone.quarantine("first unknown completion");
+        health.quarantine("later failure");
+
+        assert_eq!(
+            health.snapshot(),
+            BackendHealthSnapshot {
+                quarantined: true,
+                reason: Some("first unknown completion".to_string()),
+            }
+        );
+        assert!(clone.ensure_healthy().is_err());
+    }
+
+    #[test]
+    fn streaming_worker_gpu_owner_blocks_writer_through_cleanup() {
+        let execution_lock = Arc::new(std::sync::RwLock::new(()));
+        let worker_lock = Arc::clone(&execution_lock);
+        let backend_health = BackendHealthHandle::default();
+        let (guard_ready_tx, guard_ready_rx) = mpsc::channel();
+        let (allow_decode_tx, allow_decode_rx) = mpsc::channel();
+        let (cleanup_started_tx, cleanup_started_rx) = mpsc::channel();
+        let (allow_cleanup_tx, allow_cleanup_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _guard = worker_lock.read().unwrap();
+            guard_ready_tx.send(()).unwrap();
+            let (tx, _rx) = mpsc::channel();
+            run_prefix_cached_stream_worker(
+                tx,
+                move |_| {
+                    allow_decode_rx.recv().unwrap();
+                    PrefixStreamDecodeOutcome::Settled(Ok(None))
+                },
+                move |_| {
+                    cleanup_started_tx.send(()).unwrap();
+                    allow_cleanup_rx.recv().unwrap();
+                    Ok(())
+                },
+                empty_prefix_stream_cleanup(),
+                &backend_health,
+            );
+        });
+        guard_ready_rx.recv().unwrap();
+
+        assert!(
+            execution_lock.try_write().is_err(),
+            "writer acquired while decode was blocked"
+        );
+
+        allow_decode_tx.send(()).unwrap();
+        cleanup_started_rx.recv().unwrap();
+        assert!(
+            execution_lock.try_write().is_err(),
+            "writer acquired while cleanup was blocked"
+        );
+
+        allow_cleanup_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(
+            execution_lock.try_write().is_ok(),
+            "writer must acquire after worker cleanup"
+        );
+    }
 
     #[test]
     fn decode_row_ids_are_process_unique_across_threads() {

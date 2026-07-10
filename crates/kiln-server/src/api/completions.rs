@@ -40,7 +40,7 @@ use crate::state::{
     DeterministicChatRequestCacheValue, DeterministicChatRequestInFlightState,
     DeterministicCompletionCacheClaim, DeterministicCompletionCacheKey,
     DeterministicCompletionCacheProbe, DeterministicCompletionCacheValue,
-    DeterministicCompletionInFlightState, ModelBackend, RealPrefixCache,
+    DeterministicCompletionInFlightState, ModelBackend, RealPrefixCache, RealPrefixCacheRequest,
     gpu_coordination_read_guard,
 };
 
@@ -56,6 +56,15 @@ fn observe_post_prefill_vram(memory_budget: &std::sync::Arc<crate::state::GpuMem
     if let Some(bytes) = kiln_memory::vram::detect_used_vram_bytes() {
         memory_budget.observe_prefill_used_vram_bytes(bytes);
     }
+}
+
+fn ensure_backend_admission(state: &AppState) -> Result<(), ApiError> {
+    let ModelBackend::Real { backend_health, .. } = state.backend.as_ref() else {
+        return Ok(());
+    };
+    backend_health
+        .ensure_healthy()
+        .map_err(ApiError::backend_quarantined)
 }
 
 /// Pull the most recent user-authored message text from a request, falling
@@ -4434,6 +4443,10 @@ async fn chat_completions(
 ) -> Result<Response, ApiError> {
     let start = std::time::Instant::now();
     let streaming = req.stream;
+    if let Err(err) = ensure_backend_admission(&state) {
+        state.metrics.inc_request(RequestStatus::Rejected);
+        return Err(err);
+    }
     // Attribute this request to the calling agent (pi / opencode / SDK / curl)
     // so the dashboard can show per-client traffic. Header-only, never trusted
     // from the body.
@@ -4470,6 +4483,10 @@ async fn completions(
     Json(req): Json<TextCompletionRequest>,
 ) -> Result<Response, ApiError> {
     let start = std::time::Instant::now();
+    if let Err(err) = ensure_backend_admission(&state) {
+        state.metrics.inc_request(RequestStatus::Rejected);
+        return Err(err);
+    }
     state.metrics.inc_active();
 
     let result = completions_inner(&state, req).await;
@@ -4712,6 +4729,7 @@ async fn real_prompt_logprobs(
     let handle = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Vec<f32>>> {
         let _gpu_guard = gpu_coordination_read_guard(&gpu_lock);
         let runner_guard = runner.read().unwrap();
+        runner_guard.ensure_backend_healthy()?;
         // #1082 candle-drop: candle `model_forward` was removed; route through
         // the kt-native `model_forward_kt`, which returns a kt
         // `kiln_tensor::Tensor` and serves every backend (CPU/Metal/Vulkan/CUDA)
@@ -5153,6 +5171,7 @@ async fn chat_completions_inner(
                 prefix_cache,
                 batching_engine,
                 decode_batcher,
+                ..
             } => {
                 if let Some(batching_engine) = batching_engine {
                     generate_real_batched_streaming(
@@ -6482,40 +6501,19 @@ async fn generate_real(
     let generation = tokio::task::spawn_blocking(move || {
         // Acquire GPU coordination read lock — allows concurrent inference,
         // but blocks while training holds the write lock.
-        let _gpu_guard = gpu_coordination_read_guard(&gpu_lock);
+        let gpu_guard = gpu_coordination_read_guard(&gpu_lock);
         let runner_guard = runner.read().unwrap();
-        match speculative_mode {
-            ResolvedSpeculativeMode::Off => {
-                let prefix_enabled = {
-                    let cache = prefix_cache.lock().unwrap();
-                    cache.is_enabled()
-                };
-                if !prefix_enabled {
-                    *prefix_cache_diagnostic_inner.lock().unwrap() = "disabled";
-                    runner_guard
-                        .generate_paged_shared_tokens(
-                            &prompt_tokens,
-                            &params,
-                            bm.as_ref(),
-                            pc.as_ref(),
-                            Some(&cancel_inner),
-                        )
-                        .map(TimedGenerationOutput::without_timings)
-                } else {
-                    let (hit, should_register_on_miss) = {
-                        let mut cache = prefix_cache.lock().unwrap();
-                        let should_lookup = cache.should_lookup_prompt(&prompt_tokens);
-                        let hit = if should_lookup {
-                            cache.lookup(&adapter, &prompt_tokens, &params)?
-                        } else {
-                            None
-                        };
-                        let should_register = cache.should_register_prompt(&prompt_tokens);
-                        (hit, should_register)
+        let result = (|| -> anyhow::Result<TimedGenerationOutput> {
+            runner_guard.ensure_backend_healthy()?;
+            match speculative_mode {
+                ResolvedSpeculativeMode::Off => {
+                    let prefix_enabled = {
+                        let cache = prefix_cache.lock().unwrap();
+                        cache.is_enabled()
                     };
-                    if hit.is_none() && !should_register_on_miss {
-                        *prefix_cache_diagnostic_inner.lock().unwrap() = "skipped";
-                        return runner_guard
+                    if !prefix_enabled {
+                        *prefix_cache_diagnostic_inner.lock().unwrap() = "disabled";
+                        runner_guard
                             .generate_paged_shared_tokens(
                                 &prompt_tokens,
                                 &params,
@@ -6523,146 +6521,144 @@ async fn generate_real(
                                 pc.as_ref(),
                                 Some(&cancel_inner),
                             )
-                            .map(TimedGenerationOutput::without_timings);
-                    }
-
-                    *prefix_cache_diagnostic_inner.lock().unwrap() =
-                        if hit.is_some() { "hit" } else { "miss" };
-                    let hit_entry_id = hit.as_ref().map(|hit| hit.entry_id);
-                    let cached_prefix = hit.map(|hit| PagedPrefixReuse {
-                        cached_tokens: hit.cached_tokens,
-                        block_ids: hit.block_ids,
-                        linear_state: hit.linear_state,
-                        next_token: hit.next_token,
-                    });
-
-                    let result = runner_guard.generate_paged_shared_tokens_with_prefix_cache(
-                        &prompt_tokens,
-                        &params,
-                        bm.as_ref(),
-                        pc.as_ref(),
-                        cached_prefix,
-                        Some(&cancel_inner),
-                    );
-
-                    let mut output = match result {
-                        Ok(output) => {
-                            metrics.observe_prefill_duration(output.prefill_duration.as_secs_f64());
-                            metrics.observe_decode_duration(output.decode_duration.as_secs_f64());
-                            output
-                        }
-                        Err(err) => {
-                            if let Some(entry_id) = hit_entry_id {
-                                let mut cache = prefix_cache.lock().unwrap();
-                                cache.release_hit(entry_id);
+                            .map(TimedGenerationOutput::without_timings)
+                    } else {
+                        let pending_lookup = match RealPrefixCacheRequest::begin(
+                            &prefix_cache,
+                            &bm,
+                            adapter.clone(),
+                            &prompt_tokens,
+                            &params,
+                        ) {
+                            Ok(lookup) => lookup,
+                            Err(failure) => {
+                                let error = failure.settle(&runner_guard);
+                                return Err(error);
                             }
-                            return Err(err);
+                        };
+                        let lookup = match pending_lookup.settle(&runner_guard) {
+                            Ok(lookup) => lookup,
+                            Err(error) => return Err(error),
+                        };
+                        let should_register_on_miss = lookup.should_register;
+                        let hit = lookup.hit;
+                        if hit.is_none() && !should_register_on_miss {
+                            *prefix_cache_diagnostic_inner.lock().unwrap() = "skipped";
+                            drop(lookup.request);
+                            return runner_guard
+                                .generate_paged_shared_tokens(
+                                    &prompt_tokens,
+                                    &params,
+                                    bm.as_ref(),
+                                    pc.as_ref(),
+                                    Some(&cancel_inner),
+                                )
+                                .map(TimedGenerationOutput::without_timings);
                         }
-                    };
-                    let registration = output.registration.take();
-                    let extra_registrations = std::mem::take(&mut output.extra_registrations);
-                    let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
-                    let mut retained_blocks = Vec::new();
-                    let mut evicted_blocks = Vec::new();
-                    {
-                        let mut cache = prefix_cache.lock().unwrap();
-                        if let Some(entry_id) = hit_entry_id {
-                            cache.release_hit(entry_id);
-                        }
-                        if let Some(registration) = registration {
-                            let outcome = cache.register(adapter.clone(), registration);
-                            retained_blocks.extend(outcome.retained_blocks);
-                            evicted_blocks.extend(outcome.evicted_blocks);
-                        }
-                        for registration in extra_registrations {
-                            let outcome = cache.register(adapter.clone(), registration);
-                            retained_blocks.extend(outcome.retained_blocks);
-                            evicted_blocks.extend(outcome.evicted_blocks);
-                        }
-                    }
 
-                    let mut blocks_to_free: Vec<u32> = allocated_blocks
-                        .into_iter()
-                        .filter(|block_id| !retained_blocks.contains(block_id))
-                        .collect();
-                    blocks_to_free.extend(evicted_blocks);
-                    // #673: never free a block that the prefix cache has just
-                    // claimed for the new entry, and never queue the same
-                    // block twice in one free call.
-                    debug_assert!(
-                        blocks_to_free
-                            .iter()
-                            .all(|id| !retained_blocks.contains(id)),
-                        "blocks_to_free overlaps retained_blocks: free={blocks_to_free:?} retained={retained_blocks:?}",
-                    );
-                    debug_assert!(
-                        {
-                            let mut seen =
-                                std::collections::HashSet::with_capacity(blocks_to_free.len());
-                            blocks_to_free.iter().all(|id| seen.insert(*id))
-                        },
-                        "blocks_to_free contains duplicate block IDs: {blocks_to_free:?}",
-                    );
-                    if !blocks_to_free.is_empty() {
-                        let mut bm_guard = bm.lock().unwrap();
-                        bm_guard.free_all(&blocks_to_free);
-                    }
+                        *prefix_cache_diagnostic_inner.lock().unwrap() =
+                            if hit.is_some() { "hit" } else { "miss" };
+                        let cached_prefix = hit.map(|hit| PagedPrefixReuse {
+                            cached_tokens: hit.cached_tokens,
+                            block_ids: hit.block_ids,
+                            linear_state: hit.linear_state,
+                            next_token: hit.next_token,
+                        });
 
-                    Ok(TimedGenerationOutput {
-                        output: output.output,
-                        ttft: Some(output.prefill_duration),
-                        decode_duration: Some(output.decode_duration),
-                    })
-                }
-            }
-            ResolvedSpeculativeMode::SkipLayer(spec_config) => {
-                *prefix_cache_diagnostic_inner.lock().unwrap() = "not_used_speculative";
-                if params.temperature == 0.0 {
-                    runner_guard
-                        .generate_paged_speculative_shared_tokens(
+                        let result = runner_guard.generate_paged_shared_tokens_with_prefix_cache(
                             &prompt_tokens,
                             &params,
                             bm.as_ref(),
                             pc.as_ref(),
-                            &spec_config,
+                            cached_prefix,
                             Some(&cancel_inner),
-                        )
-                        .map(TimedGenerationOutput::without_timings)
-                } else {
-                    let flat_spec_config = SpeculativeConfig {
-                        num_speculative_tokens: spec_config.num_speculative_tokens.min(4),
-                        draft_layers: spec_config.draft_layers,
-                    };
-                    runner_guard
-                        .generate_speculative(&prompt, &params, &flat_spec_config)
-                        .map(TimedGenerationOutput::without_timings)
-                }
-            }
-            ResolvedSpeculativeMode::Mtp => {
-                *prefix_cache_diagnostic_inner.lock().unwrap() = "not_used_speculative";
-                let output = runner_guard.generate_mtp_speculative(&prompt, &params)?;
-                // Per-adapter acceptance counters — the always-on
-                // measurement (no KILN_C1_ATTR_PATH needed) that makes a
-                // draft head's alpha visible per serving adapter.
-                if output.total_draft_attempts > 0 {
-                    if let Ok(mut counters) = mtp_acceptance.lock() {
-                        let entry = counters.entry(acceptance_adapter.clone()).or_insert((0, 0));
-                        entry.0 += output.draft_accepted_count as u64;
-                        entry.1 += output.total_draft_attempts as u64;
+                        );
+
+                        let mut output = match result {
+                            Ok(output) => {
+                                metrics.observe_prefill_duration(
+                                    output.prefill_duration.as_secs_f64(),
+                                );
+                                metrics
+                                    .observe_decode_duration(output.decode_duration.as_secs_f64());
+                                output
+                            }
+                            Err(err) => {
+                                if runner_guard.backend_health_snapshot().quarantined {
+                                    std::mem::forget(lookup.request);
+                                }
+                                return Err(err);
+                            }
+                        };
+                        let mut registrations = Vec::new();
+                        if let Some(registration) = output.registration.take() {
+                            registrations.push(registration);
+                        }
+                        registrations.append(&mut output.extra_registrations);
+                        let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
+                        lookup.request.finish(registrations, allocated_blocks);
+
+                        Ok(TimedGenerationOutput {
+                            output: output.output,
+                            ttft: Some(output.prefill_duration),
+                            decode_duration: Some(output.decode_duration),
+                        })
                     }
                 }
-                // KILN_C1_ATTR_PATH acceptance instrumentation: rows are
-                // pushed per draft step but only the bench driver ever
-                // drained them — over plain HTTP serving the CSV never
-                // materialized and the acceptance-rate A/B was unmeasurable.
-                drain_c1_attr_csv_if_enabled();
-                Ok(TimedGenerationOutput::without_timings(GenerationOutput {
-                    text: output.text,
-                    token_ids: output.token_ids,
-                    finish_reason: output.finish_reason,
-                }))
+                ResolvedSpeculativeMode::SkipLayer(spec_config) => {
+                    *prefix_cache_diagnostic_inner.lock().unwrap() = "not_used_speculative";
+                    if params.temperature == 0.0 {
+                        runner_guard
+                            .generate_paged_speculative_shared_tokens(
+                                &prompt_tokens,
+                                &params,
+                                bm.as_ref(),
+                                pc.as_ref(),
+                                &spec_config,
+                                Some(&cancel_inner),
+                            )
+                            .map(TimedGenerationOutput::without_timings)
+                    } else {
+                        let flat_spec_config = SpeculativeConfig {
+                            num_speculative_tokens: spec_config.num_speculative_tokens.min(4),
+                            draft_layers: spec_config.draft_layers,
+                        };
+                        runner_guard
+                            .generate_speculative(&prompt, &params, &flat_spec_config)
+                            .map(TimedGenerationOutput::without_timings)
+                    }
+                }
+                ResolvedSpeculativeMode::Mtp => {
+                    *prefix_cache_diagnostic_inner.lock().unwrap() = "not_used_speculative";
+                    let output = runner_guard.generate_mtp_speculative(&prompt, &params)?;
+                    // Per-adapter acceptance counters — the always-on
+                    // measurement (no KILN_C1_ATTR_PATH needed) that makes a
+                    // draft head's alpha visible per serving adapter.
+                    if output.total_draft_attempts > 0 {
+                        if let Ok(mut counters) = mtp_acceptance.lock() {
+                            let entry =
+                                counters.entry(acceptance_adapter.clone()).or_insert((0, 0));
+                            entry.0 += output.draft_accepted_count as u64;
+                            entry.1 += output.total_draft_attempts as u64;
+                        }
+                    }
+                    // KILN_C1_ATTR_PATH acceptance instrumentation: rows are
+                    // pushed per draft step but only the bench driver ever
+                    // drained them — over plain HTTP serving the CSV never
+                    // materialized and the acceptance-rate A/B was unmeasurable.
+                    drain_c1_attr_csv_if_enabled();
+                    Ok(TimedGenerationOutput::without_timings(GenerationOutput {
+                        text: output.text,
+                        token_ids: output.token_ids,
+                        finish_reason: output.finish_reason,
+                    }))
+                }
             }
+        })();
+        if result.is_err() && runner_guard.backend_health_snapshot().quarantined {
+            std::mem::forget(gpu_guard);
         }
+        result
     });
 
     tokio::pin!(generation);
@@ -6802,6 +6798,21 @@ async fn generate_real(
         decode_duration,
     );
     Ok(response)
+}
+
+async fn send_stream_generation_error(
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    message: impl Into<String>,
+) {
+    let payload = serde_json::json!({
+        "error": {
+            "message": message.into(),
+            "type": "server_error",
+            "code": "generation_error"
+        }
+    });
+    let _ = tx.send(Event::default().data(payload.to_string())).await;
+    let _ = tx.send(Event::default().data("[DONE]")).await;
 }
 
 /// Generate using the real ModelRunner with SSE streaming and paged KV cache.
@@ -6988,7 +6999,7 @@ async fn generate_real_streaming(
                     // instead of buffering everything until generation is
                     // done.
                     match tokio::task::spawn_blocking(move || {
-                        let _gpu_guard = gpu_coordination_read_guard(&gpu_lock);
+                        let gpu_guard = gpu_coordination_read_guard(&gpu_lock);
                         let prefix_enabled = {
                             let cache = prefix_cache.lock().unwrap();
                             cache.is_enabled()
@@ -7002,21 +7013,44 @@ async fn generate_real_streaming(
                                 bm.clone(),
                                 pc.clone(),
                                 decode_batcher.clone(),
+                                gpu_guard,
                             )
                         } else {
-                            let (hit, should_register_on_miss) = {
-                                let mut cache = prefix_cache.lock().unwrap();
-                                let should_lookup = cache.should_lookup_prompt(&prompt_tokens);
-                                let hit = if should_lookup {
-                                    cache.lookup(&adapter, &prompt_tokens, &params)?
-                                } else {
-                                    None
-                                };
-                                let should_register = cache.should_register_prompt(&prompt_tokens);
-                                (hit, should_register)
+                            let runner_guard = runner.read().map_err(|error| {
+                                anyhow::anyhow!(
+                                    "failed to acquire runner for prefix-cache lookup: {error}"
+                                )
+                            })?;
+                            runner_guard.ensure_backend_healthy()?;
+                            let pending_lookup = match RealPrefixCacheRequest::begin(
+                                &prefix_cache,
+                                &bm,
+                                adapter.clone(),
+                                &prompt_tokens,
+                                &params,
+                            ) {
+                                Ok(lookup) => lookup,
+                                Err(failure) => {
+                                    let error = failure.settle(&runner_guard);
+                                    if runner_guard.backend_health_snapshot().quarantined {
+                                        std::mem::forget(gpu_guard);
+                                    }
+                                    return Err(error);
+                                }
                             };
+                            let lookup = match pending_lookup.settle(&runner_guard) {
+                                Ok(lookup) => lookup,
+                                Err(error) => {
+                                    std::mem::forget(gpu_guard);
+                                    return Err(error);
+                                }
+                            };
+                            drop(runner_guard);
+                            let should_register_on_miss = lookup.should_register;
+                            let hit = lookup.hit;
                             if hit.is_none() && !should_register_on_miss {
                                 *prefix_cache_diagnostic.lock().unwrap() = "skipped";
+                                drop(lookup.request);
                                 return kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
                                     runner.clone(),
                                     prompt_tokens.clone(),
@@ -7024,14 +7058,11 @@ async fn generate_real_streaming(
                                     bm.clone(),
                                     pc.clone(),
                                     decode_batcher.clone(),
+                                    gpu_guard,
                                 );
                             }
-                            *prefix_cache_diagnostic.lock().unwrap() = if hit.is_some() {
-                                "hit"
-                            } else {
-                                "miss"
-                            };
-                            let hit_entry_id = hit.as_ref().map(|hit| hit.entry_id);
+                            *prefix_cache_diagnostic.lock().unwrap() =
+                                if hit.is_some() { "hit" } else { "miss" };
                             let cached_prefix = hit.map(|hit| PagedPrefixReuse {
                                 cached_tokens: hit.cached_tokens,
                                 block_ids: hit.block_ids,
@@ -7039,7 +7070,7 @@ async fn generate_real_streaming(
                                 next_token: hit.next_token,
                             });
 
-                            let result = kiln_model::ModelRunner::
+                            kiln_model::ModelRunner::
                                 spawn_streaming_paged_shared_tokens_with_prefix_cache(
                                     runner.clone(),
                                     prompt_tokens.clone(),
@@ -7048,89 +7079,19 @@ async fn generate_real_streaming(
                                     pc.clone(),
                                     cached_prefix,
                                     decode_batcher.clone(),
-                                );
-
-                            let mut output = match result {
-                                Ok(output) => output,
-                                Err(err) => {
-                                    if let Some(entry_id) = hit_entry_id {
-                                        let mut cache = prefix_cache.lock().unwrap();
-                                        cache.release_hit(entry_id);
-                                    }
-                                    return Err(err);
-                                }
-                            };
-                            let registration = output.registration.take();
-                            let extra_registrations =
-                                std::mem::take(&mut output.extra_registrations);
-                            let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
-                            let block_free_signal = output.block_free_signal.take();
-                            let mut retained_blocks = Vec::new();
-                            let mut evicted_blocks = Vec::new();
-                            {
-                                let mut cache = prefix_cache.lock().unwrap();
-                                if let Some(entry_id) = hit_entry_id {
-                                    cache.release_hit(entry_id);
-                                }
-                                if let Some(registration) = registration {
-                                    let outcome = cache.register(adapter.clone(), registration);
-                                    retained_blocks.extend(outcome.retained_blocks);
-                                    evicted_blocks.extend(outcome.evicted_blocks);
-                                }
-                                for registration in extra_registrations {
-                                    let outcome = cache.register(adapter.clone(), registration);
-                                    retained_blocks.extend(outcome.retained_blocks);
-                                    evicted_blocks.extend(outcome.evicted_blocks);
-                                }
-                            }
-
-                            let mut blocks_to_free: Vec<u32> = allocated_blocks
-                                .into_iter()
-                                .filter(|block_id| !retained_blocks.contains(block_id))
-                                .collect();
-                            blocks_to_free.extend(evicted_blocks);
-                            // #673: never free a block that the prefix cache
-                            // has just claimed for the new entry, and never
-                            // queue the same block twice in one free call —
-                            // even on the deferred (channel) path.
-                            debug_assert!(
-                                blocks_to_free
-                                    .iter()
-                                    .all(|id| !retained_blocks.contains(id)),
-                                "blocks_to_free overlaps retained_blocks: free={blocks_to_free:?} retained={retained_blocks:?}",
-                            );
-                            debug_assert!(
-                                {
-                                    let mut seen = std::collections::HashSet::with_capacity(
-                                        blocks_to_free.len(),
-                                    );
-                                    blocks_to_free.iter().all(|id| seen.insert(*id))
-                                },
-                                "blocks_to_free contains duplicate block IDs: {blocks_to_free:?}",
-                            );
-                            // For the threaded streaming path, NEVER free
-                            // here — the spawned decode worker is still
-                            // reading these block ids for KV. Hand the
-                            // computed set to the worker via its
-                            // rendezvous channel; it frees after the
-                            // decode loop finishes. Calling
-                            // `bm.free_all` synchronously here was the
-                            // root cause of the second-and-later same-
-                            // prompt regression to "毎回毎回..." — the
-                            // BlockManager handed those same block ids
-                            // back out to the next request before the
-                            // running decode loop was done with them.
-                            // The legacy synchronous path still leaves
-                            // `block_free_signal == None` and gets the
-                            // immediate-free behavior below.
-                            if let Some(signal) = block_free_signal {
-                                let _ = signal.send(blocks_to_free);
-                            } else if !blocks_to_free.is_empty() {
-                                let mut bm_guard = bm.lock().unwrap();
-                                bm_guard.free_all(&blocks_to_free);
-                            }
-
-                            Ok(output.receiver)
+                                    gpu_guard,
+                                    move |mut cleanup| {
+                                        let mut registrations = Vec::new();
+                                        if let Some(registration) = cleanup.registration.take() {
+                                            registrations.push(registration);
+                                        }
+                                        registrations.append(&mut cleanup.extra_registrations);
+                                        lookup
+                                            .request
+                                            .finish(registrations, cleanup.allocated_blocks);
+                                        Ok(())
+                                    },
+                                )
                         }
                     })
                     .await
@@ -7139,14 +7100,20 @@ async fn generate_real_streaming(
                             observe_post_prefill_vram(&memory_budget);
                             rx
                         }
-                        _ => {
+                        Ok(Err(error)) => {
                             observe_post_prefill_vram(&memory_budget);
-                            record(
-                                "error".to_string(),
-                                &completion_buf,
-                                completion_token_count,
-                            );
-                            let _ = tx.send(Event::default().data("[DONE]")).await;
+                            record("error".to_string(), &completion_buf, completion_token_count);
+                            send_stream_generation_error(&tx, error.to_string()).await;
+                            return;
+                        }
+                        Err(join_error) => {
+                            observe_post_prefill_vram(&memory_budget);
+                            record("error".to_string(), &completion_buf, completion_token_count);
+                            send_stream_generation_error(
+                                &tx,
+                                format!("streaming prefill task failed: {join_error}"),
+                            )
+                            .await;
                             return;
                         }
                     }
@@ -7180,9 +7147,18 @@ async fn generate_real_streaming(
                     .await
                     {
                         Ok(Ok(rx)) => rx,
-                        _ => {
+                        Ok(Err(error)) => {
                             record("error".to_string(), &completion_buf, completion_token_count);
-                            let _ = tx.send(Event::default().data("[DONE]")).await;
+                            send_stream_generation_error(&tx, error.to_string()).await;
+                            return;
+                        }
+                        Err(join_error) => {
+                            record("error".to_string(), &completion_buf, completion_token_count);
+                            send_stream_generation_error(
+                                &tx,
+                                format!("speculative streaming prefill task failed: {join_error}"),
+                            )
+                            .await;
                             return;
                         }
                     }
@@ -7203,9 +7179,18 @@ async fn generate_real_streaming(
                     .await
                     {
                         Ok(Ok(rx)) => rx,
-                        _ => {
+                        Ok(Err(error)) => {
                             record("error".to_string(), &completion_buf, completion_token_count);
-                            let _ = tx.send(Event::default().data("[DONE]")).await;
+                            send_stream_generation_error(&tx, error.to_string()).await;
+                            return;
+                        }
+                        Err(join_error) => {
+                            record("error".to_string(), &completion_buf, completion_token_count);
+                            send_stream_generation_error(
+                                &tx,
+                                format!("MTP streaming prefill task failed: {join_error}"),
+                            )
+                            .await;
                             return;
                         }
                     }
@@ -7474,7 +7459,7 @@ async fn generate_real_streaming(
                                     completion_cache
                                         .lock()
                                         .unwrap()
-                                        .insert_complete_value(key, cache_value.clone());
+                                        .insert_unowned_complete_value(key, cache_value.clone());
                                 }
                                 let chat_cache_value = DeterministicChatRequestCacheValue {
                                     prompt_tokens: prompt_token_count,
@@ -7493,6 +7478,34 @@ async fn generate_real_streaming(
                                     &record_completion,
                                     completion_token_count,
                                 );
+                                return;
+                            }
+                            Ok((_, Ok(StreamEvent::Error(error)))) => {
+                                let tail = flush_buffered_stream_tail(
+                                    &tx,
+                                    &id,
+                                    created,
+                                    &model,
+                                    &mut reasoning_splitter,
+                                    &mut completion_buf,
+                                    &mut reasoning_buf,
+                                    &mut content_buf,
+                                    &mut tool_gate,
+                                    "error",
+                                )
+                                .await;
+                                let payload = serde_json::json!({
+                                    "error": {
+                                        "message": error,
+                                        "type": "server_error",
+                                        "code": "generation_error"
+                                    }
+                                });
+                                let _ = tx.send(Event::default().data(payload.to_string())).await;
+                                let _ = tx.send(Event::default().data("[DONE]")).await;
+                                let (finish, record_completion) =
+                                    stream_tail_finish_and_record(tail, "error", &completion_buf);
+                                record(finish, &record_completion, completion_token_count);
                                 return;
                             }
                             _ => {
@@ -8657,6 +8670,10 @@ async fn batch_completions(
     Json(req): Json<BatchCompletionRequest>,
 ) -> Result<Response, ApiError> {
     let start = std::time::Instant::now();
+    if let Err(err) = ensure_backend_admission(&state) {
+        state.metrics.inc_request(RequestStatus::Rejected);
+        return Err(err);
+    }
     state.metrics.inc_active();
 
     let result = batch_completions_inner(&state, req).await;
@@ -11619,6 +11636,25 @@ mod tests {
             .filter_map(|line| line.strip_prefix("data: "))
             .map(|data| serde_json::from_str(data).expect("SSE data line should be JSON"))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn streaming_generation_errors_use_structured_sse_before_done() {
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        send_stream_generation_error(&tx, "injected prefill failure".to_string()).await;
+        drop(tx);
+
+        let body = sse_body_from_events(rx).await;
+        let payloads: Vec<_> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect();
+        assert_eq!(payloads.len(), 2, "unexpected SSE body: {body}");
+        let error: serde_json::Value = serde_json::from_str(payloads[0]).unwrap();
+        assert_eq!(error["error"]["message"], "injected prefill failure");
+        assert_eq!(error["error"]["type"], "server_error");
+        assert_eq!(error["error"]["code"], "generation_error");
+        assert_eq!(payloads[1], "[DONE]");
     }
 
     #[tokio::test]

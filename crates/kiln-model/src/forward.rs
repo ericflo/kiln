@@ -5020,11 +5020,28 @@ impl LinearAttentionState {
     pub fn snapshot(&self) -> Result<Self> {
         let mut recurrent_states = Vec::with_capacity(self.recurrent_states.len());
         for t in &self.recurrent_states {
-            recurrent_states.push(t.copy().context("snapshot recurrent state")?);
+            match t.copy().context("snapshot recurrent state") {
+                Ok(snapshot) => recurrent_states.push(snapshot),
+                Err(error) => {
+                    // Earlier device copies may still be in flight. Retain
+                    // their destinations rather than returning allocations to
+                    // a backend pool before the caller settles/quarantines the
+                    // failed snapshot boundary.
+                    std::mem::forget(recurrent_states);
+                    return Err(error);
+                }
+            }
         }
         let mut conv_states = Vec::with_capacity(self.conv_states.len());
         for t in &self.conv_states {
-            conv_states.push(t.copy().context("snapshot conv state")?);
+            match t.copy().context("snapshot conv state") {
+                Ok(snapshot) => conv_states.push(snapshot),
+                Err(error) => {
+                    std::mem::forget(recurrent_states);
+                    std::mem::forget(conv_states);
+                    return Err(error);
+                }
+            }
         }
         Ok(Self {
             recurrent_states,

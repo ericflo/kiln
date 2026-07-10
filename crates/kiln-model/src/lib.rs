@@ -81,10 +81,10 @@ pub use cancel::CancelHandle;
 pub use engine::Engine;
 pub use forward::LinearAttentionState;
 pub use generate::{
-    DecodeBatcher, DecodeBatcherConfig, DecodeBatcherStats, FinishReason, GenerationOutput,
-    ModelRunner, MtpGenerationOutput, PagedBatchedDecodeState, PagedPrefixNextToken,
-    PagedPrefixRegistration, PagedPrefixReuse, PrefixCachedGenerationOutput, StreamDone,
-    StreamEvent, StreamToken,
+    BackendHealthHandle, BackendHealthSnapshot, DecodeBatcher, DecodeBatcherConfig,
+    DecodeBatcherStats, ExternalYieldSyncStats, FinishReason, GenerationOutput, ModelRunner,
+    MtpGenerationOutput, PagedBatchedDecodeState, PagedPrefixNextToken, PagedPrefixRegistration,
+    PagedPrefixReuse, PrefixCachedGenerationOutput, StreamDone, StreamEvent, StreamToken,
 };
 pub use kv_cache::KvCache;
 pub use loader::{LoadModelOptions, load_model, load_model_with_options};

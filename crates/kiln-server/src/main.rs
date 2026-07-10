@@ -22,7 +22,7 @@ use kiln_model::engine::MockEngine;
 use kiln_model::forward::GpuWeights;
 use kiln_model::{ModelRunner, StartupCapabilities};
 use kiln_scheduler::{Scheduler, SchedulerConfig};
-use state::{AppState, ModelBackend};
+use state::{AppState, GpuCoordinationLock, ModelBackend};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct HttpSendBufferApplication {
@@ -1130,7 +1130,7 @@ fn spawn_backend_prewarm(state: AppState) {
 
 fn spawn_vulkan_decode_weight_prewarm(
     runner: Arc<std::sync::RwLock<ModelRunner>>,
-    gpu_lock: Arc<std::sync::RwLock<()>>,
+    gpu_lock: GpuCoordinationLock,
     prewarm_complete: Arc<std::sync::atomic::AtomicBool>,
 ) {
     tokio::spawn(async move {

@@ -2529,6 +2529,7 @@ fn bench_training(
             &adapter_dir,
             "bench-adapter",
             progress_cb,
+            None,
         )
     } else {
         kiln_train::trainer::sft_train(

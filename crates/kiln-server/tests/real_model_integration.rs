@@ -1725,7 +1725,7 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
         block_manager.clone(),
         Arc::new(prefix_test_paged_cache(&config)),
         prefix_cache.clone(),
-        Arc::new(RwLock::new(())),
+        Arc::new(tokio::sync::RwLock::new(())),
     );
 
     let sampling = SamplingParams {
@@ -1778,11 +1778,11 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
     match &retry_slot {
         DecodeSlot::Real {
             state,
-            hit_entry_id,
+            prefix_request,
             ..
         } => {
             assert!(
-                hit_entry_id.is_some(),
+                prefix_request.is_some(),
                 "retry must pin the safe prefix entry"
             );
             assert_eq!(state.next_token, turn1_next_token);
@@ -1820,9 +1820,22 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
         stats.hit_tokens, 160,
         "both hits must cover the full split position (floor((81-1)/16)*16)"
     );
+    assert!(
+        prefix_cache.lock().unwrap().clear().is_empty(),
+        "clear must retire, not release, the prefix entry pinned by turn 2"
+    );
+    let retired = prefix_cache.lock().unwrap().stats();
+    assert_eq!(retired.active_leases, 1);
+    assert_eq!(retired.pending_release_entries, 1);
+    assert!(block_manager.lock().unwrap().num_used() > 0);
     forward
         .finish_request(slot2, FinishReason::MaxTokens)
         .expect("turn-2 finish");
+    assert_eq!(
+        block_manager.lock().unwrap().num_used(),
+        0,
+        "final request completion must release the retired prefix and private suffix"
+    );
 }
 
 /// Non-batched serve path (Metal's default): the non-streaming CPU prefill

@@ -73,6 +73,8 @@ pub struct PrefixCacheStats {
     pub max_entries: usize,
     pub cached_state_bytes: u64,
     pub max_state_bytes: u64,
+    pub active_leases: usize,
+    pub pending_release_entries: usize,
 }
 
 /// Iteration-level continuous batching scheduler.

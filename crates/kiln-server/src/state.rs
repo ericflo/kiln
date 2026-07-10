@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, watch};
 
 use kiln_core::block::BlockManager;
 use kiln_core::config::ModelConfig;
@@ -13,8 +13,8 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
 use kiln_model::{
-    DecodeBatcher, DecodeBatcherConfig, GpuAllocatorMemoryProbePolicy, GpuMemoryBudgetPolicy,
-    GpuMemoryDetectionPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
+    BackendHealthHandle, DecodeBatcher, DecodeBatcherConfig, GpuAllocatorMemoryProbePolicy,
+    GpuMemoryBudgetPolicy, GpuMemoryDetectionPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
     InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy, LinearAttentionState, ModelRunner,
     PagedKvCacheKt, PagedPrefixNextToken, PagedPrefixRegistration,
     TrainingAccelerationEnvFlagPolicy, TrainingAccelerationProfileLogMessage,
@@ -190,30 +190,18 @@ impl GpuMemoryBudget {
 ///
 /// Training should acquire this per-segment (for gradient-checkpointed training),
 /// not for the entire job, to minimize inference latency impact.
-pub type GpuCoordinationLock = Arc<std::sync::RwLock<()>>;
+pub type GpuCoordinationLock = Arc<RwLock<()>>;
 
 pub(crate) fn gpu_coordination_read_guard(
     gpu_lock: &GpuCoordinationLock,
-) -> RwLockReadGuard<'_, ()> {
-    gpu_lock.read().unwrap_or_else(|err| {
-        tracing::warn!(
-            error = %err,
-            "gpu coordination lock poisoned; continuing because the lock carries no state"
-        );
-        err.into_inner()
-    })
+) -> OwnedRwLockReadGuard<()> {
+    futures::executor::block_on(gpu_lock.clone().read_owned())
 }
 
 pub(crate) fn gpu_coordination_write_guard(
     gpu_lock: &GpuCoordinationLock,
-) -> RwLockWriteGuard<'_, ()> {
-    gpu_lock.write().unwrap_or_else(|err| {
-        tracing::warn!(
-            error = %err,
-            "gpu coordination lock poisoned; continuing because the lock carries no state"
-        );
-        err.into_inner()
-    })
+) -> OwnedRwLockWriteGuard<()> {
+    futures::executor::block_on(gpu_lock.clone().write_owned())
 }
 
 /// Type of training job.
@@ -410,6 +398,8 @@ pub struct RealPrefixCache {
     min_register_tokens: usize,
     block_size: usize,
     next_entry_id: u64,
+    global_generation: u64,
+    adapter_generations: HashMap<Option<String>, u64>,
     entries: Vec<RealPrefixCacheEntry>,
     block_refcounts: HashMap<u32, usize>,
     stats: PrefixCacheStats,
@@ -424,6 +414,7 @@ struct RealPrefixCacheEntry {
     next_token: Option<PagedPrefixNextToken>,
     last_used: u64,
     active_uses: usize,
+    retired: bool,
 }
 
 pub struct RealPrefixCacheHit {
@@ -437,6 +428,173 @@ pub struct RealPrefixCacheHit {
 pub struct RealPrefixCacheRegisterOutcome {
     pub retained_blocks: Vec<u32>,
     pub evicted_blocks: Vec<u32>,
+}
+
+pub struct RealPrefixCacheRequestLookup {
+    pub request: RealPrefixCacheRequest,
+    pub hit: Option<RealPrefixCacheHit>,
+    pub should_register: bool,
+}
+
+/// A prefix lookup whose successful hit snapshot may still own asynchronous
+/// device-to-device copies.
+///
+/// The hit and its request lease remain inaccessible until [`Self::settle`]
+/// proves those copies complete. Dropping an unsettled hit intentionally
+/// retains both the snapshot and lease so their storage cannot be recycled.
+#[must_use = "prefix-cache lookups must be settled before their hit state can be used"]
+pub struct RealPrefixCachePendingLookup {
+    request: Option<RealPrefixCacheRequest>,
+    hit: Option<RealPrefixCacheHit>,
+    should_register: bool,
+}
+
+impl RealPrefixCachePendingLookup {
+    pub fn settle(self, runner: &ModelRunner) -> anyhow::Result<RealPrefixCacheRequestLookup> {
+        self.settle_with(|| runner.synchronize_external_yield("prefix-cache hit snapshot"))
+    }
+
+    fn settle_with(
+        mut self,
+        synchronize: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<RealPrefixCacheRequestLookup> {
+        if self.hit.is_some() {
+            synchronize()?;
+        }
+        Ok(RealPrefixCacheRequestLookup {
+            request: self.request.take().expect("pending prefix request present"),
+            hit: self.hit.take(),
+            should_register: self.should_register,
+        })
+    }
+
+    #[cfg(test)]
+    fn settle_synchronous_for_test(self) -> anyhow::Result<RealPrefixCacheRequestLookup> {
+        self.settle_with(|| Ok(()))
+    }
+}
+
+impl Drop for RealPrefixCachePendingLookup {
+    fn drop(&mut self) {
+        if self.hit.is_none() {
+            return;
+        }
+        tracing::error!(
+            "unsettled prefix-cache hit dropped; retaining its snapshot and source lease"
+        );
+        if let Some(request) = self.request.take() {
+            std::mem::forget(request);
+        }
+        if let Some(hit) = self.hit.take() {
+            std::mem::forget(hit);
+        }
+    }
+}
+
+/// Owns a provisional cache lease when hit-state snapshotting fails.
+///
+/// Call [`Self::settle`] while the request still owns its GPU coordination
+/// permit. Dropping this value without settlement intentionally leaks the
+/// lease, which keeps the source entry and its pages quarantined.
+#[must_use = "prefix-cache begin failures must be settled before GPU ownership is released"]
+pub struct RealPrefixCacheBeginFailure {
+    error: Option<anyhow::Error>,
+    request: Option<RealPrefixCacheRequest>,
+}
+
+impl RealPrefixCacheBeginFailure {
+    fn without_request(error: anyhow::Error) -> Self {
+        Self {
+            error: Some(error),
+            request: None,
+        }
+    }
+
+    fn with_request(error: anyhow::Error, request: RealPrefixCacheRequest) -> Self {
+        Self {
+            error: Some(error),
+            request: Some(request),
+        }
+    }
+
+    pub fn settle(mut self, runner: &ModelRunner) -> anyhow::Error {
+        let error = self.error.take().expect("prefix begin error present");
+        let Some(request) = self.request.take() else {
+            return error;
+        };
+        match runner.synchronize_external_yield("prefix-cache hit snapshot failure") {
+            Ok(()) => {
+                drop(request);
+                runner.backend_health_handle().quarantine(format!(
+                    "prefix-cache hit snapshot failed after partial device-copy submission: {error:#}"
+                ));
+                error
+            }
+            Err(sync_error) => {
+                std::mem::forget(request);
+                sync_error.context(format!(
+                    "prefix-cache hit snapshot also failed before synchronization: {error:#}"
+                ))
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for RealPrefixCacheBeginFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RealPrefixCacheBeginFailure")
+            .field("error", &self.error.as_ref().map(ToString::to_string))
+            .field("has_provisional_lease", &self.request.is_some())
+            .finish()
+    }
+}
+
+impl std::fmt::Display for RealPrefixCacheBeginFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.error.as_ref() {
+            Some(error) => std::fmt::Display::fmt(error, formatter),
+            None => formatter.write_str("prefix-cache begin failure already consumed"),
+        }
+    }
+}
+
+impl std::error::Error for RealPrefixCacheBeginFailure {}
+
+impl Drop for RealPrefixCacheBeginFailure {
+    fn drop(&mut self) {
+        if let Some(request) = self.request.take() {
+            std::mem::forget(request);
+        }
+    }
+}
+
+struct RealPrefixCacheLookupAttempt {
+    hit: anyhow::Result<Option<RealPrefixCacheHit>>,
+    leased_entry_id: Option<u64>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RealPrefixCacheFinishOutcome {
+    pub retained_blocks: Vec<u32>,
+    pub released_blocks: Vec<u32>,
+    pub registrations_accepted: bool,
+}
+
+/// Move-only ownership for one cache-enabled generation request.
+///
+/// A request without a hit still carries generation fences so an adapter
+/// purge or global clear cannot be undone by stale prefill completing later.
+/// Dropping a hit request releases its lease and reclaims a retired entry's
+/// blocks, which makes error and cancellation paths fail closed.
+#[must_use = "dropping a prefix-cache request abandons its registration and releases its hit lease"]
+pub struct RealPrefixCacheRequest {
+    cache: Arc<std::sync::Mutex<RealPrefixCache>>,
+    block_manager: Arc<std::sync::Mutex<BlockManager>>,
+    adapter: Option<String>,
+    global_generation: u64,
+    adapter_generation: u64,
+    hit_entry_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -940,6 +1098,20 @@ impl DeterministicCompletionCache {
         self.lru.push_back(key);
     }
 
+    /// Store a value produced by a probe-only caller without disturbing a
+    /// request that claimed the same key after that probe returned.
+    pub fn insert_unowned_complete_value(
+        &mut self,
+        key: DeterministicCompletionCacheKey,
+        value: DeterministicCompletionCacheValue,
+    ) -> bool {
+        if self.in_flight.contains_key(&key) {
+            return false;
+        }
+        self.insert_complete_value(key, value);
+        true
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
         self.lru.clear();
@@ -975,6 +1147,167 @@ impl DeterministicCompletionCache {
 
     pub fn stats(&self) -> usize {
         self.entries.len()
+    }
+}
+
+impl RealPrefixCacheRequest {
+    pub fn begin(
+        cache: &Arc<std::sync::Mutex<RealPrefixCache>>,
+        block_manager: &Arc<std::sync::Mutex<BlockManager>>,
+        adapter: Option<String>,
+        prompt_tokens: &[TokenId],
+        sampling: &SamplingParams,
+    ) -> Result<RealPrefixCachePendingLookup, RealPrefixCacheBeginFailure> {
+        let mut cache_guard = cache.lock().map_err(|err| {
+            RealPrefixCacheBeginFailure::without_request(anyhow::anyhow!(
+                "prefix cache lock poisoned: {err}"
+            ))
+        })?;
+        if !cache_guard.is_enabled() {
+            return Err(RealPrefixCacheBeginFailure::without_request(
+                anyhow::anyhow!("cannot begin a request against a disabled prefix cache"),
+            ));
+        }
+
+        let global_generation = cache_guard.global_generation;
+        let adapter_generation = cache_guard.adapter_generation(&adapter);
+        let should_lookup = cache_guard.should_lookup_prompt(prompt_tokens);
+        let should_register = cache_guard.should_register_prompt(prompt_tokens);
+        let lookup = if should_lookup {
+            cache_guard.lookup(&adapter, prompt_tokens, sampling)
+        } else {
+            RealPrefixCacheLookupAttempt {
+                hit: Ok(None),
+                leased_entry_id: None,
+            }
+        };
+        let hit_entry_id = lookup.leased_entry_id;
+        drop(cache_guard);
+
+        let request = Self {
+            cache: Arc::clone(cache),
+            block_manager: Arc::clone(block_manager),
+            adapter,
+            global_generation,
+            adapter_generation,
+            hit_entry_id,
+        };
+        match lookup.hit {
+            Ok(hit) => Ok(RealPrefixCachePendingLookup {
+                request: Some(request),
+                hit,
+                should_register,
+            }),
+            Err(error) => Err(RealPrefixCacheBeginFailure::with_request(error, request)),
+        }
+    }
+
+    pub fn finish(
+        mut self,
+        registrations: Vec<PagedPrefixRegistration>,
+        allocated_blocks: Vec<u32>,
+    ) -> RealPrefixCacheFinishOutcome {
+        let mut released_blocks = Vec::new();
+        let mut final_cache_blocks = HashSet::new();
+        let registrations_accepted;
+
+        {
+            let Ok(mut cache) = self.cache.lock().map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    "prefix cache lock poisoned while finishing a request; quarantining its lease"
+                );
+            }) else {
+                // The cached hit remains quarantined because its refcount can
+                // no longer be updated safely. Fresh suffix allocations were
+                // never published into this poisoned cache, so they remain
+                // uniquely owned and can be returned after backend quiescence.
+                self.hit_entry_id = None;
+                let mut known_private = allocated_blocks;
+                known_private.sort_unstable();
+                known_private.dedup();
+                self.free_blocks(&known_private);
+                return RealPrefixCacheFinishOutcome {
+                    retained_blocks: Vec::new(),
+                    released_blocks: known_private,
+                    registrations_accepted: false,
+                };
+            };
+            registrations_accepted = cache.global_generation == self.global_generation
+                && cache.adapter_generation(&self.adapter) == self.adapter_generation;
+            if registrations_accepted {
+                for registration in registrations {
+                    let outcome = cache.register(self.adapter.clone(), registration);
+                    released_blocks.extend(outcome.evicted_blocks);
+                }
+            }
+            if let Some(entry_id) = self.hit_entry_id.take() {
+                released_blocks.extend(cache.release_hit(entry_id));
+            }
+            final_cache_blocks.extend(cache.block_refcounts.keys().copied());
+        }
+
+        let mut retained_blocks = Vec::new();
+        let mut blocks_to_free = Vec::new();
+        let mut seen = HashSet::new();
+        for block_id in allocated_blocks {
+            if final_cache_blocks.contains(&block_id) {
+                if seen.insert(block_id) {
+                    retained_blocks.push(block_id);
+                }
+            } else if seen.insert(block_id) {
+                blocks_to_free.push(block_id);
+            }
+        }
+        for block_id in released_blocks {
+            if !final_cache_blocks.contains(&block_id) && seen.insert(block_id) {
+                blocks_to_free.push(block_id);
+            }
+        }
+        self.free_blocks(&blocks_to_free);
+
+        RealPrefixCacheFinishOutcome {
+            retained_blocks,
+            released_blocks: blocks_to_free,
+            registrations_accepted,
+        }
+    }
+
+    fn release_lease(&mut self) -> Vec<u32> {
+        let Some(entry_id) = self.hit_entry_id.take() else {
+            return Vec::new();
+        };
+        let Ok(mut cache) = self.cache.lock().map_err(|err| {
+            tracing::error!(
+                error = %err,
+                "prefix cache lock poisoned while abandoning a request; quarantining its lease"
+            );
+        }) else {
+            return Vec::new();
+        };
+        cache.release_hit(entry_id)
+    }
+
+    fn free_blocks(&self, block_ids: &[u32]) {
+        if block_ids.is_empty() {
+            return;
+        }
+        let Ok(mut block_manager) = self.block_manager.lock().map_err(|err| {
+            tracing::error!(
+                error = %err,
+                "block manager lock poisoned while releasing prefix-cache request blocks; quarantining them"
+            );
+        }) else {
+            return;
+        };
+        block_manager.free_all(block_ids);
+    }
+}
+
+impl Drop for RealPrefixCacheRequest {
+    fn drop(&mut self) {
+        let released_blocks = self.release_lease();
+        self.free_blocks(&released_blocks);
     }
 }
 
@@ -1015,6 +1348,8 @@ impl RealPrefixCache {
             min_register_tokens,
             block_size,
             next_entry_id: 1,
+            global_generation: 0,
+            adapter_generations: HashMap::new(),
             entries: Vec::new(),
             block_refcounts: HashMap::new(),
             stats: PrefixCacheStats {
@@ -1049,14 +1384,17 @@ impl RealPrefixCache {
         self.should_register_prompt(prompt_tokens)
     }
 
-    pub fn lookup(
+    fn lookup(
         &mut self,
         adapter: &Option<String>,
         prompt_tokens: &[TokenId],
         sampling: &SamplingParams,
-    ) -> anyhow::Result<Option<RealPrefixCacheHit>> {
+    ) -> RealPrefixCacheLookupAttempt {
         if !self.is_enabled() {
-            return Ok(None);
+            return RealPrefixCacheLookupAttempt {
+                hit: Ok(None),
+                leased_entry_id: None,
+            };
         }
 
         let best_idx = self
@@ -1064,6 +1402,9 @@ impl RealPrefixCache {
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
+                if entry.retired {
+                    return false;
+                }
                 let block_aligned =
                     self.block_size > 0 && entry.prompt_tokens.len() % self.block_size == 0;
                 let block_shape_valid = block_aligned
@@ -1091,40 +1432,89 @@ impl RealPrefixCache {
             .map(|(idx, _)| idx);
 
         let Some(idx) = best_idx else {
-            self.stats.lookup_misses += 1;
-            return Ok(None);
+            self.stats.lookup_misses = self.stats.lookup_misses.saturating_add(1);
+            return RealPrefixCacheLookupAttempt {
+                hit: Ok(None),
+                leased_entry_id: None,
+            };
         };
 
-        // Snapshot before mutating accounting or pinning the entry. Device
-        // allocation/copy can fail, and a failed lookup has no hit handle the
-        // caller could use to release an incremented `active_uses` count.
-        let hit = {
+        let Some(next_active_uses) = self.entries[idx].active_uses.checked_add(1) else {
+            return RealPrefixCacheLookupAttempt {
+                hit: Err(anyhow::anyhow!(
+                    "prefix-cache active lease counter overflow"
+                )),
+                leased_entry_id: None,
+            };
+        };
+        self.entries[idx].active_uses = next_active_uses;
+        let entry_id = self.entries[idx].id;
+
+        // Pin before the first device copy. A partial snapshot failure returns
+        // the provisional lease to `RealPrefixCacheBeginFailure`, which may be
+        // released only after backend completion is proved.
+        let hit = (|| -> anyhow::Result<RealPrefixCacheHit> {
             let entry = &self.entries[idx];
-            RealPrefixCacheHit {
+            Ok(RealPrefixCacheHit {
                 entry_id: entry.id,
                 cached_tokens: entry.prompt_tokens.len(),
                 block_ids: entry.block_ids.clone(),
                 linear_state: entry.linear_state.snapshot()?,
                 next_token: entry.next_token.clone(),
+            })
+        })();
+        let hit = match hit {
+            Ok(hit) => hit,
+            Err(error) => {
+                return RealPrefixCacheLookupAttempt {
+                    hit: Err(error),
+                    leased_entry_id: Some(entry_id),
+                };
             }
         };
 
-        self.stats.lookup_hits += 1;
-        self.stats.hit_tokens += hit.cached_tokens as u64;
-        self.stats.hit_blocks += hit.block_ids.len() as u64;
-        self.entries[idx].last_used = self.stats.lookup_hits + self.stats.lookup_misses;
-        self.entries[idx].active_uses += 1;
-
-        Ok(Some(hit))
-    }
-
-    pub fn release_hit(&mut self, entry_id: u64) {
-        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == entry_id) {
-            entry.active_uses = entry.active_uses.saturating_sub(1);
+        self.stats.lookup_hits = self.stats.lookup_hits.saturating_add(1);
+        self.stats.hit_tokens = self
+            .stats
+            .hit_tokens
+            .saturating_add(hit.cached_tokens as u64);
+        self.stats.hit_blocks = self
+            .stats
+            .hit_blocks
+            .saturating_add(hit.block_ids.len() as u64);
+        self.entries[idx].last_used = self
+            .stats
+            .lookup_hits
+            .saturating_add(self.stats.lookup_misses);
+        RealPrefixCacheLookupAttempt {
+            hit: Ok(Some(hit)),
+            leased_entry_id: Some(entry_id),
         }
     }
 
-    pub fn register(
+    fn release_hit(&mut self, entry_id: u64) -> Vec<u32> {
+        let Some(idx) = self.entries.iter().position(|entry| entry.id == entry_id) else {
+            tracing::error!(entry_id, "released prefix-cache hit entry does not exist");
+            return Vec::new();
+        };
+        let entry = &mut self.entries[idx];
+        let Some(active_uses) = entry.active_uses.checked_sub(1) else {
+            tracing::error!(
+                entry_id,
+                "released prefix-cache hit entry has no active lease"
+            );
+            return Vec::new();
+        };
+        entry.active_uses = active_uses;
+        if active_uses == 0 && entry.retired {
+            let entry = self.entries.remove(idx);
+            self.release_entry_blocks(&entry.block_ids)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn register(
         &mut self,
         adapter: Option<String>,
         registration: PagedPrefixRegistration,
@@ -1148,7 +1538,9 @@ impl RealPrefixCache {
         }
 
         if self.entries.iter().any(|entry| {
-            entry.adapter == adapter && entry.prompt_tokens == registration.prompt_tokens
+            !entry.retired
+                && entry.adapter == adapter
+                && entry.prompt_tokens == registration.prompt_tokens
         }) {
             return RealPrefixCacheRegisterOutcome {
                 retained_blocks: Vec::new(),
@@ -1180,7 +1572,7 @@ impl RealPrefixCache {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| entry.active_uses == 0)
+            .filter(|(_, entry)| entry.active_uses == 0 && !entry.retired)
             .map(|(idx, _)| idx)
             .collect();
         eviction_candidates.sort_by_key(|&idx| {
@@ -1262,6 +1654,7 @@ impl RealPrefixCache {
             next_token: registration.next_token,
             last_used,
             active_uses: 0,
+            retired: false,
         });
         debug_assert!(self.cached_blocks() <= self.max_blocks);
         debug_assert!(self.entries.len() <= self.max_entries);
@@ -1283,11 +1676,12 @@ impl RealPrefixCache {
     }
 
     pub fn clear(&mut self) -> Vec<u32> {
-        let mut blocks = Vec::new();
-        self.entries.clear();
-        blocks.extend(self.block_refcounts.keys().copied());
-        self.block_refcounts.clear();
-        blocks
+        self.global_generation = self
+            .global_generation
+            .checked_add(1)
+            .expect("prefix-cache global generation overflow");
+        self.adapter_generations.clear();
+        self.retire_matching_entries(|_| true)
     }
 
     /// Remove every entry cached for `adapter`, releasing its blocks.
@@ -1299,17 +1693,37 @@ impl RealPrefixCache {
     /// swap must not destroy the serving agent's accumulated prefix
     /// cache).
     pub fn purge_adapter(&mut self, adapter: &Option<String>) -> Vec<u32> {
-        let mut freed = Vec::new();
+        let generation = self.adapter_generations.entry(adapter.clone()).or_default();
+        *generation = generation
+            .checked_add(1)
+            .expect("prefix-cache adapter generation overflow");
+        self.retire_matching_entries(|entry| &entry.adapter == adapter)
+    }
+
+    fn adapter_generation(&self, adapter: &Option<String>) -> u64 {
+        self.adapter_generations.get(adapter).copied().unwrap_or(0)
+    }
+
+    fn retire_matching_entries(
+        &mut self,
+        mut matches: impl FnMut(&RealPrefixCacheEntry) -> bool,
+    ) -> Vec<u32> {
+        let mut released = Vec::new();
         let mut idx = 0;
         while idx < self.entries.len() {
-            if &self.entries[idx].adapter == adapter {
-                let entry = self.entries.remove(idx);
-                freed.extend(self.release_entry_blocks(&entry.block_ids));
-            } else {
+            if !matches(&self.entries[idx]) {
                 idx += 1;
+                continue;
+            }
+            if self.entries[idx].active_uses > 0 {
+                self.entries[idx].retired = true;
+                idx += 1;
+            } else {
+                let entry = self.entries.remove(idx);
+                released.extend(self.release_entry_blocks(&entry.block_ids));
             }
         }
-        freed
+        released
     }
 
     fn release_entry_blocks(&mut self, block_ids: &[u32]) -> Vec<u32> {
@@ -1336,6 +1750,8 @@ impl RealPrefixCache {
                 .state_bytes_per_entry
                 .saturating_mul(self.entries.len() as u64),
             max_state_bytes: self.max_state_bytes,
+            active_leases: self.entries.iter().map(|entry| entry.active_uses).sum(),
+            pending_release_entries: self.entries.iter().filter(|entry| entry.retired).count(),
             ..self.stats
         }
     }
@@ -1469,6 +1885,7 @@ pub enum ModelBackend {
     /// Real model weights loaded via ModelRunner with paged KV cache.
     Real {
         runner: Arc<std::sync::RwLock<ModelRunner>>,
+        backend_health: BackendHealthHandle,
         block_manager: Arc<std::sync::Mutex<BlockManager>>,
         paged_cache: Arc<PagedKvCacheKt>,
         prefix_cache: Arc<std::sync::Mutex<RealPrefixCache>>,
@@ -1720,7 +2137,9 @@ impl AppState {
         job_id
     }
 
-    /// Create an AppState with the mock engine backend.
+    /// Logically invalidate every real prefix entry immediately. Unpinned
+    /// entries are reclaimed before return; active entries remain physically
+    /// retained and undiscoverable until their move-only request owners exit.
     pub fn clear_real_prefix_cache(&self) {
         let ModelBackend::Real {
             block_manager,
@@ -1740,8 +2159,10 @@ impl AppState {
         }
     }
 
-    /// Invalidate everything cached under `adapter` — prefix KV entries
-    /// (freeing their blocks) plus the deterministic completion caches.
+    /// Invalidate everything cached under `adapter` — prefix KV entries plus
+    /// the deterministic completion caches. Prefix entries with active request
+    /// leases become undiscoverable tombstones and release their blocks only
+    /// after the final owner exits; this method never waits for decode.
     /// Call this whenever the adapter's on-disk content changes (retrain
     /// auto-load, upload/import, delete): the name now refers to different
     /// weights, so name-keyed cache entries would replay the old model.
@@ -1810,7 +2231,7 @@ impl AppState {
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 0, 0, 1.0, None)),
             kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState::unavailable("mock_backend"),
-            gpu_lock: Arc::new(std::sync::RwLock::new(())),
+            gpu_lock: Arc::new(RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
             teacher_registry: Arc::new(crate::api::teachers::TeacherRegistry::new()),
             vram_info: kiln_memory::vram::GpuVramInfo {
@@ -2349,10 +2770,11 @@ impl AppState {
         );
 
         let runner = Arc::new(std::sync::RwLock::new(runner));
+        let backend_health = runner.read().unwrap().backend_health_handle();
         let block_manager = Arc::new(std::sync::Mutex::new(block_manager));
         let paged_cache = Arc::new(paged_cache);
         let prefix_cache = Arc::new(std::sync::Mutex::new(prefix_cache));
-        let gpu_lock = Arc::new(std::sync::RwLock::new(()));
+        let gpu_lock = Arc::new(RwLock::new(()));
         let decode_batcher_policy = backend_capabilities.decode_batcher;
         let max_decode_batch =
             crate::batching_engine::env_max_decode_batch_for_policy(Some(decode_batcher_policy));
@@ -2463,6 +2885,7 @@ impl AppState {
             model_path: None,
             backend: Arc::new(ModelBackend::Real {
                 runner,
+                backend_health,
                 block_manager,
                 paged_cache,
                 prefix_cache,
@@ -3147,18 +3570,27 @@ mod tests {
     }
 
     #[test]
-    fn gpu_coordination_guards_recover_from_poisoned_empty_lock() {
-        let gpu_lock: GpuCoordinationLock = std::sync::Arc::new(std::sync::RwLock::new(()));
-        let poison_lock = gpu_lock.clone();
-        let poisoned = std::panic::catch_unwind(move || {
-            let _guard = poison_lock.write().unwrap();
-            panic!("poison gpu coordination lock for regression coverage");
+    fn gpu_coordination_read_owner_moves_and_excludes_writer_until_drop() {
+        let gpu_lock: GpuCoordinationLock = std::sync::Arc::new(RwLock::new(()));
+        let read_owner = gpu_coordination_read_guard(&gpu_lock);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(read_owner);
         });
-        assert!(poisoned.is_err());
-        assert!(gpu_lock.is_poisoned());
-
-        drop(gpu_coordination_read_guard(&gpu_lock));
-        drop(gpu_coordination_write_guard(&gpu_lock));
+        ready_rx.recv().unwrap();
+        assert!(
+            gpu_lock.try_write().is_err(),
+            "training writer acquired while moved inference owner was live"
+        );
+        release_tx.send(()).unwrap();
+        reader.join().unwrap();
+        assert!(
+            gpu_lock.try_write().is_ok(),
+            "training writer must acquire after the moved read owner drops"
+        );
     }
 
     fn tiny_linear_config() -> ModelConfig {
@@ -3241,6 +3673,60 @@ mod tests {
             _ => panic!("completed result should be cached"),
         };
         assert_eq!(hit.text, "cached");
+    }
+
+    #[test]
+    fn unowned_completion_store_does_not_replace_concurrent_owner() {
+        let mut cache = DeterministicCompletionCache::new(8);
+        let key = DeterministicCompletionCacheKey {
+            adapter: None,
+            prompt_tokens: vec![1, 2, 3],
+            temperature_bits: 0.0f32.to_bits(),
+            max_tokens: 4,
+            thinking_budget_tokens: None,
+            stop: Vec::new(),
+            top_p_bits: 1.0f32.to_bits(),
+            top_k: 0,
+            min_p_bits: 0.0f32.to_bits(),
+            presence_penalty_bits: 0.0f32.to_bits(),
+            frequency_penalty_bits: 0.0f32.to_bits(),
+            repetition_penalty_bits: 1.0f32.to_bits(),
+            seed: None,
+            fold_reasoning_into_content: false,
+        };
+        let value = DeterministicCompletionCacheValue {
+            text: "probe result".to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            finish_reason: "length".to_string(),
+            completion_tokens: 4,
+            thinking_budget_status: None,
+        };
+
+        assert!(matches!(
+            cache.claim(&key),
+            DeterministicCompletionCacheClaim::Owner
+        ));
+        assert!(!cache.insert_unowned_complete_value(key.clone(), value));
+        assert!(matches!(
+            cache.probe(&key),
+            DeterministicCompletionCacheProbe::Wait(_)
+        ));
+
+        let owner_value = DeterministicCompletionCacheValue {
+            text: "owner result".to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            finish_reason: "stop".to_string(),
+            completion_tokens: 2,
+            thinking_budget_status: None,
+        };
+        cache.complete(key.clone(), owner_value);
+        let DeterministicCompletionCacheProbe::Hit(hit) = cache.probe(&key) else {
+            panic!("the concurrent owner must remain authoritative");
+        };
+        assert_eq!(hit.text, "owner result");
+        assert_eq!(hit.completion_tokens, 2);
     }
 
     #[tokio::test]
@@ -3460,10 +3946,12 @@ mod tests {
         assert!(
             cache
                 .lookup(&None, &[7, 8, 9, 10, 11], &SamplingParams::greedy())
+                .hit
                 .is_ok_and(|hit| hit.is_none())
         );
         let hit = cache
-            .lookup(&None, &[1, 2, 3, 4, 5], &SamplingParams::greedy())?
+            .lookup(&None, &[1, 2, 3, 4, 5], &SamplingParams::greedy())
+            .hit?
             .expect("prefix hit");
         assert_eq!(hit.cached_tokens, 4);
         assert_eq!(hit.block_ids, vec![9]);
@@ -3523,7 +4011,8 @@ mod tests {
         // Turn 2 prompt: turn-1 transcript + new user input.
         let turn2_prompt: Vec<u32> = vec![10, 11, 12, 13, 14, 200, 201, 202, 50, 51];
         let hit = cache
-            .lookup(&None, &turn2_prompt, &SamplingParams::greedy())?
+            .lookup(&None, &turn2_prompt, &SamplingParams::greedy())
+            .hit?
             .expect("turn 2 must hit the cache on the extended entry");
         assert_eq!(
             hit.cached_tokens, 8,
@@ -3579,7 +4068,8 @@ mod tests {
                     &None,
                     &[10u32, 11, 12, 13, 14, 15, 16, 17, 50, 51],
                     &SamplingParams::greedy(),
-                )?
+                )
+                .hit?
                 .is_some(),
             "resident entry must still be hittable after the unfittable attempt"
         );
@@ -3611,7 +4101,8 @@ mod tests {
         assert!(outcome.evicted_blocks.is_empty());
         assert!(
             cache
-                .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8], &SamplingParams::greedy(),)?
+                .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8], &SamplingParams::greedy(),)
+                .hit?
                 .is_none()
         );
 
@@ -3641,7 +4132,8 @@ mod tests {
         );
         assert!(
             cache
-                .lookup(&None, &[1, 2, 3, 4], &SamplingParams::greedy())?
+                .lookup(&None, &[1, 2, 3, 4], &SamplingParams::greedy())
+                .hit?
                 .is_none(),
             "an exact prompt hit without a saved next-token source cannot skip prefill"
         );
@@ -3659,7 +4151,8 @@ mod tests {
         assert_eq!(outcome.retained_blocks, vec![9]);
         assert!(outcome.evicted_blocks.is_empty());
         let hit = cache
-            .lookup(&None, &[1, 2, 3, 4], &SamplingParams::greedy())?
+            .lookup(&None, &[1, 2, 3, 4], &SamplingParams::greedy())
+            .hit?
             .expect("exact hit");
         assert_eq!(hit.cached_tokens, 4);
         assert_eq!(hit.block_ids, vec![9]);
@@ -3700,7 +4193,8 @@ mod tests {
         let sampled = SamplingParams::default();
         assert!(!sampled.is_effectively_greedy());
         let sampled_hit = cache
-            .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8], &sampled)?
+            .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8], &sampled)
+            .hit?
             .expect("sampled lookup must fall back to the strict prefix");
         assert_eq!(sampled_hit.cached_tokens, 4);
         assert!(sampled_hit.next_token.is_none());
@@ -3709,7 +4203,8 @@ mod tests {
         cache.release_hit(sampled_hit.entry_id);
 
         let greedy_hit = cache
-            .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8], &SamplingParams::greedy())?
+            .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8], &SamplingParams::greedy())
+            .hit?
             .expect("greedy lookup must use the longer exact entry");
         assert_eq!(greedy_hit.cached_tokens, 8);
         assert!(matches!(
@@ -3734,7 +4229,8 @@ mod tests {
             },
         );
         let logits_hit = cache
-            .lookup(&logits_adapter, &[1, 2, 3, 4, 5, 6, 7, 8], &sampled)?
+            .lookup(&logits_adapter, &[1, 2, 3, 4, 5, 6, 7, 8], &sampled)
+            .hit?
             .expect("full logits must support sampled exact reuse");
         assert_eq!(logits_hit.cached_tokens, 8);
         assert!(matches!(
@@ -3768,14 +4264,17 @@ mod tests {
         let stats_before = cache.stats();
         let last_used_before = cache.entries[0].last_used;
         let active_uses_before = cache.entries[0].active_uses;
-        let error = match cache.lookup(&None, &[1, 2, 3, 4], &SamplingParams::greedy()) {
+        let attempt = cache.lookup(&None, &[1, 2, 3, 4], &SamplingParams::greedy());
+        let error = match attempt.hit {
             Err(error) => error,
             Ok(_) => anyhow::bail!("unsupported Vulkan deep copy unexpectedly succeeded"),
         };
         assert!(error.to_string().contains("snapshot recurrent state"));
-        assert_eq!(cache.stats(), stats_before);
         assert_eq!(cache.entries[0].last_used, last_used_before);
+        assert_eq!(cache.entries[0].active_uses, active_uses_before + 1);
+        cache.release_hit(attempt.leased_entry_id.expect("provisional lease"));
         assert_eq!(cache.entries[0].active_uses, active_uses_before);
+        assert_eq!(cache.stats(), stats_before);
         Ok(())
     }
 
@@ -3830,7 +4329,8 @@ mod tests {
         assert!(!cache.block_refcounts.contains_key(&12));
 
         let hit = cache
-            .lookup(&None, &[1, 2, 3, 4, 5], &SamplingParams::greedy())?
+            .lookup(&None, &[1, 2, 3, 4, 5], &SamplingParams::greedy())
+            .hit?
             .expect("safe strict-prefix fallback");
         assert_eq!(hit.cached_tokens, 4);
         assert_eq!(hit.block_ids, vec![10]);
@@ -3875,10 +4375,12 @@ mod tests {
             next_token: Some(PagedPrefixNextToken::GreedyToken(124)),
             last_used: 0,
             active_uses: 0,
+            retired: false,
         });
 
         let hit = cache
-            .lookup(&None, &[1, 2, 3, 4, 5], &SamplingParams::greedy())?
+            .lookup(&None, &[1, 2, 3, 4, 5], &SamplingParams::greedy())
+            .hit?
             .expect("safe strict-prefix fallback");
         assert_ne!(hit.entry_id, legacy_id);
         assert_eq!(hit.cached_tokens, 4);
@@ -3923,17 +4425,20 @@ mod tests {
         assert_eq!(stats.cached_blocks, 2);
         assert!(
             cache
-                .lookup(&None, &[1, 2, 3, 4, 99], &SamplingParams::greedy())?
+                .lookup(&None, &[1, 2, 3, 4, 99], &SamplingParams::greedy())
+                .hit?
                 .is_none()
         );
         assert!(
             cache
-                .lookup(&None, &[5, 6, 7, 8, 99], &SamplingParams::greedy())?
+                .lookup(&None, &[5, 6, 7, 8, 99], &SamplingParams::greedy())
+                .hit?
                 .is_some()
         );
         assert!(
             cache
-                .lookup(&None, &[9, 10, 11, 12, 99], &SamplingParams::greedy())?
+                .lookup(&None, &[9, 10, 11, 12, 99], &SamplingParams::greedy())
+                .hit?
                 .is_some()
         );
         Ok(())
@@ -3971,7 +4476,8 @@ mod tests {
 
         assert!(
             cache
-                .lookup(&None, &[1, 2, 3, 4, 5], &SamplingParams::greedy())?
+                .lookup(&None, &[1, 2, 3, 4, 5], &SamplingParams::greedy())
+                .hit?
                 .is_none()
         );
         assert!(
@@ -3980,7 +4486,8 @@ mod tests {
                     &Some("adapter-b".to_string()),
                     &[1, 2, 3, 4, 5],
                     &SamplingParams::greedy(),
-                )?
+                )
+                .hit?
                 .is_none()
         );
         assert!(
@@ -3989,7 +4496,8 @@ mod tests {
                     &Some("adapter-a".to_string()),
                     &[1, 2, 3, 4, 5],
                     &SamplingParams::greedy(),
-                )?
+                )
+                .hit?
                 .is_some()
         );
         Ok(())
@@ -4042,7 +4550,8 @@ mod tests {
                     &Some("retrained".to_string()),
                     &[1, 2, 3, 4, 5],
                     &SamplingParams::greedy(),
-                )?
+                )
+                .hit?
                 .is_none(),
             "retrained adapter's entries are gone"
         );
@@ -4052,11 +4561,268 @@ mod tests {
                     &Some("untouched".to_string()),
                     &[9, 9, 9, 9, 1],
                     &SamplingParams::greedy(),
-                )?
+                )
+                .hit?
                 .is_some(),
             "other adapters' entries survive — a background eval/training \
              swap must not cost the serving agent its prefix cache"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_cache_clear_defers_reclamation_until_final_request_lease() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = cpu_device!();
+        let block_manager = Arc::new(std::sync::Mutex::new(BlockManager::new(8, 4)));
+        let blocks = block_manager.lock().unwrap().allocate(2)?;
+        let cache = Arc::new(std::sync::Mutex::new(RealPrefixCache::new(
+            true, 4, 8, 1024, 49,
+        )));
+        cache.lock().unwrap().register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                block_ids: blocks.clone(),
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+
+        let first = RealPrefixCacheRequest::begin(
+            &cache,
+            &block_manager,
+            None,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9],
+            &SamplingParams::greedy(),
+        )?
+        .settle_synchronous_for_test()?;
+        let second = RealPrefixCacheRequest::begin(
+            &cache,
+            &block_manager,
+            None,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 10],
+            &SamplingParams::greedy(),
+        )?
+        .settle_synchronous_for_test()?;
+        assert!(first.hit.is_some());
+        assert!(second.hit.is_some());
+        assert_eq!(cache.lock().unwrap().stats().active_leases, 2);
+
+        assert!(cache.lock().unwrap().clear().is_empty());
+        assert!(
+            cache.lock().unwrap().clear().is_empty(),
+            "repeated invalidation must not release an active tombstone"
+        );
+        let stats = cache.lock().unwrap().stats();
+        assert_eq!(stats.cached_entries, 1);
+        assert_eq!(stats.cached_blocks, 2);
+        assert_eq!(stats.active_leases, 2);
+        assert_eq!(stats.pending_release_entries, 1);
+
+        let after_clear = RealPrefixCacheRequest::begin(
+            &cache,
+            &block_manager,
+            None,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 11],
+            &SamplingParams::greedy(),
+        )?
+        .settle_synchronous_for_test()?;
+        assert!(
+            after_clear.hit.is_none(),
+            "retired entries must become undiscoverable immediately"
+        );
+        drop(after_clear.request);
+
+        drop(first.request);
+        assert_eq!(block_manager.lock().unwrap().num_used(), 2);
+        assert_eq!(cache.lock().unwrap().stats().active_leases, 1);
+        drop(second.request);
+        assert_eq!(block_manager.lock().unwrap().num_used(), 0);
+        let stats = cache.lock().unwrap().stats();
+        assert_eq!(stats.cached_entries, 0);
+        assert_eq!(stats.cached_blocks, 0);
+        assert_eq!(stats.active_leases, 0);
+        assert_eq!(stats.pending_release_entries, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn unsettled_prefix_hit_retains_snapshot_and_source_lease() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = cpu_device!();
+        let block_manager = Arc::new(std::sync::Mutex::new(BlockManager::new(4, 4)));
+        let blocks = block_manager.lock().unwrap().allocate(1)?;
+        let cache = Arc::new(std::sync::Mutex::new(RealPrefixCache::new(
+            true, 4, 4, 1024, 49,
+        )));
+        cache.lock().unwrap().register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: blocks,
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+
+        let pending = RealPrefixCacheRequest::begin(
+            &cache,
+            &block_manager,
+            None,
+            &[1, 2, 3, 4, 5],
+            &SamplingParams::greedy(),
+        )?;
+        let error = match pending.settle_with(|| anyhow::bail!("injected sync failure")) {
+            Ok(_) => anyhow::bail!("injected synchronization unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("injected sync failure"));
+        assert_eq!(cache.lock().unwrap().stats().active_leases, 1);
+        assert!(cache.lock().unwrap().clear().is_empty());
+        assert_eq!(block_manager.lock().unwrap().num_used(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_cache_stale_hit_finish_cannot_resurrect_purged_blocks() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = cpu_device!();
+        let block_manager = Arc::new(std::sync::Mutex::new(BlockManager::new(8, 4)));
+        let initial = block_manager.lock().unwrap().allocate(1)?;
+        let cache = Arc::new(std::sync::Mutex::new(RealPrefixCache::new(
+            true, 4, 8, 1024, 49,
+        )));
+        let adapter = Some("retrained".to_string());
+        cache.lock().unwrap().register(
+            adapter.clone(),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: initial.clone(),
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+        let lookup = RealPrefixCacheRequest::begin(
+            &cache,
+            &block_manager,
+            adapter.clone(),
+            &[1, 2, 3, 4, 5],
+            &SamplingParams::greedy(),
+        )?
+        .settle_synchronous_for_test()?;
+        assert!(lookup.hit.is_some());
+        assert!(cache.lock().unwrap().purge_adapter(&adapter).is_empty());
+
+        let suffix = block_manager.lock().unwrap().allocate(1)?;
+        let outcome = lookup.request.finish(
+            vec![PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                block_ids: vec![initial[0], suffix[0]],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            }],
+            suffix,
+        );
+        assert!(!outcome.registrations_accepted);
+        assert_eq!(outcome.released_blocks.len(), 2);
+        assert_eq!(block_manager.lock().unwrap().num_used(), 0);
+        assert!(cache.lock().unwrap().entries.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_cache_stale_miss_is_fenced_but_other_adapter_can_finish() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = cpu_device!();
+        let block_manager = Arc::new(std::sync::Mutex::new(BlockManager::new(8, 4)));
+        let cache = Arc::new(std::sync::Mutex::new(RealPrefixCache::new(
+            true, 4, 8, 1024, 49,
+        )));
+        let adapter_a = Some("adapter-a".to_string());
+        let adapter_b = Some("adapter-b".to_string());
+        let request_a = RealPrefixCacheRequest::begin(
+            &cache,
+            &block_manager,
+            adapter_a.clone(),
+            &[1, 2, 3, 4],
+            &SamplingParams::greedy(),
+        )?
+        .settle_synchronous_for_test()?;
+        let request_b = RealPrefixCacheRequest::begin(
+            &cache,
+            &block_manager,
+            adapter_b.clone(),
+            &[5, 6, 7, 8],
+            &SamplingParams::greedy(),
+        )?
+        .settle_synchronous_for_test()?;
+        assert!(request_a.hit.is_none());
+        assert!(request_b.hit.is_none());
+        cache.lock().unwrap().purge_adapter(&adapter_a);
+        let blocks = block_manager.lock().unwrap().allocate(2)?;
+
+        let outcome_a = request_a.request.finish(
+            vec![PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: vec![blocks[0]],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            }],
+            vec![blocks[0]],
+        );
+        assert!(!outcome_a.registrations_accepted);
+        let outcome_b = request_b.request.finish(
+            vec![PagedPrefixRegistration {
+                prompt_tokens: vec![5, 6, 7, 8],
+                block_ids: vec![blocks[1]],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            }],
+            vec![blocks[1]],
+        );
+        assert!(outcome_b.registrations_accepted);
+        assert_eq!(outcome_b.retained_blocks, vec![blocks[1]]);
+        assert_eq!(block_manager.lock().unwrap().num_used(), 1);
+
+        let released = cache.lock().unwrap().clear();
+        assert_eq!(released, vec![blocks[1]]);
+        block_manager.lock().unwrap().free_all(&released);
+        assert_eq!(block_manager.lock().unwrap().num_used(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_cache_global_clear_fences_in_flight_miss() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = cpu_device!();
+        let block_manager = Arc::new(std::sync::Mutex::new(BlockManager::new(4, 4)));
+        let cache = Arc::new(std::sync::Mutex::new(RealPrefixCache::new(
+            true, 4, 4, 1024, 49,
+        )));
+        let lookup = RealPrefixCacheRequest::begin(
+            &cache,
+            &block_manager,
+            Some("adapter".to_string()),
+            &[1, 2, 3, 4],
+            &SamplingParams::greedy(),
+        )?
+        .settle_synchronous_for_test()?;
+        assert!(lookup.hit.is_none());
+        assert!(cache.lock().unwrap().clear().is_empty());
+        let block = block_manager.lock().unwrap().allocate(1)?;
+        let outcome = lookup.request.finish(
+            vec![PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: block.clone(),
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            }],
+            block,
+        );
+        assert!(!outcome.registrations_accepted);
+        assert_eq!(block_manager.lock().unwrap().num_used(), 0);
+        assert!(cache.lock().unwrap().entries.is_empty());
         Ok(())
     }
 
@@ -4177,7 +4943,8 @@ mod tests {
             },
         );
         let hit = cache
-            .lookup(&None, &[1, 2, 3, 4, 9], &SamplingParams::greedy())?
+            .lookup(&None, &[1, 2, 3, 4, 9], &SamplingParams::greedy())
+            .hit?
             .expect("first entry must be pinned");
         let entries_before: Vec<u64> = cache.entries.iter().map(|entry| entry.id).collect();
         let refcounts_before = cache.block_refcounts.clone();
