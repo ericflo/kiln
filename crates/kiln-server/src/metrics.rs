@@ -551,6 +551,16 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_snapshot_age_seconds Seconds since the batching actor last published its cached control-plane snapshot. This increases while a decode forward or another long actor operation is in flight.\n");
+        out.push_str("# TYPE kiln_batching_engine_snapshot_age_seconds gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_snapshot_age_seconds {:.6}",
+                gauges.batching_engine.snapshot_age_ms as f64 / 1_000.0
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_queue_depth Requests waiting inside the real-model batching engine.\n");
         out.push_str("# TYPE kiln_batching_engine_queue_depth gauge\n");
         push_line(
@@ -737,7 +747,7 @@ impl Metrics {
             ),
         );
 
-        out.push_str("# HELP kiln_batching_engine_prefix_deferred_waiting Queued requests currently held back because an active same-adapter request can become their reusable strict prefix.\n");
+        out.push_str("# HELP kiln_batching_engine_prefix_deferred_waiting Last strong-snapshot sample of queued requests held back because an active same-adapter request can become their reusable strict prefix. Cached control-plane reads do not rescan prefixes.\n");
         out.push_str("# TYPE kiln_batching_engine_prefix_deferred_waiting gauge\n");
         push_line(
             &mut out,
@@ -1273,6 +1283,7 @@ mod tests {
             },
             batching_engine_enabled: true,
             batching_engine: BatchingEngineSnapshot {
+                snapshot_age_ms: 1_250,
                 queue_depth: 2,
                 active_decode: 3,
                 max_prefill_admission_quantum: 2,
@@ -1331,6 +1342,7 @@ mod tests {
         assert!(output.contains("kiln_prompt_token_cache_lookups_total{result=\"miss\"} 2"));
         assert!(output.contains("kiln_prompt_token_cache_entries 4"));
         assert!(output.contains("kiln_batching_engine_enabled 1"));
+        assert!(output.contains("kiln_batching_engine_snapshot_age_seconds 1.250000"));
         assert!(output.contains("kiln_batching_engine_queue_depth 2"));
         assert!(output.contains("kiln_batching_engine_active_decode 3"));
         assert!(output.contains("kiln_batching_engine_prefill_admission_quantum 2"));

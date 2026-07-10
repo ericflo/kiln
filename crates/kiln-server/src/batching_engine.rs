@@ -176,6 +176,10 @@ pub struct DecodeForwardOutput {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BatchingEngineSnapshot {
+    /// Age of the shared published snapshot at read time. Strong actor-barrier
+    /// snapshots return zero; [`BatchingEngineHandle::cached_snapshot`] fills
+    /// this from the publication timestamp without contacting the actor.
+    pub snapshot_age_ms: u64,
     pub accepting: bool,
     pub queue_depth: usize,
     pub active_decode: usize,
@@ -202,9 +206,20 @@ pub struct BatchingEngineSnapshot {
     /// Active requests discarded because their response receiver was already closed.
     pub response_channel_closed: u64,
     pub adapter_groups_waiting: usize,
+    /// Last prefix-deferral gauge sampled by a strong actor-barrier snapshot.
+    /// Cheap cached publications preserve that sample rather than repeating
+    /// the O(waiting x active x prompt_len) prefix scan on every decode token.
     pub prefix_deferred_waiting: usize,
     pub prefix_admission_deferrals: u64,
 }
+
+#[derive(Debug, Clone)]
+struct PublishedBatchingEngineSnapshot {
+    snapshot: BatchingEngineSnapshot,
+    published_at: Instant,
+}
+
+type SharedBatchingEngineSnapshot = Arc<RwLock<PublishedBatchingEngineSnapshot>>;
 
 pub enum DecodeSlot {
     Mock {
@@ -837,6 +852,7 @@ impl DecodeForward for RealDecodeForward {
 #[derive(Clone)]
 pub struct BatchingEngineHandle {
     tx: mpsc::Sender<EngineCommand>,
+    published_snapshot: SharedBatchingEngineSnapshot,
 }
 
 impl BatchingEngineHandle {
@@ -879,11 +895,15 @@ impl BatchingEngineHandle {
             prefill_admission_quantum,
             burst_refill,
         );
+        let published_snapshot = actor.published_snapshot.clone();
         thread::Builder::new()
             .name("kiln-batching-engine".to_string())
             .spawn(move || actor.run())
             .expect("spawn batching engine actor");
-        Self { tx }
+        Self {
+            tx,
+            published_snapshot,
+        }
     }
 
     pub async fn enqueue(&self, req: EngineRequest) -> Result<mpsc::Receiver<EngineEvent>> {
@@ -930,6 +950,24 @@ impl BatchingEngineHandle {
             .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
         rx.await
             .map_err(|_| anyhow::anyhow!("batching engine stopped before snapshot"))
+    }
+
+    /// Return the latest snapshot published by the actor without enqueueing a
+    /// command or waiting for a model forward to finish.
+    ///
+    /// Cheap actor fields are published at state boundaries and immediately
+    /// before a decode forward. `snapshot_age_ms` exposes how long the actor has
+    /// been inside a forward (or otherwise unable to publish). The expensive
+    /// `prefix_deferred_waiting` field is the last sample taken by
+    /// [`Self::snapshot`], drain, or stop and may be older than the cheap fields.
+    pub fn cached_snapshot(&self) -> BatchingEngineSnapshot {
+        let published = self
+            .published_snapshot
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut snapshot = published.snapshot.clone();
+        snapshot.snapshot_age_ms = duration_millis_saturating(published.published_at.elapsed());
+        snapshot
     }
 
     /// Physically resize the KV cache to `target_blocks` (#26). Returns the
@@ -1072,6 +1110,7 @@ struct BatchingEngineActor {
     /// barrier is reached promptly; swaps then run FIFO on this thread.
     pending_swaps: VecDeque<PendingAdapterSwap>,
     snapshot: BatchingEngineSnapshot,
+    published_snapshot: SharedBatchingEngineSnapshot,
 }
 
 impl BatchingEngineActor {
@@ -1085,6 +1124,15 @@ impl BatchingEngineActor {
     ) -> Self {
         let max_decode_batch = max_decode_batch.max(1);
         let max_prefill_admissions_per_cycle = prefill_admission_quantum.clamp(1, max_decode_batch);
+        let snapshot = BatchingEngineSnapshot {
+            accepting: true,
+            max_prefill_admission_quantum: max_prefill_admissions_per_cycle,
+            ..BatchingEngineSnapshot::default()
+        };
+        let published_snapshot = Arc::new(RwLock::new(PublishedBatchingEngineSnapshot {
+            snapshot: snapshot.clone(),
+            published_at: Instant::now(),
+        }));
         Self {
             rx,
             forward,
@@ -1097,11 +1145,8 @@ impl BatchingEngineActor {
             max_prefill_admissions_per_cycle,
             burst_refill,
             pending_swaps: VecDeque::new(),
-            snapshot: BatchingEngineSnapshot {
-                accepting: true,
-                max_prefill_admission_quantum: max_prefill_admissions_per_cycle,
-                ..BatchingEngineSnapshot::default()
-            },
+            snapshot,
+            published_snapshot,
         }
     }
 
@@ -1164,6 +1209,7 @@ impl BatchingEngineActor {
             EngineCommand::Enqueue { req, response_tx } => {
                 if self.accepting {
                     self.waiting.push_back(QueuedRequest { req, response_tx });
+                    self.refresh_snapshot();
                 } else {
                     let _ = response_tx.blocking_send(EngineEvent::Error(
                         "batching engine is draining".to_string(),
@@ -1175,6 +1221,7 @@ impl BatchingEngineActor {
                 self.accepting = false;
                 self.refresh_snapshot();
                 self.refresh_deferral_gauge();
+                self.publish_snapshot();
                 let _ = reply.send(());
             }
             EngineCommand::Stop { reply } => {
@@ -1182,11 +1229,13 @@ impl BatchingEngineActor {
                 self.stopped = true;
                 self.refresh_snapshot();
                 self.refresh_deferral_gauge();
+                self.publish_snapshot();
                 let _ = reply.send(());
             }
             EngineCommand::Snapshot { reply } => {
                 self.refresh_snapshot();
                 self.refresh_deferral_gauge();
+                self.publish_snapshot();
                 let _ = reply.send(self.snapshot.clone());
             }
             EngineCommand::ResizeKv {
@@ -1252,6 +1301,7 @@ impl BatchingEngineActor {
                 idx += 1;
             }
         }
+        self.refresh_snapshot();
     }
 
     fn admit_waiting(&mut self) {
@@ -1311,6 +1361,9 @@ impl BatchingEngineActor {
                         response_tx: queued.response_tx,
                         slot,
                     });
+                    // Publish admission before first-token delivery, which can
+                    // itself encounter a slow response channel.
+                    self.refresh_snapshot();
                     self.emit_pending_first_token_at(active_idx);
                 }
                 Err(err) => {
@@ -1462,6 +1515,7 @@ impl BatchingEngineActor {
                     let active = self.active.remove(idx);
                     self.snapshot.response_channel_closed =
                         self.snapshot.response_channel_closed.saturating_add(1);
+                    self.refresh_snapshot();
                     tracing::info!(
                         event = "response_channel_closed",
                         request_id = %active.req.request_id,
@@ -1479,6 +1533,7 @@ impl BatchingEngineActor {
                         backpressure_started_at = Some(Instant::now());
                         self.snapshot.response_backpressure_events =
                             self.snapshot.response_backpressure_events.saturating_add(1);
+                        self.publish_snapshot();
                         tracing::info!(
                             event = "response_channel_backpressure",
                             request_id = %self.active[idx].req.request_id,
@@ -1495,6 +1550,7 @@ impl BatchingEngineActor {
                         self.record_response_backpressure_wait(actual_wait);
                         self.snapshot.response_stall_evictions =
                             self.snapshot.response_stall_evictions.saturating_add(1);
+                        self.refresh_snapshot();
                         tracing::warn!(
                             event = "response_channel_backpressure_timeout",
                             request_id = %active.req.request_id,
@@ -1526,6 +1582,7 @@ impl BatchingEngineActor {
             .snapshot
             .response_backpressure_wait_ms
             .saturating_add(waited_ms);
+        self.publish_snapshot();
     }
 
     fn should_defer_for_active_prefix(&self, queued: &QueuedRequest) -> bool {
@@ -1591,12 +1648,6 @@ impl BatchingEngineActor {
             .take(batch_len)
             .map(|active| active.req.sampling.clone())
             .collect();
-        let mut slots: Vec<&mut DecodeSlot> = self
-            .active
-            .iter_mut()
-            .take(batch_len)
-            .map(|active| &mut active.slot)
-            .collect();
 
         self.snapshot.current_batch_size = batch_len;
         self.snapshot.max_observed_batch_size =
@@ -1612,11 +1663,22 @@ impl BatchingEngineActor {
                 .total_batched_decode_forwards
                 .saturating_add(1);
         }
+        // Publish the in-flight batch before entering a potentially long GPU
+        // forward. Control-plane readers can now remain responsive while also
+        // seeing both the batch and an increasing snapshot age.
+        self.refresh_snapshot();
+        let mut slots: Vec<&mut DecodeSlot> = self
+            .active
+            .iter_mut()
+            .take(batch_len)
+            .map(|active| &mut active.slot)
+            .collect();
         let started = Instant::now();
         let result = self.forward.forward_decode(&mut slots, &sampling);
         self.snapshot.last_forward_ms = started.elapsed().as_secs_f64() * 1000.0;
         self.snapshot.last_batch_size = batch_len;
         self.snapshot.current_batch_size = 0;
+        self.refresh_snapshot();
 
         let output_tokens = match result {
             Ok(tokens) if tokens.len() == batch_len => tokens,
@@ -1660,6 +1722,7 @@ impl BatchingEngineActor {
 
     fn finish_active(&mut self, idx: usize, finish_reason: FinishReason) {
         let active = self.active.remove(idx);
+        self.refresh_snapshot();
         match self.forward.finish_request(active.slot, finish_reason) {
             Ok(output) => {
                 let completion_tokens = completion_usage_tokens(
@@ -1679,6 +1742,7 @@ impl BatchingEngineActor {
             }
             Err(err) => {
                 self.snapshot.total_errors += 1;
+                self.publish_snapshot();
                 let _ = active
                     .response_tx
                     .blocking_send(EngineEvent::Error(err.to_string()));
@@ -1689,6 +1753,7 @@ impl BatchingEngineActor {
     fn finish_one_with_error(&mut self, idx: usize, error: String) {
         self.snapshot.total_errors += 1;
         let active = self.active.remove(idx);
+        self.refresh_snapshot();
         self.forward.discard_request(active.slot);
         let _ = active.response_tx.blocking_send(EngineEvent::Error(error));
     }
@@ -1696,6 +1761,7 @@ impl BatchingEngineActor {
     fn finish_batch_with_error(&mut self, batch_len: usize, error: String) {
         for _ in 0..batch_len.min(self.active.len()) {
             let active = self.active.remove(0);
+            self.refresh_snapshot();
             self.forward.discard_request(active.slot);
             let _ = active
                 .response_tx
@@ -1704,8 +1770,11 @@ impl BatchingEngineActor {
     }
 
     fn fail_all(&mut self, error: &str) {
+        self.accepting = false;
+        self.refresh_snapshot();
         while let Some(queued) = self.waiting.pop_front() {
             queued.req.cancel.cancel();
+            self.refresh_snapshot();
             let _ = queued
                 .response_tx
                 .blocking_send(EngineEvent::Error(error.to_string()));
@@ -1717,16 +1786,30 @@ impl BatchingEngineActor {
                 .response_tx
                 .blocking_send(EngineEvent::Error(error.to_string()));
         }
+        self.refresh_snapshot();
         while let Some(pending) = self.pending_swaps.pop_front() {
             let _ = pending.reply.send(Err(error.to_string()));
         }
     }
 
     fn refresh_snapshot(&mut self) {
+        self.snapshot.snapshot_age_ms = 0;
         self.snapshot.accepting = self.accepting;
         self.snapshot.queue_depth = self.waiting.len();
         self.snapshot.active_decode = self.active.len();
         self.snapshot.adapter_groups_waiting = usize::from(!self.waiting.is_empty());
+        self.publish_snapshot();
+    }
+
+    fn publish_snapshot(&mut self) {
+        self.snapshot.snapshot_age_ms = 0;
+        let snapshot = self.snapshot.clone();
+        let mut published = self
+            .published_snapshot
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        published.snapshot = snapshot;
+        published.published_at = Instant::now();
     }
 
     /// Recompute the `prefix_deferred_waiting` gauge. O(waiting x active x
@@ -2060,6 +2143,76 @@ mod tests {
                 decode_duration: Duration::ZERO,
             })
         }
+    }
+
+    #[tokio::test]
+    async fn cached_snapshot_remains_immediate_during_blocked_forward() {
+        let events: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let (forward, release) = GatedForward::new(events);
+        let handle = BatchingEngineHandle::start_with_options(Arc::new(forward), 1);
+        let mut response = handle.enqueue(request(100, 1)).await.unwrap();
+
+        let publication_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let cached = handle.cached_snapshot();
+            if cached.current_batch_size == 1 && cached.total_decode_forwards == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < publication_deadline,
+                "actor did not publish the in-flight batch before entering forward: {cached:?}"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let reader = handle.clone();
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = snapshot_tx.send(reader.cached_snapshot());
+        });
+        let cached = snapshot_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("cached read must not wait for the blocked actor");
+        assert_eq!(cached.current_batch_size, 1, "{cached:?}");
+        assert_eq!(cached.active_decode, 1, "{cached:?}");
+        assert_eq!(cached.total_decode_forwards, 1, "{cached:?}");
+        assert!(cached.snapshot_age_ms >= 20, "{cached:?}");
+
+        let strong_snapshot = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.snapshot().await })
+        };
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            !strong_snapshot.is_finished(),
+            "strong snapshot must remain an actor barrier while forward is blocked"
+        );
+
+        let later = handle.cached_snapshot();
+        assert!(
+            later.snapshot_age_ms >= cached.snapshot_age_ms,
+            "cache age must expose the actor's time inside forward: first={cached:?} later={later:?}"
+        );
+
+        release.send(()).unwrap();
+        let strong = tokio::time::timeout(Duration::from_secs(2), strong_snapshot)
+            .await
+            .expect("strong snapshot must finish after forward is released")
+            .unwrap()
+            .unwrap();
+        assert_eq!(strong.current_batch_size, 0, "{strong:?}");
+        assert_eq!(strong.snapshot_age_ms, 0, "{strong:?}");
+
+        loop {
+            match response.recv().await {
+                Some(EngineEvent::Done { .. }) => break,
+                Some(EngineEvent::Error(error)) => panic!("generation failed: {error}"),
+                Some(EngineEvent::Token { .. }) => {}
+                None => panic!("engine closed before completion"),
+            }
+        }
+        handle.stop().await.unwrap();
     }
 
     #[tokio::test]

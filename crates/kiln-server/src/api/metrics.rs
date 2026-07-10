@@ -61,7 +61,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 .map(|batcher| batcher.stats())
                 .unwrap_or_default();
             let batching_engine_snapshot = match batching_engine {
-                Some(engine) => engine.snapshot().await.unwrap_or_default(),
+                Some(engine) => engine.cached_snapshot(),
                 None => BatchingEngineSnapshot::default(),
             };
             (

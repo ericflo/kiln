@@ -297,6 +297,7 @@ struct DecodeBatcherInfo {
 
 #[derive(Serialize)]
 struct BatchingEngineInfo {
+    snapshot_age_ms: u64,
     accepting: bool,
     queue_depth: usize,
     active_decode: usize,
@@ -412,7 +413,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 .as_ref()
                 .map(|batcher| DecodeBatcherInfo::from(batcher.stats()));
             let batching_engine = match batching_engine {
-                Some(engine) => engine.snapshot().await.ok().map(BatchingEngineInfo::from),
+                Some(engine) => Some(BatchingEngineInfo::from(engine.cached_snapshot())),
                 None => None,
             };
             let (cuda_graph_enabled, rocm_graph_stats, metal_graph_enabled) =
@@ -767,6 +768,7 @@ impl From<kiln_model::DecodeBatcherStats> for DecodeBatcherInfo {
 impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
     fn from(snapshot: BatchingEngineSnapshot) -> Self {
         Self {
+            snapshot_age_ms: snapshot.snapshot_age_ms,
             accepting: snapshot.accepting,
             queue_depth: snapshot.queue_depth,
             active_decode: snapshot.active_decode,
@@ -878,6 +880,7 @@ mod tests {
     #[test]
     fn batching_engine_health_preserves_delivery_counters() {
         let info = BatchingEngineInfo::from(BatchingEngineSnapshot {
+            snapshot_age_ms: 125,
             response_backpressure_events: 3,
             response_backpressure_wait_ms: 750,
             response_stall_evictions: 2,
@@ -886,6 +889,7 @@ mod tests {
         });
         let json = serde_json::to_value(info).unwrap();
 
+        assert_eq!(json["snapshot_age_ms"], 125);
         assert_eq!(json["response_backpressure_events"], 3);
         assert_eq!(json["response_backpressure_wait_ms"], 750);
         assert_eq!(json["response_stall_evictions"], 2);

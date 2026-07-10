@@ -341,6 +341,39 @@ fn rocm_graph_decode_row_state_is_released_before_finish_work() {
 }
 
 #[test]
+fn control_plane_uses_published_batching_snapshot_without_actor_await() {
+    for path in [
+        "crates/kiln-server/src/api/health.rs",
+        "crates/kiln-server/src/api/metrics.rs",
+        "crates/kiln-server/src/api/debug_model_state.rs",
+    ] {
+        let source = read(path);
+        assert!(
+            source.contains("cached_snapshot()"),
+            "{path}: control-plane reads must use the published batching snapshot"
+        );
+        assert!(
+            !source.contains("engine.snapshot().await"),
+            "{path}: control-plane reads must not wait on the batching actor"
+        );
+    }
+
+    let batching_engine = read("crates/kiln-server/src/batching_engine.rs");
+    for required in [
+        "pub async fn snapshot(&self) -> Result<BatchingEngineSnapshot>",
+        "pub fn cached_snapshot(&self) -> BatchingEngineSnapshot",
+        "published_at: Instant",
+        "snapshot_age_ms",
+        "self.refresh_snapshot();\n        let mut slots:",
+    ] {
+        assert!(
+            batching_engine.contains(required),
+            "batching snapshot cache must preserve the control/barrier contract: {required}"
+        );
+    }
+}
+
+#[test]
 fn rocm_graph_owner_lifecycle_is_bounded_and_observable() {
     let rocm_graph = read("crates/kiln-model/src/rocm_graph.rs");
     let generate = read("crates/kiln-model/src/generate.rs");

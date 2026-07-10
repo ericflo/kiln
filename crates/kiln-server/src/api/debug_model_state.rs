@@ -90,6 +90,7 @@ struct BatchingEngineDebugState {
 
 #[derive(Serialize)]
 struct BatchingEngineSnapshotDebug {
+    snapshot_age_ms: u64,
     accepting: bool,
     queue_depth: usize,
     active_decode: usize,
@@ -362,7 +363,7 @@ async fn batching_engine_state(state: &AppState) -> BatchingEngineDebugState {
             ..
         } => {
             let snapshot = match batching_engine {
-                Some(engine) => engine.snapshot().await.ok().map(Into::into),
+                Some(engine) => Some(engine.cached_snapshot().into()),
                 None => None,
             };
             BatchingEngineDebugState {
@@ -465,6 +466,7 @@ impl From<PrefixCacheStats> for PrefixCacheDebugState {
 impl From<BatchingEngineSnapshot> for BatchingEngineSnapshotDebug {
     fn from(snapshot: BatchingEngineSnapshot) -> Self {
         Self {
+            snapshot_age_ms: snapshot.snapshot_age_ms,
             accepting: snapshot.accepting,
             queue_depth: snapshot.queue_depth,
             active_decode: snapshot.active_decode,
