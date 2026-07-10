@@ -275,6 +275,7 @@ async fn load_adapter(
         return Err(adapter_swap_error(&state, err));
     }
 
+    ensure_adapter_mutation_admission(&state)?;
     record_adapter_loaded(&state, &req.name, &resolved_adapter_path);
 
     Ok(Json(LoadAdapterResponse {
@@ -390,6 +391,7 @@ async fn unload_adapter(
     .await
     .map_err(|error| adapter_swap_error(&state, error))?;
 
+    ensure_adapter_mutation_admission(&state)?;
     record_adapter_unloaded(&state);
 
     Ok(Json(UnloadAdapterResponse { status: "unloaded" }))

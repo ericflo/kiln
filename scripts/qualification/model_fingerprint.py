@@ -33,6 +33,7 @@ class _OpenInput:
     relative_path: str
     fd: int
     initial_stat: os.stat_result
+    observed_hash: str | None = None
 
     def read_bytes(self) -> bytes:
         os.lseek(self.fd, 0, os.SEEK_SET)
@@ -40,10 +41,12 @@ class _OpenInput:
         while True:
             chunk = os.read(self.fd, READ_CHUNK_BYTES)
             if not chunk:
-                return b"".join(chunks)
+                payload = b"".join(chunks)
+                self.observed_hash = f"sha256:{hashlib.sha256(payload).hexdigest()}"
+                return payload
             chunks.append(chunk)
 
-    def hash(self) -> str:
+    def _current_hash(self) -> str:
         os.lseek(self.fd, 0, os.SEEK_SET)
         digest = hashlib.sha256()
         while True:
@@ -51,6 +54,11 @@ class _OpenInput:
             if not chunk:
                 return f"sha256:{digest.hexdigest()}"
             digest.update(chunk)
+
+    def hash(self) -> str:
+        digest = self._current_hash()
+        self.observed_hash = digest
+        return digest
 
     def close(self) -> None:
         os.close(self.fd)
@@ -248,6 +256,24 @@ def _verify_unchanged(root: Path, root_initial: os.stat_result, inputs: list[_Op
             ) from exc
         identity = _stat_identity(item.initial_stat)
         if _stat_identity(descriptor_stat) != identity or _stat_identity(path_stat) != identity:
+            raise ModelFingerprintError(
+                f"model input {item.relative_path!r} changed while it was being fingerprinted"
+            )
+        if item.observed_hash is None:
+            raise ModelFingerprintError(
+                f"model input {item.relative_path!r} was opened but not fingerprinted"
+            )
+        if item._current_hash() != item.observed_hash:
+            raise ModelFingerprintError(
+                f"model input {item.relative_path!r} changed while it was being fingerprinted"
+            )
+        # Catch a concurrent write during the verification read itself. This
+        # complements the digest comparison on filesystems whose timestamp
+        # granularity cannot expose a fast same-length rewrite.
+        if (
+            _stat_identity(os.fstat(item.fd)) != identity
+            or _stat_identity(item.path.stat(follow_symlinks=False)) != identity
+        ):
             raise ModelFingerprintError(
                 f"model input {item.relative_path!r} changed while it was being fingerprinted"
             )

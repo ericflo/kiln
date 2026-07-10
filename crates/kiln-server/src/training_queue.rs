@@ -18,7 +18,9 @@ use serde::Serialize;
 
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::recent_requests::now_unix_ms;
-use crate::state::{AppState, ModelBackend, TrainingJobType, gpu_coordination_write_guard};
+use crate::state::{
+    AppState, ModelBackend, TrainingJobType, gpu_coordination_write_guard_while_healthy,
+};
 use crate::training_history;
 
 /// Mark the tracked job terminal (Completed / Failed), stamp `finished_at`
@@ -436,7 +438,7 @@ fn run_sft(
     progress_cb: trainer::ProgressCallback,
     replay_ctx: trainer::ReplayContext,
     job_id: &str,
-    gpu_step_lock: Option<crate::state::GpuCoordinationLock>,
+    gpu_step_coordination: Option<trainer::GpuStepCoordination>,
 ) -> std::result::Result<PathBuf, String> {
     let loaded_examples;
     let examples = if let Some(dataset_path) = req.dataset_path.as_deref() {
@@ -480,7 +482,7 @@ fn run_sft(
                 adapter_dir,
                 adapter_name,
                 Some(progress_cb),
-                gpu_step_lock,
+                gpu_step_coordination,
             )
             .map_err(|e| format!("{e:#}"));
         }
@@ -505,7 +507,7 @@ fn run_sft(
         adapter_name,
         Some(progress_cb),
         Some(replay_ctx),
-        gpu_step_lock,
+        gpu_step_coordination,
     )
     .map_err(|e| format!("{e:#}"))
 }
@@ -741,6 +743,7 @@ fn run_opd(
     prepared_remote_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
     job_id: &str,
     gpu_lock: &crate::state::GpuCoordinationLock,
+    backend_health: &kiln_model::BackendHealthHandle,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -877,7 +880,8 @@ fn run_opd(
         None
     };
 
-    let _gpu_guard = gpu_coordination_write_guard(gpu_lock);
+    let _gpu_guard = gpu_coordination_write_guard_while_healthy(gpu_lock, backend_health)
+        .map_err(|error| format!("{error:#}"))?;
 
     tracing::info!(
         job_id = %job_id,
@@ -1619,6 +1623,7 @@ fn run_distill_refresh(
     dataset_registry: Option<&crate::eval::DatasetRegistry>,
     job_id: &str,
     gpu_lock: &crate::state::GpuCoordinationLock,
+    backend_health: &kiln_model::BackendHealthHandle,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -1666,7 +1671,8 @@ fn run_distill_refresh(
     // Local fixture construction and both GPU phases retain the existing
     // job-wide exclusion. All remote I/O above has completed before this
     // guard can block inference.
-    let _gpu_guard = gpu_coordination_write_guard(gpu_lock);
+    let _gpu_guard = gpu_coordination_write_guard_while_healthy(gpu_lock, backend_health)
+        .map_err(|error| format!("{error:#}"))?;
 
     tracing::info!(
         job_id = %job_id,
@@ -2049,6 +2055,7 @@ fn run_distill_pump(
     prepared_remote_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
     job_id: &str,
     gpu_lock: &crate::state::GpuCoordinationLock,
+    backend_health: &kiln_model::BackendHealthHandle,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -2090,7 +2097,8 @@ fn run_distill_pump(
             None
         };
 
-    let _gpu_guard = gpu_coordination_write_guard(gpu_lock);
+    let _gpu_guard = gpu_coordination_write_guard_while_healthy(gpu_lock, backend_health)
+        .map_err(|error| format!("{error:#}"))?;
 
     tracing::info!(
         job_id = %job_id,
@@ -2497,6 +2505,9 @@ fn kv_shrink_target_for_training(
 }
 
 fn prepare_training_memory_for_job(state: &AppState, reserved_bytes: u64) -> Result<(), String> {
+    state
+        .ensure_backend_healthy()
+        .map_err(|error| format!("{error:#}"))?;
     if reserved_bytes == 0 {
         return Ok(());
     }
@@ -2550,12 +2561,71 @@ fn prepare_training_memory_for_job(state: &AppState, reserved_bytes: u64) -> Res
             after as f64 / 1e9,
         ));
     }
-    Ok(())
+    state
+        .ensure_backend_healthy()
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn reject_queued_job_for_backend_quarantine(state: &AppState, job_id: &str, error: anyhow::Error) {
+    let detail = format!("training rejected because {error:#}");
+    let metadata = state
+        .training_jobs
+        .read()
+        .unwrap()
+        .get(job_id)
+        .map(|job| (job.job_type, job.adapter_name.clone()));
+    finalize_job(state, job_id, TrainingState::Failed, Some(detail.clone()));
+
+    if let Some((job_type, adapter_name)) = metadata {
+        let metric_type = match job_type {
+            TrainingJobType::Sft => TrainingMetricType::Sft,
+            TrainingJobType::Grpo => TrainingMetricType::Grpo,
+            TrainingJobType::Opd => TrainingMetricType::Opd,
+        };
+        state
+            .metrics
+            .inc_training(metric_type, TrainingMetricStatus::Failed);
+        if let Some(url) = state.training_webhook_url.as_ref() {
+            fire_completion_webhook(
+                url.clone(),
+                TrainingCompletionEvent {
+                    job_id: job_id.to_string(),
+                    job_type: TrainingCompletionEvent::job_type_str(job_type),
+                    status: "failed",
+                    adapter_name,
+                    adapter_path: None,
+                    error: Some(detail.clone()),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                },
+            );
+        }
+    }
+    tracing::error!(job_id, error = %detail, "queued training rejected by backend quarantine");
 }
 
 /// Execute a single training job (runs on a blocking thread).
 fn execute_job(state: AppState, entry: QueueEntry) {
     let job_id = entry.job_id.clone();
+
+    {
+        let jobs = state.training_jobs.read().unwrap();
+        match jobs.get(&job_id) {
+            Some(job) if job.state == TrainingState::Failed => {
+                tracing::info!(job_id = %job_id, "skipping cancelled job");
+                return;
+            }
+            Some(_) => {}
+            None => {
+                tracing::warn!(job_id = %job_id, "job not found in tracking map, skipping");
+                return;
+            }
+        }
+    }
+
+    if let Err(error) = state.ensure_backend_healthy() {
+        reject_queued_job_for_backend_quarantine(&state, &job_id, error);
+        return;
+    }
 
     // Mark as running
     {
@@ -2573,9 +2643,18 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         }
     }
 
+    if let Err(error) = state.ensure_backend_healthy() {
+        reject_queued_job_for_backend_quarantine(&state, &job_id, error);
+        return;
+    }
+
     // Extract model weights reference
-    let runner_arc = match state.backend.as_ref() {
-        ModelBackend::Real { runner, .. } => runner.clone(),
+    let (runner_arc, backend_health) = match state.backend.as_ref() {
+        ModelBackend::Real {
+            runner,
+            backend_health,
+            ..
+        } => (runner.clone(), backend_health.clone()),
         ModelBackend::Mock { .. } => {
             finalize_job(
                 &state,
@@ -2730,7 +2809,10 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     });
 
     let memory_ready = if binding_is_valid {
-        prepare_training_memory_for_job(&state, entry.reserved_bytes)
+        state
+            .ensure_backend_healthy()
+            .map_err(|error| format!("{error:#}"))
+            .and_then(|()| prepare_training_memory_for_job(&state, entry.reserved_bytes))
     } else {
         Ok(())
     };
@@ -2779,7 +2861,10 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     progress_cb,
                     _replay_ctx,
                     &job_id,
-                    Some(state.gpu_lock.clone()),
+                    Some(trainer::GpuStepCoordination::new(
+                        state.gpu_lock.clone(),
+                        backend_health.clone(),
+                    )),
                 )
             }
             QueuedJob::Grpo(mut req) => {
@@ -2795,23 +2880,27 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     request_body,
                     base_model: base_model.clone(),
                 };
-                let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
-                let guard = runner_arc.read().unwrap();
-                let training_dispatch = guard.backend_capabilities().training.server_dispatch;
-                let native_route_enabled = training_dispatch.native_route_enabled();
-                run_grpo(
-                    native_route_enabled,
-                    training_dispatch.native_training_env,
-                    &req,
-                    &state.model_config,
-                    &guard.weights,
-                    &state.tokenizer,
-                    &state.adapter_dir,
-                    &adapter_name,
-                    progress_cb,
-                    replay_ctx,
-                    &job_id,
-                )
+                gpu_coordination_write_guard_while_healthy(&state.gpu_lock, &backend_health)
+                    .map_err(|error| format!("{error:#}"))
+                    .and_then(|_gpu_guard| {
+                        let guard = runner_arc.read().unwrap();
+                        let training_dispatch =
+                            guard.backend_capabilities().training.server_dispatch;
+                        let native_route_enabled = training_dispatch.native_route_enabled();
+                        run_grpo(
+                            native_route_enabled,
+                            training_dispatch.native_training_env,
+                            &req,
+                            &state.model_config,
+                            &guard.weights,
+                            &state.tokenizer,
+                            &state.adapter_dir,
+                            &adapter_name,
+                            progress_cb,
+                            replay_ctx,
+                            &job_id,
+                        )
+                    })
             }
             QueuedJob::Opd(mut req) => {
                 if req.config.checkpoint_interval.is_none() {
@@ -2833,6 +2922,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     prepared_remote_teacher.clone(),
                     &job_id,
                     &state.gpu_lock,
+                    &backend_health,
                 )
             }
             QueuedJob::DistillRefresh(req) => {
@@ -2853,21 +2943,25 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     state.dataset_registry.as_deref(),
                     &job_id,
                     &state.gpu_lock,
+                    &backend_health,
                 )
             }
             QueuedJob::DistillMerge(req) => {
-                let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
-                let guard = runner_arc.read().unwrap();
-                run_distill_merge(
-                    &req,
-                    &state.model_config,
-                    &guard.weights,
-                    &state.tokenizer,
-                    &state.adapter_dir,
-                    &adapter_name,
-                    progress_cb,
-                    &job_id,
-                )
+                gpu_coordination_write_guard_while_healthy(&state.gpu_lock, &backend_health)
+                    .map_err(|error| format!("{error:#}"))
+                    .and_then(|_gpu_guard| {
+                        let guard = runner_arc.read().unwrap();
+                        run_distill_merge(
+                            &req,
+                            &state.model_config,
+                            &guard.weights,
+                            &state.tokenizer,
+                            &state.adapter_dir,
+                            &adapter_name,
+                            progress_cb,
+                            &job_id,
+                        )
+                    })
             }
             QueuedJob::DistillPump(req) => {
                 let guard = runner_arc.read().unwrap();
@@ -2886,21 +2980,25 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     prepared_remote_teacher.clone(),
                     &job_id,
                     &state.gpu_lock,
+                    &backend_health,
                 )
             }
             QueuedJob::DistillSelf(req) => {
-                let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
-                let guard = runner_arc.read().unwrap();
-                run_distill_self(
-                    &req,
-                    &state.model_config,
-                    &guard.weights,
-                    &state.tokenizer,
-                    &state.adapter_dir,
-                    &adapter_name,
-                    progress_cb,
-                    &job_id,
-                )
+                gpu_coordination_write_guard_while_healthy(&state.gpu_lock, &backend_health)
+                    .map_err(|error| format!("{error:#}"))
+                    .and_then(|_gpu_guard| {
+                        let guard = runner_arc.read().unwrap();
+                        run_distill_self(
+                            &req,
+                            &state.model_config,
+                            &guard.weights,
+                            &state.tokenizer,
+                            &state.adapter_dir,
+                            &adapter_name,
+                            progress_cb,
+                            &job_id,
+                        )
+                    })
             }
         }
     };
@@ -3559,7 +3657,7 @@ mod tests {
                 Some(source),
             )
             .unwrap();
-            let _gpu_guard = gpu_coordination_write_guard(&worker_gpu_lock);
+            let _gpu_guard = crate::state::gpu_coordination_write_guard(&worker_gpu_lock);
             write_acquired_tx.send(()).unwrap();
             fixture
         });

@@ -553,6 +553,17 @@ current correctness-first implementation still reads each scored vocabulary
 row to the host, so its transfer work is O(TV), not vLLM's selected-only O(TK)
 path; use it for bounded teacher queries rather than high-throughput serving.
 
+Backend quarantine is process-wide and irreversible. Once completion cannot be
+proven, `/health` becomes `503 degraded` with
+`backend_runtime.restart_required=true`, and Prometheus reports
+`kiln_backend_quarantined 1`. New completion and eval work, adapter mutations,
+prewarm operations, and training submissions reject with HTTP 503 and error
+code `backend_quarantined`. Jobs already queued transition to `failed`; an SFT
+job between steps and every job-wide training writer poll the same health latch
+instead of waiting forever behind the intentionally retained GPU read owner.
+Restart the process to construct fresh backend state; there is no unsafe reset
+endpoint.
+
 ```json
 {
   "model": "Qwen3.5-4B",

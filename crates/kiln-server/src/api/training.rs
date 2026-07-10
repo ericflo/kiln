@@ -938,6 +938,7 @@ async fn submit_sft(
     State(state): State<AppState>,
     Json(mut req): Json<SftRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    ensure_training_backend_admission(&state)?;
     // Reject new jobs during shutdown
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
@@ -1181,6 +1182,7 @@ async fn submit_grpo(
     State(state): State<AppState>,
     Json(mut req): Json<GrpoRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    ensure_training_backend_admission(&state)?;
     // Reject new jobs during shutdown
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
@@ -1375,6 +1377,7 @@ async fn submit_opd(
     State(state): State<AppState>,
     Json(mut req): Json<OpdRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    ensure_training_backend_admission(&state)?;
     // Reject during shutdown.
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
@@ -1595,6 +1598,7 @@ async fn submit_distill_refresh(
     State(state): State<AppState>,
     Json(mut req): Json<DistillRefreshRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    ensure_training_backend_admission(&state)?;
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
@@ -1727,6 +1731,7 @@ async fn submit_distill_merge(
     State(state): State<AppState>,
     Json(mut req): Json<DistillMergeRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    ensure_training_backend_admission(&state)?;
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
@@ -1790,6 +1795,7 @@ async fn submit_distill_pump(
     State(state): State<AppState>,
     Json(mut req): Json<DistillPumpRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    ensure_training_backend_admission(&state)?;
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
@@ -1856,6 +1862,7 @@ async fn submit_distill_self(
     State(state): State<AppState>,
     Json(mut req): Json<DistillSelfRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    ensure_training_backend_admission(&state)?;
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
@@ -2070,12 +2077,19 @@ fn pin_registered_teachers(
     Ok(())
 }
 
+fn ensure_training_backend_admission(state: &AppState) -> Result<(), ApiError> {
+    state
+        .ensure_backend_healthy()
+        .map_err(ApiError::backend_quarantined)
+}
+
 /// Atomically reserve queue/tracking capacity and publish a complete batch.
 /// A rejected batch leaves both the tracking map and FIFO unchanged.
 pub(crate) fn admit_training_jobs(
     state: &AppState,
     mut pending: Vec<(TrainingJobInfo, QueueEntry)>,
 ) -> Result<usize, ApiError> {
+    ensure_training_backend_admission(state)?;
     pin_registered_teachers(state, &mut pending)?;
     admit_training_jobs_into(
         &state.training_jobs,

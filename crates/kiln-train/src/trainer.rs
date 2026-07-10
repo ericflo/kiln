@@ -3020,6 +3020,42 @@ fn resident_training_weights(
     Ok(Some(resident))
 }
 
+/// Per-step GPU coordination that remains interruptible by the serving
+/// backend's process-lifetime quarantine latch.
+///
+/// A quarantined inference request may intentionally retain its read owner
+/// because dropping unknown device state is unsafe. A bare blocking write
+/// would therefore strand SFT forever between steps. Polling acquisition lets
+/// the trainer return the quarantine error while preserving that owner.
+#[derive(Clone)]
+pub struct GpuStepCoordination {
+    lock: std::sync::Arc<tokio::sync::RwLock<()>>,
+    backend_health: kiln_model::BackendHealthHandle,
+}
+
+impl GpuStepCoordination {
+    pub fn new(
+        lock: std::sync::Arc<tokio::sync::RwLock<()>>,
+        backend_health: kiln_model::BackendHealthHandle,
+    ) -> Self {
+        Self {
+            lock,
+            backend_health,
+        }
+    }
+
+    fn blocking_write(&self) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>> {
+        loop {
+            self.backend_health.ensure_healthy()?;
+            if let Ok(guard) = self.lock.clone().try_write_owned() {
+                self.backend_health.ensure_healthy()?;
+                return Ok(guard);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
 pub fn sft_train(
     examples: &[SftExample],
     config: &SftConfig,
@@ -3030,7 +3066,7 @@ pub fn sft_train(
     adapter_name: &str,
     progress_cb: Option<ProgressCallback>,
     replay_ctx: Option<ReplayContext>,
-    gpu_step_lock: Option<std::sync::Arc<tokio::sync::RwLock<()>>>,
+    gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
     let run_started = Instant::now();
     let output_dir = adapter_dir.join(adapter_name);
@@ -3330,7 +3366,14 @@ pub fn sft_train(
                 // in-flight inference streams interleave between steps
                 // instead of freezing mid-token for the whole job.
                 // Tokenization above runs lock-free (CPU work).
-                let _step_gpu = gpu_step_lock.as_ref().map(|lock| lock.blocking_write());
+                let _step_gpu = match gpu_step_coordination.as_ref() {
+                    Some(coordination) => Some(
+                        coordination
+                            .blocking_write()
+                            .context("acquire healthy backend for SFT step")?,
+                    ),
+                    None => None,
+                };
 
                 // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
                 // kt tape-authoritative — the candle checkpointed reverse + candle
@@ -11234,6 +11277,37 @@ pub(crate) mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[cfg(feature = "cuda")]
     pub(crate) static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn gpu_step_coordination_rejects_when_quarantine_latches_during_wait() {
+        let lock = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+        let retained_inference = lock.clone().try_read_owned().unwrap();
+        let backend_health = kiln_model::BackendHealthHandle::default();
+        let coordination = GpuStepCoordination::new(lock.clone(), backend_health.clone());
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = coordination
+                .blocking_write()
+                .map(drop)
+                .map_err(|error| format!("{error:#}"));
+            result_tx.send(result).unwrap();
+        });
+
+        assert!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_millis(25))
+                .is_err(),
+            "SFT step writer should wait while inference is healthy"
+        );
+        backend_health.quarantine("injected unknown inference completion between SFT steps");
+        let error = result_rx
+            .recv_timeout(std::time::Duration::from_millis(250))
+            .expect("quarantine must interrupt the SFT step wait")
+            .expect_err("quarantined SFT step must reject");
+        assert!(error.contains("requires restart"), "{error}");
+        assert!(lock.try_write().is_err());
+        drop(retained_inference);
+    }
 
     #[test]
     fn training_optimizer_fallback_policy_defaults_to_native_required_on_gpus() {

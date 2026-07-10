@@ -228,7 +228,12 @@ class ModelFingerprintTests(unittest.TestCase):
                 weight.write_bytes(b"weight-v2")
             return digest
 
-        with mock.patch.object(model_fingerprint._OpenInput, "hash", hash_then_change):
+        # Force metadata equality so this test proves the second content read,
+        # independent of filesystem timestamp granularity.
+        unchanged_metadata = (1, 2, 3, 4, 5, 6)
+        with mock.patch.object(model_fingerprint._OpenInput, "hash", hash_then_change), mock.patch.object(
+            model_fingerprint, "_stat_identity", return_value=unchanged_metadata
+        ):
             with self.assertRaisesRegex(
                 model_fingerprint.ModelFingerprintError,
                 r"changed while it was being fingerprinted",

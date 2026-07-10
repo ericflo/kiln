@@ -84,8 +84,8 @@ impl ApiError {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "backend_quarantined",
-            message: format!("Inference backend is quarantined: {detail}"),
-            hint: "Restart the server before sending more inference or training requests. The backend reported an unknown GPU completion state.",
+            message: format!("Backend is quarantined and requires restart: {detail}"),
+            hint: "Restart the server before inference, adapter mutation, prewarm, or training. The backend reported an unknown GPU completion state.",
             retry_after_seconds: None,
         }
     }

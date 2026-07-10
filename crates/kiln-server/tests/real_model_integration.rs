@@ -280,6 +280,132 @@ fn prompt_logprob_request(prompt: &[u32], top_k: usize) -> Request<Body> {
         .unwrap()
 }
 
+#[tokio::test]
+async fn quarantined_backend_rejects_training_admission_without_publication() {
+    let state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
+    let state_for_assert = state.clone();
+    let backend_health = match state.backend.as_ref() {
+        ModelBackend::Real { backend_health, .. } => backend_health.clone(),
+        ModelBackend::Mock { .. } => unreachable!("test constructed a real backend"),
+    };
+    backend_health.quarantine("injected admission quarantine");
+    let app = api::router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/train/sft")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"examples":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{json}");
+    assert_eq!(json["error"]["code"], "backend_quarantined");
+    assert!(state_for_assert.training_jobs.read().unwrap().is_empty());
+    assert_eq!(state_for_assert.training_queue.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn queued_training_transition_fails_while_quarantined_reader_is_retained() {
+    use kiln_server::state::{TrainingJobInfo, TrainingJobType};
+    use kiln_server::training_queue::{QueueEntry, QueuedJob, spawn_training_worker};
+    use kiln_train::{SftRequest, TrainingState};
+
+    let mut state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
+    let adapter_dir = tempfile::tempdir().unwrap();
+    state.adapter_dir = adapter_dir.path().to_path_buf();
+    let job_id = "quarantine-transition".to_string();
+    state.training_jobs.write().unwrap().insert(
+        job_id.clone(),
+        TrainingJobInfo {
+            job_id: job_id.clone(),
+            adapter_name: "never-started".to_string(),
+            job_type: TrainingJobType::Sft,
+            state: TrainingState::Queued,
+            progress: 0.0,
+            loss: None,
+            epoch: None,
+            adapter_path: None,
+            submitted_at: Instant::now(),
+            submitted_unix_ms: 0,
+            auto_load: false,
+            consumed_correction_ids: Vec::new(),
+            finished_at: None,
+            finished_unix_ms: None,
+            error: None,
+            linked_eval_job_ids: Vec::new(),
+            post_eval_verdict: None,
+            gate_outcome: None,
+            cancel_requested: Default::default(),
+            loss_history: Vec::new(),
+        },
+    );
+    state.training_queue.lock().unwrap().push(QueueEntry {
+        job_id: job_id.clone(),
+        reserved_bytes: 0,
+        teacher_bindings: Vec::new(),
+        job: QueuedJob::Sft(SftRequest {
+            examples: Vec::new(),
+            dataset_path: None,
+            dataset: None,
+            config: Default::default(),
+            post_eval: None,
+        }),
+    });
+
+    let retained_inference = state.gpu_lock.clone().read_owned().await;
+    match state.backend.as_ref() {
+        ModelBackend::Real { backend_health, .. } => {
+            backend_health.quarantine("injected queued-transition quarantine")
+        }
+        ModelBackend::Mock { .. } => unreachable!("test constructed a real backend"),
+    }
+    spawn_training_worker(state.clone(), state.shutdown.clone());
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let terminal = state
+                .training_jobs
+                .read()
+                .unwrap()
+                .get(&job_id)
+                .is_some_and(|job| job.state == TrainingState::Failed);
+            if terminal {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queued job must reject without waiting for retained GPU ownership");
+
+    let jobs = state.training_jobs.read().unwrap();
+    let failed = jobs.get(&job_id).unwrap();
+    assert_eq!(failed.state, TrainingState::Failed);
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("requires restart")),
+        "{:?}",
+        failed.error
+    );
+    assert!(state.gpu_lock.try_write().is_err());
+    drop(jobs);
+    state
+        .shutdown
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(retained_inference);
+}
+
 #[cfg(feature = "vulkan")]
 #[tokio::test]
 async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {

@@ -198,6 +198,7 @@ pub(crate) fn gpu_coordination_read_guard(
     futures::executor::block_on(gpu_lock.clone().read_owned())
 }
 
+#[cfg(test)]
 pub(crate) fn gpu_coordination_write_guard(
     gpu_lock: &GpuCoordinationLock,
 ) -> OwnedRwLockWriteGuard<()> {
