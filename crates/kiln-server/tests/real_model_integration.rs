@@ -247,6 +247,7 @@ fn tiny_real_state_with_timeout(config: ModelConfig, request_timeout: Duration) 
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
         request_timeout.as_secs().max(1),
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
@@ -499,6 +500,7 @@ async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {
         adapter_dir.path().to_path_buf(),
         &kiln_server::config::MemoryConfig::default(),
         kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
@@ -610,6 +612,7 @@ async fn test_real_model_chat_completion() {
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
@@ -1108,6 +1111,7 @@ async fn test_real_model_prompt_logprobs_match_full_forward_reference() {
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
@@ -1269,6 +1273,7 @@ async fn test_real_model_streaming_chat_completion() {
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
@@ -1390,6 +1395,7 @@ async fn test_request_timeout_configurable() {
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
         42,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
@@ -1418,6 +1424,7 @@ async fn test_default_request_timeout() {
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
         600,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
@@ -1446,6 +1453,7 @@ async fn test_health_with_real_backend() {
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
@@ -1516,6 +1524,7 @@ async fn test_real_model_chat_completion_metal() {
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
@@ -1616,6 +1625,7 @@ async fn test_real_model_chat_completion_metal_bf16_fused() {
         std::path::PathBuf::from("/tmp/kiln-test-adapters-bf16"),
         &kiln_server::config::MemoryConfig::default(),
         kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
         300,
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
@@ -2799,6 +2809,7 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
     let turn1_next_token = match &slot1 {
         DecodeSlot::Real { state, .. } => state.next_token,
         DecodeSlot::Mock { .. } => panic!("real forward returned a mock slot"),
+        DecodeSlot::RealPrefill { .. } => panic!("unbounded prepare left prefill pending"),
     };
     forward
         .finish_request(slot1, FinishReason::MaxTokens)
@@ -2844,6 +2855,7 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
             assert_eq!(state.block_table.blocks.len(), 6);
         }
         DecodeSlot::Mock { .. } => panic!("real forward returned a mock slot"),
+        DecodeSlot::RealPrefill { .. } => panic!("unbounded prepare left prefill pending"),
     }
     assert_eq!(block_manager.lock().unwrap().num_used(), 6);
     forward

@@ -36,6 +36,13 @@ pub const STREAM_STALL_GRACE_MIN_MS: u64 = 10;
 /// decode slot while peers continue, so this remains a bounded safety valve.
 pub const STREAM_STALL_GRACE_MAX_MS: u64 = DEFAULT_STREAM_STALL_GRACE_MS;
 
+/// Default combined decode-plus-prefill token budget for one batching-actor
+/// scheduling cycle. Decode rows consume one token each before prefill uses
+/// the remainder.
+pub const DEFAULT_MAX_BATCH_TOKENS: usize = 512;
+pub const MAX_BATCH_TOKENS_MIN: usize = 2;
+pub const MAX_BATCH_TOKENS_MAX: usize = 65_536;
+
 /// Provenance of a resolved startup configuration value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -122,6 +129,66 @@ impl<'de> Deserialize<'de> for StreamStallGrace {
     {
         let millis = u64::deserialize(deserializer)?;
         Self::new(millis, ConfigValueSource::ConfigFile).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Validated batching token budget plus the startup source that selected it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchTokenBudget {
+    tokens: usize,
+    source: ConfigValueSource,
+}
+
+impl BatchTokenBudget {
+    pub(crate) fn new(tokens: usize, source: ConfigValueSource) -> Result<Self> {
+        validate_max_batch_tokens(tokens)?;
+        Ok(Self { tokens, source })
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        let tokens = raw.trim().parse::<usize>().with_context(|| {
+            format!(
+                "KILN_MAX_BATCH_TOKENS must be a decimal integer in {}..={}, got {raw:?}",
+                MAX_BATCH_TOKENS_MIN, MAX_BATCH_TOKENS_MAX
+            )
+        })?;
+        Self::new(tokens, ConfigValueSource::Environment).context("invalid KILN_MAX_BATCH_TOKENS")
+    }
+
+    pub fn tokens(self) -> usize {
+        self.tokens
+    }
+
+    pub fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for BatchTokenBudget {
+    fn default() -> Self {
+        Self {
+            tokens: DEFAULT_MAX_BATCH_TOKENS,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for BatchTokenBudget {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(self.tokens as u64)
+    }
+}
+
+impl<'de> Deserialize<'de> for BatchTokenBudget {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let tokens = usize::deserialize(deserializer)?;
+        Self::new(tokens, ConfigValueSource::ConfigFile).map_err(serde::de::Error::custom)
     }
 }
 
@@ -411,6 +478,10 @@ pub struct ServerConfig {
     /// request retains KV and a decode slot during this grace; peer lanes and
     /// control commands continue independently.
     pub stream_stall_grace_ms: StreamStallGrace,
+    /// Combined token budget for one production batching-actor cycle. Ready
+    /// decode rows consume one token each; a resumable prefill may use only the
+    /// remainder before the actor yields back to decode and control commands.
+    pub max_batch_tokens: BatchTokenBudget,
     /// Enable deterministic eval-serving behavior for `kiln serve`.
     pub eval_mode: bool,
     /// Server-level default for chat-template `enable_thinking`. `None`
@@ -810,6 +881,7 @@ impl Default for ServerConfig {
             request_timeout_secs: 600,
             http_send_buffer_bytes: None,
             stream_stall_grace_ms: StreamStallGrace::default(),
+            max_batch_tokens: BatchTokenBudget::default(),
             eval_mode: false,
             default_thinking_enabled: None,
             default_thinking_budget_tokens: None,
@@ -1020,6 +1092,7 @@ impl KilnConfig {
         config.apply_env_overrides();
         config.apply_http_send_buffer_env_override()?;
         config.apply_stream_stall_grace_env_override()?;
+        config.apply_max_batch_tokens_env_override()?;
         config.request_log.apply_env_overrides();
         config.validate()?;
         Ok(config)
@@ -1310,6 +1383,26 @@ impl KilnConfig {
         Ok(())
     }
 
+    /// Resolve chunked-prefill scheduling once at startup. The actor receives
+    /// this typed value and never consults mutable process environment.
+    fn apply_max_batch_tokens_env_override(&mut self) -> Result<()> {
+        let raw = match std::env::var("KILN_MAX_BATCH_TOKENS") {
+            Ok(raw) => raw,
+            Err(std::env::VarError::NotPresent) => return Ok(()),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("KILN_MAX_BATCH_TOKENS must be valid UTF-8 decimal tokens")
+            }
+        };
+        self.apply_max_batch_tokens_env_value(Some(&raw))
+    }
+
+    fn apply_max_batch_tokens_env_value(&mut self, raw: Option<&str>) -> Result<()> {
+        if let Some(raw) = raw {
+            self.server.max_batch_tokens = BatchTokenBudget::from_environment_value(raw)?;
+        }
+        Ok(())
+    }
+
     /// Validate configuration values. Returns an error describing the first invalid value.
     fn validate(&self) -> Result<()> {
         if self.server.port == 0 {
@@ -1322,6 +1415,7 @@ impl KilnConfig {
             validate_http_send_buffer_bytes(bytes)?;
         }
         validate_stream_stall_grace_ms(self.server.stream_stall_grace_ms.millis())?;
+        validate_max_batch_tokens(self.server.max_batch_tokens.tokens())?;
         if self.server.shutdown_timeout_secs == 0 {
             anyhow::bail!("server.shutdown_timeout_secs must be > 0");
         }
@@ -1380,6 +1474,17 @@ fn validate_stream_stall_grace_ms(millis: u64) -> Result<()> {
             "server.stream_stall_grace_ms must be between {} and {} milliseconds, got {millis}",
             STREAM_STALL_GRACE_MIN_MS,
             STREAM_STALL_GRACE_MAX_MS
+        );
+    }
+    Ok(())
+}
+
+fn validate_max_batch_tokens(tokens: usize) -> Result<()> {
+    if !(MAX_BATCH_TOKENS_MIN..=MAX_BATCH_TOKENS_MAX).contains(&tokens) {
+        anyhow::bail!(
+            "server.max_batch_tokens must be between {} and {} tokens, got {tokens}",
+            MAX_BATCH_TOKENS_MIN,
+            MAX_BATCH_TOKENS_MAX
         );
     }
     Ok(())
@@ -1652,6 +1757,7 @@ port = 9000
 request_timeout_secs = 60
 http_send_buffer_bytes = 8192
 stream_stall_grace_ms = 1500
+max_batch_tokens = 1024
 eval_mode = true
 default_thinking_enabled = false
 default_thinking_budget_tokens = 256
@@ -1719,6 +1825,11 @@ composed_cache_max_entries = 8
             config.server.stream_stall_grace_ms.source(),
             ConfigValueSource::ConfigFile
         );
+        assert_eq!(config.server.max_batch_tokens.tokens(), 1024);
+        assert_eq!(
+            config.server.max_batch_tokens.source(),
+            ConfigValueSource::ConfigFile
+        );
         assert!(config.server.eval_mode);
         assert_eq!(config.server.default_thinking_enabled, Some(false));
         assert_eq!(config.server.default_thinking_budget_tokens, Some(256));
@@ -1778,6 +1889,7 @@ port = 3000
             config.server.stream_stall_grace_ms,
             StreamStallGrace::default()
         );
+        assert_eq!(config.server.max_batch_tokens, BatchTokenBudget::default());
         assert!(!config.server.eval_mode); // default
         assert_eq!(config.server.default_thinking_enabled, None); // default
         assert!(!config.server.fold_reasoning_into_content); // default
@@ -1956,6 +2068,61 @@ stream_stall_grace_ms = 1000
             .unwrap_err();
             assert!(
                 error.to_string().contains("server.stream_stall_grace_ms"),
+                "unexpected error for {invalid}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_max_batch_tokens_env_override_is_strict_and_source_tracked() {
+        let mut config: KilnConfig = toml::from_str(
+            r#"
+[server]
+max_batch_tokens = 1024
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.server.max_batch_tokens.source(),
+            ConfigValueSource::ConfigFile
+        );
+
+        config
+            .apply_max_batch_tokens_env_value(Some(" 256 "))
+            .unwrap();
+        assert_eq!(config.server.max_batch_tokens.tokens(), 256);
+        assert_eq!(
+            config.server.max_batch_tokens.source(),
+            ConfigValueSource::Environment
+        );
+
+        for invalid in ["", "0", "1", "65537", "-1", "not-a-number"] {
+            let error = BatchTokenBudget::from_environment_value(invalid).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("KILN_MAX_BATCH_TOKENS"),
+                "unexpected error for {invalid:?}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_max_batch_tokens_toml_validation_bounds() {
+        for valid in [MAX_BATCH_TOKENS_MIN, MAX_BATCH_TOKENS_MAX] {
+            let config: KilnConfig =
+                toml::from_str(&format!("[server]\nmax_batch_tokens = {valid}\n")).unwrap();
+            assert_eq!(config.server.max_batch_tokens.tokens(), valid);
+            assert_eq!(
+                config.server.max_batch_tokens.source(),
+                ConfigValueSource::ConfigFile
+            );
+        }
+
+        for invalid in [MAX_BATCH_TOKENS_MIN - 1, MAX_BATCH_TOKENS_MAX + 1] {
+            let error =
+                toml::from_str::<KilnConfig>(&format!("[server]\nmax_batch_tokens = {invalid}\n"))
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("server.max_batch_tokens"),
                 "unexpected error for {invalid}: {error:#}"
             );
         }

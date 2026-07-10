@@ -524,6 +524,7 @@ async fn main() -> Result<()> {
             adapter_dir,
             &config.memory,
             response_delivery_policy,
+            config.server.max_batch_tokens,
             config.server.request_timeout_secs,
             served_model_id,
             &config.prefix_cache,

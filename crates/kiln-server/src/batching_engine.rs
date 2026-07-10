@@ -17,13 +17,13 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_model::{
     BackendHealthHandle, CancelHandle, DecodeBatcherPolicy, FinishReason, GenerationOutput,
-    ModelRunner, PagedBatchedDecodeState, PagedKvCacheKt, PagedPrefixRegistration,
-    PagedPrefixReuse,
+    ModelRunner, PagedBatchedDecodeState, PagedBatchedPrefillStart, PagedBatchedPrefillState,
+    PagedKvCacheKt, PagedPrefixRegistration, PagedPrefixReuse,
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::config::{ConfigValueSource, StreamStallGrace};
+use crate::config::{BatchTokenBudget, ConfigValueSource, StreamStallGrace};
 use crate::response_delivery::{
     DeliveryBarrierError, DeliveryBatch, DeliveryCommand, DeliveryKey, DeliveryResult,
     DeliveryResultNotifyError, DeliveryResultSink, DeliveryResultSinkError, DeliveryTerminal,
@@ -210,16 +210,21 @@ pub struct BatchingEngineSnapshot {
     pub accepting: bool,
     pub queue_depth: usize,
     pub active_decode: usize,
+    pub active_prefill: usize,
+    pub max_batch_tokens: usize,
+    pub max_batch_tokens_source: ConfigValueSource,
     pub max_prefill_admission_quantum: usize,
     pub current_batch_size: usize,
     pub last_batch_size: usize,
     pub max_observed_batch_size: usize,
     pub last_forward_ms: f64,
     pub last_prefill_ms: f64,
+    pub last_prefill_tokens: usize,
     pub total_decode_forwards: u64,
     pub total_batched_decode_forwards: u64,
     pub total_decode_rows: u64,
     pub total_prefill_admission_cycles: u64,
+    pub total_prefill_forwards: u64,
     pub total_decode_tokens: u64,
     pub total_prefill_tokens: u64,
     pub total_errors: u64,
@@ -261,6 +266,22 @@ pub enum DecodeSlot {
         prefix_request: Option<RealPrefixCacheRequest>,
         first_token_pending: bool,
     },
+    RealPrefill {
+        state: Option<PagedBatchedPrefillState>,
+        prefix_request: Option<RealPrefixCacheRequest>,
+    },
+}
+
+/// Ownership returned while a request moves from admission to decode-ready.
+pub enum RequestPreparation {
+    Prefilling {
+        slot: DecodeSlot,
+        tokens_processed: usize,
+    },
+    Ready {
+        slot: DecodeSlot,
+        tokens_processed: usize,
+    },
 }
 
 fn collect_ready_decode_indices(
@@ -292,6 +313,9 @@ fn collect_ready_decode_indices(
                 decode_indices.push(idx);
                 decode_params.push(sampling[idx].clone());
             }
+            DecodeSlot::RealPrefill { .. } => {
+                anyhow::bail!("prefilling slot sent to real decode forward")
+            }
             DecodeSlot::Mock { .. } => anyhow::bail!("mock slot sent to real decode forward"),
         }
     }
@@ -301,6 +325,30 @@ fn collect_ready_decode_indices(
 
 pub trait DecodeForward: Send + Sync + 'static {
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot>;
+    fn prepare_request_chunked(
+        &self,
+        req: &EngineRequest,
+        max_tokens: usize,
+    ) -> Result<RequestPreparation> {
+        anyhow::ensure!(
+            req.prompt_tokens.len() <= max_tokens,
+            "decode forward does not support resumable prefill for a {}-token prompt under a {max_tokens}-token budget",
+            req.prompt_tokens.len()
+        );
+        Ok(RequestPreparation::Ready {
+            slot: self.prepare_request(req)?,
+            tokens_processed: req.prompt_tokens.len(),
+        })
+    }
+    fn advance_prefill(
+        &self,
+        _slot: DecodeSlot,
+        _max_tokens: usize,
+        _sampling: &SamplingParams,
+        _cancel: &CancelHandle,
+    ) -> Result<RequestPreparation> {
+        anyhow::bail!("decode forward does not support resumable prefill")
+    }
     fn can_reuse_as_strict_prefix(&self, _prompt_token_len: usize) -> bool {
         false
     }
@@ -578,6 +626,22 @@ impl DecodeForward for RealDecodeForward {
     }
 
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
+        let mut preparation = self.prepare_request_chunked(req, usize::MAX)?;
+        loop {
+            preparation = match preparation {
+                RequestPreparation::Ready { slot, .. } => return Ok(slot),
+                RequestPreparation::Prefilling { slot, .. } => {
+                    self.advance_prefill(slot, usize::MAX, &req.sampling, &req.cancel)?
+                }
+            };
+        }
+    }
+
+    fn prepare_request_chunked(
+        &self,
+        req: &EngineRequest,
+        _max_tokens: usize,
+    ) -> Result<RequestPreparation> {
         let loaded = self
             .loaded_adapter
             .read()
@@ -630,7 +694,7 @@ impl DecodeForward for RealDecodeForward {
             next_token: hit.next_token,
         });
 
-        let prepared = runner_guard.prepare_paged_batched_decode_with_prefix_cache(
+        let prepared = runner_guard.begin_paged_batched_decode_with_prefix_cache(
             &req.prompt_tokens,
             &req.sampling,
             self.block_manager.as_ref(),
@@ -639,7 +703,8 @@ impl DecodeForward for RealDecodeForward {
             prefix_cache_enabled,
             Some(&req.cancel),
         );
-        let synchronized = runner_guard.synchronize_external_yield("batched request prefill");
+        let synchronized =
+            runner_guard.synchronize_external_yield("batched request prefill initialization");
         drop(runner_guard);
         if let Err(err) = synchronized {
             std::mem::forget(prepared);
@@ -649,12 +714,98 @@ impl DecodeForward for RealDecodeForward {
         }
 
         match prepared {
-            Ok(state) => Ok(DecodeSlot::Real {
-                state,
-                prefix_request,
-                first_token_pending: true,
+            Ok(PagedBatchedPrefillStart::Ready(state)) => Ok(RequestPreparation::Ready {
+                slot: DecodeSlot::Real {
+                    state,
+                    prefix_request,
+                    first_token_pending: true,
+                },
+                tokens_processed: 0,
+            }),
+            Ok(PagedBatchedPrefillStart::Prefilling(state)) => Ok(RequestPreparation::Prefilling {
+                slot: DecodeSlot::RealPrefill {
+                    state: Some(state),
+                    prefix_request,
+                },
+                tokens_processed: 0,
             }),
             Err(err) => Err(err),
+        }
+    }
+
+    fn advance_prefill(
+        &self,
+        slot: DecodeSlot,
+        max_tokens: usize,
+        sampling: &SamplingParams,
+        cancel: &CancelHandle,
+    ) -> Result<RequestPreparation> {
+        let DecodeSlot::RealPrefill {
+            mut state,
+            prefix_request,
+        } = slot
+        else {
+            anyhow::bail!("non-prefill slot sent to resumable prefill")
+        };
+        let gpu_guard = gpu_coordination_read_guard(&self.gpu_lock);
+        let runner_guard = match self.runner_guard() {
+            Ok(runner) => runner,
+            Err(error) => {
+                std::mem::forget(state);
+                std::mem::forget(prefix_request);
+                std::mem::forget(gpu_guard);
+                return Err(error);
+            }
+        };
+        let progress = runner_guard.advance_paged_batched_prefill(
+            &mut state,
+            sampling,
+            self.paged_cache.as_ref(),
+            max_tokens,
+            Some(cancel),
+        );
+        let synchronized = runner_guard.synchronize_external_yield("batched prefill quantum");
+        drop(runner_guard);
+        if let Err(error) = synchronized {
+            std::mem::forget(progress);
+            std::mem::forget(state);
+            std::mem::forget(prefix_request);
+            std::mem::forget(gpu_guard);
+            return Err(error);
+        }
+
+        match progress {
+            Ok(progress) => match progress.decode_state {
+                Some(decode_state) => Ok(RequestPreparation::Ready {
+                    slot: DecodeSlot::Real {
+                        state: decode_state,
+                        prefix_request,
+                        first_token_pending: true,
+                    },
+                    tokens_processed: progress.tokens_processed,
+                }),
+                None => Ok(RequestPreparation::Prefilling {
+                    slot: DecodeSlot::RealPrefill {
+                        state,
+                        prefix_request,
+                    },
+                    tokens_processed: progress.tokens_processed,
+                }),
+            },
+            Err(error) => {
+                let allocated_blocks = state
+                    .take()
+                    .map(PagedBatchedPrefillState::into_allocated_blocks)
+                    .unwrap_or_default();
+                if let Err(cleanup_error) =
+                    self.finish_prefix_resources(None, Vec::new(), allocated_blocks, prefix_request)
+                {
+                    return Err(anyhow::anyhow!(
+                        "{error:#}; resumable prefill cleanup also failed: {cleanup_error:#}"
+                    ));
+                }
+                Err(error)
+            }
         }
     }
 
@@ -688,6 +839,9 @@ impl DecodeForward for RealDecodeForward {
                     }
                     DecodeSlot::Real { .. } => {
                         anyhow::bail!("decode row {idx} became first-token pending")
+                    }
+                    DecodeSlot::RealPrefill { .. } => {
+                        anyhow::bail!("prefilling row {idx} entered decode batch")
                     }
                     DecodeSlot::Mock { .. } => {
                         anyhow::bail!("mock slot sent to real decode forward")
@@ -846,6 +1000,33 @@ impl DecodeForward for RealDecodeForward {
     }
 
     fn discard_request(&self, slot: DecodeSlot) {
+        let slot = match slot {
+            DecodeSlot::RealPrefill {
+                mut state,
+                prefix_request,
+            } => {
+                if self.backend_health.snapshot().quarantined {
+                    std::mem::forget(state);
+                    std::mem::forget(prefix_request);
+                    tracing::error!("discarded prefill ownership retained with unhealthy backend");
+                    return;
+                }
+                let allocated_blocks = state
+                    .take()
+                    .map(PagedBatchedPrefillState::into_allocated_blocks)
+                    .unwrap_or_default();
+                if let Err(error) =
+                    self.finish_prefix_resources(None, Vec::new(), allocated_blocks, prefix_request)
+                {
+                    tracing::warn!(
+                        error = %format!("{error:#}"),
+                        "failed to free discarded prefill blocks"
+                    );
+                }
+                return;
+            }
+            slot => slot,
+        };
         if let DecodeSlot::Real {
             state,
             prefix_request,
@@ -990,10 +1171,27 @@ impl BatchingEngineHandle {
         policy: Option<DecodeBatcherPolicy>,
         response_delivery_policy: ResponseDeliveryPolicy,
     ) -> Self {
+        Self::start_with_runtime_options(
+            forward,
+            max_decode_batch,
+            policy,
+            BatchTokenBudget::default(),
+            response_delivery_policy,
+        )
+    }
+
+    pub fn start_with_runtime_options(
+        forward: Arc<dyn DecodeForward>,
+        max_decode_batch: usize,
+        policy: Option<DecodeBatcherPolicy>,
+        max_batch_tokens: BatchTokenBudget,
+        response_delivery_policy: ResponseDeliveryPolicy,
+    ) -> Self {
         let max_decode_batch = max_decode_batch.max(1);
         Self::start_with_policy(
             forward,
             max_decode_batch,
+            max_batch_tokens,
             env_prefix_aware_admission(),
             env_prefill_admission_quantum_for_policy(max_decode_batch, policy),
             policy.is_some_and(|policy| policy.burst_prefill_admission),
@@ -1004,6 +1202,7 @@ impl BatchingEngineHandle {
     fn start_with_policy(
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
+        max_batch_tokens: BatchTokenBudget,
         prefix_aware_admission: bool,
         prefill_admission_quantum: usize,
         burst_refill: bool,
@@ -1025,6 +1224,7 @@ impl BatchingEngineHandle {
             rx,
             forward,
             max_decode_batch.max(1),
+            max_batch_tokens,
             prefix_aware_admission,
             prefill_admission_quantum,
             burst_refill,
@@ -1332,6 +1532,8 @@ struct BatchingEngineActor {
     accepting: bool,
     stopped: bool,
     max_decode_batch: usize,
+    max_batch_tokens: usize,
+    next_prefill_index: usize,
     prefix_aware_admission: bool,
     max_prefill_admissions_per_cycle: usize,
     // #1082 CUDA concurrency regression: when true, admit_waiting refills the
@@ -1366,6 +1568,7 @@ impl BatchingEngineActor {
         rx: mpsc::Receiver<EngineCommand>,
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
+        max_batch_tokens: BatchTokenBudget,
         prefix_aware_admission: bool,
         prefill_admission_quantum: usize,
         burst_refill: bool,
@@ -1373,10 +1576,23 @@ impl BatchingEngineActor {
         delivery_worker: DeliveryWorker,
         delivery_results: std_mpsc::Receiver<Vec<DeliveryResult>>,
     ) -> Self {
-        let max_decode_batch = max_decode_batch.max(1);
+        let configured_max_decode_batch = max_decode_batch.max(1);
+        let max_decode_batch = configured_max_decode_batch
+            .min(max_batch_tokens.tokens())
+            .max(1);
+        if max_decode_batch != configured_max_decode_batch {
+            tracing::warn!(
+                configured_max_decode_batch,
+                effective_max_decode_batch = max_decode_batch,
+                max_batch_tokens = max_batch_tokens.tokens(),
+                "decode width reduced to the combined per-cycle token budget"
+            );
+        }
         let max_prefill_admissions_per_cycle = prefill_admission_quantum.clamp(1, max_decode_batch);
         let snapshot = BatchingEngineSnapshot {
             accepting: true,
+            max_batch_tokens: max_batch_tokens.tokens(),
+            max_batch_tokens_source: max_batch_tokens.source(),
             max_prefill_admission_quantum: max_prefill_admissions_per_cycle,
             stream_stall_grace_ms: duration_millis_saturating(
                 response_delivery_policy.stream_stall_grace,
@@ -1396,6 +1612,8 @@ impl BatchingEngineActor {
             accepting: true,
             stopped: false,
             max_decode_batch,
+            max_batch_tokens: max_batch_tokens.tokens(),
+            next_prefill_index: 0,
             prefix_aware_admission,
             max_prefill_admissions_per_cycle,
             burst_refill,
@@ -1475,8 +1693,17 @@ impl BatchingEngineActor {
                     break;
                 }
             }
-            if self.has_ready_decode_row() {
-                self.run_decode_batch();
+            let decoded_tokens = if self.has_ready_decode_row() {
+                self.run_decode_batch()
+            } else {
+                0
+            };
+            if self.stopped {
+                break;
+            }
+            let prefill_budget = self.max_batch_tokens.saturating_sub(decoded_tokens);
+            let advanced_prefill = self.run_prefill_budget(prefill_budget);
+            if decoded_tokens > 0 || advanced_prefill {
                 continue;
             }
 
@@ -1531,6 +1758,7 @@ impl BatchingEngineActor {
                         first_token_pending,
                         ..
                     } => !*first_token_pending,
+                    DecodeSlot::RealPrefill { .. } => false,
                     DecodeSlot::Mock { .. } => true,
                 }
         })
@@ -1887,10 +2115,39 @@ impl BatchingEngineActor {
                 .remove(waiting_idx)
                 .expect("waiting index selected from VecDeque");
             let started = Instant::now();
-            match self.forward.prepare_request(&queued.req) {
-                Ok(slot) => {
+            match self
+                .forward
+                .prepare_request_chunked(&queued.req, self.max_batch_tokens)
+            {
+                Ok(preparation) => {
+                    let (slot, tokens_processed, ready) = match preparation {
+                        RequestPreparation::Prefilling {
+                            slot,
+                            tokens_processed,
+                        } => (slot, tokens_processed, false),
+                        RequestPreparation::Ready {
+                            slot,
+                            tokens_processed,
+                        } => (slot, tokens_processed, true),
+                    };
+                    if tokens_processed > self.max_batch_tokens {
+                        self.forward.discard_request(slot);
+                        self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                        self.terminate_delivery(
+                            queued.delivery_key,
+                            format!(
+                                "prefill admission processed {tokens_processed} tokens beyond the {}-token budget",
+                                self.max_batch_tokens
+                            ),
+                        );
+                        continue;
+                    }
                     self.snapshot.last_prefill_ms = started.elapsed().as_secs_f64() * 1000.0;
-                    self.snapshot.total_prefill_tokens += queued.req.prompt_tokens.len() as u64;
+                    self.snapshot.last_prefill_tokens = tokens_processed;
+                    self.snapshot.total_prefill_tokens = self
+                        .snapshot
+                        .total_prefill_tokens
+                        .saturating_add(tokens_processed as u64);
                     admitted += 1;
                     let active_idx = self.active.len();
                     self.active.push(ActiveRequest {
@@ -1903,7 +2160,9 @@ impl BatchingEngineActor {
                     // Publish admission before first-token delivery, which can
                     // itself encounter a slow response channel.
                     self.refresh_snapshot();
-                    submitted_first_tokens |= self.emit_pending_first_token_at(active_idx);
+                    if ready {
+                        submitted_first_tokens |= self.emit_pending_first_token_at(active_idx);
+                    }
                 }
                 Err(err) => {
                     // A block-pool shortage while other requests are active
@@ -1935,6 +2194,110 @@ impl BatchingEngineActor {
         }
         self.refresh_snapshot();
         submitted_first_tokens
+    }
+
+    /// Spend at most one combined-cycle token remainder on resumable prefills.
+    /// Partial rows are selected round-robin so a 16K prompt cannot hide a 1K
+    /// prompt behind repeated quanta. Every forward returns to the actor before
+    /// another decode cohort or control-command drain.
+    fn run_prefill_budget(&mut self, mut budget: usize) -> bool {
+        let mut advanced = false;
+        while budget > 0 && !self.active.is_empty() {
+            let active_len = self.active.len();
+            let Some(idx) = (0..active_len)
+                .map(|offset| (self.next_prefill_index + offset) % active_len)
+                .find(|&idx| {
+                    self.active[idx].delivery_state == ActiveDeliveryState::Ready
+                        && matches!(&self.active[idx].slot, DecodeSlot::RealPrefill { .. })
+                })
+            else {
+                break;
+            };
+
+            let ActiveRequest {
+                req,
+                delivery_key,
+                delivery_state,
+                next_delivery_sequence,
+                slot,
+            } = self.active.remove(idx);
+            let started = Instant::now();
+            let result = self
+                .forward
+                .advance_prefill(slot, budget, &req.sampling, &req.cancel);
+            let elapsed = started.elapsed();
+            self.snapshot.last_prefill_ms = elapsed.as_secs_f64() * 1000.0;
+            self.snapshot.total_prefill_forwards =
+                self.snapshot.total_prefill_forwards.saturating_add(1);
+
+            let preparation = match result {
+                Ok(preparation) => preparation,
+                Err(error) => {
+                    self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                    self.terminate_delivery(delivery_key, format!("{error:#}"));
+                    self.next_prefill_index = if self.active.is_empty() {
+                        0
+                    } else {
+                        idx % self.active.len()
+                    };
+                    self.refresh_snapshot();
+                    advanced = true;
+                    continue;
+                }
+            };
+            let (slot, tokens_processed, ready) = match preparation {
+                RequestPreparation::Prefilling {
+                    slot,
+                    tokens_processed,
+                } => (slot, tokens_processed, false),
+                RequestPreparation::Ready {
+                    slot,
+                    tokens_processed,
+                } => (slot, tokens_processed, true),
+            };
+            if tokens_processed == 0 || tokens_processed > budget {
+                self.forward.discard_request(slot);
+                self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                self.terminate_delivery(
+                    delivery_key,
+                    format!(
+                        "prefill forward reported {tokens_processed} tokens for a {budget}-token budget"
+                    ),
+                );
+                self.next_prefill_index = if self.active.is_empty() {
+                    0
+                } else {
+                    idx % self.active.len()
+                };
+                self.refresh_snapshot();
+                advanced = true;
+                continue;
+            }
+
+            budget -= tokens_processed;
+            self.snapshot.last_prefill_tokens = tokens_processed;
+            self.snapshot.total_prefill_tokens = self
+                .snapshot
+                .total_prefill_tokens
+                .saturating_add(tokens_processed as u64);
+            self.active.insert(
+                idx,
+                ActiveRequest {
+                    req,
+                    delivery_key,
+                    delivery_state,
+                    next_delivery_sequence,
+                    slot,
+                },
+            );
+            self.next_prefill_index = (idx + 1) % self.active.len();
+            if ready {
+                self.emit_pending_first_token_at(idx);
+            }
+            self.refresh_snapshot();
+            advanced = true;
+        }
+        advanced
     }
 
     fn pending_first_token_at(&mut self, idx: usize) -> Option<TokenId> {
@@ -2058,10 +2421,10 @@ impl BatchingEngineActor {
             })
     }
 
-    fn run_decode_batch(&mut self) {
+    fn run_decode_batch(&mut self) -> usize {
         let mut ready_indices = self.ready_decode_indices();
         if ready_indices.is_empty() {
-            return;
+            return 0;
         }
 
         // Pre-grow KV per slot: a request that has outgrown the block pool
@@ -2102,13 +2465,13 @@ impl BatchingEngineActor {
                     ready_indices = self.ready_decode_indices();
                     if ready_indices.is_empty() {
                         self.refresh_snapshot();
-                        return;
+                        return 0;
                     }
                 }
                 Err(err) => {
                     self.finish_indices_with_error(&ready_indices, format!("{err:#}"));
                     self.refresh_snapshot();
-                    return;
+                    return 0;
                 }
             }
         }
@@ -2161,12 +2524,12 @@ impl BatchingEngineActor {
                     ),
                 );
                 self.refresh_snapshot();
-                return;
+                return 0;
             }
             Err(err) => {
                 self.finish_indices_with_error(&ready_indices, format!("{err:#}"));
                 self.refresh_snapshot();
-                return;
+                return 0;
             }
         };
 
@@ -2186,6 +2549,7 @@ impl BatchingEngineActor {
         self.defer_delivery_flush = false;
         self.flush_delivery_outbox();
         self.refresh_snapshot();
+        batch_len
     }
 
     fn ready_decode_indices(&self) -> Vec<usize> {
@@ -2201,7 +2565,8 @@ impl BatchingEngineActor {
                         first_token_pending,
                         ..
                     } if *first_token_pending => None,
-                    _ => Some(idx),
+                    DecodeSlot::RealPrefill { .. } => None,
+                    DecodeSlot::Real { .. } | DecodeSlot::Mock { .. } => Some(idx),
                 }
             })
             .take(self.max_decode_batch)
@@ -2214,6 +2579,9 @@ impl BatchingEngineActor {
                 generated_tokens, ..
             } => generated_tokens,
             DecodeSlot::Real { state, .. } => &state.generated_tokens,
+            DecodeSlot::RealPrefill { .. } => {
+                unreachable!("prefilling row has no generated tokens")
+            }
         }
     }
 
@@ -2327,7 +2695,15 @@ impl BatchingEngineActor {
         self.snapshot.snapshot_age_ms = 0;
         self.snapshot.accepting = self.accepting;
         self.snapshot.queue_depth = self.waiting.len();
-        self.snapshot.active_decode = self.active.len();
+        self.snapshot.active_prefill = self
+            .active
+            .iter()
+            .filter(|active| matches!(&active.slot, DecodeSlot::RealPrefill { .. }))
+            .count();
+        self.snapshot.active_decode = self
+            .active
+            .len()
+            .saturating_sub(self.snapshot.active_prefill);
         self.snapshot.response_delivery_in_flight = self
             .active
             .iter()
@@ -2408,7 +2784,7 @@ mod tests {
                 .iter()
                 .map(|slot| match slot {
                     DecodeSlot::Mock { next_token, .. } => *next_token,
-                    DecodeSlot::Real { .. } => unreachable!(),
+                    DecodeSlot::Real { .. } | DecodeSlot::RealPrefill { .. } => unreachable!(),
                 })
                 .collect();
             self.calls.lock().unwrap().push(input_tokens.clone());
@@ -2478,7 +2854,7 @@ mod tests {
                 .iter()
                 .map(|slot| match slot {
                     DecodeSlot::Real { state, .. } => state.next_token,
-                    DecodeSlot::Mock { .. } => unreachable!(),
+                    DecodeSlot::Mock { .. } | DecodeSlot::RealPrefill { .. } => unreachable!(),
                 })
                 .collect();
             self.calls.lock().unwrap().push(input_tokens.clone());
@@ -2597,6 +2973,7 @@ mod tests {
             rx,
             forward,
             max_decode_batch,
+            BatchTokenBudget::default(),
             prefix_aware_admission,
             prefill_admission_quantum,
             burst_refill,
@@ -2729,7 +3106,7 @@ mod tests {
                 .iter()
                 .map(|slot| match slot {
                     DecodeSlot::Mock { next_token, .. } => *next_token + 10,
-                    DecodeSlot::Real { .. } => unreachable!(),
+                    DecodeSlot::Real { .. } | DecodeSlot::RealPrefill { .. } => unreachable!(),
                 })
                 .collect())
         }
@@ -2972,6 +3349,7 @@ mod tests {
         let handle = BatchingEngineHandle::start_with_policy(
             forward,
             8,
+            BatchTokenBudget::default(),
             env_prefix_aware_admission(),
             env_prefill_admission_quantum_for_policy(8, None),
             false,
@@ -3070,6 +3448,7 @@ mod tests {
         let handle = BatchingEngineHandle::start_with_policy(
             Arc::new(MockForward::default()),
             1,
+            BatchTokenBudget::default(),
             false,
             1,
             false,
@@ -4006,6 +4385,7 @@ mod tests {
             command_rx,
             forward.clone(),
             8,
+            BatchTokenBudget::default(),
             false,
             8,
             false,
@@ -4134,6 +4514,7 @@ mod tests {
         let handle = BatchingEngineHandle::start_with_policy(
             forward.clone(),
             8,
+            BatchTokenBudget::default(),
             true,
             8,
             false,

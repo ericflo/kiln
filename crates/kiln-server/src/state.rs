@@ -2802,6 +2802,7 @@ impl AppState {
         adapter_dir: PathBuf,
         memory_cfg: &crate::config::MemoryConfig,
         response_delivery_policy: crate::batching_engine::ResponseDeliveryPolicy,
+        max_batch_tokens: crate::config::BatchTokenBudget,
         request_timeout_secs: u64,
         served_model_id: String,
         prefix_cache_cfg: &crate::config::PrefixCacheConfig,
@@ -3308,13 +3309,15 @@ impl AppState {
             tracing::info!(
                 backend = backend_name,
                 max_decode_batch,
+                max_batch_tokens = max_batch_tokens.tokens(),
+                max_batch_tokens_source = %max_batch_tokens.source(),
                 stream_stall_grace_ms = response_delivery_policy
                     .stream_stall_grace_ms(),
                 stream_stall_grace_source = %response_delivery_policy
                     .stream_stall_grace_source(),
                 "batching engine enabled — routing streaming and non-streaming real completions through batching actor (set KILN_BATCHING_ENGINE=0 to disable)"
             );
-            crate::batching_engine::BatchingEngineHandle::start_with_backend_options(
+            crate::batching_engine::BatchingEngineHandle::start_with_runtime_options(
                 Arc::new(crate::batching_engine::RealDecodeForward::new(
                     runner.clone(),
                     block_manager.clone(),
@@ -3325,6 +3328,7 @@ impl AppState {
                 )),
                 max_decode_batch,
                 Some(decode_batcher_policy),
+                max_batch_tokens,
                 response_delivery_policy,
             )
         });
