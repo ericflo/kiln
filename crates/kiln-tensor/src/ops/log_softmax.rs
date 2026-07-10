@@ -13,27 +13,24 @@ pub fn log_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         bail!("log_softmax_last_dim: input must have rank ≥ 1");
     }
 
-    // CUDA fast path: compose cuda_softmax_last_axis + activation_unary(log).
-    // The log kind tag is 5 per csrc/activation.cu.
+    // A softmax-then-log composition is not a valid log-softmax
+    // implementation: tail probabilities can round to zero even in F32 and
+    // then become -Inf. The fused kernels form the stable max-subtracted
+    // identity directly and allocate only the output tensor.
     #[cfg(feature = "cuda")]
     if matches!(x.device(), crate::Device::Cuda(_))
         && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
         && x.is_contiguous()
     {
-        let softmax = crate::cuda_softmax_last_axis(x)?;
-        let logged = crate::cuda_activation_unary(&softmax, 5)?;
-        return Ok(logged);
+        return crate::cuda_log_softmax_last_axis(x);
     }
 
-    // ROCm fast path: mirror the CUDA composition (rocm_softmax + log activation).
     #[cfg(feature = "rocm")]
     if matches!(x.device(), crate::Device::Rocm(_))
         && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
         && x.is_contiguous()
     {
-        let softmax = crate::rocm_softmax_last_axis(x)?;
-        let logged = crate::rocm_activation_unary(&softmax, 5)?;
-        return Ok(logged);
+        return crate::rocm_log_softmax_last_axis(x);
     }
 
     // Metal fast path: kiln-owned MSL log-softmax kernel (numerically
@@ -60,7 +57,7 @@ pub fn log_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     // a free function, so the round-trip is wired explicitly here. This
     // is correctness-first / perf-wrong; the residual TODO is to author a
     // `vk_ops::softmax::vk_log_softmax_lastdim` shader and route through
-    // it (analogous to the CUDA softmax+log compose above).
+    // it.
     #[cfg(feature = "vulkan")]
     if matches!(x.device(), crate::Device::Vulkan(_)) {
         let dev = x.device();
@@ -189,13 +186,14 @@ mod tests {
     }
 
     #[test]
-    fn log_softmax_numerically_stable_with_large_logits() {
-        // x = [1000, 1001, 1002] — overflow without max-subtraction.
-        let x = Tensor::from_slice(&[1000.0f32, 1001.0, 1002.0], vec![1, 3]).unwrap();
+    fn log_softmax_numerically_stable_with_extreme_spread() {
+        // The -1000 tail underflows in a softmax-then-log implementation.
+        let x = Tensor::from_slice(&[1000.0f32, 0.0, -1000.0], vec![1, 3]).unwrap();
         let y = read_f32(&log_softmax_last_dim(&x).unwrap());
         for v in &y {
             assert!(v.is_finite(), "log_softmax produced non-finite: {v}");
         }
+        approx(&y, &[0.0, -1000.0, -2000.0], 1e-4);
     }
 
     #[test]
@@ -236,7 +234,7 @@ mod tests {
             return;
         }
         let dev = crate::Device::Vulkan(0);
-        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 0.5, 1.5];
+        let data: Vec<f32> = vec![1000.0, 0.0, -1000.0, 4.0, 0.5, 1.5];
 
         // CPU reference.
         let x_cpu = Tensor::from_slice(&data, vec![2, 3]).unwrap();

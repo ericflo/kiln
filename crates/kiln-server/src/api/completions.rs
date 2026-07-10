@@ -4259,7 +4259,10 @@ pub enum TextCompletionPrompt {
 /// clients can query a kiln-served teacher through the same `/v1/completions`
 /// shape they use for vLLM/sglang. Token display is fail closed: an unknown
 /// token ID or decoder failure returns `tokenization_error` instead of a
-/// successful response containing an empty fallback token.
+/// successful response containing an empty fallback token. Model output is
+/// also validated before rendering; vocabulary-width or non-finite-value
+/// corruption returns `generation_error` rather than a short map or JSON
+/// `null` value.
 #[derive(Debug, Deserialize)]
 pub struct TextCompletionRequest {
     /// When omitted, the server falls back to its configured `served_model_id`.
@@ -4690,21 +4693,69 @@ fn decode_prompt_logprob_token(
     })
 }
 
-fn top_k_logprob_map(
-    state: &AppState,
-    row: &[f32],
-    top_k: usize,
-) -> Result<PromptLogprobMap, ApiError> {
-    top_k_logprob_map_with_decoder(row, top_k, |token_id| {
-        state.tokenizer.decode_token_for_display(token_id)
-    })
+#[derive(Clone, Copy)]
+struct ValidatedPromptLogprobRow<'a> {
+    values: &'a [f32],
 }
 
+fn top_k_logprob_map(
+    state: &AppState,
+    row: ValidatedPromptLogprobRow<'_>,
+    top_k: usize,
+) -> Result<PromptLogprobMap, ApiError> {
+    let mut decode_token = |token_id| state.tokenizer.decode_token_for_display(token_id);
+    top_k_logprob_map_from_validated_row(row, top_k, &mut decode_token)
+}
+
+#[cfg(test)]
 fn top_k_logprob_map_with_decoder(
     row: &[f32],
+    expected_vocab_size: usize,
     top_k: usize,
     mut decode_token: impl FnMut(TokenId) -> Result<String, TokenizerError>,
 ) -> Result<PromptLogprobMap, ApiError> {
+    let row = validate_prompt_logprob_row(row, expected_vocab_size)?;
+    top_k_logprob_map_from_validated_row(row, top_k, &mut decode_token)
+}
+
+fn validate_prompt_logprob_row<'a>(
+    row: &'a [f32],
+    expected_vocab_size: usize,
+) -> Result<ValidatedPromptLogprobRow<'a>, ApiError> {
+    if row.len() != expected_vocab_size {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "prompt-logprobs row width {} did not match model vocabulary size {expected_vocab_size}",
+            row.len()
+        )));
+    }
+
+    if let Some((token_id, value)) = row.iter().enumerate().find(|(_, value)| !value.is_finite()) {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "prompt-logprobs row contained non-finite value {value:?} at token id {token_id}"
+        )));
+    }
+
+    Ok(ValidatedPromptLogprobRow { values: row })
+}
+
+fn top_k_logprob_map_from_validated_row(
+    row: ValidatedPromptLogprobRow<'_>,
+    top_k: usize,
+    decode_token: &mut impl FnMut(TokenId) -> Result<String, TokenizerError>,
+) -> Result<PromptLogprobMap, ApiError> {
+    let row = row.values;
+    if top_k > row.len() {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "requested {top_k} prompt-logprob candidates from a vocabulary row with width {}",
+            row.len()
+        )));
+    }
+
+    let compare_rank = |a: &(TokenId, f32), b: &(TokenId, f32)| {
+        b.1.partial_cmp(&a.1)
+            .expect("validated prompt-logprob rows contain only finite values")
+            .then_with(|| a.0.cmp(&b.0))
+    };
     let mut pairs: Vec<(TokenId, f32)> = row
         .iter()
         .copied()
@@ -4712,12 +4763,10 @@ fn top_k_logprob_map_with_decoder(
         .map(|(idx, logprob)| (idx as TokenId, logprob))
         .collect();
     if top_k < pairs.len() {
-        pairs.select_nth_unstable_by(top_k, |a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        pairs.select_nth_unstable_by(top_k, compare_rank);
         pairs.truncate(top_k);
     }
-    pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    pairs.sort_unstable_by(compare_rank);
 
     let mut out = BTreeMap::new();
     for (rank, (token_id, logprob)) in pairs.into_iter().enumerate() {
@@ -4726,9 +4775,15 @@ fn top_k_logprob_map_with_decoder(
             PromptLogprobEntry {
                 logprob,
                 rank: rank + 1,
-                decoded_token: decode_prompt_logprob_token(token_id, &mut decode_token)?,
+                decoded_token: decode_prompt_logprob_token(token_id, &mut *decode_token)?,
             },
         );
+    }
+    if out.len() != top_k {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "prompt-logprobs selection returned {} distinct candidates instead of the requested {top_k}",
+            out.len()
+        )));
     }
     Ok(out)
 }
@@ -4747,12 +4802,17 @@ fn prompt_logprobs_from_rows(
         )));
     }
 
+    let validated_rows = logprob_rows
+        .iter()
+        .map(|row| validate_prompt_logprob_row(row, state.model_config.vocab_size))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let mut out = Vec::with_capacity(prompt_tokens.len());
     out.push(None);
     for pos in 1..prompt_tokens.len() {
         out.push(Some(top_k_logprob_map(
             state,
-            &logprob_rows[pos - 1],
+            validated_rows[pos - 1],
             top_k,
         )?));
     }
@@ -13565,7 +13625,7 @@ mod tests {
     #[test]
     fn prompt_logprob_map_propagates_token_decode_failure() {
         let mut attempted_token_ids = Vec::new();
-        let err = top_k_logprob_map_with_decoder(&[-2.0, -0.5, -1.0], 2, |token_id| {
+        let err = top_k_logprob_map_with_decoder(&[-2.0, -0.5, -1.0], 3, 2, |token_id| {
             attempted_token_ids.push(token_id);
             Err(TokenizerError::Decode(
                 "injected decode failure".to_string(),
@@ -13578,6 +13638,91 @@ mod tests {
         assert_eq!(err.code, "tokenization_error");
         assert!(err.message.contains("token id 1"), "{err:?}");
         assert!(err.message.contains("injected decode failure"), "{err:?}");
+    }
+
+    #[test]
+    fn prompt_logprob_map_rejects_non_model_vocab_width_before_decode() {
+        for row in [vec![-1.0; 3], vec![-1.0; 5]] {
+            let mut decode_attempts = 0;
+            let err = top_k_logprob_map_with_decoder(&row, 4, 2, |_| {
+                decode_attempts += 1;
+                Ok("unused".to_string())
+            })
+            .unwrap_err();
+
+            assert_eq!(decode_attempts, 0);
+            assert_eq!(err.code, "generation_error");
+            assert!(err.message.contains(&format!("row width {}", row.len())));
+            assert!(err.message.contains("model vocabulary size 4"));
+        }
+    }
+
+    #[test]
+    fn prompt_logprob_map_rejects_every_non_finite_value_before_decode() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut row = vec![-0.25, -0.5, -0.75, -1.0];
+            // This position is outside top-1 for both finite and -Inf values.
+            row[3] = value;
+            let mut decode_attempts = 0;
+            let err = top_k_logprob_map_with_decoder(&row, 4, 1, |_| {
+                decode_attempts += 1;
+                Ok("unused".to_string())
+            })
+            .unwrap_err();
+
+            assert_eq!(decode_attempts, 0, "value {value:?}");
+            assert_eq!(err.code, "generation_error");
+            assert!(err.message.contains("non-finite value"), "{err:?}");
+            assert!(err.message.contains("token id 3"), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_logprob_map_ties_are_token_id_ordered_and_exactly_cardinal() {
+        let row = [0.0, -0.0, -0.25, -0.25, -1.0];
+
+        for top_k in 1..=row.len() {
+            let map = top_k_logprob_map_with_decoder(&row, row.len(), top_k, |_| {
+                Ok("same-display-token".to_string())
+            })
+            .unwrap();
+            assert_eq!(map.len(), top_k);
+
+            let mut ranked = map
+                .iter()
+                .map(|(token_id, entry)| {
+                    assert_eq!(entry.decoded_token, "same-display-token");
+                    (entry.rank, token_id.parse::<TokenId>().unwrap())
+                })
+                .collect::<Vec<_>>();
+            ranked.sort_unstable();
+            assert_eq!(
+                ranked.iter().map(|(rank, _)| *rank).collect::<Vec<_>>(),
+                (1..=top_k).collect::<Vec<_>>()
+            );
+
+            let expected_ids = [0, 1, 2, 3, 4][..top_k].to_vec();
+            assert_eq!(
+                ranked
+                    .into_iter()
+                    .map(|(_, token_id)| token_id)
+                    .collect::<Vec<_>>(),
+                expected_ids
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_logprob_rows_validate_the_unused_final_forward_row() {
+        let mut state = make_prompt_logprobs_test_state();
+        state.model_config.vocab_size = 4;
+        let prompt_tokens = [0, 1];
+
+        for final_row in [vec![-1.0; 3], vec![-1.0, -2.0, f32::NAN, -4.0]] {
+            let rows = vec![vec![-0.1, -0.2, -0.3, -0.4], final_row];
+            let err = prompt_logprobs_from_rows(&state, &prompt_tokens, &rows, 1).unwrap_err();
+            assert_eq!(err.code, "generation_error");
+        }
     }
 
     #[tokio::test]

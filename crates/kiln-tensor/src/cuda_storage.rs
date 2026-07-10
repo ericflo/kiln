@@ -699,6 +699,15 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_log_softmax_last_axis_async(
+        x: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_rows: i64,
+        n_cols: i64,
+        dtype_tag: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_sum_squared_last_axis_async(
         x: *const core::ffi::c_void,
         out: *mut core::ffi::c_void,
@@ -2560,16 +2569,22 @@ mod tests {
         assert!(!super::cuda_is_finite(&tt).unwrap());
     }
 }
-/// CUDA softmax over the trailing axis (Phase 4 substrate op).
-///
-/// Operates on a contiguous `[..., D]` tensor; produces a fresh
-/// contiguous tensor of the same shape and dtype with each
-/// `[..., :]` row normalized to a probability distribution.
-///
-/// Routes through `kiln_softmax_last_axis_async` in
-/// `csrc/softmax.cu`. F32/BF16/F16 supported.
 #[cfg(feature = "cuda")]
-pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
+type CudaLastAxisNormalizationKernel = unsafe extern "C" fn(
+    *const core::ffi::c_void,
+    *mut core::ffi::c_void,
+    i64,
+    i64,
+    i32,
+    *mut core::ffi::c_void,
+) -> i32;
+
+#[cfg(feature = "cuda")]
+fn cuda_last_axis_normalization(
+    x: &crate::Tensor,
+    label: &str,
+    kernel: CudaLastAxisNormalizationKernel,
+) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
 
     let dtype = x.dtype();
@@ -2579,40 +2594,50 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         crate::DType::F16 => 2,
         other => {
             return Err(crate::Error::Msg(format!(
-                "cuda_softmax_last_axis: unsupported dtype {other}"
+                "{label}: unsupported dtype {other}"
             )));
         }
     };
     if !x.is_contiguous() {
-        return Err(crate::Error::Msg(
-            "cuda_softmax_last_axis: input must be contiguous".to_string(),
-        ));
+        return Err(crate::Error::Msg(format!(
+            "{label}: input must be contiguous"
+        )));
     }
     let rank = x.rank();
     if rank == 0 {
-        return Err(crate::Error::Msg(
-            "cuda_softmax_last_axis: input must have rank ≥ 1".to_string(),
-        ));
+        return Err(crate::Error::Msg(format!(
+            "{label}: input must have rank >= 1"
+        )));
     }
     let shape = x.shape();
-    let n_cols = shape[rank - 1] as i64;
-    let n_rows = (x.element_count() / shape[rank - 1]) as i64;
+    let trailing_dim = shape[rank - 1];
+    if trailing_dim == 0 {
+        return Err(crate::Error::Msg(format!(
+            "{label}: trailing axis must be non-empty"
+        )));
+    }
+    let n_cols = i64::try_from(trailing_dim)
+        .map_err(|_| crate::Error::Msg(format!("{label}: trailing axis exceeds i64")))?;
+    let n_rows = i64::try_from(x.element_count() / trailing_dim)
+        .map_err(|_| crate::Error::Msg(format!("{label}: row count exceeds i64")))?;
+    if n_rows > i64::from(i32::MAX) {
+        return Err(crate::Error::Msg(format!(
+            "{label}: row count {n_rows} exceeds kernel grid limit {}",
+            i32::MAX
+        )));
+    }
 
     let x_storage = x
         .storage()
         .as_any()
         .downcast_ref::<CudaStorage>()
-        .ok_or_else(|| {
-            crate::Error::Msg("cuda_softmax_last_axis: input must be CUDA".to_string())
-        })?;
+        .ok_or_else(|| crate::Error::Msg(format!("{label}: input must be CUDA")))?;
     let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    // #1082 (perf, Pattern A): softmax writes every element of the
-    // last-axis output (Pass 3 stores out[row, c] for all rows × cols);
-    // uninit skips the memset.
+    // Both kernels write every output element, so skip the zero-fill.
     let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
     let stream = crate::active_cuda_stream(&ctx);
@@ -2637,12 +2662,10 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
-    let status = unsafe {
-        kiln_softmax_last_axis_async(x_ptr, out_ptr, n_rows, n_cols, dtype_tag, raw_stream)
-    };
+    let status = unsafe { kernel(x_ptr, out_ptr, n_rows, n_cols, dtype_tag, raw_stream) };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
-            "cuda_softmax_last_axis: FFI returned status {status}"
+            "{label}: FFI returned status {status}"
         )));
     }
 
@@ -2651,6 +2674,34 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         storage_arc,
         crate::Layout::contiguous(shape.to_vec()),
         crate::TensorId::next(),
+    )
+}
+
+/// CUDA softmax over the trailing axis (Phase 4 substrate op).
+///
+/// Operates on a contiguous `[..., D]` tensor; produces a fresh
+/// contiguous tensor of the same shape and dtype with each
+/// `[..., :]` row normalized to a probability distribution.
+///
+/// Routes through `kiln_softmax_last_axis_async` in
+/// `csrc/softmax.cu`. F32/BF16/F16 supported.
+#[cfg(feature = "cuda")]
+pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
+    cuda_last_axis_normalization(x, "cuda_softmax_last_axis", kiln_softmax_last_axis_async)
+}
+
+/// Numerically stable CUDA log-softmax over the trailing axis.
+///
+/// The fused kernel forms `x - max(x) - log(sum(exp(x - max(x))))`
+/// directly in F32 arithmetic and performs one output allocation. It never
+/// materializes probabilities whose underflow could corrupt a representable
+/// log-probability before `log` is applied.
+#[cfg(feature = "cuda")]
+pub fn cuda_log_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
+    cuda_last_axis_normalization(
+        x,
+        "cuda_log_softmax_last_axis",
+        kiln_log_softmax_last_axis_async,
     )
 }
 

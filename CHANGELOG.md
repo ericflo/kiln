@@ -45,6 +45,13 @@
   `tokenization_error` with the token ID. Known special tokens retain their
   literal vocabulary text; neither mock nor real responses can turn a failed
   display decode into an empty successful field.
+- prompt-logprob integrity: real forward rows must exactly match the configured
+  vocabulary and contain only finite values before ranking or JSON
+  serialization. Selection has deterministic token-ID tie breaks and exact K
+  cardinality. CUDA and ROCm now use a fused, max-subtracted log-softmax kernel
+  that prevents softmax underflow from corrupting representable finite tails,
+  with one same-dtype output allocation instead of low-precision
+  softmax-then-log or full-vocabulary F32 temporaries.
 
 ## kiln-v0.4.1 — 2026-06-12 — multi-turn prefix caching actually caches
 

@@ -137,13 +137,14 @@ pub use cuda_storage::{
     cuda_diagonal_extract, cuda_dropout, cuda_elementwise_binary,
     cuda_flce_grad_logits_chunk_inplace, cuda_grpo_grad_logits_chunk_inplace,
     cuda_index_select_axis_n, cuda_index_select_dim0, cuda_is_finite, cuda_l2norm_last_axis,
-    cuda_layernorm_last_axis, cuda_lerp, cuda_masked_fill, cuda_max_axis, cuda_mean_axis,
-    cuda_mean_last_axis, cuda_mem_get_info, cuda_min_axis, cuda_rmsnorm_last_axis, cuda_rope,
-    cuda_rope_split_half, cuda_scalar_op, cuda_scatter_add_dim0, cuda_set_pool_release_threshold,
-    cuda_slice_set_dim0, cuda_softmax_last_axis, cuda_sum_axis, cuda_sum_last_axis,
-    cuda_sum_squared_last_axis, cuda_synchronize_default_stream, cuda_to_host_copy,
-    cuda_topk_last_axis, cuda_trim_pool, cuda_where_select, cuda_write_host_in_place,
-    cuda_zeros_ctx, host_to_cuda_copy, host_to_cuda_copy_ctx, primary_cuda_context,
+    cuda_layernorm_last_axis, cuda_lerp, cuda_log_softmax_last_axis, cuda_masked_fill,
+    cuda_max_axis, cuda_mean_axis, cuda_mean_last_axis, cuda_mem_get_info, cuda_min_axis,
+    cuda_rmsnorm_last_axis, cuda_rope, cuda_rope_split_half, cuda_scalar_op, cuda_scatter_add_dim0,
+    cuda_set_pool_release_threshold, cuda_slice_set_dim0, cuda_softmax_last_axis, cuda_sum_axis,
+    cuda_sum_last_axis, cuda_sum_squared_last_axis, cuda_synchronize_default_stream,
+    cuda_to_host_copy, cuda_topk_last_axis, cuda_trim_pool, cuda_where_select,
+    cuda_write_host_in_place, cuda_zeros_ctx, host_to_cuda_copy, host_to_cuda_copy_ctx,
+    primary_cuda_context,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_stream_priority::{
@@ -191,10 +192,10 @@ pub use rocm_ops::*;
 #[cfg(feature = "rocm")]
 pub use rocm_storage::{
     RocmStorage, host_to_rocm_copy, host_to_rocm_copy_ctx, primary_rocm_context, rocm_contiguous,
-    rocm_htod_count, rocm_is_available, rocm_mem_get_info, rocm_pool_stats, rocm_slice_set_dim0,
-    rocm_softmax_last_axis, rocm_synchronize_compute_stream, rocm_synchronize_default_stream,
-    rocm_synchronize_tensor_stream, rocm_to_host_copy, rocm_trim_pool, rocm_write_host_in_place,
-    rocm_zeros_ctx,
+    rocm_htod_count, rocm_is_available, rocm_log_softmax_last_axis, rocm_mem_get_info,
+    rocm_pool_stats, rocm_slice_set_dim0, rocm_softmax_last_axis, rocm_synchronize_compute_stream,
+    rocm_synchronize_default_stream, rocm_synchronize_tensor_stream, rocm_to_host_copy,
+    rocm_trim_pool, rocm_write_host_in_place, rocm_zeros_ctx,
 };
 #[cfg(feature = "vulkan")]
 pub use vulkan_allocator::VulkanAllocator;
