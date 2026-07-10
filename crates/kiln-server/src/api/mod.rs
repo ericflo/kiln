@@ -1,5 +1,4 @@
 use axum::Router;
-use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
@@ -93,6 +92,5 @@ pub fn router(state: AppState) -> Router {
         .merge(terminal::routes())
         .merge(ui::routes())
         .with_state(state)
-        .layer(CorsLayer::permissive())
         .layer(trace_layer)
 }
