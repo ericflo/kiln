@@ -3351,10 +3351,12 @@ fn auto_load_adapter(
                 dir: adapter_path.to_path_buf(),
             },
             content_changed: true,
+            default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Replace(Some(
+                adapter_name.to_string(),
+            )),
             reason: "training_auto_load",
         },
     )?;
-    *state.active_adapter_name.write().unwrap() = Some(adapter_name.to_string());
     Ok(())
 }
 

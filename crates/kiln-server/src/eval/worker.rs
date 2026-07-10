@@ -401,13 +401,15 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
                         dir: adapter_dir,
                     },
                     content_changed: true,
+                    default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Replace(Some(
+                        gate.adapter_name.clone(),
+                    )),
                     reason: "post_eval_gate_promotion",
                 },
             )
             .await
             {
                 Ok(_) => {
-                    *state.active_adapter_name.write().unwrap() = Some(gate.adapter_name.clone());
                     stamp_verdict(
                         crate::state::GateOutcome::Promoted,
                         format!(
@@ -448,16 +450,15 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
             crate::adapter_swap::SwapRequest {
                 target: crate::adapter_swap::SwapTarget::Base,
                 content_changed: true,
+                default_adapter: crate::adapter_swap::DefaultAdapterUpdate::ClearIf(
+                    gate.adapter_name.clone(),
+                ),
                 reason: "post_eval_gate_demotion",
             },
         )
         .await
         {
             tracing::warn!(error = %e, adapter = %gate.adapter_name, "failed to unload gated adapter");
-        }
-        let mut active = state.active_adapter_name.write().unwrap();
-        if active.as_deref() == Some(gate.adapter_name.as_str()) {
-            *active = None;
         }
     }
 

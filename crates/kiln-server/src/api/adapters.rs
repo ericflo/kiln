@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+#[cfg(test)]
 use uuid::Uuid;
 
 use kiln_model::adapter_merge::{PeftLora, merge_concat, merge_linear, merge_ties};
@@ -191,6 +192,9 @@ async fn load_adapter(
 ) -> Result<Json<LoadAdapterResponse>, ApiError> {
     ensure_adapter_mutation_admission(&state)?;
     validate_adapter_name(&req.name)?;
+    let serial = crate::adapter_swap::adapter_mutation_guard(&state)
+        .await
+        .map_err(|error| adapter_swap_error(&state, error))?;
 
     let adapter_path = state.adapter_dir.join(&req.name);
     let resolved_adapter_path = validate_loadable_adapter_dir(&adapter_path).map_err(|err| {
@@ -235,7 +239,7 @@ async fn load_adapter(
         ModelBackend::Mock { .. } => {
             #[cfg(test)]
             {
-                record_adapter_loaded(&state, &req.name, &resolved_adapter_path);
+                record_adapter_loaded(&state, &req.name, &resolved_adapter_path, &serial);
                 let content_revision = state
                     .loaded_adapter_identity()
                     .expect("mock load published adapter identity")
@@ -258,7 +262,7 @@ async fn load_adapter(
 
     // Barrier swap (see `adapter_swap`): the weight flip waits for
     // in-flight requests to finish instead of landing mid-generation.
-    let load_result = crate::adapter_swap::swap_runtime_adapter(
+    let load_result = crate::adapter_swap::swap_runtime_adapter_locked(
         &state,
         crate::adapter_swap::SwapRequest {
             target: crate::adapter_swap::SwapTarget::Resolved {
@@ -266,8 +270,12 @@ async fn load_adapter(
                 dir: resolved_adapter_path.clone(),
             },
             content_changed: false,
+            default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Replace(Some(
+                req.name.clone(),
+            )),
             reason: "adapter_load_endpoint",
         },
+        &serial,
     )
     .await
     .map(|_| ());
@@ -288,7 +296,7 @@ async fn load_adapter(
     }
 
     ensure_adapter_mutation_admission(&state)?;
-    record_adapter_loaded(&state, &req.name, &resolved_adapter_path);
+    record_adapter_loaded(&state, &req.name, &resolved_adapter_path, &serial);
     let loaded = state.loaded_adapter_identity().ok_or_else(|| {
         ApiError::internal("adapter weight flip completed without publishing its identity")
     })?;
@@ -306,27 +314,35 @@ async fn load_adapter(
     }))
 }
 
-fn record_adapter_loaded(state: &AppState, name: &str, path: &Path) {
-    let old = state.active_adapter_name.read().unwrap().clone();
-    *state.active_adapter_name.write().unwrap() = Some(name.to_string());
+fn record_adapter_loaded(
+    state: &AppState,
+    name: &str,
+    _path: &Path,
+    _serial: &crate::adapter_swap::AdapterMutationGuard<'_>,
+) {
+    state.adapter_load_errors.write().unwrap().remove(name);
     #[cfg(test)]
     if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
-        let source = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(path)
+        let old = state.active_adapter_name.read().unwrap().clone();
+        let source = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(_path)
             .expect("validated mock adapter retains an exact source identity");
-        *state.loaded_adapter.write().unwrap() =
-            Some(LoadedAdapterIdentity::from_source(name, &source));
-    }
-    state.adapter_load_errors.write().unwrap().remove(name);
+        let identity = LoadedAdapterIdentity::from_source(name, &source);
+        *state.loaded_adapter.write().unwrap() = Some(identity);
+        crate::adapter_swap::apply_default_update(
+            state,
+            &crate::adapter_swap::DefaultAdapterUpdate::Replace(Some(name.to_string())),
+        );
 
-    tracing::info!(
-        request_id = %Uuid::new_v4(),
-        old_adapter = ?old,
-        new_adapter = ?Some(name.to_string()),
-        reason = "adapter_load_endpoint",
-        path = %path.display(),
-        operation = "load",
-        "adapter transition"
-    );
+        tracing::info!(
+            request_id = %Uuid::new_v4(),
+            old_adapter = ?old,
+            new_adapter = ?Some(name.to_string()),
+            reason = "adapter_load_endpoint",
+            path = %_path.display(),
+            operation = "load",
+            "adapter transition"
+        );
+    }
 }
 
 fn validate_loadable_adapter_dir(adapter_path: &Path) -> Result<PathBuf, ApiError> {
@@ -392,12 +408,15 @@ async fn unload_adapter(
     State(state): State<AppState>,
 ) -> Result<Json<UnloadAdapterResponse>, ApiError> {
     ensure_adapter_mutation_admission(&state)?;
+    let serial = crate::adapter_swap::adapter_mutation_guard(&state)
+        .await
+        .map_err(|error| adapter_swap_error(&state, error))?;
     let runner = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner,
         ModelBackend::Mock { .. } => {
             #[cfg(test)]
             {
-                record_adapter_unloaded(&state);
+                record_adapter_unloaded(&state, &serial);
                 return Ok(Json(UnloadAdapterResponse { status: "unloaded" }));
             }
             #[cfg(not(test))]
@@ -408,39 +427,47 @@ async fn unload_adapter(
     };
 
     let _ = runner; // barrier swap reaches the runner through the state
-    crate::adapter_swap::swap_runtime_adapter(
+    crate::adapter_swap::swap_runtime_adapter_locked(
         &state,
         crate::adapter_swap::SwapRequest {
             target: crate::adapter_swap::SwapTarget::Base,
             content_changed: false,
+            default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Replace(None),
             reason: "adapter_unload_endpoint",
         },
+        &serial,
     )
     .await
     .map_err(|error| adapter_swap_error(&state, error))?;
 
     ensure_adapter_mutation_admission(&state)?;
-    record_adapter_unloaded(&state);
+    record_adapter_unloaded(&state, &serial);
 
     Ok(Json(UnloadAdapterResponse { status: "unloaded" }))
 }
 
-fn record_adapter_unloaded(state: &AppState) {
-    let old = state.active_adapter_name.read().unwrap().clone();
-    *state.active_adapter_name.write().unwrap() = None;
+fn record_adapter_unloaded(
+    state: &AppState,
+    _serial: &crate::adapter_swap::AdapterMutationGuard<'_>,
+) {
     #[cfg(test)]
     if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
+        let old = state.active_adapter_name.read().unwrap().clone();
         *state.loaded_adapter.write().unwrap() = None;
-    }
+        crate::adapter_swap::apply_default_update(
+            state,
+            &crate::adapter_swap::DefaultAdapterUpdate::Replace(None),
+        );
 
-    tracing::info!(
-        request_id = %Uuid::new_v4(),
-        old_adapter = ?old,
-        new_adapter = ?Option::<String>::None,
-        reason = "adapter_unload_endpoint",
-        operation = "unload",
-        "adapter transition"
-    );
+        tracing::info!(
+            request_id = %Uuid::new_v4(),
+            old_adapter = ?old,
+            new_adapter = ?Option::<String>::None,
+            reason = "adapter_unload_endpoint",
+            operation = "unload",
+            "adapter transition"
+        );
+    }
 }
 
 /// Delete an adapter from disk.

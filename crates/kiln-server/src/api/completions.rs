@@ -6409,6 +6409,7 @@ async fn ensure_runtime_adapter(
         crate::adapter_swap::SwapRequest {
             target,
             content_changed: false,
+            default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Preserve,
             reason: "per_request_adapter",
         },
     )
@@ -6721,6 +6722,7 @@ async fn ensure_composed_adapter_swap(
                 dir: target.cache_dir.clone(),
             },
             content_changed: false,
+            default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Preserve,
             reason: "composed_adapter",
         },
     )

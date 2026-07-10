@@ -345,11 +345,13 @@ impl EvalGenerator for LiveEvalGenerator {
                 crate::adapter_swap::SwapRequest {
                     target,
                     content_changed: true,
+                    default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Replace(
+                        want.clone(),
+                    ),
                     reason: "eval_set_adapter",
                 },
             )
             .await?;
-            *state.active_adapter_name.write().unwrap() = want;
             Ok(previous)
         })
     }
@@ -378,11 +380,13 @@ impl EvalGenerator for LiveEvalGenerator {
                 crate::adapter_swap::SwapRequest {
                     target,
                     content_changed: false,
+                    default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Replace(
+                        want.clone(),
+                    ),
                     reason: "eval_restore_adapter",
                 },
             )
             .await?;
-            *state.active_adapter_name.write().unwrap() = want;
             Ok(previous)
         })
     }

@@ -16,9 +16,9 @@
 //! resume. The engine-less fallback takes exclusive GPU coordination ownership,
 //! paired with the request-lifetime read owner held by direct inference.
 //!
-//! Cache coherence rides along: when the target adapter's directory
-//! content changed (retrain auto-load, upload), its name-keyed cache
-//! entries are purged inside the same barrier, after every request that
+//! Cache coherence and the server-default selection ride along: when the
+//! target adapter's directory content changed (retrain/import), its name-keyed
+//! cache entries are purged inside the same barrier, after every request that
 //! could have been computed under the old weights has finished.
 
 use std::path::PathBuf;
@@ -60,22 +60,50 @@ pub struct SwapRequest {
     /// reload even when the name is already active, and purge the name's
     /// cache entries at the barrier.
     pub content_changed: bool,
+    /// How this physical transition changes the server-default adapter.
+    /// Per-request swaps preserve it; explicit eval pinning, promotion, and
+    /// unload update it atomically with the loaded identity and runner weights.
+    pub default_adapter: DefaultAdapterUpdate,
     /// For the transition log line.
     pub reason: &'static str,
 }
 
+/// Server-default update applied at the same publication point as a weight
+/// flip. `ClearIf` lets a gate demote one adapter without clearing a different
+/// default that won an earlier serialized transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultAdapterUpdate {
+    Preserve,
+    Replace(Option<String>),
+    ClearIf(String),
+}
+
+pub(crate) type AdapterMutationGuard<'a> = tokio::sync::MutexGuard<'a, ()>;
+
 /// Activate `req.target` on the live runner. Serialized via
-/// `state.adapter_swap_lock`; no-ops when the target is already loaded
+/// `state.adapter_mutation_lock`; no-ops when the target is already loaded
 /// (unless `content_changed`). Returns the previously-loaded adapter name.
 pub async fn swap_runtime_adapter(
     state: &AppState,
     req: SwapRequest,
 ) -> Result<Option<String>, String> {
-    let _serial = adapter_swap_guard(state).await?;
+    let serial = adapter_mutation_guard(state).await?;
+    swap_runtime_adapter_locked(state, req, &serial).await
+}
+
+/// Guarded form used by a larger filesystem/revision transaction. The guard
+/// argument proves that the caller owns the shared mutation barrier.
+pub(crate) async fn swap_runtime_adapter_locked(
+    state: &AppState,
+    req: SwapRequest,
+    _serial: &AdapterMutationGuard<'_>,
+) -> Result<Option<String>, String> {
+    validate_default_update(&req)?;
 
     let target_name = req.target.cache_name();
     let current = state.loaded_adapter_name();
     if current == target_name && !req.content_changed {
+        apply_default_update(state, &req.default_adapter);
         return Ok(current);
     }
 
@@ -112,7 +140,14 @@ pub async fn swap_runtime_adapter(
         .backend_health_handle()
         .ok_or_else(|| "adapter swap requires the real model backend".to_string())?;
 
-    let closure = swap_closure(state, runner, lora, target_identity, req.content_changed);
+    let closure = swap_closure(
+        state,
+        runner,
+        lora,
+        target_identity,
+        req.content_changed,
+        req.default_adapter,
+    );
     match engine {
         Some(engine) => engine
             .swap_adapter_while_healthy(closure, &backend_health)
@@ -141,11 +176,22 @@ pub fn swap_runtime_adapter_blocking(
     state: &AppState,
     req: SwapRequest,
 ) -> Result<Option<String>, String> {
-    let _serial = adapter_swap_guard_blocking(state)?;
+    let serial = adapter_mutation_guard_blocking(state)?;
+    swap_runtime_adapter_blocking_locked(state, req, &serial)
+}
+
+/// Blocking guarded form for training publication transactions.
+pub(crate) fn swap_runtime_adapter_blocking_locked(
+    state: &AppState,
+    req: SwapRequest,
+    _serial: &AdapterMutationGuard<'_>,
+) -> Result<Option<String>, String> {
+    validate_default_update(&req)?;
 
     let target_name = req.target.cache_name();
     let current = state.loaded_adapter_name();
     if current == target_name && !req.content_changed {
+        apply_default_update(state, &req.default_adapter);
         return Ok(current);
     }
 
@@ -172,7 +218,14 @@ pub fn swap_runtime_adapter_blocking(
         .backend_health_handle()
         .ok_or_else(|| "adapter swap requires the real model backend".to_string())?;
 
-    let closure = swap_closure(state, runner, lora, target_identity, req.content_changed);
+    let closure = swap_closure(
+        state,
+        runner,
+        lora,
+        target_identity,
+        req.content_changed,
+        req.default_adapter,
+    );
     match engine {
         Some(engine) => engine
             .swap_adapter_blocking_while_healthy(closure, &backend_health)
@@ -189,12 +242,14 @@ pub fn swap_runtime_adapter_blocking(
     Ok(current)
 }
 
-async fn adapter_swap_guard(state: &AppState) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+pub(crate) async fn adapter_mutation_guard(
+    state: &AppState,
+) -> Result<AdapterMutationGuard<'_>, String> {
     loop {
         state
             .ensure_backend_healthy()
             .map_err(|error| format!("{error:#}"))?;
-        if let Ok(guard) = state.adapter_swap_lock.try_lock() {
+        if let Ok(guard) = state.adapter_mutation_lock.try_lock() {
             state
                 .ensure_backend_healthy()
                 .map_err(|error| format!("{error:#}"))?;
@@ -204,14 +259,14 @@ async fn adapter_swap_guard(state: &AppState) -> Result<tokio::sync::MutexGuard<
     }
 }
 
-fn adapter_swap_guard_blocking(
+pub(crate) fn adapter_mutation_guard_blocking(
     state: &AppState,
-) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+) -> Result<AdapterMutationGuard<'_>, String> {
     loop {
         state
             .ensure_backend_healthy()
             .map_err(|error| format!("{error:#}"))?;
-        if let Ok(guard) = state.adapter_swap_lock.try_lock() {
+        if let Ok(guard) = state.adapter_mutation_lock.try_lock() {
             state
                 .ensure_backend_healthy()
                 .map_err(|error| format!("{error:#}"))?;
@@ -284,6 +339,7 @@ fn swap_closure(
     lora: Option<LoraWeights>,
     target_identity: Option<LoadedAdapterIdentity>,
     content_changed: bool,
+    default_adapter: DefaultAdapterUpdate,
 ) -> crate::batching_engine::AdapterSwapClosure {
     let state = state.clone();
     Box::new(move || {
@@ -297,6 +353,7 @@ fn swap_closure(
                 .swap_lora(lora)
                 .map_err(|error| format!("{error:#}"))?;
             *published = target_identity.clone();
+            apply_default_update(&state, &default_adapter);
         }
         state
             .ensure_backend_healthy()
@@ -310,6 +367,32 @@ fn swap_closure(
         }
         Ok(())
     })
+}
+
+fn validate_default_update(req: &SwapRequest) -> Result<(), String> {
+    let target = req.target.cache_name();
+    match &req.default_adapter {
+        DefaultAdapterUpdate::Preserve | DefaultAdapterUpdate::ClearIf(_) => Ok(()),
+        DefaultAdapterUpdate::Replace(default) if *default == target => Ok(()),
+        DefaultAdapterUpdate::Replace(default) => Err(format!(
+            "adapter transition cannot publish default {default:?} while loading {target:?}"
+        )),
+    }
+}
+
+pub(crate) fn apply_default_update(state: &AppState, update: &DefaultAdapterUpdate) {
+    match update {
+        DefaultAdapterUpdate::Preserve => {}
+        DefaultAdapterUpdate::Replace(next) => {
+            *state.active_adapter_name.write().unwrap() = next.clone();
+        }
+        DefaultAdapterUpdate::ClearIf(name) => {
+            let mut active = state.active_adapter_name.write().unwrap();
+            if active.as_deref() == Some(name.as_str()) {
+                *active = None;
+            }
+        }
+    }
 }
 
 fn log_transition(old: &Option<String>, new: &Option<String>, reason: &str) {

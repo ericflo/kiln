@@ -2350,10 +2350,11 @@ pub struct AppState {
     /// Last adapter load failure by adapter name. Used by the registry so
     /// automation can distinguish "not loaded" from "failed to load".
     pub adapter_load_errors: Arc<std::sync::RwLock<HashMap<String, String>>>,
-    /// Serializes adapter swap check-then-act sequences (see
-    /// `adapter_swap`): two concurrent requests for the same not-yet-loaded
-    /// adapter must produce one load, not two racing ones.
-    pub adapter_swap_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes every adapter filesystem publication and loaded-weight
+    /// transition (see `adapter_swap`). The lock is the revision barrier that
+    /// keeps mutable adapter directories, the server default, and the exact
+    /// weights published by the runner from racing one another.
+    pub adapter_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     /// Tracked training jobs (job_id → info).
     pub training_jobs: TrainingJobs,
     /// GPU memory budget for coordinating inference and training.
@@ -2706,7 +2707,7 @@ impl AppState {
                 "adapters",
             ))),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            adapter_swap_lock: Arc::new(tokio::sync::Mutex::new(())),
+            adapter_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 0, 0, 1.0, None)),
             kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState::unavailable("mock_backend"),
@@ -3396,7 +3397,7 @@ impl AppState {
             mtp_acceptance: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             self_improve_scheduler: Arc::new(std::sync::RwLock::new(None)),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            adapter_swap_lock: Arc::new(tokio::sync::Mutex::new(())),
+            adapter_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(memory_budget),
             kv_autoscaler,
