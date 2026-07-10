@@ -441,25 +441,53 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
         return;
     }
 
-    // FAILED the gate. If someone manually loaded the adapter while the
-    // eval ran, get it out of serving first.
+    // FAILED the gate. Own the same revision barrier as load, delete, upload,
+    // and training publication until the serving name has been removed. This
+    // makes the loaded check, optional unload, default clear, rename, and cache
+    // purge one serialized transaction.
+    let serial = match crate::adapter_swap::adapter_mutation_guard(state).await {
+        Ok(serial) => serial,
+        Err(error) => {
+            stamp_verdict(
+                crate::state::GateOutcome::Error,
+                format!(
+                    "FAILED: accuracy {accuracy:.3} < {:.3}, but adapter `{}` could not be demoted: {error}",
+                    gate.min_accuracy, gate.adapter_name
+                ),
+            );
+            return;
+        }
+    };
     let currently_loaded = state.loaded_adapter_name();
     if currently_loaded.as_deref() == Some(gate.adapter_name.as_str()) {
-        if let Err(e) = crate::adapter_swap::swap_runtime_adapter(
+        if let Err(error) = crate::adapter_swap::swap_runtime_adapter_locked(
             state,
             crate::adapter_swap::SwapRequest {
                 target: crate::adapter_swap::SwapTarget::Base,
-                content_changed: true,
+                content_changed: false,
                 default_adapter: crate::adapter_swap::DefaultAdapterUpdate::ClearIf(
                     gate.adapter_name.clone(),
                 ),
                 reason: "post_eval_gate_demotion",
             },
+            &serial,
         )
         .await
         {
-            tracing::warn!(error = %e, adapter = %gate.adapter_name, "failed to unload gated adapter");
+            stamp_verdict(
+                crate::state::GateOutcome::Error,
+                format!(
+                    "FAILED: accuracy {accuracy:.3} < {:.3}, but loaded adapter `{}` could not be swapped away: {error}",
+                    gate.min_accuracy, gate.adapter_name
+                ),
+            );
+            return;
         }
+    } else {
+        crate::adapter_swap::apply_default_update(
+            state,
+            &crate::adapter_swap::DefaultAdapterUpdate::ClearIf(gate.adapter_name.clone()),
+        );
     }
 
     let src = state.adapter_dir.join(&gate.adapter_name);
@@ -473,14 +501,22 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
             crate::recent_requests::now_unix_ms()
         ));
     }
-    let rename_note = match std::fs::rename(&src, &dst) {
-        Ok(()) => format!(
-            "renamed to `{}`",
-            dst.file_name().unwrap_or_default().to_string_lossy()
-        ),
-        Err(e) => format!("rename to .failed failed: {e}"),
-    };
+    if let Err(error) = std::fs::rename(&src, &dst) {
+        stamp_verdict(
+            crate::state::GateOutcome::Error,
+            format!(
+                "FAILED: accuracy {accuracy:.3} < {:.3}, but adapter `{}` could not be renamed to .failed: {error}",
+                gate.min_accuracy, gate.adapter_name
+            ),
+        );
+        return;
+    }
     state.purge_adapter_caches(&Some(gate.adapter_name.clone()));
+    drop(serial);
+    let rename_note = format!(
+        "renamed to `{}`",
+        dst.file_name().unwrap_or_default().to_string_lossy()
+    );
     stamp_verdict(
         crate::state::GateOutcome::Demoted,
         format!(
@@ -832,6 +868,11 @@ mod tests {
         let (state, _dir) = gate_test_state();
         seed_training_job(&state, "train-1", "gated");
         std::fs::create_dir(state.adapter_dir.join("gated")).unwrap();
+        *state.active_adapter_name.write().unwrap() = Some("gated".to_string());
+        *state.loaded_adapter.write().unwrap() = Some(crate::state::LoadedAdapterIdentity {
+            name: "request-override".to_string(),
+            content_revision: "c".repeat(64),
+        });
 
         run_gated_job(
             &state,
@@ -860,6 +901,15 @@ mod tests {
         assert!(verdict.contains("FAILED"), "{verdict}");
         assert!(verdict.contains("gated.failed"), "{verdict}");
         assert_eq!(outcome_of(&state, "train-1"), "demoted");
+        assert!(
+            state.active_adapter_name.read().unwrap().is_none(),
+            "demotion must clear a rejected server default even when a request override is loaded"
+        );
+        assert_eq!(
+            state.loaded_adapter_name().as_deref(),
+            Some("request-override"),
+            "demotion must not unload a different physically loaded revision"
+        );
     }
 
     /// Gate PASS without a deferred auto-load: adapter stays under its

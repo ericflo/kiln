@@ -7,7 +7,6 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use flate2::Compression;
-use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use serde_json::json;
 use tower::ServiceExt;
@@ -251,6 +250,100 @@ async fn test_upload_rejects_existing_adapter() {
     // Original adapter contents must be untouched.
     let original = std::fs::read(tmp.path().join("already-here/adapter_config.json")).unwrap();
     assert_eq!(original.as_slice(), br#"{"r": 8, "lora_alpha": 16}"#);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_uploads_to_one_name_publish_exactly_one_complete_adapter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = make_state(tmp.path().to_path_buf());
+    let app = api::router(state);
+
+    let archive_a = build_tar_gz(&[
+        ("contended/adapter_config.json", b"{\"winner\":\"a\"}"),
+        ("contended/adapter_model.safetensors", b"weights-a"),
+    ]);
+    let archive_b = build_tar_gz(&[
+        ("contended/adapter_config.json", b"{\"winner\":\"b\"}"),
+        ("contended/adapter_model.safetensors", b"weights-b"),
+    ]);
+    let (content_type_a, body_a) = build_multipart_body(Some("contended"), Some(&archive_a));
+    let (content_type_b, body_b) = build_multipart_body(Some("contended"), Some(&archive_b));
+    let request_a = Request::builder()
+        .method("POST")
+        .uri("/v1/adapters/upload")
+        .header("content-type", content_type_a)
+        .body(Body::from(body_a))
+        .unwrap();
+    let request_b = Request::builder()
+        .method("POST")
+        .uri("/v1/adapters/upload")
+        .header("content-type", content_type_b)
+        .body(Body::from(body_b))
+        .unwrap();
+
+    let (response_a, response_b) = tokio::join!(
+        app.clone().oneshot(request_a),
+        app.clone().oneshot(request_b)
+    );
+    let mut statuses = [response_a.unwrap().status(), response_b.unwrap().status()];
+    statuses.sort_by_key(|status| status.as_u16());
+    assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
+
+    let published = tmp.path().join("contended");
+    let config = std::fs::read(published.join("adapter_config.json")).unwrap();
+    let weights = std::fs::read(published.join("adapter_model.safetensors")).unwrap();
+    assert!(
+        (config == b"{\"winner\":\"a\"}" && weights == b"weights-a")
+            || (config == b"{\"winner\":\"b\"}" && weights == b"weights-b"),
+        "the winner must be published as one complete directory"
+    );
+    assert!(
+        std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .all(|entry| {
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".upload-tmp-")
+            }),
+        "both request-owned staging directories must be cleaned"
+    );
+}
+
+#[tokio::test]
+async fn upload_rejects_a_name_whose_old_revision_is_still_physically_loaded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = make_state(tmp.path().to_path_buf());
+    *state.loaded_adapter.write().unwrap() = Some(kiln_server::state::LoadedAdapterIdentity {
+        name: "memory-only".to_string(),
+        content_revision: "a".repeat(64),
+    });
+    let app = api::router(state);
+
+    let archive = build_tar_gz(&[
+        ("memory-only/adapter_config.json", b"{}"),
+        ("memory-only/adapter_model.safetensors", b"new"),
+    ]);
+    let (content_type, body) = build_multipart_body(Some("memory-only"), Some(&archive));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/adapters/upload")
+                .header("content-type", content_type)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "adapter_loaded");
+    assert!(!tmp.path().join("memory-only").exists());
 }
 
 #[tokio::test]

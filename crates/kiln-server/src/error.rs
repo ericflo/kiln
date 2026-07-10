@@ -227,6 +227,18 @@ impl ApiError {
         }
     }
 
+    pub fn adapter_loaded(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "adapter_loaded",
+            message: format!(
+                "Adapter '{name}' is physically loaded by the model runner and cannot be mutated"
+            ),
+            hint: "Unload the adapter with POST /v1/adapters/unload, or wait for the request-specific adapter transition to finish, then retry.",
+            retry_after_seconds: None,
+        }
+    }
+
     pub fn adapter_delete_failed(detail: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

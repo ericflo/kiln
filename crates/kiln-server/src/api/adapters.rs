@@ -447,15 +447,15 @@ async fn unload_adapter(
 }
 
 fn record_adapter_unloaded(
-    state: &AppState,
+    _state: &AppState,
     _serial: &crate::adapter_swap::AdapterMutationGuard<'_>,
 ) {
     #[cfg(test)]
-    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
-        let old = state.active_adapter_name.read().unwrap().clone();
-        *state.loaded_adapter.write().unwrap() = None;
+    if matches!(_state.backend.as_ref(), ModelBackend::Mock { .. }) {
+        let old = _state.active_adapter_name.read().unwrap().clone();
+        *_state.loaded_adapter.write().unwrap() = None;
         crate::adapter_swap::apply_default_update(
-            state,
+            _state,
             &crate::adapter_swap::DefaultAdapterUpdate::Replace(None),
         );
 
@@ -477,6 +477,9 @@ async fn delete_adapter(
 ) -> Result<Json<DeleteAdapterResponse>, ApiError> {
     ensure_adapter_mutation_admission(&state)?;
     validate_adapter_name(&name)?;
+    let _serial = crate::adapter_swap::adapter_mutation_guard(&state)
+        .await
+        .map_err(|error| adapter_swap_error(&state, error))?;
     let adapter_path = state.adapter_dir.join(&name);
 
     if !adapter_path.exists() || !adapter_path.is_dir() {
@@ -487,6 +490,9 @@ async fn delete_adapter(
     let active = state.active_adapter_name.read().unwrap().clone();
     if active.as_deref() == Some(&name) {
         return Err(ApiError::adapter_active(&name));
+    }
+    if state.loaded_adapter_name().as_deref() == Some(name.as_str()) {
+        return Err(ApiError::adapter_loaded(&name));
     }
 
     std::fs::remove_dir_all(&adapter_path).map_err(|e| ApiError::adapter_delete_failed(e))?;
@@ -533,7 +539,7 @@ fn scan_adapter_dir(
         let path = entry.path();
         if path.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == ".composed" || name.starts_with(".upload-tmp-") {
+            if name.starts_with('.') {
                 continue;
             }
             let has_config = path.join("adapter_config.json").exists();
@@ -894,35 +900,31 @@ async fn merge_adapters(
         ));
     }
 
-    // Validate output_name: no path separators, not "." or "..", non-empty.
+    // Validate output_name as the same single-segment namespace accepted by
+    // every other adapter mutation. Dot-prefixed names are reserved for
+    // transaction staging and must never become registry entries.
     let output_name = req.output_name.trim().to_string();
     if output_name.is_empty()
-        || output_name == "."
-        || output_name == ".."
+        || output_name.starts_with('.')
+        || output_name.contains("..")
         || output_name.contains('/')
         || output_name.contains('\\')
     {
         return Err(ApiError::adapter_merge_bad_name(&output_name));
     }
 
-    // Resolve and confirm all source adapter directories exist before
-    // doing any I/O work.
-    let mut source_paths: Vec<(String, f32, std::path::PathBuf)> =
-        Vec::with_capacity(req.sources.len());
     for src in &req.sources {
         validate_adapter_name(&src.name)?;
-        let path = state.adapter_dir.join(&src.name);
-        if !path.exists() || !path.is_dir() {
-            return Err(ApiError::adapter_not_found(&src.name));
-        }
-        source_paths.push((src.name.clone(), src.weight, path));
     }
 
-    // Refuse to overwrite an existing output adapter.
     let output_path = state.adapter_dir.join(&output_name);
-    if output_path.exists() {
-        return Err(ApiError::adapter_merge_output_exists(&output_name));
-    }
+    let staging_root = tempfile::Builder::new()
+        .prefix(".merge-tmp-")
+        .tempdir_in(&state.adapter_dir)
+        .map_err(|error| {
+            ApiError::adapter_merge_failed(format!("creating staging dir: {error}"))
+        })?;
+    let staging_output = staging_root.path().join("adapter");
 
     let sources_info: Vec<MergeSourceInfo> = req
         .sources
@@ -933,23 +935,64 @@ async fn merge_adapters(
         })
         .collect();
 
-    // Run the (potentially slow, CPU-bound) merge work on a blocking thread.
-    let output_name_for_task = output_name.clone();
-    let output_path_for_task = output_path.clone();
+    // Snapshot source bytes into immutable in-memory PeftLora values while the
+    // mutation barrier prevents delete, rewrite, or gate demotion. Expensive
+    // arithmetic and output serialization happen after releasing the barrier.
+    let serial = crate::adapter_swap::adapter_mutation_guard(&state)
+        .await
+        .map_err(|error| adapter_swap_error(&state, error))?;
+    if output_path.exists() {
+        return Err(ApiError::adapter_merge_output_exists(&output_name));
+    }
+    if state.loaded_adapter_name().as_deref() == Some(output_name.as_str()) {
+        return Err(ApiError::adapter_loaded(&output_name));
+    }
+    let source_paths: Vec<(String, f32, PathBuf)> = req
+        .sources
+        .iter()
+        .map(|source| {
+            (
+                source.name.clone(),
+                source.weight,
+                state.adapter_dir.join(&source.name),
+            )
+        })
+        .collect();
+    for (name, _, path) in &source_paths {
+        if !path.exists() || !path.is_dir() {
+            return Err(ApiError::adapter_not_found(name));
+        }
+    }
+    let loaded =
+        tokio::task::spawn_blocking(move || -> Result<Vec<(PeftLora, f32)>, MergeError> {
+            let mut loaded = Vec::with_capacity(source_paths.len());
+            for (name, weight, path) in source_paths {
+                let adapter = PeftLora::load(&path).map_err(|error| {
+                    MergeError::Failed(format!(
+                        "loading source adapter '{name}' from {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                loaded.push((adapter, weight));
+            }
+            Ok(loaded)
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("join error: {error}")))?;
+    let loaded = match loaded {
+        Ok(loaded) => loaded,
+        Err(MergeError::Invalid(message)) => {
+            return Err(ApiError::adapter_merge_invalid(message));
+        }
+        Err(MergeError::Failed(message)) => {
+            return Err(ApiError::adapter_merge_failed(message));
+        }
+    };
+    drop(serial);
+
+    let output_path_for_task = staging_output.clone();
     let mode_for_task = resolved_mode;
     let merge_result = tokio::task::spawn_blocking(move || -> Result<usize, MergeError> {
-        // Load each source adapter from disk.
-        let mut loaded: Vec<(PeftLora, f32)> = Vec::with_capacity(source_paths.len());
-        for (name, weight, path) in source_paths {
-            let adapter = PeftLora::load(&path).map_err(|e| {
-                MergeError::Failed(format!(
-                    "loading source adapter '{name}' from {}: {e}",
-                    path.display()
-                ))
-            })?;
-            loaded.push((adapter, weight));
-        }
-
         let refs: Vec<(&PeftLora, f32)> = loaded.iter().map(|(a, w)| (a, *w)).collect();
 
         let merged = match mode_for_task {
@@ -966,7 +1009,6 @@ async fn merge_adapters(
                 output_path_for_task.display()
             ))
         })?;
-        let _ = output_name_for_task;
         Ok(num_tensors)
     })
     .await
@@ -975,20 +1017,38 @@ async fn merge_adapters(
     let num_tensors = match merge_result {
         Ok(n) => n,
         Err(MergeError::Invalid(msg)) => {
-            // Best-effort cleanup if we partially wrote anything.
-            let _ = std::fs::remove_dir_all(&output_path);
             return Err(ApiError::adapter_merge_invalid(msg));
         }
         Err(MergeError::Failed(msg)) => {
-            let _ = std::fs::remove_dir_all(&output_path);
             return Err(ApiError::adapter_merge_failed(msg));
         }
     };
 
-    if let Err(error) = ensure_adapter_mutation_admission(&state) {
-        let _ = std::fs::remove_dir_all(&output_path);
-        return Err(error);
+    let serial = crate::adapter_swap::adapter_mutation_guard(&state)
+        .await
+        .map_err(|error| adapter_swap_error(&state, error))?;
+    if output_path.exists() {
+        return Err(ApiError::adapter_merge_output_exists(&output_name));
     }
+    if state.loaded_adapter_name().as_deref() == Some(output_name.as_str()) {
+        return Err(ApiError::adapter_loaded(&output_name));
+    }
+    let output_size = dir_size_recursive(&staging_output);
+    if let Some(cap) = state.adapter_max_disk_bytes {
+        let current = measure_finalized_adapter_dir_bytes(&state.adapter_dir);
+        if current.saturating_add(output_size) > cap {
+            return Err(ApiError::adapter_disk_quota_exceeded(format!(
+                "{} GiB used + {} GiB merge output > {} GiB cap",
+                current as f64 / 1024.0 / 1024.0 / 1024.0,
+                output_size as f64 / 1024.0 / 1024.0 / 1024.0,
+                cap as f64 / 1024.0 / 1024.0 / 1024.0
+            )));
+        }
+    }
+    std::fs::rename(&staging_output, &output_path)
+        .map_err(|error| ApiError::adapter_merge_failed(format!("publishing output: {error}")))?;
+    state.purge_adapter_caches(&Some(output_name.clone()));
+    drop(serial);
 
     tracing::info!(
         output = %output_name,
@@ -1186,7 +1246,7 @@ const ADAPTER_EXTRACT_BYTES_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const ADAPTER_EXTRACT_ENTRIES_LIMIT: u32 = 100_000;
 
 /// Sum the on-disk byte size of all finalized adapter directories under
-/// `adapter_dir`. Skips the in-flight `.upload-tmp-*/` staging dirs and the
+/// `adapter_dir`. Skips dot-prefixed internal staging dirs and the
 /// `.composed/<hash>/` cache (which is bounded separately by the §6/§8 LRU
 /// eviction work — see roadmap item 8). A directory entry that fails to
 /// stat is ignored rather than aborting the whole walk; this keeps the
@@ -1200,7 +1260,7 @@ fn measure_finalized_adapter_dir_bytes(adapter_dir: &Path) -> u64 {
     for entry in read_dir.flatten() {
         let name = entry.file_name();
         let name_lossy = name.to_string_lossy();
-        if name_lossy.starts_with(".upload-tmp-") || name_lossy == ".composed" {
+        if name_lossy.starts_with('.') {
             continue;
         }
         total = total.saturating_add(dir_size_recursive(&entry.path()));
@@ -1362,21 +1422,14 @@ async fn upload_adapter(
     };
 
     let target_dir = state.adapter_dir.join(&name);
-    if target_dir.exists() {
-        cleanup_tmp(&tmp_root);
-        return Err(ApiError::adapter_already_exists(&name));
-    }
-    ensure_adapter_mutation_admission(&state)?;
 
     // Extract on a blocking thread — tar/flate2 are sync, and decompression of
     // a real adapter pegs a CPU for ~hundreds of ms.
     let tmp_root_owned = tmp_root
         .clone()
         .expect("tmp_root set when archive_path is set");
+    let staging_dir = tmp_root_owned.join("staging");
     let archive_path_owned = archive_path.clone();
-    let target_dir_owned = target_dir.clone();
-    let adapter_dir_owned = state.adapter_dir.clone();
-    let max_disk_bytes = state.adapter_max_disk_bytes;
     let extract_result = tokio::task::spawn_blocking(move || -> Result<(u64, u32), ImportError> {
         let staging = tmp_root_owned.join("staging");
         std::fs::create_dir_all(&staging)
@@ -1514,31 +1567,6 @@ async fn upload_adapter(
             ));
         }
 
-        // Disk-quota guard. We have the real extracted byte count now, and
-        // the staging dir is still under `.upload-tmp-*/` so it is excluded
-        // from `measure_finalized_adapter_dir_bytes`. Reject before rename so
-        // a quota failure leaves no partial adapter behind.
-        if let Some(cap) = max_disk_bytes {
-            let current = measure_finalized_adapter_dir_bytes(&adapter_dir_owned);
-            if current.saturating_add(bytes_written) > cap {
-                return Err(ImportError::DiskQuota(format!(
-                    "{} GiB used + {} GiB upload > {} GiB cap",
-                    current as f64 / 1024.0 / 1024.0 / 1024.0,
-                    bytes_written as f64 / 1024.0 / 1024.0 / 1024.0,
-                    cap as f64 / 1024.0 / 1024.0 / 1024.0
-                )));
-            }
-        }
-
-        // Atomic rename of staging → target_dir. On the same filesystem this is
-        // a single inode move; if it fails (e.g. EXDEV) fall back to a copy.
-        std::fs::rename(&staging, &target_dir_owned).map_err(|e| {
-            ImportError::Failed(format!(
-                "renaming staging to {}: {e}",
-                target_dir_owned.display()
-            ))
-        })?;
-
         Ok((bytes_written, files_written))
     })
     .await
@@ -1547,38 +1575,58 @@ async fn upload_adapter(
         ApiError::adapter_import_failed(format!("join error: {e}"))
     })?;
 
-    // Always remove the upload temp dir; the staging child has been renamed
-    // out by the success path or cleaned up on failure.
-    cleanup_tmp(&tmp_root);
-
     let (size_bytes, files) = match extract_result {
         Ok(v) => v,
         Err(ImportError::Invalid(msg)) => {
-            let _ = std::fs::remove_dir_all(&target_dir);
+            cleanup_tmp(&tmp_root);
             return Err(ApiError::adapter_import_invalid(msg));
         }
         Err(ImportError::Failed(msg)) => {
-            let _ = std::fs::remove_dir_all(&target_dir);
+            cleanup_tmp(&tmp_root);
             return Err(ApiError::adapter_import_failed(msg));
-        }
-        Err(ImportError::DiskQuota(msg)) => {
-            // The rejection happened before rename, so target_dir was never
-            // created. The remove_dir_all is defensive in case a future change
-            // ever creates target_dir earlier in the flow.
-            let _ = std::fs::remove_dir_all(&target_dir);
-            tracing::warn!(
-                adapter = %name,
-                detail = %msg,
-                "rejected adapter upload: adapter_dir disk quota would be exceeded"
-            );
-            return Err(ApiError::adapter_disk_quota_exceeded(msg));
         }
     };
 
-    if let Err(error) = ensure_adapter_mutation_admission(&state) {
-        let _ = std::fs::remove_dir_all(&target_dir);
-        return Err(error);
+    let serial = match crate::adapter_swap::adapter_mutation_guard(&state).await {
+        Ok(serial) => serial,
+        Err(error) => {
+            cleanup_tmp(&tmp_root);
+            return Err(adapter_swap_error(&state, error));
+        }
+    };
+    if target_dir.exists() {
+        cleanup_tmp(&tmp_root);
+        return Err(ApiError::adapter_already_exists(&name));
     }
+    if state.loaded_adapter_name().as_deref() == Some(name.as_str()) {
+        cleanup_tmp(&tmp_root);
+        return Err(ApiError::adapter_loaded(&name));
+    }
+    if let Some(cap) = state.adapter_max_disk_bytes {
+        let current = measure_finalized_adapter_dir_bytes(&state.adapter_dir);
+        if current.saturating_add(size_bytes) > cap {
+            cleanup_tmp(&tmp_root);
+            let detail = format!(
+                "{} GiB used + {} GiB upload > {} GiB cap",
+                current as f64 / 1024.0 / 1024.0 / 1024.0,
+                size_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+                cap as f64 / 1024.0 / 1024.0 / 1024.0
+            );
+            tracing::warn!(
+                adapter = %name,
+                %detail,
+                "rejected adapter upload: adapter_dir disk quota would be exceeded"
+            );
+            return Err(ApiError::adapter_disk_quota_exceeded(detail));
+        }
+    }
+    std::fs::rename(&staging_dir, &target_dir).map_err(|error| {
+        cleanup_tmp(&tmp_root);
+        ApiError::adapter_import_failed(format!(
+            "renaming staging to {}: {error}",
+            target_dir.display()
+        ))
+    })?;
 
     tracing::info!(
         adapter = %name,
@@ -1592,6 +1640,8 @@ async fn upload_adapter(
     // name-keyed cache entries (prefix KV, deterministic completions)
     // would replay whatever weights the name used to mean.
     state.purge_adapter_caches(&Some(name.clone()));
+    drop(serial);
+    cleanup_tmp(&tmp_root);
 
     Ok(Json(UploadAdapterResponse {
         name,
@@ -1601,12 +1651,11 @@ async fn upload_adapter(
 }
 
 /// Internal error type for the blocking extract task — separates user input
-/// problems (400) from server-side I/O failures (500) and quota rejections
-/// (507).
+/// problems (400) from server-side I/O failures (500). Quota admission runs at
+/// the serialized publication point after extraction.
 enum ImportError {
     Invalid(String),
     Failed(String),
-    DiskQuota(String),
 }
 
 /// Tiny stdlib-only random suffix so concurrent uploads don't collide.
@@ -2083,6 +2132,68 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("bad-canary")
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_transient_physically_loaded_adapter_not_selected_as_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_adapter(tmp.path(), "transient");
+        let state = make_state(tmp.path().to_path_buf());
+        *state.active_adapter_name.write().unwrap() = Some("other-default".to_string());
+        *state.loaded_adapter.write().unwrap() = Some(LoadedAdapterIdentity {
+            name: "transient".to_string(),
+            content_revision: "b".repeat(64),
+        });
+        let app = crate::api::router(state);
+
+        let (status, _, body) =
+            request_json(&app, Method::DELETE, "/v1/adapters/transient", None).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "adapter_loaded");
+        assert!(
+            tmp.path().join("transient").is_dir(),
+            "delete must not unlink bytes still represented by runner weights"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_merges_to_one_name_publish_exactly_one_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_adapter(tmp.path(), "source");
+        let state = make_state(tmp.path().to_path_buf());
+        let app = crate::api::router(state);
+        let request = || {
+            Some(json!({
+                "output_name": "contended-merge",
+                "sources": [{"name": "source", "weight": 1.0}]
+            }))
+        };
+
+        let (first, second) = tokio::join!(
+            request_json(&app, Method::POST, "/v1/adapters/merge", request()),
+            request_json(&app, Method::POST, "/v1/adapters/merge", request())
+        );
+        let mut statuses = [first.0, second.0];
+        statuses.sort_by_key(|status| status.as_u16());
+        assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
+        assert!(
+            tmp.path()
+                .join("contended-merge/adapter_model.safetensors")
+                .is_file()
+        );
+        assert!(
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .flatten()
+                .all(|entry| {
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".merge-tmp-")
+                }),
+            "request-owned merge staging directories must be cleaned"
         );
     }
 
