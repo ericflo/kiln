@@ -247,6 +247,129 @@ async fn test_compose_endpoint_caches_synthesized_adapter() {
     );
 }
 
+/// The cache identity includes the exact content revision of every source.
+/// Rewriting a source under the same user-visible name must therefore publish
+/// a new composition instead of serving bytes synthesized from the old source.
+#[tokio::test]
+async fn test_compose_source_rewrite_publishes_distinct_revision() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_uniform_adapter(tmp.path(), "src-a", 2, 1.0);
+    write_uniform_adapter(tmp.path(), "src-b", 2, 5.0);
+    let state = make_state(tmp.path().to_path_buf());
+    let app = api::router(state);
+    let payload = json!([
+        { "name": "src-a", "scale": 0.5 },
+        { "name": "src-b", "scale": 0.5 },
+    ]);
+
+    let first = app
+        .clone()
+        .oneshot(chat_with_adapters(payload.clone()))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let composed_root = tmp.path().join(".composed");
+    let first_name = std::fs::read_dir(&composed_root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name();
+
+    std::fs::remove_dir_all(tmp.path().join("src-a")).unwrap();
+    write_uniform_adapter(tmp.path(), "src-a", 2, 9.0);
+
+    let second = app
+        .clone()
+        .oneshot(chat_with_adapters(payload))
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let entries: Vec<_> = std::fs::read_dir(&composed_root)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .collect();
+    assert_eq!(
+        entries.len(),
+        2,
+        "same-name source rewrite must not reuse the stale composition"
+    );
+    assert!(entries.iter().any(|entry| entry.file_name() == first_name));
+    assert!(entries.iter().any(|entry| entry.file_name() != first_name));
+    for entry in entries {
+        let name = entry.file_name().into_string().unwrap();
+        assert_eq!(name.len(), 64, "cache key must be a full SHA-256 digest");
+        assert!(name.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        PeftLora::load(&entry.path()).unwrap();
+    }
+}
+
+/// Same-spec requests share one serialized, atomic publisher. Neither request
+/// can observe a partial cache directory and staging directories are removed.
+#[tokio::test]
+async fn test_compose_concurrent_same_spec_has_one_complete_publisher() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_uniform_adapter(tmp.path(), "src-a", 2, 1.0);
+    write_uniform_adapter(tmp.path(), "src-b", 2, 5.0);
+    let state = make_state(tmp.path().to_path_buf());
+    let app = api::router(state);
+    let payload = json!([
+        { "name": "src-a", "scale": 0.5 },
+        { "name": "src-b", "scale": 0.5 },
+    ]);
+
+    let (first, second) = tokio::join!(
+        app.clone().oneshot(chat_with_adapters(payload.clone())),
+        app.clone().oneshot(chat_with_adapters(payload)),
+    );
+    assert_eq!(first.unwrap().status(), StatusCode::OK);
+    assert_eq!(second.unwrap().status(), StatusCode::OK);
+
+    let composed_root = tmp.path().join(".composed");
+    let entries: Vec<_> = std::fs::read_dir(&composed_root)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "concurrent identical requests must publish exactly one cache entry"
+    );
+    let entry = &entries[0];
+    assert!(!entry.file_name().to_string_lossy().starts_with('.'));
+    PeftLora::load(&entry.path()).unwrap();
+}
+
+/// Even an impossible zero-entry cap cannot delete the composition selected
+/// for the current request before it can be loaded or used.
+#[tokio::test]
+async fn test_compose_lru_never_evicts_current_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_uniform_adapter(tmp.path(), "src-a", 2, 1.0);
+    write_uniform_adapter(tmp.path(), "src-b", 2, 5.0);
+    let state = make_state_with_caps(tmp.path().to_path_buf(), None, Some(0));
+    let app = api::router(state);
+
+    let response = app
+        .clone()
+        .oneshot(chat_with_adapters(json!([
+            { "name": "src-a", "scale": 0.5 },
+            { "name": "src-b", "scale": 0.5 },
+        ])))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let entries: Vec<_> = std::fs::read_dir(tmp.path().join(".composed"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(entries.len(), 1, "the current target must remain protected");
+    PeftLora::load(&entries[0]).unwrap();
+}
+
 /// Scale changes produce a distinct cache directory (different hash).
 #[tokio::test]
 async fn test_compose_endpoint_distinct_scales_distinct_cache_dirs() {

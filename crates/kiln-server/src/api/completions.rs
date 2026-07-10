@@ -6017,25 +6017,16 @@ async fn chat_completions_inner(
     // If `adapters` is set, synthesize (or reuse cached) composed adapter on
     // disk. Runs regardless of backend so the cache is populated even in mock
     // mode tests; only the actual hot-swap is gated on the Real backend.
-    let composed_target: Option<ComposedTarget> = if let Some(list) = req.adapters.as_deref() {
-        Some(
-            synthesize_composed_adapter(
-                &state.adapter_dir,
-                list,
-                state.composed_cache_max_bytes,
-                state.composed_cache_max_entries,
-            )
-            .await?,
-        )
+    let has_composed_adapter = if let Some(list) = req.adapters.as_deref() {
+        ensure_composed_adapter_for_request(state, list).await?;
+        true
     } else {
-        None
+        false
     };
 
     // Ensure the correct LoRA adapter is active for this request.
     if let ModelBackend::Real { runner, .. } = state.backend.as_ref() {
-        if let Some(ref target) = composed_target {
-            ensure_composed_adapter_swap(state, runner, target).await?;
-        } else {
+        if !has_composed_adapter {
             ensure_adapter(state, runner, &req.adapter, &adapter_request_id).await?;
         }
     }
@@ -6467,115 +6458,166 @@ fn validate_compose_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Compute a stable hex hash for an `adapters` composition spec.
-///
-/// Hashes the sorted list of `"<name>@<scale>"` pairs with `DefaultHasher`
-/// (deterministic SipHash-1-3 with key (0,0)). Used as the cache directory
-/// name and the suffix of the loaded-adapter identity.
-fn composition_hash(adapters: &[AdapterRef]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+type ResolvedCompositionSource = (String, f32, PathBuf, String);
 
-    let mut entries: Vec<String> = adapters
-        .iter()
-        .map(|a| format!("{}@{}", a.name, a.scale))
-        .collect();
-    entries.sort();
+/// Resolve every source and bind the cache key to its exact PEFT revision.
+/// The caller owns the adapter mutation guard, so config and weight identities
+/// cannot change between hashing and the merge loader opening them.
+fn resolve_composition_sources(
+    adapter_dir: &Path,
+    adapters: &[(String, f32)],
+) -> Result<(String, Vec<ResolvedCompositionSource>), ApiError> {
+    use sha2::{Digest, Sha256};
 
-    let mut hasher = DefaultHasher::new();
-    for e in &entries {
-        e.hash(&mut hasher);
+    let mut sources = Vec::with_capacity(adapters.len());
+    for (name, scale) in adapters {
+        let path = adapter_dir.join(name);
+        if !path.is_dir() {
+            return Err(ApiError::adapter_not_found(name));
+        }
+        let content_revision = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(&path)
+            .map_err(|error| {
+                ApiError::adapter_merge_failed(format!(
+                    "resolve exact source revision for '{}' at {}: {error:#}",
+                    name,
+                    path.display()
+                ))
+            })?
+            .content_revision();
+        sources.push((name.clone(), *scale, path, content_revision));
     }
-    format!("{:016x}", hasher.finish())
+
+    let mut canonical: Vec<_> = sources
+        .iter()
+        .map(|(name, scale, _, revision)| (name.as_str(), scale.to_bits(), revision.as_str()))
+        .collect();
+    canonical.sort_unstable();
+    let mut hasher = Sha256::new();
+    hasher.update(b"kiln-composed-adapter-v2\0");
+    for (name, scale_bits, revision) in canonical {
+        hasher.update((name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update(scale_bits.to_le_bytes());
+        hasher.update((revision.len() as u64).to_le_bytes());
+        hasher.update(revision.as_bytes());
+    }
+    let hash = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok((hash, sources))
 }
 
 /// Synthesize (or reuse the on-disk cache for) a composed adapter spec.
 ///
-/// On first call for a given hash, loads each source adapter, runs
+/// On first call for a given source-revision hash, loads each source adapter, runs
 /// `merge_concat`, and writes the result under `<adapter_dir>/.composed/<hash>/`.
-/// On subsequent calls for the same hash, returns immediately without touching
-/// the source files. Source-adapter lookup uses the same path resolution as
-/// `ensure_adapter`: each `name` is treated as a single segment under
-/// `adapter_dir`, missing sources surface as 404.
-///
-/// After a fresh synthesize, runs LRU eviction over the parent `.composed/`
-/// directory to keep total entries below `max_entries` and total bytes below
-/// `max_bytes` (oldest mtime first). Either limit set to `None` disables that
-/// dimension. Eviction is best-effort — failures are logged and the request
-/// still succeeds. Cache hits also refresh the entry's mtime so reuse counts
-/// as recency for LRU ordering.
-async fn synthesize_composed_adapter(
+/// Source-adapter lookup uses the same single-segment path resolution as
+/// `ensure_adapter`; missing sources surface as 404. Publication uses a hidden
+/// staging directory and one rename, so a failed merge never leaves a cache
+/// hit that looks complete.
+async fn synthesize_composed_adapter_locked(
     adapter_dir: &Path,
     adapters: &[AdapterRef],
-    max_bytes: Option<u64>,
-    max_entries: Option<u64>,
+    _serial: &crate::adapter_swap::AdapterMutationGuard<'_>,
 ) -> Result<ComposedTarget, ApiError> {
-    let hash = composition_hash(adapters);
+    let adapter_dir = adapter_dir.to_path_buf();
+    let adapters: Vec<_> = adapters
+        .iter()
+        .map(|source| (source.name.clone(), source.scale))
+        .collect();
+    tokio::task::spawn_blocking(move || {
+        synthesize_composed_adapter_blocking(&adapter_dir, &adapters)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("join composed-adapter publisher: {error}")))?
+}
+
+/// Blocking half of [`synthesize_composed_adapter_locked`]. Keeping every
+/// filesystem read and CPU merge in one blocking task prevents a large LoRA
+/// fingerprint from stalling an async request worker.
+fn synthesize_composed_adapter_blocking(
+    adapter_dir: &Path,
+    adapters: &[(String, f32)],
+) -> Result<ComposedTarget, ApiError> {
+    let (hash, source_paths) = resolve_composition_sources(adapter_dir, adapters)?;
     let active_name = format!("__composed:{hash}");
     let composed_root = adapter_dir.join(".composed");
     let cache_dir = composed_root.join(&hash);
 
     if cache_dir.exists() {
-        // Cache hit: refresh the directory's mtime so LRU eviction treats this
-        // entry as recently used. Best-effort — a failure does not block the
-        // request, and stale mtimes only mean slightly less-accurate LRU
-        // ordering.
-        let now = filetime::FileTime::from_system_time(std::time::SystemTime::now());
-        if let Err(e) = filetime::set_file_mtime(&cache_dir, now) {
+        if let Err(error) =
+            kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(&cache_dir)
+        {
             tracing::warn!(
                 cache_dir = %cache_dir.display(),
-                error = %e,
-                "failed to refresh composed-cache mtime on hit (LRU may be slightly off)"
+                error = %format!("{error:#}"),
+                "discarding incomplete composed-adapter cache entry"
             );
+            std::fs::remove_dir_all(&cache_dir).map_err(|remove_error| {
+                ApiError::adapter_merge_failed(format!(
+                    "remove incomplete composed cache {}: {remove_error}",
+                    cache_dir.display()
+                ))
+            })?;
+        } else {
+            // Cache hit: refresh the directory's mtime so LRU eviction treats this
+            // entry as recently used. Best-effort — a failure does not block the
+            // request, and stale mtimes only mean slightly less-accurate LRU
+            // ordering.
+            let now = filetime::FileTime::from_system_time(std::time::SystemTime::now());
+            if let Err(e) = filetime::set_file_mtime(&cache_dir, now) {
+                tracing::warn!(
+                    cache_dir = %cache_dir.display(),
+                    error = %e,
+                    "failed to refresh composed-cache mtime on hit (LRU may be slightly off)"
+                );
+            }
+            return Ok(ComposedTarget {
+                active_name,
+                cache_dir,
+            });
         }
-        return Ok(ComposedTarget {
-            active_name,
-            cache_dir,
-        });
     }
 
-    // Confirm every source exists before doing any merge work.
-    let mut source_paths: Vec<(String, f32, PathBuf)> = Vec::with_capacity(adapters.len());
-    for src in adapters {
-        let path = adapter_dir.join(&src.name);
-        if !path.exists() || !path.is_dir() {
-            return Err(ApiError::adapter_not_found(&src.name));
-        }
-        source_paths.push((src.name.clone(), src.scale, path));
+    std::fs::create_dir_all(&composed_root).map_err(|error| {
+        ApiError::adapter_merge_failed(format!("creating composed-cache dir: {error}"))
+    })?;
+    let staging = tempfile::Builder::new()
+        .prefix(".compose-tmp-")
+        .tempdir_in(&composed_root)
+        .map_err(|error| {
+            ApiError::adapter_merge_failed(format!("creating composed-cache staging dir: {error}"))
+        })?;
+    let staging_output = staging.path().join("adapter");
+
+    let mut loaded: Vec<(PeftLora, f32)> = Vec::with_capacity(source_paths.len());
+    for (name, scale, path, _revision) in source_paths {
+        let adapter = PeftLora::load(&path).map_err(|error| {
+            ApiError::adapter_merge_failed(format!(
+                "loading source '{name}' from {}: {error}",
+                path.display()
+            ))
+        })?;
+        loaded.push((adapter, scale));
     }
 
-    let composed_root_for_task = composed_root.clone();
-    let cache_dir_for_task = cache_dir.clone();
-    let merge_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        std::fs::create_dir_all(&composed_root_for_task)
-            .map_err(|e| format!("creating composed-cache dir: {e}"))?;
-
-        let mut loaded: Vec<(PeftLora, f32)> = Vec::with_capacity(source_paths.len());
-        for (name, scale, path) in source_paths {
-            let adapter = PeftLora::load(&path)
-                .map_err(|e| format!("loading source '{name}' from {}: {e}", path.display()))?;
-            loaded.push((adapter, scale));
-        }
-
-        let refs: Vec<(&PeftLora, f32)> = loaded.iter().map(|(a, s)| (a, *s)).collect();
-        let merged = merge_concat(&refs).map_err(|e| format!("merge_concat: {e}"))?;
-        merged
-            .save(&cache_dir_for_task)
-            .map_err(|e| format!("saving composed adapter: {e}"))?;
-        // LRU eviction runs in the same blocking task — keeps the request
-        // path off the runtime and avoids racing with another synthesize for
-        // the same root within this request.
-        evict_composed_cache_lru(&composed_root_for_task, max_bytes, max_entries);
-        Ok(())
-    })
-    .await
-    .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
-
-    if let Err(msg) = merge_result {
-        // Best-effort cleanup if we partially wrote anything before failing.
-        let _ = std::fs::remove_dir_all(&cache_dir);
-        return Err(ApiError::adapter_merge_failed(msg));
-    }
+    let refs: Vec<(&PeftLora, f32)> = loaded
+        .iter()
+        .map(|(adapter, scale)| (adapter, *scale))
+        .collect();
+    let merged = merge_concat(&refs)
+        .map_err(|error| ApiError::adapter_merge_failed(format!("merge_concat: {error}")))?;
+    merged.save(&staging_output).map_err(|error| {
+        ApiError::adapter_merge_failed(format!("saving composed adapter: {error}"))
+    })?;
+    std::fs::rename(&staging_output, &cache_dir).map_err(|error| {
+        ApiError::adapter_merge_failed(format!(
+            "publishing composed adapter {}: {error}",
+            cache_dir.display()
+        ))
+    })?;
 
     Ok(ComposedTarget {
         active_name,
@@ -6599,6 +6641,8 @@ fn evict_composed_cache_lru(
     composed_root: &Path,
     max_bytes: Option<u64>,
     max_entries: Option<u64>,
+    protected: &Path,
+    _serial: &crate::adapter_swap::AdapterMutationGuard<'_>,
 ) {
     if max_bytes.is_none() && max_entries.is_none() {
         return;
@@ -6617,7 +6661,7 @@ fn evict_composed_cache_lru(
         let name = entry.file_name();
         let name_lossy = name.to_string_lossy();
         // Skip hidden / sentinel files (names starting with `.`). All real
-        // entries are 16-hex-digit hash directories.
+        // entries are 64-hex-digit revision hashes.
         if name_lossy.starts_with('.') {
             continue;
         }
@@ -6647,6 +6691,9 @@ fn evict_composed_cache_lru(
             Some(e) => e,
             None => break, // Caps still exceeded but nothing left to evict.
         };
+        if path == protected {
+            continue;
+        }
         match std::fs::remove_dir_all(&path) {
             Ok(()) => {
                 total_entries = total_entries.saturating_sub(1);
@@ -6700,10 +6747,10 @@ fn composed_entry_size_bytes(root: &Path) -> u64 {
 /// Same barrier semantics as `ensure_runtime_adapter` — composed names are
 /// content-hashed (`__composed:<hash>`), so they never alias stale cache
 /// entries and `content_changed` stays false. No-op if already active.
-async fn ensure_composed_adapter_swap(
+async fn ensure_composed_adapter_swap_locked(
     state: &AppState,
-    _runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
     target: &ComposedTarget,
+    serial: &crate::adapter_swap::AdapterMutationGuard<'_>,
 ) -> Result<(), ApiError> {
     {
         let current = state.loaded_adapter_identity();
@@ -6714,7 +6761,7 @@ async fn ensure_composed_adapter_swap(
         }
     }
 
-    crate::adapter_swap::swap_runtime_adapter(
+    crate::adapter_swap::swap_runtime_adapter_locked(
         state,
         crate::adapter_swap::SwapRequest {
             target: crate::adapter_swap::SwapTarget::Resolved {
@@ -6725,6 +6772,7 @@ async fn ensure_composed_adapter_swap(
             default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Preserve,
             reason: "composed_adapter",
         },
+        serial,
     )
     .await
     .map_err(ApiError::adapter_load_failed)?;
@@ -6735,6 +6783,29 @@ async fn ensure_composed_adapter_swap(
         );
     }
 
+    Ok(())
+}
+
+/// Resolve, synthesize, publish, load, and evict a composed adapter while one
+/// mutation guard covers every disk and loaded-weight transition.
+async fn ensure_composed_adapter_for_request(
+    state: &AppState,
+    adapters: &[AdapterRef],
+) -> Result<(), ApiError> {
+    let serial = crate::adapter_swap::adapter_mutation_guard(state)
+        .await
+        .map_err(ApiError::adapter_load_failed)?;
+    let target = synthesize_composed_adapter_locked(&state.adapter_dir, adapters, &serial).await?;
+    if matches!(state.backend.as_ref(), ModelBackend::Real { .. }) {
+        ensure_composed_adapter_swap_locked(state, &target, &serial).await?;
+    }
+    evict_composed_cache_lru(
+        &state.adapter_dir.join(".composed"),
+        state.composed_cache_max_bytes,
+        state.composed_cache_max_entries,
+        &target.cache_dir,
+        &serial,
+    );
     Ok(())
 }
 
@@ -10485,24 +10556,15 @@ async fn batch_completions_inner(
     // synthesized per-output ChatCompletionRequest below leaves
     // `adapter`/`adapters` as None — generate_real reads the active adapter
     // from state, not from the request.
-    let composed_target: Option<ComposedTarget> = if let Some(list) = req.adapters.as_deref() {
-        Some(
-            synthesize_composed_adapter(
-                &state.adapter_dir,
-                list,
-                state.composed_cache_max_bytes,
-                state.composed_cache_max_entries,
-            )
-            .await?,
-        )
+    let has_composed_adapter = if let Some(list) = req.adapters.as_deref() {
+        ensure_composed_adapter_for_request(state, list).await?;
+        true
     } else {
-        None
+        false
     };
 
     if let ModelBackend::Real { runner, .. } = state.backend.as_ref() {
-        if let Some(ref target) = composed_target {
-            ensure_composed_adapter_swap(state, runner, target).await?;
-        } else {
+        if !has_composed_adapter {
             ensure_batch_adapter(state, runner, &req.adapter, &Uuid::new_v4().to_string()).await?;
         }
     }
@@ -10818,24 +10880,15 @@ async fn generate_multi_chat_response(
         return Ok((response, state.loaded_adapter_identity()));
     }
 
-    let composed_target: Option<ComposedTarget> = if let Some(list) = req.adapters.as_deref() {
-        Some(
-            synthesize_composed_adapter(
-                &state.adapter_dir,
-                list,
-                state.composed_cache_max_bytes,
-                state.composed_cache_max_entries,
-            )
-            .await?,
-        )
+    let has_composed_adapter = if let Some(list) = req.adapters.as_deref() {
+        ensure_composed_adapter_for_request(state, list).await?;
+        true
     } else {
-        None
+        false
     };
 
     if let ModelBackend::Real { runner, .. } = state.backend.as_ref() {
-        if let Some(ref target) = composed_target {
-            ensure_composed_adapter_swap(state, runner, target).await?;
-        } else {
+        if !has_composed_adapter {
             ensure_adapter(state, runner, &req.adapter, &Uuid::new_v4().to_string()).await?;
         }
     }
