@@ -85,6 +85,7 @@ pub use generate::{
     DecodeBatcherStats, ExternalYieldSyncStats, FinishReason, GenerationOutput, ModelRunner,
     MtpGenerationOutput, PagedBatchedDecodeState, PagedPrefixNextToken, PagedPrefixRegistration,
     PagedPrefixReuse, PrefixCachedGenerationOutput, StreamDone, StreamEvent, StreamToken,
+    ThreadedStreamingOutput,
 };
 pub use kv_cache::KvCache;
 pub use loader::{LoadModelOptions, load_model, load_model_with_options};

@@ -1430,6 +1430,10 @@ impl PrefillProgressGuard {
 
 impl Drop for PrefillProgressGuard {
     fn drop(&mut self) {
+        // This guard is task-scoped. Normal exits have already settled their
+        // worker, so a late cancellation is harmless; unwind exits need the
+        // signal so a detached blocking task cannot keep decoding unchecked.
+        self.0.cancel();
         self.0.clear_prefill_progress();
     }
 }
@@ -4345,6 +4349,16 @@ enum ResolvedSpeculativeMode {
     Mtp,
 }
 
+impl ResolvedSpeculativeMode {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::SkipLayer(_) => "skip_layer",
+            Self::Mtp => "mtp",
+        }
+    }
+}
+
 fn speculative_decode_policy_for_state(state: &AppState) -> (bool, SpeculativeDecodePolicy) {
     let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
         return (true, SpeculativeDecodePolicy::default());
@@ -4445,6 +4459,22 @@ fn resolve_speculative_mode(
         native_mtp_allowed,
         speculative_policy,
     )
+}
+
+fn direct_stream_threaded_mode(mode: ResolvedSpeculativeMode) -> ResolvedSpeculativeMode {
+    let requested_mode = mode.name();
+    match mode {
+        ResolvedSpeculativeMode::Off => ResolvedSpeculativeMode::Off,
+        ResolvedSpeculativeMode::SkipLayer(_) | ResolvedSpeculativeMode::Mtp => {
+            tracing::info!(
+                event = "direct_stream_speculative_fallback",
+                requested_mode,
+                reason = "threaded_settlement_required",
+                "direct streaming selected cancellable threaded single-token decode"
+            );
+            ResolvedSpeculativeMode::Off
+        }
+    }
 }
 
 async fn chat_completions(
@@ -6053,7 +6083,8 @@ async fn generate_real_batched_streaming(
             }
 
             let mut reasoning_splitter = ReasoningSplitter::new(prompt_starts_in_reasoning);
-            let deadline = tokio::time::Instant::now() + timeout;
+            let deadline =
+                tokio::time::Instant::now() + timeout.saturating_sub(request_start.elapsed());
             // Initial `false` is dead under the current control flow —
             // every non-timeout branch returns from the closure rather
             // than breaking the loop, so `timed_out` is only ever read
@@ -6203,6 +6234,8 @@ async fn generate_real_batched_streaming(
                                     kiln_model::FinishReason::MaxTokens => "length",
                                     kiln_model::FinishReason::StopSequence(_) => "stop",
                                 };
+                                let (terminal_tx, terminal_rx) =
+                                    tokio::sync::mpsc::channel(STREAM_TERMINAL_EVENT_CAPACITY);
                                 // Flush the emit gates: detokenizer residue
                                 // passes the stop gate (a stop can complete
                                 // inside held bytes), then the splitter —
@@ -6250,7 +6283,7 @@ async fn generate_real_batched_streaming(
                                     if !gate_tail.is_empty() {
                                         let chunk = reasoning_splitter.push(&gate_tail);
                                         if !emit_or_buffer_reasoning_chunk(
-                                            &tx,
+                                            &terminal_tx,
                                             &id,
                                             created,
                                             &model,
@@ -6273,7 +6306,7 @@ async fn generate_real_batched_streaming(
                                 }
                                 let trailing = reasoning_splitter.flush();
                                 if !emit_or_buffer_reasoning_chunk(
-                                    &tx,
+                                    &terminal_tx,
                                     &id,
                                     created,
                                     &model,
@@ -6320,7 +6353,7 @@ async fn generate_real_batched_streaming(
                                 // would duplicate every tool-call preamble.
                                 if let Some(tool_calls) = assistant_output.tool_calls.as_deref() {
                                     if !emit_tool_calls_chunk(
-                                        &tx,
+                                        &terminal_tx,
                                         &id,
                                         created,
                                         &model,
@@ -6338,7 +6371,7 @@ async fn generate_real_batched_streaming(
                                 } else if buffer_tool_content
                                     && !tool_gate.unsent(&content_buf).is_empty()
                                     && !emit_content_chunk(
-                                        &tx,
+                                        &terminal_tx,
                                         &id,
                                         created,
                                         &model,
@@ -6382,31 +6415,33 @@ async fn generate_real_batched_streaming(
                                         finish_reason: Some(finish.clone()),
                                     }],
                                 };
-                                let _ = tx
-                                    .send(Event::default().data(streaming_finish_chunk_json(
+                                drop(terminal_tx);
+                                let mut terminal_events =
+                                    drain_terminal_event_buffer(terminal_rx);
+                                terminal_events.push_back(
+                                    Event::default().data(streaming_finish_chunk_json(
                                         &chunk,
                                         &thinking_budget_metadata,
-                                    )))
-                                    .await;
+                                    )),
+                                );
                                 if include_usage {
-                                    let _ = tx
-                                        .send(Event::default().data(usage_chunk_json(
+                                    terminal_events.push_back(
+                                        Event::default().data(usage_chunk_json(
                                             &id,
                                             created,
                                             &model,
                                             prompt_token_count as u32,
                                             output.completion_tokens as u32,
-                                        )))
-                                        .await;
+                                        )),
+                                    );
                                 }
-                                if tx.send(Event::default().data("[DONE]")).await.is_ok() {
-                                    stream_terminal_for_task.complete();
-                                }
+                                terminal_events.push_back(Event::default().data("[DONE]"));
                                 record(
                                     finish,
                                     &record_completion,
                                     output.completion_tokens as u32,
                                 );
+                                stream_terminal_for_task.complete(terminal_events);
                                 return;
                             }
                             Some(EngineEvent::Error(err)) => {
@@ -6879,7 +6914,7 @@ async fn generate_real(
 enum StreamTerminalState {
     #[default]
     Pending,
-    Complete,
+    Complete(std::collections::VecDeque<Event>),
     Failed(String),
     Consumed,
 }
@@ -6900,27 +6935,28 @@ impl StreamTerminal {
         }
     }
 
-    fn complete(&self) {
+    fn complete(&self, events: std::collections::VecDeque<Event>) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if matches!(*state, StreamTerminalState::Pending) {
-            *state = StreamTerminalState::Complete;
+            *state = StreamTerminalState::Complete(events);
         }
     }
 
-    fn take_generation_error(&self) -> Option<String> {
+    fn take_events(&self) -> std::collections::VecDeque<Event> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match std::mem::replace(&mut *state, StreamTerminalState::Consumed) {
-            StreamTerminalState::Pending => {
-                Some("streaming response producer ended without a terminal state".to_string())
-            }
-            StreamTerminalState::Failed(message) => Some(message),
-            StreamTerminalState::Complete | StreamTerminalState::Consumed => None,
+            StreamTerminalState::Pending => stream_generation_error_events(
+                "streaming response producer ended without a terminal state".to_string(),
+            ),
+            StreamTerminalState::Failed(message) => stream_generation_error_events(message),
+            StreamTerminalState::Complete(events) => events,
+            StreamTerminalState::Consumed => std::collections::VecDeque::new(),
         }
     }
 }
@@ -6954,10 +6990,7 @@ fn stream_with_terminal(
             match rx.recv().await {
                 Some(event) => Some((Ok(event), (rx, terminal, pending))),
                 None => {
-                    pending = terminal
-                        .take_generation_error()
-                        .map(stream_generation_error_events)
-                        .unwrap_or_default();
+                    pending = terminal.take_events();
                     pending
                         .pop_front()
                         .map(|event| (Ok(event), (rx, terminal, pending)))
@@ -6967,12 +7000,262 @@ fn stream_with_terminal(
     )
 }
 
+struct DirectModelStream {
+    events: std::sync::mpsc::Receiver<StreamEvent>,
+    settled: Option<std::sync::mpsc::Receiver<()>>,
+}
+
+struct DirectPrefixLookupOwnership<G, P, B> {
+    gpu_guard: Option<G>,
+    pending_lookup: Option<P>,
+    begin_failure: Option<B>,
+}
+
+/// Fence direct-stream prefix lookup and settlement while request-owned GPU
+/// snapshots may still be in flight.
+///
+/// Both settlement callbacks borrow their owner so an unwind leaves it in the
+/// outer bundle. A panic quarantines the backend and intentionally retains the
+/// GPU coordination guard, source lease, and any snapshot destinations.
+fn run_direct_prefix_lookup_with_panic_fence<G, P, B, T>(
+    backend_health: &kiln_model::BackendHealthHandle,
+    gpu_guard: G,
+    begin: impl FnOnce() -> Result<P, B>,
+    settle_begin_failure: impl FnOnce(&mut B) -> anyhow::Error,
+    settle_pending: impl FnOnce(&mut P) -> anyhow::Result<T>,
+) -> anyhow::Result<(T, G)> {
+    let mut ownership = DirectPrefixLookupOwnership {
+        gpu_guard: Some(gpu_guard),
+        pending_lookup: None,
+        begin_failure: None,
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match begin() {
+        Ok(pending) => {
+            ownership.pending_lookup = Some(pending);
+            settle_pending(
+                ownership
+                    .pending_lookup
+                    .as_mut()
+                    .expect("pending prefix lookup stored before settlement"),
+            )
+        }
+        Err(failure) => {
+            ownership.begin_failure = Some(failure);
+            Err(settle_begin_failure(
+                ownership
+                    .begin_failure
+                    .as_mut()
+                    .expect("prefix begin failure stored before settlement"),
+            ))
+        }
+    }));
+
+    match result {
+        Ok(Ok(lookup)) => {
+            drop(ownership.pending_lookup.take());
+            drop(ownership.begin_failure.take());
+            Ok((
+                lookup,
+                ownership
+                    .gpu_guard
+                    .take()
+                    .expect("GPU coordination guard present after prefix lookup"),
+            ))
+        }
+        Ok(Err(error)) => {
+            if backend_health.snapshot().quarantined {
+                std::mem::forget(ownership);
+            }
+            Err(error)
+        }
+        Err(_) => {
+            let reason = "direct streaming prefix-cache lookup panicked; backend completion and request ownership are unknown";
+            backend_health.quarantine(reason);
+            std::mem::forget(ownership);
+            Err(anyhow::anyhow!(reason))
+        }
+    }
+}
+
+impl DirectModelStream {
+    fn threaded(output: kiln_model::ThreadedStreamingOutput) -> Self {
+        Self {
+            events: output.receiver,
+            settled: Some(output.settled),
+        }
+    }
+
+    #[cfg(test)]
+    fn already_settled(events: std::sync::mpsc::Receiver<StreamEvent>) -> Self {
+        Self {
+            events,
+            settled: None,
+        }
+    }
+}
+
+fn bridge_direct_model_stream(
+    stream: DirectModelStream,
+) -> (
+    tokio::sync::mpsc::Receiver<StreamEvent>,
+    tokio::task::JoinHandle<Result<(), String>>,
+) {
+    const MODEL_EVENT_BRIDGE_CAPACITY: usize = 16;
+    let (tx, rx) = tokio::sync::mpsc::channel(MODEL_EVENT_BRIDGE_CAPACITY);
+    let handle = tokio::task::spawn_blocking(move || {
+        let DirectModelStream {
+            events,
+            mut settled,
+        } = stream;
+        let mut consumer_open = true;
+
+        let terminal = loop {
+            match events.recv() {
+                Ok(event @ (StreamEvent::Done(_) | StreamEvent::Error(_))) => {
+                    break event;
+                }
+                Ok(event) => {
+                    if consumer_open && tx.blocking_send(event).is_err() {
+                        consumer_open = false;
+                    }
+                }
+                Err(error) => {
+                    if let Some(settled) = settled.take() {
+                        settled.recv().map_err(|settle_error| {
+                            format!(
+                                "model stream closed and worker settlement signal failed: \
+                                 {error}; {settle_error}"
+                            )
+                        })?;
+                    }
+                    return Err(format!(
+                        "model stream closed without a terminal event: {error}"
+                    ));
+                }
+            }
+        };
+
+        if let Some(settled) = settled.take() {
+            settled
+                .recv()
+                .map_err(|error| format!("model stream settlement signal failed: {error}"))?;
+        }
+        if consumer_open {
+            let _ = tx.blocking_send(terminal);
+        }
+        Ok(())
+    });
+    (rx, handle)
+}
+
+async fn cancel_and_settle_direct_model_stream(
+    cancel: &CancelHandle,
+    events: &mut tokio::sync::mpsc::Receiver<StreamEvent>,
+    bridge: tokio::task::JoinHandle<Result<(), String>>,
+) {
+    cancel.cancel();
+    while events.recv().await.is_some() {}
+    match bridge.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "direct model stream failed while settling cancellation");
+        }
+        Err(error) => {
+            tracing::error!(%error, "direct model stream bridge task failed during cancellation");
+        }
+    }
+}
+
+async fn cancel_and_settle_direct_prefill(
+    cancel: &CancelHandle,
+    prefill: tokio::task::JoinHandle<anyhow::Result<DirectModelStream>>,
+) {
+    cancel.cancel();
+    settle_cancelled_direct_prefill_result(cancel, prefill.await).await;
+}
+
+async fn settle_cancelled_direct_prefill_result(
+    cancel: &CancelHandle,
+    result: Result<anyhow::Result<DirectModelStream>, tokio::task::JoinError>,
+) {
+    cancel.cancel();
+    match result {
+        Ok(Ok(stream)) => {
+            let (mut events, bridge) = bridge_direct_model_stream(stream);
+            cancel_and_settle_direct_model_stream(cancel, &mut events, bridge).await;
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "cancelled direct streaming prefill settled with an error");
+        }
+        Err(error) => {
+            tracing::error!(%error, "direct streaming prefill task failed during cancellation");
+        }
+    }
+}
+
+// A success tail currently emits at most eight events (two residual chunks,
+// two splitter-flush chunks, one tool/content chunk, finish, usage, and DONE).
+// Keep headroom so terminal construction can never wait on an undrained queue.
+const STREAM_TERMINAL_EVENT_CAPACITY: usize = 16;
+
+fn drain_terminal_event_buffer(
+    mut rx: tokio::sync::mpsc::Receiver<Event>,
+) -> std::collections::VecDeque<Event> {
+    let mut events = std::collections::VecDeque::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push_back(event);
+    }
+    events
+}
+
+fn direct_stream_deadline_expired(deadline: tokio::time::Instant) -> bool {
+    tokio::time::Instant::now() >= deadline
+}
+
+enum DirectStreamSelection<T> {
+    DeadlineElapsed(Option<T>),
+    ClientDisconnected,
+    Ready(T),
+}
+
+async fn select_direct_stream_before_deadline<T>(
+    deadline: tokio::time::Instant,
+    disconnected: impl std::future::Future<Output = ()>,
+    ready: impl std::future::Future<Output = T>,
+) -> DirectStreamSelection<T> {
+    tokio::select! {
+        biased;
+        _ = tokio::time::sleep_until(deadline) => {
+            DirectStreamSelection::DeadlineElapsed(None)
+        }
+        _ = disconnected => DirectStreamSelection::ClientDisconnected,
+        value = ready => {
+            if direct_stream_deadline_expired(deadline) {
+                DirectStreamSelection::DeadlineElapsed(Some(value))
+            } else {
+                DirectStreamSelection::Ready(value)
+            }
+        }
+    }
+}
+
+fn publish_direct_stream_success_before_deadline(
+    deadline: tokio::time::Instant,
+    publish: impl FnOnce(),
+) -> bool {
+    if direct_stream_deadline_expired(deadline) {
+        return false;
+    }
+    publish();
+    true
+}
+
 /// Generate using the real ModelRunner with SSE streaming and paged KV cache.
 ///
-/// Client disconnects stop forwarding once an async SSE send observes the
-/// closed receiver. Request timeouts fail the SSE response explicitly; direct
-/// worker cancellation does not yet propagate on timeout and is hardened
-/// separately.
+/// Direct model work and producer-side SSE enqueue share the request's
+/// remaining deadline. Timeout and disconnect paths cooperatively cancel model
+/// work and retain ownership until the worker reports that cleanup settled;
+/// bytes already committed to the response may drain afterward.
 async fn generate_real_streaming(
     state: &AppState,
     runner: &std::sync::Arc<std::sync::RwLock<kiln_model::ModelRunner>>,
@@ -6993,13 +7276,14 @@ async fn generate_real_streaming(
         let guard = runner.read().unwrap();
         (guard.weights.mtp.is_some(), guard.active_lora().is_some())
     };
-    let speculative_mode = resolve_speculative_mode(
+    let resolved_speculative_mode = resolve_speculative_mode(
         state,
         sampling,
         prompt_tokens.len(),
         mtp_supported,
         has_active_lora,
     );
+    let speculative_mode = direct_stream_threaded_mode(resolved_speculative_mode);
 
     let runner = runner.clone();
     let bm = block_manager.clone();
@@ -7047,6 +7331,9 @@ async fn generate_real_streaming(
     let stream_thinking_budget_metadata =
         thinking_budget_metadata_for_request(state, req, prompt_starts_in_reasoning(&prompt));
     let prefix_cache_diagnostic = std::sync::Arc::new(std::sync::Mutex::new("unknown"));
+    let cancel = CancelHandle::with_prefill_progress_gauge(
+        state.metrics.request_prefill_tokens_completed.clone(),
+    );
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -7059,6 +7346,9 @@ async fn generate_real_streaming(
         let model = model.clone();
         let mut chat_request_cache_owner = chat_request_cache_owner;
         async move {
+            let _prefill_progress_guard = PrefillProgressGuard::new(cancel.clone());
+            let deadline =
+                tokio::time::Instant::now() + timeout.saturating_sub(request_start.elapsed());
             // Accumulate the assistant content so we can store a preview in the
             // recent-requests ring once generation completes (or times out, or
             // the client disconnects).
@@ -7126,17 +7416,37 @@ async fn generate_real_streaming(
                     finish_reason: None,
                 }],
             };
-            if tx
-                .send(Event::default().data(serde_json::to_string(&role_chunk).unwrap()))
-                .await
-                .is_err()
+            match tokio::time::timeout_at(
+                deadline,
+                tx.send(Event::default().data(serde_json::to_string(&role_chunk).unwrap())),
+            )
+            .await
             {
-                record(
-                    "client_disconnect".to_string(),
-                    &completion_buf,
-                    completion_token_count,
-                );
-                return;
+                Err(_) => {
+                    let error = format!(
+                        "streaming generation timed out after {} ms",
+                        timeout.as_millis()
+                    );
+                    *record_error.lock().unwrap() = Some(error.clone());
+                    stream_terminal_for_task.fail(error);
+                    cancel.cancel();
+                    record(
+                        "timeout".to_string(),
+                        &completion_buf,
+                        completion_token_count,
+                    );
+                    return;
+                }
+                Ok(Err(_)) => {
+                    cancel.cancel();
+                    record(
+                        "client_disconnect".to_string(),
+                        &completion_buf,
+                        completion_token_count,
+                    );
+                    return;
+                }
+                Ok(Ok(())) => {}
             }
 
             // Reasoning splitter — Qwen3.5's chat template prefills `<think>\n`
@@ -7149,82 +7459,86 @@ async fn generate_real_streaming(
             let mut reasoning_splitter =
                 ReasoningSplitter::new(prompt_starts_in_reasoning(&prompt));
 
-            let sync_rx = match speculative_mode {
-                ResolvedSpeculativeMode::Off => {
-                    let prefix_cache_diagnostic = prefix_cache_diagnostic.clone();
-                    // Spawn-via-blocking so that prefill (which is itself a
-                    // blocking GPU call) runs off the async runtime, then
-                    // hands the receiver back. The actual decode loop runs on
-                    // its own `std::thread` inside `spawn_streaming_*`, so
-                    // this `spawn_blocking` returns as soon as prefill emits
-                    // the first token — *not* after `max_tokens` steps. That
-                    // is what makes `stream: true` actually stream over SSE
-                    // instead of buffering everything until generation is
-                    // done.
-                    match tokio::task::spawn_blocking(move || {
-                        let gpu_guard = gpu_coordination_read_guard(&gpu_lock);
-                        let prefix_enabled = {
-                            let cache = prefix_cache.lock().unwrap();
-                            cache.is_enabled()
-                        };
-                        if !prefix_enabled {
-                            *prefix_cache_diagnostic.lock().unwrap() = "disabled";
-                            kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
-                                runner.clone(),
-                                prompt_tokens.clone(),
-                                params.clone(),
-                                bm.clone(),
-                                pc.clone(),
-                                decode_batcher.clone(),
-                                gpu_guard,
-                            )
-                        } else {
+            // Prefill and worker creation are supervised by the same absolute
+            // request deadline as token delivery. The blocking task is always
+            // awaited after cancellation; if it managed to create a decode
+            // worker, that worker is also drained through explicit settlement.
+            let prefix_cache_diagnostic_for_prefill = prefix_cache_diagnostic.clone();
+            let cancel_for_prefill = cancel.clone();
+            let mut prefill =
+                tokio::task::spawn_blocking(move || -> anyhow::Result<DirectModelStream> {
+                    if cancel_for_prefill.is_cancelled() {
+                        anyhow::bail!("direct streaming prefill cancelled before GPU ownership");
+                    }
+                    let gpu_guard = gpu_coordination_read_guard(&gpu_lock);
+                    if cancel_for_prefill.is_cancelled() {
+                        anyhow::bail!("direct streaming prefill cancelled before model work");
+                    }
+
+                    match speculative_mode {
+                        ResolvedSpeculativeMode::Off => {
+                            let prefix_enabled = {
+                                let cache = prefix_cache.lock().unwrap();
+                                cache.is_enabled()
+                            };
+                            if !prefix_enabled {
+                                *prefix_cache_diagnostic_for_prefill.lock().unwrap() = "disabled";
+                                let output =
+                                    kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
+                                        runner.clone(),
+                                        prompt_tokens.clone(),
+                                        params.clone(),
+                                        bm.clone(),
+                                        pc.clone(),
+                                        decode_batcher.clone(),
+                                        cancel_for_prefill.clone(),
+                                        gpu_guard,
+                                    )?;
+                                return Ok(DirectModelStream::threaded(output));
+                            }
+
                             let runner_guard = runner.read().map_err(|error| {
                                 anyhow::anyhow!(
                                     "failed to acquire runner for prefix-cache lookup: {error}"
                                 )
                             })?;
                             runner_guard.ensure_backend_healthy()?;
-                            let pending_lookup = match RealPrefixCacheRequest::begin(
-                                &prefix_cache,
-                                &bm,
-                                adapter.clone(),
-                                &prompt_tokens,
-                                &params,
-                            ) {
-                                Ok(lookup) => lookup,
-                                Err(failure) => {
-                                    let error = failure.settle(&runner_guard);
-                                    if runner_guard.backend_health_snapshot().quarantined {
-                                        std::mem::forget(gpu_guard);
-                                    }
-                                    return Err(error);
-                                }
-                            };
-                            let lookup = match pending_lookup.settle(&runner_guard) {
-                                Ok(lookup) => lookup,
-                                Err(error) => {
-                                    std::mem::forget(gpu_guard);
-                                    return Err(error);
-                                }
-                            };
+                            let backend_health = runner_guard.backend_health_handle();
+                            let (lookup, gpu_guard) = run_direct_prefix_lookup_with_panic_fence(
+                                &backend_health,
+                                gpu_guard,
+                                || {
+                                    RealPrefixCacheRequest::begin(
+                                        &prefix_cache,
+                                        &bm,
+                                        adapter.clone(),
+                                        &prompt_tokens,
+                                        &params,
+                                    )
+                                },
+                                |failure| failure.settle_borrowed(&runner_guard),
+                                |pending| pending.settle_borrowed(&runner_guard),
+                            )?;
                             drop(runner_guard);
                             let should_register_on_miss = lookup.should_register;
                             let hit = lookup.hit;
                             if hit.is_none() && !should_register_on_miss {
-                                *prefix_cache_diagnostic.lock().unwrap() = "skipped";
+                                *prefix_cache_diagnostic_for_prefill.lock().unwrap() = "skipped";
                                 drop(lookup.request);
-                                return kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
-                                    runner.clone(),
-                                    prompt_tokens.clone(),
-                                    params.clone(),
-                                    bm.clone(),
-                                    pc.clone(),
-                                    decode_batcher.clone(),
-                                    gpu_guard,
-                                );
+                                let output =
+                                    kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
+                                        runner.clone(),
+                                        prompt_tokens.clone(),
+                                        params.clone(),
+                                        bm.clone(),
+                                        pc.clone(),
+                                        decode_batcher.clone(),
+                                        cancel_for_prefill.clone(),
+                                        gpu_guard,
+                                    )?;
+                                return Ok(DirectModelStream::threaded(output));
                             }
-                            *prefix_cache_diagnostic.lock().unwrap() =
+                            *prefix_cache_diagnostic_for_prefill.lock().unwrap() =
                                 if hit.is_some() { "hit" } else { "miss" };
                             let cached_prefix = hit.map(|hit| PagedPrefixReuse {
                                 cached_tokens: hit.cached_tokens,
@@ -7233,7 +7547,7 @@ async fn generate_real_streaming(
                                 next_token: hit.next_token,
                             });
 
-                            kiln_model::ModelRunner::
+                            let output = kiln_model::ModelRunner::
                                 spawn_streaming_paged_shared_tokens_with_prefix_cache(
                                     runner.clone(),
                                     prompt_tokens.clone(),
@@ -7242,6 +7556,7 @@ async fn generate_real_streaming(
                                     pc.clone(),
                                     cached_prefix,
                                     decode_batcher.clone(),
+                                    cancel_for_prefill.clone(),
                                     gpu_guard,
                                     move |mut cleanup| {
                                         let mut registrations = Vec::new();
@@ -7254,17 +7569,58 @@ async fn generate_real_streaming(
                                             .finish(registrations, cleanup.allocated_blocks);
                                         Ok(())
                                     },
-                                )
+                                )?;
+                            Ok(DirectModelStream::threaded(output))
                         }
-                    })
-                    .await
-                    {
-                        Ok(Ok(rx)) => {
-                            observe_post_prefill_vram(&memory_budget);
-                            rx
+                        ResolvedSpeculativeMode::SkipLayer(_) | ResolvedSpeculativeMode::Mtp => {
+                            anyhow::bail!(
+                                "speculative mode reached direct streaming after threaded fallback"
+                            )
                         }
+                    }
+                });
+
+            let prefill_selection =
+                select_direct_stream_before_deadline(deadline, tx.closed(), &mut prefill).await;
+            let model_stream = match prefill_selection {
+                DirectStreamSelection::DeadlineElapsed(prefill_result) => {
+                    cancel.cancel();
+                    let error = format!(
+                        "streaming generation timed out after {} ms",
+                        timeout.as_millis()
+                    );
+                    *record_error.lock().unwrap() = Some(error.clone());
+                    stream_terminal_for_task.fail(error);
+                    record(
+                        "timeout".to_string(),
+                        &completion_buf,
+                        completion_token_count,
+                    );
+                    drop(tx);
+                    if let Some(result) = prefill_result {
+                        settle_cancelled_direct_prefill_result(&cancel, result).await;
+                    } else {
+                        cancel_and_settle_direct_prefill(&cancel, prefill).await;
+                    }
+                    observe_post_prefill_vram(&memory_budget);
+                    return;
+                }
+                DirectStreamSelection::ClientDisconnected => {
+                    cancel.cancel();
+                    record(
+                        "client_disconnect".to_string(),
+                        &completion_buf,
+                        completion_token_count,
+                    );
+                    cancel_and_settle_direct_prefill(&cancel, prefill).await;
+                    observe_post_prefill_vram(&memory_budget);
+                    return;
+                }
+                DirectStreamSelection::Ready(result) => {
+                    observe_post_prefill_vram(&memory_budget);
+                    match result {
+                        Ok(Ok(stream)) => stream,
                         Ok(Err(error)) => {
-                            observe_post_prefill_vram(&memory_budget);
                             let error = error.to_string();
                             *record_error.lock().unwrap() = Some(error.clone());
                             stream_terminal_for_task.fail(error.clone());
@@ -7272,86 +7628,7 @@ async fn generate_real_streaming(
                             return;
                         }
                         Err(join_error) => {
-                            observe_post_prefill_vram(&memory_budget);
                             let error = format!("streaming prefill task failed: {join_error}");
-                            *record_error.lock().unwrap() = Some(error.clone());
-                            stream_terminal_for_task.fail(error.clone());
-                            record("error".to_string(), &completion_buf, completion_token_count);
-                            return;
-                        }
-                    }
-                }
-                ResolvedSpeculativeMode::SkipLayer(spec_config) => {
-                    let prefix_cache_diagnostic = prefix_cache_diagnostic.clone();
-                    match tokio::task::spawn_blocking(move || {
-                        let _gpu_guard = gpu_coordination_read_guard(&gpu_lock);
-                        let runner_guard = runner.read().unwrap();
-                        *prefix_cache_diagnostic.lock().unwrap() = "not_used_speculative";
-                        if params.temperature == 0.0 {
-                            runner_guard.generate_streaming_paged_speculative_shared_tokens(
-                                &prompt_tokens,
-                                &params,
-                                bm.as_ref(),
-                                pc.as_ref(),
-                                &spec_config,
-                            )
-                        } else {
-                            let flat_spec_config = SpeculativeConfig {
-                                num_speculative_tokens: spec_config.num_speculative_tokens.min(4),
-                                draft_layers: spec_config.draft_layers,
-                            };
-                            runner_guard.generate_streaming_speculative(
-                                &prompt,
-                                &params,
-                                &flat_spec_config,
-                            )
-                        }
-                    })
-                    .await
-                    {
-                        Ok(Ok(rx)) => rx,
-                        Ok(Err(error)) => {
-                            let error = error.to_string();
-                            *record_error.lock().unwrap() = Some(error.clone());
-                            stream_terminal_for_task.fail(error.clone());
-                            record("error".to_string(), &completion_buf, completion_token_count);
-                            return;
-                        }
-                        Err(join_error) => {
-                            let error =
-                                format!("speculative streaming prefill task failed: {join_error}");
-                            *record_error.lock().unwrap() = Some(error.clone());
-                            stream_terminal_for_task.fail(error.clone());
-                            record("error".to_string(), &completion_buf, completion_token_count);
-                            return;
-                        }
-                    }
-                }
-                ResolvedSpeculativeMode::Mtp => {
-                    let prefix_cache_diagnostic = prefix_cache_diagnostic.clone();
-                    match tokio::task::spawn_blocking(move || {
-                        let _gpu_guard = gpu_coordination_read_guard(&gpu_lock);
-                        let runner_guard = runner.read().unwrap();
-                        *prefix_cache_diagnostic.lock().unwrap() = "not_used_speculative";
-                        let rx = runner_guard.generate_streaming_mtp_speculative(&prompt, &params);
-                        // Streaming drains at spawn end — rows from this
-                        // generation flush on the NEXT request or shutdown;
-                        // the non-streaming arm drains synchronously.
-                        drain_c1_attr_csv_if_enabled();
-                        rx
-                    })
-                    .await
-                    {
-                        Ok(Ok(rx)) => rx,
-                        Ok(Err(error)) => {
-                            let error = error.to_string();
-                            *record_error.lock().unwrap() = Some(error.clone());
-                            stream_terminal_for_task.fail(error.clone());
-                            record("error".to_string(), &completion_buf, completion_token_count);
-                            return;
-                        }
-                        Err(join_error) => {
-                            let error = format!("MTP streaming prefill task failed: {join_error}");
                             *record_error.lock().unwrap() = Some(error.clone());
                             stream_terminal_for_task.fail(error.clone());
                             record("error".to_string(), &completion_buf, completion_token_count);
@@ -7361,262 +7638,264 @@ async fn generate_real_streaming(
                 }
             };
 
-            // Forward token events as SSE, racing against a timeout. A blocking
-            // receiver task already running when the timeout wins is detached;
-            // the cooperative cancellation checkpoint owns that remaining gap.
-            //
-            // We wrap `sync_rx.recv()` in `spawn_blocking` so it doesn't block
-            // the async runtime. The receiver is moved into each spawn_blocking
-            // call and returned along with the result so we can reuse it.
-            let mut maybe_rx = Some(sync_rx);
-            // Initial `false` is dead under the current control flow —
-            // every non-timeout branch returns from the closure rather
-            // than breaking the loop, so `timed_out` is only ever read
-            // *after* the deadline arm assigns `true`. Kept for clarity.
-            #[allow(unused_assignments)]
-            let mut timed_out = false;
-            let deadline = tokio::time::Instant::now() + timeout;
+            // One bounded bridge owns the blocking model receiver through
+            // terminal delivery and worker settlement.
+            let (mut model_events, bridge_handle) = bridge_direct_model_stream(model_stream);
+            let mut bridge_handle = Some(bridge_handle);
+            enum DirectStreamExit {
+                Timeout,
+                ClientDisconnect,
+            }
 
-            loop {
-                if tx.is_closed() {
-                    record(
-                        "client_disconnect".to_string(),
-                        &completion_buf,
-                        completion_token_count,
-                    );
-                    return;
-                }
-
-                let rx_inner = match maybe_rx.take() {
-                    Some(r) => r,
-                    None => break,
-                };
-
-                // Race: recv the next token vs. request timeout
-                let recv_handle = tokio::task::spawn_blocking(move || {
-                    let result = rx_inner.recv();
-                    (rx_inner, result)
-                });
-
-                tokio::select! {
-                    _ = tx.closed() => {
-                        record(
-                            "client_disconnect".to_string(),
-                            &completion_buf,
-                            completion_token_count,
-                        );
-                        return;
+            let stream_exit = loop {
+                let event = match select_direct_stream_before_deadline(
+                    deadline,
+                    tx.closed(),
+                    model_events.recv(),
+                )
+                .await
+                {
+                    DirectStreamSelection::DeadlineElapsed(_) => {
+                        break DirectStreamExit::Timeout;
                     }
-                    join_result = recv_handle => {
-                        match join_result {
-                            Ok((rx_back, Ok(StreamEvent::Token(token)))) => {
-                                maybe_rx = Some(rx_back);
-                                if let Ok(mut stats) = decode_stats.lock() {
-                                    stats.record_token(std::time::Instant::now());
-                                }
-                                metrics.add_tokens(1);
-                                completion_token_count = completion_token_count.saturating_add(1);
-                                // Route this token through the reasoning
-                                // splitter — at most one of `content` or
-                                // `reasoning_content` lands in the delta,
-                                // depending on which side of `</think>` the
-                                // splitter currently sits on. A token that
-                                // straddles the boundary may emit both in
-                                // separate chunks (rare; emitted in order).
-                                let chunk = reasoning_splitter.push(&token.text);
-                                if !emit_or_buffer_reasoning_chunk(
-                                    &tx,
-                                    &id,
-                                    created,
-                                    &model,
-                                    chunk,
-                                    &mut completion_buf,
-                                    &mut reasoning_buf,
-                                    &mut content_buf,
-                                    &mut tool_gate,
-                                )
-                                .await
-                                {
-                                    record(
-                                        "client_disconnect".to_string(),
-                                        &completion_buf,
-                                        completion_token_count,
-                                    );
-                                    return;
-                                }
+                    DirectStreamSelection::ClientDisconnected => {
+                        break DirectStreamExit::ClientDisconnect;
+                    }
+                    DirectStreamSelection::Ready(event) => event,
+                };
+                match event {
+                    Some(StreamEvent::Token(token)) => {
+                        if let Ok(mut stats) = decode_stats.lock() {
+                            stats.record_token(std::time::Instant::now());
+                        }
+                        metrics.add_tokens(1);
+                        completion_token_count = completion_token_count.saturating_add(1);
+                        // Route this token through the reasoning
+                        // splitter — at most one of `content` or
+                        // `reasoning_content` lands in the delta,
+                        // depending on which side of `</think>` the
+                        // splitter currently sits on. A token that
+                        // straddles the boundary may emit both in
+                        // separate chunks (rare; emitted in order).
+                        let chunk = reasoning_splitter.push(&token.text);
+                        match tokio::time::timeout_at(
+                            deadline,
+                            emit_or_buffer_reasoning_chunk(
+                                &tx,
+                                &id,
+                                created,
+                                &model,
+                                chunk,
+                                &mut completion_buf,
+                                &mut reasoning_buf,
+                                &mut content_buf,
+                                &mut tool_gate,
+                            ),
+                        )
+                        .await
+                        {
+                            Err(_) => break DirectStreamExit::Timeout,
+                            Ok(false) => break DirectStreamExit::ClientDisconnect,
+                            Ok(true) if direct_stream_deadline_expired(deadline) => {
+                                break DirectStreamExit::Timeout;
                             }
-                            Ok((_, Ok(StreamEvent::Done(done)))) => {
-                                let finish = match done.finish_reason {
-                                    kiln_model::FinishReason::Eos => "stop",
-                                    kiln_model::FinishReason::MaxTokens => "length",
-                                    kiln_model::FinishReason::StopSequence(_) => "stop",
-                                };
-                                // The engine-side emit gate (UTF-8 boundary +
-                                // stop-window holdback) releases its residue
-                                // at end-of-stream. It must pass through the
-                                // splitter BEFORE the splitter flush or a
-                                // `</think>` inside the residue would leak
-                                // into reasoning_content.
-                                if !done.trailing_text.is_empty() {
-                                    let chunk =
-                                        reasoning_splitter.push(&done.trailing_text);
-                                    if !emit_or_buffer_reasoning_chunk(
-                                        &tx,
-                                        &id,
-                                        created,
-                                        &model,
-                                        chunk,
-                                        &mut completion_buf,
-                                        &mut reasoning_buf,
-                                        &mut content_buf,
-                                        &mut tool_gate,
-                                    )
-                                    .await
-                                    {
-                                        record(
-                                            "client_disconnect".to_string(),
-                                            &completion_buf,
-                                            completion_token_count,
-                                        );
-                                        return;
-                                    }
-                                }
-                                // Drain any partial-tag tail buffered in the
-                                // splitter before signaling end-of-stream so
-                                // we don't silently swallow up-to-7 chars
-                                // that turned out not to be `</think>`.
-                                let trailing = reasoning_splitter.flush();
-                                if !emit_or_buffer_reasoning_chunk(
-                                    &tx,
-                                    &id,
-                                    created,
-                                    &model,
-                                    trailing,
-                                    &mut completion_buf,
-                                    &mut reasoning_buf,
-                                    &mut content_buf,
-                                    &mut tool_gate,
-                                )
-                                .await
-                                {
-                                    record(
-                                        "client_disconnect".to_string(),
-                                        &completion_buf,
-                                        completion_token_count,
-                                    );
-                                    return;
-                                }
-                                let reasoning_content = if reasoning_buf.is_empty() {
-                                    None
-                                } else {
-                                    Some(reasoning_buf.clone())
-                                };
-                                let matched_stop = match &done.finish_reason {
-                                    kiln_model::FinishReason::StopSequence(s) => {
-                                        Some(s.as_str())
-                                    }
-                                    _ => None,
-                                };
-                                let assistant_output =
-                                    stream_assistant_output_with_stop_reconstruction(
-                                        buffer_tool_content,
-                                        reasoning_content,
-                                        &content_buf,
-                                        matched_stop,
-                                        finish,
-                                    );
-                                // Pre-tag content already streamed eagerly —
-                                // the gate's trim_end holdback makes the wire
-                                // equal the parsed content; emitting it again
-                                // would duplicate every tool-call preamble.
-                                if let Some(tool_calls) = assistant_output.tool_calls.as_deref() {
-                                    if !emit_tool_calls_chunk(
-                                        &tx,
-                                        &id,
-                                        created,
-                                        &model,
-                                        tool_calls,
-                                    )
-                                    .await
-                                    {
-                                        record(
-                                            "client_disconnect".to_string(),
-                                            &completion_buf,
-                                            completion_token_count,
-                                        );
-                                        return;
-                                    }
-                                } else if buffer_tool_content
-                                    && !tool_gate.unsent(&content_buf).is_empty()
-                                    && !emit_content_chunk(
-                                        &tx,
-                                        &id,
-                                        created,
-                                        &model,
-                                        tool_gate.unsent(&content_buf).to_string(),
-                                    )
-                                    .await
-                                {
-                                    record(
-                                        "client_disconnect".to_string(),
-                                        &completion_buf,
-                                        completion_token_count,
-                                    );
-                                    return;
-                                }
-                                let finish = assistant_output.finish_reason.clone();
-                                let record_completion = assistant_output.preview_source().to_string();
-                                let thinking_budget_status = finalized_thinking_budget_status(
-                                    thinking_budget.as_ref(),
-                                    completion_token_count as usize,
+                            Ok(true) => {}
+                        }
+                    }
+                    Some(StreamEvent::Done(done)) => {
+                        let bridge_result = tokio::select! {
+                            biased;
+                            _ = tokio::time::sleep_until(deadline) => None,
+                            result = bridge_handle
+                                .as_mut()
+                                .expect("direct model bridge consumed once") => Some(result),
+                        };
+                        let Some(bridge_result) = bridge_result else {
+                            break DirectStreamExit::Timeout;
+                        };
+                        // The join result above proves the settlement
+                        // owner completed; consume the finished handle.
+                        let _ = bridge_handle.take();
+                        let bridge_error = match bridge_result {
+                            Ok(Ok(())) => None,
+                            Ok(Err(error)) => Some(error),
+                            Err(error) => {
+                                Some(format!("direct model stream bridge failed: {error}"))
+                            }
+                        };
+                        if let Some(error) = bridge_error {
+                            *record_error.lock().unwrap() = Some(error.clone());
+                            stream_terminal_for_task.fail(error);
+                            record("error".to_string(), &completion_buf, completion_token_count);
+                            return;
+                        }
+
+                        let finish = match done.finish_reason {
+                            kiln_model::FinishReason::Eos => "stop",
+                            kiln_model::FinishReason::MaxTokens => "length",
+                            kiln_model::FinishReason::StopSequence(_) => "stop",
+                        };
+                        // Success-tail events are kept out of the
+                        // ordinary bounded queue. The stream wrapper
+                        // publishes them only after cache/accounting
+                        // commits and after all ordinary deltas drain.
+                        let (terminal_tx, terminal_rx) =
+                            tokio::sync::mpsc::channel(STREAM_TERMINAL_EVENT_CAPACITY);
+                        // The engine-side emit gate (UTF-8 boundary +
+                        // stop-window holdback) releases its residue
+                        // at end-of-stream. It must pass through the
+                        // splitter BEFORE the splitter flush or a
+                        // `</think>` inside the residue would leak
+                        // into reasoning_content.
+                        if !done.trailing_text.is_empty() {
+                            let chunk = reasoning_splitter.push(&done.trailing_text);
+                            if !emit_or_buffer_reasoning_chunk(
+                                &terminal_tx,
+                                &id,
+                                created,
+                                &model,
+                                chunk,
+                                &mut completion_buf,
+                                &mut reasoning_buf,
+                                &mut content_buf,
+                                &mut tool_gate,
+                            )
+                            .await
+                            {
+                                record(
+                                    "client_disconnect".to_string(),
+                                    &completion_buf,
+                                    completion_token_count,
                                 );
-                                let mut thinking_budget_metadata =
-                                    stream_thinking_budget_metadata.clone();
-                                if let Some(status) = thinking_budget_status {
-                                    apply_thinking_budget_status_to_metadata(
-                                        &mut thinking_budget_metadata,
-                                        status,
-                                    );
-                                }
-                                let chunk = ChatCompletionChunk {
-                                    id: id.clone(),
-                                    object: "chat.completion.chunk",
-                                    created,
-                                    model: model.clone(),
-                                    choices: vec![ChunkChoice {
-                                        index: 0,
-                                        delta: Delta {
-                                            role: None,
-                                            content: None,
-                                            reasoning_content: None,
-                                            tool_calls: None,
-                                        },
-                                        finish_reason: Some(finish.clone()),
-                                    }],
-                                };
-                                let _ = tx
-                                    .send(
-                                        Event::default()
-                                            .data(streaming_finish_chunk_json(
-                                                &chunk,
-                                                &thinking_budget_metadata,
-                                            )),
-                                    )
-                                    .await;
-                                if include_usage {
-                                    let _ = tx
-                                        .send(Event::default().data(usage_chunk_json(
-                                            &id,
-                                            created,
-                                            &model,
-                                            prompt_token_count as u32,
-                                            completion_token_count,
-                                        )))
-                                        .await;
-                                }
-                                if tx.send(Event::default().data("[DONE]")).await.is_ok() {
-                                    stream_terminal_for_task.complete();
-                                }
+                                return;
+                            }
+                        }
+                        // Drain any partial-tag tail buffered in the
+                        // splitter before signaling end-of-stream so
+                        // we don't silently swallow up-to-7 chars
+                        // that turned out not to be `</think>`.
+                        let trailing = reasoning_splitter.flush();
+                        if !emit_or_buffer_reasoning_chunk(
+                            &terminal_tx,
+                            &id,
+                            created,
+                            &model,
+                            trailing,
+                            &mut completion_buf,
+                            &mut reasoning_buf,
+                            &mut content_buf,
+                            &mut tool_gate,
+                        )
+                        .await
+                        {
+                            record(
+                                "client_disconnect".to_string(),
+                                &completion_buf,
+                                completion_token_count,
+                            );
+                            return;
+                        }
+                        let reasoning_content = if reasoning_buf.is_empty() {
+                            None
+                        } else {
+                            Some(reasoning_buf.clone())
+                        };
+                        let matched_stop = match &done.finish_reason {
+                            kiln_model::FinishReason::StopSequence(s) => Some(s.as_str()),
+                            _ => None,
+                        };
+                        let assistant_output = stream_assistant_output_with_stop_reconstruction(
+                            buffer_tool_content,
+                            reasoning_content,
+                            &content_buf,
+                            matched_stop,
+                            finish,
+                        );
+                        // Pre-tag content already streamed eagerly —
+                        // the gate's trim_end holdback makes the wire
+                        // equal the parsed content; emitting it again
+                        // would duplicate every tool-call preamble.
+                        if let Some(tool_calls) = assistant_output.tool_calls.as_deref() {
+                            if !emit_tool_calls_chunk(
+                                &terminal_tx,
+                                &id,
+                                created,
+                                &model,
+                                tool_calls,
+                            )
+                            .await
+                            {
+                                record(
+                                    "client_disconnect".to_string(),
+                                    &completion_buf,
+                                    completion_token_count,
+                                );
+                                return;
+                            }
+                        } else if buffer_tool_content
+                            && !tool_gate.unsent(&content_buf).is_empty()
+                            && !emit_content_chunk(
+                                &terminal_tx,
+                                &id,
+                                created,
+                                &model,
+                                tool_gate.unsent(&content_buf).to_string(),
+                            )
+                            .await
+                        {
+                            record(
+                                "client_disconnect".to_string(),
+                                &completion_buf,
+                                completion_token_count,
+                            );
+                            return;
+                        }
+                        let finish = assistant_output.finish_reason.clone();
+                        let record_completion = assistant_output.preview_source().to_string();
+                        let thinking_budget_status = finalized_thinking_budget_status(
+                            thinking_budget.as_ref(),
+                            completion_token_count as usize,
+                        );
+                        let mut thinking_budget_metadata = stream_thinking_budget_metadata.clone();
+                        if let Some(status) = thinking_budget_status {
+                            apply_thinking_budget_status_to_metadata(
+                                &mut thinking_budget_metadata,
+                                status,
+                            );
+                        }
+                        let chunk = ChatCompletionChunk {
+                            id: id.clone(),
+                            object: "chat.completion.chunk",
+                            created,
+                            model: model.clone(),
+                            choices: vec![ChunkChoice {
+                                index: 0,
+                                delta: Delta {
+                                    role: None,
+                                    content: None,
+                                    reasoning_content: None,
+                                    tool_calls: None,
+                                },
+                                finish_reason: Some(finish.clone()),
+                            }],
+                        };
+                        drop(terminal_tx);
+                        let mut terminal_events = drain_terminal_event_buffer(terminal_rx);
+                        terminal_events.push_back(Event::default().data(
+                            streaming_finish_chunk_json(&chunk, &thinking_budget_metadata),
+                        ));
+                        if include_usage {
+                            terminal_events.push_back(Event::default().data(usage_chunk_json(
+                                &id,
+                                created,
+                                &model,
+                                prompt_token_count as u32,
+                                completion_token_count,
+                            )));
+                        }
+                        terminal_events.push_back(Event::default().data("[DONE]"));
+                        let published =
+                            publish_direct_stream_success_before_deadline(deadline, || {
                                 let cache_value = DeterministicCompletionCacheValue {
                                     text: assistant_output.content.clone(),
                                     reasoning_content: assistant_output.reasoning_content.clone(),
@@ -7643,135 +7922,153 @@ async fn generate_real_streaming(
                                         .unwrap()
                                         .insert(key, chat_cache_value);
                                 }
-                                record(
-                                    finish,
-                                    &record_completion,
-                                    completion_token_count,
-                                );
-                                return;
+                                record(finish, &record_completion, completion_token_count);
+                                stream_terminal_for_task.complete(terminal_events);
+                            });
+                        if !published {
+                            break DirectStreamExit::Timeout;
+                        }
+                        return;
+                    }
+                    Some(StreamEvent::Error(mut error)) => {
+                        match bridge_handle
+                            .take()
+                            .expect("direct model bridge consumed once")
+                            .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(bridge_error)) => {
+                                error = format!("{error}; {bridge_error}");
                             }
-                            Ok((_, Ok(StreamEvent::Error(error)))) => {
-                                *record_error.lock().unwrap() = Some(error.clone());
-                                stream_terminal_for_task.fail(error.clone());
-                                let tail = flush_buffered_stream_tail(
-                                    &tx,
-                                    &id,
-                                    created,
-                                    &model,
-                                    &mut reasoning_splitter,
-                                    &mut completion_buf,
-                                    &mut reasoning_buf,
-                                    &mut content_buf,
-                                    &mut tool_gate,
-                                    "error",
-                                )
-                                .await;
-                                let record_completion =
-                                    stream_tail_record_completion(tail, &completion_buf);
-                                record(
-                                    "error".to_string(),
-                                    &record_completion,
-                                    completion_token_count,
+                            Err(bridge_error) => {
+                                error = format!(
+                                    "{error}; direct model stream bridge failed: {bridge_error}"
                                 );
-                                return;
-                            }
-                            Ok((_, Err(recv_error))) => {
-                                let error = format!(
-                                    "generation worker ended without a terminal event: {recv_error}"
-                                );
-                                *record_error.lock().unwrap() = Some(error.clone());
-                                stream_terminal_for_task.fail(error.clone());
-                                let tail = flush_buffered_stream_tail(
-                                    &tx,
-                                    &id,
-                                    created,
-                                    &model,
-                                    &mut reasoning_splitter,
-                                    &mut completion_buf,
-                                    &mut reasoning_buf,
-                                    &mut content_buf,
-                                    &mut tool_gate,
-                                    "error",
-                                )
-                                .await;
-                                let record_completion =
-                                    stream_tail_record_completion(tail, &completion_buf);
-                                record(
-                                    "error".to_string(),
-                                    &record_completion,
-                                    completion_token_count,
-                                );
-                                return;
-                            }
-                            Err(join_error) => {
-                                let error =
-                                    format!("generation event receiver task failed: {join_error}");
-                                *record_error.lock().unwrap() = Some(error.clone());
-                                stream_terminal_for_task.fail(error.clone());
-                                let tail = flush_buffered_stream_tail(
-                                    &tx,
-                                    &id,
-                                    created,
-                                    &model,
-                                    &mut reasoning_splitter,
-                                    &mut completion_buf,
-                                    &mut reasoning_buf,
-                                    &mut content_buf,
-                                    &mut tool_gate,
-                                    "error",
-                                )
-                                .await;
-                                let record_completion =
-                                    stream_tail_record_completion(tail, &completion_buf);
-                                record(
-                                    "error".to_string(),
-                                    &record_completion,
-                                    completion_token_count,
-                                );
-                                return;
                             }
                         }
+                        *record_error.lock().unwrap() = Some(error.clone());
+                        stream_terminal_for_task.fail(error.clone());
+                        let tail = flush_buffered_stream_tail(
+                            &tx,
+                            &id,
+                            created,
+                            &model,
+                            &mut reasoning_splitter,
+                            &mut completion_buf,
+                            &mut reasoning_buf,
+                            &mut content_buf,
+                            &mut tool_gate,
+                            "error",
+                        )
+                        .await;
+                        let record_completion =
+                            stream_tail_record_completion(tail, &completion_buf);
+                        record(
+                            "error".to_string(),
+                            &record_completion,
+                            completion_token_count,
+                        );
+                        return;
                     }
-                    _ = tokio::time::sleep_until(deadline) => {
-                        timed_out = true;
-                        // Dropping a running spawn_blocking JoinHandle detaches
-                        // it; cooperative worker cancellation is handled by a
-                        // separate checkpoint. The SSE response still fails
-                        // explicitly instead of publishing a normal finish.
-                        break;
+                    None => {
+                        let error = match bridge_handle
+                            .take()
+                            .expect("direct model bridge consumed once")
+                            .await
+                        {
+                            Ok(Ok(())) => {
+                                "direct model stream ended without a terminal event".to_string()
+                            }
+                            Ok(Err(error)) => error,
+                            Err(error) => {
+                                format!("direct model stream bridge task failed: {error}")
+                            }
+                        };
+                        *record_error.lock().unwrap() = Some(error.clone());
+                        stream_terminal_for_task.fail(error.clone());
+                        let tail = flush_buffered_stream_tail(
+                            &tx,
+                            &id,
+                            created,
+                            &model,
+                            &mut reasoning_splitter,
+                            &mut completion_buf,
+                            &mut reasoning_buf,
+                            &mut content_buf,
+                            &mut tool_gate,
+                            "error",
+                        )
+                        .await;
+                        let record_completion =
+                            stream_tail_record_completion(tail, &completion_buf);
+                        record(
+                            "error".to_string(),
+                            &record_completion,
+                            completion_token_count,
+                        );
+                        return;
                     }
                 }
-            }
+            };
 
-            if timed_out {
-                let error = format!(
-                    "streaming generation timed out after {} ms",
-                    timeout.as_millis()
-                );
-                *record_error.lock().unwrap() = Some(error.clone());
-                stream_terminal_for_task.fail(error.clone());
-                // Drain any pending partial-tag tail and any buffered
-                // tool-call content before the error object so the
-                // client doesn't lose those bytes.
-                let tail = flush_buffered_stream_tail(
-                    &tx,
-                    &id,
-                    created,
-                    &model,
-                    &mut reasoning_splitter,
-                    &mut completion_buf,
-                    &mut reasoning_buf,
-                    &mut content_buf,
-                    &mut tool_gate,
-                    "timeout",
-                )
-                .await;
-                let record_completion = stream_tail_record_completion(tail, &completion_buf);
-                record(
-                    "timeout".to_string(),
-                    &record_completion,
-                    completion_token_count,
-                );
+            match stream_exit {
+                DirectStreamExit::ClientDisconnect => {
+                    cancel.cancel();
+                    record(
+                        "client_disconnect".to_string(),
+                        &completion_buf,
+                        completion_token_count,
+                    );
+                    drop(tx);
+                    cancel_and_settle_direct_model_stream(
+                        &cancel,
+                        &mut model_events,
+                        bridge_handle
+                            .take()
+                            .expect("direct model bridge consumed once"),
+                    )
+                    .await;
+                }
+                DirectStreamExit::Timeout => {
+                    cancel.cancel();
+                    let error = format!(
+                        "streaming generation timed out after {} ms",
+                        timeout.as_millis()
+                    );
+                    *record_error.lock().unwrap() = Some(error.clone());
+                    stream_terminal_for_task.fail(error);
+                    // Salvage only already-decoded text, under the bounded
+                    // tail grace, before allowing the wrapper to emit the
+                    // structured timeout and `[DONE]` terminal events.
+                    let tail = flush_buffered_stream_tail(
+                        &tx,
+                        &id,
+                        created,
+                        &model,
+                        &mut reasoning_splitter,
+                        &mut completion_buf,
+                        &mut reasoning_buf,
+                        &mut content_buf,
+                        &mut tool_gate,
+                        "timeout",
+                    )
+                    .await;
+                    let record_completion = stream_tail_record_completion(tail, &completion_buf);
+                    record(
+                        "timeout".to_string(),
+                        &record_completion,
+                        completion_token_count,
+                    );
+                    drop(tx);
+                    if let Some(bridge_handle) = bridge_handle.take() {
+                        cancel_and_settle_direct_model_stream(
+                            &cancel,
+                            &mut model_events,
+                            bridge_handle,
+                        )
+                        .await;
+                    }
+                }
             }
         }
     });
@@ -11842,6 +12139,369 @@ mod tests {
         assert_eq!(payloads[2], "[DONE]");
     }
 
+    #[test]
+    fn expired_direct_stream_deadline_cannot_publish_success_or_cache_state() {
+        let deadline = tokio::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1))
+            .unwrap();
+        let terminal = StreamTerminal::default();
+        let cache_published = std::sync::atomic::AtomicBool::new(false);
+
+        let published = publish_direct_stream_success_before_deadline(deadline, || {
+            cache_published.store(true, std::sync::atomic::Ordering::SeqCst);
+            terminal.complete([Event::default().data("[DONE]")].into());
+        });
+
+        assert!(!published);
+        assert!(!cache_published.load(std::sync::atomic::Ordering::SeqCst));
+        let events = terminal.take_events();
+        assert_eq!(events.len(), 2, "pending success must fail closed");
+    }
+
+    #[tokio::test]
+    async fn expired_direct_stream_deadline_wins_over_ready_prefill_result() {
+        let deadline = tokio::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1))
+            .unwrap();
+        let selected = select_direct_stream_before_deadline(
+            deadline,
+            std::future::pending::<()>(),
+            std::future::ready("prefill ready"),
+        )
+        .await;
+
+        assert!(matches!(
+            selected,
+            DirectStreamSelection::DeadlineElapsed(None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_direct_stream_deadline_wins_over_ready_settled_done() {
+        let deadline = tokio::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1))
+            .unwrap();
+        let done = StreamEvent::Done(kiln_model::StreamDone {
+            finish_reason: kiln_model::FinishReason::MaxTokens,
+            completion_tokens: 0,
+            trailing_text: String::new(),
+        });
+        let selected = select_direct_stream_before_deadline(
+            deadline,
+            std::future::pending::<()>(),
+            std::future::ready(done),
+        )
+        .await;
+
+        assert!(matches!(
+            selected,
+            DirectStreamSelection::DeadlineElapsed(None)
+        ));
+    }
+
+    #[test]
+    fn direct_prefix_settlement_panic_quarantines_and_retains_owners() {
+        struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let gpu_drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pending_drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let backend_health = kiln_model::BackendHealthHandle::default();
+        let result = run_direct_prefix_lookup_with_panic_fence(
+            &backend_health,
+            DropProbe(gpu_drops.clone()),
+            || Ok::<_, ()>(DropProbe(pending_drops.clone())),
+            |_: &mut ()| anyhow::anyhow!("unexpected begin failure"),
+            |_pending| -> anyhow::Result<()> { panic!("injected settlement panic") },
+        );
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("injected settlement panic unexpectedly succeeded"),
+        };
+        assert!(error.to_string().contains("prefix-cache lookup panicked"));
+        assert!(backend_health.snapshot().quarantined);
+        assert_eq!(gpu_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(pending_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn direct_prefix_begin_panic_quarantines_and_retains_gpu_guard() {
+        struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let gpu_drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let backend_health = kiln_model::BackendHealthHandle::default();
+        let result = run_direct_prefix_lookup_with_panic_fence(
+            &backend_health,
+            DropProbe(gpu_drops.clone()),
+            || -> Result<(), ()> { panic!("injected begin panic") },
+            |_failure| anyhow::anyhow!("unexpected begin failure"),
+            |_pending| Ok(()),
+        );
+
+        assert!(result.is_err());
+        assert!(backend_health.snapshot().quarantined);
+        assert_eq!(gpu_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn direct_prefix_begin_failure_panic_retains_failure_owner() {
+        struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let gpu_drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failure_drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let backend_health = kiln_model::BackendHealthHandle::default();
+        let result = run_direct_prefix_lookup_with_panic_fence(
+            &backend_health,
+            DropProbe(gpu_drops.clone()),
+            || Err::<(), _>(DropProbe(failure_drops.clone())),
+            |_failure| -> anyhow::Error { panic!("injected begin-failure settlement panic") },
+            |_pending| Ok(()),
+        );
+
+        assert!(result.is_err());
+        assert!(backend_health.snapshot().quarantined);
+        assert_eq!(gpu_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(failure_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn direct_model_bridge_withholds_terminal_until_worker_settles() {
+        let (model_tx, model_rx) = std::sync::mpsc::channel();
+        let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+        let (mut events, bridge) = bridge_direct_model_stream(DirectModelStream {
+            events: model_rx,
+            settled: Some(settled_rx),
+        });
+
+        model_tx
+            .send(StreamEvent::Token(kiln_model::StreamToken {
+                token_id: 7,
+                text: "token".to_string(),
+            }))
+            .unwrap();
+        model_tx
+            .send(StreamEvent::Done(kiln_model::StreamDone {
+                finish_reason: kiln_model::FinishReason::MaxTokens,
+                completion_tokens: 1,
+                trailing_text: String::new(),
+            }))
+            .unwrap();
+
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await,
+            Ok(Some(StreamEvent::Token(token))) if token.token_id == 7
+        ));
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(!bridge.is_finished());
+
+        settled_tx.send(()).unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await,
+            Ok(Some(StreamEvent::Done(done))) if done.completion_tokens == 1
+        ));
+        assert!(bridge.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn direct_model_bridge_fails_closed_when_source_has_no_terminal() {
+        let (model_tx, model_rx) = std::sync::mpsc::channel();
+        drop(model_tx);
+        let (mut events, bridge) =
+            bridge_direct_model_stream(DirectModelStream::already_settled(model_rx));
+
+        assert!(events.recv().await.is_none());
+        let error = bridge.await.unwrap().unwrap_err();
+        assert!(
+            error.contains("model stream closed without a terminal event"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_model_bridge_fails_closed_when_settlement_signal_drops() {
+        let (model_tx, model_rx) = std::sync::mpsc::channel();
+        let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+        let (mut events, bridge) = bridge_direct_model_stream(DirectModelStream {
+            events: model_rx,
+            settled: Some(settled_rx),
+        });
+        model_tx
+            .send(StreamEvent::Done(kiln_model::StreamDone {
+                finish_reason: kiln_model::FinishReason::MaxTokens,
+                completion_tokens: 0,
+                trailing_text: String::new(),
+            }))
+            .unwrap();
+        drop(settled_tx);
+
+        assert!(events.recv().await.is_none());
+        let error = bridge.await.unwrap().unwrap_err();
+        assert!(
+            error.contains("model stream settlement signal failed"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_model_cancellation_waits_for_worker_settlement() {
+        let (model_tx, model_rx) = std::sync::mpsc::channel();
+        let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+        let (mut events, bridge) = bridge_direct_model_stream(DirectModelStream {
+            events: model_rx,
+            settled: Some(settled_rx),
+        });
+        model_tx
+            .send(StreamEvent::Error("cancelled".to_string()))
+            .unwrap();
+
+        let cancel = CancelHandle::new();
+        let cancel_for_task = cancel.clone();
+        let settling = tokio::spawn(async move {
+            cancel_and_settle_direct_model_stream(&cancel_for_task, &mut events, bridge).await;
+        });
+        tokio::task::yield_now().await;
+        assert!(cancel.is_cancelled());
+        assert!(!settling.is_finished());
+
+        settled_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), settling)
+            .await
+            .expect("cancellation settlement timed out")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_prefill_cancellation_supervises_late_worker_settlement() {
+        let (model_tx, model_rx) = std::sync::mpsc::channel();
+        let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let prefill = tokio::task::spawn_blocking(move || {
+            release_rx.recv().unwrap();
+            Ok(DirectModelStream {
+                events: model_rx,
+                settled: Some(settled_rx),
+            })
+        });
+
+        let cancel = CancelHandle::new();
+        let cancel_for_task = cancel.clone();
+        let settling = tokio::spawn(async move {
+            cancel_and_settle_direct_prefill(&cancel_for_task, prefill).await;
+        });
+        tokio::task::yield_now().await;
+        assert!(cancel.is_cancelled());
+        assert!(!settling.is_finished());
+
+        model_tx
+            .send(StreamEvent::Error("cancelled during prefill".to_string()))
+            .unwrap();
+        release_tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(!settling.is_finished());
+
+        settled_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), settling)
+            .await
+            .expect("prefill cancellation settlement timed out")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn streaming_task_unwind_signals_cancel_and_clears_prefill_progress() {
+        let gauge = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let cancel = CancelHandle::with_prefill_progress_gauge(gauge.clone());
+        cancel.report_prefill_tokens_completed(64);
+        let cancel_for_task = cancel.clone();
+
+        let task = tokio::spawn(async move {
+            let _guard = PrefillProgressGuard::new(cancel_for_task);
+            panic!("injected streaming producer panic");
+        });
+        let error = task.await.expect_err("producer task should panic");
+        assert!(error.is_panic());
+        assert!(cancel.is_cancelled());
+        assert_eq!(
+            gauge.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "task unwind must clear its in-flight prefill contribution"
+        );
+        cancel.report_prefill_tokens_completed(128);
+        assert_eq!(cancel.prefill_tokens_completed(), 0);
+        assert_eq!(
+            gauge.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a detached prefill must not resurrect progress after cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_success_terminals_survive_a_saturated_event_queue() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(Event::default().data("queued-before-complete"))
+            .await
+            .unwrap();
+
+        let (terminal_tx, terminal_rx) = tokio::sync::mpsc::channel(STREAM_TERMINAL_EVENT_CAPACITY);
+        terminal_tx
+            .send(Event::default().data("finish"))
+            .await
+            .unwrap();
+        terminal_tx
+            .send(Event::default().data("usage"))
+            .await
+            .unwrap();
+        terminal_tx
+            .send(Event::default().data("[DONE]"))
+            .await
+            .unwrap();
+        drop(terminal_tx);
+
+        let terminal = StreamTerminal::default();
+        terminal.complete(drain_terminal_event_buffer(terminal_rx));
+        drop(tx);
+
+        use axum::body::to_bytes;
+        let response = Sse::new(stream_with_terminal(rx, terminal)).into_response();
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            to_bytes(response.into_body(), 1 << 20),
+        )
+        .await
+        .expect("saturated success stream stalled")
+        .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let payloads: Vec<_> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect();
+        assert_eq!(
+            payloads,
+            ["queued-before-complete", "finish", "usage", "[DONE]"]
+        );
+    }
+
     #[tokio::test]
     async fn streaming_producer_drop_fails_closed_unless_completed() {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -11866,7 +12526,7 @@ mod tests {
 
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let terminal = StreamTerminal::default();
-        terminal.complete();
+        terminal.complete(std::collections::VecDeque::new());
         drop(tx);
         let resp = Sse::new(stream_with_terminal(rx, terminal)).into_response();
         let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
@@ -12408,6 +13068,26 @@ mod tests {
             }
             _ => panic!("desktop toggle should resolve to skip-layer"),
         }
+    }
+
+    #[test]
+    fn direct_streaming_uses_only_the_threaded_settlement_mode() {
+        let skip = SpeculativeConfig {
+            num_speculative_tokens: 4,
+            draft_layers: 8,
+        };
+        assert!(matches!(
+            direct_stream_threaded_mode(ResolvedSpeculativeMode::Off),
+            ResolvedSpeculativeMode::Off
+        ));
+        assert!(matches!(
+            direct_stream_threaded_mode(ResolvedSpeculativeMode::SkipLayer(skip)),
+            ResolvedSpeculativeMode::Off
+        ));
+        assert!(matches!(
+            direct_stream_threaded_mode(ResolvedSpeculativeMode::Mtp),
+            ResolvedSpeculativeMode::Off
+        ));
     }
 
     #[test]

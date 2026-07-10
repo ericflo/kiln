@@ -43,7 +43,7 @@ impl Default for Settings {
             fp8_kv_cache: false,
             cuda_graphs: !cfg!(target_os = "macos"),
             prefix_cache: true,
-            speculative_decoding: cfg!(target_os = "macos"),
+            speculative_decoding: false,
             adapter_dir: None,
             served_model_id: None,
             default_thinking_budget_tokens: None,
@@ -247,7 +247,7 @@ mod tests {
         assert!(!s.fp8_kv_cache);
         assert_eq!(s.cuda_graphs, !cfg!(target_os = "macos"));
         assert!(s.prefix_cache);
-        assert_eq!(s.speculative_decoding, cfg!(target_os = "macos"));
+        assert!(!s.speculative_decoding);
         assert_eq!(s.default_thinking_budget_tokens, None);
         assert_eq!(s.default_thinking_budget_ms, None);
         assert!(s.auto_start);

@@ -132,7 +132,9 @@ enabled = true                        # Reuse KV cache blocks for shared prompt 
                                       # on Qwen3.5-4B, separate from KV blocks.
 
 [speculative]
-enabled = false                       # Self-speculative decoding (skip-layer draft)
+enabled = false                       # Self-speculative decoding for direct non-streaming
+                                      # generation. Direct SSE streams temporarily use settled
+                                      # single-token decode even when this is enabled.
 num_speculative_tokens = 256          # Upper bound on drafted tokens per step (the paged
                                       # skip-layer draft adapts within this budget)
 draft_layers = 8                      # First N layers used as draft model

@@ -40,7 +40,8 @@ use crate::forward::{
     model_forward_paged_last_token_greedy, model_forward_paged_last_token_with_last_hidden,
     model_forward_paged_next_token_greedy, model_forward_paged_streaming,
     model_forward_paged_streaming_last_token_with_last_hidden,
-    model_forward_paged_streaming_with_progress, streaming_prefill_enabled_for,
+    model_forward_paged_streaming_with_progress,
+    model_forward_paged_streaming_with_progress_offset, streaming_prefill_enabled_for,
 };
 use crate::metal_graph::MetalGraphRunner;
 use crate::rocm_graph::RocmGraphRunner;
@@ -753,6 +754,56 @@ pub struct PrefixCachedStreamingOutput {
     pub registration: Option<PagedPrefixRegistration>,
     pub extra_registrations: Vec<PagedPrefixRegistration>,
     pub allocated_blocks: Vec<u32>,
+}
+
+/// Event stream plus an explicit acknowledgement that its worker has either
+/// released or intentionally retained every GPU-owned lifetime resource.
+#[must_use = "the event stream must be consumed and worker settlement observed"]
+pub struct ThreadedStreamingOutput {
+    /// Tokens and the model-level terminal event produced by the worker.
+    pub receiver: mpsc::Receiver<StreamEvent>,
+    /// Becomes readable only after decode cleanup and lifetime settlement.
+    /// A disconnected channel means the worker exited without proving that
+    /// boundary and must be treated as a failed settlement.
+    pub settled: mpsc::Receiver<()>,
+}
+
+/// Values whose destruction would make a threaded request's GPU state appear
+/// reusable. Prefill only borrows this bundle so a panic fence can retain the
+/// entire ownership chain when backend completion is unknown.
+struct ThreadedPrefillOwnership<L, F> {
+    worker_lifetime: L,
+    post_decode: F,
+    block_table: BlockTable,
+    allocated_blocks: Vec<u32>,
+    linear_state: Option<LinearAttentionState>,
+}
+
+/// Run prefill without allowing a panic to release request-owned GPU state.
+///
+/// An ordinary `Err` returns the ownership bundle to its caller for normal
+/// cleanup. A panic means backend completion cannot be established: quarantine
+/// is latched before the error is returned and every supplied owner is leaked.
+fn run_threaded_prefill_with_panic_fence<T, O, F>(
+    backend_health: &BackendHealthHandle,
+    boundary: &'static str,
+    mut ownership: O,
+    prefill: F,
+) -> Result<(Result<T>, O)>
+where
+    F: FnOnce(&mut O) -> Result<T>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prefill(&mut ownership))) {
+        Ok(result) => Ok((result, ownership)),
+        Err(_) => {
+            let reason = format!(
+                "{boundary} panicked; backend completion and request ownership are unknown"
+            );
+            backend_health.quarantine(reason.clone());
+            std::mem::forget(ownership);
+            Err(anyhow::anyhow!(reason))
+        }
+    }
 }
 
 /// Prefix-cache metadata transferred to the sole post-decode cleanup owner.
@@ -3183,7 +3234,7 @@ impl ModelRunner {
                     });
 
                     let tail_tokens = &prompt_tokens[split_pos..];
-                    let logits = model_forward_paged_streaming_with_progress(
+                    let logits = model_forward_paged_streaming_with_progress_offset(
                         &*self.backend,
                         tail_tokens,
                         &self.weights,
@@ -3193,7 +3244,8 @@ impl ModelRunner {
                         split_pos,
                         Some(&mut linear_state),
                         self.active_lora.as_ref(),
-                        None,
+                        cancel,
+                        head_tokens.len() as u64,
                     )
                     .context("prefill forward pass (paged prefix cache, streaming tail)")?;
                     if let Some(cancel) = cancel {
@@ -3237,6 +3289,10 @@ impl ModelRunner {
                         None,
                     )
                     .context("greedy prefill forward pass (paged prefix cache, head) failed")?;
+                    if let Some(cancel) = cancel {
+                        cancel.report_prefill_tokens_completed(head_tokens.len() as u64);
+                    }
+                    check_cancelled(cancel)?;
                     prefill_split_snapshot = Some(RollingPrefixSnapshot {
                         position: split_pos,
                         linear_state: linear_state
@@ -3246,37 +3302,43 @@ impl ModelRunner {
 
                     let tail_tokens = &prompt_tokens[split_pos..];
                     let pc_guard = lock_paged_cache(paged_cache)?;
-                    PrefillSampleSource::GreedyToken(
-                        model_forward_paged_last_token_greedy(
-                            &*self.backend,
-                            tail_tokens,
-                            &self.weights,
-                            &self.config,
-                            pc_guard,
-                            block_table,
-                            split_pos,
-                            Some(&mut linear_state),
-                            self.active_lora.as_ref(),
-                            None,
-                        )
-                        .context("greedy prefill forward pass (paged prefix cache, tail) failed")?,
+                    let token = model_forward_paged_last_token_greedy(
+                        &*self.backend,
+                        tail_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_table,
+                        split_pos,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
                     )
+                    .context("greedy prefill forward pass (paged prefix cache, tail) failed")?;
+                    if let Some(cancel) = cancel {
+                        cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
+                    }
+                    check_cancelled(cancel)?;
+                    PrefillSampleSource::GreedyToken(token)
                 } else {
-                    PrefillSampleSource::GreedyToken(
-                        model_forward_paged_last_token_greedy(
-                            &*self.backend,
-                            prefill_tokens,
-                            &self.weights,
-                            &self.config,
-                            pc_guard,
-                            block_table,
-                            cached_tokens,
-                            Some(&mut linear_state),
-                            self.active_lora.as_ref(),
-                            None,
-                        )
-                        .context("greedy prefill forward pass (paged prefix cache) failed")?,
+                    let token = model_forward_paged_last_token_greedy(
+                        &*self.backend,
+                        prefill_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_table,
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
                     )
+                    .context("greedy prefill forward pass (paged prefix cache) failed")?;
+                    if let Some(cancel) = cancel {
+                        cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
+                    }
+                    check_cancelled(cancel)?;
+                    PrefillSampleSource::GreedyToken(token)
                 }
             } else if let Some(split_pos) = split_pos {
                 // Split the prefill at the last block boundary so the
@@ -3509,7 +3571,7 @@ impl ModelRunner {
                     );
 
                     let tail_tokens = &prompt_tokens[split_pos..];
-                    let logits = model_forward_paged_streaming_with_progress(
+                    let logits = model_forward_paged_streaming_with_progress_offset(
                         &*self.backend,
                         tail_tokens,
                         &self.weights,
@@ -3519,7 +3581,8 @@ impl ModelRunner {
                         split_pos,
                         Some(&mut linear_state),
                         self.active_lora.as_ref(),
-                        None,
+                        cancel,
+                        head_tokens.len() as u64,
                     )
                     .context("batched-engine prefill forward pass (streaming tail) failed")?;
                     if let Some(cancel) = cancel {
@@ -7870,7 +7933,7 @@ impl ModelRunner {
         )
     }
 
-    /// Streaming variant of [`generate_paged_shared_tokens`].
+    /// Streaming variant of [`Self::generate_paged_shared_tokens`].
     pub fn generate_streaming_paged_shared_tokens(
         &self,
         prompt_tokens: &[TokenId],
@@ -7886,7 +7949,7 @@ impl ModelRunner {
         )
     }
 
-    /// Same as [`generate_streaming_paged_shared_tokens`], but optionally reuses
+    /// Same as [`Self::generate_streaming_paged_shared_tokens`], but optionally reuses
     /// a block-aligned cached prefix and returns completed prompt metadata that
     /// the caller may register after successful generation.
     pub fn generate_streaming_paged_shared_tokens_with_prefix_cache(
@@ -7906,7 +7969,7 @@ impl ModelRunner {
         )
     }
 
-    /// Threaded variant of [`generate_streaming_paged_shared_tokens`] that
+    /// Threaded variant of [`Self::generate_streaming_paged_shared_tokens`] that
     /// performs prefill on the calling thread and runs the decode loop on a
     /// spawned `std::thread`. The returned receiver yields tokens as they are
     /// produced, instead of after the entire `max_tokens` loop has completed
@@ -7917,6 +7980,15 @@ impl ModelRunner {
     /// Holds an `Arc<RwLock<Self>>` so the spawned worker can re-acquire a
     /// read lock for decode steps without keeping the lock guard alive across
     /// thread boundaries (which `RwLockReadGuard` cannot do).
+    ///
+    /// `cancel` is required because dropping the receiver does not interrupt
+    /// GPU work already running on the worker. Callers must retain a clone,
+    /// signal it, and then observe [`ThreadedStreamingOutput::settled`] before
+    /// considering a cancelled request quiescent.
+    ///
+    /// A prefill panic is converted to `Err` after quarantining the backend.
+    /// The request lifetime and allocation ownership are intentionally retained
+    /// in that case because completion cannot be proven.
     pub fn spawn_streaming_paged_shared_tokens<L>(
         runner_lock: Arc<std::sync::RwLock<Self>>,
         prompt_tokens: Vec<TokenId>,
@@ -7924,12 +7996,14 @@ impl ModelRunner {
         block_manager: Arc<Mutex<BlockManager>>,
         paged_cache: Arc<PagedKvCache>,
         decode_batcher: Option<Arc<DecodeBatcher>>,
+        cancel: CancelHandle,
         worker_lifetime: L,
-    ) -> Result<mpsc::Receiver<StreamEvent>>
+    ) -> Result<ThreadedStreamingOutput>
     where
         L: Send + 'static,
     {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+        check_cancelled(Some(&cancel))?;
 
         let backend_health = {
             let runner = runner_lock
@@ -7958,78 +8032,107 @@ impl ModelRunner {
             }
             block_table
         };
-        let allocated_blocks = block_table.blocks.clone();
+        let ownership = ThreadedPrefillOwnership {
+            allocated_blocks: block_table.blocks.clone(),
+            block_table,
+            linear_state: None,
+            post_decode: (),
+            worker_lifetime,
+        };
 
         // Run prefill on the calling thread so a malformed prompt fails the
         // request synchronously rather than via an SSE error chunk. The decode
         // loop is what actually benefits from being threaded.
-        let prefill_result = {
-            let runner_guard = runner_lock
-                .read()
-                .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
-            let result = (|| -> Result<_> {
-                runner_guard.ensure_backend_healthy()?;
-                let mut linear_state = runner_guard.new_linear_state()?;
-                let logits = {
-                    let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
-                    if streaming_prefill_enabled_for(
-                        &runner_guard.weights.embed_tokens.device(),
-                        prompt_tokens.len(),
-                    ) {
-                        model_forward_paged_streaming(
-                            &*runner_guard.backend,
-                            &prompt_tokens,
-                            &runner_guard.weights,
-                            &runner_guard.config,
-                            pc_guard,
-                            &block_table,
-                            0,
-                            Some(&mut linear_state),
-                            runner_guard.active_lora.as_ref(),
-                        )
-                        .context("prefill forward pass (paged, streaming) failed")?
-                    } else {
-                        model_forward_paged_last_token(
-                            &*runner_guard.backend,
-                            &prompt_tokens,
-                            &runner_guard.weights,
-                            &runner_guard.config,
-                            pc_guard,
-                            &block_table,
-                            0,
-                            Some(&mut linear_state),
-                            runner_guard.active_lora.as_ref(),
-                            None,
-                        )
-                        .context("prefill forward pass (paged) failed")?
+        let (prefill_result, ownership) = run_threaded_prefill_with_panic_fence(
+            &backend_health,
+            "threaded streaming prefill",
+            ownership,
+            |ownership| {
+                let runner_guard = runner_lock
+                    .read()
+                    .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
+                let result = (|| -> Result<_> {
+                    runner_guard.ensure_backend_healthy()?;
+                    check_cancelled(Some(&cancel))?;
+                    ownership.linear_state = Some(runner_guard.new_linear_state()?);
+                    let linear_state = ownership
+                        .linear_state
+                        .as_mut()
+                        .expect("linear state initialized before prefill");
+                    let logits = {
+                        let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
+                        if streaming_prefill_enabled_for(
+                            &runner_guard.weights.embed_tokens.device(),
+                            prompt_tokens.len(),
+                        ) {
+                            model_forward_paged_streaming_with_progress(
+                                &*runner_guard.backend,
+                                &prompt_tokens,
+                                &runner_guard.weights,
+                                &runner_guard.config,
+                                pc_guard,
+                                &ownership.block_table,
+                                0,
+                                Some(linear_state),
+                                runner_guard.active_lora.as_ref(),
+                                Some(&cancel),
+                            )
+                            .context("prefill forward pass (paged, streaming) failed")?
+                        } else {
+                            let logits = model_forward_paged_last_token(
+                                &*runner_guard.backend,
+                                &prompt_tokens,
+                                &runner_guard.weights,
+                                &runner_guard.config,
+                                pc_guard,
+                                &ownership.block_table,
+                                0,
+                                Some(linear_state),
+                                runner_guard.active_lora.as_ref(),
+                                None,
+                            )
+                            .context("prefill forward pass (paged) failed")?;
+                            cancel.report_prefill_tokens_completed(prompt_tokens.len() as u64);
+                            logits
+                        }
+                    };
+                    check_cancelled(Some(&cancel))?;
+                    let next_token = sample_first_decode_token(&logits, &params)?;
+                    Ok((next_token, logits))
+                })();
+                let synchronized =
+                    runner_guard.synchronize_external_yield("threaded streaming prefill");
+                drop(runner_guard);
+                match synchronized {
+                    Ok(()) => result,
+                    Err(err) => {
+                        std::mem::forget(result);
+                        Err(err)
                     }
-                };
-                let next_token = sample_first_decode_token(&logits, &params)?;
-                Ok((next_token, linear_state, logits))
-            })();
-            let synchronized =
-                runner_guard.synchronize_external_yield("threaded streaming prefill");
-            drop(runner_guard);
-            match synchronized {
-                Ok(()) => result,
-                Err(err) => {
-                    std::mem::forget(result);
-                    Err(err)
                 }
-            }
-        };
-        let (next_token, mut linear_state, logits) = match prefill_result {
+            },
+        )?;
+        let (next_token, logits) = match prefill_result {
             Ok(result) => result,
             Err(err) => {
                 if backend_health.snapshot().quarantined {
-                    std::mem::forget(worker_lifetime);
-                } else if !allocated_blocks.is_empty() {
-                    lock_block_manager(block_manager.as_ref())?.free_all(&allocated_blocks);
+                    std::mem::forget(ownership);
+                } else if !ownership.allocated_blocks.is_empty() {
+                    lock_block_manager(block_manager.as_ref())?
+                        .free_all(&ownership.allocated_blocks);
                 }
                 return Err(err);
             }
         };
         drop(logits);
+        let ThreadedPrefillOwnership {
+            worker_lifetime,
+            block_table,
+            allocated_blocks,
+            linear_state,
+            post_decode: (),
+        } = ownership;
+        let mut linear_state = linear_state.expect("successful prefill initialized linear state");
 
         let (tx, rx) = mpsc::channel();
         let seq_len = prompt_tokens.len();
@@ -8044,6 +8147,7 @@ impl ModelRunner {
         };
         let blocks_for_spawn_failure = allocated_blocks;
         let backend_health_for_thread = backend_health.clone();
+        let (settled_tx, settled_rx) = mpsc::channel();
         let spawn_result = std::thread::Builder::new()
             .name("kiln-stream-decode".to_string())
             .spawn(move || {
@@ -8071,6 +8175,7 @@ impl ModelRunner {
                             &block_table,
                             &mut linear_state,
                             decode_batcher_for_thread.as_deref(),
+                            Some(&cancel),
                         );
                         match runner_guard.ensure_backend_healthy() {
                             Ok(()) => PrefixStreamDecodeOutcome::Settled(result),
@@ -8092,7 +8197,10 @@ impl ModelRunner {
                 );
                 if quarantined {
                     std::mem::forget(worker_lifetime);
+                } else {
+                    drop(worker_lifetime);
                 }
+                let _ = settled_tx.send(());
             });
 
         if let Err(err) = spawn_result {
@@ -8103,14 +8211,20 @@ impl ModelRunner {
                 "failed to spawn streaming decode thread: {err}"
             ));
         }
-        Ok(rx)
+        Ok(ThreadedStreamingOutput {
+            receiver: rx,
+            settled: settled_rx,
+        })
     }
 
     /// Threaded variant of
-    /// [`generate_streaming_paged_shared_tokens_with_prefix_cache`]. Same
-    /// motivation as [`spawn_streaming_paged_shared_tokens`]: hand the
+    /// [`Self::generate_streaming_paged_shared_tokens_with_prefix_cache`]. Same
+    /// motivation as [`Self::spawn_streaming_paged_shared_tokens`]: hand the
     /// receiver back before decode starts so the SSE layer can stream tokens
-    /// in real time.
+    /// in real time. It has the same required cancellation and explicit
+    /// settlement contract as the non-prefix variant. Prefill panics quarantine
+    /// the backend and retain the request lifetime, allocation metadata, and
+    /// prefix-cache finalizer rather than releasing an unproven cache lease.
     pub fn spawn_streaming_paged_shared_tokens_with_prefix_cache<F, L>(
         runner_lock: Arc<std::sync::RwLock<Self>>,
         prompt_tokens: Vec<TokenId>,
@@ -8119,14 +8233,16 @@ impl ModelRunner {
         paged_cache: Arc<PagedKvCache>,
         cached_prefix: Option<PagedPrefixReuse>,
         decode_batcher: Option<Arc<DecodeBatcher>>,
+        cancel: CancelHandle,
         worker_lifetime: L,
         post_decode: F,
-    ) -> Result<mpsc::Receiver<StreamEvent>>
+    ) -> Result<ThreadedStreamingOutput>
     where
         F: FnOnce(PrefixCachedStreamingCleanup) -> Result<()> + Send + 'static,
         L: Send + 'static,
     {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+        check_cancelled(Some(&cancel))?;
 
         let backend_health = {
             let runner = runner_lock
@@ -8164,6 +8280,13 @@ impl ModelRunner {
                 .map_err(|e| anyhow::anyhow!("{e}"))?
         };
         let block_table = append_prefix_block_table(&cached_blocks, &allocated_blocks);
+        let ownership = ThreadedPrefillOwnership {
+            worker_lifetime,
+            post_decode,
+            block_table,
+            allocated_blocks,
+            linear_state: None,
+        };
 
         // Free helper for failure paths so a prefill error does not leak the
         // freshly-allocated suffix blocks (the cached-prefix blocks remain
@@ -8181,64 +8304,64 @@ impl ModelRunner {
             }
         };
 
-        let (exact_next_token, mut linear_state) = match cached_prefix {
-            Some(prefix) => {
-                let exact_next_token = if prefix.cached_tokens == prompt_tokens.len() {
-                    prefix.next_token
-                } else {
-                    None
-                };
-                (exact_next_token, prefix.linear_state)
-            }
-            None => {
-                let state = (|| -> Result<LinearAttentionState> {
-                    let runner_guard = runner_lock
-                        .read()
-                        .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
-                    runner_guard.new_linear_state()
-                })();
-                match state {
-                    Ok(state) => (None, state),
-                    Err(err) => {
-                        free_allocated(&allocated_blocks);
-                        return Err(err);
-                    }
-                }
-            }
-        };
-
-        let prepared = {
-            let runner_guard = runner_lock
-                .read()
-                .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
-            let result = (|| -> Result<(
-                TokenId,
-                Option<PagedPrefixRegistration>,
-                Vec<PagedPrefixRegistration>,
-                Option<kiln_tensor::Tensor>,
-            )> {
-                runner_guard.ensure_backend_healthy()?;
-                if let Some(next_token) = exact_next_token {
-                    return match next_token {
-                        PagedPrefixNextToken::Logits(logits) => {
-                            let token = sample_first_decode_token(&logits, &params)?;
-                            Ok((token, None, Vec::new(), Some(logits)))
+        let (prepared, ownership) = run_threaded_prefill_with_panic_fence(
+            &backend_health,
+            "prefix-cached threaded streaming prefill",
+            ownership,
+            |ownership| {
+                let runner_guard = runner_lock
+                    .read()
+                    .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
+                let result = (|| -> Result<(
+                    TokenId,
+                    Option<PagedPrefixRegistration>,
+                    Vec<PagedPrefixRegistration>,
+                    Option<kiln_tensor::Tensor>,
+                )> {
+                    runner_guard.ensure_backend_healthy()?;
+                    check_cancelled(Some(&cancel))?;
+                    let (exact_next_token, linear_state) = match cached_prefix {
+                        Some(prefix) => {
+                            let exact_next_token =
+                                if prefix.cached_tokens == prompt_tokens.len() {
+                                    prefix.next_token
+                                } else {
+                                    None
+                                };
+                            (exact_next_token, prefix.linear_state)
                         }
-                        PagedPrefixNextToken::GreedyToken(token) => {
-                            anyhow::ensure!(
-                                params.temperature == 0.0,
-                                "greedy cached first token cannot serve non-greedy sampling"
-                            );
-                            Ok((token, None, Vec::new(), None))
-                        }
+                        None => (None, runner_guard.new_linear_state()?),
                     };
-                }
+                    ownership.linear_state = Some(linear_state);
+                    let ThreadedPrefillOwnership {
+                        block_table,
+                        linear_state,
+                        ..
+                    } = ownership;
+                    let linear_state = linear_state
+                        .as_mut()
+                        .expect("prefix linear state initialized before prefill");
+                    if let Some(next_token) = exact_next_token {
+                        return match next_token {
+                            PagedPrefixNextToken::Logits(logits) => {
+                                let token = sample_first_decode_token(&logits, &params)?;
+                                Ok((token, None, Vec::new(), Some(logits)))
+                            }
+                            PagedPrefixNextToken::GreedyToken(token) => {
+                                anyhow::ensure!(
+                                    params.temperature == 0.0,
+                                    "greedy cached first token cannot serve non-greedy sampling"
+                                );
+                                Ok((token, None, Vec::new(), None))
+                            }
+                        };
+                    }
 
-                let prefill_tokens = &prompt_tokens[cached_tokens..];
-                anyhow::ensure!(
-                    !prefill_tokens.is_empty(),
-                    "non-exact streaming prefix cache hit must leave at least one suffix token"
-                );
+                    let prefill_tokens = &prompt_tokens[cached_tokens..];
+                    anyhow::ensure!(
+                        !prefill_tokens.is_empty(),
+                        "non-exact streaming prefix cache hit must leave at least one suffix token"
+                    );
 
                     let split_pos =
                         strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size);
@@ -8251,16 +8374,17 @@ impl ModelRunner {
                         ) {
                             if let Some(split_pos) = split_pos {
                                 let head_tokens = &prompt_tokens[cached_tokens..split_pos];
-                                let _ = model_forward_paged_streaming(
+                                let _ = model_forward_paged_streaming_with_progress(
                                     &*runner_guard.backend,
                                     head_tokens,
                                     &runner_guard.weights,
                                     &runner_guard.config,
                                     pc_guard,
-                                    &block_table,
+                                    &*block_table,
                                     cached_tokens,
-                                    Some(&mut linear_state),
+                                    Some(&mut *linear_state),
                                     runner_guard.active_lora.as_ref(),
+                                    Some(&cancel),
                                 )
                                 .context(
                                     "prefill forward pass (streaming paged prefix cache head)",
@@ -8273,57 +8397,63 @@ impl ModelRunner {
                                 });
 
                                 let tail_tokens = &prompt_tokens[split_pos..];
-                                model_forward_paged_streaming(
+                                model_forward_paged_streaming_with_progress_offset(
                                     &*runner_guard.backend,
                                     tail_tokens,
                                     &runner_guard.weights,
                                     &runner_guard.config,
                                     pc_guard,
-                                    &block_table,
+                                    &*block_table,
                                     split_pos,
-                                    Some(&mut linear_state),
+                                    Some(&mut *linear_state),
                                     runner_guard.active_lora.as_ref(),
+                                    Some(&cancel),
+                                    head_tokens.len() as u64,
                                 )
                                 .context(
                                     "prefill forward pass (streaming paged prefix cache tail)",
                                 )?
                             } else {
-                                model_forward_paged_streaming(
+                                model_forward_paged_streaming_with_progress(
                                     &*runner_guard.backend,
                                     prefill_tokens,
                                     &runner_guard.weights,
                                     &runner_guard.config,
                                     pc_guard,
-                                    &block_table,
+                                    &*block_table,
                                     cached_tokens,
-                                    Some(&mut linear_state),
+                                    Some(&mut *linear_state),
                                     runner_guard.active_lora.as_ref(),
+                                    Some(&cancel),
                                 )
                                 .context(
                                     "prefill forward pass (streaming paged prefix cache) failed",
                                 )?
                             }
                         } else {
-                            model_forward_paged_last_token(
+                            let logits = model_forward_paged_last_token(
                                 &*runner_guard.backend,
                                 prefill_tokens,
                                 &runner_guard.weights,
                                 &runner_guard.config,
                                 pc_guard,
-                                &block_table,
+                                &*block_table,
                                 cached_tokens,
-                                Some(&mut linear_state),
+                                Some(&mut *linear_state),
                                 runner_guard.active_lora.as_ref(),
                                 None,
                             )
-                            .context("prefill forward pass (paged prefix cache) failed")?
+                            .context("prefill forward pass (paged prefix cache) failed")?;
+                            cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
+                            logits
                         }
                     };
+                    check_cancelled(Some(&cancel))?;
                     // (#1082) kt-native logits — next-token store is kt; no bridge.
                     let registration = runner_guard.completed_prompt_registration(
                         &prompt_tokens,
-                        &block_table,
-                        &linear_state,
+                        &*block_table,
+                        &*linear_state,
                         block_size,
                         Some(PagedPrefixNextToken::Logits(logits.clone())),
                     )?;
@@ -8331,44 +8461,53 @@ impl ModelRunner {
                     if let Some(reg) = build_extended_registration(
                         &prompt_tokens,
                         &[],
-                        &block_table,
+                        &*block_table,
                         block_size,
                         prefill_split_snapshot,
                     ) {
                         extra_registrations.push(reg);
                     }
-                let next_token = sample_first_decode_token(&logits, &params)?;
-                Ok((
-                    next_token,
-                    registration,
-                    extra_registrations,
-                    Some(logits),
-                ))
-            })();
-            let synchronized = runner_guard
-                .synchronize_external_yield("prefix streaming prefill and first-token sample");
-            drop(runner_guard);
-            match synchronized {
-                Ok(()) => result,
-                Err(err) => {
-                    std::mem::forget(result);
-                    Err(err)
+                    let next_token = sample_first_decode_token(&logits, &params)?;
+                    Ok((
+                        next_token,
+                        registration,
+                        extra_registrations,
+                        Some(logits),
+                    ))
+                })();
+                let synchronized = runner_guard
+                    .synchronize_external_yield("prefix streaming prefill and first-token sample");
+                drop(runner_guard);
+                match synchronized {
+                    Ok(()) => result,
+                    Err(err) => {
+                        std::mem::forget(result);
+                        Err(err)
+                    }
                 }
-            }
-        };
+            },
+        )?;
         let (next_token, registration, extra_registrations, logits_keepalive) = match prepared {
             Ok(prepared) => prepared,
             Err(err) => {
                 if backend_health.snapshot().quarantined {
-                    std::mem::forget(worker_lifetime);
-                    std::mem::forget(post_decode);
+                    std::mem::forget(ownership);
                 } else {
-                    free_allocated(&allocated_blocks);
+                    free_allocated(&ownership.allocated_blocks);
                 }
                 return Err(err);
             }
         };
         drop(logits_keepalive);
+        let ThreadedPrefillOwnership {
+            worker_lifetime,
+            post_decode,
+            block_table,
+            allocated_blocks,
+            linear_state,
+        } = ownership;
+        let mut linear_state =
+            linear_state.expect("successful prefix prefill retained linear state");
 
         let (tx, rx) = mpsc::channel();
         let seq_len = prompt_tokens.len();
@@ -8382,6 +8521,7 @@ impl ModelRunner {
             allocated_blocks: allocated_blocks.clone(),
         };
         let backend_health_for_thread = backend_health.clone();
+        let (settled_tx, settled_rx) = mpsc::channel();
 
         let spawn_result = std::thread::Builder::new()
             .name("kiln-stream-decode-prefix".to_string())
@@ -8410,6 +8550,7 @@ impl ModelRunner {
                             &block_table_for_thread,
                             &mut linear_state,
                             decode_batcher_for_thread.as_deref(),
+                            Some(&cancel),
                         );
                         match runner_guard.ensure_backend_healthy() {
                             Ok(()) => PrefixStreamDecodeOutcome::Settled(result),
@@ -8426,7 +8567,10 @@ impl ModelRunner {
                     // Unknown completion means exclusive GPU mutation must
                     // remain blocked for the lifetime of this process.
                     std::mem::forget(worker_lifetime);
+                } else {
+                    drop(worker_lifetime);
                 }
+                let _ = settled_tx.send(());
             });
 
         if let Err(err) = spawn_result {
@@ -8436,7 +8580,10 @@ impl ModelRunner {
             ));
         }
 
-        Ok(rx)
+        Ok(ThreadedStreamingOutput {
+            receiver: rx,
+            settled: settled_rx,
+        })
     }
 
     pub fn generate_streaming_paged_speculative_shared_tokens(
@@ -8446,8 +8593,14 @@ impl ModelRunner {
         block_manager: &Mutex<BlockManager>,
         paged_cache: &PagedKvCache,
         spec_config: &SpeculativeConfig,
+        cancel: Option<&CancelHandle>,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
+        check_cancelled(cancel)?;
         if params.thinking_budget.is_some() {
+            anyhow::ensure!(
+                cancel.is_none(),
+                "cancellable thinking-budget streams must use single-token decode"
+            );
             return self.generate_streaming_paged_shared_tokens(
                 prompt_tokens,
                 params,
@@ -8493,6 +8646,7 @@ impl ModelRunner {
             paged_cache,
             &block_table,
             spec_config,
+            cancel,
         );
 
         reservation.release_after_settlement(
@@ -8852,6 +9006,7 @@ impl ModelRunner {
             block_table,
             linear_state,
             None,
+            None,
         )?;
         if let Some(done) = done {
             let _ = tx.send(StreamEvent::Done(done));
@@ -8875,6 +9030,7 @@ impl ModelRunner {
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
         decode_batcher: Option<&DecodeBatcher>,
+        cancel: Option<&CancelHandle>,
     ) -> Result<Option<StreamDone>> {
         let rocm_owner = RocmDecodeOwnerLease::new(&self.rocm_graph, &self.backend_health);
         let mut generated_tokens: Vec<TokenId> = Vec::new();
@@ -8883,6 +9039,7 @@ impl ModelRunner {
         let mut gate = StreamTextGate::new(&params.stop);
 
         for _step in 0..params.max_tokens {
+            check_cancelled(cancel)?;
             if let Some(s) = step_seed.as_mut() {
                 *s = s.wrapping_add(1);
             }
@@ -8959,7 +9116,9 @@ impl ModelRunner {
         paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         spec_config: &SpeculativeConfig,
+        cancel: Option<&CancelHandle>,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
+        check_cancelled(cancel)?;
         let (tx, rx) = mpsc::channel();
         let mut linear_state = self.new_linear_state()?;
 
@@ -8969,7 +9128,7 @@ impl ModelRunner {
                 &self.weights.embed_tokens.device(),
                 prompt_tokens.len(),
             ) {
-                model_forward_paged_streaming(
+                model_forward_paged_streaming_with_progress(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
@@ -8979,10 +9138,11 @@ impl ModelRunner {
                     0,
                     Some(&mut linear_state),
                     self.active_lora.as_ref(),
+                    cancel,
                 )
                 .context("prefill forward pass (streaming paged skip-layer, streaming) failed")?
             } else {
-                model_forward_paged_last_token(
+                let logits = model_forward_paged_last_token(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
@@ -8994,9 +9154,14 @@ impl ModelRunner {
                     self.active_lora.as_ref(),
                     None,
                 )
-                .context("prefill forward pass (streaming paged skip-layer) failed")?
+                .context("prefill forward pass (streaming paged skip-layer) failed")?;
+                if let Some(cancel) = cancel {
+                    cancel.report_prefill_tokens_completed(prompt_tokens.len() as u64);
+                }
+                logits
             }
         };
+        check_cancelled(cancel)?;
         // (#1082) forward returns kt logits; sampler is kt — no bridge.
 
         let mut draft_linear_state =
@@ -9009,6 +9174,7 @@ impl ModelRunner {
         let mut last_token = greedy_sample(&logits)?;
 
         loop {
+            check_cancelled(cancel)?;
             if generated_tokens.len() >= params.max_tokens {
                 break;
             }
@@ -9415,6 +9581,61 @@ mod tests {
             extra_registrations: Vec::new(),
             allocated_blocks: Vec::new(),
         }
+    }
+
+    #[test]
+    fn threaded_prefill_panic_fence_quarantines_every_request_owner() {
+        struct DropProbe(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        struct PrefillOwners {
+            _worker_lifetime: DropProbe,
+            _allocation_metadata: DropProbe,
+            _prefix_lease: DropProbe,
+        }
+
+        let worker_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let allocation_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lease_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let backend_health = BackendHealthHandle::default();
+        let result = run_threaded_prefill_with_panic_fence(
+            &backend_health,
+            "injected threaded prefill",
+            PrefillOwners {
+                _worker_lifetime: DropProbe(Arc::clone(&worker_drops)),
+                _allocation_metadata: DropProbe(Arc::clone(&allocation_drops)),
+                _prefix_lease: DropProbe(Arc::clone(&lease_drops)),
+            },
+            |_| -> Result<()> { panic!("injected prefill panic") },
+        );
+
+        let error = match result {
+            Ok(_) => panic!("prefill panic must become an error"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("injected threaded prefill panicked")
+        );
+        assert_eq!(worker_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            allocation_drops.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(lease_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let snapshot = backend_health.snapshot();
+        assert!(snapshot.quarantined);
+        assert_eq!(
+            snapshot.reason.as_deref(),
+            Some(
+                "injected threaded prefill panicked; backend completion and request ownership are unknown"
+            )
+        );
     }
 
     #[test]

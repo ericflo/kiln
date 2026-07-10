@@ -450,12 +450,27 @@ pub struct RealPrefixCachePendingLookup {
 }
 
 impl RealPrefixCachePendingLookup {
-    pub fn settle(self, runner: &ModelRunner) -> anyhow::Result<RealPrefixCacheRequestLookup> {
-        self.settle_with(|| runner.synchronize_external_yield("prefix-cache hit snapshot"))
+    pub fn settle(mut self, runner: &ModelRunner) -> anyhow::Result<RealPrefixCacheRequestLookup> {
+        self.settle_borrowed(runner)
     }
 
+    pub(crate) fn settle_borrowed(
+        &mut self,
+        runner: &ModelRunner,
+    ) -> anyhow::Result<RealPrefixCacheRequestLookup> {
+        self.settle_borrowed_with(|| runner.synchronize_external_yield("prefix-cache hit snapshot"))
+    }
+
+    #[cfg(test)]
     fn settle_with(
         mut self,
+        synchronize: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<RealPrefixCacheRequestLookup> {
+        self.settle_borrowed_with(synchronize)
+    }
+
+    fn settle_borrowed_with(
+        &mut self,
         synchronize: impl FnOnce() -> anyhow::Result<()>,
     ) -> anyhow::Result<RealPrefixCacheRequestLookup> {
         if self.hit.is_some() {
@@ -518,12 +533,20 @@ impl RealPrefixCacheBeginFailure {
     }
 
     pub fn settle(mut self, runner: &ModelRunner) -> anyhow::Error {
+        self.settle_borrowed(runner)
+    }
+
+    pub(crate) fn settle_borrowed(&mut self, runner: &ModelRunner) -> anyhow::Error {
         let error = self.error.take().expect("prefix begin error present");
-        let Some(request) = self.request.take() else {
+        if self.request.is_none() {
             return error;
-        };
+        }
         match runner.synchronize_external_yield("prefix-cache hit snapshot failure") {
             Ok(()) => {
+                let request = self
+                    .request
+                    .take()
+                    .expect("provisional prefix request present after synchronization");
                 drop(request);
                 runner.backend_health_handle().quarantine(format!(
                     "prefix-cache hit snapshot failed after partial device-copy submission: {error:#}"
@@ -531,12 +554,26 @@ impl RealPrefixCacheBeginFailure {
                 error
             }
             Err(sync_error) => {
+                let request = self
+                    .request
+                    .take()
+                    .expect("provisional prefix request present after synchronization failure");
                 std::mem::forget(request);
                 sync_error.context(format!(
                     "prefix-cache hit snapshot also failed before synchronization: {error:#}"
                 ))
             }
         }
+    }
+}
+
+impl Drop for RealPrefixCacheBeginFailure {
+    fn drop(&mut self) {
+        let Some(request) = self.request.take() else {
+            return;
+        };
+        tracing::error!("unsettled prefix-cache begin failure dropped; retaining its source lease");
+        std::mem::forget(request);
     }
 }
 
@@ -560,14 +597,6 @@ impl std::fmt::Display for RealPrefixCacheBeginFailure {
 }
 
 impl std::error::Error for RealPrefixCacheBeginFailure {}
-
-impl Drop for RealPrefixCacheBeginFailure {
-    fn drop(&mut self) {
-        if let Some(request) = self.request.take() {
-            std::mem::forget(request);
-        }
-    }
-}
 
 struct RealPrefixCacheLookupAttempt {
     hit: anyhow::Result<Option<RealPrefixCacheHit>>,

@@ -24,6 +24,17 @@
   `kiln-eval` CLI expose inherited, unlimited, zero, and custom limits. Eval
   runs preflight active budgets before decode and retain raw output, effective
   limit provenance, runtime outcomes, and a generation-configuration hash.
+- streaming lifecycle: direct threaded prefill and decode are supervised by
+  one remaining request deadline and a cooperative cancellation handle.
+  Cancellation is observed between prefill tiles and at token boundaries, and
+  the server retains request ownership
+  until model cleanup explicitly settles; timeout/model failures end with a
+  structured `generation_error` SSE event followed by `[DONE]`.
+- streaming delivery: finish, usage, and `[DONE]` are committed out of band
+  after cache/accounting work, so a full ordinary-delta queue cannot hold model
+  cleanup or suppress the terminal events. Direct `stream: true` requests fall
+  back from MTP or skip-layer speculation to threaded single-token decode until
+  those speculative paths provide the same explicit settlement contract.
 
 ## kiln-v0.4.1 — 2026-06-12 — multi-turn prefix caching actually caches
 

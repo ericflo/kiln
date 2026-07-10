@@ -1396,7 +1396,7 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
             );
             println!(
                 "  {} {}",
-                style("Speculative:").dim(),
+                style("Speculative (direct non-streaming):").dim(),
                 config.speculative.enabled
             );
             if let Some(warning) = non_loopback_host_warning(&config.server.host) {

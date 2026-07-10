@@ -4333,6 +4333,36 @@ pub struct LinearAttentionState {
     pub conv_states: Vec<Tensor>,
 }
 
+/// Build a linear-attention snapshot without releasing partially submitted
+/// device-copy destinations on either an error or a panic.
+///
+/// The destination vectors live outside the unwind boundary and are only
+/// borrowed by `build`. That lets this helper retain every completed tensor
+/// before resuming the panic into the serving layer's ownership fence, which
+/// quarantines the backend and converts it into a request error.
+fn build_linear_attention_snapshot<T>(
+    mut recurrent_states: Vec<T>,
+    mut conv_states: Vec<T>,
+    build: impl FnOnce(&mut Vec<T>, &mut Vec<T>) -> Result<()>,
+) -> Result<(Vec<T>, Vec<T>)> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        build(&mut recurrent_states, &mut conv_states)
+    }));
+    match result {
+        Ok(Ok(())) => Ok((recurrent_states, conv_states)),
+        Ok(Err(error)) => {
+            std::mem::forget(recurrent_states);
+            std::mem::forget(conv_states);
+            Err(error)
+        }
+        Err(payload) => {
+            std::mem::forget(recurrent_states);
+            std::mem::forget(conv_states);
+            std::panic::resume_unwind(payload)
+        }
+    }
+}
+
 impl LinearAttentionState {
     /// Create fresh zero-initialized state for all linear attention layers.
     pub fn new(config: &kiln_core::config::ModelConfig, device: &Device) -> Result<Self> {
@@ -5018,31 +5048,19 @@ impl LinearAttentionState {
     /// code path (no per-step alloc, two pre-allocated slots swapped via
     /// index) to bring overhead to zero.
     pub fn snapshot(&self) -> Result<Self> {
-        let mut recurrent_states = Vec::with_capacity(self.recurrent_states.len());
-        for t in &self.recurrent_states {
-            match t.copy().context("snapshot recurrent state") {
-                Ok(snapshot) => recurrent_states.push(snapshot),
-                Err(error) => {
-                    // Earlier device copies may still be in flight. Retain
-                    // their destinations rather than returning allocations to
-                    // a backend pool before the caller settles/quarantines the
-                    // failed snapshot boundary.
-                    std::mem::forget(recurrent_states);
-                    return Err(error);
+        let (recurrent_states, conv_states) = build_linear_attention_snapshot(
+            Vec::with_capacity(self.recurrent_states.len()),
+            Vec::with_capacity(self.conv_states.len()),
+            |recurrent_states, conv_states| {
+                for tensor in &self.recurrent_states {
+                    recurrent_states.push(tensor.copy().context("snapshot recurrent state")?);
                 }
-            }
-        }
-        let mut conv_states = Vec::with_capacity(self.conv_states.len());
-        for t in &self.conv_states {
-            match t.copy().context("snapshot conv state") {
-                Ok(snapshot) => conv_states.push(snapshot),
-                Err(error) => {
-                    std::mem::forget(recurrent_states);
-                    std::mem::forget(conv_states);
-                    return Err(error);
+                for tensor in &self.conv_states {
+                    conv_states.push(tensor.copy().context("snapshot conv state")?);
                 }
-            }
-        }
+                Ok(())
+            },
+        )?;
         Ok(Self {
             recurrent_states,
             conv_states,
@@ -30927,6 +30945,39 @@ pub fn model_forward_paged_streaming_with_progress(
     lora: Option<&LoraWeights>,
     progress: Option<&crate::cancel::CancelHandle>,
 ) -> Result<Tensor> {
+    model_forward_paged_streaming_with_progress_offset(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        progress,
+        0,
+    )
+}
+
+/// Progress-aware tiled prefill with an existing request-local progress base.
+///
+/// Prefix-cache callers use this for a tail pass after a separately executed
+/// head pass, so progress remains cumulative across both forwards.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn model_forward_paged_streaming_with_progress_offset(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    progress: Option<&crate::cancel::CancelHandle>,
+    progress_offset: u64,
+) -> Result<Tensor> {
     model_forward_paged_streaming_with(
         backend,
         token_ids,
@@ -30940,6 +30991,7 @@ pub fn model_forward_paged_streaming_with_progress(
         streaming_tile_tokens_for_paged_prefill(&weights.embed_tokens.device(), token_ids.len()),
         streaming_last_token_lm_head(),
         progress,
+        progress_offset,
     )
 }
 
@@ -31183,6 +31235,7 @@ pub fn model_forward_paged_streaming_with(
     tile_size: usize,
     last_token_only: bool,
     progress: Option<&crate::cancel::CancelHandle>,
+    progress_offset: u64,
 ) -> Result<Tensor> {
     let total = token_ids.len();
     if total == 0 {
@@ -31198,6 +31251,9 @@ pub fn model_forward_paged_streaming_with(
     let mut last_logits: Option<Tensor> = None;
     let mut cursor = 0usize;
     while cursor < total {
+        if progress.is_some_and(crate::cancel::CancelHandle::is_cancelled) {
+            anyhow::bail!("streaming prefill cancelled by caller");
+        }
         let end = (cursor + tile_size).min(total);
         let is_last_tile = end == total;
         let mode = if is_last_tile {
@@ -31247,7 +31303,10 @@ pub fn model_forward_paged_streaming_with(
 
         cursor = end;
         if let Some(progress) = progress {
-            progress.report_prefill_tokens_completed(cursor as u64);
+            progress.report_prefill_tokens_completed(progress_offset.saturating_add(cursor as u64));
+            if progress.is_cancelled() {
+                anyhow::bail!("streaming prefill cancelled by caller");
+            }
         }
     }
 
@@ -33245,6 +33304,33 @@ mod tests {
         assert_eq!(draft.recurrent_states.len(), 1);
         assert_eq!(draft.conv_states.len(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn linear_attention_snapshot_panic_retains_partial_destinations() {
+        struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = build_linear_attention_snapshot(Vec::new(), Vec::new(), |recurrent, conv| {
+                recurrent.push(DropProbe(drops.clone()));
+                conv.push(DropProbe(drops.clone()));
+                panic!("injected snapshot panic");
+            });
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(
+            drops.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "panic must not release device-copy destinations"
+        );
     }
 
     fn make_test_attn_weights(
@@ -38607,6 +38693,7 @@ mod tests {
             tile_size,
             false,
             None,
+            0,
         )?;
 
         Ok((mono_logits, stream_logits))
@@ -38658,6 +38745,104 @@ mod tests {
         assert_eq!(mono.dims(), &[1, total, config.vocab_size]);
         assert_eq!(stream.dims(), &[1, tile, config.vocab_size]);
         assert_last_tile_matches(&mono, &stream, total, tile, 1e-5)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_prefill_rejects_pre_cancelled_work_before_first_tile() -> Result<()> {
+        let config = streaming_test_config();
+        let tokens = deterministic_tokens(64, config.vocab_size as u32);
+        let device = Device::Cpu;
+        let weights = make_hybrid_gpu_weights(
+            &device,
+            config.vocab_size,
+            config.hidden_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.intermediate_size,
+            config.num_layers,
+            config.full_attention_interval,
+        )?;
+        let backend = test_backend(&device);
+        let (cache, block_table) = make_paged_setup(&config, tokens.len(), 64, &device)?;
+        let mut linear_state = LinearAttentionState::new(&config, &device)?;
+        let cancel = crate::cancel::CancelHandle::new();
+        cancel.cancel();
+
+        let error = model_forward_paged_streaming_with(
+            &backend,
+            &tokens,
+            &weights,
+            &config,
+            &cache,
+            &block_table,
+            0,
+            Some(&mut linear_state),
+            None,
+            64,
+            true,
+            Some(&cancel),
+            0,
+        )
+        .expect_err("pre-cancelled prefill must stop before the first tile");
+
+        assert!(error.to_string().contains("cancelled by caller"));
+        assert_eq!(cancel.prefill_tokens_completed(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_prefill_progress_is_cumulative_across_split_cpu() -> Result<()> {
+        let config = streaming_test_config();
+        let total = GDN_CHUNK_SIZE * 2;
+        let split = GDN_CHUNK_SIZE;
+        let tokens = deterministic_tokens(total, config.vocab_size as u32);
+        let device = Device::Cpu;
+        let weights = make_hybrid_gpu_weights(
+            &device,
+            config.vocab_size,
+            config.hidden_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.intermediate_size,
+            config.num_layers,
+            config.full_attention_interval,
+        )?;
+        let backend = test_backend(&device);
+        let (cache, block_table) = make_paged_setup(&config, total, GDN_CHUNK_SIZE, &device)?;
+        let mut linear_state = LinearAttentionState::new(&config, &device)?;
+        let progress = crate::cancel::CancelHandle::new();
+
+        let _ = model_forward_paged_streaming_with_progress(
+            &backend,
+            &tokens[..split],
+            &weights,
+            &config,
+            &cache,
+            &block_table,
+            0,
+            Some(&mut linear_state),
+            None,
+            Some(&progress),
+        )?;
+        assert_eq!(progress.prefill_tokens_completed(), split as u64);
+
+        let _ = model_forward_paged_streaming_with_progress_offset(
+            &backend,
+            &tokens[split..],
+            &weights,
+            &config,
+            &cache,
+            &block_table,
+            split,
+            Some(&mut linear_state),
+            None,
+            Some(&progress),
+            split as u64,
+        )?;
+        assert_eq!(progress.prefill_tokens_completed(), total as u64);
         Ok(())
     }
 
@@ -38809,6 +38994,7 @@ mod tests {
                 tile,
                 true, // last_token_only — matches production dispatch
                 None,
+                0,
             )?;
             assert_eq!(logits.dims(), &[1, 1, config.vocab_size]);
             let last = logits.flatten_all()?.to_vec1::<f32>()?;
@@ -39031,6 +39217,7 @@ mod tests {
             tile,
             true,
             None,
+            0,
         )?;
         let stream_decode = model_forward_paged(
             &backend,
@@ -39394,6 +39581,7 @@ mod tests {
             tile,
             false,
             None,
+            0,
         )?;
 
         assert_eq!(mono_logits.dims(), &[1, total, config.vocab_size]);
