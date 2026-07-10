@@ -1515,9 +1515,9 @@ fn test_real_model_opd_metal() {
 use std::sync::{Arc, Mutex, RwLock};
 
 use kiln_core::block::BlockManager;
-use kiln_core::sampling::SamplingParams;
+use kiln_core::sampling::{SamplingParams, ThinkingBudget};
 use kiln_core::token::TokenId;
-use kiln_model::{CancelHandle, FinishReason, PagedKvCacheKt, PagedPrefixReuse};
+use kiln_model::{CancelHandle, FinishReason, PagedKvCacheKt, PagedPrefixReuse, StreamEvent};
 use kiln_server::batching_engine::{DecodeForward, DecodeSlot, EngineRequest, RealDecodeForward};
 use kiln_server::state::RealPrefixCache;
 use uuid::Uuid;
@@ -1688,6 +1688,43 @@ fn prefix_test_paged_cache(config: &ModelConfig) -> PagedKvCacheKt {
         Device::Cpu,
     )
     .expect("paged KV cache")
+}
+
+#[test]
+#[allow(deprecated)]
+fn legacy_mutable_paged_stream_settles_before_return() {
+    let config = tiny_config();
+    let weights = tiny_weights(&config, &Device::Cpu);
+    let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+    let mut block_manager = BlockManager::new(PREFIX_TEST_NUM_BLOCKS, PREFIX_TEST_BLOCK_SIZE);
+    let paged_cache = prefix_test_paged_cache(&config);
+    let sampling = SamplingParams {
+        max_tokens: 1,
+        thinking_budget: Some(
+            ThinkingBudget::new(Some(0), None, 1, vec![1])
+                .expect("deterministic one-token thinking budget"),
+        ),
+        ..SamplingParams::greedy()
+    };
+
+    let events = runner
+        .generate_streaming_paged("<|im_start|>", &sampling, &mut block_manager, &paged_cache)
+        .expect("legacy mutable paged stream")
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    assert!(matches!(
+        events.as_slice(),
+        [
+            StreamEvent::Token(token),
+            StreamEvent::Done(done)
+        ] if token.token_id == 1 && done.completion_tokens == 1
+    ));
+    assert_eq!(
+        block_manager.num_used(),
+        0,
+        "the synchronous compatibility API must settle before returning its populated receiver"
+    );
 }
 
 /// 81 deterministic prompt tokens: long enough that the prefill-split entry

@@ -35,6 +35,11 @@
   cleanup or suppress the terminal events. Direct `stream: true` requests fall
   back from MTP or skip-layer speculation to threaded single-token decode until
   those speculative paths provide the same explicit settlement contract.
+- legacy paged streaming: the synchronous mutable-`BlockManager` compatibility
+  API now holds pages, recurrent state, logits, and graph coordination through
+  one backend-settlement epilogue on success, error, receiver drop, or panic.
+  Its already-populated receiver semantics are documented and the API is
+  deprecated in favor of live threaded streaming with explicit settlement.
 
 ## kiln-v0.4.1 — 2026-06-12 — multi-turn prefix caching actually caches
 

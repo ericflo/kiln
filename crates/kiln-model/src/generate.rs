@@ -1692,6 +1692,144 @@ impl Drop for SharedBlockReservation<'_> {
     }
 }
 
+struct SettlementOutcome<T, O> {
+    result: Result<T>,
+    owners: O,
+}
+
+fn catch_external_yield_sync_panic(
+    backend_health: &BackendHealthHandle,
+    boundary: &'static str,
+    synchronize: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(synchronize)) {
+        Ok(result) => result,
+        Err(_) => {
+            let reason = format!("backend synchronization panicked at {boundary}");
+            backend_health.quarantine(reason.clone());
+            Err(anyhow::anyhow!(reason))
+        }
+    }
+}
+
+/// Exclusive reservation used by the legacy synchronous paged-stream API.
+///
+/// Unlike the older ad hoc cleanup branches, this guard retains its pages by
+/// default. Only `release_after_settlement*` can return them to the mutable
+/// block manager, after backend completion has been proven and the associated
+/// GPU owners can be dropped safely.
+struct MutableBlockReservation<'a> {
+    block_manager: &'a mut BlockManager,
+    block_ids: Vec<u32>,
+}
+
+impl MutableBlockReservation<'_> {
+    fn block_table(&self) -> BlockTable {
+        let mut block_table = BlockTable::new();
+        for &block_id in &self.block_ids {
+            block_table.push(block_id);
+        }
+        block_table
+    }
+
+    fn release_after_settlement<T>(
+        self,
+        runner: &ModelRunner,
+        boundary: &'static str,
+        outcome: SettlementOutcome<T, LegacyMutablePagedStreamOwners<'_>>,
+    ) -> Result<T> {
+        self.release_after_settlement_with(
+            boundary,
+            outcome,
+            || {
+                catch_external_yield_sync_panic(&runner.backend_health, boundary, || {
+                    runner.synchronize_external_yield(boundary)
+                })
+            },
+            LegacyMutablePagedStreamOwners::quarantine,
+        )
+    }
+
+    fn release_after_settlement_with<T, O>(
+        mut self,
+        boundary: &'static str,
+        mut outcome: SettlementOutcome<T, O>,
+        synchronize: impl FnOnce() -> Result<()>,
+        quarantine_owners: impl FnOnce(&mut O),
+    ) -> Result<T> {
+        match synchronize() {
+            Ok(()) => {
+                let SettlementOutcome { result, owners } = outcome;
+                drop(owners);
+                let block_ids = std::mem::take(&mut self.block_ids);
+                self.block_manager.free_all(&block_ids);
+                result
+            }
+            Err(sync_error) => {
+                let prior_error = outcome
+                    .result
+                    .as_ref()
+                    .err()
+                    .map(|error| format!("{error:#}"));
+                quarantine_owners(&mut outcome.owners);
+                std::mem::forget(outcome);
+                tracing::error!(
+                    blocks = self.block_ids.len(),
+                    boundary,
+                    "mutable KV reservation settlement failed; retaining pages and GPU owners"
+                );
+                std::mem::forget(self);
+                match prior_error {
+                    Some(prior_error) => Err(sync_error.context(format!(
+                        "generation also failed before mutable KV release: {prior_error}"
+                    ))),
+                    None => Err(sync_error),
+                }
+            }
+        }
+    }
+}
+
+impl Drop for MutableBlockReservation<'_> {
+    fn drop(&mut self) {
+        if self.block_ids.is_empty() {
+            return;
+        }
+        tracing::error!(
+            blocks = self.block_ids.len(),
+            "unsettled mutable KV reservation dropped; retaining its pages"
+        );
+    }
+}
+
+struct LegacyMutablePagedStreamOwners<'a> {
+    linear_state: Option<LinearAttentionState>,
+    prefill_logits: Option<kiln_tensor::Tensor>,
+    pending_decode_logits: Option<kiln_tensor::Tensor>,
+    cuda_graph: Option<std::sync::MutexGuard<'a, CudaGraphRunner>>,
+}
+
+impl LegacyMutablePagedStreamOwners<'_> {
+    fn new() -> Self {
+        Self {
+            linear_state: None,
+            prefill_logits: None,
+            pending_decode_logits: None,
+            cuda_graph: None,
+        }
+    }
+
+    fn quarantine(&mut self) {
+        // The guard is coordination state, not GPU-owned request state. Keep it
+        // through the synchronization attempt, then unlock even when device
+        // completion remains unknown so later health checks fail promptly.
+        drop(self.cuda_graph.take());
+        if let Some(linear_state) = self.linear_state.as_mut() {
+            quarantine_linear_attention_state(linear_state);
+        }
+    }
+}
+
 fn lock_block_manager(
     block_manager: &Mutex<BlockManager>,
 ) -> Result<std::sync::MutexGuard<'_, BlockManager>> {
@@ -9287,10 +9425,16 @@ impl ModelRunner {
         Ok(rx)
     }
 
-    /// Streaming generation using paged KV cache.
+    /// Legacy synchronous generation using a mutable paged KV block manager.
     ///
-    /// Same as [`generate_streaming`] but uses paged KV cache for memory-efficient
-    /// serving with the BlockManager.
+    /// Despite returning a receiver, this method performs prefill and decode on
+    /// the calling thread and the receiver is already fully populated when it
+    /// returns. New serving integrations should use
+    /// [`Self::spawn_streaming_paged_shared_tokens`], which exposes live token
+    /// delivery, cancellation, and explicit worker settlement.
+    #[deprecated(
+        note = "use spawn_streaming_paged_shared_tokens for live streaming and explicit settlement"
+    )]
     pub fn generate_streaming_paged(
         &self,
         prompt: &str,
@@ -9319,6 +9463,7 @@ impl ModelRunner {
         block_manager: &mut BlockManager,
         paged_cache: &PagedKvCache,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
+        self.ensure_backend_healthy()?;
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
         let block_size = block_manager.block_size();
@@ -9328,237 +9473,223 @@ impl ModelRunner {
         let allocated_blocks = block_manager
             .allocate(num_blocks)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        let mut block_table = BlockTable::new();
-        for &block_id in &allocated_blocks {
-            block_table.push(block_id);
-        }
+        let reservation = MutableBlockReservation {
+            block_manager,
+            block_ids: allocated_blocks,
+        };
+        let block_table = reservation.block_table();
 
         let (tx, rx) = mpsc::channel();
-        let mut linear_state = self.new_linear_state()?;
+        let mut owners = LegacyMutablePagedStreamOwners::new();
+        let execution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<mpsc::Receiver<StreamEvent>> {
+                owners.linear_state = Some(self.new_linear_state()?);
 
-        // Prefill. Long Metal prompts use tiled streaming prefill by default;
-        // env overrides can force either path.
-        let prefill_result = if streaming_prefill_enabled_for(
-            &self.weights.embed_tokens.device(),
-            prompt_tokens.len(),
-        ) {
-            model_forward_paged_streaming(
-                &*self.backend,
-                &prompt_tokens,
-                &self.weights,
-                &self.config,
-                paged_cache,
-                &block_table,
-                0,
-                Some(&mut linear_state),
-                self.active_lora.as_ref(),
-            )
-        } else {
-            model_forward_paged_last_token(
-                &*self.backend,
-                &prompt_tokens,
-                &self.weights,
-                &self.config,
-                paged_cache,
-                &block_table,
-                0,
-                Some(&mut linear_state),
-                self.active_lora.as_ref(),
-                None,
-            )
-        };
-        let logits = match prefill_result {
-            Ok(l) => l,
-            Err(e) => {
-                block_manager.free_all(&allocated_blocks);
-                return Err(e.context("prefill forward pass (paged) failed"));
-            }
-        };
-        // (#1082) forward returns kt logits; sampler is kt — no bridge.
-
-        let mut seq_len = prompt_tokens.len();
-        let mut generated_tokens: Vec<TokenId> = Vec::new();
-        let mut step_seed = params.seed;
-        let mut finish_reason = FinishReason::MaxTokens;
-        let mut gate = StreamTextGate::new(&params.stop);
-
-        // Acquire CUDA graph runner for decode steps
-        let mut graph_runner = self
-            .cuda_graph
-            .lock()
-            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
-
-        let mut next_token = if params.is_effectively_greedy() {
-            greedy_sample(&logits)?
-        } else {
-            sample_step(&logits, params, step_seed, &[])?
-        };
-
-        for _step in 0..params.max_tokens {
-            if let Some(s) = step_seed.as_mut() {
-                *s = s.wrapping_add(1);
-            }
-
-            next_token = params.apply_thinking_budget(&generated_tokens, next_token);
-            if self.eos_token_ids.contains(&next_token) {
-                finish_reason = FinishReason::Eos;
-                break;
-            }
-
-            let disposition = match emit_stream_token(
-                &tx,
-                &self.tokenizer,
-                &mut gate,
-                &mut generated_tokens,
-                next_token,
-            ) {
-                Ok(disposition) => disposition,
-                Err(detokenize_error) => {
-                    match self.synchronize_external_yield(
-                        "locked streaming detokenization failure cleanup",
+                // Prefill. Long Metal prompts use tiled streaming prefill by default;
+                // env overrides can force either path.
+                owners.prefill_logits = Some(
+                    if streaming_prefill_enabled_for(
+                        &self.weights.embed_tokens.device(),
+                        prompt_tokens.len(),
                     ) {
-                        Ok(()) => block_manager.free_all(&allocated_blocks),
-                        Err(sync_error) => {
-                            quarantine_linear_attention_state(&mut linear_state);
-                            std::mem::forget(logits);
-                            return Err(sync_error.context(format!(
-                                "streaming detokenization also failed before synchronization: \
-                                 {detokenize_error:#}"
-                            )));
-                        }
-                    }
-                    return Err(detokenize_error);
-                }
-            };
-            match disposition {
-                StreamTokenDisposition::ReceiverDropped => {
-                    block_manager.free_all(&allocated_blocks);
-                    return Ok(rx);
-                }
-                StreamTokenDisposition::Finished(reason) => {
-                    let _ = tx.send(StreamEvent::Done(StreamDone {
-                        finish_reason: reason,
-                        completion_tokens: generated_tokens.len(),
-                        trailing_text: String::new(),
-                    }));
-                    block_manager.free_all(&allocated_blocks);
-                    return Ok(rx);
-                }
-                StreamTokenDisposition::Continue => {}
-            }
-
-            if generated_tokens.len() >= params.max_tokens {
-                break;
-            }
-
-            next_token = if params.is_effectively_greedy()
-                && greedy_token_decode_enabled(self.backend.as_ref())
-            {
-                let linear_state_for_graph = if self.has_linear_attention_layers() {
-                    Some(&mut linear_state)
-                } else {
-                    None
-                };
-                match self.decode_next_token_paged_greedy_metal_graph(
-                    next_token,
-                    paged_cache,
-                    &block_table,
-                    seq_len,
-                    linear_state_for_graph,
-                ) {
-                    Ok(Some(token)) => {
-                        seq_len += 1;
-                        token
-                    }
-                    Ok(None) => {
-                        let token = match model_forward_paged_next_token_greedy(
+                        model_forward_paged_streaming(
                             &*self.backend,
-                            next_token,
+                            prompt_tokens,
                             &self.weights,
                             &self.config,
                             paged_cache,
                             &block_table,
-                            seq_len,
-                            Some(&mut linear_state),
+                            0,
+                            owners.linear_state.as_mut(),
+                            self.active_lora.as_ref(),
+                        )
+                    } else {
+                        model_forward_paged_last_token(
+                            &*self.backend,
+                            prompt_tokens,
+                            &self.weights,
+                            &self.config,
+                            paged_cache,
+                            &block_table,
+                            0,
+                            owners.linear_state.as_mut(),
                             self.active_lora.as_ref(),
                             None,
-                        ) {
-                            Ok(token) => token,
-                            Err(e) => {
-                                block_manager.free_all(&allocated_blocks);
-                                return Err(e.context("decode forward pass (paged greedy) failed"));
-                            }
-                        };
-                        seq_len += 1;
-                        token
+                        )
                     }
-                    Err(e) => {
-                        block_manager.free_all(&allocated_blocks);
-                        return Err(
-                            e.context("greedy Metal graph decode forward pass (paged) failed")
-                        );
-                    }
-                }
-            } else {
-                // Decode step: use CUDA graph runner
-                let logits = match graph_runner.decode_step_paged(
-                    &*self.backend,
-                    next_token,
-                    &self.weights,
-                    &self.config,
-                    paged_cache,
-                    &block_table,
-                    seq_len,
-                    &mut linear_state,
-                    self.active_lora.as_ref(),
-                    None,
-                ) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        block_manager.free_all(&allocated_blocks);
-                        return Err(e.context("decode forward pass (paged) failed"));
-                    }
-                };
-                seq_len += 1;
-                // #1082: `decode_step_paged` now returns kt — feed `sample_step`
-                // directly, no candle->kt bridge.
-                sample_step(&logits, params, step_seed, &generated_tokens)?
-            };
-        }
+                    .context("prefill forward pass (paged) failed")?,
+                );
+                // (#1082) forward returns kt logits; sampler is kt -- no bridge.
 
-        let (gate_trailing, late_stop) = match gate.finish(&self.tokenizer, &generated_tokens) {
-            Ok(finished) => finished,
-            Err(detokenize_error) => {
-                match self.synchronize_external_yield(
-                    "locked streaming detokenizer flush failure cleanup",
-                ) {
-                    Ok(()) => block_manager.free_all(&allocated_blocks),
-                    Err(sync_error) => {
-                        quarantine_linear_attention_state(&mut linear_state);
-                        std::mem::forget(logits);
-                        return Err(sync_error.context(format!(
-                            "streaming detokenizer flush also failed before synchronization: \
-                             {detokenize_error:#}"
-                        )));
+                let mut seq_len = prompt_tokens.len();
+                let mut generated_tokens: Vec<TokenId> = Vec::new();
+                let mut step_seed = params.seed;
+                let mut finish_reason = FinishReason::MaxTokens;
+                let mut gate = StreamTextGate::new(&params.stop);
+
+                // Preserve the legacy whole-request CUDA graph lock and replay path.
+                owners.cuda_graph = Some(
+                    self.cuda_graph
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?,
+                );
+
+                let mut next_token = if params.is_effectively_greedy() {
+                    greedy_sample(
+                        owners
+                            .prefill_logits
+                            .as_ref()
+                            .expect("prefill logits initialized"),
+                    )?
+                } else {
+                    sample_step(
+                        owners
+                            .prefill_logits
+                            .as_ref()
+                            .expect("prefill logits initialized"),
+                        params,
+                        step_seed,
+                        &[],
+                    )?
+                };
+
+                for _step in 0..params.max_tokens {
+                    if let Some(s) = step_seed.as_mut() {
+                        *s = s.wrapping_add(1);
                     }
+
+                    next_token = params.apply_thinking_budget(&generated_tokens, next_token);
+                    if self.eos_token_ids.contains(&next_token) {
+                        finish_reason = FinishReason::Eos;
+                        break;
+                    }
+
+                    match emit_stream_token(
+                        &tx,
+                        &self.tokenizer,
+                        &mut gate,
+                        &mut generated_tokens,
+                        next_token,
+                    )? {
+                        StreamTokenDisposition::ReceiverDropped => return Ok(rx),
+                        StreamTokenDisposition::Finished(reason) => {
+                            let _ = tx.send(StreamEvent::Done(StreamDone {
+                                finish_reason: reason,
+                                completion_tokens: generated_tokens.len(),
+                                trailing_text: String::new(),
+                            }));
+                            return Ok(rx);
+                        }
+                        StreamTokenDisposition::Continue => {}
+                    }
+
+                    if generated_tokens.len() >= params.max_tokens {
+                        break;
+                    }
+
+                    next_token = if params.is_effectively_greedy()
+                        && greedy_token_decode_enabled(self.backend.as_ref())
+                    {
+                        let linear_state_for_graph = if self.has_linear_attention_layers() {
+                            owners.linear_state.as_mut()
+                        } else {
+                            None
+                        };
+                        match self
+                            .decode_next_token_paged_greedy_metal_graph(
+                                next_token,
+                                paged_cache,
+                                &block_table,
+                                seq_len,
+                                linear_state_for_graph,
+                            )
+                            .context("greedy Metal graph decode forward pass (paged) failed")?
+                        {
+                            Some(token) => {
+                                seq_len += 1;
+                                token
+                            }
+                            None => {
+                                let token = model_forward_paged_next_token_greedy(
+                                    &*self.backend,
+                                    next_token,
+                                    &self.weights,
+                                    &self.config,
+                                    paged_cache,
+                                    &block_table,
+                                    seq_len,
+                                    owners.linear_state.as_mut(),
+                                    self.active_lora.as_ref(),
+                                    None,
+                                )
+                                .context("decode forward pass (paged greedy) failed")?;
+                                seq_len += 1;
+                                token
+                            }
+                        }
+                    } else {
+                        owners.pending_decode_logits = Some(
+                            owners
+                                .cuda_graph
+                                .as_mut()
+                                .expect("CUDA graph runner initialized")
+                                .decode_step_paged(
+                                    &*self.backend,
+                                    next_token,
+                                    &self.weights,
+                                    &self.config,
+                                    paged_cache,
+                                    &block_table,
+                                    seq_len,
+                                    owners
+                                        .linear_state
+                                        .as_mut()
+                                        .expect("linear state initialized"),
+                                    self.active_lora.as_ref(),
+                                    None,
+                                )
+                                .context("decode forward pass (paged) failed")?,
+                        );
+                        seq_len += 1;
+                        sample_step(
+                            owners
+                                .pending_decode_logits
+                                .as_ref()
+                                .expect("decode logits initialized"),
+                            params,
+                            step_seed,
+                            &generated_tokens,
+                        )?
+                    };
                 }
-                return Err(detokenize_error);
+
+                let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens)?;
+                let (finish_reason, gate_trailing) = match late_stop {
+                    Some(stop) => (FinishReason::StopSequence(stop), String::new()),
+                    None => (finish_reason, gate_trailing),
+                };
+                let _ = tx.send(StreamEvent::Done(StreamDone {
+                    finish_reason,
+                    completion_tokens: generated_tokens.len(),
+                    trailing_text: gate_trailing,
+                }));
+                Ok(rx)
+            },
+        ));
+        let result = match execution {
+            Ok(result) => result,
+            Err(_) => {
+                let reason = "legacy mutable paged streaming execution panicked; backend completion and request ownership are unknown";
+                self.backend_health.quarantine(reason);
+                Err(anyhow::anyhow!(reason))
             }
         };
-        let (finish_reason, gate_trailing) = match late_stop {
-            Some(stop) => (FinishReason::StopSequence(stop), String::new()),
-            None => (finish_reason, gate_trailing),
-        };
-        let _ = tx.send(StreamEvent::Done(StreamDone {
-            finish_reason,
-            completion_tokens: generated_tokens.len(),
-            trailing_text: gate_trailing,
-        }));
 
-        block_manager.free_all(&allocated_blocks);
-
-        Ok(rx)
+        reservation.release_after_settlement(
+            self,
+            "legacy mutable paged streaming release",
+            SettlementOutcome { result, owners },
+        )
     }
 }
 
@@ -9686,6 +9817,196 @@ mod tests {
         assert!(error.to_string().contains("injected sync failure"));
         assert_eq!(block_manager.lock().unwrap().num_used(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn mutable_block_reservation_settles_receiver_drop_outcome_before_release() -> Result<()> {
+        #[derive(Debug, PartialEq, Eq)]
+        enum TestStreamExit {
+            ReceiverDropped,
+        }
+
+        struct DropProbe(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let owner_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut block_manager = BlockManager::new(4, 4);
+        let block_ids = block_manager.allocate(1)?;
+        let reservation = MutableBlockReservation {
+            block_manager: &mut block_manager,
+            block_ids,
+        };
+
+        let exit = reservation.release_after_settlement_with(
+            "injected mutable reservation success",
+            SettlementOutcome {
+                result: Ok(TestStreamExit::ReceiverDropped),
+                owners: DropProbe(Arc::clone(&owner_drops)),
+            },
+            || Ok(()),
+            |_| {},
+        )?;
+
+        assert_eq!(exit, TestStreamExit::ReceiverDropped);
+        assert_eq!(owner_drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(block_manager.num_used(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn mutable_block_reservation_releases_after_settled_execution_error() -> Result<()> {
+        struct DropProbe(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let owner_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut block_manager = BlockManager::new(4, 4);
+        let block_ids = block_manager.allocate(1)?;
+        let reservation = MutableBlockReservation {
+            block_manager: &mut block_manager,
+            block_ids,
+        };
+
+        let error = reservation
+            .release_after_settlement_with(
+                "injected mutable reservation execution error",
+                SettlementOutcome::<(), _> {
+                    result: Err(anyhow::anyhow!("injected execution failure")),
+                    owners: DropProbe(Arc::clone(&owner_drops)),
+                },
+                || Ok(()),
+                |_| {},
+            )
+            .expect_err("a settled execution error must remain an error");
+
+        assert!(error.to_string().contains("injected execution failure"));
+        assert_eq!(owner_drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(block_manager.num_used(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn mutable_block_reservation_retains_device_outcome_but_releases_coordination_on_sync_failure()
+    -> Result<()> {
+        #[derive(Debug)]
+        struct DropProbe(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        struct TestOwners {
+            device: DropProbe,
+            coordination: Option<DropProbe>,
+            quarantined: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        let device_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let coordination_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let quarantined = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut block_manager = BlockManager::new(4, 4);
+        let block_ids = block_manager.allocate(1)?;
+        let reservation = MutableBlockReservation {
+            block_manager: &mut block_manager,
+            block_ids,
+        };
+
+        let error = reservation
+            .release_after_settlement_with(
+                "injected mutable reservation settlement failure",
+                SettlementOutcome {
+                    result: Ok(DropProbe(Arc::clone(&result_drops))),
+                    owners: TestOwners {
+                        device: DropProbe(Arc::clone(&device_drops)),
+                        coordination: Some(DropProbe(Arc::clone(&coordination_drops))),
+                        quarantined: Arc::clone(&quarantined),
+                    },
+                },
+                || anyhow::bail!("injected sync failure"),
+                |owners| {
+                    owners
+                        .quarantined
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    drop(owners.coordination.take());
+                    let _retain_device_owner = &owners.device;
+                },
+            )
+            .expect_err("failed settlement must fail the request");
+
+        assert!(error.to_string().contains("injected sync failure"));
+        assert!(quarantined.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            coordination_drops.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(device_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(result_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(block_manager.num_used(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn mutable_block_reservation_sync_panic_latches_quarantine() {
+        let backend_health = BackendHealthHandle::default();
+        let error = catch_external_yield_sync_panic(
+            &backend_health,
+            "injected mutable reservation sync panic",
+            || -> Result<()> { panic!("injected synchronization panic") },
+        )
+        .expect_err("synchronization panic must become a quarantine error");
+
+        assert!(
+            error
+                .to_string()
+                .contains("backend synchronization panicked")
+        );
+        let snapshot = backend_health.snapshot();
+        assert!(snapshot.quarantined);
+        assert_eq!(
+            snapshot.reason.as_deref(),
+            Some("backend synchronization panicked at injected mutable reservation sync panic")
+        );
+    }
+
+    #[test]
+    fn legacy_mutable_paged_stream_has_one_settlement_epilogue() {
+        let source = include_str!("generate.rs");
+        let start = source
+            .find("    fn generate_from_tokens_streaming_paged_locked(")
+            .expect("legacy mutable paged stream function");
+        let end_marker = "\n    }\n}\n\n#[cfg(test)]";
+        let end = start
+            + source[start..]
+                .find(end_marker)
+                .expect("legacy mutable paged stream function end");
+        let body = &source[start..end];
+
+        assert!(body.contains("StreamTokenDisposition::ReceiverDropped"));
+        assert!(body.contains("SettlementOutcome { result, owners }"));
+        let health_gate = body
+            .find("self.ensure_backend_healthy()")
+            .expect("legacy stream health gate");
+        let allocation = body
+            .find(".allocate(num_blocks)")
+            .expect("legacy stream block allocation");
+        assert!(
+            health_gate < allocation,
+            "quarantined backends must fail before reserving reusable pages"
+        );
+        assert_eq!(body.matches("release_after_settlement(").count(), 1);
+        assert!(
+            !body.contains(".free_all("),
+            "execution body must not recycle pages outside the settlement epilogue"
+        );
     }
 
     #[test]
