@@ -1,5 +1,6 @@
 use crate::token::TokenId;
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokenizers::Tokenizer;
 
@@ -129,6 +130,56 @@ impl KilnTokenizer {
     pub fn tokenizer_config_sha256(&self) -> Result<String, TokenizerError> {
         let json = self.tokenizer_config_json()?;
         Ok(crate::config_hashes::sha256_bytes(json.as_bytes()))
+    }
+
+    /// SHA-256 identity of the complete numeric token vocabulary.
+    ///
+    /// This deliberately excludes tokenizer processing configuration and the
+    /// chat template: it identifies the token-string-to-ID mapping used when
+    /// prompts cross a process boundary as numeric IDs. Added and special
+    /// tokens are included via `get_vocab(true)`.
+    ///
+    /// The cross-runtime byte format is `kiln.tokenizer-vocab.v1\0`, followed
+    /// by the pair count as little-endian `u64`, then every pair sorted by
+    /// `(u32 ID, raw UTF-8 token bytes)`. Each pair is encoded as the ID in
+    /// little-endian, the token byte length as little-endian `u64`, and the
+    /// token bytes. The `tokenizers` API represents vocabulary IDs as `u32`,
+    /// so an out-of-range ID cannot enter this format.
+    pub fn vocab_identity_sha256(&self) -> String {
+        let mut entries = self
+            .inner
+            .get_vocab(true)
+            .into_iter()
+            .map(|(token, id)| (id, token))
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.as_bytes().cmp(right.1.as_bytes()))
+        });
+
+        let pair_count =
+            u64::try_from(entries.len()).expect("tokenizer vocabulary pair count must fit in u64");
+        let mut hasher = Sha256::new();
+        hasher.update(b"kiln.tokenizer-vocab.v1\0");
+        hasher.update(pair_count.to_le_bytes());
+        for (id, token) in entries {
+            let bytes = token.as_bytes();
+            let byte_len = u64::try_from(bytes.len())
+                .expect("tokenizer vocabulary token length must fit in u64");
+            hasher.update(id.to_le_bytes());
+            hasher.update(byte_len.to_le_bytes());
+            hasher.update(bytes);
+        }
+
+        let digest = hasher.finalize();
+        format!(
+            "sha256:{}",
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        )
     }
 
     /// SHA-256 digest of the configured chat template, when one is loaded.
@@ -639,6 +690,23 @@ mod tests {
         }
     }
 
+    fn tokenizer_with_vocab(vocab_json: &str) -> KilnTokenizer {
+        KilnTokenizer::from_bytes(
+            format!(
+                r#"{{
+                    "version": "1.0",
+                    "model": {{
+                        "type": "BPE",
+                        "vocab": {vocab_json},
+                        "merges": []
+                    }}
+                }}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
     fn byte_level_display_tokenizer() -> KilnTokenizer {
         // Byte-level BPE where ids 1+2 encode the three UTF-8 bytes of
         // "好": E5 A5 BD. Id 3 is an independent alternative for the final
@@ -786,6 +854,68 @@ mod tests {
         assert_ne!(
             templated.config_sha256().unwrap(),
             combined_without_template
+        );
+    }
+
+    #[test]
+    fn vocab_identity_is_stable_across_vocab_insertion_order() {
+        let ascending = tokenizer_with_vocab(r#"{"a": 0, "b": 1}"#);
+        let descending = tokenizer_with_vocab(r#"{"b": 1, "a": 0}"#);
+
+        assert_eq!(
+            ascending.vocab_identity_sha256(),
+            descending.vocab_identity_sha256()
+        );
+    }
+
+    #[test]
+    fn vocab_identity_includes_added_special_tokens() {
+        let base = minimal_tokenizer();
+        let with_added = KilnTokenizer::from_bytes(
+            br#"{
+                "version": "1.0",
+                "added_tokens": [
+                    {"id": 2, "content": "<special>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+                ],
+                "model": {
+                    "type": "BPE",
+                    "vocab": {"a": 0, "b": 1},
+                    "merges": []
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(with_added.vocab_size(), 3);
+        assert_ne!(
+            base.vocab_identity_sha256(),
+            with_added.vocab_identity_sha256()
+        );
+    }
+
+    #[test]
+    fn vocab_identity_changes_with_token_or_id_mapping() {
+        let original = tokenizer_with_vocab(r#"{"a": 0, "b": 1}"#);
+        let changed_token = tokenizer_with_vocab(r#"{"a": 0, "c": 1}"#);
+        let swapped_ids = tokenizer_with_vocab(r#"{"a": 1, "b": 0}"#);
+
+        assert_ne!(
+            original.vocab_identity_sha256(),
+            changed_token.vocab_identity_sha256()
+        );
+        assert_ne!(
+            original.vocab_identity_sha256(),
+            swapped_ids.vocab_identity_sha256()
+        );
+    }
+
+    #[test]
+    fn vocab_identity_matches_cross_runtime_golden_vector() {
+        // Payload (after the domain): pair count 2, then (0, "a"), (1, "b")
+        // using the little-endian lengths documented on the public method.
+        assert_eq!(
+            minimal_tokenizer().vocab_identity_sha256(),
+            "sha256:0e7ed7c4b2c375344d31b534f7cbb119b528114f1301f09d6642801b100710ff"
         );
     }
 
