@@ -543,7 +543,7 @@ impl EvalGenerator for LiveEvalGenerator {
             let collect = async {
                 loop {
                     match events.recv().await {
-                        Some(EngineEvent::Token(_)) => {}
+                        Some(EngineEvent::Token { .. }) => {}
                         Some(EngineEvent::Done { output }) => break Ok(output),
                         Some(EngineEvent::Error(err)) => break Err(err),
                         None => break Err("batching engine response channel closed".to_string()),

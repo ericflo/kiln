@@ -149,7 +149,7 @@ pub struct EngineRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineEvent {
-    Token(TokenId),
+    Token { token: TokenId, ready_at: Instant },
     Done { output: BatchedGenerationOutput },
     Error(String),
 }
@@ -1437,7 +1437,10 @@ impl BatchingEngineActor {
     /// grace window is cancelled — its slot frees, everyone else keeps
     /// decoding. Returns false when the request was removed.
     fn send_token_or_evict_stalled(&mut self, idx: usize, token: TokenId) -> bool {
-        let mut event = EngineEvent::Token(token);
+        let mut event = EngineEvent::Token {
+            token,
+            ready_at: Instant::now(),
+        };
         let mut waited = Duration::ZERO;
         let mut grace = None;
         let mut backpressure_observed = false;
@@ -1935,6 +1938,16 @@ mod tests {
         }
     }
 
+    fn assert_token_event(event: Option<EngineEvent>, expected: TokenId) {
+        match event {
+            Some(EngineEvent::Token { token, ready_at }) => {
+                assert_eq!(token, expected);
+                assert!(ready_at <= Instant::now());
+            }
+            other => panic!("expected token {expected}, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn thinking_budget_forces_close_tokens_into_batched_decode_history() {
         let forward = Arc::new(MockForward::default());
@@ -1949,7 +1962,7 @@ mod tests {
             match events.recv().await {
                 Some(EngineEvent::Done { output }) => break output,
                 Some(EngineEvent::Error(error)) => panic!("generation failed: {error}"),
-                Some(EngineEvent::Token(_)) => {}
+                Some(EngineEvent::Token { .. }) => {}
                 None => panic!("engine closed before completion"),
             }
         };
@@ -2059,7 +2072,7 @@ mod tests {
         // the first release.
         let mut rx_a = handle.enqueue(request(100, 2)).await.unwrap();
         release.send(()).unwrap(); // A's first step runs; A stays active.
-        assert!(matches!(rx_a.recv().await, Some(EngineEvent::Token(_))));
+        assert!(matches!(rx_a.recv().await, Some(EngineEvent::Token { .. })));
 
         // With A mid-generation: queue a swap, then request B behind it.
         let swap_events = events.clone();
@@ -2210,6 +2223,34 @@ mod tests {
         assert_eq!(actor.snapshot.response_stall_evictions, 0);
     }
 
+    #[test]
+    fn delivered_token_carries_response_ready_timestamp() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(MockForward::default());
+        let mut actor = BatchingEngineActor::new(rx, forward, 8, false, 1, false);
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        actor.active.push(ActiveRequest {
+            req: request(101, 2),
+            response_tx,
+            slot: DecodeSlot::Mock {
+                next_token: 101,
+                generated_tokens: Vec::new(),
+            },
+        });
+
+        let before = Instant::now();
+        assert!(actor.send_token_or_evict_stalled(0, 111));
+        let after = Instant::now();
+        match response_rx.blocking_recv() {
+            Some(EngineEvent::Token { token, ready_at }) => {
+                assert_eq!(token, 111);
+                assert!(ready_at >= before);
+                assert!(ready_at <= after);
+            }
+            other => panic!("expected timed token, got {other:?}"),
+        }
+    }
+
     /// Forward whose `prepare_request` reports a block-pool shortage for a
     /// marked prompt while the flag is up, and whose decode steps block on
     /// a test-released gate (so a request stays ACTIVE deterministically)
@@ -2267,12 +2308,12 @@ mod tests {
         // A needs 3 gated decode steps — it stays active while B knocks.
         let mut rx_a = handle.enqueue(request(100, 3)).await.unwrap();
         release.send(()).unwrap();
-        assert!(matches!(rx_a.recv().await, Some(EngineEvent::Token(_))));
+        assert!(matches!(rx_a.recv().await, Some(EngineEvent::Token { .. })));
 
         // B hits the (transient) shortage — it must NOT receive an error.
         let mut rx_b = handle.enqueue(request(999, 1)).await.unwrap();
         release.send(()).unwrap(); // A step 2; B's admission retries with A active
-        assert!(matches!(rx_a.recv().await, Some(EngineEvent::Token(_))));
+        assert!(matches!(rx_a.recv().await, Some(EngineEvent::Token { .. })));
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             matches!(rx_b.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
@@ -2415,7 +2456,7 @@ mod tests {
         assert!(err.to_string().contains("load exploded"));
         // The engine keeps serving after a failed swap.
         let mut rx = handle.enqueue(request(7, 1)).await.unwrap();
-        assert!(matches!(rx.recv().await, Some(EngineEvent::Token(_))));
+        assert!(matches!(rx.recv().await, Some(EngineEvent::Token { .. })));
         handle.stop().await.unwrap();
     }
 
@@ -2670,10 +2711,7 @@ mod tests {
         assert!(forward.calls.lock().unwrap().is_empty());
 
         for (idx, rx) in receivers.iter_mut().take(4).enumerate() {
-            assert_eq!(
-                rx.blocking_recv(),
-                Some(EngineEvent::Token(110 + idx as TokenId))
-            );
+            assert_token_event(rx.blocking_recv(), 110 + idx as TokenId);
         }
     }
 
@@ -2706,7 +2744,7 @@ mod tests {
 
         for (idx, rx) in receivers.iter_mut().take(3).enumerate() {
             let expected = 110 + idx as TokenId;
-            assert_eq!(rx.blocking_recv(), Some(EngineEvent::Token(expected)));
+            assert_token_event(rx.blocking_recv(), expected);
             assert!(matches!(
                 rx.blocking_recv(),
                 Some(EngineEvent::Done {
@@ -2730,7 +2768,7 @@ mod tests {
         let mut rx1 = handle.enqueue(request(101, 1)).await.unwrap();
         let mut rx2 = handle.enqueue(request(202, 1)).await.unwrap();
 
-        assert_eq!(rx1.recv().await, Some(EngineEvent::Token(111)));
+        assert_token_event(rx1.recv().await, 111);
         assert!(matches!(
             rx1.recv().await,
             Some(EngineEvent::Done {
@@ -2741,7 +2779,7 @@ mod tests {
                 }
             }) if token_ids == vec![111]
         ));
-        assert_eq!(rx2.recv().await, Some(EngineEvent::Token(212)));
+        assert_token_event(rx2.recv().await, 212);
         assert!(matches!(
             rx2.recv().await,
             Some(EngineEvent::Done {
@@ -2850,17 +2888,17 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(prefix_rx.recv().await, Some(EngineEvent::Token(12)));
+        assert_token_event(prefix_rx.recv().await, 12);
         assert!(matches!(
             prefix_rx.recv().await,
             Some(EngineEvent::Done { .. })
         ));
-        assert_eq!(independent_rx.recv().await, Some(EngineEvent::Token(19)));
+        assert_token_event(independent_rx.recv().await, 19);
         assert!(matches!(
             independent_rx.recv().await,
             Some(EngineEvent::Done { .. })
         ));
-        assert_eq!(descendant_rx.recv().await, Some(EngineEvent::Token(13)));
+        assert_token_event(descendant_rx.recv().await, 13);
         assert!(matches!(
             descendant_rx.recv().await,
             Some(EngineEvent::Done { .. })
@@ -2902,8 +2940,8 @@ mod tests {
 
         let mut rx = handle.enqueue(request(7, 2)).await.unwrap();
 
-        assert_eq!(rx.recv().await, Some(EngineEvent::Token(17)));
-        assert_eq!(rx.recv().await, Some(EngineEvent::Token(27)));
+        assert_token_event(rx.recv().await, 17);
+        assert_token_event(rx.recv().await, 27);
         assert!(matches!(
             rx.recv().await,
             Some(EngineEvent::Done {

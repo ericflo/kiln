@@ -1104,6 +1104,42 @@ fn streaming_finish_chunk_json(
     serde_json::to_string(&value).expect("chat completion chunk JSON must serialize")
 }
 
+#[derive(Debug, Serialize)]
+struct StreamingTokenTiming {
+    object: &'static str,
+    token_index: u32,
+    ready_ms: f64,
+    handler_received_ms: f64,
+    queue_delay_ms: f64,
+}
+
+fn instant_delta_ms(start: std::time::Instant, end: std::time::Instant) -> f64 {
+    end.saturating_duration_since(start).as_secs_f64() * 1_000.0
+}
+
+fn streaming_token_timing_enabled(req: &ChatCompletionRequest) -> bool {
+    req.include_performance == Some(true)
+}
+
+fn streaming_token_timing_json(
+    enabled: bool,
+    token_index: u32,
+    request_start: std::time::Instant,
+    ready_at: std::time::Instant,
+    handler_received_at: std::time::Instant,
+) -> Option<String> {
+    enabled.then(|| {
+        serde_json::to_string(&StreamingTokenTiming {
+            object: "kiln.token_timing",
+            token_index,
+            ready_ms: instant_delta_ms(request_start, ready_at),
+            handler_received_ms: instant_delta_ms(request_start, handler_received_at),
+            queue_delay_ms: instant_delta_ms(ready_at, handler_received_at),
+        })
+        .expect("token timing payload must serialize")
+    })
+}
+
 async fn emit_or_buffer_reasoning_chunk(
     tx: &tokio::sync::mpsc::Sender<Event>,
     id: &str,
@@ -3917,8 +3953,11 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub fold_reasoning_into_content: Option<bool>,
     /// Kiln extension: include request-scoped performance counters in the
-    /// stable `metadata.performance` response field. When omitted, the server
-    /// config default decides.
+    /// stable `metadata.performance` response field. An explicit `true` on a
+    /// batching-engine stream also emits a distinct `kiln.token_timing` SSE
+    /// object before each model token. When omitted, the server config default
+    /// decides final-response metadata but does not opt the client into custom
+    /// per-token SSE objects.
     #[serde(default)]
     pub include_performance: Option<bool>,
     /// Kiln extension: include model/tokenizer/template/config hashes in the
@@ -5705,7 +5744,7 @@ async fn generate_real_batched(
     let collect = async {
         loop {
             match events.recv().await {
-                Some(EngineEvent::Token(_token)) => {
+                Some(EngineEvent::Token { .. }) => {
                     first_token_at.get_or_insert_with(std::time::Instant::now);
                 }
                 Some(EngineEvent::Done { output }) => break Ok(output),
@@ -5851,6 +5890,12 @@ async fn generate_real_batched_streaming(
         })
         .await
         .map_err(ApiError::generation_failed)?;
+    tracing::info!(
+        event = "stream_request_bound",
+        request_id = %request_id,
+        client = req.client.as_deref().unwrap_or(""),
+        "stream_request_bound"
+    );
 
     let model = req
         .model
@@ -5876,6 +5921,7 @@ async fn generate_real_batched_streaming(
     let buffer_tool_content = request_allows_tool_call_parsing(req);
     let mut tool_gate = ToolCallGate::new(buffer_tool_content);
     let include_usage = req.stream_options.as_ref().is_some_and(|o| o.include_usage);
+    let include_token_timing = streaming_token_timing_enabled(req);
     let batching_engine = batching_engine.clone();
     let stop_sequences = sampling.stop.clone();
     let thinking_budget = sampling.thinking_budget.clone();
@@ -5996,10 +6042,42 @@ async fn generate_real_batched_streaming(
                     }
                     event = events.recv() => {
                         match event {
-                            Some(EngineEvent::Token(token)) => {
+                            Some(EngineEvent::Token { token, ready_at }) => {
+                                let handler_received_at = std::time::Instant::now();
                                 generated_tokens.push(token);
                                 completion_token_count = completion_token_count.saturating_add(1);
                                 metrics.add_tokens(1);
+
+                                if let Some(timing) = streaming_token_timing_json(
+                                    include_token_timing,
+                                    completion_token_count,
+                                    request_start,
+                                    ready_at,
+                                    handler_received_at,
+                                ) {
+                                    match tokio::time::timeout_at(
+                                        deadline,
+                                        tx.send(Event::default().data(timing)),
+                                    )
+                                    .await
+                                    {
+                                        Err(_) => {
+                                            timed_out = true;
+                                            break;
+                                        }
+                                        Ok(Err(_)) => {
+                                            cancel.cancel();
+                                            let _ = batching_engine.cancel(request_id).await;
+                                            record(
+                                                "client_disconnect".to_string(),
+                                                &completion_buf,
+                                                completion_token_count,
+                                            );
+                                            return;
+                                        }
+                                        Ok(Ok(())) => {}
+                                    }
+                                }
 
                                 let delta = detok.next_delta(&tokenizer, &generated_tokens);
                                 let scan = stop_gate.push(&delta);
@@ -11541,6 +11619,46 @@ mod tests {
             .filter_map(|line| line.strip_prefix("data: "))
             .map(|data| serde_json::from_str(data).expect("SSE data line should be JSON"))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn streaming_token_timing_is_explicit_opt_in_and_not_a_chat_chunk() {
+        let omitted = parse_request(r#"{"messages":[{"role":"user","content":"hi"}]}"#);
+        let disabled = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],"include_performance":false}"#,
+        );
+        let enabled = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],"include_performance":true}"#,
+        );
+        assert!(!streaming_token_timing_enabled(&omitted));
+        assert!(!streaming_token_timing_enabled(&disabled));
+        assert!(streaming_token_timing_enabled(&enabled));
+
+        let request_start = std::time::Instant::now();
+        let ready_at = request_start + std::time::Duration::from_millis(12);
+        let handler_received_at = ready_at + std::time::Duration::from_millis(5);
+        assert!(
+            streaming_token_timing_json(false, 1, request_start, ready_at, handler_received_at,)
+                .is_none()
+        );
+        let timing =
+            streaming_token_timing_json(true, 7, request_start, ready_at, handler_received_at)
+                .unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(Event::default().data(timing)).await.unwrap();
+        drop(tx);
+        let payloads = sse_data_payloads(&sse_body_from_events(rx).await);
+        assert_eq!(payloads.len(), 1);
+        let payload = payloads.into_iter().next().unwrap();
+        let object = payload.as_object().unwrap();
+        assert_eq!(object.len(), 5, "timing payload shape changed: {payload}");
+        assert_eq!(payload["object"], "kiln.token_timing");
+        assert_eq!(payload["token_index"], 7);
+        assert_eq!(payload["ready_ms"], 12.0);
+        assert_eq!(payload["handler_received_ms"], 17.0);
+        assert_eq!(payload["queue_delay_ms"], 5.0);
+        assert!(payload.get("choices").is_none());
     }
 
     #[tokio::test]
