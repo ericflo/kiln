@@ -87,7 +87,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **Prefix caching** — shared prompt prefixes reuse cached KV blocks.
 - **Gradient checkpointing** — training fits on consumer 24GB GPUs (RTX 3090/4090).
 - **Adapter management** — load, unload, upload (import), download (export), and version LoRA adapters; click any adapter in `/ui/` for its provenance (training history + eval scores against it).
-- **Adapter composition** — stack multiple LoRAs per request with per-adapter scaling, or merge them server-side via weighted_average / TIES / concatenation.
+- **Adapter composition** — stack multiple LoRAs per request with per-adapter scaling and source-revision-aware caching, or merge them server-side via weighted_average / TIES / concatenation.
 - **Embedded web dashboard** at `/ui/` — live server status, VRAM donut, adapter cards, training queue with live loss curves, full eval workflow (datasets / suites / jobs / judgments) with drill-in per-example modal, A/B compare playground, and a `⌘K` command palette across all of it. No extra service to run.
 - **Prometheus metrics** at `/metrics` — request latency, throughput, training progress, memory usage.
 - **Durable request log** — every inference request/response (SSE streams reassembled) lands as one JSONL row under `<adapter_dir>/.requests`, size-rotated, gzipped, retention-capped, attributed to the serving adapter. Production traffic becomes a corpus you can mine into SFT data or a `kiln-eval trace-suite` eval with one `jq` line — see [docs/EVAL_GUIDE.md § Mine your own request log](docs/EVAL_GUIDE.md#mine-your-own-request-log).
@@ -465,10 +465,10 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET | `/v1/adapters/{name}/detail` | Files + training history + eval history for one adapter |
 | POST | `/v1/adapters/load` | Load adapter from disk and return its exact content revision |
 | POST | `/v1/adapters/unload` | Unload active adapter |
-| DELETE | `/v1/adapters/{name}` | Delete an adapter |
-| POST | `/v1/adapters/upload` | Multipart tar.gz import of an adapter |
+| DELETE | `/v1/adapters/{name}` | Delete an idle adapter; active or physically loaded adapters return 409 |
+| POST | `/v1/adapters/upload` | Stage and atomically publish a multipart tar.gz adapter import |
 | GET  | `/v1/adapters/{name}/download` | Stream adapter as tar.gz (export) |
-| POST | `/v1/adapters/merge` | Merge adapters (weighted_average, TIES, or concatenation modes) |
+| POST | `/v1/adapters/merge` | Stage and atomically publish an adapter merge (weighted_average, TIES, or concatenation modes) |
 | POST | `/v1/adapters/distill_merge` | Behaviour-space adapter merge |
 | GET / POST | `/v1/eval/suites` | List or register eval suites (body = `EvalSuite`) |
 | GET / DELETE | `/v1/eval/suites/{name}` | Fetch / delete one suite |
@@ -601,6 +601,34 @@ generation fence and revoke in-flight owner claims, so a late old request
 cannot restore an invalidated entry. Chat requests log adapter runtime
 transitions with the old adapter, new adapter, request id, and transition
 reason.
+
+### Adapter publication and conflicts
+
+All adapter-changing operations share one serialized revision barrier. Uploads
+and merges prepare dot-prefixed staging directories and become visible with one
+rename; an incomplete artifact never appears in `GET /v1/adapters`. Delete and
+rewrite operations refuse to touch bytes that the runner still has physically
+loaded. `DELETE /v1/adapters/{name}` returns 409 `adapter_active` for the server
+default and 409 `adapter_loaded` for any physically loaded revision; call
+`POST /v1/adapters/unload` and retry. A failed post-eval gate uses the same
+barrier, swaps a loaded rejected adapter to base, then renames it to `.failed`.
+Per-request composition also resolves exact source revisions and performs
+synthesis, atomic cache publication, live swap, and eviction under this
+barrier. Its cache identity includes names, scales, and source revisions, so a
+same-name source rewrite cannot reuse a stale composed adapter.
+
+Training writes weights, receipts, replay data, lineage, and checkpoints under
+a hidden staging root. At job start Kiln captures the target content revision
+and a filesystem-local starting snapshot. At completion it compares the target
+again: an intervening upload, delete, gate action, or other publisher wins, the
+training job fails with `adapter_revision_conflict`, and that newer revision is
+preserved. For an ungated same-name target that is already loaded, the final
+directory replacement, fresh weight flip, loaded identity, and cache purge run
+inside one drained inference barrier. This reload is required even when
+`auto_load=false`, because the old bytes were already serving under that name.
+When `post_eval.min_accuracy` is set, a loaded same-name rewrite is rejected
+before GPU training instead of serving unapproved weights; unload it or choose
+a versioned `config.output_name`.
 
 ## Architecture
 
@@ -772,7 +800,7 @@ Kiln has no built-in auth. The default listen address is `127.0.0.1:8420` so a f
 
 **Training data is privileged.** Kiln applies a faithful gradient update to anything you POST to `/v1/train/sft` or `/v1/train/grpo` — it validates structure, not semantics. A poisoned training example will permanently influence the active adapter until you unload or reset it. Treat your training corpus as security-sensitive: do not accept training data from untrusted sources, and review examples before submission the same way you would review code before merging it.
 
-Adapters are easy to revert if a bad training run lands. `POST /v1/adapters/unload` deactivates the current adapter; `DELETE /v1/adapters/{name}` removes it from disk. The base model is unaffected — only LoRA deltas are written.
+Adapters are easy to revert if a bad training run lands. `POST /v1/adapters/unload` deactivates the current adapter; after it is no longer physically loaded, `DELETE /v1/adapters/{name}` removes it from disk. The base model is unaffected — only LoRA deltas are written.
 
 Completed training runs also write `adapter_manifest.json` beside the adapter
 weights. The manifest records adapter/config/receipt hashes, parent adapter,

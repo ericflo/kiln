@@ -234,7 +234,7 @@ impl ApiError {
             message: format!(
                 "Adapter '{name}' is physically loaded by the model runner and cannot be mutated"
             ),
-            hint: "Unload the adapter with POST /v1/adapters/unload, or wait for the request-specific adapter transition to finish, then retry.",
+            hint: "Unload the adapter with POST /v1/adapters/unload, then retry. Unload also clears a request-specific adapter that remains physically loaded.",
             retry_after_seconds: None,
         }
     }

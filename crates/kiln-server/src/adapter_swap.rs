@@ -350,7 +350,7 @@ pub(crate) fn publish_staged_adapter_blocking_locked(
     let actual = adapter_disk_revision(final_path)?;
     if &actual != expected {
         return Err(format!(
-            "adapter `{name}` changed while training prepared its replacement: expected {expected:?}, found {actual:?}"
+            "adapter_revision_conflict: adapter `{name}` changed while training prepared its replacement (expected {expected:?}, found {actual:?}); the intervening revision was preserved, so resubmit training against the current adapter"
         ));
     }
     let staged_identity = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(staged)

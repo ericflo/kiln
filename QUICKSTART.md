@@ -327,7 +327,13 @@ curl -s http://localhost:8420/v1/train/sft \
   }' | python3 -m json.tool
 ```
 
-Training runs in the background. The model continues serving requests during training. When training completes, the new LoRA adapter is hot-swapped — all subsequent requests use the updated weights.
+Training runs in the background and keeps its weights, receipt, replay data,
+and checkpoints hidden until the job finishes. The model continues serving
+requests during training. At completion Kiln publishes the adapter atomically;
+with the default `auto_load=true`, subsequent requests use the new revision. A
+same-name adapter that was already serving is reloaded inside that publication
+barrier even when `auto_load=false`, because its on-disk bytes cannot change
+behind the loaded weights.
 
 ## 7. Check Training Status
 
@@ -357,9 +363,14 @@ curl -s http://localhost:8420/v1/train/status | python3 -m json.tool
 # Reload it
 ./target/release/kiln adapters load default
 
-# Delete an adapter permanently
+# Delete an idle adapter permanently (unload it first if needed)
 ./target/release/kiln adapters delete default
 ```
+
+Delete returns 409 `adapter_active` when the name is the server default and 409
+`adapter_loaded` when its revision is still physically loaded by the runner.
+`kiln adapters unload` clears both states and prints the server's recovery hint
+when a conflict occurs.
 
 ## 9. Advanced API Examples
 
@@ -578,7 +589,9 @@ curl -s http://localhost:8420/v1/adapters/upload \
 # -> {"name":"imported","size_bytes":...,"files":...}
 ```
 
-Body limit is 2 GB gzipped / 4 GB extracted. Uploads fail with 409 if the target name already exists.
+Body limit is 2 GB gzipped / 4 GB extracted. The archive is validated in a
+hidden staging directory and published with one rename. Uploads fail with 409
+if the target name already exists; they never expose a partial adapter.
 
 ### 9.7 Merge adapters (TIES)
 
@@ -600,7 +613,16 @@ curl -s http://localhost:8420/v1/adapters/merge \
 
 ### 9.8 Compose adapters per-request
 
-The standard `/v1/chat/completions` endpoint accepts a request-body `adapters` array as a Kiln extension (mutually exclusive with `adapter`). Each entry is `{"name", "scale"}`. The server merges the composed adapter once via `merge_concat`, caches it on disk under `adapter_dir/.composed/` keyed by `(name, scale)` hash, and reuses the cache on subsequent requests with the same composition. `/v1/completions/batch` accepts the same `adapters` field for the whole batch.
+The standard `/v1/chat/completions` endpoint accepts a request-body `adapters`
+array as a Kiln extension (mutually exclusive with `adapter`). Each entry is
+`{"name", "scale"}`. The server merges the composed adapter once via
+`merge_concat` and caches it under `adapter_dir/.composed/`. Its key includes
+each name, scale, and exact source content revision, so rewriting a source under
+the same name produces a new composition instead of reusing stale bytes.
+Resolution, synthesis in a hidden staging directory, atomic publication, live
+weight swap, and LRU eviction share the adapter revision barrier; concurrent
+identical requests see one complete publisher. `/v1/completions/batch` accepts
+the same `adapters` field for the whole batch.
 
 Adapter identity is content-addressed, not name-only. `POST /v1/adapters/load`
 returns `content_revision`; `GET /v1/adapters` exposes the authoritative
@@ -610,6 +632,16 @@ returns `content_revision`; `GET /v1/adapters` exposes the authoritative
 published with the weight flip and is part of queued work, prefix-cache keys,
 and deterministic response-cache keys, so rewriting an adapter in place cannot
 reuse results produced by the previous bytes.
+
+Upload, merge, delete, training publication, eval-gate demotion, and live
+weight changes all use the same serialized revision barrier. Training captures
+the target revision and a starting snapshot before GPU work, then compares the
+target again at publication. If another operation changed it, the job fails
+with `adapter_revision_conflict`, preserves the intervening winner, and should
+be resubmitted against the current adapter. If `post_eval.min_accuracy` is set,
+a physically loaded same-name output is rejected before training; unload it or
+choose a versioned `config.output_name` so unapproved bytes never serve before
+the gate.
 
 ```bash
 curl -s http://localhost:8420/v1/chat/completions \
@@ -761,7 +793,7 @@ kiln adapters list
 kiln adapters load support-bot
 kiln adapters unload
 kiln adapters delete support-bot
-    List, load, unload the active adapter to revert to the base model, or delete a saved adapter on the running server.
+    List, load, unload the active adapter to revert to the base model, or delete an idle saved adapter on the running server.
 ```
 
 Set it and forget it: `[agent] self_improve_interval_hours = 168` in kiln.toml runs the

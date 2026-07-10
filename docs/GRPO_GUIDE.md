@@ -61,9 +61,9 @@ is not supported on this endpoint.
 **`POST /v1/train/grpo`** — accepts `groups`, where each group is
 `{"messages": [...], "completions": [{"text": "...", "reward": 0.0}, ...]}`.
 The request is enqueued and returns a `job_id` immediately; training runs on a
-background thread, and the resulting adapter is auto-loaded (atomically, at an
-iteration boundary) when it lands. Every `config` field has a server default,
-so `{"groups": [...]}` is a valid minimal payload.
+background thread. Its output remains hidden until Kiln atomically publishes
+and auto-loads the completed adapter at an iteration boundary. Every `config`
+field has a server default, so `{"groups": [...]}` is a valid minimal payload.
 
 ## Worked example 1: Math correctness reward
 
@@ -298,7 +298,9 @@ server-side default, so omit anything you don't want to override:
   `grpo-<job_id_prefix>`).
 - **`auto_load`** — defaults `true`. When the job completes, the new adapter
   is hot-swapped in immediately. Set `false` if you want to load it manually
-  via `/v1/adapters` (e.g., for A/B testing).
+  via `/v1/adapters` (e.g., for A/B testing). If `output_name` is already
+  physically loaded, Kiln must reload that same name at its revision barrier
+  even when this is `false`; use a new versioned name for a truly idle output.
 
 For full schema details, see
 [QUICKSTART.md §9.4](../QUICKSTART.md#94-batch-generation-efficient-for-grpo-rollouts).
@@ -339,6 +341,12 @@ Watch live training progress with `GET /v1/train/status`.
   model weights (`--model-path`/`KILN_MODEL_PATH` unset, or the path didn't
   resolve). Training requires real weights; mock inference is fine for API
   smoke tests but not for training.
+- **`adapter_revision_conflict`.** Another upload, delete, gate action, or
+  publisher changed `output_name` while this job was preparing its result. The
+  newer on-disk revision was preserved; start the next iteration from the
+  current adapter and resubmit. A gated (`post_eval.min_accuracy`) same-name
+  rewrite also returns this before GPU work when that adapter is physically
+  loaded; unload it or choose a versioned `output_name`.
 
 ## See also
 

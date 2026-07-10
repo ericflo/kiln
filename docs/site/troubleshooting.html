@@ -281,6 +281,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#long-prefill-timeouts">Long-prefill timeouts</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#mock-mode">Mock mode</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#adapter-directory">Adapter directory</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#adapter-mutation-conflicts">Adapter conflicts</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
         </div>
       </div>
@@ -523,6 +524,28 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
           <div>
             <div class="label mb-2">Fix</div>
             <p>Use an explicit adapter directory in your config or CLI flags, and mount it into Docker just like the model directory. Then verify with <code>GET /v1/adapters</code>.</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="card p-6">
+        <h2 id="adapter-mutation-conflicts" class="text-xl font-semibold mb-4">An adapter mutation or training publication was rejected</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>Delete returns HTTP 409 <code>adapter_active</code> or <code>adapter_loaded</code>, or a training job fails with <code>adapter_revision_conflict</code>.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li><code>GET /v1/adapters</code> reports both the server default and exact <code>loaded_adapter_identity</code>.</li>
+              <li><code>GET /v1/train/status/{job_id}</code> keeps the complete publication failure in <code>error</code>.</li>
+              <li>A post-eval gate cannot safely rewrite a physically loaded adapter under the same name.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix</div>
+            <p>For <code>adapter_active</code> or <code>adapter_loaded</code>, call <code>POST /v1/adapters/unload</code> and retry. For <code>adapter_revision_conflict</code>, keep the intervening winner and resubmit against the current revision. Unload a gated same-name target or choose a versioned <code>config.output_name</code>. Hidden staging directories clean themselves up.</p>
           </div>
         </div>
       </article>
