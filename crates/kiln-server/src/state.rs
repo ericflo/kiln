@@ -1482,6 +1482,10 @@ pub struct AppState {
     /// Requested `SO_SNDBUF` for every accepted HTTP connection. `None` leaves
     /// the platform default untouched.
     pub http_send_buffer_bytes: Option<usize>,
+    /// Raw listener `getsockopt(SO_SNDBUF)` result captured before readiness.
+    pub http_send_buffer_preflight_actual_bytes: Option<usize>,
+    /// Listener send-buffer bytes after normalizing platform accounting.
+    pub http_send_buffer_preflight_effective_bytes: Option<usize>,
     /// Eval-serving mode: deterministic defaults, no-think defaults, headers,
     /// adapter-switch warnings, and per-request transient cache cleanup.
     pub eval_mode: bool,
@@ -1741,6 +1745,8 @@ impl AppState {
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             http_send_buffer_bytes: None,
+            http_send_buffer_preflight_actual_bytes: None,
+            http_send_buffer_preflight_effective_bytes: None,
             eval_mode: false,
             default_thinking_enabled: None,
             default_thinking_budget_tokens: None,
@@ -2403,6 +2409,8 @@ impl AppState {
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             http_send_buffer_bytes: None,
+            http_send_buffer_preflight_actual_bytes: None,
+            http_send_buffer_preflight_effective_bytes: None,
             eval_mode: false,
             default_thinking_enabled: None,
             default_thinking_budget_tokens: None,

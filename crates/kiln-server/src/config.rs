@@ -141,7 +141,8 @@ pub struct ServerConfig {
     pub request_timeout_secs: u64,
     /// Optional `SO_SNDBUF` request applied to every accepted HTTP socket.
     /// Operating systems may round or account for bookkeeping differently;
-    /// Kiln reads the actual value back and rejects ineffective application.
+    /// Kiln preflights the listener, normalizes platform accounting, and
+    /// rejects ineffective application before advertising readiness.
     pub http_send_buffer_bytes: Option<usize>,
     /// Enable deterministic eval-serving behavior for `kiln serve`.
     pub eval_mode: bool,

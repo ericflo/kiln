@@ -72,8 +72,12 @@ struct EnvFlagState {
 
 #[derive(Serialize)]
 struct HttpDebugState {
-    /// Effective requested value after TOML and environment resolution.
-    send_buffer_bytes: Option<usize>,
+    /// Resolved request after TOML and environment precedence.
+    send_buffer_requested_bytes: Option<usize>,
+    /// Raw listener `getsockopt(SO_SNDBUF)` result captured before readiness.
+    send_buffer_kernel_readback_bytes: Option<usize>,
+    /// Preflight result after normalizing platform-specific accounting.
+    send_buffer_effective_bytes: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -206,7 +210,9 @@ async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
         adapters: adapter_debug_state(state),
         config_hashes: state.config_hashes.clone(),
         http: HttpDebugState {
-            send_buffer_bytes: state.http_send_buffer_bytes,
+            send_buffer_requested_bytes: state.http_send_buffer_bytes,
+            send_buffer_kernel_readback_bytes: state.http_send_buffer_preflight_actual_bytes,
+            send_buffer_effective_bytes: state.http_send_buffer_preflight_effective_bytes,
         },
         env_flags: selected_env_flags(),
         batching_engine: batching_engine_state(state).await,
@@ -560,6 +566,8 @@ mod tests {
         let mut state = make_test_state(tmp.path().to_path_buf());
         state.eval_mode = true;
         state.http_send_buffer_bytes = Some(4096);
+        state.http_send_buffer_preflight_actual_bytes = Some(8192);
+        state.http_send_buffer_preflight_effective_bytes = Some(4096);
         state.default_thinking_enabled = Some(false);
         *state.active_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
         *state.loaded_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
@@ -632,7 +640,9 @@ mod tests {
         assert!(json["env_flags"]["KILN_KV_AUTOSCALE"].is_object());
         assert!(json["env_flags"]["KILN_MEMORY_RECLAIM_MODE"].is_object());
         assert!(json["env_flags"]["KILN_HTTP_SEND_BUFFER_BYTES"].is_object());
-        assert_eq!(json["http"]["send_buffer_bytes"], 4096);
+        assert_eq!(json["http"]["send_buffer_requested_bytes"], 4096);
+        assert_eq!(json["http"]["send_buffer_kernel_readback_bytes"], 8192);
+        assert_eq!(json["http"]["send_buffer_effective_bytes"], 4096);
         assert!(json["caches"]["rendered_prompt"].is_object());
         assert!(json["caches"]["prefix_cache"].is_object());
 

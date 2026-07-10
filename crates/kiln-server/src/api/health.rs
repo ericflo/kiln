@@ -49,8 +49,12 @@ struct HealthResponse {
 
 #[derive(Serialize)]
 struct HttpRuntimeInfo {
-    /// Requested per-connection `SO_SNDBUF`; null leaves the OS default.
-    send_buffer_bytes: Option<usize>,
+    /// Resolved per-connection `SO_SNDBUF` request; null leaves the OS default.
+    send_buffer_requested_bytes: Option<usize>,
+    /// Raw listener `getsockopt(SO_SNDBUF)` result captured before readiness.
+    send_buffer_kernel_readback_bytes: Option<usize>,
+    /// Preflight result after normalizing platform-specific accounting.
+    send_buffer_effective_bytes: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -540,7 +544,9 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         ),
         backend: backend_name,
         http: HttpRuntimeInfo {
-            send_buffer_bytes: state.http_send_buffer_bytes,
+            send_buffer_requested_bytes: state.http_send_buffer_bytes,
+            send_buffer_kernel_readback_bytes: state.http_send_buffer_preflight_actual_bytes,
+            send_buffer_effective_bytes: state.http_send_buffer_preflight_effective_bytes,
         },
         model_defaults_profile: state.model_defaults_profile,
         eval_mode: state.eval_mode,
@@ -899,7 +905,9 @@ mod tests {
         assert!(json["uptime_seconds"].is_number());
         assert!(json["model"].as_str().unwrap().contains("Qwen3.5-4B"));
         assert_eq!(json["backend"], "mock");
-        assert!(json["http"]["send_buffer_bytes"].is_null());
+        assert!(json["http"]["send_buffer_requested_bytes"].is_null());
+        assert!(json["http"]["send_buffer_kernel_readback_bytes"].is_null());
+        assert!(json["http"]["send_buffer_effective_bytes"].is_null());
         assert_eq!(json["model_defaults_profile"]["name"], "Qwen3.5-4B");
         assert_eq!(
             json["model_defaults_profile"]["canonical_model_id"],
@@ -1000,6 +1008,8 @@ mod tests {
     async fn test_health_reports_effective_http_send_buffer() {
         let mut state = make_test_state();
         state.http_send_buffer_bytes = Some(4096);
+        state.http_send_buffer_preflight_actual_bytes = Some(8192);
+        state.http_send_buffer_preflight_effective_bytes = Some(4096);
         let app = routes().with_state(state);
 
         let resp = app
@@ -1017,7 +1027,9 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["http"]["send_buffer_bytes"], 4096);
+        assert_eq!(json["http"]["send_buffer_requested_bytes"], 4096);
+        assert_eq!(json["http"]["send_buffer_kernel_readback_bytes"], 8192);
+        assert_eq!(json["http"]["send_buffer_effective_bytes"], 4096);
     }
 
     #[tokio::test]

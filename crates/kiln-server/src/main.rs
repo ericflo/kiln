@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use anyhow::{Context, Result};
 use axum::serve::ListenerExt as _;
 use clap::Parser;
-use socket2::SockRef;
+use socket2::{SockRef, Socket};
 
 use kiln_server::api;
 use kiln_server::cli::{self, AdapterCommands, Cli, Commands, TrainCommands, TrajectoryCommands};
@@ -24,23 +24,116 @@ use kiln_model::{ModelRunner, StartupCapabilities};
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use state::{AppState, ModelBackend};
 
-const HTTP_SEND_BUFFER_ACTUAL_MAX_MULTIPLIER: usize = 8;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HttpSendBufferApplication {
+    /// Raw `getsockopt(SO_SNDBUF)` value reported by the operating system.
+    actual_bytes: usize,
+    /// Usable buffer request after normalizing platform accounting.
+    effective_bytes: usize,
+}
 
-fn configure_http_send_buffer(
-    stream: &tokio::net::TcpStream,
+fn effective_http_send_buffer_bytes(actual_bytes: usize) -> usize {
+    // Linux reports twice the requested SO_SNDBUF to include kernel
+    // bookkeeping. Compare against the normalized value so a capped request
+    // cannot look successful merely because the read-back is doubled.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        actual_bytes / 2
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        actual_bytes
+    }
+}
+
+fn validate_http_send_buffer_readback(
     requested_bytes: usize,
-) -> std::io::Result<usize> {
-    let socket = SockRef::from(stream);
-    socket.set_send_buffer_size(requested_bytes)?;
-    let actual_bytes = socket.send_buffer_size()?;
-    let maximum_actual = requested_bytes.saturating_mul(HTTP_SEND_BUFFER_ACTUAL_MAX_MULTIPLIER);
-    if actual_bytes < requested_bytes || actual_bytes > maximum_actual {
+    actual_bytes: usize,
+) -> std::io::Result<HttpSendBufferApplication> {
+    let effective_bytes = effective_http_send_buffer_bytes(actual_bytes);
+    if effective_bytes < requested_bytes {
         return Err(std::io::Error::other(format!(
-            "SO_SNDBUF read-back {actual_bytes} is outside the accepted range \
-             {requested_bytes}..={maximum_actual} for request {requested_bytes}"
+            "SO_SNDBUF read-back {actual_bytes} represents {effective_bytes} effective bytes, \
+             below requested {requested_bytes}"
         )));
     }
-    Ok(actual_bytes)
+    Ok(HttpSendBufferApplication {
+        actual_bytes,
+        effective_bytes,
+    })
+}
+
+fn configure_http_send_buffer(
+    socket: &Socket,
+    requested_bytes: usize,
+) -> std::io::Result<HttpSendBufferApplication> {
+    socket.set_send_buffer_size(requested_bytes)?;
+    let actual_bytes = socket.send_buffer_size()?;
+    validate_http_send_buffer_readback(requested_bytes, actual_bytes)
+}
+
+fn configure_http_listener_send_buffer(
+    listener: &tokio::net::TcpListener,
+    requested_bytes: usize,
+) -> std::io::Result<HttpSendBufferApplication> {
+    configure_http_send_buffer(&SockRef::from(listener), requested_bytes)
+}
+
+fn configure_http_stream_send_buffer(
+    stream: &tokio::net::TcpStream,
+    requested_bytes: usize,
+) -> std::io::Result<HttpSendBufferApplication> {
+    configure_http_send_buffer(&SockRef::from(stream), requested_bytes)
+}
+
+fn inspect_http_send_buffer(socket: &Socket) -> (Option<usize>, Option<usize>) {
+    let actual_bytes = socket.send_buffer_size().ok();
+    let effective_bytes = actual_bytes.map(effective_http_send_buffer_bytes);
+    (actual_bytes, effective_bytes)
+}
+
+fn preflight_http_send_buffer(
+    listener: &tokio::net::TcpListener,
+    requested_bytes: Option<usize>,
+) -> Result<Option<HttpSendBufferApplication>> {
+    let Some(requested_bytes) = requested_bytes else {
+        return Ok(None);
+    };
+
+    match configure_http_listener_send_buffer(listener, requested_bytes) {
+        Ok(application) => {
+            tracing::info!(
+                requested_bytes,
+                actual_bytes = application.actual_bytes,
+                effective_bytes = application.effective_bytes,
+                "http_listener_send_buffer_preflight_succeeded"
+            );
+            Ok(Some(application))
+        }
+        Err(error) => {
+            let socket = SockRef::from(listener);
+            let (actual_bytes, effective_bytes) = inspect_http_send_buffer(&socket);
+            tracing::error!(
+                requested_bytes,
+                actual_bytes = actual_bytes.unwrap_or_default(),
+                actual_bytes_known = actual_bytes.is_some(),
+                effective_bytes = effective_bytes.unwrap_or_default(),
+                effective_bytes_known = effective_bytes.is_some(),
+                error = %error,
+                "http_listener_send_buffer_preflight_failed"
+            );
+            let actual_display = actual_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let effective_display = effective_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            Err(anyhow::Error::new(error).context(format!(
+                "HTTP SO_SNDBUF listener preflight failed: requested_bytes={requested_bytes}, \
+                 actual_bytes={actual_display}, effective_bytes={effective_display}"
+            )))
+        }
+    }
 }
 
 #[tokio::main]
@@ -752,13 +845,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    let tokenizer_prewarm = state.tokenizer.clone();
-    let prewarm_state = state.clone();
-    // Cheap clones so the shutdown handler can reach the batching engine
-    // after `api::router` consumes the state.
-    let app_state_for_shutdown = state.clone();
-    let app = api::router(state);
-
     let addr = format!("{host}:{port}");
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(listener) => listener,
@@ -770,23 +856,50 @@ async fn main() -> Result<()> {
             return Err(anyhow::Error::new(e).context(format!("failed to bind {addr}")));
         }
     };
+    let http_send_buffer_preflight =
+        preflight_http_send_buffer(&listener, config.server.http_send_buffer_bytes)?;
+    state.http_send_buffer_preflight_actual_bytes =
+        http_send_buffer_preflight.map(|application| application.actual_bytes);
+    state.http_send_buffer_preflight_effective_bytes =
+        http_send_buffer_preflight.map(|application| application.effective_bytes);
+
+    let tokenizer_prewarm = state.tokenizer.clone();
+    let prewarm_state = state.clone();
+    // Cheap clones so the shutdown handler can reach the batching engine
+    // after `api::router` consumes the state.
+    let app_state_for_shutdown = state.clone();
+    let app = api::router(state);
+
     let requested_http_send_buffer_bytes = config.server.http_send_buffer_bytes;
+    let expected_http_send_buffer_application = http_send_buffer_preflight;
     let listener = listener.tap_io(move |stream| {
         let Some(requested_bytes) = requested_http_send_buffer_bytes else {
             return;
         };
-        match configure_http_send_buffer(stream, requested_bytes) {
-            Ok(actual_bytes) => tracing::info!(
-                requested_bytes,
-                actual_bytes,
-                "http_accepted_socket_send_buffer_configured"
-            ),
+        match configure_http_stream_send_buffer(stream, requested_bytes) {
+            Ok(application) => {
+                if Some(application) != expected_http_send_buffer_application {
+                    let expected = expected_http_send_buffer_application
+                        .expect("configured send buffer has a preflight result");
+                    tracing::warn!(
+                        requested_bytes,
+                        preflight_actual_bytes = expected.actual_bytes,
+                        preflight_effective_bytes = expected.effective_bytes,
+                        accepted_actual_bytes = application.actual_bytes,
+                        accepted_effective_bytes = application.effective_bytes,
+                        "http_accepted_socket_send_buffer_preflight_mismatch"
+                    );
+                }
+            }
             Err(error) => {
-                let actual_bytes = SockRef::from(&*stream).send_buffer_size().ok();
+                let socket = SockRef::from(&*stream);
+                let (actual_bytes, effective_bytes) = inspect_http_send_buffer(&socket);
                 tracing::error!(
                     requested_bytes,
                     actual_bytes = actual_bytes.unwrap_or_default(),
                     actual_bytes_known = actual_bytes.is_some(),
+                    effective_bytes = effective_bytes.unwrap_or_default(),
+                    effective_bytes_known = effective_bytes.is_some(),
                     error = %error,
                     "http_accepted_socket_send_buffer_configuration_failed"
                 );
@@ -1182,25 +1295,82 @@ async fn shutdown_signal(
 mod tests {
     use super::*;
 
+    #[test]
+    fn send_buffer_readback_uses_platform_accounting() {
+        let requested_bytes = 4096;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let actual_bytes = requested_bytes * 2;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let actual_bytes = requested_bytes;
+
+        let application =
+            validate_http_send_buffer_readback(requested_bytes, actual_bytes).unwrap();
+        assert_eq!(application.actual_bytes, actual_bytes);
+        assert_eq!(application.effective_bytes, requested_bytes);
+    }
+
+    #[test]
+    fn send_buffer_readback_rejects_platform_normalized_clamp() {
+        let requested_bytes = 6 * 1024 * 1024;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let actual_bytes = 8 * 1024 * 1024;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let actual_bytes = 4 * 1024 * 1024;
+
+        let error = validate_http_send_buffer_readback(requested_bytes, actual_bytes).unwrap_err();
+        assert!(error.to_string().contains("below requested"));
+    }
+
+    #[tokio::test]
+    async fn listener_send_buffer_default_is_a_no_op() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let before = SockRef::from(&listener).send_buffer_size().unwrap();
+
+        assert_eq!(preflight_http_send_buffer(&listener, None).unwrap(), None);
+
+        let after = SockRef::from(&listener).send_buffer_size().unwrap();
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn listener_send_buffer_preflight_returns_structured_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let error = preflight_http_send_buffer(&listener, Some(usize::MAX)).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("HTTP SO_SNDBUF listener preflight failed"));
+        assert!(message.contains("requested_bytes="));
+        assert!(message.contains("actual_bytes="));
+        assert!(message.contains("effective_bytes="));
+    }
+
     #[tokio::test]
     async fn accepted_socket_send_buffer_is_applied_and_bounded() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let requested_bytes = 4096;
+        let listener_application = preflight_http_send_buffer(&listener, Some(requested_bytes))
+            .unwrap()
+            .unwrap();
+        assert!(listener_application.effective_bytes >= requested_bytes);
+
         let mut listener = listener.tap_io(move |stream| {
-            configure_http_send_buffer(stream, requested_bytes).unwrap();
+            configure_http_stream_send_buffer(stream, requested_bytes).unwrap();
         });
-        let (client, (accepted, _)) = tokio::join!(
-            tokio::net::TcpStream::connect(address),
-            axum::serve::Listener::accept(&mut listener),
-        );
+        let (client, (accepted, _)) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(
+                    tokio::net::TcpStream::connect(address),
+                    axum::serve::Listener::accept(&mut listener),
+                )
+            })
+            .await
+            .expect("loopback accept timed out");
         let _client = client.unwrap();
 
         let actual_bytes = SockRef::from(&accepted).send_buffer_size().unwrap();
-        assert!(actual_bytes >= requested_bytes);
-        assert!(
-            actual_bytes <= requested_bytes.saturating_mul(HTTP_SEND_BUFFER_ACTUAL_MAX_MULTIPLIER),
-            "accepted socket SO_SNDBUF {actual_bytes} was not bounded near request {requested_bytes}"
-        );
+        let application =
+            validate_http_send_buffer_readback(requested_bytes, actual_bytes).unwrap();
+        assert!(application.effective_bytes >= requested_bytes);
     }
 }

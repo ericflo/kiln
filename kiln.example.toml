@@ -26,8 +26,11 @@ request_timeout_secs = 600
 shutdown_timeout_secs = 5
 # http_send_buffer_bytes = 4096         # Optional per-connection SO_SNDBUF request, useful for
                                         # deterministic slow-client/backpressure testing. The OS
-                                        # may round or double it; Kiln logs the read-back value and
-                                        # exits if application is ineffective. Valid range:
+                                        # may round it, and Linux reports 2x for bookkeeping. Kiln
+                                        # normalizes and preflights the value before readiness,
+                                        # failing startup if application is ineffective. Requested,
+                                        # kernel-readback, and effective values are in health/debug.
+                                        # Valid range:
                                         # 1024..=16777216. Override strictly with
                                         # KILN_HTTP_SEND_BUFFER_BYTES; malformed/zero/out-of-range
                                         # values are fatal startup errors.
