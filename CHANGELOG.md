@@ -40,6 +40,11 @@
   one backend-settlement epilogue on success, error, receiver drop, or panic.
   Its already-populated receiver semantics are documented and the API is
   deprecated in favor of live threaded streaming with explicit settlement.
+- prompt logprobs: token-level display decoding now rejects tokenizer/model
+  vocabulary drift and propagates decoder failures as a structured HTTP 500
+  `tokenization_error` with the token ID. Known special tokens retain their
+  literal vocabulary text; neither mock nor real responses can turn a failed
+  display decode into an empty successful field.
 
 ## kiln-v0.4.1 — 2026-06-12 — multi-turn prefix caching actually caches
 

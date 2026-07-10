@@ -181,6 +181,23 @@ impl KilnTokenizer {
             .map_err(|e| TokenizerError::Decode(e.to_string()))
     }
 
+    /// Decode one vocabulary entry for token-level API display.
+    ///
+    /// This rejects unknown IDs instead of letting `tokenizers` silently omit
+    /// them. Unlike [`Self::decode`], it retains special tokens so token-level
+    /// API fields identify the vocabulary entry instead of displaying an
+    /// ambiguous empty string.
+    pub fn decode_token_for_display(&self, id: TokenId) -> Result<String, TokenizerError> {
+        self.inner.id_to_token(id).ok_or_else(|| {
+            TokenizerError::Decode(format!(
+                "token id {id} is absent from the tokenizer vocabulary"
+            ))
+        })?;
+        self.inner
+            .decode(&[id], false)
+            .map_err(|e| TokenizerError::Decode(e.to_string()))
+    }
+
     /// Apply the chat template to format messages into a prompt string.
     ///
     /// If a Jinja2 template was set via [`with_chat_template`], renders it with
@@ -650,6 +667,43 @@ mod tests {
         // Decode roundtrip — BPE may insert spaces between tokens
         let decoded = tok.decode(&ids).unwrap();
         assert!(decoded.contains('a') && decoded.contains('b'));
+    }
+
+    #[test]
+    fn display_decode_rejects_unknown_token_id() {
+        let err = minimal_tokenizer()
+            .decode_token_for_display(17)
+            .unwrap_err();
+        assert!(
+            matches!(err, TokenizerError::Decode(ref detail) if detail.contains("token id 17")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn display_decode_preserves_special_token_text() {
+        let tokenizer = KilnTokenizer::from_bytes(
+            br#"{
+                "version": "1.0",
+                "model": {
+                    "type": "BPE",
+                    "vocab": {"a": 0, "b": 1},
+                    "merges": []
+                },
+                "added_tokens": [{
+                    "id": 2,
+                    "content": "<special>",
+                    "single_word": false,
+                    "lstrip": false,
+                    "rstrip": false,
+                    "normalized": false,
+                    "special": true
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(tokenizer.decode_token_for_display(2).unwrap(), "<special>");
     }
 
     #[test]

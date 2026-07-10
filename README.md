@@ -390,7 +390,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | Method | Path | Description |
 |---|---|---|
 | POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets |
-| POST | `/v1/completions` | vLLM-compatible prompt logprobs for remote OPD teachers |
+| POST | `/v1/completions` | vLLM-shaped prompt-logprob subset for remote OPD teachers |
 | POST | `/v1/completions/batch` | Batch generation API for GRPO (up to 64 prompts per request), with the same thinking-budget controls |
 | POST | `/v1/train/sft` | Submit SFT training examples (optionally with a `post_eval` hook) |
 | POST | `/v1/train/grpo` | Submit GRPO scored completions (optionally with a `post_eval` hook). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |

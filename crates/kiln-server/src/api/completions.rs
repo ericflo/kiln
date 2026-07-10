@@ -16,7 +16,7 @@ use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::request::Request;
 use kiln_core::sampling::{SamplingParams, ThinkingBudget, ThinkingBudgetStatus};
 use kiln_core::token::TokenId;
-use kiln_core::tokenizer::{ChatMessage, ChatTemplateOptions};
+use kiln_core::tokenizer::{ChatMessage, ChatTemplateOptions, TokenizerError};
 use kiln_eval::qwen3::ParsedToolCall;
 use kiln_model::adapter_merge::{PeftLora, merge_concat};
 use kiln_model::{
@@ -4253,11 +4253,13 @@ pub enum TextCompletionPrompt {
     TokenIds(Vec<TokenId>),
 }
 
-/// vLLM-compatible text-completions request subset.
+/// vLLM-shaped text-completions request subset.
 ///
 /// Kiln supports this endpoint's prompt-logprobs mode so `RemoteTeacher`
 /// clients can query a kiln-served teacher through the same `/v1/completions`
-/// shape they use for vLLM/sglang.
+/// shape they use for vLLM/sglang. Token display is fail closed: an unknown
+/// token ID or decoder failure returns `tokenization_error` instead of a
+/// successful response containing an empty fallback token.
 #[derive(Debug, Deserialize)]
 pub struct TextCompletionRequest {
     /// When omitted, the server falls back to its configured `served_model_id`.
@@ -4601,7 +4603,7 @@ async fn completions_inner(
     }
 
     let prompt_logprobs = match state.backend.as_ref() {
-        ModelBackend::Mock { .. } => mock_prompt_logprobs(state, &prompt_tokens, top_k),
+        ModelBackend::Mock { .. } => mock_prompt_logprobs(state, &prompt_tokens, top_k)?,
         ModelBackend::Real { runner, .. } => {
             real_prompt_logprobs(state, runner, &prompt_tokens, top_k).await?
         }
@@ -4671,11 +4673,38 @@ fn tokens_for_text_completion_prompt(
     }
 }
 
-fn decoded_token_for_logprob(state: &AppState, token_id: TokenId) -> String {
-    state.tokenizer.decode(&[token_id]).unwrap_or_default()
+fn decoded_token_for_logprob(state: &AppState, token_id: TokenId) -> Result<String, ApiError> {
+    decode_prompt_logprob_token(token_id, |token_id| {
+        state.tokenizer.decode_token_for_display(token_id)
+    })
 }
 
-fn top_k_logprob_map(state: &AppState, row: &[f32], top_k: usize) -> PromptLogprobMap {
+fn decode_prompt_logprob_token(
+    token_id: TokenId,
+    decode_token: impl FnOnce(TokenId) -> Result<String, TokenizerError>,
+) -> Result<String, ApiError> {
+    decode_token(token_id).map_err(|err| {
+        ApiError::tokenization_failed(format!(
+            "failed to render prompt-logprob token id {token_id}: {err}"
+        ))
+    })
+}
+
+fn top_k_logprob_map(
+    state: &AppState,
+    row: &[f32],
+    top_k: usize,
+) -> Result<PromptLogprobMap, ApiError> {
+    top_k_logprob_map_with_decoder(row, top_k, |token_id| {
+        state.tokenizer.decode_token_for_display(token_id)
+    })
+}
+
+fn top_k_logprob_map_with_decoder(
+    row: &[f32],
+    top_k: usize,
+    mut decode_token: impl FnMut(TokenId) -> Result<String, TokenizerError>,
+) -> Result<PromptLogprobMap, ApiError> {
     let mut pairs: Vec<(TokenId, f32)> = row
         .iter()
         .copied()
@@ -4697,11 +4726,11 @@ fn top_k_logprob_map(state: &AppState, row: &[f32], top_k: usize) -> PromptLogpr
             PromptLogprobEntry {
                 logprob,
                 rank: rank + 1,
-                decoded_token: decoded_token_for_logprob(state, token_id),
+                decoded_token: decode_prompt_logprob_token(token_id, &mut decode_token)?,
             },
         );
     }
-    out
+    Ok(out)
 }
 
 fn prompt_logprobs_from_rows(
@@ -4725,7 +4754,7 @@ fn prompt_logprobs_from_rows(
             state,
             &logprob_rows[pos - 1],
             top_k,
-        )));
+        )?));
     }
     Ok(out)
 }
@@ -4734,7 +4763,7 @@ fn mock_prompt_logprobs(
     state: &AppState,
     prompt_tokens: &[TokenId],
     top_k: usize,
-) -> Vec<Option<PromptLogprobMap>> {
+) -> Result<Vec<Option<PromptLogprobMap>>, ApiError> {
     let vocab_size = state.model_config.vocab_size.max(1);
     let mut out = Vec::with_capacity(prompt_tokens.len());
     out.push(None);
@@ -4748,13 +4777,13 @@ fn mock_prompt_logprobs(
                 PromptLogprobEntry {
                     logprob: -(rank as f32),
                     rank: rank + 1,
-                    decoded_token: decoded_token_for_logprob(state, token_id),
+                    decoded_token: decoded_token_for_logprob(state, token_id)?,
                 },
             );
         }
         out.push(Some(map));
     }
-    out
+    Ok(out)
 }
 
 async fn real_prompt_logprobs(
@@ -13309,6 +13338,24 @@ mod tests {
         )
     }
 
+    fn make_prompt_logprobs_test_state() -> AppState {
+        let mut state = make_batch_test_state();
+        let vocab = (0..512u32)
+            .map(|token_id| (format!("token-{token_id}"), token_id))
+            .collect::<std::collections::HashMap<_, _>>();
+        let tokenizer_json = serde_json::json!({
+            "version": "1.0",
+            "model": { "type": "BPE", "vocab": vocab, "merges": [] }
+        });
+        state.tokenizer = std::sync::Arc::new(
+            kiln_core::tokenizer::KilnTokenizer::from_bytes(
+                &serde_json::to_vec(&tokenizer_json).unwrap(),
+            )
+            .unwrap(),
+        );
+        state
+    }
+
     #[test]
     fn slow_request_log_values_respect_threshold_and_redact_prompt_text() {
         let mut state = make_batch_test_state();
@@ -13496,7 +13543,7 @@ mod tests {
         })
         .to_string();
 
-        let (status, json) = completion_post(make_batch_test_state(), &body).await;
+        let (status, json) = completion_post(make_prompt_logprobs_test_state(), &body).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{json}");
         assert_eq!(json["object"], "text_completion");
         assert_eq!(json["usage"]["prompt_tokens"], 3);
@@ -13512,6 +13559,49 @@ mod tests {
                 .unwrap()
                 .values()
                 .all(|entry| entry["logprob"].is_number() && entry["rank"].is_number())
+        );
+    }
+
+    #[test]
+    fn prompt_logprob_map_propagates_token_decode_failure() {
+        let mut attempted_token_ids = Vec::new();
+        let err = top_k_logprob_map_with_decoder(&[-2.0, -0.5, -1.0], 2, |token_id| {
+            attempted_token_ids.push(token_id);
+            Err(TokenizerError::Decode(
+                "injected decode failure".to_string(),
+            ))
+        })
+        .unwrap_err();
+
+        assert_eq!(attempted_token_ids, vec![1]);
+        assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.code, "tokenization_error");
+        assert!(err.message.contains("token id 1"), "{err:?}");
+        assert!(err.message.contains("injected decode failure"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn completions_prompt_logprobs_rejects_token_absent_from_tokenizer() {
+        let body = serde_json::json!({
+            "prompt": [0, 11],
+            "max_tokens": 1,
+            "prompt_logprobs": 1
+        })
+        .to_string();
+
+        let (status, json) = completion_post(make_batch_test_state(), &body).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "{json}"
+        );
+        assert_eq!(json["error"]["code"], "tokenization_error");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("token id 11"),
+            "{json}"
         );
     }
 
@@ -13598,7 +13688,7 @@ mod tests {
         })
         .to_string();
 
-        let (status, json) = completion_post(make_batch_test_state(), &body).await;
+        let (status, json) = completion_post(make_prompt_logprobs_test_state(), &body).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{json}");
         assert_eq!(json["usage"]["prompt_tokens"], 3);
     }
