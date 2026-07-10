@@ -51,6 +51,35 @@ python3 scripts/qualification/run.py \
   qualification/workloads/correctness-core-v1.json
 ```
 
+ROCm token-budgeted prefill correctness (Strix Halo/gfx1151):
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" ROCM_PATH=/opt/rocm \
+python3 scripts/qualification/run.py \
+  --variant rocm \
+  --host-id strix-halo \
+  qualification/workloads/prefill-scheduling-v1.json
+```
+
+This workload pairs ROCm with a Vulkan variant for later cross-backend receipt
+comparison. Each arm combines the literal short-decode/1K-prefill/16K-prefill
+actor test with a real-device deterministic hybrid-model parity test. The
+latter compares monolithic prefill against six bounded quanta, including
+recurrent state, the block-aligned prefix snapshot, the first following decode
+token, and KV-block release. Qualification mode turns a missing device into
+failure.
+
+After the ROCm receipt is checked in, run the paired Vulkan arm from the same
+source tree:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant vulkan \
+  --host-id strix-halo \
+  qualification/workloads/prefill-scheduling-v1.json
+```
+
 Vulkan core correctness:
 
 ```bash

@@ -1,0 +1,347 @@
+{
+  "schema_version": 1,
+  "workload_id": "prefill-scheduling-v1",
+  "kind": "correctness",
+  "description": "Prove bounded mixed-prompt actor scheduling and resumable hybrid-model prefill parity on required Strix Halo ROCm and Vulkan devices.",
+  "determinism": {
+    "seed": 20260710,
+    "seed_delivery": "fixed_fixture",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "rocm",
+      "description": "ROCm actor-fairness and real-device resumable-prefill correctness on gfx1151.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "device-probe",
+          "description": "Require rocminfo to identify the target gfx1151 ROCm device.",
+          "required": true,
+          "command": ["rocminfo"],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 60,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "gfx1151"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "mixed-admission-fairness",
+          "description": "Mix an eight-token short decode with literal 1K and 16K prefills under a 32-token actor budget and prove decode-first round-robin progress plus cancellation cleanup.",
+          "required": true,
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-server",
+            "--no-default-features",
+            "--features",
+            "rocm",
+            "--lib",
+            "token_budget_fairly_mixes_short_decode_1k_and_16k_prefill",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_ROCM_ARCHS": "gfx1151",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "token_budget_fairly_mixes_short_decode_1k_and_16k_prefill \\.\\.\\. ok"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "test result: FAILED"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "resumable-prefill-parity",
+          "description": "Compare monolithic and six-quantum paged prefill for a deterministic nonzero GDN-plus-full-attention model on Device::Rocm(0), including recurrent state, split snapshot, next token, following decode token, and block release.",
+          "required": true,
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-server",
+            "--no-default-features",
+            "--features",
+            "rocm",
+            "--test",
+            "real_model_integration",
+            "resumable_paged_prefill_matches_monolithic_rocm",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1",
+            "KILN_ROCM_ARCHS": "gfx1151",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[ROCm PREFILL PASS\\] quanta=\\[17, 17, 17, 17, 12, 1\\]"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*prefill|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "vulkan",
+      "description": "Vulkan actor-fairness and real-device resumable-prefill correctness on RADV Strix Halo.",
+      "backend": "vulkan",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "device-probe",
+          "description": "Require vulkaninfo to identify a usable Vulkan device.",
+          "required": true,
+          "command": ["vulkaninfo", "--summary"],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 60,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "Devices:"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no vulkan device|skipp(?:ed|ing))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "mixed-admission-fairness",
+          "description": "Run the same literal short-decode, 1K-prefill, and 16K-prefill actor contract in a Vulkan feature build.",
+          "required": true,
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-server",
+            "--no-default-features",
+            "--features",
+            "vulkan",
+            "--lib",
+            "token_budget_fairly_mixes_short_decode_1k_and_16k_prefill",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "token_budget_fairly_mixes_short_decode_1k_and_16k_prefill \\.\\.\\. ok"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "test result: FAILED"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "resumable-prefill-parity",
+          "description": "Run the same deterministic nonzero six-quantum hybrid-model prefill parity contract on Device::Vulkan(0).",
+          "required": true,
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-server",
+            "--no-default-features",
+            "--features",
+            "vulkan",
+            "--test",
+            "real_model_integration",
+            "resumable_paged_prefill_matches_monolithic_vulkan",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[Vulkan PREFILL PASS\\] quanta=\\[17, 17, 17, 17, 12, 1\\]"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no vulkan device|skipp(?:ed|ing).*prefill|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "cross_backend_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [
+      {
+        "backend_a": "rocm",
+        "variant_a_id": "rocm",
+        "backend_b": "vulkan",
+        "variant_b_id": "vulkan",
+        "allowed_environment_differences": [
+          "compiler.hipcc",
+          "compiler.shader",
+          "device.architecture",
+          "device.driver",
+          "device.name",
+          "runtime.driver",
+          "runtime.hipcc",
+          "runtime.hsa",
+          "runtime.rocm",
+          "runtime.vulkan_device",
+          "runtime.vulkan_instance"
+        ]
+      }
+    ],
+    "metric_rules": [
+      {
+        "scope": "result",
+        "result_id": "device-probe",
+        "metric": "case_pass",
+        "metric_class": "correctness",
+        "unit": "bool",
+        "aggregation": "exact",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "mixed-admission-fairness",
+        "metric": "case_pass",
+        "metric_class": "correctness",
+        "unit": "bool",
+        "aggregation": "exact",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "resumable-prefill-parity",
+        "metric": "case_pass",
+        "metric_class": "correctness",
+        "unit": "bool",
+        "aggregation": "exact",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      }
+    ]
+  }
+}

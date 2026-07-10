@@ -2431,9 +2431,11 @@ fn tiny_gdn_config_f32() -> ModelConfig {
     }
 }
 
-/// FP32 GpuWeights for [`tiny_gdn_config_f32`]: layer 0 GDN, layer 1 full
-/// attention. Same literal as `tiny_gdn_weights_bf16` minus the BF16 casts.
+/// Deterministic, non-degenerate FP32 weights for [`tiny_gdn_config_f32`]:
+/// layer 0 GDN, layer 1 full attention.
 fn tiny_gdn_weights_f32(config: &ModelConfig, device: &Device) -> GpuWeights {
+    use std::cell::Cell;
+
     let h = config.hidden_size;
     let inter = config.intermediate_size;
     let vocab = config.vocab_size;
@@ -2441,16 +2443,32 @@ fn tiny_gdn_weights_f32(config: &ModelConfig, device: &Device) -> GpuWeights {
     let num_kv_heads = config.num_kv_heads;
     let head_dim = config.head_dim;
 
-    let rnd = |shape: &[usize]| Tensor::randn(0.0_f32, 0.02, shape, device).unwrap();
+    let next_salt = Cell::new(0usize);
+    let rnd = |shape: &[usize]| {
+        let salt = next_salt.get();
+        next_salt.set(salt + 1);
+        let len = shape.iter().product();
+        let values: Vec<f32> = (0..len)
+            .map(|index| {
+                let patterned = index
+                    .wrapping_mul(37)
+                    .wrapping_add(salt.wrapping_mul(17))
+                    .wrapping_add(11)
+                    % 257;
+                (patterned as f32 / 257.0 - 0.5) * 0.08
+            })
+            .collect();
+        Tensor::from_vec_on(device.clone(), values, shape.to_vec()).unwrap()
+    };
     let rnd_t = |shape: &[usize]| {
-        let w = Tensor::randn(0.0_f32, 0.02, shape, device).unwrap();
+        let w = rnd(shape);
         let wt = w.t().unwrap().contiguous().unwrap();
         (w, wt)
     };
 
-    let embed = Tensor::randn(0.0_f32, 0.02, (vocab, h), device).unwrap();
+    let embed = rnd(&[vocab, h]);
     let embed_t = embed.t().unwrap().contiguous().unwrap();
-    let final_norm = Tensor::zeros((h,), DType::F32, device).unwrap();
+    let final_norm = Tensor::ones((h,), DType::F32, device).unwrap();
 
     let mk_mlp = || {
         let (gate_proj, gate_proj_t) = rnd_t(&[inter, h]);
@@ -2481,10 +2499,10 @@ fn tiny_gdn_weights_f32(config: &ModelConfig, device: &Device) -> GpuWeights {
     let (out_proj, out_proj_t) = rnd_t(&[h, v_dim]);
     let (in_proj_a, in_proj_a_t) = rnd_t(&[nv, h]);
     let (in_proj_b, in_proj_b_t) = rnd_t(&[nv, h]);
-    let a_log = Tensor::randn(0.0_f32, 0.5, (nv,), device).unwrap();
+    let a_log = rnd(&[nv]);
     let gdn_layer = GpuLayerWeights {
-        input_layernorm: Tensor::zeros((h,), DType::F32, device).unwrap(),
-        post_attention_layernorm: Tensor::zeros((h,), DType::F32, device).unwrap(),
+        input_layernorm: Tensor::ones((h,), DType::F32, device).unwrap(),
+        post_attention_layernorm: Tensor::ones((h,), DType::F32, device).unwrap(),
         attention: GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
             in_proj_qkv,
             in_proj_z,
@@ -2514,15 +2532,15 @@ fn tiny_gdn_weights_f32(config: &ModelConfig, device: &Device) -> GpuWeights {
     let (v_proj, v_proj_t) = rnd_t(&[num_kv_heads * head_dim, h]);
     let (o_proj, o_proj_t) = rnd_t(&[h, num_heads * head_dim]);
     let full_layer = GpuLayerWeights {
-        input_layernorm: Tensor::zeros((h,), DType::F32, device).unwrap(),
-        post_attention_layernorm: Tensor::zeros((h,), DType::F32, device).unwrap(),
+        input_layernorm: Tensor::ones((h,), DType::F32, device).unwrap(),
+        post_attention_layernorm: Tensor::ones((h,), DType::F32, device).unwrap(),
         attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
             q_proj,
             k_proj,
             v_proj,
             o_proj,
-            q_norm: Tensor::zeros((head_dim,), DType::F32, device).unwrap(),
-            k_norm: Tensor::zeros((head_dim,), DType::F32, device).unwrap(),
+            q_norm: Tensor::ones((head_dim,), DType::F32, device).unwrap(),
+            k_norm: Tensor::ones((head_dim,), DType::F32, device).unwrap(),
             q_proj_t,
             k_proj_t,
             v_proj_t,
@@ -2553,7 +2571,7 @@ fn tiny_gdn_weights_f32(config: &ModelConfig, device: &Device) -> GpuWeights {
     }
 }
 
-fn prefix_test_paged_cache(config: &ModelConfig) -> PagedKvCacheKt {
+fn prefix_test_paged_cache_on(config: &ModelConfig, device: Device) -> PagedKvCacheKt {
     PagedKvCacheKt::new(
         config.num_full_attention_layers,
         PREFIX_TEST_NUM_BLOCKS,
@@ -2561,9 +2579,13 @@ fn prefix_test_paged_cache(config: &ModelConfig) -> PagedKvCacheKt {
         config.num_kv_heads,
         config.head_dim,
         DType::F32,
-        Device::Cpu,
+        device,
     )
     .expect("paged KV cache")
+}
+
+fn prefix_test_paged_cache(config: &ModelConfig) -> PagedKvCacheKt {
+    prefix_test_paged_cache_on(config, Device::Cpu)
 }
 
 #[test]
@@ -2657,11 +2679,61 @@ fn prefix_test_turn1_prompt() -> Vec<TokenId> {
     (0..81u32).map(|i| (i % 17) + 1).collect()
 }
 
-#[test]
-fn resumable_paged_prefill_matches_monolithic_cpu() {
+fn assert_linear_attention_state_close(
+    actual: &LinearAttentionState,
+    expected: &LinearAttentionState,
+    tolerance: f32,
+    label: &str,
+) {
+    fn assert_tensor_lists_close(
+        actual: &[Tensor],
+        expected: &[Tensor],
+        tolerance: f32,
+        label: &str,
+    ) {
+        assert_eq!(actual.len(), expected.len(), "{label}: tensor count");
+        for (tensor_index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(actual.dims(), expected.dims(), "{label}[{tensor_index}]");
+            let actual = actual
+                .flatten_all()
+                .and_then(|tensor| tensor.to_dtype(DType::F32))
+                .and_then(|tensor| tensor.to_vec1::<f32>())
+                .unwrap_or_else(|error| panic!("read {label}[{tensor_index}] actual: {error:#}"));
+            let expected = expected
+                .flatten_all()
+                .and_then(|tensor| tensor.to_dtype(DType::F32))
+                .and_then(|tensor| tensor.to_vec1::<f32>())
+                .unwrap_or_else(|error| panic!("read {label}[{tensor_index}] expected: {error:#}"));
+            let max_abs_diff = actual
+                .iter()
+                .zip(&expected)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                max_abs_diff <= tolerance,
+                "{label}[{tensor_index}] drifted: max_abs_diff={max_abs_diff:e}, tolerance={tolerance:e}"
+            );
+        }
+    }
+
+    assert_tensor_lists_close(
+        &actual.recurrent_states,
+        &expected.recurrent_states,
+        tolerance,
+        &format!("{label}.recurrent"),
+    );
+    assert_tensor_lists_close(
+        &actual.conv_states,
+        &expected.conv_states,
+        tolerance,
+        &format!("{label}.conv"),
+    );
+}
+
+fn assert_resumable_paged_prefill_matches_monolithic(device: Device, backend: &str) {
     let config = tiny_gdn_config_f32();
     let runner = ModelRunner::new(
-        tiny_gdn_weights_f32(&config, &Device::Cpu),
+        tiny_gdn_weights_f32(&config, &device),
         test_tokenizer(),
         config.clone(),
     );
@@ -2675,8 +2747,8 @@ fn resumable_paged_prefill_matches_monolithic_cpu() {
         PREFIX_TEST_NUM_BLOCKS,
         PREFIX_TEST_BLOCK_SIZE,
     ));
-    let control_cache = prefix_test_paged_cache(&config);
-    let control = runner
+    let control_cache = prefix_test_paged_cache_on(&config, device.clone());
+    let mut control = runner
         .prepare_paged_batched_decode_with_prefix_cache(
             &prompt,
             &sampling,
@@ -2695,7 +2767,7 @@ fn resumable_paged_prefill_matches_monolithic_cpu() {
         PREFIX_TEST_NUM_BLOCKS,
         PREFIX_TEST_BLOCK_SIZE,
     ));
-    let chunked_cache = prefix_test_paged_cache(&config);
+    let chunked_cache = prefix_test_paged_cache_on(&config, device);
     let start = runner
         .begin_paged_batched_decode_with_prefix_cache(
             &prompt,
@@ -2715,7 +2787,7 @@ fn resumable_paged_prefill_matches_monolithic_cpu() {
 
     let mut prefill = Some(prefill);
     let mut chunks = Vec::new();
-    let chunked = loop {
+    let mut chunked = loop {
         let progress = runner
             .advance_paged_batched_prefill(&mut prefill, &sampling, &chunked_cache, 17, None)
             .expect("advance resumable prefill");
@@ -2734,6 +2806,12 @@ fn resumable_paged_prefill_matches_monolithic_cpu() {
     assert_eq!(chunks.iter().sum::<usize>(), prompt.len());
     assert_eq!(chunked.next_token, control.next_token);
     assert_eq!(chunked.seq_len, control.seq_len);
+    assert_linear_attention_state_close(
+        &chunked.linear_state,
+        &control.linear_state,
+        1e-4,
+        "completed prefill state",
+    );
     assert_eq!(
         chunked
             .prefill_split_snapshot
@@ -2751,6 +2829,54 @@ fn resumable_paged_prefill_matches_monolithic_cpu() {
             .map(|snapshot| snapshot.position),
         Some(80)
     );
+    assert_linear_attention_state_close(
+        &chunked
+            .prefill_split_snapshot
+            .as_ref()
+            .unwrap()
+            .linear_state,
+        &control
+            .prefill_split_snapshot
+            .as_ref()
+            .unwrap()
+            .linear_state,
+        1e-4,
+        "block-aligned split snapshot",
+    );
+
+    let control_decode = runner
+        .paged_batched_decode_step(
+            &mut [&mut control],
+            std::slice::from_ref(&sampling),
+            &control_cache,
+        )
+        .expect("decode after monolithic prefill");
+    runner
+        .synchronize_external_yield("monolithic post-prefill decode")
+        .unwrap();
+    let chunked_decode = runner
+        .paged_batched_decode_step(
+            &mut [&mut chunked],
+            std::slice::from_ref(&sampling),
+            &chunked_cache,
+        )
+        .expect("decode after resumable prefill");
+    runner
+        .synchronize_external_yield("resumable post-prefill decode")
+        .unwrap();
+    assert_eq!(chunked_decode, control_decode);
+    assert_eq!(chunked.seq_len, control.seq_len);
+    assert_linear_attention_state_close(
+        &chunked.linear_state,
+        &control.linear_state,
+        1e-4,
+        "state after first decode",
+    );
+
+    eprintln!(
+        "[{backend} PREFILL PASS] quanta={chunks:?} first_token={} next_decode_token={} split_position=80",
+        chunked.next_token, chunked_decode[0]
+    );
 
     control_blocks
         .lock()
@@ -2762,6 +2888,41 @@ fn resumable_paged_prefill_matches_monolithic_cpu() {
         .free_all(&chunked.allocated_blocks);
     assert_eq!(control_blocks.lock().unwrap().num_used(), 0);
     assert_eq!(chunked_blocks.lock().unwrap().num_used(), 0);
+}
+
+#[test]
+fn resumable_paged_prefill_matches_monolithic_cpu() {
+    assert_resumable_paged_prefill_matches_monolithic(Device::Cpu, "CPU");
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn resumable_paged_prefill_matches_monolithic_rocm() {
+    if !kiln_tensor::rocm_is_available() {
+        assert_ne!(
+            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
+            Some("1"),
+            "ROCm device unavailable while KILN_QUALIFICATION=1"
+        );
+        eprintln!("no ROCm device available; skipping resumable prefill parity");
+        return;
+    }
+    assert_resumable_paged_prefill_matches_monolithic(Device::Rocm(0), "ROCm");
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn resumable_paged_prefill_matches_monolithic_vulkan() {
+    if !kiln_model::backend::vulkan::vulkan_is_available() {
+        assert_ne!(
+            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
+            Some("1"),
+            "Vulkan device unavailable while KILN_QUALIFICATION=1"
+        );
+        eprintln!("no Vulkan device available; skipping resumable prefill parity");
+        return;
+    }
+    assert_resumable_paged_prefill_matches_monolithic(Device::Vulkan(0), "Vulkan");
 }
 
 #[test]

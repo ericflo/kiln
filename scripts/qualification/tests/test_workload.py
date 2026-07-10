@@ -94,6 +94,7 @@ class WorkloadTests(unittest.TestCase):
         for name in (
             "environment-v1.json",
             "correctness-core-v1.json",
+            "prefill-scheduling-v1.json",
             "serving-mixed-rocm-v1.json",
         ):
             with self.subTest(name=name):
