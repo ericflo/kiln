@@ -156,7 +156,6 @@ async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
         "/v1/adapters/distill_merge",
         "/v1/cache/stats",
         "/v1/cache/export",
-        "/v1/cache/import",
         "/v1/library",
         "/v1/agent/traces",
         "/v1/agent/traces/discover",
@@ -168,4 +167,9 @@ async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
             "Distill UI doesn't reference endpoint {endpoint}"
         );
     }
+
+    assert!(
+        !app_js.contains("/v1/cache/import"),
+        "Distill UI must not expose the removed unsafe cache import route"
+    );
 }

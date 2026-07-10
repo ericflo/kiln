@@ -10135,7 +10135,7 @@ document.getElementById('distill-self-form')?.addEventListener('submit', async (
   } catch (err) { toast(err.message, 'err'); }
 });
 
-// --- Cache (/v1/cache/{stats,import,export}) ------------------------
+// --- Cache (/v1/cache/{stats,export}) -------------------------------
 async function refreshCacheStats() {
   const node = document.getElementById('cache-stats');
   if (!node) return;
@@ -10162,21 +10162,6 @@ async function refreshCacheStats() {
 
 document.getElementById('cache-export-btn')?.addEventListener('click', () => {
   window.location.href = '/v1/cache/export';
-});
-
-document.getElementById('cache-import-btn')?.addEventListener('click', () => {
-  document.getElementById('cache-import-file').click();
-});
-
-document.getElementById('cache-import-file')?.addEventListener('change', async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  try {
-    const res = await fetch('/v1/cache/import', { method: 'POST', body: file, headers: { 'Content-Type': 'application/x-tar' } });
-    if (!res.ok) throw new Error(await res.text());
-    toast('Imported cache tarball');
-    refreshCacheStats();
-  } catch (err) { toast('Import failed: ' + err.message, 'err'); }
 });
 
 // --- Library (/v1/library) ------------------------------------------
