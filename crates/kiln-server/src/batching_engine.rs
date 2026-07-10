@@ -5,7 +5,8 @@
 //! Decode now issues a multi-row forward by default; the rowwise path remains
 //! only as an operator-forced comparison or fallback mode.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,6 +23,10 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::config::{ConfigValueSource, StreamStallGrace};
+use crate::response_delivery::{
+    DeliveryBatch, DeliveryCommand, DeliveryKey, DeliveryResult, DeliveryResultNotifyError,
+    DeliveryResultSink, DeliveryResultSinkError, DeliveryTerminal, DeliveryWorker,
+};
 use crate::state::{
     GpuCoordinationLock, RealPrefixCache, gpu_coordination_read_guard, gpu_coordination_write_guard,
 };
@@ -32,8 +37,8 @@ const DEFAULT_MAX_DECODE_BATCH: usize = 8;
 const DEFAULT_PREFILL_ADMISSION_QUANTUM: usize = 4;
 const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 
-/// Poll cadence while waiting out the grace window.
-const STALLED_SEND_POLL: Duration = Duration::from_millis(10);
+/// Fair worker retry cadence while a response lane is inside its grace window.
+const RESPONSE_DELIVERY_POLL_CADENCE: Duration = Duration::from_millis(10);
 
 /// Delivery settings resolved and validated before the batching actor starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,8 +220,8 @@ pub struct BatchingEngineSnapshot {
     pub total_decode_tokens: u64,
     pub total_prefill_tokens: u64,
     pub total_errors: u64,
-    /// Token-delivery attempts that encountered a full per-request event channel.
-    /// A single bounded-grace polling episode counts once, regardless of polls.
+    /// Response batches that encountered a full per-request event channel.
+    /// Each sequence counts once even if token progress starts a fresh grace episode.
     pub response_backpressure_events: u64,
     /// Cumulative time spent polling full response channels during bounded grace.
     pub response_backpressure_wait_ms: u64,
@@ -224,6 +229,9 @@ pub struct BatchingEngineSnapshot {
     pub response_stall_evictions: u64,
     /// Active requests discarded because their response receiver was already closed.
     pub response_channel_closed: u64,
+    pub response_delivery_in_flight: usize,
+    pub response_delivery_backpressured: usize,
+    pub response_delivery_pending_terminal: usize,
     pub adapter_groups_waiting: usize,
     /// Last prefix-deferral gauge sampled by a strong actor-barrier snapshot.
     /// Cheap cached publications preserve that sample rather than repeating
@@ -914,6 +922,17 @@ impl BatchingEngineHandle {
         response_delivery_policy: ResponseDeliveryPolicy,
     ) -> Self {
         let (tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let (delivery_result_tx, delivery_results) = std_mpsc::channel();
+        let delivery_worker = DeliveryWorker::start(
+            response_delivery_policy.stream_stall_grace,
+            RESPONSE_DELIVERY_POLL_CADENCE,
+            EngineDeliveryResultSink {
+                result_tx: delivery_result_tx,
+                pending_results: Vec::new(),
+                engine_tx: tx.downgrade(),
+            },
+        )
+        .expect("spawn response delivery worker");
         let actor = BatchingEngineActor::new(
             rx,
             forward,
@@ -922,6 +941,8 @@ impl BatchingEngineHandle {
             prefill_admission_quantum,
             burst_refill,
             response_delivery_policy,
+            delivery_worker,
+            delivery_results,
         );
         let published_snapshot = actor.published_snapshot.clone();
         thread::Builder::new()
@@ -936,6 +957,20 @@ impl BatchingEngineHandle {
 
     pub async fn enqueue(&self, req: EngineRequest) -> Result<mpsc::Receiver<EngineEvent>> {
         let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
+        self.tx
+            .send(EngineCommand::Enqueue { req, response_tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
+        Ok(response_rx)
+    }
+
+    #[cfg(test)]
+    async fn enqueue_with_response_capacity(
+        &self,
+        req: EngineRequest,
+        capacity: usize,
+    ) -> Result<mpsc::Receiver<EngineEvent>> {
+        let (response_tx, response_rx) = mpsc::channel(capacity);
         self.tx
             .send(EngineCommand::Enqueue { req, response_tx })
             .await
@@ -1072,6 +1107,7 @@ enum EngineCommand {
     Cancel {
         request_id: Uuid,
     },
+    DeliveryWake,
     Drain {
         reply: oneshot::Sender<()>,
     },
@@ -1104,13 +1140,50 @@ struct PendingAdapterSwap {
 
 struct QueuedRequest {
     req: EngineRequest,
-    response_tx: mpsc::Sender<EngineEvent>,
+    delivery_key: DeliveryKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveDeliveryState {
+    Ready,
+    InFlight { sequence: u64 },
 }
 
 struct ActiveRequest {
     req: EngineRequest,
-    response_tx: mpsc::Sender<EngineEvent>,
+    delivery_key: DeliveryKey,
+    delivery_state: ActiveDeliveryState,
+    next_delivery_sequence: u64,
     slot: DecodeSlot,
+}
+
+struct EngineDeliveryResultSink {
+    // One worker flush becomes one channel item. The actor cannot observe a
+    // prefix of a decode cohort and accidentally launch a narrower forward.
+    result_tx: std_mpsc::Sender<Vec<DeliveryResult>>,
+    pending_results: Vec<DeliveryResult>,
+    engine_tx: mpsc::WeakSender<EngineCommand>,
+}
+
+impl DeliveryResultSink for EngineDeliveryResultSink {
+    fn try_send(&mut self, result: DeliveryResult) -> Result<(), DeliveryResultSinkError> {
+        self.pending_results.push(result);
+        Ok(())
+    }
+
+    fn notify(&mut self) -> Result<(), DeliveryResultNotifyError> {
+        let results = std::mem::take(&mut self.pending_results);
+        self.result_tx
+            .send(results)
+            .map_err(|_| DeliveryResultNotifyError)?;
+        let Some(engine_tx) = self.engine_tx.upgrade() else {
+            return Ok(());
+        };
+        match engine_tx.try_send(EngineCommand::DeliveryWake) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(DeliveryResultNotifyError),
+        }
+    }
 }
 
 struct BatchingEngineActor {
@@ -1134,6 +1207,14 @@ struct BatchingEngineActor {
     // their tuned yield behavior.
     burst_refill: bool,
     response_delivery_policy: ResponseDeliveryPolicy,
+    delivery_worker: Option<DeliveryWorker>,
+    delivery_results: std_mpsc::Receiver<Vec<DeliveryResult>>,
+    next_delivery_generation: u64,
+    delivery_backpressured: HashSet<(DeliveryKey, u64)>,
+    delivery_pending_terminal: HashSet<DeliveryKey>,
+    delivery_outbox: Vec<(DeliveryKey, DeliveryBatch)>,
+    defer_delivery_flush: bool,
+    stop_replies: Vec<oneshot::Sender<()>>,
     /// Adapter swaps waiting for the active batch to drain. While any swap
     /// is pending, admission pauses (waiting requests stay queued) so the
     /// barrier is reached promptly; swaps then run FIFO on this thread.
@@ -1151,6 +1232,8 @@ impl BatchingEngineActor {
         prefill_admission_quantum: usize,
         burst_refill: bool,
         response_delivery_policy: ResponseDeliveryPolicy,
+        delivery_worker: DeliveryWorker,
+        delivery_results: std_mpsc::Receiver<Vec<DeliveryResult>>,
     ) -> Self {
         let max_decode_batch = max_decode_batch.max(1);
         let max_prefill_admissions_per_cycle = prefill_admission_quantum.clamp(1, max_decode_batch);
@@ -1179,6 +1262,14 @@ impl BatchingEngineActor {
             max_prefill_admissions_per_cycle,
             burst_refill,
             response_delivery_policy,
+            delivery_worker: Some(delivery_worker),
+            delivery_results,
+            next_delivery_generation: 0,
+            delivery_backpressured: HashSet::new(),
+            delivery_pending_terminal: HashSet::new(),
+            delivery_outbox: Vec::new(),
+            defer_delivery_flush: false,
+            stop_replies: Vec::new(),
             pending_swaps: VecDeque::new(),
             snapshot,
             published_snapshot,
@@ -1187,6 +1278,10 @@ impl BatchingEngineActor {
 
     fn run(mut self) {
         while !self.stopped {
+            self.drain_delivery_results();
+            if self.stopped {
+                break;
+            }
             // Between-requests barrier: with no decode step in flight and
             // the active batch drained, queued adapter swaps execute now —
             // before blocking on the channel, so a swap queued behind a
@@ -1200,6 +1295,9 @@ impl BatchingEngineActor {
                 }
                 // A swap that arrived while idle executes immediately.
                 self.run_pending_swaps_at_barrier();
+                if self.stopped {
+                    break;
+                }
             }
 
             // Only sleep when we have nothing to do. Sleeping unconditionally
@@ -1211,47 +1309,281 @@ impl BatchingEngineActor {
                 thread::sleep(Duration::from_millis(1));
             }
             self.drain_commands();
+            self.drain_delivery_results();
+            if self.stopped {
+                break;
+            }
             self.admit_waiting();
-            if !self.active.is_empty() {
+            if self.stopped {
+                break;
+            }
+            if self.has_ready_decode_row() {
                 self.run_decode_batch();
+                continue;
+            }
+
+            // Every live row may be waiting for its one in-flight delivery
+            // batch. Block for a delivery wakeup or control command instead
+            // of issuing duplicate model work or spinning an empty loop.
+            if !self.active.is_empty() {
+                match self.rx.blocking_recv() {
+                    Some(cmd) => self.handle_command(cmd),
+                    None => break,
+                }
                 continue;
             }
 
             thread::sleep(Duration::from_millis(1));
         }
 
+        // Reject new commands before collecting every Stop that was already
+        // accepted. Otherwise a concurrent caller can enqueue Stop behind the
+        // command that ended the run loop and wait forever for its reply.
+        self.rx.close();
+        while let Ok(command) = self.rx.try_recv() {
+            if let EngineCommand::Stop { reply } = command {
+                self.stop_replies.push(reply);
+            }
+        }
         self.fail_all("batching engine stopped");
+        for reply in self.stop_replies.drain(..) {
+            let _ = reply.send(());
+        }
     }
 
     fn drain_commands(&mut self) {
-        while let Ok(cmd) = self.rx.try_recv() {
-            self.handle_command(cmd);
+        loop {
+            match self.rx.try_recv() {
+                Ok(cmd) => self.handle_command(cmd),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.accepting = false;
+                    self.stopped = true;
+                    break;
+                }
+            }
         }
     }
 
     fn has_ready_decode_row(&self) -> bool {
-        self.active.iter().any(|active| match &active.slot {
-            DecodeSlot::Real {
-                first_token_pending,
-                ..
-            } => !*first_token_pending,
-            DecodeSlot::Mock { .. } => true,
+        self.active.iter().any(|active| {
+            active.delivery_state == ActiveDeliveryState::Ready
+                && match &active.slot {
+                    DecodeSlot::Real {
+                        first_token_pending,
+                        ..
+                    } => !*first_token_pending,
+                    DecodeSlot::Mock { .. } => true,
+                }
         })
+    }
+
+    fn send_delivery(&self, command: DeliveryCommand) -> bool {
+        self.delivery_worker
+            .as_ref()
+            .is_some_and(|worker| worker.command(command).is_ok())
+    }
+
+    fn queue_delivery(&mut self, key: DeliveryKey, batch: DeliveryBatch) {
+        self.delivery_outbox.push((key, batch));
+        if !self.defer_delivery_flush {
+            self.flush_delivery_outbox();
+        }
+    }
+
+    fn flush_delivery_outbox(&mut self) {
+        if self.delivery_outbox.is_empty() {
+            return;
+        }
+        let mut deliveries = std::mem::take(&mut self.delivery_outbox);
+        let command = if deliveries.len() == 1 {
+            let (key, batch) = deliveries.pop().expect("single delivery remains present");
+            DeliveryCommand::Deliver { key, batch }
+        } else {
+            DeliveryCommand::DeliverMany { deliveries }
+        };
+        if !self.send_delivery(command) {
+            self.accepting = false;
+            self.stopped = true;
+        }
+    }
+
+    fn register_delivery(
+        &mut self,
+        request_id: Uuid,
+        response_tx: mpsc::Sender<EngineEvent>,
+    ) -> Option<DeliveryKey> {
+        let generation = self.next_delivery_generation;
+        self.next_delivery_generation = self.next_delivery_generation.checked_add(1)?;
+        let key = DeliveryKey::new(request_id, generation);
+        self.send_delivery(DeliveryCommand::Register { key, response_tx })
+            .then_some(key)
+    }
+
+    fn drain_delivery_results(&mut self) {
+        while let Ok(results) = self.delivery_results.try_recv() {
+            for result in results {
+                self.handle_delivery_result(result);
+            }
+        }
+    }
+
+    fn handle_delivery_result(&mut self, result: DeliveryResult) {
+        match result {
+            DeliveryResult::BackpressureStarted {
+                key,
+                sequence,
+                capacity,
+            } => {
+                if self.delivery_backpressured.insert((key, sequence)) {
+                    self.snapshot.response_backpressure_events =
+                        self.snapshot.response_backpressure_events.saturating_add(1);
+                    tracing::info!(
+                        event = "response_channel_backpressure",
+                        request_id = %key.request_id,
+                        generation = key.generation,
+                        sequence,
+                        channel_capacity = capacity,
+                        grace_ms = self.response_delivery_policy.stream_stall_grace_ms(),
+                        "response_channel_backpressure"
+                    );
+                }
+            }
+            DeliveryResult::Delivered {
+                key,
+                sequence,
+                terminal,
+                waited,
+            } => {
+                let was_backpressured = self.delivery_backpressured.remove(&(key, sequence));
+                if terminal {
+                    self.delivery_pending_terminal.remove(&key);
+                }
+                if was_backpressured {
+                    self.record_response_backpressure_wait(waited);
+                }
+                if !terminal
+                    && let Some(active) = self.active.iter_mut().find(|active| {
+                        active.delivery_key == key
+                            && active.delivery_state == ActiveDeliveryState::InFlight { sequence }
+                    })
+                {
+                    active.delivery_state = ActiveDeliveryState::Ready;
+                }
+            }
+            DeliveryResult::Closed {
+                key,
+                sequence,
+                waited,
+                backpressured,
+            } => {
+                self.delivery_backpressured.remove(&(key, sequence));
+                let pending_terminal = self.delivery_pending_terminal.remove(&key);
+                if backpressured {
+                    self.record_response_backpressure_wait(waited);
+                }
+                let active_idx = self.active.iter().position(|active| {
+                    active.delivery_key == key
+                        && active.delivery_state == ActiveDeliveryState::InFlight { sequence }
+                });
+                if let Some(idx) = active_idx {
+                    let active = self.active.remove(idx);
+                    active.req.cancel.cancel();
+                    self.forward.discard_request(active.slot);
+                }
+                if pending_terminal || active_idx.is_some() {
+                    self.snapshot.response_channel_closed =
+                        self.snapshot.response_channel_closed.saturating_add(1);
+                }
+                tracing::info!(
+                    event = "response_channel_closed",
+                    request_id = %key.request_id,
+                    generation = key.generation,
+                    sequence,
+                    backpressured,
+                    waited_ms = duration_millis_saturating(waited),
+                    "stream response receiver closed"
+                );
+            }
+            DeliveryResult::TimedOut {
+                key,
+                sequence,
+                waited,
+            } => {
+                self.delivery_backpressured.remove(&(key, sequence));
+                let pending_terminal = self.delivery_pending_terminal.remove(&key);
+                self.record_response_backpressure_wait(waited);
+                let active_idx = self.active.iter().position(|active| {
+                    active.delivery_key == key
+                        && active.delivery_state == ActiveDeliveryState::InFlight { sequence }
+                });
+                if let Some(idx) = active_idx {
+                    let active = self.active.remove(idx);
+                    active.req.cancel.cancel();
+                    self.forward.discard_request(active.slot);
+                }
+                if pending_terminal || active_idx.is_some() {
+                    self.snapshot.response_stall_evictions =
+                        self.snapshot.response_stall_evictions.saturating_add(1);
+                    self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                }
+                tracing::warn!(
+                    event = "response_channel_backpressure_timeout",
+                    request_id = %key.request_id,
+                    generation = key.generation,
+                    sequence,
+                    grace_ms = self.response_delivery_policy.stream_stall_grace_ms(),
+                    waited_ms = duration_millis_saturating(waited),
+                    "response_channel_backpressure_timeout"
+                );
+            }
+            DeliveryResult::ProtocolError(error) => {
+                self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                self.accepting = false;
+                self.stopped = true;
+                tracing::error!(
+                    event = "response_delivery_protocol_error",
+                    error = %error,
+                    "response delivery protocol violation; stopping batching actor"
+                );
+            }
+        }
+        self.refresh_snapshot();
+    }
+
+    fn record_response_backpressure_wait(&mut self, waited: Duration) {
+        self.snapshot.response_backpressure_wait_ms = self
+            .snapshot
+            .response_backpressure_wait_ms
+            .saturating_add(duration_millis_saturating(waited));
     }
 
     fn handle_command(&mut self, cmd: EngineCommand) {
         match cmd {
             EngineCommand::Enqueue { req, response_tx } => {
+                let Some(delivery_key) = self.register_delivery(req.request_id, response_tx) else {
+                    req.cancel.cancel();
+                    self.accepting = false;
+                    self.stopped = true;
+                    tracing::error!(
+                        request_id = %req.request_id,
+                        "response delivery worker unavailable; stopping batching actor"
+                    );
+                    return;
+                };
                 if self.accepting {
-                    self.waiting.push_back(QueuedRequest { req, response_tx });
+                    self.waiting.push_back(QueuedRequest { req, delivery_key });
                     self.refresh_snapshot();
                 } else {
-                    let _ = response_tx.blocking_send(EngineEvent::Error(
+                    req.cancel.cancel();
+                    self.terminate_delivery(
+                        delivery_key,
                         "batching engine is draining".to_string(),
-                    ));
+                    );
                 }
             }
             EngineCommand::Cancel { request_id } => self.cancel(request_id),
+            EngineCommand::DeliveryWake => self.drain_delivery_results(),
             EngineCommand::Drain { reply } => {
                 self.accepting = false;
                 self.refresh_snapshot();
@@ -1262,10 +1594,10 @@ impl BatchingEngineActor {
             EngineCommand::Stop { reply } => {
                 self.accepting = false;
                 self.stopped = true;
+                self.stop_replies.push(reply);
                 self.refresh_snapshot();
                 self.refresh_deferral_gauge();
                 self.publish_snapshot();
-                let _ = reply.send(());
             }
             EngineCommand::Snapshot { reply } => {
                 self.refresh_snapshot();
@@ -1312,16 +1644,19 @@ impl BatchingEngineActor {
     }
 
     fn cancel(&mut self, request_id: Uuid) {
-        self.waiting.retain(|queued| {
-            let keep = queued.req.request_id != request_id;
-            if !keep {
+        let mut waiting_idx = 0;
+        while waiting_idx < self.waiting.len() {
+            if self.waiting[waiting_idx].req.request_id == request_id {
+                let queued = self
+                    .waiting
+                    .remove(waiting_idx)
+                    .expect("waiting request index remains valid");
                 queued.req.cancel.cancel();
-                let _ = queued
-                    .response_tx
-                    .blocking_send(EngineEvent::Error("request cancelled".to_string()));
+                self.terminate_delivery(queued.delivery_key, "request cancelled".to_string());
+            } else {
+                waiting_idx += 1;
             }
-            keep
-        });
+        }
 
         let mut idx = 0;
         while idx < self.active.len() {
@@ -1329,14 +1664,20 @@ impl BatchingEngineActor {
                 let active = self.active.remove(idx);
                 active.req.cancel.cancel();
                 self.forward.discard_request(active.slot);
-                let _ = active
-                    .response_tx
-                    .blocking_send(EngineEvent::Error("request cancelled".to_string()));
+                self.terminate_delivery(active.delivery_key, "request cancelled".to_string());
             } else {
                 idx += 1;
             }
         }
         self.refresh_snapshot();
+    }
+
+    fn terminate_delivery(&mut self, key: DeliveryKey, error: String) {
+        self.delivery_pending_terminal.insert(key);
+        if !self.send_delivery(DeliveryCommand::Terminate { key, error }) {
+            self.accepting = false;
+            self.stopped = true;
+        }
     }
 
     fn admit_waiting(&mut self) {
@@ -1393,7 +1734,9 @@ impl BatchingEngineActor {
                     let active_idx = self.active.len();
                     self.active.push(ActiveRequest {
                         req: queued.req,
-                        response_tx: queued.response_tx,
+                        delivery_key: queued.delivery_key,
+                        delivery_state: ActiveDeliveryState::Ready,
+                        next_delivery_sequence: 0,
                         slot,
                     });
                     // Publish admission before first-token delivery, which can
@@ -1419,7 +1762,7 @@ impl BatchingEngineActor {
                         break;
                     }
                     self.snapshot.total_errors += 1;
-                    let _ = queued.response_tx.blocking_send(EngineEvent::Error(msg));
+                    self.terminate_delivery(queued.delivery_key, msg);
                 }
             }
         }
@@ -1456,6 +1799,7 @@ impl BatchingEngineActor {
     }
 
     fn emit_output_token_at(&mut self, idx: usize, token: TokenId) {
+        let ready_at = Instant::now();
         let token = {
             let generated_tokens = self.generated_tokens_for(idx);
             self.active[idx]
@@ -1465,12 +1809,12 @@ impl BatchingEngineActor {
         };
         match self.forward.is_eos_token(token) {
             Ok(true) => {
-                self.finish_active(idx, FinishReason::Eos);
+                self.finish_active(idx, FinishReason::Eos, None);
                 return;
             }
             Ok(false) => {}
             Err(err) => {
-                self.finish_one_with_error(idx, format!("{err:#}"));
+                self.finish_one_with_error(idx, format!("{err:#}"), None);
                 return;
             }
         }
@@ -1478,15 +1822,11 @@ impl BatchingEngineActor {
         let generated_count = match self.forward.accept_token(&mut self.active[idx].slot, token) {
             Ok(count) => count,
             Err(err) => {
-                self.finish_one_with_error(idx, format!("{err:#}"));
+                self.finish_one_with_error(idx, format!("{err:#}"), None);
                 return;
             }
         };
         self.snapshot.total_decode_tokens += 1;
-
-        if !self.send_token_or_evict_stalled(idx, token) {
-            return;
-        }
 
         // No per-token Vec clone: `forward` is an Arc, so a cheap handle
         // clone lets the generated-tokens slice borrow `self.active`
@@ -1501,123 +1841,44 @@ impl BatchingEngineActor {
         };
         match stop {
             Ok(Some(reason)) => {
-                self.finish_active(idx, reason);
+                self.finish_active(idx, reason, Some((token, ready_at)));
             }
             Ok(None) if generated_count >= self.active[idx].req.sampling.max_tokens => {
-                self.finish_active(idx, FinishReason::MaxTokens);
+                self.finish_active(idx, FinishReason::MaxTokens, Some((token, ready_at)));
             }
-            Ok(None) => {}
+            Ok(None) => self.submit_token_delivery(idx, token, ready_at),
             Err(err) => {
-                self.finish_one_with_error(idx, format!("{err:#}"));
+                self.finish_one_with_error(idx, format!("{err:#}"), Some((token, ready_at)));
             }
         }
     }
 
-    /// Deliver a token to the request's event channel without letting one
-    /// stalled client halt the engine. The old `blocking_send` parked the
-    /// ENTIRE actor — decode and admission for every concurrent request,
-    /// the dashboard, evals — whenever a single client stopped reading
-    /// without closing its socket (laptop sleep mid-stream, suspended pi
-    /// process, TCP zero-window) until TCP gave up.
-    ///
-    /// Now: `try_send`, and on a full channel a wall-clock-bounded grace; a
-    /// client that refuses to drain for the whole grace window is cancelled.
-    /// Delivery still runs on this actor, so peers pause during the grace, but
-    /// the injected policy makes that impact explicit and strictly bounded.
-    /// Returns false when the request was removed.
-    fn send_token_or_evict_stalled(&mut self, idx: usize, token: TokenId) -> bool {
-        let mut event = EngineEvent::Token {
-            token,
-            ready_at: Instant::now(),
+    fn submit_token_delivery(&mut self, idx: usize, token: TokenId, ready_at: Instant) {
+        let (key, sequence) = {
+            let active = &mut self.active[idx];
+            debug_assert_eq!(active.delivery_state, ActiveDeliveryState::Ready);
+            let sequence = active.next_delivery_sequence;
+            let Some(next_sequence) = sequence.checked_add(1) else {
+                self.finish_one_with_error(
+                    idx,
+                    "response delivery sequence exhausted".to_string(),
+                    Some((token, ready_at)),
+                );
+                return;
+            };
+            active.next_delivery_sequence = next_sequence;
+            active.delivery_state = ActiveDeliveryState::InFlight { sequence };
+            (active.delivery_key, sequence)
         };
-        let mut backpressure_observed = false;
-        let mut backpressure_started_at: Option<Instant> = None;
-        loop {
-            match self.active[idx].response_tx.try_send(event) {
-                Ok(()) => {
-                    if let Some(started_at) = backpressure_started_at {
-                        self.record_response_backpressure_wait(started_at.elapsed());
-                    }
-                    return true;
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    let actual_wait =
-                        backpressure_started_at.map(|started_at| started_at.elapsed());
-                    if let Some(wait) = actual_wait {
-                        self.record_response_backpressure_wait(wait);
-                    }
-                    let active = self.active.remove(idx);
-                    self.snapshot.response_channel_closed =
-                        self.snapshot.response_channel_closed.saturating_add(1);
-                    self.refresh_snapshot();
-                    tracing::info!(
-                        event = "response_channel_closed",
-                        request_id = %active.req.request_id,
-                        backpressured = backpressure_observed,
-                        waited_ms = actual_wait.map_or(0, duration_millis_saturating),
-                        "stream response receiver closed; discarding active request"
-                    );
-                    self.forward.discard_request(active.slot);
-                    return false;
-                }
-                Err(mpsc::error::TrySendError::Full(e)) => {
-                    let grace = self.response_delivery_policy.stream_stall_grace;
-                    if !backpressure_observed {
-                        backpressure_observed = true;
-                        backpressure_started_at = Some(Instant::now());
-                        self.snapshot.response_backpressure_events =
-                            self.snapshot.response_backpressure_events.saturating_add(1);
-                        self.publish_snapshot();
-                        tracing::info!(
-                            event = "response_channel_backpressure",
-                            request_id = %self.active[idx].req.request_id,
-                            channel_capacity = self.active[idx].response_tx.max_capacity(),
-                            grace_ms = duration_millis_saturating(grace),
-                            "response_channel_backpressure"
-                        );
-                    }
-                    if backpressure_started_at
-                        .is_some_and(|started_at| started_at.elapsed() >= grace)
-                    {
-                        let active = self.active.remove(idx);
-                        let actual_wait = backpressure_started_at
-                            .expect("full response channel records its start time")
-                            .elapsed();
-                        self.record_response_backpressure_wait(actual_wait);
-                        self.snapshot.response_stall_evictions =
-                            self.snapshot.response_stall_evictions.saturating_add(1);
-                        self.refresh_snapshot();
-                        tracing::warn!(
-                            event = "response_channel_backpressure_timeout",
-                            request_id = %active.req.request_id,
-                            grace_ms = duration_millis_saturating(grace),
-                            waited_ms = duration_millis_saturating(actual_wait),
-                            "response_channel_backpressure_timeout"
-                        );
-                        active.req.cancel.cancel();
-                        self.forward.discard_request(active.slot);
-                        self.snapshot.total_errors += 1;
-                        // Best-effort: the channel is full, so the error
-                        // event only lands if the client drains later.
-                        let _ = active.response_tx.try_send(EngineEvent::Error(
-                            "stream stalled: client stopped reading".into(),
-                        ));
-                        return false;
-                    }
-                    event = e;
-                    thread::sleep(STALLED_SEND_POLL);
-                }
-            }
-        }
-    }
-
-    fn record_response_backpressure_wait(&mut self, waited: Duration) {
-        let waited_ms = duration_millis_saturating(waited);
-        self.snapshot.response_backpressure_wait_ms = self
-            .snapshot
-            .response_backpressure_wait_ms
-            .saturating_add(waited_ms);
-        self.publish_snapshot();
+        self.queue_delivery(
+            key,
+            DeliveryBatch::Token {
+                token,
+                ready_at,
+                sequence,
+            },
+        );
+        self.refresh_snapshot();
     }
 
     fn should_defer_for_active_prefix(&self, queued: &QueuedRequest) -> bool {
@@ -1636,6 +1897,11 @@ impl BatchingEngineActor {
     }
 
     fn run_decode_batch(&mut self) {
+        let mut ready_indices = self.ready_decode_indices();
+        if ready_indices.is_empty() {
+            return;
+        }
+
         // Pre-grow KV per slot: a request that has outgrown the block pool
         // finishes as a `length` casualty HERE — the old order let the
         // forward's atomic grow fail and `finish_batch_with_error` killed
@@ -1644,14 +1910,24 @@ impl BatchingEngineActor {
             let mut probe_slots: Vec<&mut DecodeSlot> = self
                 .active
                 .iter_mut()
-                .take(self.max_decode_batch)
-                .map(|active| &mut active.slot)
+                .enumerate()
+                .filter_map(|(idx, active)| {
+                    ready_indices.contains(&idx).then_some(&mut active.slot)
+                })
                 .collect();
             match self.forward.grow_for_decode(&mut probe_slots) {
                 Ok(starved) => {
                     drop(probe_slots);
-                    for idx in starved.into_iter().rev() {
-                        if idx >= self.active.len() {
+                    let mut starved_indices: Vec<usize> = starved
+                        .into_iter()
+                        .filter_map(|relative_idx| ready_indices.get(relative_idx).copied())
+                        .collect();
+                    starved_indices.sort_unstable();
+                    starved_indices.dedup();
+                    for idx in starved_indices.into_iter().rev() {
+                        if idx >= self.active.len()
+                            || self.active[idx].delivery_state != ActiveDeliveryState::Ready
+                        {
                             continue;
                         }
                         tracing::warn!(
@@ -1659,29 +1935,26 @@ impl BatchingEngineActor {
                             "KV block pool exhausted for this request — finishing it as \
                              `length`; other requests keep decoding"
                         );
-                        self.finish_active(idx, FinishReason::MaxTokens);
+                        self.finish_active(idx, FinishReason::MaxTokens, None);
                     }
-                    if self.active.is_empty() {
+                    ready_indices = self.ready_decode_indices();
+                    if ready_indices.is_empty() {
                         self.refresh_snapshot();
                         return;
                     }
                 }
                 Err(err) => {
-                    let batch_len = self.active.len().min(self.max_decode_batch);
-                    self.snapshot.total_errors += batch_len as u64;
-                    self.finish_batch_with_error(batch_len, format!("{err:#}"));
+                    self.finish_indices_with_error(&ready_indices, format!("{err:#}"));
                     self.refresh_snapshot();
                     return;
                 }
             }
         }
 
-        let batch_len = self.active.len().min(self.max_decode_batch);
-        let sampling: Vec<SamplingParams> = self
-            .active
+        let batch_len = ready_indices.len();
+        let sampling: Vec<SamplingParams> = ready_indices
             .iter()
-            .take(batch_len)
-            .map(|active| active.req.sampling.clone())
+            .map(|&idx| self.active[idx].req.sampling.clone())
             .collect();
 
         self.snapshot.current_batch_size = batch_len;
@@ -1705,8 +1978,8 @@ impl BatchingEngineActor {
         let mut slots: Vec<&mut DecodeSlot> = self
             .active
             .iter_mut()
-            .take(batch_len)
-            .map(|active| &mut active.slot)
+            .enumerate()
+            .filter_map(|(idx, active)| ready_indices.contains(&idx).then_some(&mut active.slot))
             .collect();
         let started = Instant::now();
         let result = self.forward.forward_decode(&mut slots, &sampling);
@@ -1718,9 +1991,8 @@ impl BatchingEngineActor {
         let output_tokens = match result {
             Ok(tokens) if tokens.len() == batch_len => tokens,
             Ok(tokens) => {
-                self.snapshot.total_errors += batch_len as u64;
-                self.finish_batch_with_error(
-                    batch_len,
+                self.finish_indices_with_error(
+                    &ready_indices,
                     format!(
                         "batched decode returned {} rows for batch size {batch_len}",
                         tokens.len()
@@ -1730,20 +2002,48 @@ impl BatchingEngineActor {
                 return;
             }
             Err(err) => {
-                self.snapshot.total_errors += batch_len as u64;
-                self.finish_batch_with_error(batch_len, format!("{err:#}"));
+                self.finish_indices_with_error(&ready_indices, format!("{err:#}"));
                 self.refresh_snapshot();
                 return;
             }
         };
 
-        for idx in (0..batch_len).rev() {
-            if idx >= self.active.len() {
+        debug_assert!(!self.defer_delivery_flush);
+        self.defer_delivery_flush = true;
+        for (idx, token) in ready_indices.into_iter().zip(output_tokens).rev() {
+            if idx >= self.active.len()
+                || self.active[idx].delivery_state != ActiveDeliveryState::Ready
+            {
                 continue;
             }
-            self.emit_output_token_at(idx, output_tokens[idx]);
+            self.emit_output_token_at(idx, token);
+            if self.stopped {
+                break;
+            }
         }
+        self.defer_delivery_flush = false;
+        self.flush_delivery_outbox();
         self.refresh_snapshot();
+    }
+
+    fn ready_decode_indices(&self) -> Vec<usize> {
+        self.active
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, active)| {
+                if active.delivery_state != ActiveDeliveryState::Ready {
+                    return None;
+                }
+                match &active.slot {
+                    DecodeSlot::Real {
+                        first_token_pending,
+                        ..
+                    } if *first_token_pending => None,
+                    _ => Some(idx),
+                }
+            })
+            .take(self.max_decode_batch)
+            .collect()
     }
 
     fn generated_tokens_for(&self, idx: usize) -> &[TokenId] {
@@ -1755,53 +2055,85 @@ impl BatchingEngineActor {
         }
     }
 
-    fn finish_active(&mut self, idx: usize, finish_reason: FinishReason) {
+    fn finish_active(
+        &mut self,
+        idx: usize,
+        finish_reason: FinishReason,
+        preceding_token: Option<(TokenId, Instant)>,
+    ) {
         let active = self.active.remove(idx);
+        let key = active.delivery_key;
+        let sequence = active.next_delivery_sequence;
         self.refresh_snapshot();
-        match self.forward.finish_request(active.slot, finish_reason) {
+        let terminal = match self.forward.finish_request(active.slot, finish_reason) {
             Ok(output) => {
                 let completion_tokens = completion_usage_tokens(
                     output.output.token_ids.len(),
                     &output.output.finish_reason,
                 );
-                let _ = active.response_tx.blocking_send(EngineEvent::Done {
-                    output: BatchedGenerationOutput {
-                        text: output.output.text,
-                        token_ids: output.output.token_ids,
-                        finish_reason: output.output.finish_reason,
-                        completion_tokens,
-                        prefill_duration: output.prefill_duration,
-                        decode_duration: output.decode_duration,
-                    },
-                });
+                DeliveryTerminal::Done(BatchedGenerationOutput {
+                    text: output.output.text,
+                    token_ids: output.output.token_ids,
+                    finish_reason: output.output.finish_reason,
+                    completion_tokens,
+                    prefill_duration: output.prefill_duration,
+                    decode_duration: output.decode_duration,
+                })
             }
             Err(err) => {
                 self.snapshot.total_errors += 1;
                 self.publish_snapshot();
-                let _ = active
-                    .response_tx
-                    .blocking_send(EngineEvent::Error(err.to_string()));
+                DeliveryTerminal::Error(err.to_string())
+            }
+        };
+        self.submit_terminal_delivery(key, sequence, preceding_token, terminal);
+    }
+
+    fn finish_one_with_error(
+        &mut self,
+        idx: usize,
+        error: String,
+        preceding_token: Option<(TokenId, Instant)>,
+    ) {
+        self.snapshot.total_errors += 1;
+        let active = self.active.remove(idx);
+        let key = active.delivery_key;
+        let sequence = active.next_delivery_sequence;
+        self.refresh_snapshot();
+        self.forward.discard_request(active.slot);
+        self.submit_terminal_delivery(
+            key,
+            sequence,
+            preceding_token,
+            DeliveryTerminal::Error(error),
+        );
+    }
+
+    fn finish_indices_with_error(&mut self, indices: &[usize], error: String) {
+        for &idx in indices.iter().rev() {
+            if idx < self.active.len() {
+                self.finish_one_with_error(idx, error.clone(), None);
             }
         }
     }
 
-    fn finish_one_with_error(&mut self, idx: usize, error: String) {
-        self.snapshot.total_errors += 1;
-        let active = self.active.remove(idx);
+    fn submit_terminal_delivery(
+        &mut self,
+        key: DeliveryKey,
+        sequence: u64,
+        preceding_token: Option<(TokenId, Instant)>,
+        terminal: DeliveryTerminal,
+    ) {
+        self.delivery_pending_terminal.insert(key);
+        self.queue_delivery(
+            key,
+            DeliveryBatch::Terminal {
+                preceding_token,
+                terminal,
+                sequence,
+            },
+        );
         self.refresh_snapshot();
-        self.forward.discard_request(active.slot);
-        let _ = active.response_tx.blocking_send(EngineEvent::Error(error));
-    }
-
-    fn finish_batch_with_error(&mut self, batch_len: usize, error: String) {
-        for _ in 0..batch_len.min(self.active.len()) {
-            let active = self.active.remove(0);
-            self.refresh_snapshot();
-            self.forward.discard_request(active.slot);
-            let _ = active
-                .response_tx
-                .blocking_send(EngineEvent::Error(error.clone()));
-        }
     }
 
     fn fail_all(&mut self, error: &str) {
@@ -1810,21 +2142,23 @@ impl BatchingEngineActor {
         while let Some(queued) = self.waiting.pop_front() {
             queued.req.cancel.cancel();
             self.refresh_snapshot();
-            let _ = queued
-                .response_tx
-                .blocking_send(EngineEvent::Error(error.to_string()));
         }
         for active in self.active.drain(..) {
             active.req.cancel.cancel();
             self.forward.discard_request(active.slot);
-            let _ = active
-                .response_tx
-                .blocking_send(EngineEvent::Error(error.to_string()));
         }
         self.refresh_snapshot();
+        if let Some(mut worker) = self.delivery_worker.take() {
+            let _ = worker.shutdown(error.to_string());
+        }
+        self.delivery_outbox.clear();
+        self.defer_delivery_flush = false;
+        self.delivery_backpressured.clear();
+        self.delivery_pending_terminal.clear();
         while let Some(pending) = self.pending_swaps.pop_front() {
             let _ = pending.reply.send(Err(error.to_string()));
         }
+        self.refresh_snapshot();
     }
 
     fn refresh_snapshot(&mut self) {
@@ -1832,6 +2166,13 @@ impl BatchingEngineActor {
         self.snapshot.accepting = self.accepting;
         self.snapshot.queue_depth = self.waiting.len();
         self.snapshot.active_decode = self.active.len();
+        self.snapshot.response_delivery_in_flight = self
+            .active
+            .iter()
+            .filter(|active| matches!(active.delivery_state, ActiveDeliveryState::InFlight { .. }))
+            .count();
+        self.snapshot.response_delivery_backpressured = self.delivery_backpressured.len();
+        self.snapshot.response_delivery_pending_terminal = self.delivery_pending_terminal.len();
         self.snapshot.adapter_groups_waiting = usize::from(!self.waiting.is_empty());
         self.publish_snapshot();
     }
@@ -2063,6 +2404,90 @@ mod tests {
                 assert!(ready_at <= Instant::now());
             }
             other => panic!("expected token {expected}, got {other:?}"),
+        }
+    }
+
+    fn test_actor(
+        rx: mpsc::Receiver<EngineCommand>,
+        forward: Arc<dyn DecodeForward>,
+        max_decode_batch: usize,
+        prefix_aware_admission: bool,
+        prefill_admission_quantum: usize,
+        burst_refill: bool,
+        response_delivery_policy: ResponseDeliveryPolicy,
+    ) -> BatchingEngineActor {
+        let (result_tx, delivery_results) = std_mpsc::channel();
+        let (wake_tx, _wake_rx) = mpsc::channel(1);
+        let delivery_worker = DeliveryWorker::start(
+            response_delivery_policy.stream_stall_grace,
+            Duration::from_millis(1),
+            EngineDeliveryResultSink {
+                result_tx,
+                pending_results: Vec::new(),
+                engine_tx: wake_tx.downgrade(),
+            },
+        )
+        .expect("spawn test response delivery worker");
+        BatchingEngineActor::new(
+            rx,
+            forward,
+            max_decode_batch,
+            prefix_aware_admission,
+            prefill_admission_quantum,
+            burst_refill,
+            response_delivery_policy,
+            delivery_worker,
+            delivery_results,
+        )
+    }
+
+    fn queue_test_request(
+        actor: &mut BatchingEngineActor,
+        req: EngineRequest,
+        response_tx: mpsc::Sender<EngineEvent>,
+    ) {
+        let delivery_key = actor
+            .register_delivery(req.request_id, response_tx)
+            .expect("test delivery lane registers");
+        actor.waiting.push_back(QueuedRequest { req, delivery_key });
+    }
+
+    fn push_test_active(
+        actor: &mut BatchingEngineActor,
+        req: EngineRequest,
+        response_tx: mpsc::Sender<EngineEvent>,
+        slot: DecodeSlot,
+    ) {
+        let delivery_key = actor
+            .register_delivery(req.request_id, response_tx)
+            .expect("test delivery lane registers");
+        actor.active.push(ActiveRequest {
+            req,
+            delivery_key,
+            delivery_state: ActiveDeliveryState::Ready,
+            next_delivery_sequence: 0,
+            slot,
+        });
+    }
+
+    fn settle_active_deliveries(actor: &mut BatchingEngineActor) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            actor.drain_delivery_results();
+            if actor
+                .active
+                .iter()
+                .all(|active| active.delivery_state == ActiveDeliveryState::Ready)
+                && actor.delivery_pending_terminal.is_empty()
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "test delivery worker did not settle: {:?}",
+                actor.snapshot
+            );
+            thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -2323,16 +2748,14 @@ mod tests {
         handle.stop().await.unwrap();
     }
 
-    /// One client that stops reading must not halt decode for everyone:
-    /// its 64-cap event channel fills, the bounded grace elapses, the
-    /// engine cancels THAT request, and a request queued behind the stall
-    /// still completes. (The old `blocking_send` parked the entire actor
-    /// until TCP gave up.)
+    /// A healthy lane must complete while another lane is still inside its
+    /// backpressure grace window. The stalled lane is evicted only after that
+    /// window elapses; neither phase may park compute or the control plane.
     #[tokio::test]
     async fn stalled_streaming_client_is_evicted_and_others_proceed() {
         let forward = Arc::new(MockForward::default());
         let response_delivery_policy = ResponseDeliveryPolicy {
-            stream_stall_grace: Duration::from_millis(50),
+            stream_stall_grace: Duration::from_millis(1000),
             stream_stall_grace_source: ConfigValueSource::ConfigFile,
         };
         let handle = BatchingEngineHandle::start_with_policy(
@@ -2347,11 +2770,23 @@ mod tests {
         // A wants 200 tokens but its events are NEVER read — the channel
         // (cap 64) fills and the client looks suspended.
         let mut rx_a = handle.enqueue(request(101, 200)).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let pressure_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = handle.cached_snapshot();
+            if snapshot.response_delivery_backpressured == 1 {
+                assert_eq!(snapshot.response_stall_evictions, 0, "{snapshot:?}");
+                break;
+            }
+            assert!(
+                Instant::now() < pressure_deadline,
+                "stalled request never reached backpressure: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
 
-        // B arrives behind the stall and must still complete.
+        // B arrives after A is observably full but before A's grace expires.
         let mut rx_b = handle.enqueue(request(7, 1)).await.unwrap();
-        let b_done = tokio::time::timeout(Duration::from_secs(10), async {
+        let b_done = tokio::time::timeout(Duration::from_millis(500), async {
             loop {
                 match rx_b.recv().await {
                     Some(EngineEvent::Done { .. }) => break true,
@@ -2363,9 +2798,23 @@ mod tests {
         .await
         .expect("engine must not stay parked on the stalled client");
         assert!(b_done, "healthy request completes despite the stalled one");
+        let during_grace = handle.snapshot().await.unwrap();
+        assert_eq!(during_grace.response_stall_evictions, 0, "{during_grace:?}");
 
-        // A was cancelled: draining its channel ends in the stall error
-        // (or channel close), never a Done.
+        // A is cancelled only once its full grace has elapsed. Draining its
+        // channel ends in the stall error (or close), never a Done.
+        let eviction_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let snapshot = handle.cached_snapshot();
+            if snapshot.response_stall_evictions == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < eviction_deadline,
+                "stalled request was not evicted after its grace: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         let a_outcome = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match rx_a.recv().await {
@@ -2385,24 +2834,305 @@ mod tests {
         }
 
         let snapshot = handle.snapshot().await.unwrap();
-        assert_eq!(snapshot.stream_stall_grace_ms, 50);
+        assert_eq!(snapshot.stream_stall_grace_ms, 1000);
         assert_eq!(
             snapshot.stream_stall_grace_source,
             ConfigValueSource::ConfigFile
         );
         assert_eq!(snapshot.response_backpressure_events, 1);
-        assert!(snapshot.response_backpressure_wait_ms >= 50, "{snapshot:?}");
+        assert!(
+            snapshot.response_backpressure_wait_ms >= 1000,
+            "{snapshot:?}"
+        );
         assert_eq!(snapshot.response_stall_evictions, 1);
         assert_eq!(snapshot.response_channel_closed, 0);
 
         handle.stop().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn final_token_precedes_done_with_one_response_slot() {
+        let response_delivery_policy = ResponseDeliveryPolicy {
+            stream_stall_grace: Duration::from_secs(2),
+            stream_stall_grace_source: ConfigValueSource::ConfigFile,
+        };
+        let handle = BatchingEngineHandle::start_with_policy(
+            Arc::new(MockForward::default()),
+            1,
+            false,
+            1,
+            false,
+            response_delivery_policy,
+        );
+        let mut response = handle
+            .enqueue_with_response_capacity(request(101, 1), 1)
+            .await
+            .unwrap();
+
+        let pressure_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = handle.cached_snapshot();
+            if snapshot.response_delivery_backpressured == 1 {
+                assert_eq!(snapshot.active_decode, 0, "{snapshot:?}");
+                assert_eq!(snapshot.response_delivery_in_flight, 0, "{snapshot:?}");
+                assert_eq!(
+                    snapshot.response_delivery_pending_terminal, 1,
+                    "{snapshot:?}"
+                );
+                assert_eq!(snapshot.response_stall_evictions, 0, "{snapshot:?}");
+                break;
+            }
+            assert!(
+                Instant::now() < pressure_deadline,
+                "terminal delivery never observed its full slot: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        // The actor remains responsive while Done is waiting for the sole
+        // channel slot occupied by the final token.
+        let snapshot = tokio::time::timeout(Duration::from_millis(250), handle.snapshot())
+            .await
+            .expect("control plane must remain responsive")
+            .unwrap();
+        assert_eq!(snapshot.response_delivery_pending_terminal, 1);
+
+        assert_token_event(response.recv().await, 111);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), response.recv())
+                .await
+                .expect("Done must follow after the final-token slot is released"),
+            Some(EngineEvent::Done {
+                output: BatchedGenerationOutput {
+                    token_ids,
+                    completion_tokens: 1,
+                    finish_reason: FinishReason::MaxTokens,
+                    ..
+                }
+            }) if token_ids == vec![111]
+        ));
+
+        let settled = handle.snapshot().await.unwrap();
+        assert_eq!(settled.response_delivery_pending_terminal, 0, "{settled:?}");
+        assert_eq!(settled.response_delivery_backpressured, 0, "{settled:?}");
+        assert_eq!(settled.response_stall_evictions, 0, "{settled:?}");
+        handle.stop().await.unwrap();
+    }
+
+    #[test]
+    fn cancellation_after_token_delivery_keeps_terminal_generation_accounted() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(MockForward::default());
+        let mut actor = test_actor(
+            rx,
+            forward,
+            1,
+            false,
+            1,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let req = request(101, 2);
+        let request_id = req.request_id;
+        let (response_tx, mut response_rx) = mpsc::channel(2);
+        push_test_active(
+            &mut actor,
+            req,
+            response_tx,
+            DecodeSlot::Mock {
+                next_token: 101,
+                generated_tokens: Vec::new(),
+            },
+        );
+
+        actor.submit_token_delivery(0, 111, Instant::now());
+        assert_token_event(response_rx.blocking_recv(), 111);
+        assert!(matches!(
+            actor.active[0].delivery_state,
+            ActiveDeliveryState::InFlight { sequence: 0 }
+        ));
+
+        // The delivery worker has made progress, but the actor has not yet
+        // consumed that acknowledgement. Cancellation must account for the
+        // terminal sequence the worker creates after the delivered token.
+        actor.cancel(request_id);
+        assert_eq!(actor.snapshot.response_delivery_pending_terminal, 1);
+        assert!(matches!(
+            response_rx.blocking_recv(),
+            Some(EngineEvent::Error(error)) if error == "request cancelled"
+        ));
+
+        settle_active_deliveries(&mut actor);
+        assert!(actor.active.is_empty());
+        assert_eq!(actor.snapshot.response_delivery_pending_terminal, 0);
+        assert_eq!(actor.snapshot.response_channel_closed, 0);
+        assert_eq!(actor.snapshot.response_stall_evictions, 0);
+    }
+
+    #[test]
+    fn cancellation_after_worker_retires_closed_lane_is_nonfatal() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let mut actor = test_actor(
+            rx,
+            Arc::new(MockForward::default()),
+            1,
+            false,
+            1,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let req = request(101, 2);
+        let request_id = req.request_id;
+        let (response_tx, response_rx) = mpsc::channel(1);
+        drop(response_rx);
+        push_test_active(
+            &mut actor,
+            req,
+            response_tx,
+            DecodeSlot::Mock {
+                next_token: 101,
+                generated_tokens: Vec::new(),
+            },
+        );
+
+        actor.submit_token_delivery(0, 111, Instant::now());
+        let mut held_closed = actor
+            .delivery_results
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker must retire the disconnected lane");
+        assert_eq!(held_closed.len(), 1);
+        let held_closed = held_closed.pop().unwrap();
+        assert!(matches!(held_closed, DeliveryResult::Closed { .. }));
+
+        // Hold the Closed result so Cancel still sees an InFlight row after
+        // the worker has retired its lane. Terminate must be idempotent for
+        // that generation rather than becoming a fatal UnknownKey protocol
+        // error.
+        actor.cancel(request_id);
+        actor.handle_delivery_result(held_closed);
+
+        // A later delivery is a command-channel barrier: by the time its
+        // result arrives, the raced Terminate has also been processed.
+        let (barrier_tx, mut barrier_rx) = mpsc::channel(1);
+        let barrier_key = actor
+            .register_delivery(Uuid::from_u128(999), barrier_tx)
+            .unwrap();
+        assert!(actor.send_delivery(DeliveryCommand::Deliver {
+            key: barrier_key,
+            batch: DeliveryBatch::Token {
+                token: 999,
+                ready_at: Instant::now(),
+                sequence: 0,
+            },
+        }));
+        assert_token_event(barrier_rx.blocking_recv(), 999);
+
+        loop {
+            let results = actor
+                .delivery_results
+                .recv_timeout(Duration::from_secs(1))
+                .expect("barrier delivery result cohort must arrive");
+            let mut barrier_delivered = false;
+            for result in results {
+                barrier_delivered |= matches!(
+                    &result,
+                    DeliveryResult::Delivered {
+                        key,
+                        sequence: 0,
+                        terminal: false,
+                        ..
+                    } if *key == barrier_key
+                );
+                actor.handle_delivery_result(result);
+            }
+            if barrier_delivered {
+                break;
+            }
+        }
+
+        assert!(!actor.stopped);
+        assert!(actor.delivery_pending_terminal.is_empty());
+        assert_eq!(actor.snapshot.response_channel_closed, 1);
+        assert_eq!(actor.snapshot.total_errors, 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_stop_callers_receive_acknowledgements() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let (forward, release) = GatedForward::new(events);
+        let handle = BatchingEngineHandle::start_with_options(Arc::new(forward), 1);
+        let _response = handle.enqueue(request(101, 4)).await.unwrap();
+
+        let forward_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = handle.cached_snapshot();
+            if snapshot.current_batch_size == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < forward_deadline,
+                "request did not enter its gated forward: {snapshot:?}"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        let first = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.stop().await }
+        });
+        let second = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.stop().await }
+        });
+        tokio::task::yield_now().await;
+        release.send(()).unwrap();
+
+        let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .expect("both accepted Stop commands must be acknowledged");
+        first.unwrap().unwrap();
+        second.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_final_handle_stops_actor_and_delivery_worker() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let (forward, release) = GatedForward::new(events);
+        let handle = BatchingEngineHandle::start_with_options(Arc::new(forward), 1);
+        let req = request(101, 4);
+        let cancel = req.cancel.clone();
+        let mut response = handle.enqueue(req).await.unwrap();
+
+        let forward_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = handle.cached_snapshot();
+            if snapshot.current_batch_size == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < forward_deadline,
+                "request did not enter its gated forward: {snapshot:?}"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        drop(handle);
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while response.recv().await.is_some() {}
+        })
+        .await
+        .expect("dropping the final strong handle must tear down both threads");
+        assert!(cancel.is_cancelled());
+    }
+
     #[test]
     fn closed_response_channel_is_counted_without_backpressure() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(MockForward::default());
-        let mut actor = BatchingEngineActor::new(
+        let mut actor = test_actor(
             rx,
             forward,
             8,
@@ -2414,16 +3144,18 @@ mod tests {
         let (response_tx, response_rx) = mpsc::channel(1);
         drop(response_rx);
         let req = request(101, 2);
-        actor.active.push(ActiveRequest {
+        push_test_active(
+            &mut actor,
             req,
             response_tx,
-            slot: DecodeSlot::Mock {
+            DecodeSlot::Mock {
                 next_token: 101,
                 generated_tokens: Vec::new(),
             },
-        });
+        );
 
-        assert!(!actor.send_token_or_evict_stalled(0, 111));
+        actor.submit_token_delivery(0, 111, Instant::now());
+        settle_active_deliveries(&mut actor);
         assert!(actor.active.is_empty());
         assert_eq!(actor.snapshot.response_channel_closed, 1);
         assert_eq!(actor.snapshot.response_backpressure_events, 0);
@@ -2435,7 +3167,7 @@ mod tests {
     fn delivered_token_carries_response_ready_timestamp() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(MockForward::default());
-        let mut actor = BatchingEngineActor::new(
+        let mut actor = test_actor(
             rx,
             forward,
             8,
@@ -2445,17 +3177,19 @@ mod tests {
             ResponseDeliveryPolicy::default(),
         );
         let (response_tx, mut response_rx) = mpsc::channel(1);
-        actor.active.push(ActiveRequest {
-            req: request(101, 2),
+        push_test_active(
+            &mut actor,
+            request(101, 2),
             response_tx,
-            slot: DecodeSlot::Mock {
+            DecodeSlot::Mock {
                 next_token: 101,
                 generated_tokens: Vec::new(),
             },
-        });
+        );
 
         let before = Instant::now();
-        assert!(actor.send_token_or_evict_stalled(0, 111));
+        let ready_at = Instant::now();
+        actor.submit_token_delivery(0, 111, ready_at);
         let after = Instant::now();
         match response_rx.blocking_recv() {
             Some(EngineEvent::Token { token, ready_at }) => {
@@ -2869,7 +3603,7 @@ mod tests {
     fn prefill_admission_quantum_limits_each_actor_cycle() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(MockForward::default());
-        let mut actor = BatchingEngineActor::new(
+        let mut actor = test_actor(
             rx,
             forward,
             8,
@@ -2880,10 +3614,7 @@ mod tests {
         );
         for idx in 0..8 {
             let (response_tx, _response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
-            actor.waiting.push_back(QueuedRequest {
-                req: request(100 + idx as TokenId, 1),
-                response_tx,
-            });
+            queue_test_request(&mut actor, request(100 + idx as TokenId, 1), response_tx);
         }
 
         actor.admit_waiting();
@@ -2907,7 +3638,7 @@ mod tests {
     fn ready_decode_rows_limit_followup_prefill_admission_to_one() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(PendingFirstTokenForward::default());
-        let mut actor = BatchingEngineActor::new(
+        let mut actor = test_actor(
             rx,
             forward.clone(),
             8,
@@ -2919,10 +3650,7 @@ mod tests {
         let mut receivers = Vec::new();
         for idx in 0..6 {
             let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
-            actor.waiting.push_back(QueuedRequest {
-                req: request(100 + idx as TokenId, 2),
-                response_tx,
-            });
+            queue_test_request(&mut actor, request(100 + idx as TokenId, 2), response_tx);
             receivers.push(response_rx);
         }
 
@@ -2934,6 +3662,7 @@ mod tests {
         assert_eq!(actor.snapshot.total_decode_tokens, 3);
         assert!(forward.calls.lock().unwrap().is_empty());
 
+        settle_active_deliveries(&mut actor);
         actor.admit_waiting();
         assert_eq!(actor.active.len(), 4);
         assert_eq!(actor.waiting.len(), 2);
@@ -2951,7 +3680,7 @@ mod tests {
     fn admission_emits_prefill_first_tokens_without_model_decode() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(PendingFirstTokenForward::default());
-        let mut actor = BatchingEngineActor::new(
+        let mut actor = test_actor(
             rx,
             forward.clone(),
             8,
@@ -2963,10 +3692,7 @@ mod tests {
         let mut receivers = Vec::new();
         for idx in 0..4 {
             let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
-            actor.waiting.push_back(QueuedRequest {
-                req: request(100 + idx as TokenId, 1),
-                response_tx,
-            });
+            queue_test_request(&mut actor, request(100 + idx as TokenId, 1), response_tx);
             receivers.push(response_rx);
         }
 
@@ -3043,6 +3769,73 @@ mod tests {
         handle.stop().await.unwrap();
     }
 
+    #[test]
+    fn delivery_ack_cohort_preserves_sustained_wide_decode() {
+        let forward = Arc::new(MockForward::default());
+        let (command_tx, command_rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let (delivery_result_tx, delivery_results) = std_mpsc::channel();
+        let response_delivery_policy = ResponseDeliveryPolicy::default();
+        let delivery_worker = DeliveryWorker::start(
+            response_delivery_policy.stream_stall_grace,
+            Duration::from_millis(1),
+            EngineDeliveryResultSink {
+                result_tx: delivery_result_tx,
+                pending_results: Vec::new(),
+                engine_tx: command_tx.downgrade(),
+            },
+        )
+        .expect("spawn test response delivery worker");
+        let mut actor = BatchingEngineActor::new(
+            command_rx,
+            forward.clone(),
+            8,
+            false,
+            8,
+            false,
+            response_delivery_policy,
+            delivery_worker,
+            delivery_results,
+        );
+
+        let mut receivers = Vec::new();
+        for prompt in 100..108 {
+            let (response_tx, response_rx) = mpsc::channel(64);
+            queue_test_request(&mut actor, request(prompt, 4), response_tx);
+            receivers.push(response_rx);
+        }
+
+        let actor_thread = thread::spawn(move || actor.run());
+        for (row, response_rx) in receivers.iter_mut().enumerate() {
+            let mut token_count = 0;
+            loop {
+                match response_rx.blocking_recv() {
+                    Some(EngineEvent::Token { .. }) => token_count += 1,
+                    Some(EngineEvent::Done { output }) => {
+                        assert_eq!(token_count, 4, "row {row}");
+                        assert_eq!(output.completion_tokens, 4, "row {row}");
+                        break;
+                    }
+                    Some(EngineEvent::Error(error)) => panic!("row {row} failed: {error}"),
+                    None => panic!("row {row} closed before Done"),
+                }
+            }
+        }
+
+        let (stop_reply, stop_ack) = oneshot::channel();
+        command_tx
+            .blocking_send(EngineCommand::Stop { reply: stop_reply })
+            .unwrap();
+        stop_ack.blocking_recv().unwrap();
+        actor_thread.join().unwrap();
+
+        let calls = forward.calls.lock().unwrap().clone();
+        let expected: Vec<Vec<TokenId>> = (0..4)
+            .map(|step| (100..108).map(|token| token + step * 10).collect())
+            .collect();
+        assert_eq!(calls, expected);
+        assert!(calls.iter().all(|batch| batch.len() == 8));
+    }
+
     /// The O(waiting x active x prompt_len) deferral predicate (which also
     /// takes a prefix-cache lock per matching pair) must stay off the
     /// per-decode-step hot path: decode steps evaluate it zero times, one
@@ -3055,7 +3848,7 @@ mod tests {
             ..MockForward::default()
         });
         let (_cmd_tx, cmd_rx) = mpsc::channel(8);
-        let mut actor = BatchingEngineActor::new(
+        let mut actor = test_actor(
             cmd_rx,
             forward.clone(),
             8,

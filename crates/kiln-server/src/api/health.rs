@@ -316,6 +316,9 @@ struct BatchingEngineInfo {
     total_decode_tokens: u64,
     total_prefill_tokens: u64,
     total_errors: u64,
+    response_delivery_in_flight: usize,
+    response_delivery_backpressured: usize,
+    response_delivery_pending_terminal: usize,
     response_backpressure_events: u64,
     response_backpressure_wait_ms: u64,
     response_stall_evictions: u64,
@@ -789,6 +792,9 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             total_decode_tokens: snapshot.total_decode_tokens,
             total_prefill_tokens: snapshot.total_prefill_tokens,
             total_errors: snapshot.total_errors,
+            response_delivery_in_flight: snapshot.response_delivery_in_flight,
+            response_delivery_backpressured: snapshot.response_delivery_backpressured,
+            response_delivery_pending_terminal: snapshot.response_delivery_pending_terminal,
             response_backpressure_events: snapshot.response_backpressure_events,
             response_backpressure_wait_ms: snapshot.response_backpressure_wait_ms,
             response_stall_evictions: snapshot.response_stall_evictions,
@@ -891,6 +897,9 @@ mod tests {
             response_backpressure_wait_ms: 750,
             response_stall_evictions: 2,
             response_channel_closed: 5,
+            response_delivery_in_flight: 7,
+            response_delivery_backpressured: 2,
+            response_delivery_pending_terminal: 1,
             ..BatchingEngineSnapshot::default()
         });
         let json = serde_json::to_value(info).unwrap();
@@ -898,6 +907,9 @@ mod tests {
         assert_eq!(json["snapshot_age_ms"], 125);
         assert_eq!(json["stream_stall_grace_ms"], 750);
         assert_eq!(json["stream_stall_grace_source"], "environment");
+        assert_eq!(json["response_delivery_in_flight"], 7);
+        assert_eq!(json["response_delivery_backpressured"], 2);
+        assert_eq!(json["response_delivery_pending_terminal"], 1);
         assert_eq!(json["response_backpressure_events"], 3);
         assert_eq!(json["response_backpressure_wait_ms"], 750);
         assert_eq!(json["response_stall_evictions"], 2);

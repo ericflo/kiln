@@ -527,7 +527,7 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `model.path` | `KILN_MODEL_PATH` | — | Path to model weights (required) |
 | `server.port` | `KILN_PORT` | 8420 | Server listen port |
 | `server.http_send_buffer_bytes` | `KILN_HTTP_SEND_BUFFER_BYTES` | OS default | Optional accepted-socket `SO_SNDBUF` request (1024–16777216 bytes); Kiln preflights it before readiness and reports requested, kernel-readback, and platform-normalized effective bytes in health/debug |
-| `server.stream_stall_grace_ms` | `KILN_STREAM_STALL_GRACE_MS` | 2000 | Time a full 64-event response channel may remain undrained before that request is cancelled (10–2000 ms). Strict startup validation rejects malformed or out-of-range values; health/debug report the effective value and whether it came from the default, config file, or environment |
+| `server.stream_stall_grace_ms` | `KILN_STREAM_STALL_GRACE_MS` | 2000 | Maximum continuous time a full 64-event response channel may make no delivery progress before that request is cancelled (10–2000 ms). Strict startup validation rejects malformed or out-of-range values; health/debug report the effective value and whether it came from the default, config file, or environment |
 | `server.default_thinking_enabled` | `KILN_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
 | `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block |
 | `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget before Kiln closes an open thinking block |
@@ -541,6 +541,16 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
 | `request_log.enabled` | `KILN_REQUEST_LOG_ENABLED` | true | Durable JSONL request/response log for the inference endpoints |
 | `request_log.dir` | `KILN_REQUEST_LOG_DIR` | `<adapter_dir>/.requests` | Request log directory (rotated + gzipped, retention-capped) |
+
+Streaming response channels are serviced by a fair delivery worker outside the
+compute actor. A full or disconnected client cannot park peer decode or control
+commands; final tokens remain ordered before `Done` or `Error`, and only the
+affected request retains its KV slot during the configured grace. Delivery
+acknowledgements from one decode forward are published to the actor atomically,
+so response handling cannot fragment a wide batch into per-row forwards.
+Current in-flight, backpressured, and pending-terminal counts are reported by
+`/health`, `/v1/debug/model-state`, and the
+`kiln_batching_engine_response_delivery_*` Prometheus gauges.
 
 Device-pool reclaim is disabled by default because CUDA and ROCm reclaim hooks
 may synchronize the accelerator. `on-demand` permits explicit startup and

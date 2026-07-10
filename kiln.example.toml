@@ -34,10 +34,11 @@ shutdown_timeout_secs = 5
                                         # 1024..=16777216. Override strictly with
                                         # KILN_HTTP_SEND_BUFFER_BYTES; malformed/zero/out-of-range
                                         # values are fatal startup errors.
-stream_stall_grace_ms = 2000             # Maximum time a full 64-event response channel may stay
-                                        # undrained before only that request is cancelled. The
-                                        # clock starts after the buffer fills; this is not the
-                                        # request or socket timeout. Valid range: 10..=2000.
+stream_stall_grace_ms = 2000             # Maximum continuous time a full 64-event response channel
+                                        # may make no delivery progress before only that request is
+                                        # cancelled. Delivery runs outside the compute actor; any
+                                        # successful event resets this clock. This is not the request
+                                        # or socket timeout. Valid range: 10..=2000.
                                         # KILN_STREAM_STALL_GRACE_MS overrides this strictly;
                                         # malformed/zero/out-of-range values fail startup. The
                                         # effective value and source are in health/debug state.

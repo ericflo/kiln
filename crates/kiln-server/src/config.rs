@@ -25,14 +25,14 @@ pub const HTTP_SEND_BUFFER_MIN_BYTES: usize = 1024;
 /// large buffers would multiply memory use by every concurrent connection.
 pub const HTTP_SEND_BUFFER_MAX_BYTES: usize = 16 * 1024 * 1024;
 
-/// Default time a full streaming response channel may remain undrained before
-/// the batching actor evicts that request.
+/// Default continuous time a full streaming response channel may make no
+/// delivery progress before the worker asks the actor to evict that request.
 pub const DEFAULT_STREAM_STALL_GRACE_MS: u64 = 2_000;
-/// Minimum stream-stall grace. This matches the actor's retry cadence, so every
-/// accepted value permits at least one bounded delivery retry.
+/// Minimum stream-stall grace. This matches the delivery worker's fair retry
+/// cadence, so every accepted value permits at least one bounded retry.
 pub const STREAM_STALL_GRACE_MIN_MS: u64 = 10;
-/// Maximum stream-stall grace. A stalled response blocks the batching actor's
-/// delivery loop, so this must remain a bounded operational safety valve.
+/// Maximum stream-stall grace. A stalled request retains its KV state and
+/// decode slot while peers continue, so this remains a bounded safety valve.
 pub const STREAM_STALL_GRACE_MAX_MS: u64 = DEFAULT_STREAM_STALL_GRACE_MS;
 
 /// Provenance of a resolved startup configuration value.
@@ -245,9 +245,10 @@ pub struct ServerConfig {
     /// Kiln preflights the listener, normalizes platform accounting, and
     /// rejects ineffective application before advertising readiness.
     pub http_send_buffer_bytes: Option<usize>,
-    /// How long a full per-request streaming response channel may remain
-    /// undrained before the batching actor cancels that request. While delivery
-    /// remains actor-local, this bounds the pause imposed on peer requests.
+    /// How long a full per-request streaming response channel may make no
+    /// delivery progress before the worker reports it for cancellation. The
+    /// request retains KV and a decode slot during this grace; peer lanes and
+    /// control commands continue independently.
     pub stream_stall_grace_ms: StreamStallGrace,
     /// Enable deterministic eval-serving behavior for `kiln serve`.
     pub eval_mode: bool,

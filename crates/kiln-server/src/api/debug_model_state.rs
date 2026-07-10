@@ -109,6 +109,9 @@ struct BatchingEngineSnapshotDebug {
     total_decode_tokens: u64,
     total_prefill_tokens: u64,
     total_errors: u64,
+    response_delivery_in_flight: usize,
+    response_delivery_backpressured: usize,
+    response_delivery_pending_terminal: usize,
     response_backpressure_events: u64,
     response_backpressure_wait_ms: u64,
     response_stall_evictions: u64,
@@ -488,6 +491,9 @@ impl From<BatchingEngineSnapshot> for BatchingEngineSnapshotDebug {
             total_decode_tokens: snapshot.total_decode_tokens,
             total_prefill_tokens: snapshot.total_prefill_tokens,
             total_errors: snapshot.total_errors,
+            response_delivery_in_flight: snapshot.response_delivery_in_flight,
+            response_delivery_backpressured: snapshot.response_delivery_backpressured,
+            response_delivery_pending_terminal: snapshot.response_delivery_pending_terminal,
             response_backpressure_events: snapshot.response_backpressure_events,
             response_backpressure_wait_ms: snapshot.response_backpressure_wait_ms,
             response_stall_evictions: snapshot.response_stall_evictions,
@@ -665,11 +671,17 @@ mod tests {
         let debug = BatchingEngineSnapshotDebug::from(BatchingEngineSnapshot {
             stream_stall_grace_ms: 500,
             stream_stall_grace_source: ConfigValueSource::ConfigFile,
+            response_delivery_in_flight: 4,
+            response_delivery_backpressured: 2,
+            response_delivery_pending_terminal: 1,
             ..BatchingEngineSnapshot::default()
         });
         let json = serde_json::to_value(debug).unwrap();
 
         assert_eq!(json["stream_stall_grace_ms"], 500);
         assert_eq!(json["stream_stall_grace_source"], "config_file");
+        assert_eq!(json["response_delivery_in_flight"], 4);
+        assert_eq!(json["response_delivery_backpressured"], 2);
+        assert_eq!(json["response_delivery_pending_terminal"], 1);
     }
 }

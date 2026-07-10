@@ -421,6 +421,56 @@ fn stream_stall_grace_is_strict_startup_config_not_actor_environment() {
 }
 
 #[test]
+fn response_delivery_is_off_actor_ordered_and_non_blocking() {
+    let batching = read("crates/kiln-server/src/batching_engine.rs");
+    let delivery = read("crates/kiln-server/src/response_delivery.rs");
+
+    let queued = source_between(
+        &batching,
+        "struct QueuedRequest {",
+        "enum ActiveDeliveryState",
+    );
+    let active = source_between(
+        &batching,
+        "struct ActiveRequest {",
+        "struct EngineDeliveryResultSink",
+    );
+    assert!(
+        !queued.contains("response_tx") && !active.contains("response_tx"),
+        "compute-owned request rows must hold delivery keys, not public response senders"
+    );
+    assert!(!batching.contains("blocking_send(EngineEvent"));
+    assert!(!batching.contains("try_send(EngineEvent"));
+    assert!(batching.contains("DeliveryKey"));
+    assert!(batching.contains("ActiveDeliveryState::InFlight"));
+    assert!(batching.contains("DeliveryCommand::DeliverMany"));
+    assert!(batching.contains("delivery_outbox"));
+    assert!(batching.contains("Sender<Vec<DeliveryResult>>"));
+    assert!(batching.contains("for result in results"));
+    assert!(batching.contains("mpsc::WeakSender<EngineCommand>"));
+
+    for required in [
+        "struct DeliveryWorker",
+        "response_tx.try_send(event)",
+        "A terminal batch may include the final token",
+        "generation: u64",
+        "newly_ready_lanes",
+        "cadence_blocked_lanes",
+        "fn notify(&mut self)",
+        "DeliveryResult::ProtocolError",
+    ] {
+        assert!(
+            delivery.contains(required),
+            "response delivery worker contract is missing: {required}"
+        );
+    }
+    assert!(
+        !delivery.contains("blocking_send"),
+        "the delivery worker must never wait on a public response channel"
+    );
+}
+
+#[test]
 fn rocm_graph_owner_lifecycle_is_bounded_and_observable() {
     let rocm_graph = read("crates/kiln-model/src/rocm_graph.rs");
     let generate = read("crates/kiln-model/src/generate.rs");

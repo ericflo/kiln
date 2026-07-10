@@ -705,7 +705,37 @@ impl Metrics {
             ),
         );
 
-        out.push_str("# HELP kiln_batching_engine_response_backpressure_events_total Token-delivery attempts that encountered a full per-request response channel.\n");
+        out.push_str("# HELP kiln_batching_engine_response_delivery_in_flight Requests with a response batch currently owned by the delivery worker.\n");
+        out.push_str("# TYPE kiln_batching_engine_response_delivery_in_flight gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_response_delivery_in_flight {}",
+                gauges.batching_engine.response_delivery_in_flight
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_response_delivery_backpressured Response batches currently waiting for capacity in a per-request response channel.\n");
+        out.push_str("# TYPE kiln_batching_engine_response_delivery_backpressured gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_response_delivery_backpressured {}",
+                gauges.batching_engine.response_delivery_backpressured
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_response_delivery_pending_terminal Terminal response batches awaiting ordered delivery.\n");
+        out.push_str("# TYPE kiln_batching_engine_response_delivery_pending_terminal gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_response_delivery_pending_terminal {}",
+                gauges.batching_engine.response_delivery_pending_terminal
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_response_backpressure_events_total Response batches that encountered a full per-request response channel.\n");
         out.push_str("# TYPE kiln_batching_engine_response_backpressure_events_total counter\n");
         push_line(
             &mut out,
@@ -1298,6 +1328,9 @@ mod tests {
                 total_decode_tokens: 128,
                 total_prefill_tokens: 8192,
                 total_errors: 1,
+                response_delivery_in_flight: 3,
+                response_delivery_backpressured: 2,
+                response_delivery_pending_terminal: 1,
                 response_backpressure_events: 2,
                 response_backpressure_wait_ms: 750,
                 response_stall_evictions: 1,
@@ -1362,6 +1395,16 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_decode_tokens_total 128"));
         assert!(output.contains("kiln_batching_engine_prefill_tokens_total 8192"));
         assert!(output.contains("kiln_batching_engine_errors_total 1"));
+        assert!(output.contains("# TYPE kiln_batching_engine_response_delivery_in_flight gauge"));
+        assert!(output.contains("kiln_batching_engine_response_delivery_in_flight 3"));
+        assert!(
+            output.contains("# TYPE kiln_batching_engine_response_delivery_backpressured gauge")
+        );
+        assert!(output.contains("kiln_batching_engine_response_delivery_backpressured 2"));
+        assert!(
+            output.contains("# TYPE kiln_batching_engine_response_delivery_pending_terminal gauge")
+        );
+        assert!(output.contains("kiln_batching_engine_response_delivery_pending_terminal 1"));
         assert!(output.contains("kiln_batching_engine_response_backpressure_events_total 2"));
         assert!(
             output
