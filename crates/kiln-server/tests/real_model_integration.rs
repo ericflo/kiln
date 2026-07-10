@@ -2527,7 +2527,8 @@ fn tiny_gdn_weights_f32(config: &ModelConfig, device: &Device) -> GpuWeights {
     };
 
     // --- Layer 1: full attention. ---
-    let (q_proj, q_proj_t) = rnd_t(&[num_heads * head_dim, h]);
+    let q_proj_dim = num_heads * head_dim * if config.attn_output_gate { 2 } else { 1 };
+    let (q_proj, q_proj_t) = rnd_t(&[q_proj_dim, h]);
     let (k_proj, k_proj_t) = rnd_t(&[num_kv_heads * head_dim, h]);
     let (v_proj, v_proj_t) = rnd_t(&[num_kv_heads * head_dim, h]);
     let (o_proj, o_proj_t) = rnd_t(&[h, num_heads * head_dim]);
@@ -2571,14 +2572,73 @@ fn tiny_gdn_weights_f32(config: &ModelConfig, device: &Device) -> GpuWeights {
     }
 }
 
+fn tiny_gdn_weights_bf16_deterministic(config: &ModelConfig, device: &Device) -> GpuWeights {
+    let mut weights = tiny_gdn_weights_f32(config, device);
+    let bf16 = |tensor: &Tensor| {
+        tensor
+            .to_dtype(DType::BF16)
+            .expect("cast deterministic tiny weight to BF16")
+    };
+
+    weights.embed_tokens = bf16(&weights.embed_tokens);
+    weights.embed_tokens_t = bf16(&weights.embed_tokens_t);
+    weights.final_norm = bf16(&weights.final_norm);
+    for layer in &mut weights.layers {
+        layer.input_layernorm = bf16(&layer.input_layernorm);
+        layer.post_attention_layernorm = bf16(&layer.post_attention_layernorm);
+        match &mut layer.attention {
+            GpuAttentionWeights::Linear(attention) => {
+                attention.in_proj_qkv = bf16(&attention.in_proj_qkv);
+                attention.in_proj_z = bf16(&attention.in_proj_z);
+                attention.out_proj = bf16(&attention.out_proj);
+                attention.in_proj_a = bf16(&attention.in_proj_a);
+                attention.in_proj_b = bf16(&attention.in_proj_b);
+                attention.conv1d = bf16(&attention.conv1d);
+                attention.a_log = bf16(&attention.a_log);
+                attention.a_log_gates = bf16(&attention.a_log_gates);
+                attention.dt_bias = bf16(&attention.dt_bias);
+                attention.in_proj_qkv_t = bf16(&attention.in_proj_qkv_t);
+                attention.in_proj_z_t = bf16(&attention.in_proj_z_t);
+                attention.in_proj_a_t = bf16(&attention.in_proj_a_t);
+                attention.in_proj_b_t = bf16(&attention.in_proj_b_t);
+                attention.out_proj_t = bf16(&attention.out_proj_t);
+            }
+            GpuAttentionWeights::Full(attention) => {
+                attention.q_proj = bf16(&attention.q_proj);
+                attention.k_proj = bf16(&attention.k_proj);
+                attention.v_proj = bf16(&attention.v_proj);
+                attention.o_proj = bf16(&attention.o_proj);
+                attention.q_norm = bf16(&attention.q_norm);
+                attention.k_norm = bf16(&attention.k_norm);
+                attention.q_proj_t = bf16(&attention.q_proj_t);
+                attention.k_proj_t = bf16(&attention.k_proj_t);
+                attention.v_proj_t = bf16(&attention.v_proj_t);
+                attention.o_proj_t = bf16(&attention.o_proj_t);
+            }
+        }
+        layer.mlp.gate_proj = bf16(&layer.mlp.gate_proj);
+        layer.mlp.up_proj = bf16(&layer.mlp.up_proj);
+        layer.mlp.down_proj = bf16(&layer.mlp.down_proj);
+        layer.mlp.gate_proj_t = bf16(&layer.mlp.gate_proj_t);
+        layer.mlp.up_proj_t = bf16(&layer.mlp.up_proj_t);
+        layer.mlp.down_proj_t = bf16(&layer.mlp.down_proj_t);
+    }
+    weights
+}
+
 fn prefix_test_paged_cache_on(config: &ModelConfig, device: Device) -> PagedKvCacheKt {
+    let dtype = match config.dtype {
+        kiln_core::config::DType::BF16 => DType::BF16,
+        kiln_core::config::DType::FP16 => DType::F16,
+        kiln_core::config::DType::FP32 => DType::F32,
+    };
     PagedKvCacheKt::new(
         config.num_full_attention_layers,
         PREFIX_TEST_NUM_BLOCKS,
         PREFIX_TEST_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
-        DType::F32,
+        dtype,
         device,
     )
     .expect("paged KV cache")
@@ -2730,13 +2790,30 @@ fn assert_linear_attention_state_close(
     );
 }
 
-fn assert_resumable_paged_prefill_matches_monolithic(device: Device, backend: &str) {
-    let config = tiny_gdn_config_f32();
-    let runner = ModelRunner::new(
-        tiny_gdn_weights_f32(&config, &device),
-        test_tokenizer(),
-        config.clone(),
-    );
+fn assert_resumable_paged_prefill_matches_monolithic(
+    model_device: Device,
+    cache_device: Device,
+    model_dtype: DType,
+    attention_output_gate: bool,
+    backend: &str,
+    expected_runtime: Option<&str>,
+) {
+    let mut config = tiny_gdn_config_f32();
+    config.attn_output_gate = attention_output_gate;
+    config.dtype = match model_dtype {
+        DType::F32 => kiln_core::config::DType::FP32,
+        DType::BF16 => kiln_core::config::DType::BF16,
+        other => panic!("unsupported tiny model dtype {other:?}"),
+    };
+    let weights = match model_dtype {
+        DType::F32 => tiny_gdn_weights_f32(&config, &model_device),
+        DType::BF16 => tiny_gdn_weights_bf16_deterministic(&config, &model_device),
+        _ => unreachable!(),
+    };
+    let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+    if let Some(expected_runtime) = expected_runtime {
+        assert_eq!(runner.backend_name(), expected_runtime);
+    }
     let prompt = prefix_test_turn1_prompt();
     let sampling = SamplingParams {
         max_tokens: 1,
@@ -2747,7 +2824,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(device: Device, backend: &s
         PREFIX_TEST_NUM_BLOCKS,
         PREFIX_TEST_BLOCK_SIZE,
     ));
-    let control_cache = prefix_test_paged_cache_on(&config, device.clone());
+    let control_cache = prefix_test_paged_cache_on(&config, cache_device.clone());
     let mut control = runner
         .prepare_paged_batched_decode_with_prefix_cache(
             &prompt,
@@ -2760,14 +2837,14 @@ fn assert_resumable_paged_prefill_matches_monolithic(device: Device, backend: &s
         )
         .expect("monolithic control prefill");
     runner
-        .synchronize_external_yield("monolithic CPU prefill test")
+        .synchronize_external_yield("monolithic prefill parity")
         .unwrap();
 
     let chunked_blocks = Mutex::new(BlockManager::new(
         PREFIX_TEST_NUM_BLOCKS,
         PREFIX_TEST_BLOCK_SIZE,
     ));
-    let chunked_cache = prefix_test_paged_cache_on(&config, device);
+    let chunked_cache = prefix_test_paged_cache_on(&config, cache_device);
     let start = runner
         .begin_paged_batched_decode_with_prefix_cache(
             &prompt,
@@ -2792,7 +2869,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(device: Device, backend: &s
             .advance_paged_batched_prefill(&mut prefill, &sampling, &chunked_cache, 17, None)
             .expect("advance resumable prefill");
         runner
-            .synchronize_external_yield("resumable CPU prefill test quantum")
+            .synchronize_external_yield("resumable prefill parity quantum")
             .unwrap();
         assert!((1..=17).contains(&progress.tokens_processed));
         chunks.push(progress.tokens_processed);
@@ -2892,7 +2969,14 @@ fn assert_resumable_paged_prefill_matches_monolithic(device: Device, backend: &s
 
 #[test]
 fn resumable_paged_prefill_matches_monolithic_cpu() {
-    assert_resumable_paged_prefill_matches_monolithic(Device::Cpu, "CPU");
+    assert_resumable_paged_prefill_matches_monolithic(
+        Device::Cpu,
+        Device::Cpu,
+        DType::F32,
+        false,
+        "CPU",
+        None,
+    );
 }
 
 #[cfg(feature = "rocm")]
@@ -2907,7 +2991,14 @@ fn resumable_paged_prefill_matches_monolithic_rocm() {
         eprintln!("no ROCm device available; skipping resumable prefill parity");
         return;
     }
-    assert_resumable_paged_prefill_matches_monolithic(Device::Rocm(0), "ROCm");
+    assert_resumable_paged_prefill_matches_monolithic(
+        Device::Rocm(0),
+        Device::Rocm(0),
+        DType::F32,
+        false,
+        "ROCm",
+        Some("rocm"),
+    );
 }
 
 #[cfg(feature = "vulkan")]
@@ -2922,7 +3013,16 @@ fn resumable_paged_prefill_matches_monolithic_vulkan() {
         eprintln!("no Vulkan device available; skipping resumable prefill parity");
         return;
     }
-    assert_resumable_paged_prefill_matches_monolithic(Device::Vulkan(0), "Vulkan");
+    // Production Vulkan uses CPU-backed model tensors and canonical paged
+    // pools; the runtime seeds its separate resident cache at decode entry.
+    assert_resumable_paged_prefill_matches_monolithic(
+        Device::Cpu,
+        Device::Cpu,
+        DType::BF16,
+        true,
+        "Vulkan",
+        Some("vulkan"),
+    );
 }
 
 #[test]

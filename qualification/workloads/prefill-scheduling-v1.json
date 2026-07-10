@@ -230,7 +230,7 @@
         },
         {
           "id": "resumable-prefill-parity",
-          "description": "Run the same deterministic nonzero six-quantum hybrid-model prefill parity contract on Device::Vulkan(0).",
+          "description": "Run the same deterministic nonzero six-quantum hybrid-model prefill parity contract through the production Vulkan runtime: CPU-backed BF16 model and canonical paged pools, followed by native resident-cache decode.",
           "required": true,
           "command": [
             "cargo",
