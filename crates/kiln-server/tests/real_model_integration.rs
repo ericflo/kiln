@@ -2392,7 +2392,9 @@ use kiln_model::{
     CancelHandle, FinishReason, PagedBatchedPrefillStart, PagedKvCacheKt, PagedPrefixReuse,
     StreamEvent,
 };
-use kiln_server::batching_engine::{DecodeForward, DecodeSlot, EngineRequest, RealDecodeForward};
+use kiln_server::batching_engine::{
+    DecodeForward, DecodeSlot, EngineRequest, RealDecodeForward, RequestPreparation,
+};
 use kiln_server::state::{LoadedAdapterIdentity, RealPrefixCache};
 use uuid::Uuid;
 
@@ -2760,6 +2762,98 @@ fn resumable_paged_prefill_matches_monolithic_cpu() {
         .free_all(&chunked.allocated_blocks);
     assert_eq!(control_blocks.lock().unwrap().num_used(), 0);
     assert_eq!(chunked_blocks.lock().unwrap().num_used(), 0);
+}
+
+#[test]
+fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
+    let config = tiny_gdn_config_f32();
+    let block_manager = Arc::new(Mutex::new(BlockManager::new(
+        PREFIX_TEST_NUM_BLOCKS,
+        PREFIX_TEST_BLOCK_SIZE,
+    )));
+    let prefix_cache = Arc::new(Mutex::new(RealPrefixCache::new_with_min_register_tokens(
+        true,
+        PREFIX_TEST_BLOCK_SIZE,
+        32,
+        8,
+        1024,
+        64,
+    )));
+    let forward = RealDecodeForward::new(
+        Arc::new(RwLock::new(ModelRunner::new(
+            tiny_gdn_weights_f32(&config, &Device::Cpu),
+            test_tokenizer(),
+            config.clone(),
+        ))),
+        block_manager.clone(),
+        Arc::new(prefix_test_paged_cache(&config)),
+        prefix_cache.clone(),
+        Arc::new(tokio::sync::RwLock::new(())),
+        Arc::new(RwLock::new(None)),
+    );
+    let sampling = SamplingParams {
+        max_tokens: 1,
+        ..SamplingParams::greedy()
+    };
+
+    let request = EngineRequest {
+        request_id: Uuid::new_v4(),
+        prompt_tokens: prefix_test_turn1_prompt(),
+        sampling: sampling.clone(),
+        adapter: None,
+        cancel: CancelHandle::new(),
+    };
+    let RequestPreparation::Prefilling {
+        slot,
+        tokens_processed,
+    } = forward
+        .prepare_request_chunked(&request, 17)
+        .expect("begin actor-owned prefill")
+    else {
+        panic!("uncached prompt unexpectedly became decode-ready")
+    };
+    assert_eq!(tokens_processed, 0);
+    assert!(block_manager.lock().unwrap().num_used() > 0);
+    let RequestPreparation::Prefilling {
+        slot,
+        tokens_processed,
+    } = forward
+        .advance_prefill(slot, 17, &sampling, &request.cancel)
+        .expect("advance actor-owned prefill")
+    else {
+        panic!("17 tokens unexpectedly completed an 81-token prefill")
+    };
+    assert_eq!(tokens_processed, 17);
+    forward.discard_request(slot);
+    assert_eq!(block_manager.lock().unwrap().num_used(), 0);
+    let stats = prefix_cache.lock().unwrap().stats();
+    assert_eq!(stats.active_leases, 0);
+    assert_eq!(stats.pending_release_entries, 0);
+
+    let cancelled = EngineRequest {
+        request_id: Uuid::new_v4(),
+        prompt_tokens: prefix_test_turn1_prompt(),
+        sampling: sampling.clone(),
+        adapter: None,
+        cancel: CancelHandle::new(),
+    };
+    let RequestPreparation::Prefilling { slot, .. } = forward
+        .prepare_request_chunked(&cancelled, 17)
+        .expect("begin cancellable actor-owned prefill")
+    else {
+        panic!("uncached prompt unexpectedly became decode-ready")
+    };
+    assert!(block_manager.lock().unwrap().num_used() > 0);
+    cancelled.cancel.cancel();
+    let error = match forward.advance_prefill(slot, 17, &sampling, &cancelled.cancel) {
+        Ok(_) => panic!("cancelled prefill unexpectedly advanced"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("cancelled"), "{error:#}");
+    assert_eq!(block_manager.lock().unwrap().num_used(), 0);
+    let stats = prefix_cache.lock().unwrap().stats();
+    assert_eq!(stats.active_leases, 0);
+    assert_eq!(stats.pending_release_entries, 0);
 }
 
 /// Batching-engine serve path (CUDA / Vulkan / ROCm / CPU default): a prompt

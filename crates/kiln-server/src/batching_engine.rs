@@ -1313,7 +1313,8 @@ impl BatchingEngineHandle {
             .await
             .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
         rx.await
-            .map_err(|_| anyhow::anyhow!("batching engine stopped before snapshot"))
+            .map_err(|_| anyhow::anyhow!("batching engine stopped before snapshot"))?
+            .map_err(anyhow::Error::msg)
     }
 
     /// Return the latest snapshot published by the actor without enqueueing a
@@ -1466,7 +1467,7 @@ enum EngineCommand {
         reply: oneshot::Sender<()>,
     },
     Snapshot {
-        reply: oneshot::Sender<BatchingEngineSnapshot>,
+        reply: oneshot::Sender<std::result::Result<BatchingEngineSnapshot, String>>,
     },
     /// Physically resize the KV cache to `target_blocks` usable blocks (#26).
     /// Handled at the between-steps barrier so no forward is in flight.
@@ -2019,10 +2020,22 @@ impl BatchingEngineActor {
                 self.publish_snapshot();
             }
             EngineCommand::Snapshot { reply } => {
+                let delivery_barrier = self
+                    .delivery_worker
+                    .as_ref()
+                    .ok_or(DeliveryBarrierError)
+                    .and_then(DeliveryWorker::barrier);
+                if let Err(error) = delivery_barrier {
+                    let _ = reply.send(Err(format!(
+                        "response delivery worker unavailable at snapshot barrier: {error}"
+                    )));
+                    return;
+                }
+                self.drain_delivery_results();
                 self.refresh_snapshot();
                 self.refresh_deferral_gauge();
                 self.publish_snapshot();
-                let _ = reply.send(self.snapshot.clone());
+                let _ = reply.send(Ok(self.snapshot.clone()));
             }
             EngineCommand::ResizeKv {
                 target_blocks,
@@ -2804,6 +2817,7 @@ mod tests {
     use kiln_core::block::BlockTable;
     use kiln_core::sampling::ThinkingBudget;
     use kiln_model::LinearAttentionState;
+    use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
 
     #[derive(Default)]
@@ -2817,6 +2831,181 @@ mod tests {
     struct PendingFirstTokenForward {
         calls: StdMutex<Vec<Vec<TokenId>>>,
         prepare_delay: Duration,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum SchedulingEvent {
+        Decode(Vec<TokenId>),
+        Prefill {
+            key: TokenId,
+            tokens: usize,
+            remaining: usize,
+        },
+        Discard(TokenId),
+    }
+
+    #[derive(Default)]
+    struct SyntheticPrefillForward {
+        remaining: StdMutex<HashMap<TokenId, usize>>,
+        events: StdMutex<Vec<SchedulingEvent>>,
+    }
+
+    impl SyntheticPrefillForward {
+        fn mock_slot(key: TokenId) -> DecodeSlot {
+            DecodeSlot::Mock {
+                next_token: key,
+                generated_tokens: Vec::new(),
+            }
+        }
+
+        fn slot_key(slot: &DecodeSlot) -> TokenId {
+            match slot {
+                DecodeSlot::Mock { next_token, .. } => *next_token,
+                DecodeSlot::Real { .. } | DecodeSlot::RealPrefill { .. } => unreachable!(),
+            }
+        }
+    }
+
+    impl DecodeForward for SyntheticPrefillForward {
+        fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
+            Ok(Self::mock_slot(
+                req.prompt_tokens.last().copied().unwrap_or_default(),
+            ))
+        }
+
+        fn supports_resumable_prefill(&self) -> bool {
+            true
+        }
+
+        fn prepare_request_chunked(
+            &self,
+            req: &EngineRequest,
+            _max_tokens: usize,
+        ) -> Result<RequestPreparation> {
+            let key = req.prompt_tokens.last().copied().unwrap_or_default();
+            let slot = Self::mock_slot(key);
+            if req.prompt_tokens.len() <= 1 {
+                return Ok(RequestPreparation::Ready {
+                    slot,
+                    tokens_processed: 0,
+                });
+            }
+            self.remaining
+                .lock()
+                .unwrap()
+                .insert(key, req.prompt_tokens.len());
+            Ok(RequestPreparation::Prefilling {
+                slot,
+                tokens_processed: 0,
+            })
+        }
+
+        fn is_prefilling(&self, slot: &DecodeSlot) -> bool {
+            let DecodeSlot::Mock { next_token, .. } = slot else {
+                return matches!(slot, DecodeSlot::RealPrefill { .. });
+            };
+            self.remaining.lock().unwrap().contains_key(next_token)
+        }
+
+        fn advance_prefill(
+            &self,
+            slot: DecodeSlot,
+            max_tokens: usize,
+            _sampling: &SamplingParams,
+            cancel: &CancelHandle,
+        ) -> Result<RequestPreparation> {
+            anyhow::ensure!(!cancel.is_cancelled(), "synthetic prefill cancelled");
+            let key = Self::slot_key(&slot);
+            let (tokens, remaining_after) = {
+                let mut remaining = self.remaining.lock().unwrap();
+                let remaining_tokens = remaining
+                    .get_mut(&key)
+                    .ok_or_else(|| anyhow::anyhow!("missing synthetic prefill state for {key}"))?;
+                let tokens = (*remaining_tokens).min(max_tokens);
+                anyhow::ensure!(tokens > 0, "synthetic prefill received an empty budget");
+                *remaining_tokens -= tokens;
+                let remaining_after = *remaining_tokens;
+                if remaining_after == 0 {
+                    remaining.remove(&key);
+                }
+                (tokens, remaining_after)
+            };
+            thread::sleep(Duration::from_micros(100));
+            self.events.lock().unwrap().push(SchedulingEvent::Prefill {
+                key,
+                tokens,
+                remaining: remaining_after,
+            });
+            if remaining_after == 0 {
+                Ok(RequestPreparation::Ready {
+                    slot,
+                    tokens_processed: tokens,
+                })
+            } else {
+                Ok(RequestPreparation::Prefilling {
+                    slot,
+                    tokens_processed: tokens,
+                })
+            }
+        }
+
+        fn forward_decode(
+            &self,
+            slots: &mut [&mut DecodeSlot],
+            _sampling: &[SamplingParams],
+        ) -> Result<Vec<TokenId>> {
+            let keys: Vec<_> = slots.iter().map(|slot| Self::slot_key(slot)).collect();
+            self.events
+                .lock()
+                .unwrap()
+                .push(SchedulingEvent::Decode(keys.clone()));
+            Ok(keys.into_iter().map(|key| key + 1).collect())
+        }
+
+        fn accept_token(&self, slot: &mut DecodeSlot, token: TokenId) -> Result<usize> {
+            let DecodeSlot::Mock {
+                next_token,
+                generated_tokens,
+            } = slot
+            else {
+                anyhow::bail!("non-mock slot sent to synthetic accept_token")
+            };
+            generated_tokens.push(token);
+            *next_token = token;
+            Ok(generated_tokens.len())
+        }
+
+        fn finish_request(
+            &self,
+            slot: DecodeSlot,
+            finish_reason: FinishReason,
+        ) -> Result<DecodeForwardOutput> {
+            let DecodeSlot::Mock {
+                generated_tokens, ..
+            } = slot
+            else {
+                anyhow::bail!("non-mock slot sent to synthetic finish_request")
+            };
+            Ok(DecodeForwardOutput {
+                output: GenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason,
+                },
+                prefill_duration: Duration::ZERO,
+                decode_duration: Duration::ZERO,
+            })
+        }
+
+        fn discard_request(&self, slot: DecodeSlot) {
+            let key = Self::slot_key(&slot);
+            if self.remaining.lock().unwrap().remove(&key).is_some() {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(SchedulingEvent::Discard(key));
+            }
+        }
     }
 
     impl DecodeForward for MockForward {
@@ -4611,6 +4800,185 @@ mod tests {
         let calls = forward.calls.lock().unwrap().clone();
         assert_eq!(calls, vec![vec![2, 9], vec![3]]);
         handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn token_budget_fairly_mixes_short_decode_1k_and_16k_prefill() {
+        const SHORT_KEY: TokenId = 10;
+        const MEDIUM_KEY: TokenId = 1_000;
+        const LONG_KEY: TokenId = 16_000;
+        const TOKEN_BUDGET: usize = 32;
+
+        let forward = Arc::new(SyntheticPrefillForward::default());
+        let budget = BatchTokenBudget::new(TOKEN_BUDGET, ConfigValueSource::ConfigFile).unwrap();
+        let handle = BatchingEngineHandle::start_with_policy(
+            forward.clone(),
+            3,
+            budget,
+            false,
+            3,
+            true,
+            ResponseDeliveryPolicy::default(),
+        );
+
+        let short = request_with_tokens(vec![SHORT_KEY], 8);
+        let medium = request_with_tokens(vec![MEDIUM_KEY; 1_024], 1);
+        let long = request_with_tokens(vec![LONG_KEY; 16_384], 1);
+        let long_id = long.request_id;
+        let (short_rx, medium_rx, long_rx) = tokio::join!(
+            handle.enqueue(short),
+            handle.enqueue(medium),
+            handle.enqueue(long)
+        );
+        let mut short_rx = short_rx.unwrap();
+        let mut medium_rx = medium_rx.unwrap();
+        let mut long_rx = long_rx.unwrap();
+
+        let short_tokens = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut tokens = Vec::new();
+            loop {
+                match short_rx.recv().await {
+                    Some(EngineEvent::Token { token, .. }) => tokens.push(token),
+                    Some(EngineEvent::Done { output }) => {
+                        assert_eq!(output.finish_reason, FinishReason::MaxTokens);
+                        break tokens;
+                    }
+                    Some(EngineEvent::Error(error)) => panic!("short decode failed: {error}"),
+                    None => panic!("short decode response closed without a terminal event"),
+                }
+            }
+        })
+        .await
+        .expect("short decode was starved by prefill");
+        assert_eq!(short_tokens.len(), 8);
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match medium_rx.recv().await {
+                    Some(EngineEvent::Token { .. }) => {}
+                    Some(EngineEvent::Done { output }) => {
+                        assert_eq!(output.finish_reason, FinishReason::MaxTokens);
+                        break;
+                    }
+                    Some(EngineEvent::Error(error)) => panic!("1K prefill failed: {error}"),
+                    None => panic!("1K prefill response closed without a terminal event"),
+                }
+            }
+        })
+        .await
+        .expect("1K prefill was starved by 16K prefill");
+
+        let in_flight = handle.snapshot().await.unwrap();
+        assert_eq!(in_flight.active_prefill, 1);
+        assert_eq!(in_flight.max_batch_tokens, TOKEN_BUDGET);
+        assert_eq!(
+            in_flight.max_batch_tokens_source,
+            ConfigValueSource::ConfigFile
+        );
+        assert!(in_flight.last_prefill_tokens <= TOKEN_BUDGET);
+        assert!(in_flight.total_prefill_forwards > 0);
+
+        handle.cancel(long_id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match long_rx.recv().await {
+                    Some(EngineEvent::Error(error)) => {
+                        assert!(error.contains("cancelled"));
+                        break;
+                    }
+                    Some(EngineEvent::Token { .. }) => {}
+                    Some(EngineEvent::Done { .. }) => {
+                        panic!("16K prefill completed before its cancellation barrier")
+                    }
+                    None => panic!("16K prefill response closed without cancellation"),
+                }
+            }
+        })
+        .await
+        .expect("16K prefill cancellation did not settle");
+
+        let settled = handle.snapshot().await.unwrap();
+        assert_eq!(settled.active_prefill, 0);
+        assert_eq!(settled.active_decode, 0);
+        handle.stop().await.unwrap();
+
+        let events = forward.events.lock().unwrap().clone();
+        let prefills: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                SchedulingEvent::Prefill {
+                    key,
+                    tokens,
+                    remaining,
+                } => Some((*key, *tokens, *remaining)),
+                _ => None,
+            })
+            .collect();
+        assert!(prefills.len() > 2);
+        assert_eq!(prefills[0].0, MEDIUM_KEY);
+        assert_eq!(prefills[1].0, LONG_KEY);
+        assert!(
+            prefills
+                .iter()
+                .all(|(_, tokens, _)| *tokens <= TOKEN_BUDGET)
+        );
+        assert_eq!(
+            prefills
+                .iter()
+                .filter(|(key, _, _)| *key == MEDIUM_KEY)
+                .map(|(_, tokens, _)| *tokens)
+                .sum::<usize>(),
+            1_024
+        );
+        let long_progress: usize = prefills
+            .iter()
+            .filter(|(key, _, _)| *key == LONG_KEY)
+            .map(|(_, tokens, _)| *tokens)
+            .sum();
+        assert!(long_progress > 0 && long_progress < 16_384);
+        assert!(events.contains(&SchedulingEvent::Discard(LONG_KEY)));
+
+        let short_decode_indices: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, event)| match event {
+                SchedulingEvent::Decode(keys) if keys.iter().any(|key| *key < MEDIUM_KEY) => {
+                    Some(idx)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(short_decode_indices.len(), 8);
+        let interleaved =
+            &events[*short_decode_indices.first().unwrap()..=*short_decode_indices.last().unwrap()];
+        assert!(interleaved.iter().any(|event| {
+            matches!(
+                event,
+                SchedulingEvent::Prefill {
+                    key: MEDIUM_KEY,
+                    ..
+                }
+            )
+        }));
+        assert!(
+            interleaved
+                .iter()
+                .any(|event| { matches!(event, SchedulingEvent::Prefill { key: LONG_KEY, .. }) })
+        );
+
+        for window in events.windows(2) {
+            if let [
+                SchedulingEvent::Decode(keys),
+                SchedulingEvent::Prefill { tokens, .. },
+            ] = window
+                && keys.iter().any(|key| *key < MEDIUM_KEY)
+            {
+                assert!(
+                    *tokens <= TOKEN_BUDGET - keys.len(),
+                    "prefill quantum did not leave room for its decode cohort: {window:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
