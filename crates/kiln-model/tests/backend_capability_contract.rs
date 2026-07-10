@@ -4565,15 +4565,24 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "paged decode graph replay routing should use the focused ReplayBackend facet"
     );
 
+    let batched_rocm_graph_route_selection = source_between(
+        &generate_source,
+        "let hip_graph_single_row_ready =",
+        "let greedy_route =",
+    );
+    assert!(
+        batched_rocm_graph_route_selection.contains("paged_decode_replay_primitive_enabled")
+            && batched_rocm_graph_route_selection.contains("ReplayNativePrimitive::HipGraph"),
+        "batched ROCm graph readiness should use replay primitive policy"
+    );
     let batched_rocm_graph_section = source_between(
         &generate_source,
         "// R.9: ROCm HIP-graph single-row decode for the batched/batching-engine",
         "let pc_guard = lock_paged_cache(paged_cache)?;",
     );
     assert!(
-        batched_rocm_graph_section.contains("paged_decode_replay_primitive_enabled")
-            && batched_rocm_graph_section.contains("ReplayNativePrimitive::HipGraph"),
-        "batched ROCm graph routing should use replay primitive policy"
+        batched_rocm_graph_section.contains("hip_graph_single_row_ready"),
+        "batched ROCm graph routing should consume capability-derived graph readiness"
     );
     assert!(
         !batched_rocm_graph_section

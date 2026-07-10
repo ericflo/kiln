@@ -783,6 +783,28 @@ fn paged_decode_replay_primitive_enabled(
     native_support_enabled(support) && authority.native_primitive == primitive
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GreedyBatchRoute {
+    HipGraph,
+    Contiguous,
+    Later,
+}
+
+fn greedy_batch_route(
+    all_greedy: bool,
+    cache_is_fp8: bool,
+    row_count: usize,
+    hip_graph_ready: bool,
+) -> GreedyBatchRoute {
+    if all_greedy && row_count == 1 && hip_graph_ready {
+        GreedyBatchRoute::HipGraph
+    } else if all_greedy && !cache_is_fp8 {
+        GreedyBatchRoute::Contiguous
+    } else {
+        GreedyBatchRoute::Later
+    }
+}
+
 fn decode_hot_path_fallback_disabled_context(
     backend: &dyn BackendRuntime,
     operation: &'static str,
@@ -3335,7 +3357,25 @@ impl ModelRunner {
         // launch instead of `run_legacy_lm_head_sample_batch`'s per-row
         // narrow + argmax loop).
         let _ = positions_uniform;
-        let try_contiguous_batched = all_greedy && !cache_is_fp8;
+        let hip_graph_single_row_ready = row_count == 1
+            && paged_decode_replay_primitive_enabled(
+                self.backend.as_ref(),
+                &self.config,
+                1,
+                ReplayNativePrimitive::HipGraph,
+            )
+            && self
+                .rocm_graph
+                .lock()
+                .map(|graph| graph.is_enabled())
+                .unwrap_or(false);
+        let greedy_route = greedy_batch_route(
+            all_greedy,
+            cache_is_fp8,
+            row_count,
+            hip_graph_single_row_ready,
+        );
+        let try_contiguous_batched = greedy_route == GreedyBatchRoute::Contiguous;
 
         let mut sampled: Option<Vec<TokenId>> = None;
         // Multi-batch CUDA graph fast path.
@@ -3778,20 +3818,7 @@ impl ModelRunner {
         // set above and the cuda/eager block below runs unchanged. Sampled rows
         // use the hidden-only graph path and keep the stochastic lm-head sampler
         // outside the captured graph.
-        if sampled.is_none()
-            && row_count == 1
-            && paged_decode_replay_primitive_enabled(
-                self.backend.as_ref(),
-                &self.config,
-                1,
-                ReplayNativePrimitive::HipGraph,
-            )
-            && self
-                .rocm_graph
-                .lock()
-                .map(|g| g.is_enabled())
-                .unwrap_or(false)
-        {
+        if sampled.is_none() && hip_graph_single_row_ready {
             let pc_guard = lock_paged_cache(paged_cache)?;
             if params[0].temperature == 0.0 {
                 let token = self
@@ -8827,6 +8854,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn single_row_hip_graph_preempts_generic_greedy_batch_route() {
+        assert_eq!(
+            greedy_batch_route(true, false, 1, true),
+            GreedyBatchRoute::HipGraph,
+            "BF16 single-row ROCm decode must reach the enabled HIP graph runner"
+        );
+        assert_eq!(
+            greedy_batch_route(true, true, 1, true),
+            GreedyBatchRoute::HipGraph,
+            "FP8 single-row ROCm decode is also graph-capturable"
+        );
+        assert_eq!(
+            greedy_batch_route(true, false, 1, false),
+            GreedyBatchRoute::Contiguous,
+            "graphs-off and non-ROCm single-row decode must retain the eager path"
+        );
+        assert_eq!(
+            greedy_batch_route(true, false, 4, true),
+            GreedyBatchRoute::Contiguous,
+            "multi-row greedy decode must retain true batching"
+        );
+        assert_eq!(
+            greedy_batch_route(false, false, 1, true),
+            GreedyBatchRoute::Later,
+            "sampled single-row decode is handled by the later HIP graph branch"
+        );
     }
 
     #[derive(Debug)]
