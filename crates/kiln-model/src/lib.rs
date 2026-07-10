@@ -83,9 +83,10 @@ pub use forward::LinearAttentionState;
 pub use generate::{
     BackendHealthHandle, BackendHealthSnapshot, DecodeBatcher, DecodeBatcherConfig,
     DecodeBatcherStats, ExternalYieldSyncStats, FinishReason, GenerationOutput, ModelRunner,
-    MtpGenerationOutput, PagedBatchedDecodeState, PagedPrefixNextToken, PagedPrefixRegistration,
-    PagedPrefixReuse, PrefixCachedGenerationOutput, StreamDone, StreamEvent, StreamToken,
-    ThreadedStreamingOutput,
+    MtpGenerationOutput, PagedBatchedDecodeState, PagedBatchedPrefillProgress,
+    PagedBatchedPrefillStart, PagedBatchedPrefillState, PagedPrefixNextToken,
+    PagedPrefixRegistration, PagedPrefixReuse, PrefixCachedGenerationOutput, StreamDone,
+    StreamEvent, StreamToken, ThreadedStreamingOutput,
 };
 pub use kv_cache::KvCache;
 pub use loader::{

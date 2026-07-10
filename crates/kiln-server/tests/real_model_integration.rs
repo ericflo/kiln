@@ -2378,7 +2378,10 @@ use std::sync::{Mutex, RwLock};
 use kiln_core::block::BlockManager;
 use kiln_core::sampling::{SamplingParams, ThinkingBudget};
 use kiln_core::token::TokenId;
-use kiln_model::{CancelHandle, FinishReason, PagedKvCacheKt, PagedPrefixReuse, StreamEvent};
+use kiln_model::{
+    CancelHandle, FinishReason, PagedBatchedPrefillStart, PagedKvCacheKt, PagedPrefixReuse,
+    StreamEvent,
+};
 use kiln_server::batching_engine::{DecodeForward, DecodeSlot, EngineRequest, RealDecodeForward};
 use kiln_server::state::{LoadedAdapterIdentity, RealPrefixCache};
 use uuid::Uuid;
@@ -2640,6 +2643,113 @@ fn legacy_mutable_paged_stream_settles_before_return() {
 /// every real chat-template rendering.
 fn prefix_test_turn1_prompt() -> Vec<TokenId> {
     (0..81u32).map(|i| (i % 17) + 1).collect()
+}
+
+#[test]
+fn resumable_paged_prefill_matches_monolithic_cpu() {
+    let config = tiny_gdn_config_f32();
+    let runner = ModelRunner::new(
+        tiny_gdn_weights_f32(&config, &Device::Cpu),
+        test_tokenizer(),
+        config.clone(),
+    );
+    let prompt = prefix_test_turn1_prompt();
+    let sampling = SamplingParams {
+        max_tokens: 1,
+        ..SamplingParams::greedy()
+    };
+
+    let control_blocks = Mutex::new(BlockManager::new(
+        PREFIX_TEST_NUM_BLOCKS,
+        PREFIX_TEST_BLOCK_SIZE,
+    ));
+    let control_cache = prefix_test_paged_cache(&config);
+    let control = runner
+        .prepare_paged_batched_decode_with_prefix_cache(
+            &prompt,
+            &sampling,
+            &control_blocks,
+            &control_cache,
+            None,
+            true,
+            None,
+        )
+        .expect("monolithic control prefill");
+    runner
+        .synchronize_external_yield("monolithic CPU prefill test")
+        .unwrap();
+
+    let chunked_blocks = Mutex::new(BlockManager::new(
+        PREFIX_TEST_NUM_BLOCKS,
+        PREFIX_TEST_BLOCK_SIZE,
+    ));
+    let chunked_cache = prefix_test_paged_cache(&config);
+    let start = runner
+        .begin_paged_batched_decode_with_prefix_cache(
+            &prompt,
+            &sampling,
+            &chunked_blocks,
+            &chunked_cache,
+            None,
+            true,
+            None,
+        )
+        .expect("begin resumable prefill");
+    let PagedBatchedPrefillStart::Prefilling(prefill) = start else {
+        panic!("an uncached prompt must require prefill")
+    };
+    assert_eq!(prefill.processed_tokens(), 0);
+    assert_eq!(prefill.remaining_tokens(), prompt.len());
+
+    let mut prefill = Some(prefill);
+    let mut chunks = Vec::new();
+    let chunked = loop {
+        let progress = runner
+            .advance_paged_batched_prefill(&mut prefill, &sampling, &chunked_cache, 17, None)
+            .expect("advance resumable prefill");
+        runner
+            .synchronize_external_yield("resumable CPU prefill test quantum")
+            .unwrap();
+        assert!((1..=17).contains(&progress.tokens_processed));
+        chunks.push(progress.tokens_processed);
+        if let Some(state) = progress.decode_state {
+            break state;
+        }
+        assert!(prefill.as_ref().unwrap().remaining_tokens() > 0);
+    };
+
+    assert!(chunks.len() > 1, "prompt should span multiple quanta");
+    assert_eq!(chunks.iter().sum::<usize>(), prompt.len());
+    assert_eq!(chunked.next_token, control.next_token);
+    assert_eq!(chunked.seq_len, control.seq_len);
+    assert_eq!(
+        chunked
+            .prefill_split_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.position),
+        control
+            .prefill_split_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.position)
+    );
+    assert_eq!(
+        chunked
+            .prefill_split_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.position),
+        Some(80)
+    );
+
+    control_blocks
+        .lock()
+        .unwrap()
+        .free_all(&control.allocated_blocks);
+    chunked_blocks
+        .lock()
+        .unwrap()
+        .free_all(&chunked.allocated_blocks);
+    assert_eq!(control_blocks.lock().unwrap().num_used(), 0);
+    assert_eq!(chunked_blocks.lock().unwrap().num_used(), 0);
 }
 
 /// Batching-engine serve path (CUDA / Vulkan / ROCm / CPU default): a prompt

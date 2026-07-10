@@ -565,6 +565,55 @@ pub struct PagedBatchedDecodeState {
     pub id: u64,
 }
 
+/// Resumable prompt-prefill ownership for the server batching actor.
+///
+/// A state is created after prefix lookup and block allocation, then advanced
+/// by bounded token quanta. It owns every resource that the monolithic
+/// `prepare_paged_batched_decode_with_prefix_cache` path owns, so cancellation
+/// can release it and an unsettled accelerator failure can retain it.
+pub struct PagedBatchedPrefillState {
+    block_table: BlockTable,
+    linear_state: LinearAttentionState,
+    prompt_tokens: Vec<TokenId>,
+    cached_tokens: usize,
+    next_position: usize,
+    block_size: usize,
+    allocated_blocks: Vec<u32>,
+    split_pos: Option<usize>,
+    prefill_split_snapshot: Option<LinearAttentionState>,
+    streaming: bool,
+    prefill_duration: std::time::Duration,
+    /// Keeps an intermediate chunk's output alive until the caller performs
+    /// its mandatory external-yield synchronization.
+    pending_logits: Option<kiln_tensor::Tensor>,
+}
+
+impl PagedBatchedPrefillState {
+    pub fn processed_tokens(&self) -> usize {
+        self.next_position.saturating_sub(self.cached_tokens)
+    }
+
+    pub fn remaining_tokens(&self) -> usize {
+        self.prompt_tokens.len().saturating_sub(self.next_position)
+    }
+
+    pub fn into_allocated_blocks(self) -> Vec<u32> {
+        self.allocated_blocks
+    }
+}
+
+/// Initial result of prefix lookup and paged prefill allocation.
+pub enum PagedBatchedPrefillStart {
+    Ready(PagedBatchedDecodeState),
+    Prefilling(PagedBatchedPrefillState),
+}
+
+/// Result of one bounded prefill quantum.
+pub struct PagedBatchedPrefillProgress {
+    pub tokens_processed: usize,
+    pub decode_state: Option<PagedBatchedDecodeState>,
+}
+
 static DECODE_ROW_NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn allocate_decode_row_id(counter: &std::sync::atomic::AtomicU64) -> u64 {
@@ -3037,7 +3086,74 @@ impl ModelRunner {
         capture_prefix_split: bool,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedDecodeState> {
+        let start = self.begin_paged_batched_decode_with_prefix_cache(
+            prompt_tokens,
+            params,
+            block_manager,
+            paged_cache,
+            cached_prefix,
+            capture_prefix_split,
+            cancel,
+        )?;
+        let state = match start {
+            PagedBatchedPrefillStart::Ready(state) => return Ok(state),
+            PagedBatchedPrefillStart::Prefilling(state) => state,
+        };
+        let mut state = Some(state);
+        loop {
+            match self.advance_paged_batched_prefill(
+                &mut state,
+                params,
+                paged_cache,
+                usize::MAX,
+                cancel,
+            ) {
+                Ok(PagedBatchedPrefillProgress {
+                    decode_state: Some(state),
+                    ..
+                }) => return Ok(state),
+                Ok(PagedBatchedPrefillProgress {
+                    decode_state: None, ..
+                }) => {}
+                Err(prepare_err) => {
+                    if let Err(sync_err) =
+                        self.synchronize_external_yield("batched prefill failure cleanup")
+                    {
+                        std::mem::forget(state.take());
+                        return Err(sync_err.context(format!(
+                            "batched prefill also failed before synchronization: {prepare_err:#}"
+                        )));
+                    }
+                    let allocated_blocks = state
+                        .take()
+                        .map(PagedBatchedPrefillState::into_allocated_blocks)
+                        .unwrap_or_default();
+                    if !allocated_blocks.is_empty() {
+                        let mut bm_guard = lock_block_manager(block_manager)?;
+                        bm_guard.free_all(&allocated_blocks);
+                    }
+                    return Err(prepare_err);
+                }
+            }
+        }
+    }
+
+    /// Resolve prefix reuse and allocate paged ownership without executing an
+    /// unbounded prompt forward. Exact cache hits are immediately ready;
+    /// otherwise the returned state must be advanced and externally
+    /// synchronized one bounded quantum at a time.
+    pub fn begin_paged_batched_decode_with_prefix_cache(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        _paged_cache: &PagedKvCache,
+        cached_prefix: Option<PagedPrefixReuse>,
+        capture_prefix_split: bool,
+        cancel: Option<&CancelHandle>,
+    ) -> Result<PagedBatchedPrefillStart> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+        check_cancelled(cancel)?;
 
         let block_size = {
             let bm_guard = lock_block_manager(block_manager)?;
@@ -3067,10 +3183,9 @@ impl ModelRunner {
         };
         let block_table = append_prefix_block_table(cached_blocks, &allocated_blocks);
 
-        let prepared = self.prepare_paged_batched_decode_with_prefix_blocks(
+        let prepared = self.begin_paged_batched_decode_with_prefix_blocks(
             prompt_tokens,
             params,
-            paged_cache,
             block_table,
             cached_prefix,
             block_size,
@@ -3083,10 +3198,10 @@ impl ModelRunner {
             Ok(state) => Ok(state),
             Err(prepare_err) => {
                 if let Err(sync_err) =
-                    self.synchronize_external_yield("batched prefill failure cleanup")
+                    self.synchronize_external_yield("batched prefill initialization failure")
                 {
                     return Err(sync_err.context(format!(
-                        "batched prefill also failed before synchronization: {prepare_err:#}"
+                        "batched prefill initialization also failed before synchronization: {prepare_err:#}"
                     )));
                 }
                 if !allocated_blocks.is_empty() {
@@ -3616,19 +3731,18 @@ impl ModelRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_paged_batched_decode_with_prefix_blocks(
+    fn begin_paged_batched_decode_with_prefix_blocks(
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
-        paged_cache: &PagedKvCache,
         block_table: BlockTable,
         cached_prefix: Option<PagedPrefixReuse>,
         block_size: usize,
         allocated_blocks: Vec<u32>,
         capture_prefix_split: bool,
         cancel: Option<&CancelHandle>,
-    ) -> Result<PagedBatchedDecodeState> {
-        let (cached_tokens, exact_next_token, mut linear_state) = match cached_prefix {
+    ) -> Result<PagedBatchedPrefillStart> {
+        let (cached_tokens, exact_next_token, linear_state) = match cached_prefix {
             Some(prefix) => {
                 let exact_next_token = if prefix.cached_tokens == prompt_tokens.len() {
                     prefix.next_token
@@ -3651,7 +3765,7 @@ impl ModelRunner {
                     token
                 }
             };
-            return Ok(PagedBatchedDecodeState {
+            return Ok(PagedBatchedPrefillStart::Ready(PagedBatchedDecodeState {
                 block_table,
                 linear_state,
                 seq_len: prompt_tokens.len(),
@@ -3667,206 +3781,183 @@ impl ModelRunner {
                 prefill_split_snapshot: None,
                 rolling_snapshot: None,
                 id: next_decode_row_id(),
-            });
+            }));
         }
 
-        let prefill_tokens = &prompt_tokens[cached_tokens..];
         anyhow::ensure!(
-            !prefill_tokens.is_empty(),
+            cached_tokens < prompt_tokens.len(),
             "prefix cache hit must leave at least one suffix token"
         );
-
-        // Capture an intermediate snapshot at the largest block-aligned
-        // position strictly inside the prefill range. This lets us register
-        // an extra prefix-cache entry whose token sequence stops *before*
-        // the chat template's generation-prompt tail (e.g. Qwen3.5's
-        // `<|im_start|>assistant\n<think>\n\n</think>\n\n` when
-        // enable_thinking=false), which is the divergent portion that
-        // every subsequent turn's prompt does NOT contain — without this
-        // snapshot, multi-turn lookups miss because the cached entry's
-        // last block contains generation-prompt-only tokens.
+        check_cancelled(cancel)?;
         let capture_prefix_split =
             capture_prefix_split && prefix_cache_split_snapshot_allowed(self.backend.as_ref());
         let split_pos = capture_prefix_split
             .then(|| strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size))
             .flatten();
-        let mut prefill_split_snapshot: Option<LinearAttentionState> = None;
+        let streaming = streaming_prefill_enabled_for(
+            &self.weights.embed_tokens.device(),
+            prompt_tokens.len().saturating_sub(cached_tokens),
+        );
 
-        let prefill_start = std::time::Instant::now();
+        Ok(PagedBatchedPrefillStart::Prefilling(
+            PagedBatchedPrefillState {
+                block_table,
+                linear_state,
+                prompt_tokens: prompt_tokens.to_vec(),
+                cached_tokens,
+                next_position: cached_tokens,
+                block_size,
+                allocated_blocks,
+                split_pos,
+                prefill_split_snapshot: None,
+                streaming,
+                prefill_duration: std::time::Duration::ZERO,
+                pending_logits: None,
+            },
+        ))
+    }
+
+    /// Execute at most `max_tokens` prompt tokens. The state remains in the
+    /// caller-owned option on every error, allowing the caller to synchronize
+    /// and either release or deliberately retain all accelerator ownership.
+    pub fn advance_paged_batched_prefill(
+        &self,
+        prefill: &mut Option<PagedBatchedPrefillState>,
+        params: &SamplingParams,
+        paged_cache: &PagedKvCache,
+        max_tokens: usize,
+        cancel: Option<&CancelHandle>,
+    ) -> Result<PagedBatchedPrefillProgress> {
+        anyhow::ensure!(max_tokens > 0, "prefill token quantum must be positive");
+        check_cancelled(cancel)?;
+
+        let state = prefill
+            .as_mut()
+            .context("paged batched prefill state was already consumed")?;
+        anyhow::ensure!(
+            state.next_position < state.prompt_tokens.len(),
+            "paged batched prefill has no remaining prompt tokens"
+        );
+        // The previous output was retained only until the caller's external
+        // synchronization between quanta.
+        state.pending_logits.take();
+
+        let chunk_start = state.next_position;
+        let mut chunk_end = chunk_start
+            .saturating_add(max_tokens)
+            .min(state.prompt_tokens.len());
+        if let Some(split_pos) = state.split_pos
+            && split_pos > chunk_start
+            && split_pos < chunk_end
+        {
+            chunk_end = split_pos;
+        }
+        let chunk_len = chunk_end.saturating_sub(chunk_start);
+        anyhow::ensure!(chunk_len > 0, "prefill quantum made no progress");
+
+        let started = std::time::Instant::now();
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(
-                &self.weights.embed_tokens.device(),
-                prefill_tokens.len(),
-            ) {
-                if let Some(split_pos) = split_pos {
-                    let head_tokens = &prompt_tokens[cached_tokens..split_pos];
-                    let _ = model_forward_paged_streaming_with_progress(
-                        &*self.backend,
-                        head_tokens,
-                        &self.weights,
-                        &self.config,
-                        pc_guard,
-                        &block_table,
-                        cached_tokens,
-                        Some(&mut linear_state),
-                        self.active_lora.as_ref(),
-                        cancel,
-                    )
-                    .context("batched-engine prefill forward pass (streaming head) failed")?;
-                    prefill_split_snapshot = Some(
-                        linear_state
-                            .snapshot()
-                            .context("snapshot linear state at streaming prefill split")?,
-                    );
-
-                    let tail_tokens = &prompt_tokens[split_pos..];
-                    let logits = model_forward_paged_streaming_with_progress_offset(
-                        &*self.backend,
-                        tail_tokens,
-                        &self.weights,
-                        &self.config,
-                        pc_guard,
-                        &block_table,
-                        split_pos,
-                        Some(&mut linear_state),
-                        self.active_lora.as_ref(),
-                        cancel,
-                        head_tokens.len() as u64,
-                    )
-                    .context("batched-engine prefill forward pass (streaming tail) failed")?;
-                    if let Some(cancel) = cancel {
-                        cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
-                    }
-                    // (#1082) forward returns kt logits; sampler is kt — no bridge.
-                    logits
-                } else {
-                    let logits = model_forward_paged_streaming_with_progress(
-                        &*self.backend,
-                        prefill_tokens,
-                        &self.weights,
-                        &self.config,
-                        pc_guard,
-                        &block_table,
-                        cached_tokens,
-                        Some(&mut linear_state),
-                        self.active_lora.as_ref(),
-                        cancel,
-                    )
-                    .context("batched-engine prefill forward pass (streaming) failed")?;
-                    // (#1082) forward returns kt logits; sampler is kt — no bridge.
-                    logits
-                }
-            } else if let Some(split_pos) = split_pos {
-                // Split the prefill at the last block boundary so we can
-                // snapshot the linear-attention state at the cross-turn-safe
-                // position. The first call's logits are discarded.
-                let head_tokens = &prompt_tokens[cached_tokens..split_pos];
-                let _ = model_forward_paged_last_token(
+            let tokens = &state.prompt_tokens[chunk_start..chunk_end];
+            if state.streaming {
+                model_forward_paged_streaming_with_progress_offset(
                     &*self.backend,
-                    head_tokens,
+                    tokens,
                     &self.weights,
                     &self.config,
                     pc_guard,
-                    &block_table,
-                    cached_tokens,
-                    Some(&mut linear_state),
+                    &state.block_table,
+                    chunk_start,
+                    Some(&mut state.linear_state),
                     self.active_lora.as_ref(),
-                    None,
+                    cancel,
+                    chunk_start.saturating_sub(state.cached_tokens) as u64,
                 )
-                .context("batched-engine prefill forward pass (head) failed")?;
-                prefill_split_snapshot = Some(
-                    linear_state
-                        .snapshot()
-                        .context("snapshot linear state at prefill split")?,
-                );
-                if let Some(cancel) = cancel {
-                    cancel.report_prefill_tokens_completed(head_tokens.len() as u64);
-                }
-
-                let tail_tokens = &prompt_tokens[split_pos..];
-                let pc_guard = lock_paged_cache(paged_cache)?;
-                let logits = model_forward_paged_last_token(
-                    &*self.backend,
-                    tail_tokens,
-                    &self.weights,
-                    &self.config,
-                    pc_guard,
-                    &block_table,
-                    split_pos,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                    None,
-                )
-                .context("batched-engine prefill forward pass (tail) failed")?;
-                if let Some(cancel) = cancel {
-                    cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
-                }
-                // (#1082) forward returns kt logits; sampler is kt — no bridge.
-                logits
+                .context("batched-engine chunked streaming prefill failed")?
             } else {
-                let logits = model_forward_paged_last_token(
+                model_forward_paged_last_token(
                     &*self.backend,
-                    prefill_tokens,
+                    tokens,
                     &self.weights,
                     &self.config,
                     pc_guard,
-                    &block_table,
-                    cached_tokens,
-                    Some(&mut linear_state),
+                    &state.block_table,
+                    chunk_start,
+                    Some(&mut state.linear_state),
                     self.active_lora.as_ref(),
                     None,
                 )
-                .context("batched-engine prefill forward pass failed")?;
-                if let Some(cancel) = cancel {
-                    cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
-                }
-                // (#1082) forward returns kt logits; sampler is kt — no bridge.
-                logits
+                .context("batched-engine chunked prefill failed")?
             }
         };
-        let prefill_duration = prefill_start.elapsed();
+        state.prefill_duration += started.elapsed();
+        state.next_position = chunk_end;
+        state.pending_logits = Some(logits);
 
-        let next_token = sample_first_decode_token(&logits, params)?;
+        if !state.streaming
+            && let Some(cancel) = cancel
+        {
+            cancel.report_prefill_tokens_completed(state.processed_tokens() as u64);
+        }
+        if state.split_pos == Some(chunk_end) && state.prefill_split_snapshot.is_none() {
+            state.prefill_split_snapshot = Some(
+                state
+                    .linear_state
+                    .snapshot()
+                    .context("snapshot linear state at chunked prefill split")?,
+            );
+        }
+        check_cancelled(cancel)?;
 
+        if state.next_position < state.prompt_tokens.len() {
+            return Ok(PagedBatchedPrefillProgress {
+                tokens_processed: chunk_len,
+                decode_state: None,
+            });
+        }
+
+        let logits = state
+            .pending_logits
+            .as_ref()
+            .context("completed prefill did not retain final logits")?;
+        let next_token = sample_first_decode_token(logits, params)?;
         let registration = self.completed_prompt_registration(
-            prompt_tokens,
-            &block_table,
-            &linear_state,
-            block_size,
+            &state.prompt_tokens,
+            &state.block_table,
+            &state.linear_state,
+            state.block_size,
             Some(PagedPrefixNextToken::Logits(logits.clone())),
         )?;
 
-        // Stash the prefill-split snapshot for finish-time registration.
-        // Multi-turn agentic workloads against chat templates (notably
-        // Qwen3.5 with enable_thinking=false) need a cache entry whose
-        // token sequence stops *before* the generation-prompt tail; the
-        // split position is the largest block-aligned offset ≤ prompt_len,
-        // which for typical prompts lands just before that tail.
-        let prefill_split_snapshot = match (split_pos, prefill_split_snapshot) {
-            (Some(position), Some(state)) => Some(RollingPrefixSnapshot {
+        let mut state = prefill
+            .take()
+            .context("completed paged batched prefill state disappeared")?;
+        let prefill_split_snapshot = match (state.split_pos, state.prefill_split_snapshot.take()) {
+            (Some(position), Some(linear_state)) => Some(RollingPrefixSnapshot {
                 position,
-                linear_state: state,
+                linear_state,
             }),
             _ => None,
         };
-
-        Ok(PagedBatchedDecodeState {
-            block_table,
-            linear_state,
-            seq_len: prompt_tokens.len(),
-            next_token,
-            generated_tokens: Vec::new(),
-            step_seed: params.seed,
-            registration,
-            allocated_blocks,
-            prefill_duration,
-            decode_duration: std::time::Duration::ZERO,
-            prompt_tokens: prompt_tokens.to_vec(),
-            block_size,
-            prefill_split_snapshot,
-            rolling_snapshot: None,
-            id: next_decode_row_id(),
+        Ok(PagedBatchedPrefillProgress {
+            tokens_processed: chunk_len,
+            decode_state: Some(PagedBatchedDecodeState {
+                block_table: state.block_table,
+                linear_state: state.linear_state,
+                seq_len: state.prompt_tokens.len(),
+                next_token,
+                generated_tokens: Vec::new(),
+                step_seed: params.seed,
+                registration,
+                allocated_blocks: state.allocated_blocks,
+                prefill_duration: state.prefill_duration,
+                decode_duration: std::time::Duration::ZERO,
+                prompt_tokens: state.prompt_tokens,
+                block_size: state.block_size,
+                prefill_split_snapshot,
+                rolling_snapshot: None,
+                id: next_decode_row_id(),
+            }),
         })
     }
 
