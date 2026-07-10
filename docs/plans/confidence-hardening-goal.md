@@ -263,6 +263,10 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
   decode at their external-yield boundaries before publishing progress or
   recycling KV ownership; on these paths, latch an observable,
   restart-required quarantine when completion cannot be proven.
+- [ ] Route the legacy mutable-`BlockManager` paged streaming entry point
+  through one settlement-owning reservation. Every post-allocation error,
+  receiver-drop, and success exit must settle before recycling pages and retain
+  GPU-owned state when settlement cannot be proven.
 - [x] Make successful prefix-hit snapshots opaque until an explicit backend
   settlement, and make shared KV reservations retain pages by default unless a
   settlement boundary explicitly releases them.
@@ -276,12 +280,15 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
   threaded prefill, its blocking task, or an explicit decode worker fails.
 - [x] Prevent probe-only streaming completion from failing or overwriting a
   concurrently claimed deterministic-cache owner.
-- [ ] Make incremental detokenization and unexpected worker-channel termination
+- [x] Make incremental detokenization and unexpected worker-channel termination
   fallible end to end; never turn tokenizer decode failure or a missing
   terminal event into empty text followed by a normal-looking `[DONE]`.
-- [ ] Propagate cooperative cancellation into direct threaded streaming so
-  timeout and disconnect stop the model worker rather than only abandoning the
-  async receiver task.
+- [ ] Propagate cooperative cancellation and the request deadline through
+  direct threaded prefill, token delivery, and terminal delivery so timeout and
+  disconnect stop the model worker rather than detaching a blocking receiver or
+  waiting indefinitely on a full SSE queue.
+- [ ] Make prompt-logprob token rendering fallible instead of converting a
+  tokenizer decode failure into an empty display token.
 - [ ] Extend the backend quarantine gate to every inference worker, adapter
   mutation, prewarm, training admission, and queued training transition. A
   quarantined backend must reject rather than wait forever on its retained GPU
@@ -787,6 +794,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Atomic prefix-cache admission | `sha256:f214c03d9215` | this commit | portable + ROCm + Vulkan | overlap-capacity, pinned-LRU, duplicate-page, refcount, and all-target compile gates | passed | Registration now simulates the complete final refcount union and every required LRU removal before mutating resident state. Intrinsically oversized and duplicate-page tables are rejected, a late pinned-entry blockade cannot leave partial evictions, and successful shared-prefix admission preserves exact refcounts with disjoint retained and released block sets. Six focused adversarial tests and all 662 server library tests passed, along with formatting and portable, ROCm, and Vulkan server all-target checks |
 | 2026-07-10 | Leased prefix ownership and generation fencing | `sha256:da76c63f4cc7` | this commit | portable + CPU integration | move-only request/provisional leases, tombstones, generation fences, and real batching integration | passed | Prefix sources are pinned before snapshot copies; hit counters and LRU commit only after success, while partial snapshot failure settles under the GPU permit and quarantines. Clear and purge hide live entries and defer reclamation; cache-local generations reject late registrations. This supersedes the earlier pre-pin snapshot ordering. All 669 server library tests and the real CPU multi-turn integration passed |
 | 2026-07-10 | Settled paged streaming and GPU synchronization | `sha256:da76c63f4cc7` | this commit | portable; ROCm/Vulkan compile gates | worker finalizers, movable permit/writer exclusion, health/debug/Prometheus, SSE, reservation, and cache-owner contracts | passed | Paged workers run their sole cleanup before `Done` or `Error`. Decode panic or external-yield sync failure retains unknown GPU state/read ownership and latches quarantine for covered completion APIs; shared KV pages recycle only after settlement. SFT, including CUDA-native dispatch, uses the per-step writer. Bounded sync telemetry is exported, prefill and explicit worker failures emit structured errors, and probe-only completion cannot replace a concurrent cache owner. All 347 model and 669 server library tests, 19 concurrency contracts, formatting, and portable, ROCm, and Vulkan all-target checks passed |
+| 2026-07-10 | Fallible streaming text and fail-closed terminals | `sha256:fdba4c099963` | this commit | portable; ROCm/Vulkan compile gates | injected decoder faults, saturated SSE queue, abrupt producer drop, tail salvage, and independent review | passed | Incremental decode and flush errors retain their offsets, roll back the accepted token, and propagate through model and batching streams instead of becoming empty text. Explicit worker failure, missing terminal events, timeout, and an unexpected producer drop emit a structured `generation_error` followed by `[DONE]` after queued deltas drain, even when the event queue is full; recent-request records preserve explicit error/timeout classification. Legacy detokenizer exits settle before page release. All 349 model and 670 server library tests, 19 concurrency contracts, formatting, and portable, ROCm, and Vulkan all-target checks passed; direct cancellation/deadline propagation remains the next checkpoint |
 | 2026-07-09 | First reduced-CI measurement | `sha256:cda13f3f84e5` | `3c71cc4002f8` | GitHub Actions | run `29049575526` | passed | Three active jobs completed in 3m52s wall and about 4m36s aggregate time; all GPU backend jobs were skipped |
 
 ## Known Starting Defects

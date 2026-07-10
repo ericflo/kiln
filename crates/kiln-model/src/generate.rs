@@ -1901,15 +1901,18 @@ impl StreamTextGate {
         &mut self,
         tokenizer: &KilnTokenizer,
         tokens: &[TokenId],
-    ) -> (String, Option<String>) {
-        let residual = self.detok.flush(tokenizer, tokens);
+    ) -> Result<(String, Option<String>)> {
+        let residual = self
+            .detok
+            .flush(tokenizer, tokens)
+            .context("failed to flush streaming detokenizer")?;
         let scan = self.stop.push(&residual);
         if let Some(stop) = scan.matched_stop {
-            return (scan.emit, Some(stop));
+            return Ok((scan.emit, Some(stop)));
         }
         let mut trailing = scan.emit;
         trailing.push_str(&self.stop.flush());
-        (trailing, None)
+        Ok((trailing, None))
     }
 }
 
@@ -1919,7 +1922,7 @@ fn emit_stream_token(
     gate: &mut StreamTextGate,
     generated_tokens: &mut Vec<TokenId>,
     token: TokenId,
-) -> StreamTokenDisposition {
+) -> Result<StreamTokenDisposition> {
     generated_tokens.push(token);
 
     // CHECK BEFORE EMIT: the delta passes the stop gate first, so the
@@ -1928,7 +1931,13 @@ fn emit_stream_token(
     // stop-marker parsers saw phantom delimiters in every stream).
     // Exactly one StreamEvent::Token per accepted token (text may be ""),
     // keeping completion-token counting and usage exact.
-    let delta = gate.detok.next_delta(tokenizer, generated_tokens);
+    let delta = match gate.detok.next_delta(tokenizer, generated_tokens) {
+        Ok(delta) => delta,
+        Err(error) => {
+            generated_tokens.pop();
+            return Err(error).context("failed to decode streaming token delta");
+        }
+    };
     let scan = gate.stop.push(&delta);
     if tx
         .send(StreamEvent::Token(StreamToken {
@@ -1937,12 +1946,12 @@ fn emit_stream_token(
         }))
         .is_err()
     {
-        return StreamTokenDisposition::ReceiverDropped;
+        return Ok(StreamTokenDisposition::ReceiverDropped);
     }
-    match scan.matched_stop {
+    Ok(match scan.matched_stop {
         Some(stop) => StreamTokenDisposition::Finished(FinishReason::StopSequence(stop)),
         None => StreamTokenDisposition::Continue,
-    }
+    })
 }
 
 /// Why generation stopped.
@@ -2454,7 +2463,7 @@ impl ModelRunner {
                 &mut gate,
                 &mut generated_tokens,
                 next_token,
-            ) {
+            )? {
                 StreamTokenDisposition::ReceiverDropped => return Ok(rx),
                 StreamTokenDisposition::Finished(reason) => {
                     let _ = tx.send(StreamEvent::Done(StreamDone {
@@ -2491,7 +2500,7 @@ impl ModelRunner {
             };
         }
 
-        let (trailing_text, late_stop) = gate.finish(&self.tokenizer, &generated_tokens);
+        let (trailing_text, late_stop) = gate.finish(&self.tokenizer, &generated_tokens)?;
         let (finish_reason, trailing_text) = match late_stop {
             Some(stop) => (FinishReason::StopSequence(stop), String::new()),
             None => (finish_reason, trailing_text),
@@ -7482,7 +7491,7 @@ impl ModelRunner {
                 &mut gate,
                 &mut generated_tokens,
                 last_token,
-            ) {
+            )? {
                 StreamTokenDisposition::Continue => {}
                 StreamTokenDisposition::Finished(reason) => {
                     let completion_tokens = generated_tokens.len();
@@ -7537,7 +7546,7 @@ impl ModelRunner {
                     &mut gate,
                     &mut generated_tokens,
                     token,
-                ) {
+                )? {
                     StreamTokenDisposition::Continue => {}
                     StreamTokenDisposition::Finished(reason) => {
                         let completion_tokens = generated_tokens.len();
@@ -7572,7 +7581,7 @@ impl ModelRunner {
             }
         }
 
-        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens);
+        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens)?;
         let (finish_reason, gate_trailing) = match late_stop {
             Some(stop) => (FinishReason::StopSequence(stop), String::new()),
             None => (finish_reason, gate_trailing),
@@ -7722,7 +7731,7 @@ impl ModelRunner {
                 &mut gate,
                 &mut generated_tokens,
                 last_token,
-            ) {
+            )? {
                 StreamTokenDisposition::Continue => {}
                 StreamTokenDisposition::Finished(reason) => {
                     let completion_tokens = generated_tokens.len();
@@ -7784,7 +7793,7 @@ impl ModelRunner {
                     &mut gate,
                     &mut generated_tokens,
                     token,
-                ) {
+                )? {
                     StreamTokenDisposition::Continue => {}
                     StreamTokenDisposition::Finished(reason) => {
                         let completion_tokens = generated_tokens.len();
@@ -7819,7 +7828,7 @@ impl ModelRunner {
             }
         }
 
-        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens);
+        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens)?;
         let (finish_reason, gate_trailing) = match late_stop {
             Some(stop) => (FinishReason::StopSequence(stop), String::new()),
             None => (finish_reason, gate_trailing),
@@ -8890,7 +8899,7 @@ impl ModelRunner {
                 &mut gate,
                 &mut generated_tokens,
                 next_token,
-            ) {
+            )? {
                 StreamTokenDisposition::Continue => {}
                 StreamTokenDisposition::Finished(reason) => {
                     finish_reason = reason;
@@ -8931,7 +8940,7 @@ impl ModelRunner {
             seq_len += 1;
         }
 
-        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens);
+        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens)?;
         let (finish_reason, gate_trailing) = match late_stop {
             Some(stop) => (FinishReason::StopSequence(stop), String::new()),
             None => (finish_reason, gate_trailing),
@@ -9015,7 +9024,7 @@ impl ModelRunner {
                 &mut gate,
                 &mut generated_tokens,
                 last_token,
-            ) {
+            )? {
                 StreamTokenDisposition::Continue => {}
                 StreamTokenDisposition::Finished(reason) => {
                     finish_reason = reason;
@@ -9069,7 +9078,7 @@ impl ModelRunner {
                     &mut gate,
                     &mut generated_tokens,
                     token,
-                ) {
+                )? {
                     StreamTokenDisposition::Continue => {}
                     StreamTokenDisposition::Finished(reason) => {
                         finish_reason = reason;
@@ -9098,7 +9107,7 @@ impl ModelRunner {
             }
         }
 
-        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens);
+        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens)?;
         let (finish_reason, gate_trailing) = match late_stop {
             Some(stop) => (FinishReason::StopSequence(stop), String::new()),
             None => (finish_reason, gate_trailing),
@@ -9231,13 +9240,32 @@ impl ModelRunner {
                 break;
             }
 
-            match emit_stream_token(
+            let disposition = match emit_stream_token(
                 &tx,
                 &self.tokenizer,
                 &mut gate,
                 &mut generated_tokens,
                 next_token,
             ) {
+                Ok(disposition) => disposition,
+                Err(detokenize_error) => {
+                    match self.synchronize_external_yield(
+                        "locked streaming detokenization failure cleanup",
+                    ) {
+                        Ok(()) => block_manager.free_all(&allocated_blocks),
+                        Err(sync_error) => {
+                            quarantine_linear_attention_state(&mut linear_state);
+                            std::mem::forget(logits);
+                            return Err(sync_error.context(format!(
+                                "streaming detokenization also failed before synchronization: \
+                                 {detokenize_error:#}"
+                            )));
+                        }
+                    }
+                    return Err(detokenize_error);
+                }
+            };
+            match disposition {
                 StreamTokenDisposition::ReceiverDropped => {
                     block_manager.free_all(&allocated_blocks);
                     return Ok(rx);
@@ -9333,7 +9361,25 @@ impl ModelRunner {
             };
         }
 
-        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens);
+        let (gate_trailing, late_stop) = match gate.finish(&self.tokenizer, &generated_tokens) {
+            Ok(finished) => finished,
+            Err(detokenize_error) => {
+                match self.synchronize_external_yield(
+                    "locked streaming detokenizer flush failure cleanup",
+                ) {
+                    Ok(()) => block_manager.free_all(&allocated_blocks),
+                    Err(sync_error) => {
+                        quarantine_linear_attention_state(&mut linear_state);
+                        std::mem::forget(logits);
+                        return Err(sync_error.context(format!(
+                            "streaming detokenizer flush also failed before synchronization: \
+                             {detokenize_error:#}"
+                        )));
+                    }
+                }
+                return Err(detokenize_error);
+            }
+        };
         let (finish_reason, gate_trailing) = match late_stop {
             Some(stop) => (FinishReason::StopSequence(stop), String::new()),
             None => (finish_reason, gate_trailing),

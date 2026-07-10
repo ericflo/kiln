@@ -18,7 +18,7 @@
 //! so no bytes are silently dropped on non-stop exits.
 
 use kiln_core::token::TokenId;
-use kiln_core::tokenizer::KilnTokenizer;
+use kiln_core::tokenizer::{KilnTokenizer, TokenizerError};
 
 /// HF/vLLM two-offset incremental detokenizer.
 ///
@@ -41,55 +41,79 @@ impl IncrementalDetokenizer {
 
     /// The new complete-character text after the latest token, or `""`
     /// while the tail is an incomplete UTF-8 sequence.
-    pub fn next_delta(&mut self, tokenizer: &KilnTokenizer, tokens: &[TokenId]) -> String {
-        let prefix_text = tokenizer
-            .decode(&tokens[self.prefix_offset..self.read_offset])
-            .unwrap_or_default();
-        let new_text = match tokenizer.decode(&tokens[self.prefix_offset..]) {
-            Ok(t) => t,
-            Err(_) => {
-                // Decode failure: fall back to single-token decode (the
-                // pre-gate behavior) and resync so nothing re-emits.
-                self.prefix_offset = tokens.len().saturating_sub(1);
-                self.read_offset = tokens.len();
-                return tokenizer
-                    .decode(&tokens[tokens.len().saturating_sub(1)..])
-                    .unwrap_or_default();
-            }
-        };
-        if new_text.len() <= prefix_text.len() || new_text.ends_with('\u{FFFD}') {
+    pub fn next_delta(
+        &mut self,
+        tokenizer: &KilnTokenizer,
+        tokens: &[TokenId],
+    ) -> Result<String, TokenizerError> {
+        self.next_delta_with_decode(tokens, |ids| tokenizer.decode(ids))
+    }
+
+    fn next_delta_with_decode(
+        &mut self,
+        tokens: &[TokenId],
+        mut decode: impl FnMut(&[TokenId]) -> Result<String, TokenizerError>,
+    ) -> Result<String, TokenizerError> {
+        self.validate_offsets(tokens)?;
+        let prefix_text = decode(&tokens[self.prefix_offset..self.read_offset])?;
+        let new_text = decode(&tokens[self.prefix_offset..])?;
+        let delta = new_text.strip_prefix(prefix_text.as_str()).ok_or_else(|| {
+            TokenizerError::Decode(
+                "incremental decode changed text that was already emitted".to_string(),
+            )
+        })?;
+        if delta.is_empty() || new_text.ends_with('\u{FFFD}') {
             // No growth, or the newest token split a multi-byte character —
             // hold until it completes.
-            return String::new();
+            return Ok(String::new());
         }
-        // Byte-level BPE keeps the decoded prefix stable; guard anyway
-        // (mirrors the strip_prefix fallback the server used per token).
-        let delta = match new_text.strip_prefix(prefix_text.as_str()) {
-            Some(d) => d.to_string(),
-            None => tokenizer
-                .decode(&tokens[self.read_offset..])
-                .unwrap_or_default(),
-        };
+        let delta = delta.to_string();
         self.prefix_offset = self.read_offset;
         self.read_offset = tokens.len();
-        delta
+        Ok(delta)
     }
 
     /// End-of-stream residual. May legitimately contain U+FFFD when
     /// generation stopped mid-character.
-    pub fn flush(&mut self, tokenizer: &KilnTokenizer, tokens: &[TokenId]) -> String {
-        let prefix_text = tokenizer
-            .decode(&tokens[self.prefix_offset..self.read_offset])
-            .unwrap_or_default();
-        let new_text = tokenizer
-            .decode(&tokens[self.prefix_offset..])
-            .unwrap_or_default();
+    pub fn flush(
+        &mut self,
+        tokenizer: &KilnTokenizer,
+        tokens: &[TokenId],
+    ) -> Result<String, TokenizerError> {
+        self.flush_with_decode(tokens, |ids| tokenizer.decode(ids))
+    }
+
+    fn flush_with_decode(
+        &mut self,
+        tokens: &[TokenId],
+        mut decode: impl FnMut(&[TokenId]) -> Result<String, TokenizerError>,
+    ) -> Result<String, TokenizerError> {
+        self.validate_offsets(tokens)?;
+        let prefix_text = decode(&tokens[self.prefix_offset..self.read_offset])?;
+        let new_text = decode(&tokens[self.prefix_offset..])?;
+        let residual = new_text
+            .strip_prefix(prefix_text.as_str())
+            .ok_or_else(|| {
+                TokenizerError::Decode(
+                    "final incremental decode changed text that was already emitted".to_string(),
+                )
+            })?
+            .to_string();
         self.prefix_offset = tokens.len();
         self.read_offset = tokens.len();
-        new_text
-            .strip_prefix(prefix_text.as_str())
-            .unwrap_or("")
-            .to_string()
+        Ok(residual)
+    }
+
+    fn validate_offsets(&self, tokens: &[TokenId]) -> Result<(), TokenizerError> {
+        if self.prefix_offset <= self.read_offset && self.read_offset <= tokens.len() {
+            return Ok(());
+        }
+        Err(TokenizerError::Decode(format!(
+            "incremental detokenizer offsets {}..{} exceed token length {}",
+            self.prefix_offset,
+            self.read_offset,
+            tokens.len()
+        )))
     }
 }
 
@@ -243,16 +267,16 @@ mod tests {
         let mut tokens: Vec<TokenId> = Vec::new();
 
         tokens.push(2); // E5 A5 — incomplete
-        let delta = d.next_delta(&tok, &tokens);
+        let delta = d.next_delta(&tok, &tokens).unwrap();
         assert_eq!(delta, "", "mid-character bytes must be held");
 
         tokens.push(3); // BD — completes 好
-        let delta = d.next_delta(&tok, &tokens);
+        let delta = d.next_delta(&tok, &tokens).unwrap();
         assert_eq!(delta, "好");
         assert!(!delta.contains('\u{FFFD}'));
 
         // Clean end: nothing left.
-        assert_eq!(d.flush(&tok, &tokens), "");
+        assert_eq!(d.flush(&tok, &tokens).unwrap(), "");
     }
 
     #[test]
@@ -260,9 +284,9 @@ mod tests {
         let tok = fixture_tokenizer();
         let mut d = IncrementalDetokenizer::new();
         let tokens: Vec<TokenId> = vec![0, 2]; // "A" + incomplete bytes
-        assert_eq!(d.next_delta(&tok, &tokens[..1]), "A");
-        assert_eq!(d.next_delta(&tok, &tokens), "", "held");
-        let residue = d.flush(&tok, &tokens);
+        assert_eq!(d.next_delta(&tok, &tokens[..1]).unwrap(), "A");
+        assert_eq!(d.next_delta(&tok, &tokens).unwrap(), "", "held");
+        let residue = d.flush(&tok, &tokens).unwrap();
         assert!(
             residue.contains('\u{FFFD}'),
             "mid-char end legitimately surfaces the replacement char: {residue:?}"
@@ -277,9 +301,85 @@ mod tests {
         let mut out = String::new();
         for t in [0u32, 1, 6] {
             tokens.push(t);
-            out.push_str(&d.next_delta(&tok, &tokens));
+            out.push_str(&d.next_delta(&tok, &tokens).unwrap());
         }
         assert_eq!(out, "A B C");
+    }
+
+    #[test]
+    fn detokenizer_decode_failures_are_visible_and_failure_atomic() {
+        let tok = fixture_tokenizer();
+        let mut next = IncrementalDetokenizer::new();
+        let injected = next.next_delta_with_decode(&[0], |_| {
+            Err(TokenizerError::Decode("injected next failure".to_string()))
+        });
+        assert!(
+            injected
+                .unwrap_err()
+                .to_string()
+                .contains("injected next failure")
+        );
+        assert_eq!((next.prefix_offset, next.read_offset), (0, 0));
+        assert_eq!(next.next_delta(&tok, &[0]).unwrap(), "A");
+
+        let mut second_decode = IncrementalDetokenizer::new();
+        let mut calls = 0;
+        let injected = second_decode.next_delta_with_decode(&[0], |_| {
+            calls += 1;
+            if calls == 2 {
+                Err(TokenizerError::Decode(
+                    "injected second decode failure".to_string(),
+                ))
+            } else {
+                Ok(String::new())
+            }
+        });
+        assert!(
+            injected
+                .unwrap_err()
+                .to_string()
+                .contains("injected second decode failure")
+        );
+        assert_eq!(
+            (second_decode.prefix_offset, second_decode.read_offset),
+            (0, 0)
+        );
+        assert_eq!(second_decode.next_delta(&tok, &[0]).unwrap(), "A");
+
+        let mut flush = IncrementalDetokenizer::new();
+        let injected = flush.flush_with_decode(&[0], |_| {
+            Err(TokenizerError::Decode("injected flush failure".to_string()))
+        });
+        assert!(
+            injected
+                .unwrap_err()
+                .to_string()
+                .contains("injected flush failure")
+        );
+        assert_eq!((flush.prefix_offset, flush.read_offset), (0, 0));
+        assert_eq!(flush.flush(&tok, &[0]).unwrap(), "A");
+    }
+
+    #[test]
+    fn detokenizer_rejects_rewritten_prefixes_and_shortened_histories() {
+        let tok = fixture_tokenizer();
+        let mut detok = IncrementalDetokenizer::new();
+        assert_eq!(detok.next_delta(&tok, &[0]).unwrap(), "A");
+
+        let mut calls = 0;
+        let rewritten = detok.next_delta_with_decode(&[0, 1], |_| {
+            calls += 1;
+            Ok(if calls == 1 { "A" } else { "B" }.to_string())
+        });
+        assert!(
+            rewritten
+                .unwrap_err()
+                .to_string()
+                .contains("already emitted")
+        );
+        assert_eq!((detok.prefix_offset, detok.read_offset), (0, 1));
+
+        assert!(detok.next_delta(&tok, &[]).is_err());
     }
 
     /// The required stop="Observation:" case: the marker never reaches

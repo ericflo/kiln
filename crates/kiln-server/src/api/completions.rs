@@ -6,7 +6,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use tokio_stream::StreamExt;
+#[cfg(test)]
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
@@ -1218,6 +1220,8 @@ async fn emit_or_buffer_reasoning_chunk(
 /// completion; returns `None` when no content was buffered. Sends are
 /// best-effort — a disconnected client must not stop the caller from
 /// recording the salvaged output.
+const STREAM_TAIL_FLUSH_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+
 #[allow(clippy::too_many_arguments)]
 async fn flush_buffered_stream_tail(
     tx: &tokio::sync::mpsc::Sender<Event>,
@@ -1231,17 +1235,21 @@ async fn flush_buffered_stream_tail(
     tool_gate: &mut ToolCallGate,
     finish_reason: &str,
 ) -> Option<AssistantOutputParts> {
+    let flush_deadline = tokio::time::Instant::now() + STREAM_TAIL_FLUSH_GRACE;
     let trailing = reasoning_splitter.flush();
-    let _ = emit_or_buffer_reasoning_chunk(
-        tx,
-        id,
-        created,
-        model,
-        trailing,
-        completion_preview_buf,
-        reasoning_buf,
-        content_buf,
-        tool_gate,
+    let _ = tokio::time::timeout_at(
+        flush_deadline,
+        emit_or_buffer_reasoning_chunk(
+            tx,
+            id,
+            created,
+            model,
+            trailing,
+            completion_preview_buf,
+            reasoning_buf,
+            content_buf,
+            tool_gate,
+        ),
     )
     .await;
 
@@ -1264,35 +1272,38 @@ async fn flush_buffered_stream_tail(
         // Pre-tag content already streamed eagerly (the gate's trim_end
         // holdback makes the wire equal the parsed content exactly) —
         // emit nothing extra, just the calls.
-        let _ = emit_tool_calls_chunk(tx, id, created, model, tool_calls).await;
+        let _ = tokio::time::timeout_at(
+            flush_deadline,
+            emit_tool_calls_chunk(tx, id, created, model, tool_calls),
+        )
+        .await;
     } else {
         // Malformed/unclosed tag (the gate confirmed and buffered) or a
         // pending holdback tail: the client receives the UNSENT suffix
         // exactly once — never a replay of eagerly-streamed bytes.
         let unsent = tool_gate.unsent(content_buf).to_string();
         if !unsent.is_empty() {
-            let _ = emit_content_chunk(tx, id, created, model, unsent).await;
+            let _ = tokio::time::timeout_at(
+                flush_deadline,
+                emit_content_chunk(tx, id, created, model, unsent),
+            )
+            .await;
         }
     }
     tool_gate.mark_all_sent(content_buf);
     Some(assistant_output)
 }
 
-/// Resolve what a timeout/error stream exit should report after the
-/// buffered-tail salvage: the finish reason for the wire and the
-/// completion text for the recent-requests record (the full salvaged
-/// content rather than the capped preview buffer).
-fn stream_tail_finish_and_record(
+/// Preserve the full salvaged completion for recent-request diagnostics.
+/// Terminal classification stays owned by the caller, so a parsed tool call
+/// cannot disguise an error or timeout as a successful `tool_calls` finish.
+fn stream_tail_record_completion(
     tail: Option<AssistantOutputParts>,
-    default_finish: &str,
     fallback_completion: &str,
-) -> (String, String) {
+) -> String {
     match tail {
-        Some(parts) => {
-            let completion = parts.preview_source().to_string();
-            (parts.finish_reason, completion)
-        }
-        None => (default_finish.to_string(), fallback_completion.to_string()),
+        Some(parts) => parts.preview_source().to_string(),
+        None => fallback_completion.to_string(),
     }
 }
 
@@ -5947,6 +5958,8 @@ async fn generate_real_batched_streaming(
     let stream_thinking_budget_metadata =
         thinking_budget_metadata_for_request(state, req, prompt_starts_in_reasoning);
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
+    let stream_terminal = StreamTerminal::default();
+    let stream_terminal_for_task = stream_terminal.clone();
 
     tokio::task::spawn({
         let id = completion_id.clone();
@@ -5966,7 +5979,19 @@ async fn generate_real_batched_streaming(
             // matched stop never reaches the wire).
             let mut detok = kiln_model::stream_text::IncrementalDetokenizer::new();
             let mut stop_gate = kiln_model::stream_text::StopTailGate::new(&stop_sequences);
+            let record_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+            let record_error_for_record = record_error.clone();
             let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
+                let error =
+                    record_error_for_record
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .or_else(|| match finish_reason.as_str() {
+                            "error" => Some("streaming generation failed".to_string()),
+                            "timeout" => Some("streaming generation timed out".to_string()),
+                            _ => None,
+                        });
                 let record = RequestRecord {
                     user_agent: req_user_agent.clone(),
                     client: req_client.clone(),
@@ -5991,7 +6016,7 @@ async fn generate_real_batched_streaming(
                     ttft_ms: None,
                     model_prefill_ms: None,
                     model_decode_ms: None,
-                    error: None,
+                    error,
                 };
                 record_recent_request(&state_for_record, record);
             };
@@ -6098,7 +6123,38 @@ async fn generate_real_batched_streaming(
                                     }
                                 }
 
-                                let delta = detok.next_delta(&tokenizer, &generated_tokens);
+                                let delta = match detok.next_delta(&tokenizer, &generated_tokens) {
+                                    Ok(delta) => delta,
+                                    Err(error) => {
+                                        let error =
+                                            format!("streaming detokenization failed: {error}");
+                                        *record_error.lock().unwrap() = Some(error.clone());
+                                        stream_terminal_for_task.fail(error.clone());
+                                        cancel.cancel();
+                                        let _ = batching_engine.cancel(request_id).await;
+                                        let tail = flush_buffered_stream_tail(
+                                            &tx,
+                                            &id,
+                                            created,
+                                            &model,
+                                            &mut reasoning_splitter,
+                                            &mut completion_buf,
+                                            &mut reasoning_buf,
+                                            &mut content_buf,
+                                            &mut tool_gate,
+                                            "error",
+                                        )
+                                        .await;
+                                        let record_completion =
+                                            stream_tail_record_completion(tail, &completion_buf);
+                                        record(
+                                            "error".to_string(),
+                                            &record_completion,
+                                            completion_token_count,
+                                        );
+                                        return;
+                                    }
+                                };
                                 let scan = stop_gate.push(&delta);
                                 let chunk = reasoning_splitter.push(&scan.emit);
                                 // The emit awaits channel capacity — a client
@@ -6152,8 +6208,40 @@ async fn generate_real_batched_streaming(
                                 // inside held bytes), then the splitter —
                                 // BEFORE the splitter's own flush.
                                 {
-                                    let residual =
-                                        detok.flush(&tokenizer, &generated_tokens);
+                                    let residual = match detok.flush(&tokenizer, &generated_tokens) {
+                                        Ok(residual) => residual,
+                                        Err(error) => {
+                                            let error = format!(
+                                                "streaming detokenizer flush failed: {error}"
+                                            );
+                                            *record_error.lock().unwrap() = Some(error.clone());
+                                            stream_terminal_for_task.fail(error.clone());
+                                            let tail = flush_buffered_stream_tail(
+                                                &tx,
+                                                &id,
+                                                created,
+                                                &model,
+                                                &mut reasoning_splitter,
+                                                &mut completion_buf,
+                                                &mut reasoning_buf,
+                                                &mut content_buf,
+                                                &mut tool_gate,
+                                                "error",
+                                            )
+                                            .await;
+                                            let record_completion =
+                                                stream_tail_record_completion(
+                                                    tail,
+                                                    &completion_buf,
+                                                );
+                                            record(
+                                                "error".to_string(),
+                                                &record_completion,
+                                                completion_token_count,
+                                            );
+                                            return;
+                                        }
+                                    };
                                     let scan = stop_gate.push(&residual);
                                     let mut gate_tail = scan.emit;
                                     if scan.matched_stop.is_none() {
@@ -6311,7 +6399,9 @@ async fn generate_real_batched_streaming(
                                         )))
                                         .await;
                                 }
-                                let _ = tx.send(Event::default().data("[DONE]")).await;
+                                if tx.send(Event::default().data("[DONE]")).await.is_ok() {
+                                    stream_terminal_for_task.complete();
+                                }
                                 record(
                                     finish,
                                     &record_completion,
@@ -6321,6 +6411,9 @@ async fn generate_real_batched_streaming(
                             }
                             Some(EngineEvent::Error(err)) => {
                                 tracing::error!(error = %err, "batched streaming generation failed");
+                                let error = err.to_string();
+                                *record_error.lock().unwrap() = Some(error.clone());
+                                stream_terminal_for_task.fail(error.clone());
                                 let tail = flush_buffered_stream_tail(
                                     &tx,
                                     &id,
@@ -6334,17 +6427,21 @@ async fn generate_real_batched_streaming(
                                     "error",
                                 )
                                 .await;
-                                let _ = tx.send(Event::default().data("[DONE]")).await;
-                                let (finish, record_completion) =
-                                    stream_tail_finish_and_record(tail, "error", &completion_buf);
+                                let record_completion =
+                                    stream_tail_record_completion(tail, &completion_buf);
                                 record(
-                                    finish,
+                                    "error".to_string(),
                                     &record_completion,
                                     completion_token_count,
                                 );
                                 return;
                             }
                             None => {
+                                let error =
+                                    "batched generation worker ended without a terminal event"
+                                        .to_string();
+                                *record_error.lock().unwrap() = Some(error.clone());
+                                stream_terminal_for_task.fail(error.clone());
                                 let tail = flush_buffered_stream_tail(
                                     &tx,
                                     &id,
@@ -6358,11 +6455,10 @@ async fn generate_real_batched_streaming(
                                     "error",
                                 )
                                 .await;
-                                let _ = tx.send(Event::default().data("[DONE]")).await;
-                                let (finish, record_completion) =
-                                    stream_tail_finish_and_record(tail, "error", &completion_buf);
+                                let record_completion =
+                                    stream_tail_record_completion(tail, &completion_buf);
                                 record(
-                                    finish,
+                                    "error".to_string(),
                                     &record_completion,
                                     completion_token_count,
                                 );
@@ -6378,6 +6474,12 @@ async fn generate_real_batched_streaming(
             }
 
             if timed_out {
+                let error = format!(
+                    "streaming generation timed out after {} ms",
+                    timeout.as_millis()
+                );
+                *record_error.lock().unwrap() = Some(error.clone());
+                stream_terminal_for_task.fail(error.clone());
                 cancel.cancel();
                 let _ = batching_engine.cancel(request_id).await;
                 let tail = flush_buffered_stream_tail(
@@ -6393,44 +6495,17 @@ async fn generate_real_batched_streaming(
                     "timeout",
                 )
                 .await;
-                let (finish, record_completion) =
-                    stream_tail_finish_and_record(tail, "timeout", &completion_buf);
-                let timeout_chunk = ChatCompletionChunk {
-                    id: id.clone(),
-                    object: "chat.completion.chunk",
-                    created,
-                    model: model.clone(),
-                    choices: vec![ChunkChoice {
-                        index: 0,
-                        delta: Delta {
-                            role: None,
-                            content: None,
-                            reasoning_content: None,
-                            tool_calls: None,
-                        },
-                        finish_reason: Some(finish.clone()),
-                    }],
-                };
-                let mut thinking_budget_metadata = stream_thinking_budget_metadata.clone();
-                if let Some(status) = finalized_thinking_budget_status(
-                    thinking_budget.as_ref(),
-                    completion_token_count as usize,
-                ) {
-                    apply_thinking_budget_status_to_metadata(&mut thinking_budget_metadata, status);
-                }
-                let _ = tx
-                    .send(Event::default().data(streaming_finish_chunk_json(
-                        &timeout_chunk,
-                        &thinking_budget_metadata,
-                    )))
-                    .await;
-                let _ = tx.send(Event::default().data("[DONE]")).await;
-                record(finish, &record_completion, completion_token_count);
+                let record_completion = stream_tail_record_completion(tail, &completion_buf);
+                record(
+                    "timeout".to_string(),
+                    &record_completion,
+                    completion_token_count,
+                );
             }
         }
     });
 
-    let stream = ReceiverStream::new(rx).map(Ok::<_, std::convert::Infallible>);
+    let stream = stream_with_terminal(rx, stream_terminal);
 
     Ok(Sse::new(stream)
         .keep_alive(KeepAlive::default())
@@ -6800,30 +6875,104 @@ async fn generate_real(
     Ok(response)
 }
 
-async fn send_stream_generation_error(
-    tx: &tokio::sync::mpsc::Sender<Event>,
-    message: impl Into<String>,
-) {
+#[derive(Debug, Default)]
+enum StreamTerminalState {
+    #[default]
+    Pending,
+    Complete,
+    Failed(String),
+    Consumed,
+}
+
+#[derive(Clone, Default)]
+struct StreamTerminal {
+    state: std::sync::Arc<std::sync::Mutex<StreamTerminalState>>,
+}
+
+impl StreamTerminal {
+    fn fail(&self, message: impl Into<String>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*state, StreamTerminalState::Pending) {
+            *state = StreamTerminalState::Failed(message.into());
+        }
+    }
+
+    fn complete(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*state, StreamTerminalState::Pending) {
+            *state = StreamTerminalState::Complete;
+        }
+    }
+
+    fn take_generation_error(&self) -> Option<String> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match std::mem::replace(&mut *state, StreamTerminalState::Consumed) {
+            StreamTerminalState::Pending => {
+                Some("streaming response producer ended without a terminal state".to_string())
+            }
+            StreamTerminalState::Failed(message) => Some(message),
+            StreamTerminalState::Complete | StreamTerminalState::Consumed => None,
+        }
+    }
+}
+
+fn stream_generation_error_events(message: String) -> std::collections::VecDeque<Event> {
     let payload = serde_json::json!({
         "error": {
-            "message": message.into(),
+            "message": message,
             "type": "server_error",
             "code": "generation_error"
         }
     });
-    let _ = tx.send(Event::default().data(payload.to_string())).await;
-    let _ = tx.send(Event::default().data("[DONE]")).await;
+    [
+        Event::default().data(payload.to_string()),
+        Event::default().data("[DONE]"),
+    ]
+    .into()
+}
+
+fn stream_with_terminal(
+    rx: tokio::sync::mpsc::Receiver<Event>,
+    terminal: StreamTerminal,
+) -> impl futures::Stream<Item = Result<Event, std::convert::Infallible>> {
+    futures::stream::unfold(
+        (rx, terminal, std::collections::VecDeque::new()),
+        |(mut rx, terminal, mut pending)| async move {
+            if let Some(event) = pending.pop_front() {
+                return Some((Ok(event), (rx, terminal, pending)));
+            }
+
+            match rx.recv().await {
+                Some(event) => Some((Ok(event), (rx, terminal, pending))),
+                None => {
+                    pending = terminal
+                        .take_generation_error()
+                        .map(stream_generation_error_events)
+                        .unwrap_or_default();
+                    pending
+                        .pop_front()
+                        .map(|event| (Ok(event), (rx, terminal, pending)))
+                }
+            }
+        },
+    )
 }
 
 /// Generate using the real ModelRunner with SSE streaming and paged KV cache.
 ///
-/// Handles two cancellation paths:
-/// 1. **Client disconnect**: When the SSE client drops the connection, the async
-///    mpsc `tx.send()` fails. The forwarding task then drops `sync_rx`, which
-///    causes `tx.send()` in the generation loop to fail, stopping generation.
-/// 2. **Request timeout**: A `tokio::time::sleep` future races against the
-///    forwarding loop. On timeout, the task drops `sync_rx`, stopping generation,
-///    and sends an error event to the client.
+/// Client disconnects stop forwarding once an async SSE send observes the
+/// closed receiver. Request timeouts fail the SSE response explicitly; direct
+/// worker cancellation does not yet propagate on timeout and is hardened
+/// separately.
 async fn generate_real_streaming(
     state: &AppState,
     runner: &std::sync::Arc<std::sync::RwLock<kiln_model::ModelRunner>>,
@@ -6901,6 +7050,8 @@ async fn generate_real_streaming(
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
+    let stream_terminal = StreamTerminal::default();
+    let stream_terminal_for_task = stream_terminal.clone();
 
     // Spawn a task that runs the blocking generation and converts to SSE events.
     tokio::task::spawn({
@@ -6916,7 +7067,19 @@ async fn generate_real_streaming(
             let mut content_buf = String::new();
             let mut completion_token_count: u32 = 0;
 
+            let record_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+            let record_error_for_record = record_error.clone();
             let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
+                let error =
+                    record_error_for_record
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .or_else(|| match finish_reason.as_str() {
+                            "error" => Some("streaming generation failed".to_string()),
+                            "timeout" => Some("streaming generation timed out".to_string()),
+                            _ => None,
+                        });
                 let record = RequestRecord {
                     user_agent: req_user_agent.clone(),
                     client: req_client.clone(),
@@ -6941,7 +7104,7 @@ async fn generate_real_streaming(
                     ttft_ms: None,
                     model_prefill_ms: None,
                     model_decode_ms: None,
-                    error: None,
+                    error,
                 };
                 record_recent_request(&state_for_record, record);
             };
@@ -7102,18 +7265,18 @@ async fn generate_real_streaming(
                         }
                         Ok(Err(error)) => {
                             observe_post_prefill_vram(&memory_budget);
+                            let error = error.to_string();
+                            *record_error.lock().unwrap() = Some(error.clone());
+                            stream_terminal_for_task.fail(error.clone());
                             record("error".to_string(), &completion_buf, completion_token_count);
-                            send_stream_generation_error(&tx, error.to_string()).await;
                             return;
                         }
                         Err(join_error) => {
                             observe_post_prefill_vram(&memory_budget);
+                            let error = format!("streaming prefill task failed: {join_error}");
+                            *record_error.lock().unwrap() = Some(error.clone());
+                            stream_terminal_for_task.fail(error.clone());
                             record("error".to_string(), &completion_buf, completion_token_count);
-                            send_stream_generation_error(
-                                &tx,
-                                format!("streaming prefill task failed: {join_error}"),
-                            )
-                            .await;
                             return;
                         }
                     }
@@ -7148,17 +7311,18 @@ async fn generate_real_streaming(
                     {
                         Ok(Ok(rx)) => rx,
                         Ok(Err(error)) => {
+                            let error = error.to_string();
+                            *record_error.lock().unwrap() = Some(error.clone());
+                            stream_terminal_for_task.fail(error.clone());
                             record("error".to_string(), &completion_buf, completion_token_count);
-                            send_stream_generation_error(&tx, error.to_string()).await;
                             return;
                         }
                         Err(join_error) => {
+                            let error =
+                                format!("speculative streaming prefill task failed: {join_error}");
+                            *record_error.lock().unwrap() = Some(error.clone());
+                            stream_terminal_for_task.fail(error.clone());
                             record("error".to_string(), &completion_buf, completion_token_count);
-                            send_stream_generation_error(
-                                &tx,
-                                format!("speculative streaming prefill task failed: {join_error}"),
-                            )
-                            .await;
                             return;
                         }
                     }
@@ -7180,27 +7344,26 @@ async fn generate_real_streaming(
                     {
                         Ok(Ok(rx)) => rx,
                         Ok(Err(error)) => {
+                            let error = error.to_string();
+                            *record_error.lock().unwrap() = Some(error.clone());
+                            stream_terminal_for_task.fail(error.clone());
                             record("error".to_string(), &completion_buf, completion_token_count);
-                            send_stream_generation_error(&tx, error.to_string()).await;
                             return;
                         }
                         Err(join_error) => {
+                            let error = format!("MTP streaming prefill task failed: {join_error}");
+                            *record_error.lock().unwrap() = Some(error.clone());
+                            stream_terminal_for_task.fail(error.clone());
                             record("error".to_string(), &completion_buf, completion_token_count);
-                            send_stream_generation_error(
-                                &tx,
-                                format!("MTP streaming prefill task failed: {join_error}"),
-                            )
-                            .await;
                             return;
                         }
                     }
                 }
             };
 
-            // Forward token events as SSE, racing against a timeout.
-            // When the timeout fires or client disconnects, we drop `sync_rx`,
-            // which causes `tx.send()` in the generation loop to fail, stopping
-            // generation and freeing KV cache blocks.
+            // Forward token events as SSE, racing against a timeout. A blocking
+            // receiver task already running when the timeout wins is detached;
+            // the cooperative cancellation checkpoint owns that remaining gap.
             //
             // We wrap `sync_rx.recv()` in `spawn_blocking` so it doesn't block
             // the async runtime. The receiver is moved into each spawn_blocking
@@ -7310,7 +7473,12 @@ async fn generate_real_streaming(
                                     )
                                     .await
                                     {
-                                        break;
+                                        record(
+                                            "client_disconnect".to_string(),
+                                            &completion_buf,
+                                            completion_token_count,
+                                        );
+                                        return;
                                     }
                                 }
                                 // Drain any partial-tag tail buffered in the
@@ -7446,7 +7614,9 @@ async fn generate_real_streaming(
                                         )))
                                         .await;
                                 }
-                                let _ = tx.send(Event::default().data("[DONE]")).await;
+                                if tx.send(Event::default().data("[DONE]")).await.is_ok() {
+                                    stream_terminal_for_task.complete();
+                                }
                                 let cache_value = DeterministicCompletionCacheValue {
                                     text: assistant_output.content.clone(),
                                     reasoning_content: assistant_output.reasoning_content.clone(),
@@ -7481,6 +7651,8 @@ async fn generate_real_streaming(
                                 return;
                             }
                             Ok((_, Ok(StreamEvent::Error(error)))) => {
+                                *record_error.lock().unwrap() = Some(error.clone());
+                                stream_terminal_for_task.fail(error.clone());
                                 let tail = flush_buffered_stream_tail(
                                     &tx,
                                     &id,
@@ -7494,22 +7666,21 @@ async fn generate_real_streaming(
                                     "error",
                                 )
                                 .await;
-                                let payload = serde_json::json!({
-                                    "error": {
-                                        "message": error,
-                                        "type": "server_error",
-                                        "code": "generation_error"
-                                    }
-                                });
-                                let _ = tx.send(Event::default().data(payload.to_string())).await;
-                                let _ = tx.send(Event::default().data("[DONE]")).await;
-                                let (finish, record_completion) =
-                                    stream_tail_finish_and_record(tail, "error", &completion_buf);
-                                record(finish, &record_completion, completion_token_count);
+                                let record_completion =
+                                    stream_tail_record_completion(tail, &completion_buf);
+                                record(
+                                    "error".to_string(),
+                                    &record_completion,
+                                    completion_token_count,
+                                );
                                 return;
                             }
-                            _ => {
-                                // Channel closed or join error
+                            Ok((_, Err(recv_error))) => {
+                                let error = format!(
+                                    "generation worker ended without a terminal event: {recv_error}"
+                                );
+                                *record_error.lock().unwrap() = Some(error.clone());
+                                stream_terminal_for_task.fail(error.clone());
                                 let tail = flush_buffered_stream_tail(
                                     &tx,
                                     &id,
@@ -7523,11 +7694,37 @@ async fn generate_real_streaming(
                                     "error",
                                 )
                                 .await;
-                                let _ = tx.send(Event::default().data("[DONE]")).await;
-                                let (finish, record_completion) =
-                                    stream_tail_finish_and_record(tail, "error", &completion_buf);
+                                let record_completion =
+                                    stream_tail_record_completion(tail, &completion_buf);
                                 record(
-                                    finish,
+                                    "error".to_string(),
+                                    &record_completion,
+                                    completion_token_count,
+                                );
+                                return;
+                            }
+                            Err(join_error) => {
+                                let error =
+                                    format!("generation event receiver task failed: {join_error}");
+                                *record_error.lock().unwrap() = Some(error.clone());
+                                stream_terminal_for_task.fail(error.clone());
+                                let tail = flush_buffered_stream_tail(
+                                    &tx,
+                                    &id,
+                                    created,
+                                    &model,
+                                    &mut reasoning_splitter,
+                                    &mut completion_buf,
+                                    &mut reasoning_buf,
+                                    &mut content_buf,
+                                    &mut tool_gate,
+                                    "error",
+                                )
+                                .await;
+                                let record_completion =
+                                    stream_tail_record_completion(tail, &completion_buf);
+                                record(
+                                    "error".to_string(),
                                     &record_completion,
                                     completion_token_count,
                                 );
@@ -7537,17 +7734,24 @@ async fn generate_real_streaming(
                     }
                     _ = tokio::time::sleep_until(deadline) => {
                         timed_out = true;
-                        // recv_handle is dropped, which will abort the
-                        // spawn_blocking task. The sync_rx inside it will
-                        // be dropped, causing the generation loop to stop.
+                        // Dropping a running spawn_blocking JoinHandle detaches
+                        // it; cooperative worker cancellation is handled by a
+                        // separate checkpoint. The SSE response still fails
+                        // explicitly instead of publishing a normal finish.
                         break;
                     }
                 }
             }
 
             if timed_out {
+                let error = format!(
+                    "streaming generation timed out after {} ms",
+                    timeout.as_millis()
+                );
+                *record_error.lock().unwrap() = Some(error.clone());
+                stream_terminal_for_task.fail(error.clone());
                 // Drain any pending partial-tag tail and any buffered
-                // tool-call content before the timeout chunk so the
+                // tool-call content before the error object so the
                 // client doesn't lose those bytes.
                 let tail = flush_buffered_stream_tail(
                     &tx,
@@ -7562,44 +7766,17 @@ async fn generate_real_streaming(
                     "timeout",
                 )
                 .await;
-                let (finish, record_completion) =
-                    stream_tail_finish_and_record(tail, "timeout", &completion_buf);
-                let error_chunk = ChatCompletionChunk {
-                    id: id.clone(),
-                    object: "chat.completion.chunk",
-                    created,
-                    model: model.clone(),
-                    choices: vec![ChunkChoice {
-                        index: 0,
-                        delta: Delta {
-                            role: None,
-                            content: None,
-                            reasoning_content: None,
-                            tool_calls: None,
-                        },
-                        finish_reason: Some(finish.clone()),
-                    }],
-                };
-                let mut thinking_budget_metadata = stream_thinking_budget_metadata.clone();
-                if let Some(status) = finalized_thinking_budget_status(
-                    thinking_budget.as_ref(),
-                    completion_token_count as usize,
-                ) {
-                    apply_thinking_budget_status_to_metadata(&mut thinking_budget_metadata, status);
-                }
-                let _ = tx
-                    .send(Event::default().data(streaming_finish_chunk_json(
-                        &error_chunk,
-                        &thinking_budget_metadata,
-                    )))
-                    .await;
-                let _ = tx.send(Event::default().data("[DONE]")).await;
-                record(finish, &record_completion, completion_token_count);
+                let record_completion = stream_tail_record_completion(tail, &completion_buf);
+                record(
+                    "timeout".to_string(),
+                    &record_completion,
+                    completion_token_count,
+                );
             }
         }
     });
 
-    let stream = ReceiverStream::new(rx).map(Ok::<_, std::convert::Infallible>);
+    let stream = stream_with_terminal(rx, stream_terminal);
 
     Ok(Sse::new(stream)
         .keep_alive(KeepAlive::default())
@@ -11639,22 +11816,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_generation_errors_use_structured_sse_before_done() {
-        let (tx, rx) = tokio::sync::mpsc::channel(2);
-        send_stream_generation_error(&tx, "injected prefill failure".to_string()).await;
+    async fn streaming_generation_errors_survive_a_saturated_event_queue_before_done() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(Event::default().data("queued-before-error"))
+            .await
+            .unwrap();
+        let terminal = StreamTerminal::default();
+        terminal.fail("injected prefill failure");
         drop(tx);
 
-        let body = sse_body_from_events(rx).await;
+        use axum::body::to_bytes;
+        let resp = Sse::new(stream_with_terminal(rx, terminal)).into_response();
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let payloads: Vec<_> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect();
+        assert_eq!(payloads.len(), 3, "unexpected SSE body: {body}");
+        assert_eq!(payloads[0], "queued-before-error");
+        let error: serde_json::Value = serde_json::from_str(payloads[1]).unwrap();
+        assert_eq!(error["error"]["message"], "injected prefill failure");
+        assert_eq!(error["error"]["type"], "server_error");
+        assert_eq!(error["error"]["code"], "generation_error");
+        assert_eq!(payloads[2], "[DONE]");
+    }
+
+    #[tokio::test]
+    async fn streaming_producer_drop_fails_closed_unless_completed() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let terminal = StreamTerminal::default();
+        drop(tx);
+
+        use axum::body::to_bytes;
+        let resp = Sse::new(stream_with_terminal(rx, terminal)).into_response();
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
         let payloads: Vec<_> = body
             .lines()
             .filter_map(|line| line.strip_prefix("data: "))
             .collect();
         assert_eq!(payloads.len(), 2, "unexpected SSE body: {body}");
         let error: serde_json::Value = serde_json::from_str(payloads[0]).unwrap();
-        assert_eq!(error["error"]["message"], "injected prefill failure");
-        assert_eq!(error["error"]["type"], "server_error");
-        assert_eq!(error["error"]["code"], "generation_error");
+        assert_eq!(
+            error["error"]["message"],
+            "streaming response producer ended without a terminal state"
+        );
         assert_eq!(payloads[1], "[DONE]");
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let terminal = StreamTerminal::default();
+        terminal.complete();
+        drop(tx);
+        let resp = Sse::new(stream_with_terminal(rx, terminal)).into_response();
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        assert!(
+            bytes.is_empty(),
+            "completed producers add no fallback events"
+        );
     }
 
     #[tokio::test]
@@ -11883,9 +12102,7 @@ mod tests {
 
         assert_eq!(tail.preview_source(), "partial answer text");
 
-        let (finish, record_completion) =
-            stream_tail_finish_and_record(Some(tail), "timeout", &completion_buf);
-        assert_eq!(finish, "timeout");
+        let record_completion = stream_tail_record_completion(Some(tail), &completion_buf);
         assert_eq!(
             record_completion, "partial answer text",
             "the record must keep the full salvaged content, not the capped preview buffer"
