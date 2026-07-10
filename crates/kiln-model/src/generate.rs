@@ -8442,7 +8442,15 @@ impl ModelRunner {
                     finish_reason = reason;
                     break;
                 }
-                StreamTokenDisposition::ReceiverDropped => return Ok(()),
+                StreamTokenDisposition::ReceiverDropped => {
+                    tracing::debug!(
+                        event = "direct_decode_receiver_dropped",
+                        row_id = rocm_owner.row_id(),
+                        generated_tokens = generated_tokens.len(),
+                        "direct_decode_receiver_dropped"
+                    );
+                    return Ok(());
+                }
             }
 
             if generated_tokens.len() >= params.max_tokens {

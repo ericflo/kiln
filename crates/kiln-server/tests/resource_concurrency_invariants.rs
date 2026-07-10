@@ -341,6 +341,66 @@ fn rocm_graph_decode_row_state_is_released_before_finish_work() {
 }
 
 #[test]
+fn rocm_graph_owner_lifecycle_is_bounded_and_observable() {
+    let rocm_graph = read("crates/kiln-model/src/rocm_graph.rs");
+    let generate = read("crates/kiln-model/src/generate.rs");
+    let health = read("crates/kiln-server/src/api/health.rs");
+
+    for field in [
+        "decode_owner_release_count",
+        "decode_owner_graph_release_count",
+        "tracked_decode_owner_count",
+    ] {
+        assert!(
+            rocm_graph.contains(field),
+            "ROCm graph lifecycle stats must expose {field}"
+        );
+        assert!(
+            health.contains(field),
+            "health must preserve ROCm graph lifecycle field {field}"
+        );
+    }
+    let release = source_between(
+        &rocm_graph,
+        "pub fn release_decode_row(&mut self, row_id: u64)",
+        "fn prepare_owner_decode",
+    );
+    for field in [
+        "record_decode_owner_release(evicted_graphs)",
+        "event = \"rocm_graph_decode_owner_released\"",
+        "row_id",
+        "evicted_graphs",
+        "removed_timeline",
+        "tracked_decode_owner_count = self.decode_timelines.len()",
+    ] {
+        assert!(
+            release.contains(field),
+            "ROCm graph release event must preserve cleanup field {field}"
+        );
+    }
+
+    let owner_start = source_between(
+        &rocm_graph,
+        "fn prepare_owner_decode",
+        "fn max_cached_graphs",
+    );
+    for field in [
+        "event = \"rocm_graph_decode_owner_started\"",
+        "row_id = owner.row_id()",
+        "seq_len",
+        "block0 = block0.unwrap_or_default()",
+        "block0_present = block0.is_some()",
+    ] {
+        assert!(
+            owner_start.contains(field),
+            "ROCm graph start event must preserve request-bound field {field}"
+        );
+    }
+    assert!(generate.contains("event = \"direct_decode_receiver_dropped\""));
+    assert!(generate.contains("row_id = rocm_owner.row_id()"));
+}
+
+#[test]
 fn cuda_graph_state_is_decode_row_owned() {
     let cuda_graph = read("crates/kiln-model/src/cuda_graph.rs");
     let generate = read("crates/kiln-model/src/generate.rs");

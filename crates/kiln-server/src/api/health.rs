@@ -246,7 +246,10 @@ struct RocmGraphInfo {
     replay_successes: Option<u64>,
     replay_failures: Option<u64>,
     failures: Option<u64>,
+    decode_owner_release_count: Option<u64>,
+    decode_owner_graph_release_count: Option<u64>,
     captured_graph_count: Option<usize>,
+    tracked_decode_owner_count: Option<usize>,
 }
 
 fn rocm_graph_info(stats: Option<kiln_model::RocmGraphStats>) -> RocmGraphInfo {
@@ -269,7 +272,11 @@ fn rocm_graph_info(stats: Option<kiln_model::RocmGraphStats>) -> RocmGraphInfo {
         replay_successes: stats.map(|snapshot| snapshot.replay_successes),
         replay_failures: stats.map(|snapshot| snapshot.replay_failures),
         failures: stats.map(|snapshot| snapshot.failures),
+        decode_owner_release_count: stats.map(|snapshot| snapshot.decode_owner_release_count),
+        decode_owner_graph_release_count: stats
+            .map(|snapshot| snapshot.decode_owner_graph_release_count),
         captured_graph_count: stats.map(|snapshot| snapshot.captured_graph_count),
+        tracked_decode_owner_count: stats.map(|snapshot| snapshot.tracked_decode_owner_count),
     }
 }
 
@@ -842,7 +849,10 @@ mod tests {
             replay_successes: 8,
             replay_failures: 1,
             failures: 2,
+            decode_owner_release_count: 3,
+            decode_owner_graph_release_count: 4,
             captured_graph_count: 0,
+            tracked_decode_owner_count: 1,
         }));
         let json = serde_json::to_value(info).unwrap();
 
@@ -859,7 +869,10 @@ mod tests {
         assert_eq!(json["replay_successes"], 8);
         assert_eq!(json["replay_failures"], 1);
         assert_eq!(json["failures"], 2);
+        assert_eq!(json["decode_owner_release_count"], 3);
+        assert_eq!(json["decode_owner_graph_release_count"], 4);
         assert_eq!(json["captured_graph_count"], 0);
+        assert_eq!(json["tracked_decode_owner_count"], 1);
     }
 
     #[test]
@@ -979,7 +992,10 @@ mod tests {
             "replay_successes",
             "replay_failures",
             "failures",
+            "decode_owner_release_count",
+            "decode_owner_graph_release_count",
             "captured_graph_count",
+            "tracked_decode_owner_count",
         ] {
             assert_eq!(rocm_graphs[counter], 0, "unexpected {counter}");
         }

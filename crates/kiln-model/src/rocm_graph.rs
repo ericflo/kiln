@@ -143,6 +143,15 @@ enum RocmGraphOwner {
 }
 
 #[cfg(feature = "rocm")]
+impl RocmGraphOwner {
+    fn row_id(self) -> u64 {
+        match self {
+            Self::DecodeRow(row_id) => row_id,
+        }
+    }
+}
+
+#[cfg(feature = "rocm")]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RocmGraphCacheKey {
     owner: RocmGraphOwner,
@@ -280,6 +289,8 @@ struct RocmGraphCounters {
     replay_attempts: u64,
     replay_successes: u64,
     replay_failures: u64,
+    decode_owner_release_count: u64,
+    decode_owner_graph_release_count: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -313,13 +324,20 @@ impl RocmGraphCounters {
             self.replay_failures = self.replay_failures.saturating_add(1);
         }
     }
+
+    fn record_decode_owner_release(&mut self, released_graphs: usize) {
+        self.decode_owner_release_count = self.decode_owner_release_count.saturating_add(1);
+        self.decode_owner_graph_release_count = self
+            .decode_owner_graph_release_count
+            .saturating_add(released_graphs as u64);
+    }
 }
 
 /// Point-in-time ROCm HIP-graph execution state.
 ///
 /// The attempt/success/failure fields are monotonic for the lifetime of the
-/// runner, including across adapter invalidations. `captured_graph_count` is a
-/// live cache gauge and may decrease when graphs are evicted or invalidated.
+/// runner, including across adapter invalidations. The graph and owner counts
+/// are live gauges and may decrease when state is released or invalidated.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RocmGraphStats {
     /// The ROCm device and primary `KILN_ROCM_GRAPHS` gate requested the graph
@@ -347,8 +365,14 @@ pub struct RocmGraphStats {
     pub replay_failures: u64,
     /// Saturating sum of capture and replay failures.
     pub failures: u64,
+    /// Finished decode owners whose tracked timeline or graph state was removed.
+    pub decode_owner_release_count: u64,
+    /// Captured graphs evicted by finished-owner cleanup.
+    pub decode_owner_graph_release_count: u64,
     /// Graphs currently retained in the live cache.
     pub captured_graph_count: usize,
+    /// Decode owners whose continuity timeline is currently retained.
+    pub tracked_decode_owner_count: usize,
 }
 
 /// Runs decode steps through captured HIP graphs when enabled, falling back to
@@ -448,6 +472,10 @@ impl RocmGraphRunner {
         let captured_graph_count = self.captured.len();
         #[cfg(not(feature = "rocm"))]
         let captured_graph_count = 0;
+        #[cfg(feature = "rocm")]
+        let tracked_decode_owner_count = self.decode_timelines.len();
+        #[cfg(not(feature = "rocm"))]
+        let tracked_decode_owner_count = 0;
 
         RocmGraphStats {
             requested: self.requested,
@@ -465,7 +493,10 @@ impl RocmGraphRunner {
                 .counters
                 .capture_failures
                 .saturating_add(self.counters.replay_failures),
+            decode_owner_release_count: self.counters.decode_owner_release_count,
+            decode_owner_graph_release_count: self.counters.decode_owner_graph_release_count,
             captured_graph_count,
+            tracked_decode_owner_count,
         }
     }
 
@@ -500,11 +531,14 @@ impl RocmGraphRunner {
                 self.cache_full_warned = false;
             }
             if evicted_graphs > 0 || removed_timeline {
-                tracing::trace!(
+                self.counters.record_decode_owner_release(evicted_graphs);
+                tracing::debug!(
+                    event = "rocm_graph_decode_owner_released",
                     row_id,
                     evicted_graphs,
                     removed_timeline,
-                    "ROCm graph: released finished decode-row state"
+                    tracked_decode_owner_count = self.decode_timelines.len(),
+                    "rocm_graph_decode_owner_released"
                 );
             }
         }
@@ -520,6 +554,17 @@ impl RocmGraphRunner {
         seq_len: usize,
     ) -> bool {
         let block0 = block_table.blocks.first().copied();
+        let owner_started = !self.decode_timelines.contains_key(&owner);
+        if owner_started {
+            tracing::debug!(
+                event = "rocm_graph_decode_owner_started",
+                row_id = owner.row_id(),
+                seq_len,
+                block0 = block0.unwrap_or_default(),
+                block0_present = block0.is_some(),
+                "rocm_graph_decode_owner_started"
+            );
+        }
         let timeline = self.decode_timelines.entry(owner).or_default();
         let continues = block0.is_some()
             && timeline.last_decode_seq_len == Some(seq_len.wrapping_sub(1))
@@ -2368,11 +2413,22 @@ mod tests {
         runner
             .decode_timelines
             .insert(second_survivor, Default::default());
+        assert_eq!(runner.stats().tracked_decode_owner_count, 3);
         runner.release_decode_row(7);
 
         assert!(!runner.decode_timelines.contains_key(&target));
         assert!(runner.decode_timelines.contains_key(&survivor));
         assert!(runner.decode_timelines.contains_key(&second_survivor));
+        let stats = runner.stats();
+        assert_eq!(stats.tracked_decode_owner_count, 2);
+        assert_eq!(stats.decode_owner_release_count, 1);
+        assert_eq!(stats.decode_owner_graph_release_count, 0);
+
+        runner.release_decode_row(7);
+        let stats = runner.stats();
+        assert_eq!(stats.tracked_decode_owner_count, 2);
+        assert_eq!(stats.decode_owner_release_count, 1);
+        assert_eq!(stats.decode_owner_graph_release_count, 0);
     }
 
     #[cfg(feature = "rocm")]
@@ -2426,6 +2482,8 @@ mod tests {
         counters.record_capture_outcome(RocmGraphCaptureOutcome::Succeeded);
         counters.record_replay_outcome(true);
         counters.record_replay_outcome(false);
+        counters.record_decode_owner_release(2);
+        counters.record_decode_owner_release(1);
 
         assert_eq!(counters.capture_attempts, 3);
         assert_eq!(counters.capture_successes, 1);
@@ -2434,5 +2492,7 @@ mod tests {
         assert_eq!(counters.replay_attempts, 2);
         assert_eq!(counters.replay_successes, 1);
         assert_eq!(counters.replay_failures, 1);
+        assert_eq!(counters.decode_owner_release_count, 2);
+        assert_eq!(counters.decode_owner_graph_release_count, 3);
     }
 }
