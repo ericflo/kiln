@@ -314,6 +314,34 @@ pub(super) fn kt_tensor_from_f32_bytes(
     }
 }
 
+/// Wrap F32 kernel output bytes as a tensor on the requested device.
+///
+/// Vulkan byte-dispatch helpers stage their results through host-visible
+/// buffers. Callers that continue a device-resident graph must upload those
+/// bytes before returning rather than leaking a CPU tensor into the next op.
+#[inline]
+pub(super) fn kt_tensor_from_f32_bytes_on(
+    data: &[u8],
+    shape: &[usize],
+    dtype: kiln_tensor::DType,
+    device: kiln_tensor::Device,
+) -> Result<kiln_tensor::Tensor> {
+    let f32_tensor = kiln_tensor::Tensor::from_raw_bytes_on(
+        device,
+        kiln_tensor::DType::F32,
+        data.to_vec(),
+        shape.to_vec(),
+    )
+    .map_err(|e| anyhow::anyhow!("kt_tensor_from_f32_bytes_on: from_raw_bytes_on: {e}"))?;
+    if dtype == kiln_tensor::DType::F32 {
+        Ok(f32_tensor)
+    } else {
+        f32_tensor
+            .to_dtype(dtype)
+            .map_err(|e| anyhow::anyhow!("kt_tensor_from_f32_bytes_on: to_dtype: {e}"))
+    }
+}
+
 /// kt-native packed bf16 extraction with shape — mirrors the tuple shape of
 /// `kiln_vulkan_kernel::kernels::extract_tensor_packed_bf16_bytes_pub`
 /// so call sites that use the `.0` (bytes) projection stay identical.

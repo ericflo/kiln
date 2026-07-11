@@ -13228,6 +13228,23 @@ fn lm_head_weighted_prep_argmax(
 /// default-on kt route is disabled or any precondition fails.
 fn l2_normalize(x: &Tensor) -> Result<Tensor> {
     let x_f32 = x.to_dtype(DType::F32)?;
+    #[cfg(feature = "vulkan")]
+    if matches!(x_f32.device(), Device::Vulkan(_))
+        && x_f32.is_contiguous()
+        && x_f32.layout().start_offset() == 0
+        && x_f32.rank() > 0
+        && x_f32
+            .shape()
+            .last()
+            .is_some_and(|&hidden| hidden > 0 && hidden <= 256)
+    {
+        // Axis-reduction fallback materializes on CPU. GDN feeds this result
+        // directly into a Vulkan state matmul, so keep the whole Q/K norm on
+        // device through the native trailing-axis kernel. The surrounding
+        // gdn_qk_norm recorder owns the backward node for this forward result.
+        return kiln_tensor::vulkan_l2norm_last_axis(&x_f32, 1e-6)
+            .context("Vulkan GDN L2 normalization");
+    }
     #[cfg(feature = "cuda")]
     if cuda_use_kt_api_l2_normalize()
         && matches!(x_f32.device(), Device::Cuda(_))

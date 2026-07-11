@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 
 use super::vulkan::VulkanBackend;
-use super::vulkan_tensor_bridge::{kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape};
+use super::vulkan_tensor_bridge::{kt_tensor_from_f32_bytes_on, kt_tensor_to_f32_bytes_with_shape};
 
 pub(super) fn supports_causal_conv1d_update(backend: &VulkanBackend) -> bool {
     // Single-token update still regresses Strix Halo decode latency.
@@ -65,9 +65,14 @@ pub(super) fn causal_conv1d_update(
         )
         .context("causal_conv1d_update kernel failed")?;
     let out_shape: Vec<usize> = dims.to_vec();
-    let out = kt_tensor_from_f32_bytes(&out_data, &out_shape, kiln_tensor::DType::F32)?;
-    *conv_state_kt =
-        kt_tensor_from_f32_bytes(&state_data_out, &conv_state_shape, kiln_tensor::DType::F32)?;
+    let out =
+        kt_tensor_from_f32_bytes_on(&out_data, &out_shape, kiln_tensor::DType::F32, x.device())?;
+    *conv_state_kt = kt_tensor_from_f32_bytes_on(
+        &state_data_out,
+        &conv_state_shape,
+        kiln_tensor::DType::F32,
+        conv_state_kt.device(),
+    )?;
     Ok(Some(out))
 }
 
@@ -113,9 +118,14 @@ pub(super) fn causal_conv1d_prefill(
                 kernel_size,
             )
             .context("causal_conv1d_prefill cached-weight single-submit kernel failed")?;
-        let out = kt_tensor_from_f32_bytes(&out_data, x_dims, kiln_tensor::DType::F32)?;
-        let new_state =
-            kt_tensor_from_f32_bytes(&new_state_data, &conv_state_dims, kiln_tensor::DType::F32)?;
+        let out =
+            kt_tensor_from_f32_bytes_on(&out_data, x_dims, kiln_tensor::DType::F32, x.device())?;
+        let new_state = kt_tensor_from_f32_bytes_on(
+            &new_state_data,
+            &conv_state_dims,
+            kiln_tensor::DType::F32,
+            conv_state_kt.device(),
+        )?;
         (out, new_state)
     } else {
         let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
@@ -136,9 +146,14 @@ pub(super) fn causal_conv1d_prefill(
                 kernel_size,
             )
             .context("causal_conv1d_prefill kernel failed")?;
-        let out = kt_tensor_from_f32_bytes(&out_data, x_dims, kiln_tensor::DType::F32)?;
-        let new_state =
-            kt_tensor_from_f32_bytes(&new_state_data, &conv_state_dims, kiln_tensor::DType::F32)?;
+        let out =
+            kt_tensor_from_f32_bytes_on(&out_data, x_dims, kiln_tensor::DType::F32, x.device())?;
+        let new_state = kt_tensor_from_f32_bytes_on(
+            &new_state_data,
+            &conv_state_dims,
+            kiln_tensor::DType::F32,
+            conv_state_kt.device(),
+        )?;
         (out, new_state)
     };
     *conv_state_kt = new_state;
