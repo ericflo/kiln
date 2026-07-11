@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -765,10 +766,14 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         with tempfile.TemporaryDirectory() as tmp:
             model = Path(tmp) / "model"
             adapters = Path(tmp) / "adapters"
+            snapshots = Path(tmp) / "snapshots"
             for variant, config in serve.VARIANT_CONFIGS.items():
                 with self.subTest(variant=variant):
-                    env = serve.server_environment(variant, model, 1234, adapters)
+                    env = serve.server_environment(
+                        variant, model, 1234, adapters, snapshots
+                    )
                     expected = config["runtime"]
+                    self.assertEqual(env["KILN_MODEL_SNAPSHOT_DIR"], str(snapshots))
                     self.assertEqual(
                         env["KILN_MEMORY_RECLAIM_MODE"],
                         expected["memory_reclaim_requested_mode"],
@@ -794,6 +799,37 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                         env.get("KILN_ROCM_GRAPHS"),
                         None if expected["rocm_graphs_requested"] else "0",
                     )
+
+    def test_server_termination_reports_graceful_and_forced_outcomes(self) -> None:
+        graceful = mock.Mock(pid=101)
+        graceful.poll.return_value = None
+        graceful.wait.return_value = 0
+        with mock.patch.object(serve.os, "killpg") as killpg:
+            outcome = serve.terminate_process(graceful)
+        self.assertEqual(outcome.returncode, 0)
+        self.assertFalse(outcome.forced)
+        killpg.assert_called_once_with(101, serve.signal.SIGTERM)
+        graceful.wait.assert_called_once_with(
+            timeout=serve.SERVER_SHUTDOWN_GRACE_SECONDS
+        )
+
+        forced = mock.Mock(pid=202)
+        forced.poll.return_value = None
+        forced.wait.side_effect = [
+            subprocess.TimeoutExpired("kiln", serve.SERVER_SHUTDOWN_GRACE_SECONDS),
+            -serve.signal.SIGKILL,
+        ]
+        with mock.patch.object(serve.os, "killpg") as killpg:
+            outcome = serve.terminate_process(forced)
+        self.assertEqual(outcome.returncode, -serve.signal.SIGKILL)
+        self.assertTrue(outcome.forced)
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                mock.call(202, serve.signal.SIGTERM),
+                mock.call(202, serve.signal.SIGKILL),
+            ],
+        )
 
     def test_http_send_buffer_attestation_is_platform_strict(self) -> None:
         linux = {

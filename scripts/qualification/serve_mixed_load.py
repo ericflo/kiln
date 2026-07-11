@@ -61,6 +61,8 @@ STREAM_STALL_GRACE_MS = 2000
 SLO_TTFT_MS = 30_000.0
 SLO_E2E_MS = 120_000.0
 STREAM_READ_POLL_SECONDS = 0.25
+SERVER_SHUTDOWN_GRACE_SECONDS = 60.0
+SERVER_KILL_WAIT_SECONDS = 10.0
 
 
 def _variant_config(
@@ -959,6 +961,13 @@ class DeliveryPressureWindow:
     timed_out: float
 
 
+@dataclasses.dataclass(frozen=True)
+class ShutdownOutcome:
+    returncode: int
+    forced: bool
+    elapsed_ms: float
+
+
 def parse_server_log_line(line: str) -> tuple[str, dict[str, Any]]:
     message = line
     structured_fields: dict[str, Any] = {}
@@ -1206,7 +1215,11 @@ def build_binary(absolute_deadline: float) -> tuple[Path, str, float]:
 
 
 def server_environment(
-    variant: str, model_path: Path, port: int, adapter_dir: Path
+    variant: str,
+    model_path: Path,
+    port: int,
+    adapter_dir: Path,
+    snapshot_dir: Path,
 ) -> dict[str, str]:
     config = VARIANT_CONFIGS[variant]
     environment = sanitized_environment(dict(os.environ))
@@ -1229,6 +1242,7 @@ def server_environment(
                 "memory_reclaim_requested_mode"
             ],
             "KILN_MODEL_PATH": str(model_path),
+            "KILN_MODEL_SNAPSHOT_DIR": str(snapshot_dir),
             "KILN_PORT": str(port),
             "KILN_REQUEST_TIMEOUT_SECS": str(
                 config["server"]["request_timeout_seconds"]
@@ -1248,21 +1262,31 @@ def server_environment(
     return environment
 
 
-def terminate_process(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
+def terminate_process(process: subprocess.Popen[str]) -> ShutdownOutcome:
+    started = time.monotonic()
+    returncode = process.poll()
+    if returncode is not None:
+        return ShutdownOutcome(returncode, False, 0.0)
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        returncode = process.wait(timeout=SERVER_KILL_WAIT_SECONDS)
+        return ShutdownOutcome(
+            returncode, False, (time.monotonic() - started) * 1000.0
+        )
+    forced = False
     try:
-        process.wait(timeout=10.0)
+        returncode = process.wait(timeout=SERVER_SHUTDOWN_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
+        forced = True
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        process.wait(timeout=10.0)
+        returncode = process.wait(timeout=SERVER_KILL_WAIT_SECONDS)
+    return ShutdownOutcome(
+        returncode, forced, (time.monotonic() - started) * 1000.0
+    )
 
 
 def wait_ready(
@@ -2123,8 +2147,11 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
     port = free_loopback_port()
     run_dir = ROOT / ".qualification/serving" / f"{variant}-{os.getpid()}"
     adapter_dir = run_dir / "adapters"
+    snapshot_dir = run_dir / "model-snapshots"
     adapter_dir.mkdir(parents=True, exist_ok=False)
-    environment = server_environment(variant, model_path, port, adapter_dir)
+    environment = server_environment(
+        variant, model_path, port, adapter_dir, snapshot_dir
+    )
     policy_events_started = time.monotonic()
     process = subprocess.Popen(
         [str(binary), "--config", "/dev/null", "serve", "--served-model-id", MODEL_ID],
@@ -2141,6 +2168,9 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
     server_log.start()
     sampler = MemorySampler(port)
     slow: SlowConsumer | None = None
+    result: tuple[list[dict[str, Any]], str | None] | None = None
+    shutdown_outcome: ShutdownOutcome | None = None
+    snapshot_residue: list[str] = []
     try:
         wait_ready(port, process, server_log, overall_deadline)
         health_before_warmup = read_stable_health(
@@ -2439,14 +2469,47 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 ttft_ms=result.ttft_ms,
             )
         details = " | ".join(status_failures) if status_failures else None
-        return metrics_from_values(values), details
+        result = metrics_from_values(values), details
     finally:
         if slow is not None:
             slow.close()
         sampler.close()
-        terminate_process(process)
+        shutdown_outcome = terminate_process(process)
         server_log.join()
+        if snapshot_dir.is_dir():
+            snapshot_residue = sorted(
+                str(path.relative_to(snapshot_dir))
+                for path in snapshot_dir.rglob("*")
+            )[:8]
+        trace(
+            "server_shutdown",
+            elapsed_ms=shutdown_outcome.elapsed_ms,
+            forced=shutdown_outcome.forced,
+            returncode=shutdown_outcome.returncode,
+            snapshot_residue=snapshot_residue,
+        )
         shutil.rmtree(run_dir, ignore_errors=True)
+
+    if result is None or shutdown_outcome is None:
+        raise AssertionError("mixed-load execution completed without a result")
+    metrics, details = result
+    lifecycle_failures: list[str] = []
+    if shutdown_outcome.forced:
+        lifecycle_failures.append(
+            "server did not exit within the 60-second graceful teardown window"
+        )
+    if shutdown_outcome.returncode != 0:
+        lifecycle_failures.append(
+            f"server shutdown returned {shutdown_outcome.returncode}, expected 0"
+        )
+    if snapshot_residue:
+        lifecycle_failures.append(
+            "server left private model snapshot entries after shutdown: "
+            + ", ".join(snapshot_residue)
+        )
+    if lifecycle_failures:
+        details = " | ".join(filter(None, [details, *lifecycle_failures]))
+    return metrics, details
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
