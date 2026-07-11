@@ -700,6 +700,34 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_decode_forward_seconds_total Cumulative wall time spent inside decode forwards.\n");
+        out.push_str("# TYPE kiln_batching_engine_decode_forward_seconds_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_decode_forward_seconds_total {:.6}",
+                gauges.batching_engine.total_decode_forward_ms / 1_000.0
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_decode_forward_max_seconds Maximum decode-forward wall time observed since process start.\n");
+        out.push_str("# TYPE kiln_batching_engine_decode_forward_max_seconds gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_decode_forward_max_seconds {:.6}",
+                gauges.batching_engine.max_decode_forward_ms / 1_000.0
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_slow_decode_forwards_total Decode forwards taking at least 100 milliseconds.\n");
+        out.push_str("# TYPE kiln_batching_engine_slow_decode_forwards_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_slow_decode_forwards_total {}",
+                gauges.batching_engine.slow_decode_forward_count
+            ),
+        );
+
         out.push_str(
             "# HELP kiln_batching_engine_last_prefill_ms Last prefill wall time in milliseconds.\n",
         );
@@ -719,6 +747,80 @@ impl Metrics {
             &format!(
                 "kiln_batching_engine_last_prefill_tokens {}",
                 gauges.batching_engine.last_prefill_tokens
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_prefill_forward_seconds_total Cumulative wall time spent inside bounded prefill forwards.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefill_forward_seconds_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefill_forward_seconds_total {:.6}",
+                gauges.batching_engine.total_prefill_forward_ms / 1_000.0
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_prefill_forward_max_seconds Maximum bounded-prefill wall time observed since process start.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefill_forward_max_seconds gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefill_forward_max_seconds {:.6}",
+                gauges.batching_engine.max_prefill_forward_ms / 1_000.0
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_slow_prefill_forwards_total Bounded prefill forwards taking at least 100 milliseconds.\n");
+        out.push_str("# TYPE kiln_batching_engine_slow_prefill_forwards_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_slow_prefill_forwards_total {}",
+                gauges.batching_engine.slow_prefill_forward_count
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_last_admission_seconds Wall time of the most recent request-admission preparation call.\n");
+        out.push_str("# TYPE kiln_batching_engine_last_admission_seconds gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_last_admission_seconds {:.6}",
+                gauges.batching_engine.last_admission_ms / 1_000.0
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_admission_seconds_total Cumulative wall time spent preparing admitted requests.\n");
+        out.push_str("# TYPE kiln_batching_engine_admission_seconds_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_admission_seconds_total {:.6}",
+                gauges.batching_engine.total_admission_ms / 1_000.0
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_admission_max_seconds Maximum request-admission preparation wall time observed since process start.\n");
+        out.push_str("# TYPE kiln_batching_engine_admission_max_seconds gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_admission_max_seconds {:.6}",
+                gauges.batching_engine.max_admission_ms / 1_000.0
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_admission_calls_total Request-admission preparation calls.\n");
+        out.push_str("# TYPE kiln_batching_engine_admission_calls_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_admission_calls_total {}",
+                gauges.batching_engine.total_admission_calls
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_slow_admissions_total Request-admission preparation calls taking at least 100 milliseconds.\n");
+        out.push_str("# TYPE kiln_batching_engine_slow_admissions_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_slow_admissions_total {}",
+                gauges.batching_engine.slow_admission_count
             ),
         );
 
@@ -1454,8 +1556,19 @@ mod tests {
                 last_batch_size: 3,
                 max_observed_batch_size: 4,
                 last_forward_ms: 12.5,
+                max_decode_forward_ms: 125.0,
+                total_decode_forward_ms: 1_250.0,
+                slow_decode_forward_count: 2,
                 last_prefill_ms: 250.0,
+                max_prefill_forward_ms: 625.0,
+                total_prefill_forward_ms: 2_500.0,
+                slow_prefill_forward_count: 4,
                 last_prefill_tokens: 253,
+                last_admission_ms: 25.0,
+                max_admission_ms: 150.0,
+                total_admission_ms: 500.0,
+                total_admission_calls: 8,
+                slow_admission_count: 1,
                 total_decode_forwards: 17,
                 total_batched_decode_forwards: 15,
                 total_decode_rows: 48,
@@ -1538,8 +1651,19 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_last_batch_size 3"));
         assert!(output.contains("kiln_batching_engine_max_observed_batch 4"));
         assert!(output.contains("kiln_batching_engine_last_forward_ms 12.500000"));
+        assert!(output.contains("kiln_batching_engine_decode_forward_seconds_total 1.250000"));
+        assert!(output.contains("kiln_batching_engine_decode_forward_max_seconds 0.125000"));
+        assert!(output.contains("kiln_batching_engine_slow_decode_forwards_total 2"));
         assert!(output.contains("kiln_batching_engine_last_prefill_ms 250.000000"));
         assert!(output.contains("kiln_batching_engine_last_prefill_tokens 253"));
+        assert!(output.contains("kiln_batching_engine_prefill_forward_seconds_total 2.500000"));
+        assert!(output.contains("kiln_batching_engine_prefill_forward_max_seconds 0.625000"));
+        assert!(output.contains("kiln_batching_engine_slow_prefill_forwards_total 4"));
+        assert!(output.contains("kiln_batching_engine_last_admission_seconds 0.025000"));
+        assert!(output.contains("kiln_batching_engine_admission_seconds_total 0.500000"));
+        assert!(output.contains("kiln_batching_engine_admission_max_seconds 0.150000"));
+        assert!(output.contains("kiln_batching_engine_admission_calls_total 8"));
+        assert!(output.contains("kiln_batching_engine_slow_admissions_total 1"));
         assert!(output.contains("kiln_batching_engine_decode_forwards_total 17"));
         assert!(output.contains("kiln_batching_engine_batched_decode_forwards_total 15"));
         assert!(output.contains("kiln_batching_engine_decode_rows_total 48"));

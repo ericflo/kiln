@@ -737,7 +737,13 @@ source, the last quantum size, and cumulative prefill-forward count. Prometheus
 exports the corresponding `kiln_batching_engine_active_prefill`,
 `kiln_batching_engine_max_batch_tokens`,
 `kiln_batching_engine_last_prefill_tokens`, and
-`kiln_batching_engine_prefill_forwards_total` series.
+`kiln_batching_engine_prefill_forwards_total` series. Admission, bounded-prefill,
+and decode-forward wall time is also available as cumulative, process-maximum,
+and 100 ms slow-phase counters under `kiln_batching_engine_{admission,prefill_forward,decode_forward}_*`.
+The same values appear in health and debug snapshots. A phase crossing 100 ms
+emits one structured `slow_batching_actor_phase` event with the bounded phase
+name and work size, which lets qualification correlate a token gap without
+logging ordinary forwards or request content.
 
 Device-pool reclaim is disabled by default because CUDA and ROCm reclaim hooks
 may synchronize the accelerator. `on-demand` permits explicit startup and

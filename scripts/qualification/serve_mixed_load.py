@@ -203,11 +203,22 @@ PROFILE_POLICIES: dict[str, dict[str, bool | str]] = {
 
 METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "attributed_itl_outlier_count": ("count", "sum", True),
+    "batching_admission_call_count": ("count", "sum", False),
+    "batching_admission_ms_max": ("ms", "max", True),
+    "batching_admission_ms_total": ("ms", "sum", True),
     "batching_batched_decode_forward_count": ("count", "sum", False),
     "batching_decode_forward_count": ("count", "sum", False),
+    "batching_decode_forward_ms_max": ("ms", "max", True),
+    "batching_decode_forward_ms_total": ("ms", "sum", True),
     "batching_decode_row_count": ("rows", "sum", False),
     "batching_max_observed_batch_size": ("rows", "max", False),
     "batching_mean_rows_per_forward": ("rows", "mean", False),
+    "batching_prefill_forward_count": ("count", "sum", False),
+    "batching_prefill_forward_ms_max": ("ms", "max", True),
+    "batching_prefill_forward_ms_total": ("ms", "sum", True),
+    "batching_slow_admission_count": ("count", "sum", True),
+    "batching_slow_decode_forward_count": ("count", "sum", True),
+    "batching_slow_prefill_forward_count": ("count", "sum", True),
     "batching_total_errors": ("count", "sum", True),
     "cancellation_confirmed_count": ("count", "sum", False),
     "client_backpressure_event_count": ("count", "sum", True),
@@ -1009,6 +1020,10 @@ def classify_server_event(
         return "graph_capture"
     if lowered == "slow_backend_external_yield_sync":
         return "external_yield_sync"
+    if lowered == "slow_batching_actor_phase" and isinstance(fields, dict):
+        phase = fields.get("phase")
+        if phase in {"admission", "prefill", "decode"}:
+            return f"actor_{phase}"
     if lowered == "stream_request_bound":
         return "stream_request_bound"
     if lowered == "response_channel_backpressure":
@@ -1605,7 +1620,7 @@ def attest_runtime(
     return failures
 
 
-def batching_snapshot(health: dict[str, Any]) -> dict[str, int]:
+def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int]:
     runtime = health.get("decode_runtime")
     batching = runtime.get("batching_engine") if isinstance(runtime, dict) else None
     scheduler = health.get("scheduler")
@@ -1613,13 +1628,18 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, int]:
         raise QualificationError("health batching-engine snapshot is missing")
     if not isinstance(scheduler, dict):
         raise QualificationError("health scheduler snapshot is missing")
-    snapshot: dict[str, int] = {}
+    snapshot: dict[str, float | int] = {}
     for field in (
         "max_observed_batch_size",
         "total_errors",
         "total_decode_forwards",
         "total_batched_decode_forwards",
         "total_decode_rows",
+        "total_prefill_forwards",
+        "total_admission_calls",
+        "slow_admission_count",
+        "slow_prefill_forward_count",
+        "slow_decode_forward_count",
         "response_backpressure_events",
         "response_backpressure_wait_ms",
         "response_stall_evictions",
@@ -1629,6 +1649,25 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, int]:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise QualificationError(
                 f"batching-engine field {field} must be a nonnegative integer, got {value!r}"
+            )
+        snapshot[field] = value
+    for field in (
+        "total_admission_ms",
+        "max_admission_ms",
+        "total_prefill_forward_ms",
+        "max_prefill_forward_ms",
+        "total_decode_forward_ms",
+        "max_decode_forward_ms",
+    ):
+        value = batching.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise QualificationError(
+                f"batching-engine field {field} must be a nonnegative number, got {value!r}"
+            )
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            raise QualificationError(
+                f"batching-engine field {field} must be finite and nonnegative, got {value!r}"
             )
         snapshot[field] = value
     for source, field in ((scheduler, "blocks_total"), (scheduler, "blocks_used")):
@@ -1673,7 +1712,11 @@ def graph_snapshot(health: dict[str, Any]) -> dict[str, int]:
     return snapshot
 
 
-def counter_delta(before: dict[str, int], after: dict[str, int], field: str) -> int:
+def counter_delta(
+    before: dict[str, float | int],
+    after: dict[str, float | int],
+    field: str,
+) -> float | int:
     if after[field] < before[field]:
         raise QualificationError(
             f"monotonic counter {field} regressed from {before[field]} to {after[field]}"
@@ -1936,6 +1979,9 @@ def classify_itl_outliers(
     attributed = 0
     unexplained = 0
     attributable = {
+        "actor_admission",
+        "actor_prefill",
+        "actor_decode",
         "kv_resize",
         "memory_reclaim",
         "graph_capture",
@@ -2014,17 +2060,46 @@ def metric_values(
         batching_start, batching_end, "total_batched_decode_forwards"
     )
     decode_rows = counter_delta(batching_start, batching_end, "total_decode_rows")
+    admission_calls = counter_delta(
+        batching_start, batching_end, "total_admission_calls"
+    )
+    prefill_forwards = counter_delta(
+        batching_start, batching_end, "total_prefill_forwards"
+    )
     categories = [event.category for event in events]
     values: dict[str, float | int] = {
         "attributed_itl_outlier_count": attributed,
+        "batching_admission_call_count": admission_calls,
+        "batching_admission_ms_max": batching_end["max_admission_ms"],
+        "batching_admission_ms_total": counter_delta(
+            batching_start, batching_end, "total_admission_ms"
+        ),
         "batching_batched_decode_forward_count": batched_decode_forwards,
         "batching_decode_forward_count": decode_forwards,
+        "batching_decode_forward_ms_max": batching_end["max_decode_forward_ms"],
+        "batching_decode_forward_ms_total": counter_delta(
+            batching_start, batching_end, "total_decode_forward_ms"
+        ),
         "batching_decode_row_count": decode_rows,
         "batching_max_observed_batch_size": max(
             batching_start["max_observed_batch_size"],
             batching_end["max_observed_batch_size"],
         ),
         "batching_mean_rows_per_forward": decode_rows / max(decode_forwards, 1),
+        "batching_prefill_forward_count": prefill_forwards,
+        "batching_prefill_forward_ms_max": batching_end["max_prefill_forward_ms"],
+        "batching_prefill_forward_ms_total": counter_delta(
+            batching_start, batching_end, "total_prefill_forward_ms"
+        ),
+        "batching_slow_admission_count": counter_delta(
+            batching_start, batching_end, "slow_admission_count"
+        ),
+        "batching_slow_decode_forward_count": counter_delta(
+            batching_start, batching_end, "slow_decode_forward_count"
+        ),
+        "batching_slow_prefill_forward_count": counter_delta(
+            batching_start, batching_end, "slow_prefill_forward_count"
+        ),
         "batching_total_errors": counter_delta(
             batching_start, batching_end, "total_errors"
         ),
@@ -2403,6 +2478,19 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 final_blocks_total=batching_snapshot(health_end)["blocks_total"],
             ),
         ]
+        for phase, metric_name in (
+            ("admission", "batching_slow_admission_count"),
+            ("prefill", "batching_slow_prefill_forward_count"),
+            ("decode", "batching_slow_decode_forward_count"),
+        ):
+            event_count = sum(
+                event.category == f"actor_{phase}" for event in measurement_events
+            )
+            if values[metric_name] != event_count:
+                status_failures.append(
+                    f"slow actor {phase} counter={values[metric_name]} but observed "
+                    f"{event_count} structured phase events"
+                )
         if values["request_failure_count"] != 0:
             status_failures.append(f"{values['request_failure_count']} measured requests failed")
         if values["zero_token_response_count"] != 0:

@@ -40,6 +40,10 @@ const DEFAULT_MAX_DECODE_BATCH: usize = 8;
 const DEFAULT_PREFILL_ADMISSION_QUANTUM: usize = 4;
 const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 
+/// Actor work above this wall time is material to the qualification stall
+/// gate and gets one bounded structured event after the phase completes.
+const SLOW_ACTOR_PHASE_THRESHOLD: Duration = Duration::from_millis(100);
+
 /// Fair worker retry cadence while a response lane is inside its grace window.
 const RESPONSE_DELIVERY_POLL_CADENCE: Duration = Duration::from_millis(10);
 
@@ -218,8 +222,19 @@ pub struct BatchingEngineSnapshot {
     pub last_batch_size: usize,
     pub max_observed_batch_size: usize,
     pub last_forward_ms: f64,
+    pub max_decode_forward_ms: f64,
+    pub total_decode_forward_ms: f64,
+    pub slow_decode_forward_count: u64,
     pub last_prefill_ms: f64,
+    pub max_prefill_forward_ms: f64,
+    pub total_prefill_forward_ms: f64,
+    pub slow_prefill_forward_count: u64,
     pub last_prefill_tokens: usize,
+    pub last_admission_ms: f64,
+    pub max_admission_ms: f64,
+    pub total_admission_ms: f64,
+    pub total_admission_calls: u64,
+    pub slow_admission_count: u64,
     pub total_decode_forwards: u64,
     pub total_batched_decode_forwards: u64,
     pub total_decode_rows: u64,
@@ -1776,6 +1791,84 @@ impl BatchingEngineActor {
         }
     }
 
+    fn record_admission_duration(
+        &mut self,
+        elapsed: Duration,
+        request_id: Uuid,
+        prompt_tokens: usize,
+        token_budget: usize,
+    ) {
+        let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+        self.snapshot.last_admission_ms = elapsed_ms;
+        self.snapshot.max_admission_ms = self.snapshot.max_admission_ms.max(elapsed_ms);
+        self.snapshot.total_admission_ms += elapsed_ms;
+        self.snapshot.total_admission_calls = self.snapshot.total_admission_calls.saturating_add(1);
+        if elapsed >= SLOW_ACTOR_PHASE_THRESHOLD {
+            self.snapshot.slow_admission_count =
+                self.snapshot.slow_admission_count.saturating_add(1);
+            tracing::warn!(
+                event = "slow_batching_actor_phase",
+                phase = "admission",
+                %request_id,
+                prompt_tokens,
+                token_budget,
+                elapsed_ms,
+                threshold_ms = duration_millis_saturating(SLOW_ACTOR_PHASE_THRESHOLD),
+                active_requests = self.active.len(),
+                waiting_requests = self.waiting.len(),
+                "slow_batching_actor_phase"
+            );
+        }
+    }
+
+    fn record_prefill_forward_duration(
+        &mut self,
+        elapsed: Duration,
+        request_id: Uuid,
+        token_budget: usize,
+    ) {
+        let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+        self.snapshot.last_prefill_ms = elapsed_ms;
+        self.snapshot.max_prefill_forward_ms = self.snapshot.max_prefill_forward_ms.max(elapsed_ms);
+        self.snapshot.total_prefill_forward_ms += elapsed_ms;
+        if elapsed >= SLOW_ACTOR_PHASE_THRESHOLD {
+            self.snapshot.slow_prefill_forward_count =
+                self.snapshot.slow_prefill_forward_count.saturating_add(1);
+            tracing::warn!(
+                event = "slow_batching_actor_phase",
+                phase = "prefill",
+                %request_id,
+                token_budget,
+                elapsed_ms,
+                threshold_ms = duration_millis_saturating(SLOW_ACTOR_PHASE_THRESHOLD),
+                active_requests = self.active.len(),
+                waiting_requests = self.waiting.len(),
+                "slow_batching_actor_phase"
+            );
+        }
+    }
+
+    fn record_decode_forward_duration(&mut self, elapsed: Duration, batch_rows: usize) {
+        let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+        self.snapshot.last_forward_ms = elapsed_ms;
+        self.snapshot.max_decode_forward_ms = self.snapshot.max_decode_forward_ms.max(elapsed_ms);
+        self.snapshot.total_decode_forward_ms += elapsed_ms;
+        if elapsed >= SLOW_ACTOR_PHASE_THRESHOLD {
+            self.snapshot.slow_decode_forward_count =
+                self.snapshot.slow_decode_forward_count.saturating_add(1);
+            tracing::warn!(
+                event = "slow_batching_actor_phase",
+                phase = "decode",
+                batch_rows,
+                elapsed_ms,
+                threshold_ms = duration_millis_saturating(SLOW_ACTOR_PHASE_THRESHOLD),
+                active_requests = self.active.len(),
+                waiting_requests = self.waiting.len(),
+                "slow_batching_actor_phase"
+            );
+        }
+    }
+
     fn drain_commands(&mut self) {
         loop {
             match self.rx.try_recv() {
@@ -2176,10 +2269,16 @@ impl BatchingEngineActor {
                 break;
             }
             let started = Instant::now();
-            match self
+            let preparation = self
                 .forward
-                .prepare_request_chunked(&queued.req, token_budget)
-            {
+                .prepare_request_chunked(&queued.req, token_budget);
+            self.record_admission_duration(
+                started.elapsed(),
+                queued.req.request_id,
+                queued.req.prompt_tokens.len(),
+                token_budget,
+            );
+            match preparation {
                 Ok(preparation) => {
                     let (slot, tokens_processed, ready) = match preparation {
                         RequestPreparation::Prefilling {
@@ -2202,7 +2301,6 @@ impl BatchingEngineActor {
                         );
                         continue;
                     }
-                    self.snapshot.last_prefill_ms = started.elapsed().as_secs_f64() * 1000.0;
                     self.snapshot.last_prefill_tokens = tokens_processed;
                     self.snapshot.total_prefill_tokens = self
                         .snapshot
@@ -2296,7 +2394,7 @@ impl BatchingEngineActor {
                 .forward
                 .advance_prefill(slot, budget, &req.sampling, &req.cancel);
             let elapsed = started.elapsed();
-            self.snapshot.last_prefill_ms = elapsed.as_secs_f64() * 1000.0;
+            self.record_prefill_forward_duration(elapsed, req.request_id, budget);
             self.snapshot.total_prefill_forwards =
                 self.snapshot.total_prefill_forwards.saturating_add(1);
 
@@ -2578,7 +2676,9 @@ impl BatchingEngineActor {
             .collect();
         let started = Instant::now();
         let result = self.forward.forward_decode(&mut slots, &sampling);
-        self.snapshot.last_forward_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let elapsed = started.elapsed();
+        drop(slots);
+        self.record_decode_forward_duration(elapsed, batch_len);
         self.snapshot.last_batch_size = batch_len;
         self.snapshot.current_batch_size = 0;
         self.refresh_snapshot();
@@ -3285,6 +3385,39 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn actor_phase_accounting_tracks_totals_maxima_and_slow_counts() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let mut actor = test_actor(
+            rx,
+            Arc::new(MockForward::default()),
+            8,
+            false,
+            4,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let request_id = Uuid::new_v4();
+
+        actor.record_admission_duration(Duration::from_millis(25), request_id, 128, 512);
+        actor.record_admission_duration(Duration::from_millis(125), request_id, 128, 512);
+        actor.record_prefill_forward_duration(Duration::from_millis(90), request_id, 512);
+        actor.record_prefill_forward_duration(Duration::from_millis(510), request_id, 512);
+        actor.record_decode_forward_duration(Duration::from_millis(75), 4);
+        actor.record_decode_forward_duration(Duration::from_millis(175), 8);
+
+        assert_eq!(actor.snapshot.total_admission_calls, 2);
+        assert_eq!(actor.snapshot.total_admission_ms, 150.0);
+        assert_eq!(actor.snapshot.max_admission_ms, 125.0);
+        assert_eq!(actor.snapshot.slow_admission_count, 1);
+        assert_eq!(actor.snapshot.total_prefill_forward_ms, 600.0);
+        assert_eq!(actor.snapshot.max_prefill_forward_ms, 510.0);
+        assert_eq!(actor.snapshot.slow_prefill_forward_count, 1);
+        assert_eq!(actor.snapshot.total_decode_forward_ms, 250.0);
+        assert_eq!(actor.snapshot.max_decode_forward_ms, 175.0);
+        assert_eq!(actor.snapshot.slow_decode_forward_count, 1);
     }
 
     #[tokio::test]

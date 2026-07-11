@@ -109,6 +109,17 @@ def health_fixture(
                 "total_decode_forwards": 0,
                 "total_batched_decode_forwards": 0,
                 "total_decode_rows": 0,
+                "total_decode_forward_ms": 0.0,
+                "max_decode_forward_ms": 0.0,
+                "slow_decode_forward_count": 0,
+                "total_prefill_forwards": 0,
+                "total_prefill_forward_ms": 0.0,
+                "max_prefill_forward_ms": 0.0,
+                "slow_prefill_forward_count": 0,
+                "total_admission_calls": 0,
+                "total_admission_ms": 0.0,
+                "max_admission_ms": 0.0,
+                "slow_admission_count": 0,
                 "response_backpressure_events": 0,
                 "response_backpressure_wait_ms": 0,
                 "response_stall_evictions": 0,
@@ -571,6 +582,21 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         for message, expected in cases.items():
             with self.subTest(message=message):
                 self.assertEqual(serve.classify_server_event(message), expected)
+        for phase in ("admission", "prefill", "decode"):
+            with self.subTest(phase=phase):
+                self.assertEqual(
+                    serve.classify_server_event(
+                        "slow_batching_actor_phase",
+                        {"event": "slow_batching_actor_phase", "phase": phase},
+                    ),
+                    f"actor_{phase}",
+                )
+        self.assertIsNone(
+            serve.classify_server_event(
+                "slow_batching_actor_phase",
+                {"event": "slow_batching_actor_phase", "phase": "unknown"},
+            )
+        )
 
     def test_structured_log_fields_bind_pressure_to_the_slow_request(self) -> None:
         line = json.dumps(
@@ -1145,6 +1171,11 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             [100.0, 100.0], [result], [synchronization]
         )
         self.assertEqual((attributed, unexplained), (1, 0))
+        prefill = serve.ObservedEvent(0.7, "actor_prefill", "slow prefill")
+        attributed, unexplained = serve.classify_itl_outliers(
+            [100.0, 100.0], [result], [prefill]
+        )
+        self.assertEqual((attributed, unexplained), (1, 0))
 
     def test_metric_values_use_runtime_counter_deltas(self) -> None:
         result = serve.StreamResult(
@@ -1188,6 +1219,17 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "total_decode_forwards": 10,
                 "total_batched_decode_forwards": 2,
                 "total_decode_rows": 20,
+                "total_decode_forward_ms": 200.0,
+                "max_decode_forward_ms": 50.0,
+                "slow_decode_forward_count": 0,
+                "total_prefill_forwards": 4,
+                "total_prefill_forward_ms": 100.0,
+                "max_prefill_forward_ms": 40.0,
+                "slow_prefill_forward_count": 0,
+                "total_admission_calls": 3,
+                "total_admission_ms": 30.0,
+                "max_admission_ms": 20.0,
+                "slow_admission_count": 0,
                 "response_backpressure_events": 3,
                 "response_backpressure_wait_ms": 100,
                 "response_stall_evictions": 2,
@@ -1229,6 +1271,17 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "total_decode_forwards": 15,
                 "total_batched_decode_forwards": 6,
                 "total_decode_rows": 35,
+                "total_decode_forward_ms": 800.0,
+                "max_decode_forward_ms": 150.0,
+                "slow_decode_forward_count": 2,
+                "total_prefill_forwards": 9,
+                "total_prefill_forward_ms": 1_500.0,
+                "max_prefill_forward_ms": 600.0,
+                "slow_prefill_forward_count": 3,
+                "total_admission_calls": 8,
+                "total_admission_ms": 110.0,
+                "max_admission_ms": 120.0,
+                "slow_admission_count": 1,
                 "response_backpressure_events": 5,
                 "response_backpressure_wait_ms": 850,
                 "response_stall_evictions": 3,
@@ -1255,6 +1308,17 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(values["batching_batched_decode_forward_count"], 4)
         self.assertEqual(values["batching_decode_row_count"], 15)
         self.assertEqual(values["batching_mean_rows_per_forward"], 3.0)
+        self.assertEqual(values["batching_decode_forward_ms_total"], 600.0)
+        self.assertEqual(values["batching_decode_forward_ms_max"], 150.0)
+        self.assertEqual(values["batching_slow_decode_forward_count"], 2)
+        self.assertEqual(values["batching_prefill_forward_count"], 5)
+        self.assertEqual(values["batching_prefill_forward_ms_total"], 1_400.0)
+        self.assertEqual(values["batching_prefill_forward_ms_max"], 600.0)
+        self.assertEqual(values["batching_slow_prefill_forward_count"], 3)
+        self.assertEqual(values["batching_admission_call_count"], 5)
+        self.assertEqual(values["batching_admission_ms_total"], 80.0)
+        self.assertEqual(values["batching_admission_ms_max"], 120.0)
+        self.assertEqual(values["batching_slow_admission_count"], 1)
         self.assertEqual(values["graph_measured_capture_success_count"], 1)
         self.assertEqual(values["graph_measured_capture_deferral_count"], 1)
         self.assertEqual(values["graph_measured_replay_success_count"], 8)

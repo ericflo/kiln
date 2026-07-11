@@ -338,8 +338,19 @@ struct BatchingEngineInfo {
     last_batch_size: usize,
     max_observed_batch_size: usize,
     last_forward_ms: f64,
+    max_decode_forward_ms: f64,
+    total_decode_forward_ms: f64,
+    slow_decode_forward_count: u64,
     last_prefill_ms: f64,
+    max_prefill_forward_ms: f64,
+    total_prefill_forward_ms: f64,
+    slow_prefill_forward_count: u64,
     last_prefill_tokens: usize,
+    last_admission_ms: f64,
+    max_admission_ms: f64,
+    total_admission_ms: f64,
+    total_admission_calls: u64,
+    slow_admission_count: u64,
     total_decode_forwards: u64,
     total_batched_decode_forwards: u64,
     total_decode_rows: u64,
@@ -866,8 +877,19 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             last_batch_size: snapshot.last_batch_size,
             max_observed_batch_size: snapshot.max_observed_batch_size,
             last_forward_ms: snapshot.last_forward_ms,
+            max_decode_forward_ms: snapshot.max_decode_forward_ms,
+            total_decode_forward_ms: snapshot.total_decode_forward_ms,
+            slow_decode_forward_count: snapshot.slow_decode_forward_count,
             last_prefill_ms: snapshot.last_prefill_ms,
+            max_prefill_forward_ms: snapshot.max_prefill_forward_ms,
+            total_prefill_forward_ms: snapshot.total_prefill_forward_ms,
+            slow_prefill_forward_count: snapshot.slow_prefill_forward_count,
             last_prefill_tokens: snapshot.last_prefill_tokens,
+            last_admission_ms: snapshot.last_admission_ms,
+            max_admission_ms: snapshot.max_admission_ms,
+            total_admission_ms: snapshot.total_admission_ms,
+            total_admission_calls: snapshot.total_admission_calls,
+            slow_admission_count: snapshot.slow_admission_count,
             total_decode_forwards: snapshot.total_decode_forwards,
             total_batched_decode_forwards: snapshot.total_batched_decode_forwards,
             total_decode_rows: snapshot.total_decode_rows,
@@ -981,6 +1003,16 @@ mod tests {
             max_batch_tokens: 256,
             max_batch_tokens_source: ConfigValueSource::ConfigFile,
             last_prefill_tokens: 251,
+            max_decode_forward_ms: 125.0,
+            total_decode_forward_ms: 500.0,
+            slow_decode_forward_count: 2,
+            max_prefill_forward_ms: 625.0,
+            total_prefill_forward_ms: 1_500.0,
+            slow_prefill_forward_count: 3,
+            max_admission_ms: 175.0,
+            total_admission_ms: 250.0,
+            total_admission_calls: 4,
+            slow_admission_count: 1,
             total_prefill_forwards: 9,
             response_backpressure_events: 3,
             response_backpressure_wait_ms: 750,
@@ -1000,6 +1032,16 @@ mod tests {
         assert_eq!(json["max_batch_tokens"], 256);
         assert_eq!(json["max_batch_tokens_source"], "config_file");
         assert_eq!(json["last_prefill_tokens"], 251);
+        assert_eq!(json["max_decode_forward_ms"], 125.0);
+        assert_eq!(json["total_decode_forward_ms"], 500.0);
+        assert_eq!(json["slow_decode_forward_count"], 2);
+        assert_eq!(json["max_prefill_forward_ms"], 625.0);
+        assert_eq!(json["total_prefill_forward_ms"], 1_500.0);
+        assert_eq!(json["slow_prefill_forward_count"], 3);
+        assert_eq!(json["max_admission_ms"], 175.0);
+        assert_eq!(json["total_admission_ms"], 250.0);
+        assert_eq!(json["total_admission_calls"], 4);
+        assert_eq!(json["slow_admission_count"], 1);
         assert_eq!(json["total_prefill_forwards"], 9);
         assert_eq!(json["response_delivery_in_flight"], 7);
         assert_eq!(json["response_delivery_backpressured"], 2);
