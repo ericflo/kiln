@@ -1,0 +1,372 @@
+{
+  "created_at": "2026-07-11T04:57:08.958307+00:00",
+  "diagnostics": {
+    "timed_request_path_affected": false,
+    "url": "http://127.0.0.1:8420/health"
+  },
+  "driver_environment": {
+    "hostname": "llmbox",
+    "machine": "x86_64",
+    "platform": "Linux-7.0.14-arch1-1-x86_64-with-glibc2.43",
+    "python": "3.14.6",
+    "repository": {
+      "commit": "f4a662b2a362d349cc7dff30137a82cdf240c015",
+      "dirty": false,
+      "source_tree_sha256": "sha256:d07c3e4d3ab05d7d3c1ec822e9e69f0c7726d057b0189aafa87df4743b458fc2"
+    }
+  },
+  "driver_version": "2",
+  "engine": {
+    "authentication_configured": false,
+    "authentication_source": "none",
+    "available_models": [
+      "Qwen3.5-4B"
+    ],
+    "base_url": "http://127.0.0.1:8420",
+    "model": "Qwen3.5-4B",
+    "name": "kiln",
+    "reported_version": "0.4.1",
+    "runtime_identity": "kiln/0.4.1/rocm/binary-sha256:55243ebb8202ea82387224dcd7eba823d9ec72f0ee0d7cd730b4d4d308aacb5d/git:f4a662b2a3/deterministic"
+  },
+  "memory_sampler": {
+    "interval_ms": 50,
+    "path": "/sys/devices/pci0000:00/0000:00:08.1/0000:c6:00.0/mem_info_vram_used",
+    "source": "drm_vram_used"
+  },
+  "receipt_sha256": "sha256:3dc731b7ea032581a591d49fcf8d6626cec207e0e4a0a953e387fa64ef74aca6",
+  "runs": [
+    {
+      "client_visible_itl_ms_p50": 41.04867899150122,
+      "client_visible_itl_ms_p99": 44.04522506287322,
+      "client_visible_itl_ms_p999": 44.9062117987196,
+      "client_visible_stream_event_count": 64,
+      "completion_tokens": 64,
+      "concurrency": 1,
+      "dispatch_spread_ms": 0.0,
+      "e2e_ms_p50": 2956.428771998617,
+      "e2e_ms_p99": 2956.428771998617,
+      "e2e_ms_p999": 2956.428771998617,
+      "elapsed_s": 2.9565929480013438,
+      "error_count": 0,
+      "errors": [],
+      "gates": [
+        {
+          "detail": "1/1 requests succeeded",
+          "name": "all_requests_succeeded",
+          "passed": true
+        },
+        {
+          "detail": "every measured request must contribute positive completion usage",
+          "name": "positive_completion_usage",
+          "passed": true
+        },
+        {
+          "detail": "0.000 ms <= 250.000 ms",
+          "name": "dispatch_spread",
+          "passed": true
+        },
+        {
+          "detail": "not requested or parsed successfully",
+          "name": "diagnostics_readable",
+          "passed": true
+        },
+        {
+          "detail": "every request must finish by length with exactly 64 tokens",
+          "name": "fixed_output_length",
+          "passed": true
+        },
+        {
+          "detail": "observed prompt-token counts: [145]",
+          "name": "uniform_prompt_tokens",
+          "passed": true
+        },
+        {
+          "detail": "a local device-memory counter must be sampled during the run",
+          "name": "memory_measured",
+          "passed": true
+        },
+        {
+          "detail": "batching-engine error delta: 0",
+          "name": "server_reported_no_errors",
+          "passed": true
+        }
+      ],
+      "memory": {
+        "baseline_bytes": 37678030848,
+        "peak_bytes": 37749727232,
+        "peak_delta_bytes": 71696384,
+        "samples": 61
+      },
+      "output_set_sha256": "sha256:0545e3e9d43478abe4f26f92e000f5afbb2c21dd0c631f3f4d23dec2fef40639",
+      "output_token_throughput_per_s": 21.64653745902492,
+      "prompt_set_sha256": "sha256:bab3a3db17eb43e295b7a161eec26144d591faac15eaf77d46c4c34370e4cfb9",
+      "prompt_tokens_max": 145,
+      "prompt_tokens_min": 145,
+      "repeat": 0,
+      "request_count": 1,
+      "request_throughput_per_s": 0.33822714779726437,
+      "server": {
+        "batched_decode_forward_fraction": 0.0,
+        "effective_max_decode_batch": 1,
+        "mean_decode_rows_per_forward": 1.0,
+        "process_max_observed_batch": 1,
+        "total_admission_calls": 1,
+        "total_admission_ms": 0.5322249999999998,
+        "total_batched_decode_forwards": 0,
+        "total_decode_forward_ms": 2595.370401,
+        "total_decode_forwards": 63,
+        "total_decode_rows": 63,
+        "total_decode_tokens": 64,
+        "total_errors": 0,
+        "total_prefill_forward_ms": 354.43878700000005,
+        "total_prefill_forwards": 24,
+        "total_prefill_layer_yields": 21,
+        "total_prefill_layers": 96,
+        "total_prefill_tokens": 145
+      },
+      "slo_good_request_count": 1,
+      "slo_goodput_requests_per_s": 0.33822714779726437,
+      "slo_goodput_tokens_per_s": 21.64653745902492,
+      "success_count": 1,
+      "ttft_ms_p50": 358.0504749988904,
+      "ttft_ms_p99": 358.0504749988904,
+      "ttft_ms_p999": 358.0504749988904,
+      "verdict": "passed"
+    },
+    {
+      "client_visible_itl_ms_p50": 40.872473997296765,
+      "client_visible_itl_ms_p99": 42.598357523966115,
+      "client_visible_itl_ms_p999": 43.02849552691623,
+      "client_visible_stream_event_count": 512,
+      "completion_tokens": 512,
+      "concurrency": 8,
+      "dispatch_spread_ms": 1.4833780005574226,
+      "e2e_ms_p50": 13145.849246502621,
+      "e2e_ms_p99": 23218.746429227176,
+      "e2e_ms_p999": 23404.03519082954,
+      "elapsed_s": 23.425997890997678,
+      "error_count": 0,
+      "errors": [],
+      "gates": [
+        {
+          "detail": "8/8 requests succeeded",
+          "name": "all_requests_succeeded",
+          "passed": true
+        },
+        {
+          "detail": "every measured request must contribute positive completion usage",
+          "name": "positive_completion_usage",
+          "passed": true
+        },
+        {
+          "detail": "1.483 ms <= 250.000 ms",
+          "name": "dispatch_spread",
+          "passed": true
+        },
+        {
+          "detail": "not requested or parsed successfully",
+          "name": "diagnostics_readable",
+          "passed": true
+        },
+        {
+          "detail": "every request must finish by length with exactly 64 tokens",
+          "name": "fixed_output_length",
+          "passed": true
+        },
+        {
+          "detail": "observed prompt-token counts: [145]",
+          "name": "uniform_prompt_tokens",
+          "passed": true
+        },
+        {
+          "detail": "a local device-memory counter must be sampled during the run",
+          "name": "memory_measured",
+          "passed": true
+        },
+        {
+          "detail": "batching-engine error delta: 0",
+          "name": "server_reported_no_errors",
+          "passed": true
+        }
+      ],
+      "memory": {
+        "baseline_bytes": 37715976192,
+        "peak_bytes": 37743501312,
+        "peak_delta_bytes": 27525120,
+        "samples": 469
+      },
+      "output_set_sha256": "sha256:af5beb4bfc5e2733e883700d6a7cea61337262a50564b891d6f34b5b0b3b3373",
+      "output_token_throughput_per_s": 21.85605933981388,
+      "prompt_set_sha256": "sha256:345161f132198b980d2de5de9c273a045764d12c7fecdd1aa2a9aca650bbc3d0",
+      "prompt_tokens_max": 145,
+      "prompt_tokens_min": 145,
+      "repeat": 0,
+      "request_count": 8,
+      "request_throughput_per_s": 0.34150092718459185,
+      "server": {
+        "batched_decode_forward_fraction": 0.0,
+        "effective_max_decode_batch": 1,
+        "mean_decode_rows_per_forward": 1.0,
+        "process_max_observed_batch": 1,
+        "total_admission_calls": 8,
+        "total_admission_ms": 1.940804,
+        "total_batched_decode_forwards": 0,
+        "total_decode_forward_ms": 20624.518691000016,
+        "total_decode_forwards": 504,
+        "total_decode_rows": 504,
+        "total_decode_tokens": 512,
+        "total_errors": 0,
+        "total_prefill_forward_ms": 2766.5705829999997,
+        "total_prefill_forwards": 192,
+        "total_prefill_layer_yields": 168,
+        "total_prefill_layers": 768,
+        "total_prefill_tokens": 1160
+      },
+      "slo_good_request_count": 4,
+      "slo_goodput_requests_per_s": 0.17075046359229593,
+      "slo_goodput_tokens_per_s": 10.92802966990694,
+      "success_count": 8,
+      "ttft_ms_p50": 10573.726643000555,
+      "ttft_ms_p99": 20624.89236492198,
+      "ttft_ms_p999": 20810.840074394597,
+      "verdict": "passed"
+    }
+  ],
+  "schema": "kiln.serving-benchmark.v1",
+  "verdict": "passed",
+  "warmup": {
+    "client_visible_itl_ms_p50": 40.12766500818543,
+    "client_visible_itl_ms_p99": 44.108264923561364,
+    "client_visible_itl_ms_p999": 44.58887579571456,
+    "client_visible_stream_event_count": 16,
+    "completion_tokens": 16,
+    "concurrency": 1,
+    "dispatch_spread_ms": 0.0,
+    "e2e_ms_p50": 964.8970309935976,
+    "e2e_ms_p99": 964.8970309935976,
+    "e2e_ms_p999": 964.8970309935976,
+    "elapsed_s": 0.9650296370091382,
+    "error_count": 0,
+    "errors": [],
+    "gates": [
+      {
+        "detail": "1/1 requests succeeded",
+        "name": "all_requests_succeeded",
+        "passed": true
+      },
+      {
+        "detail": "every measured request must contribute positive completion usage",
+        "name": "positive_completion_usage",
+        "passed": true
+      },
+      {
+        "detail": "0.000 ms <= 250.000 ms",
+        "name": "dispatch_spread",
+        "passed": true
+      },
+      {
+        "detail": "not requested or parsed successfully",
+        "name": "diagnostics_readable",
+        "passed": true
+      },
+      {
+        "detail": "every request must finish by length with exactly 16 tokens",
+        "name": "fixed_output_length",
+        "passed": true
+      },
+      {
+        "detail": "observed prompt-token counts: [142]",
+        "name": "uniform_prompt_tokens",
+        "passed": true
+      },
+      {
+        "detail": "a local device-memory counter must be sampled during the run",
+        "name": "memory_measured",
+        "passed": true
+      },
+      {
+        "detail": "batching-engine error delta: 0",
+        "name": "server_reported_no_errors",
+        "passed": true
+      }
+    ],
+    "memory": {
+      "baseline_bytes": 37709750272,
+      "peak_bytes": 37709750272,
+      "peak_delta_bytes": 0,
+      "samples": 21
+    },
+    "output_set_sha256": "sha256:09fda6afa9a5cd09ac9a77378d4baf81d32a50fd7622be3ca57c721551eff1a3",
+    "output_token_throughput_per_s": 16.57980168317721,
+    "prompt_set_sha256": "sha256:586d628a38f1204beeeb2eb81b80456a751b3bacd1e8462ec7c98f759697898b",
+    "prompt_tokens_max": 142,
+    "prompt_tokens_min": 142,
+    "repeat": -1,
+    "request_count": 1,
+    "request_throughput_per_s": 1.0362376051985756,
+    "server": {
+      "batched_decode_forward_fraction": 0.0,
+      "effective_max_decode_batch": 1,
+      "mean_decode_rows_per_forward": 1.0,
+      "process_max_observed_batch": 1,
+      "total_admission_calls": 1,
+      "total_admission_ms": 0.732439,
+      "total_batched_decode_forwards": 0,
+      "total_decode_forward_ms": 605.8181850000001,
+      "total_decode_forwards": 15,
+      "total_decode_rows": 15,
+      "total_decode_tokens": 16,
+      "total_errors": 0,
+      "total_prefill_forward_ms": 354.4005460000001,
+      "total_prefill_forwards": 24,
+      "total_prefill_layer_yields": 21,
+      "total_prefill_layers": 96,
+      "total_prefill_tokens": 142
+    },
+    "slo_good_request_count": 1,
+    "slo_goodput_requests_per_s": 1.0362376051985756,
+    "slo_goodput_tokens_per_s": 16.57980168317721,
+    "success_count": 1,
+    "ttft_ms_p50": 358.12218199134804,
+    "ttft_ms_p99": 358.12218199134804,
+    "ttft_ms_p999": 358.12218199134804,
+    "verdict": "passed"
+  },
+  "workload": {
+    "arrival_pattern": "thread_barrier_all_at_once",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "concurrency": [
+      1,
+      8
+    ],
+    "endpoint": "/v1/chat/completions",
+    "max_dispatch_spread_ms": 250.0,
+    "max_tokens": 64,
+    "model": "Qwen3.5-4B",
+    "prompt_template_version": "equal-token-multiset-v1",
+    "repeats": 1,
+    "require_max_tokens": true,
+    "require_uniform_prompt_tokens": true,
+    "run_id": "rocm-deterministic-repeat-f4a662b2",
+    "sampling": {
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.0,
+      "seed": 17,
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "schema": "kiln.serving-benchmark-workload.v1",
+    "slo": {
+      "client_visible_itl_ms": 1000.0,
+      "e2e_ms": 60000.0,
+      "ttft_ms": 10000.0
+    },
+    "stream": true,
+    "stream_include_usage": true,
+    "warmup_requests": 1
+  },
+  "workload_fingerprint": "sha256:7d8e76703aee5e569d854c65046b06ad75372e7ef6271d15b39398e7580de01d"
+}
