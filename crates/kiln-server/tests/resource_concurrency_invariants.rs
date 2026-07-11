@@ -63,10 +63,10 @@ fn grpo_uses_settled_group_boundaries_instead_of_a_job_long_gpu_writer() {
     }
 
     let trainer = read("crates/kiln-train/src/trainer.rs");
-    let helper = source_between(
+    let shared_helper = source_between(
         &trainer,
-        "fn run_coordinated_grpo_gpu_phase<T>(",
-        "pub fn sft_train(",
+        "fn blocking_gpu_phase<T>(",
+        "/// Run one bounded training GPU phase",
     );
     for required in [
         "catch_unwind",
@@ -75,10 +75,20 @@ fn grpo_uses_settled_group_boundaries_instead_of_a_job_long_gpu_writer() {
         "drop(guard)",
     ] {
         assert!(
-            helper.contains(required),
-            "coordinated GRPO phases must settle and fail closed before yielding: {required}"
+            shared_helper.contains(required),
+            "shared coordinated GPU phases must settle and fail closed before yielding: {required}"
         );
     }
+    let grpo_helper = source_between(
+        &trainer,
+        "fn run_coordinated_grpo_gpu_phase<T>(",
+        "pub fn sft_train(",
+    );
+    assert!(
+        grpo_helper.contains("coordination.blocking_gpu_phase(backend, \"GRPO\"")
+            && grpo_helper.contains("timings.acquisitions"),
+        "GRPO must delegate each bounded phase through the shared settled coordinator"
+    );
 
     let inline = source_between(
         &trainer,
