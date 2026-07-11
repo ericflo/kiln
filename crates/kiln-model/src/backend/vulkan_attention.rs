@@ -27,6 +27,71 @@ fn generic_paged_decode_splitk_chunks(batch: usize, max_blocks_per_seq: usize) -
     kiln_vulkan_kernel::kernels::paged_attn_decode_splitk_chunks(batch, max_blocks_per_seq)
 }
 
+/// Return the smallest physical slot prefix containing every page the active
+/// rows can reach. Vulkan's current bytes bridge uploads this prefix each
+/// decode step; uploading the full auto-sized pool makes latency scale with
+/// reserved capacity instead of live context.
+fn referenced_pool_prefix_slots(
+    block_data: &[u32],
+    seq_lens: &[u32],
+    max_blocks_per_seq: usize,
+    page_block_size: usize,
+    total_slots: usize,
+) -> Result<Option<usize>> {
+    if seq_lens.is_empty() || max_blocks_per_seq == 0 || page_block_size == 0 {
+        return Ok(None);
+    }
+    let expected_blocks = seq_lens
+        .len()
+        .checked_mul(max_blocks_per_seq)
+        .context("Vulkan paged decode block-table size overflow")?;
+    if block_data.len() != expected_blocks {
+        return Ok(None);
+    }
+
+    let mut prefix_slots = 0usize;
+    for (row, &row_len) in seq_lens.iter().enumerate() {
+        let row_len = row_len as usize;
+        if row_len == 0 {
+            return Ok(None);
+        }
+        let blocks_needed = row_len.div_ceil(page_block_size);
+        if blocks_needed > max_blocks_per_seq {
+            return Ok(None);
+        }
+        for block_idx in 0..blocks_needed {
+            let block = block_data[row * max_blocks_per_seq + block_idx] as usize;
+            let block_end = block
+                .checked_add(1)
+                .and_then(|count| count.checked_mul(page_block_size))
+                .context("Vulkan paged decode slot index overflow")?;
+            if block_end > total_slots {
+                return Ok(None);
+            }
+            prefix_slots = prefix_slots.max(block_end);
+        }
+    }
+    Ok((prefix_slots > 0).then_some(prefix_slots))
+}
+
+fn paged_pool_prefix_f32_bytes(
+    pool: &kiln_tensor::Tensor,
+    prefix_slots: usize,
+    total_slots: usize,
+) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        prefix_slots > 0 && prefix_slots <= total_slots,
+        "Vulkan paged decode upload prefix {prefix_slots} is outside 1..={total_slots}"
+    );
+    if prefix_slots == total_slots {
+        return Ok(kt_tensor_to_f32_bytes_with_shape(pool)?.0);
+    }
+    let prefix = pool
+        .narrow(0, 0, prefix_slots)
+        .context("Vulkan paged decode: narrow live pool prefix")?;
+    Ok(kt_tensor_to_f32_bytes_with_shape(&prefix)?.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_vulkan_paged_decode_bytes(
     vk_device: &kiln_vulkan_kernel::VulkanDevice,
@@ -270,38 +335,29 @@ pub(super) fn flash_attn_paged_decode(
     if block_data.len() != batch * max_blocks_per_seq {
         return Ok(None);
     }
-
-    for row in 0..batch {
-        let blocks_needed = total_seqlen_k.div_ceil(page_block_size).max(1);
-        for block_idx in 0..blocks_needed {
-            let block = block_data[row * max_blocks_per_seq + block_idx] as usize;
-            let last_pos_in_block = if block_idx == blocks_needed - 1 {
-                total_seqlen_k - block_idx * page_block_size - 1
-            } else {
-                page_block_size - 1
-            };
-            let last_slot = block
-                .checked_mul(page_block_size)
-                .and_then(|base| base.checked_add(last_pos_in_block))
-                .context("Vulkan paged decode slot index overflow")?;
-            if last_slot >= total_slots {
-                return Ok(None);
-            }
-        }
-    }
+    let seq_lens = vec![
+        u32::try_from(total_seqlen_k)
+            .context("Vulkan paged decode total_seqlen_k exceeds u32")?;
+        batch
+    ];
+    let Some(upload_slots) = referenced_pool_prefix_slots(
+        &block_data,
+        &seq_lens,
+        max_blocks_per_seq,
+        page_block_size,
+        total_slots,
+    )?
+    else {
+        return Ok(None);
+    };
 
     let vk_device = backend
         .vulkan_device
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
     let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
-    let k_pool_data = kt_tensor_to_f32_bytes_with_shape(k_pool)?.0;
-    let v_pool_data = kt_tensor_to_f32_bytes_with_shape(v_pool)?.0;
-    let seq_lens = vec![
-        u32::try_from(total_seqlen_k)
-            .context("Vulkan paged decode total_seqlen_k exceeds u32")?;
-        batch
-    ];
+    let k_pool_data = paged_pool_prefix_f32_bytes(k_pool, upload_slots, total_slots)?;
+    let v_pool_data = paged_pool_prefix_f32_bytes(v_pool, upload_slots, total_slots)?;
 
     let out_data = dispatch_vulkan_paged_decode_bytes(
         vk_device,
@@ -311,7 +367,7 @@ pub(super) fn flash_attn_paged_decode(
         batch,
         num_heads,
         head_dim,
-        total_slots,
+        upload_slots,
         num_kv_heads,
         &block_data,
         &seq_lens,
@@ -412,37 +468,24 @@ pub(super) fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         seq_lens
             .push(u32::try_from(row_len).context("Vulkan paged decode row length exceeds u32")?);
     }
-    // Bounds-check the block_table entries that the kernel will follow. We do
-    // not want the shader to OOB-read the K/V pool, so reject any out-of-range
-    // (block, offset) we can prove invalid from host state. Only the slots
-    // actually visited (`pos < row_len`) need to be valid.
-    for row in 0..batch {
-        let row_len = seq_lens[row] as usize;
-        let blocks_needed = row_len.div_ceil(page_block_size).max(1);
-        for block_idx in 0..blocks_needed {
-            let block = block_data[row * max_blocks_per_seq + block_idx] as usize;
-            let last_pos_in_block = if block_idx == blocks_needed - 1 {
-                row_len - block_idx * page_block_size - 1
-            } else {
-                page_block_size - 1
-            };
-            let last_slot = block
-                .checked_mul(page_block_size)
-                .and_then(|base| base.checked_add(last_pos_in_block))
-                .context("Vulkan paged decode slot index overflow")?;
-            if last_slot >= total_slots {
-                return Ok(None);
-            }
-        }
-    }
+    let Some(upload_slots) = referenced_pool_prefix_slots(
+        &block_data,
+        &seq_lens,
+        max_blocks_per_seq,
+        page_block_size,
+        total_slots,
+    )?
+    else {
+        return Ok(None);
+    };
 
     let vk_device = backend
         .vulkan_device
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
     let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
-    let k_pool_data = kt_tensor_to_f32_bytes_with_shape(k_pool)?.0;
-    let v_pool_data = kt_tensor_to_f32_bytes_with_shape(v_pool)?.0;
+    let k_pool_data = paged_pool_prefix_f32_bytes(k_pool, upload_slots, total_slots)?;
+    let v_pool_data = paged_pool_prefix_f32_bytes(v_pool, upload_slots, total_slots)?;
     let out_data = dispatch_vulkan_paged_decode_bytes(
         vk_device,
         &q_data,
@@ -451,7 +494,7 @@ pub(super) fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         batch,
         num_heads,
         head_dim,
-        total_slots,
+        upload_slots,
         num_kv_heads,
         &block_data,
         &seq_lens,
@@ -465,4 +508,38 @@ pub(super) fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         &[batch, 1, num_heads, head_dim],
         kiln_tensor::DType::F32,
     )?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::referenced_pool_prefix_slots;
+
+    #[test]
+    fn paged_decode_upload_prefix_scales_with_referenced_pages() {
+        let prefix = referenced_pool_prefix_slots(&[0, 0, 0, 0], &[5], 4, 16, 1_000_000).unwrap();
+        assert_eq!(prefix, Some(16));
+    }
+
+    #[test]
+    fn paged_decode_upload_prefix_covers_fragmented_batch_high_water() {
+        let blocks = [7, 2, 2, 1, 5, 5];
+        let prefix = referenced_pool_prefix_slots(&blocks, &[17, 32], 3, 16, 256).unwrap();
+        assert_eq!(prefix, Some(128));
+    }
+
+    #[test]
+    fn paged_decode_upload_prefix_rejects_invalid_tables_and_pages() {
+        assert_eq!(
+            referenced_pool_prefix_slots(&[0], &[1, 1], 1, 16, 32).unwrap(),
+            None
+        );
+        assert_eq!(
+            referenced_pool_prefix_slots(&[2], &[1], 1, 16, 32).unwrap(),
+            None
+        );
+        assert_eq!(
+            referenced_pool_prefix_slots(&[0], &[17], 1, 16, 32).unwrap(),
+            None
+        );
+    }
 }
