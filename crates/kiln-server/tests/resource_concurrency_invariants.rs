@@ -38,7 +38,7 @@ fn grpo_uses_settled_group_boundaries_instead_of_a_job_long_gpu_writer() {
     );
     assert!(branch.contains("Some(trainer::GpuStepCoordination::new("));
 
-    let run_grpo = source_between(&queue, "fn run_grpo(", "/// Run one OPD training request.");
+    let run_grpo = source_between(&queue, "fn run_grpo(", "fn registered_teacher_descriptor(");
     for required in [
         "return kiln_train::cuda_train::cuda_native_grpo_train_jsonl_to_with_checkpoint_root(",
         "return trainer::grpo_train_jsonl_to_with_checkpoint_root(",
@@ -128,6 +128,118 @@ fn grpo_uses_settled_group_boundaries_instead_of_a_job_long_gpu_writer() {
             "{route} GRPO must not regress to non-resumable PEFT checkpoint directories"
         );
     }
+}
+
+#[test]
+fn opd_routes_use_settled_phases_and_durable_exact_checkpoints() {
+    let queue = read("crates/kiln-server/src/training_queue.rs");
+    let branches = source_between(
+        &queue,
+        "QueuedJob::Opd(mut req) => {",
+        "    let result: std::result::Result<PublishedTrainingOutput, String> =",
+    );
+    assert!(
+        !branches.contains("gpu_coordination_write_guard_while_healthy"),
+        "OPD-class routes must not retain one GPU writer across the full job"
+    );
+    assert_eq!(
+        branches
+            .matches("trainer::GpuStepCoordination::new(")
+            .count(),
+        5,
+        "direct OPD and every distillation recipe must receive settled phase coordination"
+    );
+
+    let routes = [
+        (
+            "opd",
+            source_between(
+                &queue,
+                "fn run_opd(",
+                "fn build_multi_tenant_merge_teacher(",
+            ),
+        ),
+        (
+            "distill_refresh",
+            source_between(&queue, "fn run_distill_refresh(", "fn run_distill_merge("),
+        ),
+        (
+            "distill_merge",
+            source_between(&queue, "fn run_distill_merge(", "fn run_distill_pump("),
+        ),
+        (
+            "distill_pump",
+            source_between(&queue, "fn run_distill_pump(", "fn run_distill_self("),
+        ),
+        (
+            "distill_self",
+            source_between(
+                &queue,
+                "fn run_distill_self(",
+                "struct TrainingMemoryRuntime",
+            ),
+        ),
+    ];
+    for (route, source) in routes {
+        assert!(
+            source.contains("opd_train_to_with_checkpoint_root("),
+            "{route} must use the exact OPD checkpoint entry point"
+        );
+        assert!(
+            source.contains("output_adapter_dir,\n        adapter_dir,\n        adapter_name,"),
+            "{route} must publish checkpoints outside final-adapter staging"
+        );
+        assert!(
+            source.contains("Some(gpu_step_coordination.clone())"),
+            "{route} must settle every bounded OPD GPU phase"
+        );
+        assert!(
+            source.contains("release_opd_teacher("),
+            "{route} must release retained teacher device ownership in a final settled phase"
+        );
+        assert!(
+            source.contains("resolved_opd_seed(&output_dir, adapter_name)"),
+            "{route} must publish the optimizer's actual effective seed"
+        );
+        assert!(
+            !source.contains("kiln_train::opd::opd_train_to("),
+            "{route} must not couple checkpoints to staging or omit coordination"
+        );
+    }
+
+    let merge_teacher = source_between(
+        &queue,
+        "fn build_multi_tenant_merge_teacher(",
+        "fn validate_self_distill_target_alignment(",
+    );
+    assert!(
+        merge_teacher.find("tokenize_teacher_prompts(").is_some_and(
+            |tokenize| tokenize < merge_teacher.find("merge teacher adapter load").unwrap()
+        ),
+        "merge prompt validation must complete before loading a teacher adapter"
+    );
+    let local_teacher = source_between(
+        &queue,
+        "fn build_local_teacher_for(",
+        "/// `/v1/distill/refresh` runtime",
+    );
+    assert!(
+        local_teacher.find("let prompts_and_active =").is_some_and(
+            |tokenize| tokenize < local_teacher.find("let teacher_lora = match").unwrap()
+        ),
+        "fixed local-teacher rows must validate before loading a teacher adapter"
+    );
+    assert!(local_teacher.contains("\"live local teacher ownership\""));
+    assert!(local_teacher.contains("release_teacher_lora("));
+
+    let opd = read("crates/kiln-train/src/opd.rs");
+    let cleanup = source_between(
+        &opd,
+        "\"resident adapter and optimizer cleanup\"",
+        "/// Tape-authoritative OPD forward + backward",
+    );
+    assert!(cleanup.contains("drop(teacher);"));
+    assert!(cleanup.contains("params.evict_from_backend"));
 }
 
 #[test]

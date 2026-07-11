@@ -18,9 +18,7 @@ use serde::Serialize;
 
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::recent_requests::now_unix_ms;
-use crate::state::{
-    AppState, ModelBackend, TrainingJobType, gpu_coordination_write_guard_while_healthy,
-};
+use crate::state::{AppState, ModelBackend, TrainingJobType};
 use crate::training_history;
 
 /// Mark the tracked job terminal (Completed / Failed), stamp `finished_at`
@@ -453,6 +451,20 @@ fn normalize_grpo_resume_checkpoint(
     )
 }
 
+fn normalize_opd_resume_checkpoint(
+    config: &mut kiln_train::OpdConfig,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+) -> Result<(), String> {
+    normalize_training_resume_checkpoint(
+        &mut config.resume_checkpoint,
+        kiln_train::checkpoint::TrainingKind::Opd,
+        "OPD",
+        adapter_dir,
+        adapter_name,
+    )
+}
+
 fn normalize_training_resume_checkpoint(
     resume_checkpoint: &mut Option<String>,
     expected_kind: kiln_train::checkpoint::TrainingKind,
@@ -748,31 +760,7 @@ fn run_grpo(
     .map_err(|e| format!("{e:#}"))
 }
 
-/// Run one OPD training request.
-///
-/// **Milestone 4 (this commit) scope.** The plumbing — HTTP → queue →
-/// blocking worker → job tracking → metrics → webhook → auto-load → post-
-/// eval — is wired identically to SFT/GRPO. The runtime body itself runs
-/// the §3.1 pseudocode against a fixture teacher (no real teacher
-/// resolution yet) so the entire host code path is exercised
-/// end-to-end before the GPU model integration lands. Outcome:
-///
-/// 1. Validate the prompt set is non-empty.
-/// 2. Verify the `OpdRequest`'s loss / top_k / Stable-OPD knobs
-///    deserialise cleanly (already enforced via serde at the endpoint
-///    boundary).
-/// 3. Persist a stub PEFT adapter directory so `auto_load` and
-///    `post_eval` callers see a real path. The adapter weights match
-///    the base model exactly (no update yet) — the §3.1 loss + IS
-///    advantage path is the next commit.
-///
-/// Returns an explicit error when the GPU runtime path *would* run but
-/// the model is mocked, matching SFT/GRPO. The reason for the explicit
-/// runtime stub: the §3.1 trainer body shares almost all of its
-/// machinery (segment-checkpointed forward, LoRA Vars, AdamW step,
-/// hot-swap) with `grpo_train`, and the refactor that factors those
-/// pieces out so OPD can call them is its own diff; doing it here would
-/// produce a much larger PR than this milestone wants.
+/// Build the receipt-facing descriptor for an admitted teacher binding.
 fn registered_teacher_descriptor(
     spec: &crate::api::teachers::TeacherSpec,
 ) -> kiln_train::TeacherDescriptor {
@@ -838,9 +826,80 @@ fn materialize_remote_teacher_for_off_policy(
             .authoritative_teacher_identity()
             .map(kiln_train::TeacherIdentityV1::content_revision)
             .unwrap_or_default(),
-        "materialized remote teacher before acquiring GPU coordination lock"
+        "materialized remote teacher before bounded GPU phases"
     );
     Ok(std::sync::Arc::new(fixture))
+}
+
+fn resolved_opd_seed(
+    output_dir: &std::path::Path,
+    adapter_name: &str,
+) -> std::result::Result<u64, String> {
+    let receipt = kiln_train::TrainReceipt::read_from_adapter_dir(output_dir)
+        .map_err(|error| format!("read OPD train receipt seed: {error:#}"))?
+        .ok_or_else(|| "OPD trainer completed without train_receipt.json".to_string())?;
+    if receipt.status != kiln_train::TrainReceiptStatus::Success {
+        return Err("OPD trainer returned a non-success train receipt".to_string());
+    }
+    if receipt.adapter_name != adapter_name || receipt.hyperparameters.mode != "opd" {
+        return Err(format!(
+            "OPD train receipt identity mismatch: expected adapter {adapter_name:?} in mode \"opd\", got adapter {:?} in mode {:?}",
+            receipt.adapter_name, receipt.hyperparameters.mode
+        ));
+    }
+    receipt.hyperparameters.seed.ok_or_else(|| {
+        "OPD train receipt is missing the resolved effective seed used by the optimizer".to_string()
+    })
+}
+
+fn combine_operation_and_cleanup<T>(
+    operation: std::result::Result<T, String>,
+    cleanup: std::result::Result<(), String>,
+    cleanup_label: &str,
+) -> std::result::Result<T, String> {
+    match (operation, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(error), Err(cleanup_error)) => Err(format!(
+            "{error}; {cleanup_label} also failed: {cleanup_error}"
+        )),
+    }
+}
+
+fn release_teacher_lora(
+    teacher_lora: Option<kiln_model::lora_loader::LoraWeights>,
+    weights: &kiln_model::forward::GpuWeights,
+    gpu_step_coordination: &trainer::GpuStepCoordination,
+    phase: &'static str,
+) -> std::result::Result<(), String> {
+    let Some(teacher_lora) = teacher_lora else {
+        return Ok(());
+    };
+    let device = weights.embed_tokens.device();
+    let backend = kiln_model::backend::for_device_kt(&device);
+    gpu_step_coordination
+        .run_gpu_phase(&*backend, "OPD", phase, || {
+            drop(teacher_lora);
+            Ok(())
+        })
+        .map_err(|error| format!("{phase}: {error:#}"))
+}
+
+fn release_opd_teacher(
+    teacher: std::sync::Arc<dyn kiln_train::LogitSource>,
+    weights: &kiln_model::forward::GpuWeights,
+    gpu_step_coordination: &trainer::GpuStepCoordination,
+    phase: &'static str,
+) -> std::result::Result<(), String> {
+    let device = weights.embed_tokens.device();
+    let backend = kiln_model::backend::for_device_kt(&device);
+    gpu_step_coordination
+        .run_gpu_phase(&*backend, "OPD", phase, || {
+            drop(teacher);
+            Ok(())
+        })
+        .map_err(|error| format!("{phase}: {error:#}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -856,8 +915,7 @@ fn run_opd(
     teacher_spec: &crate::api::teachers::TeacherSpec,
     prepared_remote_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
     job_id: &str,
-    gpu_lock: &crate::state::GpuCoordinationLock,
-    backend_health: &kiln_model::BackendHealthHandle,
+    gpu_step_coordination: trainer::GpuStepCoordination,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -994,9 +1052,6 @@ fn run_opd(
         None
     };
 
-    let _gpu_guard = gpu_coordination_write_guard_while_healthy(gpu_lock, backend_health)
-        .map_err(|error| format!("{error:#}"))?;
-
     tracing::info!(
         job_id = %job_id,
         teacher = %req.teacher,
@@ -1041,6 +1096,7 @@ fn run_opd(
                     adapter_dir,
                     req.config.top_k,
                     req.config.training_mode,
+                    &gpu_step_coordination,
                 )?,
                 crate::api::teachers::TeacherKind::Remote => materialized_remote_teacher
                     .clone()
@@ -1050,19 +1106,29 @@ fn run_opd(
 
     let trainer_progress_cb: trainer::ProgressCallback = progress_cb;
 
-    let output_dir = kiln_train::opd::opd_train_to(
+    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root(
         prompts,
         &req.config,
         model_config,
         weights,
         tokenizer,
-        teacher,
+        teacher.clone(),
         adapter_dir,
         output_adapter_dir,
+        adapter_dir,
         adapter_name,
         Some(trainer_progress_cb),
+        Some(gpu_step_coordination.clone()),
     )
-    .map_err(|e| format!("opd_train failed: {e:#}"))?;
+    .map_err(|e| format!("opd_train failed: {e:#}"));
+    let teacher_release = release_opd_teacher(
+        teacher,
+        weights,
+        &gpu_step_coordination,
+        "direct teacher release",
+    );
+    let output_dir =
+        combine_operation_and_cleanup(train_result, teacher_release, "direct OPD teacher release")?;
 
     if let (Some(path), Some(source_sha256)) =
         (req.dataset_path.as_deref(), dataset_source_sha256.as_ref())
@@ -1087,7 +1153,7 @@ fn run_opd(
     }
 
     // §8.11 reproducibility receipt — every adapter ships with one.
-    let seed = req.config.seed.unwrap_or(0);
+    let seed = resolved_opd_seed(&output_dir, adapter_name)?;
     let hyperparameters = serde_json::to_value(&req.config)
         .map_err(|error| format!("serialize OPD receipt hyperparameters: {error}"))?;
     let teacher_descriptor = if dataset_summary.is_some() {
@@ -1209,27 +1275,35 @@ fn build_multi_tenant_merge_teacher(
     weights: &kiln_model::forward::GpuWeights,
     model_config: &kiln_core::config::ModelConfig,
     top_k: usize,
+    gpu_step_coordination: &trainer::GpuStepCoordination,
 ) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
     let mut unified = kiln_train::logit_source::FixtureLogitSource::uniform_topk(
         teacher_id.to_string(),
         model_config.vocab_size,
         top_k,
     );
+    let backend_device = weights.embed_tokens.device();
+    let backend = kiln_model::backend::for_device_kt(&backend_device);
     for (source, prompts) in per_source {
+        let tokenized =
+            tokenize_teacher_prompts("distill_merge", &source.adapter, prompts, tokenizer)?;
         // The source identity is the declared LoRA. Loading it is part of the
         // teacher contract, so failure cannot degrade to base-model scoring.
         let src_dir = adapter_dir.join(&source.adapter);
         let device = weights.embed_tokens.device().clone();
-        let teacher_lora = load_declared_merge_source_lora(
-            &source.adapter,
-            &src_dir,
-            model_config.num_layers,
-            device,
-        )?;
+        let teacher_lora = gpu_step_coordination
+            .run_gpu_phase(&*backend, "OPD", "merge teacher adapter load", || {
+                load_declared_merge_source_lora(
+                    &source.adapter,
+                    &src_dir,
+                    model_config.num_layers,
+                    device,
+                )
+                .map_err(anyhow::Error::msg)
+            })
+            .map_err(|error| format!("distill_merge teacher adapter load: {error:#}"))?;
 
-        let tokenized =
-            tokenize_teacher_prompts("distill_merge", &source.adapter, prompts, tokenizer)?;
-        let source_fixture = kiln_train::opd::build_local_teacher_fixture(
+        let source_fixture = kiln_train::opd::build_local_teacher_fixture_with_coordination(
             format!("{teacher_id}:{}", source.adapter),
             &tokenized,
             weights,
@@ -1237,8 +1311,20 @@ fn build_multi_tenant_merge_teacher(
             Some(&teacher_lora),
             top_k,
             None,
+            Some(gpu_step_coordination),
         )
-        .map_err(|e| format!("build_local_teacher_fixture for {}: {e:#}", source.adapter))?;
+        .map_err(|e| format!("build_local_teacher_fixture for {}: {e:#}", source.adapter));
+        let teacher_release = release_teacher_lora(
+            Some(teacher_lora),
+            weights,
+            gpu_step_coordination,
+            "merge teacher adapter release",
+        );
+        let source_fixture = combine_operation_and_cleanup(
+            source_fixture,
+            teacher_release,
+            "distill_merge teacher adapter release",
+        )?;
 
         // Drain entries from source_fixture into unified.
         for (tokens, active_positions) in &tokenized {
@@ -1511,6 +1597,7 @@ fn build_self_distill_teacher(
     weights: &kiln_model::forward::GpuWeights,
     model_config: &kiln_core::config::ModelConfig,
     top_k: usize,
+    gpu_step_coordination: &trainer::GpuStepCoordination,
 ) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
     // Tokenization and target alignment complete before any forward so a bad
     // prompt cannot create a partial fixture or silently change the dataset.
@@ -1523,7 +1610,7 @@ fn build_self_distill_teacher(
     // top-K at teacher_only positions, then re-insert under the
     // exact student sequence at the student positions — same logprob
     // values, different key.
-    let teacher_fixture = kiln_train::opd::build_local_teacher_fixture(
+    let teacher_fixture = kiln_train::opd::build_local_teacher_fixture_with_coordination(
         teacher_id.to_string(),
         &teacher_only,
         weights,
@@ -1531,6 +1618,7 @@ fn build_self_distill_teacher(
         None,
         top_k,
         None,
+        Some(gpu_step_coordination),
     )
     .map_err(|e| format!("self-distill local-teacher forward: {e:#}"))?;
 
@@ -1595,6 +1683,7 @@ fn build_local_teacher_for(
     adapter_dir: &std::path::Path,
     top_k: usize,
     training_mode: kiln_train::opd::OpdTrainingMode,
+    gpu_step_coordination: &trainer::GpuStepCoordination,
 ) -> std::result::Result<std::sync::Arc<dyn kiln_train::logit_source::LogitSource>, String> {
     let pinned_identity = spec.identity.as_ref().ok_or_else(|| {
         format!(
@@ -1602,6 +1691,17 @@ fn build_local_teacher_for(
             spec.alias
         )
     })?;
+    let on_policy = matches!(training_mode, kiln_train::opd::OpdTrainingMode::OnPolicy);
+    let prompts_and_active = if on_policy {
+        None
+    } else {
+        Some(tokenize_teacher_prompts(
+            "local-teacher",
+            &spec.alias,
+            prompts,
+            tokenizer,
+        )?)
+    };
     // The teacher's LoRA. A spec that names an adapter MUST wear it —
     // the silent fall-through to `None` here is what made
     // `distill_refresh` toward a prior self and `self_improve`'s
@@ -1635,22 +1735,26 @@ fn build_local_teacher_for(
                     spec.alias
                 )
             })?;
-            Some(
+            let backend = kiln_model::backend::for_device_kt(&device);
+            let load = || {
                 kiln_model::lora_loader::LoraWeights::load_pinned(
                     &dir,
                     model_config.num_layers,
                     device,
                     &expected_source,
                 )
-                .map_err(|e| {
-                    format!(
-                        "teacher '{}' is pinned to adapter '{name}', but the exact registered content \
-                         could not be loaded from {}: {e:#}; re-register after any adapter rewrite",
-                        spec.alias,
-                        dir.display()
-                    )
-                })?,
-            )
+            };
+            let loaded = gpu_step_coordination
+                .run_gpu_phase(&*backend, "OPD", "local teacher adapter load", load)
+            .map_err(|e| {
+                format!(
+                    "teacher '{}' is pinned to adapter '{name}', but the exact registered content \
+                     could not be loaded from {}: {e:#}; re-register after any adapter rewrite",
+                    spec.alias,
+                    dir.display()
+                )
+            })?;
+            Some(loaded)
         }
         None => {
             if let Some(adapter) = pinned_identity.adapter() {
@@ -1669,24 +1773,29 @@ fn build_local_teacher_for(
     // fixture would miss every rollout. Return a LiveLocalTeacher that holds a
     // cheap (Arc-backed) clone of the loaded model and runs a detached forward on
     // demand.
-    if matches!(training_mode, kiln_train::opd::OpdTrainingMode::OnPolicy) {
-        let teacher = kiln_train::opd::LiveLocalTeacher::new(
-            spec.alias.clone(),
-            weights.clone(),
-            model_config.clone(),
-            teacher_lora,
-            pinned_identity.clone(),
-            top_k,
-        )
-        .map_err(|e| format!("construct pinned live local teacher: {e:#}"))?;
+    if on_policy {
+        let construct = || {
+            kiln_train::opd::LiveLocalTeacher::new(
+                spec.alias.clone(),
+                weights.clone(),
+                model_config.clone(),
+                teacher_lora,
+                pinned_identity.clone(),
+                top_k,
+            )
+        };
+        let device = weights.embed_tokens.device();
+        let backend = kiln_model::backend::for_device_kt(&device);
+        let teacher = gpu_step_coordination
+            .run_gpu_phase(&*backend, "OPD", "live local teacher ownership", construct)
+            .map_err(|e| format!("construct pinned live local teacher: {e:#}"))?;
         return Ok(std::sync::Arc::new(teacher));
     }
 
     // OFF-POLICY: the assistant turns are fixed, so pre-compute the fixture keyed
     // by exact sequence (cheaper — one forward per prompt up front).
-    let prompts_and_active =
-        tokenize_teacher_prompts("local-teacher", &spec.alias, prompts, tokenizer)?;
-    let fixture = kiln_train::opd::build_local_teacher_fixture(
+    let prompts_and_active = prompts_and_active.expect("off-policy prompts were tokenized");
+    let fixture = kiln_train::opd::build_local_teacher_fixture_with_coordination(
         spec.alias.clone(),
         &prompts_and_active,
         weights,
@@ -1694,8 +1803,17 @@ fn build_local_teacher_for(
         teacher_lora.as_ref(),
         top_k,
         spec.tokenizer_hash.clone(),
+        Some(gpu_step_coordination),
     )
-    .map_err(|e| format!("build_local_teacher_fixture failed: {e:#}"))?;
+    .map_err(|e| format!("build_local_teacher_fixture failed: {e:#}"));
+    let teacher_release = release_teacher_lora(
+        teacher_lora,
+        weights,
+        gpu_step_coordination,
+        "local teacher adapter release",
+    );
+    let fixture =
+        combine_operation_and_cleanup(fixture, teacher_release, "local teacher adapter release")?;
     let fixture = fixture
         .with_authoritative_identity(pinned_identity.clone())
         .map_err(|e| format!("bind local teacher fixture to pinned identity: {e}"))?;
@@ -1709,21 +1827,6 @@ fn build_local_teacher_for(
 ///    SFT under the hood — same `trainer::sft_train` path SFT uses.
 /// 2. **OPD-recover** against `behavioural_teacher`. Uses OPD on
 ///    Tulu3-flavoured prompts.
-///
-/// Both phases pre-eval (baseline at start) and post-eval (after
-/// each phase) against the registered eval suites. New adapter is
-/// only published when:
-///   IF-eval after refresh >= `require_if_eval_recovery * baseline_if_eval`
-///   AND
-///   new-knowledge eval after refresh - baseline new-knowledge >=
-///     `require_internal_qa_gain`.
-///
-/// Milestone-9 state: this function ships the *plumbing* (validation,
-/// queue dispatch, receipt write, stub adapter for the dashboard to
-/// point at). The actual two-phase runtime + dual eval gate lands
-/// alongside the §3.1 trainer body (task #31), since the OPD step is
-/// what the refresh orchestrates.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn run_distill_refresh(
     req: &DistillRefreshRequest,
@@ -1738,8 +1841,7 @@ fn run_distill_refresh(
     prepared_remote_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
     dataset_registry: Option<&crate::eval::DatasetRegistry>,
     job_id: &str,
-    gpu_lock: &crate::state::GpuCoordinationLock,
-    backend_health: &kiln_model::BackendHealthHandle,
+    gpu_step_coordination: trainer::GpuStepCoordination,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -1783,12 +1885,6 @@ fn run_distill_refresh(
         } else {
             None
         };
-
-    // Local fixture construction and both GPU phases retain the existing
-    // job-wide exclusion. All remote I/O above has completed before this
-    // guard can block inference.
-    let _gpu_guard = gpu_coordination_write_guard_while_healthy(gpu_lock, backend_health)
-        .map_err(|error| format!("{error:#}"))?;
 
     tracing::info!(
         job_id = %job_id,
@@ -1853,7 +1949,7 @@ fn run_distill_refresh(
         &midtrain_name,
         Some(progress_cb),
         None,
-        None,
+        Some(gpu_step_coordination.clone()),
     )
     .map_err(|e| format!("distill_refresh phase 1 (SFT midtrain) failed: {e:#}"))?;
 
@@ -1887,6 +1983,7 @@ fn run_distill_refresh(
             adapter_dir,
             req.config.top_k,
             req.config.training_mode,
+            &gpu_step_coordination,
         )
         .map_err(|e| format!("distill_refresh phase 2 local-teacher build: {e}"))?,
         crate::api::teachers::TeacherKind::Remote => materialized_remote_teacher
@@ -1908,23 +2005,36 @@ fn run_distill_refresh(
         teacher = %req.behavioural_teacher,
         "phase 2 — OPD recover"
     );
-    let output_dir = kiln_train::opd::opd_train_to(
+    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root(
         &prompts,
         &recover_config,
         model_config,
         weights,
         tokenizer,
-        teacher,
+        teacher.clone(),
         adapter_dir,
         output_adapter_dir,
+        adapter_dir,
         adapter_name,
         None,
+        Some(gpu_step_coordination.clone()),
     )
-    .map_err(|e| format!("distill_refresh phase 2 (OPD recover) failed: {e:#}"))?;
+    .map_err(|e| format!("distill_refresh phase 2 (OPD recover) failed: {e:#}"));
+    let teacher_release = release_opd_teacher(
+        teacher,
+        weights,
+        &gpu_step_coordination,
+        "refresh teacher release",
+    );
+    let output_dir = combine_operation_and_cleanup(
+        train_result,
+        teacher_release,
+        "distill_refresh teacher release",
+    )?;
 
     // §8.11 receipt — records the two-phase pipeline + behavioural-
     // teacher metadata + the recover config.
-    let seed = req.config.seed.unwrap_or(0);
+    let seed = resolved_opd_seed(&output_dir, adapter_name)?;
     let receipt_hyperparameters = serde_json::to_value(req)
         .map_err(|error| format!("serialize distill_refresh receipt: {error}"))?;
     let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_refresh", seed)
@@ -1947,9 +2057,6 @@ fn run_distill_refresh(
 /// training-prompt distribution. Multi-teacher reverse-KL with per-
 /// prompt routing (source-of-origin) plus DeepSeek-V4-style weighted
 /// averaging on shared prompts.
-///
-/// Milestone-9 state: plumbing + receipt. Runtime body lands with the
-/// §3.1 trainer refactor (task #31).
 #[allow(clippy::too_many_arguments)]
 fn run_distill_merge(
     req: &DistillMergeRequest,
@@ -1961,6 +2068,7 @@ fn run_distill_merge(
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
     job_id: &str,
+    gpu_step_coordination: trainer::GpuStepCoordination,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -2049,6 +2157,7 @@ fn run_distill_merge(
             weights,
             model_config,
             req.config.top_k,
+            &gpu_step_coordination,
         )?);
 
     let mut merge_config = req.config.clone();
@@ -2058,21 +2167,34 @@ fn run_distill_merge(
     merge_config.output_name = Some(adapter_name.to_string());
     merge_config.auto_load = false;
 
-    let output_dir = kiln_train::opd::opd_train_to(
+    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root(
         &all_prompts,
         &merge_config,
         model_config,
         weights,
         tokenizer,
-        teacher,
+        teacher.clone(),
         adapter_dir,
         output_adapter_dir,
+        adapter_dir,
         adapter_name,
         Some(progress_cb),
+        Some(gpu_step_coordination.clone()),
     )
-    .map_err(|e| format!("distill_merge opd_train failed: {e:#}"))?;
+    .map_err(|e| format!("distill_merge opd_train failed: {e:#}"));
+    let teacher_release = release_opd_teacher(
+        teacher,
+        weights,
+        &gpu_step_coordination,
+        "merge fixture release",
+    );
+    let output_dir = combine_operation_and_cleanup(
+        train_result,
+        teacher_release,
+        "distill_merge teacher release",
+    )?;
 
-    let seed = req.config.seed.unwrap_or(0);
+    let seed = resolved_opd_seed(&output_dir, adapter_name)?;
     let receipt_hyperparameters = serde_json::to_value(req)
         .map_err(|error| format!("serialize distill_merge receipt: {error}"))?;
     let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_merge", seed)
@@ -2160,9 +2282,6 @@ fn derive_source_prompts(
 /// `/v1/distill/pump` runtime — §3.5 27B → 4B Knowledge Pump.
 /// Three modes (Domain / Wide / Examples); §3.5.4 data-multiplier
 /// mode auto-engages internally when |examples| < 200.
-///
-/// Milestone-9 state: plumbing + receipt. Runtime body lands with the
-/// §3.1 trainer refactor.
 #[allow(clippy::too_many_arguments)]
 fn run_distill_pump(
     req: &DistillPumpRequest,
@@ -2176,8 +2295,7 @@ fn run_distill_pump(
     teacher_spec: &crate::api::teachers::TeacherSpec,
     prepared_remote_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
     job_id: &str,
-    gpu_lock: &crate::state::GpuCoordinationLock,
-    backend_health: &kiln_model::BackendHealthHandle,
+    gpu_step_coordination: trainer::GpuStepCoordination,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -2219,9 +2337,6 @@ fn run_distill_pump(
             None
         };
 
-    let _gpu_guard = gpu_coordination_write_guard_while_healthy(gpu_lock, backend_health)
-        .map_err(|error| format!("{error:#}"))?;
-
     tracing::info!(
         job_id = %job_id,
         name = %req.name,
@@ -2252,6 +2367,7 @@ fn run_distill_pump(
             adapter_dir,
             req.config.top_k,
             req.config.training_mode,
+            &gpu_step_coordination,
         )
         .map_err(|e| format!("distill_pump local-teacher build: {e}"))?,
         crate::api::teachers::TeacherKind::Remote => materialized_remote_teacher
@@ -2266,22 +2382,35 @@ fn run_distill_pump(
     pump_config.output_name = Some(adapter_name.to_string());
     pump_config.auto_load = false;
 
-    let output_dir = kiln_train::opd::opd_train_to(
+    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root(
         &prompts,
         &pump_config,
         model_config,
         weights,
         tokenizer,
-        teacher,
+        teacher.clone(),
         adapter_dir,
         output_adapter_dir,
+        adapter_dir,
         adapter_name,
         Some(progress_cb),
+        Some(gpu_step_coordination.clone()),
     )
-    .map_err(|e| format!("distill_pump opd_train failed: {e:#}"))?;
+    .map_err(|e| format!("distill_pump opd_train failed: {e:#}"));
+    let teacher_release = release_opd_teacher(
+        teacher,
+        weights,
+        &gpu_step_coordination,
+        "pump teacher release",
+    );
+    let output_dir = combine_operation_and_cleanup(
+        train_result,
+        teacher_release,
+        "distill_pump teacher release",
+    )?;
 
     // §8.11 receipt.
-    let seed = req.config.seed.unwrap_or(0);
+    let seed = resolved_opd_seed(&output_dir, adapter_name)?;
     let receipt_hyperparameters = serde_json::to_value(req)
         .map_err(|error| format!("serialize distill_pump receipt: {error}"))?;
     let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_pump", seed)
@@ -2440,6 +2569,7 @@ fn run_distill_self(
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
     job_id: &str,
+    gpu_step_coordination: trainer::GpuStepCoordination,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -2504,27 +2634,41 @@ fn run_distill_self(
             weights,
             model_config,
             req.config.top_k,
+            &gpu_step_coordination,
         )?);
 
     let mut self_config = req.config.clone();
     self_config.output_name = Some(adapter_name.to_string());
     self_config.auto_load = false;
 
-    let output_dir = kiln_train::opd::opd_train_to(
+    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root(
         &prompts,
         &self_config,
         model_config,
         weights,
         tokenizer,
-        teacher,
+        teacher.clone(),
         adapter_dir,
         output_adapter_dir,
+        adapter_dir,
         adapter_name,
         Some(progress_cb),
+        Some(gpu_step_coordination.clone()),
     )
-    .map_err(|e| format!("distill_self opd_train failed: {e:#}"))?;
+    .map_err(|e| format!("distill_self opd_train failed: {e:#}"));
+    let teacher_release = release_opd_teacher(
+        teacher,
+        weights,
+        &gpu_step_coordination,
+        "self-distill fixture release",
+    );
+    let output_dir = combine_operation_and_cleanup(
+        train_result,
+        teacher_release,
+        "distill_self teacher release",
+    )?;
 
-    let seed = req.config.seed.unwrap_or(0);
+    let seed = resolved_opd_seed(&output_dir, adapter_name)?;
     let receipt_hyperparameters = serde_json::to_value(req)
         .map_err(|error| format!("serialize distill_self receipt: {error}"))?;
     let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_self", seed)
@@ -3041,7 +3185,21 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
         QueuedJob::Grpo(request) => {
             normalize_grpo_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
         }
-        _ => Ok(()),
+        QueuedJob::Opd(request) => {
+            normalize_opd_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
+        }
+        QueuedJob::DistillRefresh(request) => {
+            normalize_opd_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
+        }
+        QueuedJob::DistillMerge(request) => {
+            normalize_opd_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
+        }
+        QueuedJob::DistillPump(request) => {
+            normalize_opd_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
+        }
+        QueuedJob::DistillSelf(request) => {
+            normalize_opd_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
+        }
     };
     if let Err(error) = resume_admission {
         reject_queued_training_job(&state, &job_id, error, "invalid_resume_checkpoint");
@@ -3308,8 +3466,10 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     teacher_spec,
                     prepared_remote_teacher.clone(),
                     &job_id,
-                    &state.gpu_lock,
-                    &backend_health,
+                    trainer::GpuStepCoordination::new(
+                        state.gpu_lock.clone(),
+                        backend_health.clone(),
+                    ),
                 )
             }
             QueuedJob::DistillRefresh(req) => {
@@ -3330,27 +3490,29 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     prepared_remote_teacher.clone(),
                     state.dataset_registry.as_deref(),
                     &job_id,
-                    &state.gpu_lock,
-                    &backend_health,
+                    trainer::GpuStepCoordination::new(
+                        state.gpu_lock.clone(),
+                        backend_health.clone(),
+                    ),
                 )
             }
             QueuedJob::DistillMerge(req) => {
-                gpu_coordination_write_guard_while_healthy(&state.gpu_lock, &backend_health)
-                    .map_err(|error| format!("{error:#}"))
-                    .and_then(|_gpu_guard| {
-                        let guard = runner_arc.read().unwrap();
-                        run_distill_merge(
-                            &req,
-                            &state.model_config,
-                            &guard.weights,
-                            &state.tokenizer,
-                            &state.adapter_dir,
-                            output_adapter_dir,
-                            &adapter_name,
-                            progress_cb,
-                            &job_id,
-                        )
-                    })
+                let guard = runner_arc.read().unwrap();
+                run_distill_merge(
+                    &req,
+                    &state.model_config,
+                    &guard.weights,
+                    &state.tokenizer,
+                    &state.adapter_dir,
+                    output_adapter_dir,
+                    &adapter_name,
+                    progress_cb,
+                    &job_id,
+                    trainer::GpuStepCoordination::new(
+                        state.gpu_lock.clone(),
+                        backend_health.clone(),
+                    ),
+                )
             }
             QueuedJob::DistillPump(req) => {
                 let guard = runner_arc.read().unwrap();
@@ -3369,27 +3531,29 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     teacher_spec,
                     prepared_remote_teacher.clone(),
                     &job_id,
-                    &state.gpu_lock,
-                    &backend_health,
+                    trainer::GpuStepCoordination::new(
+                        state.gpu_lock.clone(),
+                        backend_health.clone(),
+                    ),
                 )
             }
             QueuedJob::DistillSelf(req) => {
-                gpu_coordination_write_guard_while_healthy(&state.gpu_lock, &backend_health)
-                    .map_err(|error| format!("{error:#}"))
-                    .and_then(|_gpu_guard| {
-                        let guard = runner_arc.read().unwrap();
-                        run_distill_self(
-                            &req,
-                            &state.model_config,
-                            &guard.weights,
-                            &state.tokenizer,
-                            &state.adapter_dir,
-                            output_adapter_dir,
-                            &adapter_name,
-                            progress_cb,
-                            &job_id,
-                        )
-                    })
+                let guard = runner_arc.read().unwrap();
+                run_distill_self(
+                    &req,
+                    &state.model_config,
+                    &guard.weights,
+                    &state.tokenizer,
+                    &state.adapter_dir,
+                    output_adapter_dir,
+                    &adapter_name,
+                    progress_cb,
+                    &job_id,
+                    trainer::GpuStepCoordination::new(
+                        state.gpu_lock.clone(),
+                        backend_health.clone(),
+                    ),
+                )
             }
         }
     };
@@ -3889,6 +4053,114 @@ mod tests {
         let error =
             normalize_grpo_resume_checkpoint(&mut wrong_kind, temp.path(), "target").unwrap_err();
         assert!(error.contains("GRPO resume_checkpoint contains Sft state"));
+    }
+
+    #[test]
+    fn opd_resume_admission_normalizes_only_matching_exact_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let name = "target-checkpoint-step-00000001.kiln-checkpoint";
+        write_resume_checkpoint_fixture(temp.path(), name, "target", TrainingKind::Opd);
+        let mut config = kiln_train::OpdConfig {
+            resume_checkpoint: Some(name.into()),
+            ..Default::default()
+        };
+
+        normalize_opd_resume_checkpoint(&mut config, temp.path(), "target").unwrap();
+        assert_eq!(
+            config.resume_checkpoint.as_deref(),
+            temp.path().join(name).to_str()
+        );
+
+        let sft_name = "target-checkpoint-sft.kiln-checkpoint";
+        write_resume_checkpoint_fixture(temp.path(), sft_name, "target", TrainingKind::Sft);
+        let mut wrong_kind = kiln_train::OpdConfig {
+            resume_checkpoint: Some(sft_name.into()),
+            ..Default::default()
+        };
+        let error =
+            normalize_opd_resume_checkpoint(&mut wrong_kind, temp.path(), "target").unwrap_err();
+        assert!(error.contains("OPD resume_checkpoint contains Sft state"));
+
+        let mut traversal = kiln_train::OpdConfig {
+            resume_checkpoint: Some("../escape.kiln-checkpoint".into()),
+            ..Default::default()
+        };
+        assert!(normalize_opd_resume_checkpoint(&mut traversal, temp.path(), "target").is_err());
+    }
+
+    fn write_opd_seed_receipt_fixture(
+        root: &std::path::Path,
+        adapter_name: &str,
+        mode: &str,
+        seed: Option<u64>,
+    ) {
+        let receipt = kiln_train::TrainReceipt::new(
+            adapter_name,
+            "opd-test",
+            &kiln_core::config::ModelConfig::qwen3_5_4b(),
+            &merge_teacher_test_tokenizer(),
+            kiln_train::train_receipt::HyperparameterReceipt {
+                mode: mode.to_string(),
+                rank: 8,
+                alpha: 16.0,
+                alpha_over_rank: Some(2.0),
+                learning_rate: 1e-4,
+                epochs: 1,
+                seed,
+                shuffle: false,
+            },
+            serde_json::json!({"seed": seed}),
+        );
+        std::fs::write(
+            root.join(kiln_train::TRAIN_RECEIPT_FILENAME),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resolved_opd_seed_comes_from_the_success_receipt_and_fails_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        write_opd_seed_receipt_fixture(temp.path(), "target", "opd", Some(73));
+        assert_eq!(resolved_opd_seed(temp.path(), "target").unwrap(), 73);
+
+        write_opd_seed_receipt_fixture(temp.path(), "target", "opd", None);
+        let missing = resolved_opd_seed(temp.path(), "target").unwrap_err();
+        assert!(missing.contains("missing the resolved effective seed"));
+
+        write_opd_seed_receipt_fixture(temp.path(), "other", "opd", Some(73));
+        let mismatched = resolved_opd_seed(temp.path(), "target").unwrap_err();
+        assert!(mismatched.contains("receipt identity mismatch"));
+
+        write_opd_seed_receipt_fixture(temp.path(), "target", "sft", Some(73));
+        let wrong_mode = resolved_opd_seed(temp.path(), "target").unwrap_err();
+        assert!(wrong_mode.contains("receipt identity mismatch"));
+    }
+
+    #[test]
+    fn operation_cleanup_combiner_preserves_both_failures() {
+        assert_eq!(
+            combine_operation_and_cleanup(Ok(7), Ok(()), "cleanup").unwrap(),
+            7
+        );
+        assert_eq!(
+            combine_operation_and_cleanup::<()>(Err("operation".into()), Ok(()), "cleanup")
+                .unwrap_err(),
+            "operation"
+        );
+        assert_eq!(
+            combine_operation_and_cleanup(Ok(()), Err("release".into()), "cleanup").unwrap_err(),
+            "release"
+        );
+        assert_eq!(
+            combine_operation_and_cleanup::<()>(
+                Err("operation".into()),
+                Err("release".into()),
+                "teacher cleanup",
+            )
+            .unwrap_err(),
+            "operation; teacher cleanup also failed: release"
+        );
     }
 
     #[test]

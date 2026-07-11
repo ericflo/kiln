@@ -2770,7 +2770,7 @@ async fn job_detail(
     let checkpoint_kind = match detail.job_type {
         TrainingJobType::Sft => Some(kiln_train::checkpoint::TrainingKind::Sft),
         TrainingJobType::Grpo => Some(kiln_train::checkpoint::TrainingKind::Grpo),
-        TrainingJobType::Opd => None,
+        TrainingJobType::Opd => Some(kiln_train::checkpoint::TrainingKind::Opd),
     };
     if let (Some(expected_kind), Some(adapter_name)) =
         (checkpoint_kind, detail.status.adapter_name.as_deref())
@@ -2922,7 +2922,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_discovery_returns_latest_sft_resume_basename_and_errors() {
+    fn checkpoint_discovery_returns_latest_resume_basename_for_every_training_kind() {
         let temp = tempfile::tempdir().unwrap();
         write_discovery_checkpoint(
             temp.path(),
@@ -2946,6 +2946,14 @@ mod tests {
             "demo",
             TrainingKind::Grpo,
             6,
+            8,
+        );
+        write_discovery_checkpoint(
+            temp.path(),
+            "demo-checkpoint-step-00000007.kiln-checkpoint",
+            "demo",
+            TrainingKind::Opd,
+            7,
             8,
         );
         let corrupt = temp
@@ -2981,6 +2989,21 @@ mod tests {
         assert_eq!(
             latest.resume_checkpoint,
             "demo-checkpoint-step-00000006.kiln-checkpoint"
+        );
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("step-00000009"))
+        );
+
+        let (latest, error) =
+            discover_latest_training_checkpoint(temp.path(), "demo", TrainingKind::Opd);
+        let latest = latest.expect("latest valid OPD checkpoint");
+        assert_eq!(latest.training_kind, TrainingKind::Opd);
+        assert_eq!(latest.global_step, 7);
+        assert_eq!(
+            latest.resume_checkpoint,
+            "demo-checkpoint-step-00000007.kiln-checkpoint"
         );
         assert!(
             error
