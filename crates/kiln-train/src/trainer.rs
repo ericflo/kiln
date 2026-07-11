@@ -1457,15 +1457,14 @@ impl OptimizerState {
         Ok(synced)
     }
 
-    /// Save optimizer tensors by stable parameter name. Device buffers and
-    /// CPU fallback state share one F32 safetensors representation; per-param
-    /// counters are U32 scalar tensors.
-    pub fn save_checkpoint_state(
+    /// Capture optimizer tensors by stable parameter name into CPU storage.
+    /// Device buffers and CPU fallback state share one F32 safetensors
+    /// representation; per-param counters are U32 scalar tensors.
+    fn capture_checkpoint_state(
         &mut self,
         params: &TrainableLoraParams,
         backend: &dyn BackendRuntime,
-        path: &Path,
-    ) -> Result<()> {
+    ) -> Result<CheckpointTensorSnapshot> {
         self.sync_to_master(backend)?;
         let mut owned: Vec<(String, KtTensor)> = Vec::new();
         match self {
@@ -1563,12 +1562,20 @@ impl OptimizerState {
                 }
             }
         }
-        let tensors: HashMap<&str, &KtTensor> = owned
-            .iter()
-            .map(|(key, tensor)| (key.as_str(), tensor))
-            .collect();
-        kiln_tensor::safetensors::save_cpu(&tensors, path)
-            .map_err(|error| anyhow::anyhow!("save checkpoint optimizer state: {error}"))
+        CheckpointTensorSnapshot::new(owned, "optimizer")
+    }
+
+    /// Save optimizer state directly. Production loop checkpointing uses the
+    /// split capture/publish path below so filesystem latency never extends
+    /// the serving GPU write section; this wrapper remains useful to codecs
+    /// and focused tests.
+    pub fn save_checkpoint_state(
+        &mut self,
+        params: &TrainableLoraParams,
+        backend: &dyn BackendRuntime,
+        path: &Path,
+    ) -> Result<()> {
+        self.capture_checkpoint_state(params, backend)?.save(path)
     }
 
     /// Restore optimizer tensors into both the device-owned buffers and the
@@ -1694,6 +1701,33 @@ fn checkpoint_tensor_to_cpu_f32(tensor: &KtTensor, label: &str) -> Result<KtTens
         .and_then(|tensor| tensor.to_device(kiln_tensor::Device::Cpu))
         .and_then(|tensor| tensor.contiguous())
         .map_err(|error| anyhow::anyhow!("checkpoint optimizer tensor {label}: {error}"))
+}
+
+#[derive(Debug)]
+struct CheckpointTensorSnapshot {
+    kind: &'static str,
+    tensors: Vec<(String, KtTensor)>,
+}
+
+impl CheckpointTensorSnapshot {
+    fn new(tensors: Vec<(String, KtTensor)>, kind: &'static str) -> Result<Self> {
+        let unique_names: BTreeSet<_> = tensors.iter().map(|(name, _)| name.as_str()).collect();
+        anyhow::ensure!(
+            unique_names.len() == tensors.len(),
+            "checkpoint {kind} snapshot contains duplicate tensor names"
+        );
+        Ok(Self { kind, tensors })
+    }
+
+    fn save(&self, path: &Path) -> Result<()> {
+        let tensors: HashMap<&str, &KtTensor> = self
+            .tensors
+            .iter()
+            .map(|(key, tensor)| (key.as_str(), tensor))
+            .collect();
+        kiln_tensor::safetensors::save_cpu(&tensors, path)
+            .map_err(|error| anyhow::anyhow!("save checkpoint {} state: {error}", self.kind))
+    }
 }
 
 fn checkpoint_ensure_finite_f32(tensor: &KtTensor, label: &str) -> Result<()> {
@@ -1955,9 +1989,10 @@ impl TrainableLoraParams {
         keys.into_iter().zip(self.all_params_mut()).collect()
     }
 
-    /// Save exact main-loop adapter parameters without PEFT receipts/config.
-    /// The enclosing checkpoint writer owns atomicity and checksums.
-    pub fn save_checkpoint_parameters(&self, path: &Path) -> Result<()> {
+    /// Capture exact main-loop adapter parameters into CPU storage without
+    /// PEFT receipts/config. The enclosing checkpoint writer owns atomicity
+    /// and checksums.
+    fn capture_checkpoint_parameters(&self) -> Result<CheckpointTensorSnapshot> {
         let mut owned = Vec::with_capacity(self.all_params().len());
         for (key, param) in self.checkpoint_params() {
             let tensor = param
@@ -1970,12 +2005,14 @@ impl TrainableLoraParams {
                 })?;
             owned.push((key, tensor));
         }
-        let tensors: HashMap<&str, &KtTensor> = owned
-            .iter()
-            .map(|(key, tensor)| (key.as_str(), tensor))
-            .collect();
-        kiln_tensor::safetensors::save_cpu(&tensors, path)
-            .map_err(|error| anyhow::anyhow!("save checkpoint adapter parameters: {error}"))
+        CheckpointTensorSnapshot::new(owned, "adapter parameter")
+    }
+
+    /// Save adapter parameters directly. Production loop checkpointing uses
+    /// a coordinated CPU snapshot and publishes it after releasing the GPU
+    /// lock; this wrapper remains useful to codecs and focused tests.
+    pub fn save_checkpoint_parameters(&self, path: &Path) -> Result<()> {
+        self.capture_checkpoint_parameters()?.save(path)
     }
 
     /// Restore exact main-loop adapter parameters by stable name. Missing,
@@ -2586,6 +2623,46 @@ struct SftCheckpointDescriptor {
     auxiliary_state: serde_json::Value,
 }
 
+#[derive(Debug)]
+struct SftCheckpointSnapshot {
+    target: PathBuf,
+    manifest: crate::checkpoint::TrainingCheckpointManifest,
+    artifacts: Vec<crate::checkpoint::CheckpointArtifact>,
+    adapter_parameters: CheckpointTensorSnapshot,
+    optimizer_state: Option<CheckpointTensorSnapshot>,
+    loop_state_bytes: Vec<u8>,
+}
+
+impl SftCheckpointSnapshot {
+    fn publish(self) -> Result<PathBuf> {
+        let Self {
+            target,
+            manifest,
+            artifacts,
+            adapter_parameters,
+            optimizer_state,
+            loop_state_bytes,
+        } = self;
+        crate::checkpoint::write_training_checkpoint_atomic(
+            &target,
+            manifest,
+            &artifacts,
+            move |staging| {
+                adapter_parameters.save(&staging.join(SFT_CHECKPOINT_ADAPTER_FILE))?;
+                if let Some(state) = optimizer_state.as_ref() {
+                    state.save(&staging.join(SFT_CHECKPOINT_OPTIMIZER_FILE))?;
+                }
+                std::fs::write(
+                    staging.join(SFT_CHECKPOINT_LOOP_STATE_FILE),
+                    &loop_state_bytes,
+                )
+                .context("write SFT checkpoint loop state")?;
+                Ok(())
+            },
+        )
+    }
+}
+
 impl SftCheckpointDescriptor {
     fn optimizer_state_file(&self) -> Option<String> {
         (!matches!(self.optimizer, Optimizer::Sgd))
@@ -2763,7 +2840,7 @@ impl SftCheckpointDescriptor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn save(
+    fn capture(
         &self,
         output_root: &Path,
         backend: &dyn BackendRuntime,
@@ -2773,7 +2850,7 @@ impl SftCheckpointDescriptor {
         cursor_in_epoch: usize,
         data_order: &[usize],
         loop_state: &SftCheckpointLoopState,
-    ) -> Result<PathBuf> {
+    ) -> Result<SftCheckpointSnapshot> {
         anyhow::ensure!(
             self.base_model_weights_sha256.is_some(),
             "exact SFT checkpointing requires base-model weights loaded with a content identity"
@@ -2792,6 +2869,11 @@ impl SftCheckpointDescriptor {
             self.adapter_name, loop_state.global_step
         ));
         params.sync_to_master(backend)?;
+        let adapter_parameters = params.capture_checkpoint_parameters()?;
+        let optimizer_state = opt_state
+            .as_mut()
+            .map(|state| state.capture_checkpoint_state(params, backend))
+            .transpose()?;
 
         let mut artifacts = vec![
             crate::checkpoint::CheckpointArtifact {
@@ -2811,27 +2893,60 @@ impl SftCheckpointDescriptor {
         }
         let loop_state_bytes =
             serde_json::to_vec_pretty(loop_state).context("serialize SFT checkpoint loop state")?;
-        crate::checkpoint::write_training_checkpoint_atomic(
-            &target,
+        Ok(SftCheckpointSnapshot {
+            target,
             manifest,
-            &artifacts,
-            |staging| {
-                params.save_checkpoint_parameters(&staging.join(SFT_CHECKPOINT_ADAPTER_FILE))?;
-                if let Some(state) = opt_state.as_mut() {
-                    state.save_checkpoint_state(
-                        params,
-                        backend,
-                        &staging.join(SFT_CHECKPOINT_OPTIMIZER_FILE),
-                    )?;
-                }
-                std::fs::write(
-                    staging.join(SFT_CHECKPOINT_LOOP_STATE_FILE),
-                    &loop_state_bytes,
-                )
-                .context("write SFT checkpoint loop state")?;
-                Ok(())
-            },
-        )
+            artifacts,
+            adapter_parameters,
+            optimizer_state,
+            loop_state_bytes,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save(
+        &self,
+        output_root: &Path,
+        backend: &dyn BackendRuntime,
+        params: &mut TrainableLoraParams,
+        opt_state: &mut Option<OptimizerState>,
+        epoch_index: usize,
+        cursor_in_epoch: usize,
+        data_order: &[usize],
+        loop_state: &SftCheckpointLoopState,
+        gpu_step_coordination: Option<&GpuStepCoordination>,
+    ) -> Result<PathBuf> {
+        let wait_started = Instant::now();
+        let checkpoint_gpu = gpu_step_coordination
+            .map(GpuStepCoordination::blocking_write)
+            .transpose()
+            .context("acquire healthy backend for SFT checkpoint snapshot")?;
+        let gpu_wait_ms = wait_started.elapsed().as_millis() as u64;
+        let snapshot_started = Instant::now();
+        let snapshot = self.capture(
+            output_root,
+            backend,
+            params,
+            opt_state,
+            epoch_index,
+            cursor_in_epoch,
+            data_order,
+            loop_state,
+        )?;
+        let device_snapshot_ms = snapshot_started.elapsed().as_millis() as u64;
+        drop(checkpoint_gpu);
+
+        let publish_started = Instant::now();
+        let path = snapshot.publish()?;
+        let publish_ms = publish_started.elapsed().as_millis() as u64;
+        tracing::info!(
+            checkpoint = %path.display(),
+            gpu_wait_ms,
+            device_snapshot_ms,
+            publish_ms,
+            "published coordinated SFT checkpoint"
+        );
+        Ok(path)
     }
 }
 
@@ -4903,6 +5018,7 @@ pub fn sft_train_to_with_checkpoint_root(
                             cursor + 1,
                             &order,
                             &loop_state,
+                            gpu_step_coordination.as_ref(),
                         )?;
                         last_saved_step = Some(global_step);
                         tracing::info!(
@@ -4945,6 +5061,7 @@ pub fn sft_train_to_with_checkpoint_root(
                                 cursor + 1,
                                 &order,
                                 &loop_state,
+                                gpu_step_coordination.as_ref(),
                             )?;
                             tracing::info!(
                                 step = global_step,
@@ -5027,6 +5144,7 @@ pub fn sft_train_to_with_checkpoint_root(
                     0,
                     &next_order,
                     &loop_state,
+                    gpu_step_coordination.as_ref(),
                 )?;
                 last_saved_step = Some(global_step);
                 tracing::info!(
@@ -5091,10 +5209,28 @@ pub fn sft_train_to_with_checkpoint_root(
         // Pull current Var values from registry into candle CPU
         // storage before final save_peft (the on-device optimizer
         // path leaves candle storage stale between steps).
-        let synced = params.sync_to_master(&*backend).unwrap_or(0);
-        tracing::debug!(synced, "synced LoRA Vars to candle before SFT save");
+        let final_snapshot_wait_started = Instant::now();
+        let final_snapshot_gpu = gpu_step_coordination
+            .as_ref()
+            .map(GpuStepCoordination::blocking_write)
+            .transpose()
+            .context("acquire healthy backend for final SFT adapter snapshot")?;
+        let final_snapshot_gpu_wait_ms = final_snapshot_wait_started.elapsed().as_millis() as u64;
+        let final_snapshot_started = Instant::now();
+        let synced = params
+            .sync_to_master(&*backend)
+            .context("capture final SFT adapter state from resident backend")?;
+        let final_device_snapshot_ms = final_snapshot_started.elapsed().as_millis() as u64;
+        drop(final_snapshot_gpu);
+        tracing::info!(
+            synced,
+            final_snapshot_gpu_wait_ms,
+            final_device_snapshot_ms,
+            "captured final SFT adapter state before publication"
+        );
 
-        // Save the trained adapter
+        // Safetensors/config/receipt I/O consumes only the captured master
+        // state and therefore cannot hold serving behind the GPU writer.
         params.save_peft(&output_dir, model_config.num_layers)?;
 
         tracing::info!(

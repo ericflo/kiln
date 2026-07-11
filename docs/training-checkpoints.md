@@ -26,6 +26,16 @@ The loader rejects an incomplete sentinel, unsupported schema/type, unknown
 manifest fields, invalid or escaping paths, symlinks, missing or untracked
 files, size drift, and checksum drift before returning any state to a trainer.
 
+On a shared serving GPU, checkpoint publication has two phases. Kiln takes the
+same interruptible serving write lock used by an optimizer step only while it
+copies authoritative adapter and optimizer buffers into CPU-owned tensors. It
+then releases the lock before safetensors encoding, checksumming, file writes,
+fsync, and rename. Logs report `gpu_wait_ms`, `device_snapshot_ms`, and
+`publish_ms` separately, so an operator can distinguish inference contention or
+device-transfer latency from storage latency. Final SFT adapter export follows
+the same device-snapshot boundary and fails closed if resident synchronization
+fails.
+
 The manifest records the exact resolved training configuration, precision
 policy, optimizer and scheduler step, next epoch/cursor and item order, data
 identity, and every named RNG stream. Objective-specific reference, EMA,
