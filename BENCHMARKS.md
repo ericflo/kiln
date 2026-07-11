@@ -79,6 +79,9 @@ An official receipt must not use `--allow-dirty`, disable fixed output or
 uniform prompt-token gates, omit runtime identity, or include failed/zero-token
 requests in throughput. Use a shared run ID for both engines and restart the
 engine between implementations so device-memory baselines are independent.
+Authenticated endpoints must opt in with `--api-key-env VARIABLE` (preferred)
+or `--api-key VALUE`. The driver never inherits `OPENAI_API_KEY` implicitly and
+never writes the credential or environment-variable name into a receipt.
 
 ## Historical CUDA setup
 

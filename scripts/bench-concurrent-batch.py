@@ -985,7 +985,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--memory-path", default="auto")
     parser.add_argument("--memory-sample-ms", type=int, default=50)
     parser.add_argument("--require-memory", action="store_true")
-    parser.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY"))
+    authentication = parser.add_mutually_exclusive_group()
+    authentication.add_argument(
+        "--api-key",
+        help="Explicit bearer token (prefer --api-key-env to keep it out of process listings)",
+    )
+    authentication.add_argument(
+        "--api-key-env",
+        help="Name of the environment variable containing the bearer token",
+    )
     parser.add_argument("--reference-receipt", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--out", type=Path)
@@ -1020,6 +1028,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("memory sampling cadence must be positive")
     if not 0 <= args.seed <= 2**64 - 1:
         parser.error("seed must fit an unsigned 64-bit integer")
+    args.api_key_source = "none"
+    if args.api_key_env is not None:
+        args.api_key = os.environ.get(args.api_key_env)
+        if not args.api_key:
+            parser.error(f"api-key environment variable {args.api_key_env!r} is unset or empty")
+        args.api_key_source = "environment"
+    elif args.api_key is not None:
+        if not args.api_key:
+            parser.error("api-key cannot be empty")
+        args.api_key_source = "argument"
     return args
 
 
@@ -1118,6 +1136,7 @@ def main(argv: list[str] | None = None) -> int:
                 "model": args.model,
                 "available_models": models,
                 "authentication_configured": bool(args.api_key),
+                "authentication_source": args.api_key_source,
             },
             "driver_environment": {
                 "hostname": socket.gethostname(),

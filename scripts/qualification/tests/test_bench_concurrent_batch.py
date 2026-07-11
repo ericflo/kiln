@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -11,6 +12,7 @@ import unittest
 from contextlib import redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -360,6 +362,8 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(receipt["schema"], bench.SCHEMA)
         self.assertEqual(receipt["verdict"], "passed")
         self.assertEqual(receipt["engine"]["runtime_identity"], "test-runtime")
+        self.assertFalse(receipt["engine"]["authentication_configured"])
+        self.assertEqual(receipt["engine"]["authentication_source"], "none")
         self.assertEqual(receipt["runs"][0]["success_count"], 1)
         recorded_hash = receipt.pop("receipt_sha256")
         self.assertEqual(recorded_hash, bench.canonical_sha256(receipt))
@@ -377,6 +381,17 @@ class ServingBenchmarkTests(unittest.TestCase):
             bench.parse_sizes("1,8,8")
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             bench.parse_args(["--temperature", "nan"])
+
+    def test_generic_api_key_is_not_inherited(self) -> None:
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "must-not-leak"}):
+            args = bench.parse_args([])
+        self.assertIsNone(args.api_key)
+        self.assertEqual(args.api_key_source, "none")
+
+        with mock.patch.dict(os.environ, {"BENCH_FIXTURE_KEY": "fixture-secret"}):
+            args = bench.parse_args(["--api-key-env", "BENCH_FIXTURE_KEY"])
+        self.assertEqual(args.api_key, "fixture-secret")
+        self.assertEqual(args.api_key_source, "environment")
 
 
 if __name__ == "__main__":
