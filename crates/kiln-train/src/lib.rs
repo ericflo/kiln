@@ -129,9 +129,11 @@ pub use opd::{
 pub use train_receipt::{
     ADAPTER_CANARY_STATUS_FILENAME, AdapterCanaryCheckReceipt, AdapterCanaryState,
     AdapterCanaryStatusReceipt, AdapterSmokePromptDiagnosis, AdapterSmokePromptDiagnosisReceipt,
-    AdapterSmokePromptReceipt, AdapterSmokeTestReceipt, OpdReceipt, TRAIN_RECEIPT_FILENAME,
-    TRAIN_RECEIPT_SCHEMA_VERSION, TrainFailureReason, TrainReceipt, TrainReceiptStatus,
-    read_adapter_canary_status_from_adapter_dir,
+    AdapterSmokePromptReceipt, AdapterSmokeTestReceipt, GRPO_POLICY_AUDIT_SCHEMA_V1,
+    GrpoImportanceSamplingMetricsReceipt, GrpoKlReferenceMetricsReceipt, GrpoPolicyAuditReceipt,
+    GrpoRecordedBehaviorSourceReceipt, GrpoRecordedProvenanceReceipt, OpdReceipt,
+    TRAIN_RECEIPT_FILENAME, TRAIN_RECEIPT_SCHEMA_VERSION, TrainFailureReason, TrainReceipt,
+    TrainReceiptStatus, read_adapter_canary_status_from_adapter_dir,
 };
 
 pub use replay::{

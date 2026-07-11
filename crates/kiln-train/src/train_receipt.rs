@@ -42,6 +42,9 @@ pub const DEFAULT_REWARD_LOW_VARIANCE_THRESHOLD: f64 = 1e-4;
 pub const REWARD_DEGENERATE_GROUP_VARIANCE_EPSILON: f64 = 1e-12;
 pub const REWARD_MOST_GROUPS_FRACTION: f64 = 0.5;
 pub const REWARD_SATURATION_RECOMMENDATION: &str = "policy-gradient may be harmful; collect harder tasks, use stronger rubric gates, switch to OPD/teacher distillation, or use `--no-policy-loss` with ECHO";
+pub const GRPO_POLICY_AUDIT_SCHEMA_V1: &str = "kiln.grpo-policy-audit.v1";
+const GRPO_BEHAVIOR_SOURCE_SCHEMA_V1: &str = "kiln.grpo-behavior-source.v1";
+const GRPO_BEHAVIOR_SOURCE_MANIFEST_SCHEMA_V1: &str = "kiln.grpo-behavior-source-manifest.v1";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -208,6 +211,368 @@ pub struct GrpoReceipt {
     #[serde(default, alias = "reference_policy")]
     pub kl_reference_policy: serde_json::Value,
     pub entropy_aware_kl_quantile: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_audit: Option<GrpoPolicyAuditReceipt>,
+}
+
+/// Versioned observed-policy diagnostics for a GRPO run.
+///
+/// Importance ratios are always relative to the configured behavior policy;
+/// KL values are always relative to the independently configured frozen
+/// reference. Keeping them in distinct records prevents receipts from
+/// accidentally presenting one denominator as the other.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GrpoPolicyAuditReceipt {
+    pub schema: String,
+    pub importance_sampling: GrpoImportanceSamplingMetricsReceipt,
+    pub kl_reference: GrpoKlReferenceMetricsReceipt,
+    pub recorded_provenance: GrpoRecordedProvenanceReceipt,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GrpoImportanceSamplingMetricsReceipt {
+    /// `token` for token PPO/CISPO, `sequence` for GSPO.
+    pub ratio_scope: Option<String>,
+    pub action_tokens: u64,
+    pub ratio_observations: u64,
+    pub mean_ratio: Option<f64>,
+    pub min_ratio: Option<f64>,
+    pub max_ratio: Option<f64>,
+    pub below_clip_count: u64,
+    pub above_clip_count: u64,
+    pub outside_clip_fraction: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GrpoKlReferenceMetricsReceipt {
+    pub token_observations: u64,
+    pub entropy_mask_applied_tokens: u64,
+    pub mean_policy_reference_log_ratio: Option<f64>,
+    /// Configured K1/K3 value before the optional entropy-aware mask.
+    pub mean_estimator: Option<f64>,
+    /// Configured K1/K3 value after masking, still normalized by all action
+    /// tokens so it matches the loss contribution before `kl_coeff`.
+    pub mean_masked_estimator: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GrpoRecordedProvenanceReceipt {
+    pub completion_count: u64,
+    pub sampled_action_tokens: u64,
+    pub forced_action_tokens: u64,
+    pub unique_behavior_sources: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior_source_manifest_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub behavior_sources: Vec<GrpoRecordedBehaviorSourceReceipt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GrpoRecordedBehaviorSourceReceipt {
+    pub behavior_source_sha256: String,
+    pub completion_count: u64,
+    pub sampled_action_tokens: u64,
+    pub forced_action_tokens: u64,
+    pub behavior_policy: crate::RolloutBehaviorPolicyIdentityV1,
+    pub tokenizer: crate::RolloutTokenizerIdentityV1,
+    pub template_invocation: crate::RolloutChatTemplateInvocationV1,
+    pub sampling: crate::RolloutSamplingConfigV1,
+    pub generation_backend: String,
+}
+
+#[derive(Serialize)]
+struct GrpoBehaviorSourceIdentityV1<'a> {
+    schema: &'static str,
+    behavior_policy: &'a crate::RolloutBehaviorPolicyIdentityV1,
+    tokenizer: &'a crate::RolloutTokenizerIdentityV1,
+    template_invocation: &'a crate::RolloutChatTemplateInvocationV1,
+    sampling: &'a crate::RolloutSamplingConfigV1,
+    generation_backend: &'a str,
+}
+
+#[derive(Serialize)]
+struct GrpoBehaviorSourceManifestV1<'a> {
+    schema: &'static str,
+    sources: &'a [GrpoRecordedBehaviorSourceReceipt],
+}
+
+#[derive(Debug, Clone)]
+struct GrpoRecordedBehaviorSourceAccumulator {
+    receipt: GrpoRecordedBehaviorSourceReceipt,
+}
+
+/// Accumulates receipt-grade GRPO diagnostics without retaining per-token
+/// values. The trainer feeds it selected policy log-probabilities already
+/// computed by the loss path, so this contract requires no second model
+/// forward.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct GrpoPolicyAuditAccumulator {
+    ratio_scope: Option<&'static str>,
+    action_tokens: u64,
+    ratio_observations: u64,
+    ratio_sum: f64,
+    ratio_min: Option<f64>,
+    ratio_max: Option<f64>,
+    below_clip_count: u64,
+    above_clip_count: u64,
+    kl_token_observations: u64,
+    kl_mask_applied_tokens: u64,
+    kl_log_ratio_sum: f64,
+    kl_estimator_sum: f64,
+    kl_masked_estimator_sum: f64,
+    recorded_completions: u64,
+    recorded_sampled_actions: u64,
+    recorded_forced_actions: u64,
+    behavior_sources: BTreeMap<String, GrpoRecordedBehaviorSourceAccumulator>,
+}
+
+impl GrpoPolicyAuditAccumulator {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_policy_values(
+        &mut self,
+        policy_log_probs: &[f32],
+        behavior_log_probs: Option<&[f32]>,
+        kl_reference_log_probs: Option<&[f32]>,
+        is_level: crate::IsLevel,
+        clip_low: f64,
+        clip_high: f64,
+        kl_estimator: crate::KlEstimator,
+        entropy_aware_kl_quantile: Option<f32>,
+    ) -> Result<()> {
+        if policy_log_probs.is_empty() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            policy_log_probs.iter().all(|value| value.is_finite()),
+            "GRPO policy audit received a non-finite policy log-probability"
+        );
+        anyhow::ensure!(
+            clip_low.is_finite() && clip_high.is_finite(),
+            "GRPO policy audit received non-finite clip bounds"
+        );
+
+        let importance_log_ratios = match behavior_log_probs {
+            Some(behavior) => {
+                anyhow::ensure!(
+                    behavior.len() == policy_log_probs.len(),
+                    "GRPO policy audit behavior length {} differs from policy length {}",
+                    behavior.len(),
+                    policy_log_probs.len()
+                );
+                anyhow::ensure!(
+                    behavior.iter().all(|value| value.is_finite()),
+                    "GRPO policy audit received a non-finite behavior log-probability"
+                );
+                policy_log_probs
+                    .iter()
+                    .zip(behavior)
+                    .map(|(&policy, &old)| f64::from(policy - old))
+                    .collect::<Vec<_>>()
+            }
+            // Explicit no-importance-correction mode fixes the ratio at one;
+            // it must not use the KL reference as an implicit denominator.
+            None => vec![0.0; policy_log_probs.len()],
+        };
+        let scope = match is_level {
+            crate::IsLevel::Sequence => "sequence",
+            crate::IsLevel::Token | crate::IsLevel::Cispo => "token",
+        };
+        anyhow::ensure!(
+            self.ratio_scope.is_none() || self.ratio_scope == Some(scope),
+            "GRPO policy audit ratio scope changed within one run"
+        );
+        self.ratio_scope = Some(scope);
+        self.action_tokens = self
+            .action_tokens
+            .saturating_add(policy_log_probs.len() as u64);
+
+        if is_level == crate::IsLevel::Sequence {
+            let mean_log_ratio =
+                importance_log_ratios.iter().sum::<f64>() / importance_log_ratios.len() as f64;
+            self.observe_ratio(mean_log_ratio.exp(), clip_low, clip_high)?;
+        } else {
+            for log_ratio in importance_log_ratios {
+                self.observe_ratio(log_ratio.exp(), clip_low, clip_high)?;
+            }
+        }
+
+        if let Some(reference) = kl_reference_log_probs {
+            anyhow::ensure!(
+                reference.len() == policy_log_probs.len(),
+                "GRPO policy audit KL-reference length {} differs from policy length {}",
+                reference.len(),
+                policy_log_probs.len()
+            );
+            anyhow::ensure!(
+                reference.iter().all(|value| value.is_finite()),
+                "GRPO policy audit received a non-finite KL-reference log-probability"
+            );
+            let mask = entropy_aware_kl_mask_host(policy_log_probs, entropy_aware_kl_quantile);
+            for ((&policy, &reference), apply) in policy_log_probs.iter().zip(reference).zip(mask) {
+                let log_ratio = f64::from(policy - reference);
+                let estimator = match kl_estimator {
+                    crate::KlEstimator::None => 0.0,
+                    crate::KlEstimator::K1 => log_ratio,
+                    crate::KlEstimator::K3 => (-log_ratio).exp() - 1.0 + log_ratio,
+                };
+                anyhow::ensure!(
+                    log_ratio.is_finite() && estimator.is_finite(),
+                    "GRPO policy audit produced a non-finite KL observation"
+                );
+                self.kl_token_observations = self.kl_token_observations.saturating_add(1);
+                self.kl_log_ratio_sum += log_ratio;
+                self.kl_estimator_sum += estimator;
+                if apply {
+                    self.kl_mask_applied_tokens = self.kl_mask_applied_tokens.saturating_add(1);
+                    self.kl_masked_estimator_sum += estimator;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn observe_ratio(&mut self, ratio: f64, clip_low: f64, clip_high: f64) -> Result<()> {
+        anyhow::ensure!(
+            ratio.is_finite(),
+            "GRPO policy audit produced a non-finite importance ratio"
+        );
+        self.ratio_observations = self.ratio_observations.saturating_add(1);
+        self.ratio_sum += ratio;
+        self.ratio_min = Some(self.ratio_min.map_or(ratio, |current| current.min(ratio)));
+        self.ratio_max = Some(self.ratio_max.map_or(ratio, |current| current.max(ratio)));
+        if ratio < 1.0 - clip_low {
+            self.below_clip_count = self.below_clip_count.saturating_add(1);
+        }
+        if ratio > 1.0 + clip_high {
+            self.above_clip_count = self.above_clip_count.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn observe_provenance(
+        &mut self,
+        provenance: &crate::RolloutProvenanceV1,
+    ) -> Result<()> {
+        provenance
+            .validate()
+            .map_err(anyhow::Error::msg)
+            .context("validate GRPO policy-audit rollout provenance")?;
+        let identity = GrpoBehaviorSourceIdentityV1 {
+            schema: GRPO_BEHAVIOR_SOURCE_SCHEMA_V1,
+            behavior_policy: &provenance.behavior_policy,
+            tokenizer: &provenance.tokenizer,
+            template_invocation: &provenance.template_invocation,
+            sampling: &provenance.sampling,
+            generation_backend: &provenance.generation_backend,
+        };
+        let encoded = serde_json::to_vec(&identity).context("serialize GRPO behavior source")?;
+        let identity_sha256 = kiln_core::config_hashes::sha256_bytes(&encoded);
+        let sampled = provenance.sampled_action_tokens().count() as u64;
+        let forced = provenance.action_tokens.len() as u64 - sampled;
+        let entry = self
+            .behavior_sources
+            .entry(identity_sha256.clone())
+            .or_insert_with(|| GrpoRecordedBehaviorSourceAccumulator {
+                receipt: GrpoRecordedBehaviorSourceReceipt {
+                    behavior_source_sha256: identity_sha256,
+                    completion_count: 0,
+                    sampled_action_tokens: 0,
+                    forced_action_tokens: 0,
+                    behavior_policy: provenance.behavior_policy.clone(),
+                    tokenizer: provenance.tokenizer.clone(),
+                    template_invocation: provenance.template_invocation.clone(),
+                    sampling: provenance.sampling.clone(),
+                    generation_backend: provenance.generation_backend.clone(),
+                },
+            });
+        entry.receipt.completion_count = entry.receipt.completion_count.saturating_add(1);
+        entry.receipt.sampled_action_tokens =
+            entry.receipt.sampled_action_tokens.saturating_add(sampled);
+        entry.receipt.forced_action_tokens =
+            entry.receipt.forced_action_tokens.saturating_add(forced);
+        self.recorded_completions = self.recorded_completions.saturating_add(1);
+        self.recorded_sampled_actions = self.recorded_sampled_actions.saturating_add(sampled);
+        self.recorded_forced_actions = self.recorded_forced_actions.saturating_add(forced);
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> Result<GrpoPolicyAuditReceipt> {
+        let ratio_mean =
+            (self.ratio_observations > 0).then(|| self.ratio_sum / self.ratio_observations as f64);
+        let outside_clip = self.below_clip_count.saturating_add(self.above_clip_count);
+        let outside_clip_fraction = (self.ratio_observations > 0)
+            .then(|| outside_clip as f64 / self.ratio_observations as f64);
+        let kl_mean = (self.kl_token_observations > 0)
+            .then(|| self.kl_log_ratio_sum / self.kl_token_observations as f64);
+        let estimator_mean = (self.kl_token_observations > 0)
+            .then(|| self.kl_estimator_sum / self.kl_token_observations as f64);
+        let masked_estimator_mean = (self.kl_token_observations > 0)
+            .then(|| self.kl_masked_estimator_sum / self.kl_token_observations as f64);
+
+        let behavior_sources = self
+            .behavior_sources
+            .into_values()
+            .map(|source| source.receipt)
+            .collect::<Vec<_>>();
+        let behavior_source_manifest_sha256 = if behavior_sources.is_empty() {
+            None
+        } else {
+            let manifest = GrpoBehaviorSourceManifestV1 {
+                schema: GRPO_BEHAVIOR_SOURCE_MANIFEST_SCHEMA_V1,
+                sources: &behavior_sources,
+            };
+            let encoded =
+                serde_json::to_vec(&manifest).context("serialize GRPO behavior-source manifest")?;
+            Some(kiln_core::config_hashes::sha256_bytes(&encoded))
+        };
+
+        Ok(GrpoPolicyAuditReceipt {
+            schema: GRPO_POLICY_AUDIT_SCHEMA_V1.to_string(),
+            importance_sampling: GrpoImportanceSamplingMetricsReceipt {
+                ratio_scope: self.ratio_scope.map(str::to_string),
+                action_tokens: self.action_tokens,
+                ratio_observations: self.ratio_observations,
+                mean_ratio: ratio_mean,
+                min_ratio: self.ratio_min,
+                max_ratio: self.ratio_max,
+                below_clip_count: self.below_clip_count,
+                above_clip_count: self.above_clip_count,
+                outside_clip_fraction,
+            },
+            kl_reference: GrpoKlReferenceMetricsReceipt {
+                token_observations: self.kl_token_observations,
+                entropy_mask_applied_tokens: self.kl_mask_applied_tokens,
+                mean_policy_reference_log_ratio: kl_mean,
+                mean_estimator: estimator_mean,
+                mean_masked_estimator: masked_estimator_mean,
+            },
+            recorded_provenance: GrpoRecordedProvenanceReceipt {
+                completion_count: self.recorded_completions,
+                sampled_action_tokens: self.recorded_sampled_actions,
+                forced_action_tokens: self.recorded_forced_actions,
+                unique_behavior_sources: behavior_sources.len(),
+                behavior_source_manifest_sha256,
+                behavior_sources,
+            },
+        })
+    }
+}
+
+fn entropy_aware_kl_mask_host(policy_log_probs: &[f32], quantile: Option<f32>) -> Vec<bool> {
+    let Some(q) = quantile.filter(|q| q.is_finite() && (0.0..1.0).contains(q)) else {
+        return vec![true; policy_log_probs.len()];
+    };
+    let mut negative = policy_log_probs
+        .iter()
+        .map(|value| -f64::from(*value))
+        .collect::<Vec<_>>();
+    negative.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let index = ((q as f64) * policy_log_probs.len().saturating_sub(1) as f64).round() as usize;
+    let threshold = negative[index.min(negative.len().saturating_sub(1))];
+    policy_log_probs
+        .iter()
+        .map(|value| -f64::from(*value) >= threshold)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1777,6 +2142,172 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn full_sha256(fill: char) -> String {
+        format!("sha256:{}", fill.to_string().repeat(64))
+    }
+
+    fn audit_provenance(adapter_revision_fill: char, seed: u64) -> crate::RolloutProvenanceV1 {
+        crate::RolloutProvenanceV1::new(
+            vec![1, 2, 3, 4],
+            2,
+            full_sha256('1'),
+            full_sha256('2'),
+            vec![
+                crate::RolloutActionTokenV1::sampled(2, 3, -0.25),
+                crate::RolloutActionTokenV1::forced(3, 4),
+            ],
+            crate::RolloutBehaviorPolicyIdentityV1 {
+                served_model_id: "policy-model".to_string(),
+                base_model_sha256: full_sha256('3'),
+                adapter: Some(crate::RolloutAdapterIdentityV1 {
+                    name: "policy-adapter".to_string(),
+                    content_sha256: full_sha256(adapter_revision_fill),
+                }),
+                inference_config_sha256: full_sha256('4'),
+                implementation: "kiln-test".to_string(),
+            },
+            crate::RolloutTokenizerIdentityV1 {
+                vocab_sha256: full_sha256('5'),
+                config_sha256: full_sha256('6'),
+                chat_template_sha256: full_sha256('7'),
+            },
+            crate::RolloutSamplingConfigV1 {
+                temperature: 0.9,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                max_tokens: 16,
+                repetition_penalty: 1.0,
+                presence_penalty: 0.0,
+                frequency_penalty: 0.0,
+                stop: Vec::new(),
+                thinking_budget: Some(crate::RolloutThinkingBudgetV1 {
+                    max_tokens: Some(8),
+                    max_time_ms: None,
+                    close_token_ids: vec![4],
+                }),
+            },
+            seed,
+            "rocm",
+        )
+        .unwrap()
+    }
+
+    fn assert_near(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1e-7,
+            "actual {actual} != expected {expected}"
+        );
+    }
+
+    #[test]
+    fn grpo_policy_audit_keeps_behavior_ratios_and_kl_reference_distinct() -> Result<()> {
+        let policy = [-1.0_f32, -2.0];
+        let behavior = [-1.2_f32, -1.8];
+        let kl_reference = [-0.7_f32, -2.3];
+        let mut audit = GrpoPolicyAuditAccumulator::default();
+        audit.observe_policy_values(
+            &policy,
+            Some(&behavior),
+            Some(&kl_reference),
+            crate::IsLevel::Token,
+            0.2,
+            0.2,
+            crate::KlEstimator::K3,
+            Some(0.5),
+        )?;
+        let receipt = audit.finish()?;
+
+        assert_eq!(receipt.schema, GRPO_POLICY_AUDIT_SCHEMA_V1);
+        let importance = receipt.importance_sampling;
+        assert_eq!(importance.ratio_scope.as_deref(), Some("token"));
+        assert_eq!(importance.action_tokens, 2);
+        assert_eq!(importance.ratio_observations, 2);
+        assert_eq!(importance.below_clip_count, 0);
+        assert_eq!(importance.above_clip_count, 1);
+        assert_near(
+            importance.mean_ratio.unwrap(),
+            (0.2_f64.exp() + (-0.2_f64).exp()) / 2.0,
+        );
+        assert_near(importance.outside_clip_fraction.unwrap(), 0.5);
+
+        let kl = receipt.kl_reference;
+        assert_eq!(kl.token_observations, 2);
+        assert_eq!(kl.entropy_mask_applied_tokens, 1);
+        assert_near(kl.mean_policy_reference_log_ratio.unwrap(), 0.0);
+        let first = 0.3_f64.exp() - 1.0 - 0.3;
+        let second = (-0.3_f64).exp() - 1.0 + 0.3;
+        assert_near(kl.mean_estimator.unwrap(), (first + second) / 2.0);
+        assert_near(kl.mean_masked_estimator.unwrap(), second / 2.0);
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_policy_audit_no_correction_fixes_ratio_without_deleting_kl() -> Result<()> {
+        let mut audit = GrpoPolicyAuditAccumulator::default();
+        audit.observe_policy_values(
+            &[-1.0, -2.0],
+            None,
+            Some(&[-1.5, -2.5]),
+            crate::IsLevel::Sequence,
+            0.2,
+            0.2,
+            crate::KlEstimator::K1,
+            None,
+        )?;
+        let receipt = audit.finish()?;
+
+        assert_eq!(
+            receipt.importance_sampling.ratio_scope.as_deref(),
+            Some("sequence")
+        );
+        assert_eq!(receipt.importance_sampling.action_tokens, 2);
+        assert_eq!(receipt.importance_sampling.ratio_observations, 1);
+        assert_eq!(receipt.importance_sampling.mean_ratio, Some(1.0));
+        assert_eq!(receipt.kl_reference.token_observations, 2);
+        assert_eq!(receipt.kl_reference.mean_estimator, Some(0.5));
+        assert_eq!(receipt.kl_reference.mean_masked_estimator, Some(0.5));
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_policy_audit_behavior_manifest_is_exact_and_order_independent() -> Result<()> {
+        let first = audit_provenance('8', 10);
+        let same_source = audit_provenance('8', 11);
+        let revised = audit_provenance('9', 12);
+
+        let mut forward = GrpoPolicyAuditAccumulator::default();
+        forward.observe_provenance(&first)?;
+        forward.observe_provenance(&same_source)?;
+        forward.observe_provenance(&revised)?;
+        let forward = forward.finish()?.recorded_provenance;
+
+        let mut reverse = GrpoPolicyAuditAccumulator::default();
+        reverse.observe_provenance(&revised)?;
+        reverse.observe_provenance(&same_source)?;
+        reverse.observe_provenance(&first)?;
+        let reverse = reverse.finish()?.recorded_provenance;
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.completion_count, 3);
+        assert_eq!(forward.sampled_action_tokens, 3);
+        assert_eq!(forward.forced_action_tokens, 3);
+        assert_eq!(forward.unique_behavior_sources, 2);
+        assert!(forward.behavior_source_manifest_sha256.is_some());
+        let counts = forward
+            .behavior_sources
+            .iter()
+            .map(|source| source.completion_count)
+            .collect::<Vec<_>>();
+        assert!(counts.contains(&1));
+        assert!(counts.contains(&2));
+        assert_ne!(
+            forward.behavior_sources[0].behavior_source_sha256,
+            forward.behavior_sources[1].behavior_source_sha256
+        );
+        Ok(())
+    }
+
     #[test]
     fn legacy_grpo_receipt_maps_reference_to_kl_and_leaves_behavior_unknown() {
         let receipt: GrpoReceipt = serde_json::from_value(serde_json::json!({
@@ -1799,7 +2330,8 @@ mod tests {
             serde_json::json!({"kind": "base_per_step"})
         );
 
-        let wire = serde_json::to_value(receipt).unwrap();
+        assert!(receipt.policy_audit.is_none());
+        let wire = serde_json::to_value(&receipt).unwrap();
         assert!(wire.get("reference_policy").is_none());
         assert_eq!(wire["behavior_policy"], serde_json::Value::Null);
     }

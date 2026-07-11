@@ -2066,6 +2066,7 @@ fn grpo_settings_receipt(
         kl_reference_policy: serde_json::to_value(&config.kl_reference_policy)
             .unwrap_or(serde_json::Value::Null),
         entropy_aware_kl_quantile: config.entropy_aware_kl_quantile,
+        policy_audit: None,
     }
 }
 
