@@ -376,14 +376,17 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
 
 ### 2.1 Shared budget model
 
-- [ ] Move inherit/unlimited/limit semantics, source attribution, effective
+- [x] Move inherit/unlimited/limit semantics, source attribution, effective
   limits, and outcomes into one shared typed model used by API, CLI, eval,
   batch, desktop, and browser code.
-- [ ] Remove duplicated `BudgetOverride`, `EvalBudgetOverride`, and CLI-only
+- [x] Remove duplicated `BudgetOverride`, `EvalBudgetOverride`, and CLI-only
   semantic implementations or reduce them to conversions around the shared
   type.
 - [ ] Define one canonical schema/reference and generate or validate duplicated
   documentation from it.
+  - Progress: the versioned schema and conformance vectors are now executable
+    in Rust, browser, and desktop production parsers. Public prose still needs
+    a cheap drift check before this item closes.
 
 ### 2.2 Configuration and validation
 
@@ -409,7 +412,7 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
 
 ### 2.4 User ergonomics
 
-- [ ] Give token and time budgets independent Inherit/Unlimited/Limit controls.
+- [x] Give token and time budgets independent Inherit/Unlimited/Limit controls.
   Editing one dimension must not disable the inherited other dimension.
 - [ ] Fetch and display effective server defaults and preview the effective pair
   before send.
@@ -901,6 +904,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-10 | Canonical effective thinking-budget record | `sha256:26b42c95429f` | this commit | portable + ROCm/Vulkan compile gates | 90 core, 215 eval, and 819 server library tests; eval all-target check; flat/legacy-nested schema and invalid-state regressions; portable, ROCm, and Vulkan server all-target checks; formatting and diff hygiene | passed | Chat metadata and eval results now use one validated `kiln-core` record for effective limits, typed sources, applicability, and the optional canonical outcome. Serialization preserves the established flat chat shape and rejects inconsistent configured/limit, source/limit, applied/configured, or outcome/applied states. Deserialization accepts both that shape and the earlier nested eval-only outcome for backward compatibility; new eval results write the shared flat form documented in the eval guide. The duplicate server and eval record structs were removed behind compatibility aliases. Recent requests retain a small conversion wrapper only for their legitimate unresolved-applicability state. Phase 2.1 remains open for a machine-readable cross-runtime reference and browser/desktop conformance. |
 | 2026-07-10 | Versioned thinking-budget contract foundation | `sha256:f44b59dece39` | this commit | portable contract/core | 91 core tests; JSON syntax, formatting, and diff hygiene | passed | A Draft 2020-12 schema now defines request overrides, effective configuration, sources, terminal outcomes, application records, and unresolved recent records. A versioned conformance file covers independent dimensions, zero, inherit, explicit unlimited, request/suite/run/example provenance, flat terminal records, legacy nested eval input, and invalid states. The core suite executes every vector and cross-checks the schema's complete source and trigger vocabularies. A concise human reference links the normative artifacts from the README. This is a foundation checkpoint: Phase 2.1's schema/reference item remains open until browser and desktop runners execute the same vectors. |
 | 2026-07-10 | Desktop thinking-budget contract vectors | `sha256:a6631d186c4f` | this commit | desktop portable UI | executable desktop VM smoke plus core v1 contract test; JSON syntax and diff hygiene | passed | The v1 contract now includes server-default vectors for unlimited, token-only, time-only, and dual finite limits. The desktop smoke extracts and runs the production settings parser against every vector, including exact fractional-seconds-to-milliseconds conversion and zero preservation. This closes desktop's cross-runtime portion without adding accelerator CI; browser request vectors remain before the Phase 2.1 schema/reference item can close. |
+| 2026-07-10 | Independent Playground thinking-budget controls | `sha256:4c92ea3d97f3` | this commit | real Chromium + portable/ROCm/Vulkan compile gates | five shared request-contract vectors in four-scenario Chromium smoke; 390 px responsive regression; desktop and core contract runners; 819 server library tests; portable, ROCm, and Vulkan all-target checks; JavaScript syntax, formatting, and diff hygiene | passed | Token and time now have separate Inherit, Unlimited, and Limit selectors, so each request dimension independently omits its field, sends explicit null, or sends a validated finite value. Production parsing and request serialization execute every request-scope vector from the same v1 conformance file used by Rust and desktop. Finite fields appear only for their selected dimension, zero and exact fractional milliseconds remain intact, thinking-off preserves but disables the chosen controls, and the 390 px layout has no horizontal overflow. Existing combined `server`/`unlimited`/`custom` local-storage settings migrate dimension by dimension without losing prior values. The shared typed implementation and independent-control checklist items close here; the canonical-documentation item remains open until cheap CI enforces public prose linkage. |
 | 2026-07-09 | First reduced-CI measurement | `sha256:cda13f3f84e5` | `3c71cc4002f8` | GitHub Actions | run `29049575526` | passed | Three active jobs completed in 3m52s wall and about 4m36s aggregate time; all GPU backend jobs were skipped |
 
 ## Known Starting Defects

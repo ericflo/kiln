@@ -4385,7 +4385,8 @@ function capturePlaygroundSettings() {
     temperature:        get('chat-temp')?.value ?? '1.0',
     maxTokens:          get('chat-max-tokens')?.value ?? '16384',
     enableThinking:     !!get('chat-enable-thinking')?.checked,
-    thinkingBudgetMode: get('chat-thinking-budget-mode')?.value ?? 'server',
+    thinkingBudgetTokensMode: get('chat-thinking-budget-tokens-mode')?.value ?? 'inherit',
+    thinkingBudgetTimeMode: get('chat-thinking-budget-time-mode')?.value ?? 'inherit',
     thinkingBudgetTokens: get('chat-thinking-budget-tokens')?.value ?? '',
     thinkingBudgetSeconds: get('chat-thinking-budget-seconds')?.value ?? '',
     preset:             get('chat-preset')?.value ?? 'qwen3-thinking-general',
@@ -4416,8 +4417,25 @@ function applyPlaygroundSettings(settings) {
   if (settings.maxTokens && settings.maxTokens !== '1024') {
     set('chat-max-tokens', settings.maxTokens);
   }
-  const budgetModes = new Set(['server', 'unlimited', 'custom']);
-  set('chat-thinking-budget-mode', budgetModes.has(settings.thinkingBudgetMode) ? settings.thinkingBudgetMode : 'server');
+  const budgetModes = new Set(['inherit', 'unlimited', 'limit']);
+  let tokensMode = settings.thinkingBudgetTokensMode;
+  let timeMode = settings.thinkingBudgetTimeMode;
+  if (!budgetModes.has(tokensMode) || !budgetModes.has(timeMode)) {
+    // Migrate the former combined server/unlimited/custom selector once.
+    const legacyMode = settings.thinkingBudgetMode;
+    if (legacyMode === 'unlimited') {
+      tokensMode = 'unlimited';
+      timeMode = 'unlimited';
+    } else if (legacyMode === 'custom') {
+      tokensMode = settings.thinkingBudgetTokens ? 'limit' : 'unlimited';
+      timeMode = settings.thinkingBudgetSeconds ? 'limit' : 'unlimited';
+    } else {
+      tokensMode = 'inherit';
+      timeMode = 'inherit';
+    }
+  }
+  set('chat-thinking-budget-tokens-mode', tokensMode);
+  set('chat-thinking-budget-time-mode', timeMode);
   set('chat-thinking-budget-tokens', settings.thinkingBudgetTokens);
   set('chat-thinking-budget-seconds', settings.thinkingBudgetSeconds);
   set('chat-preset',              settings.preset);
@@ -4556,33 +4574,23 @@ function thinkingBudgetInputRaw(input, message, fieldId) {
 
 function readThinkingBudgetRequest({ validateDisabled = false } = {}) {
   const thinkingEnabled = document.getElementById('chat-enable-thinking')?.checked !== false;
-  const mode = document.getElementById('chat-thinking-budget-mode')?.value || 'server';
-  if ((!thinkingEnabled && !validateDisabled) || mode === 'server') return { mode: 'server' };
-  if (mode === 'unlimited') return { mode, tokens: null, ms: null };
-
+  if (!thinkingEnabled && !validateDisabled) {
+    return { tokensMode: 'inherit', timeMode: 'inherit' };
+  }
+  const tokensMode = document.getElementById('chat-thinking-budget-tokens-mode')?.value || 'inherit';
+  const timeMode = document.getElementById('chat-thinking-budget-time-mode')?.value || 'inherit';
   const tokensInput = document.getElementById('chat-thinking-budget-tokens');
   const secondsInput = document.getElementById('chat-thinking-budget-seconds');
   const tokensMessage = 'Thinking tokens must be a whole number from 0 to 131072.';
   const secondsMessage = 'Thinking seconds must be between 0 and 86400 with at most three decimal places.';
-  const tokensRaw = thinkingBudgetInputRaw(
-    tokensInput,
-    tokensMessage,
-    'chat-thinking-budget-tokens',
-  );
-  const secondsRaw = thinkingBudgetInputRaw(
-    secondsInput,
-    secondsMessage,
-    'chat-thinking-budget-seconds',
-  );
-  if (!tokensRaw && !secondsRaw) {
-    throw thinkingBudgetError(
-      'Set a thinking token limit, a time limit, or choose Unlimited.',
+  let tokens;
+  if (tokensMode === 'limit') {
+    const tokensRaw = thinkingBudgetInputRaw(
+      tokensInput,
+      tokensMessage,
       'chat-thinking-budget-tokens',
     );
-  }
-
-  let tokens = null;
-  if (tokensRaw) {
+    if (!tokensRaw) throw thinkingBudgetError(tokensMessage, 'chat-thinking-budget-tokens');
     tokens = strictThinkingBudgetInteger(tokensRaw, 131072);
     if (tokens === null) {
       throw thinkingBudgetError(
@@ -4591,9 +4599,14 @@ function readThinkingBudgetRequest({ validateDisabled = false } = {}) {
       );
     }
   }
-
-  let ms = null;
-  if (secondsRaw) {
+  let ms;
+  if (timeMode === 'limit') {
+    const secondsRaw = thinkingBudgetInputRaw(
+      secondsInput,
+      secondsMessage,
+      'chat-thinking-budget-seconds',
+    );
+    if (!secondsRaw) throw thinkingBudgetError(secondsMessage, 'chat-thinking-budget-seconds');
     ms = strictThinkingBudgetMilliseconds(secondsRaw, 86_400_000);
     if (ms === null) {
       throw thinkingBudgetError(
@@ -4602,7 +4615,7 @@ function readThinkingBudgetRequest({ validateDisabled = false } = {}) {
       );
     }
   }
-  return { mode, tokens, ms };
+  return { tokensMode, timeMode, tokens, ms };
 }
 
 function readThinkingBudgetRequestOrNotify() {
@@ -4626,22 +4639,46 @@ function openChatAdvancedControls() {
 
 function syncThinkingBudgetControls({ revealCustom = false } = {}) {
   const enabled = document.getElementById('chat-enable-thinking')?.checked !== false;
-  const modeInput = document.getElementById('chat-thinking-budget-mode');
-  const mode = modeInput?.value || 'server';
+  const tokensModeInput = document.getElementById('chat-thinking-budget-tokens-mode');
+  const timeModeInput = document.getElementById('chat-thinking-budget-time-mode');
+  const tokensMode = tokensModeInput?.value || 'inherit';
+  const timeMode = timeModeInput?.value || 'inherit';
   const custom = document.getElementById('chat-thinking-budget-custom');
+  const tokensField = document.getElementById('chat-thinking-budget-tokens-field');
+  const timeField = document.getElementById('chat-thinking-budget-time-field');
   const tokens = document.getElementById('chat-thinking-budget-tokens');
   const seconds = document.getElementById('chat-thinking-budget-seconds');
-  const customMode = mode === 'custom';
+  const tokenLimit = tokensMode === 'limit';
+  const timeLimit = timeMode === 'limit';
+  const hasLimit = tokenLimit || timeLimit;
 
-  if (modeInput) modeInput.disabled = !enabled;
+  if (tokensModeInput) tokensModeInput.disabled = !enabled;
+  if (timeModeInput) timeModeInput.disabled = !enabled;
   if (custom) {
-    custom.hidden = !customMode;
+    custom.hidden = !hasLimit;
     custom.classList.toggle('is-disabled', !enabled);
     custom.setAttribute('aria-disabled', String(!enabled));
   }
-  if (tokens) tokens.disabled = !enabled || !customMode;
-  if (seconds) seconds.disabled = !enabled || !customMode;
-  if (enabled && customMode && revealCustom) openChatAdvancedControls();
+  if (tokensField) tokensField.hidden = !tokenLimit;
+  if (timeField) timeField.hidden = !timeLimit;
+  if (tokens) tokens.disabled = !enabled || !tokenLimit;
+  if (seconds) seconds.disabled = !enabled || !timeLimit;
+  if (enabled && hasLimit && revealCustom) openChatAdvancedControls();
+}
+
+function applyThinkingBudgetRequest(body, thinkingBudget) {
+  if (thinkingBudget?.tokensMode === 'unlimited') body.thinking_budget_tokens = null;
+  if (thinkingBudget?.tokensMode === 'limit') body.thinking_budget_tokens = thinkingBudget.tokens;
+  if (thinkingBudget?.timeMode === 'unlimited') body.thinking_budget_ms = null;
+  if (thinkingBudget?.timeMode === 'limit') body.thinking_budget_ms = thinkingBudget.ms;
+}
+
+if (Object.prototype.hasOwnProperty.call(window, '__kilnThinkingBudgetTest')) {
+  window.__kilnThinkingBudgetTest = Object.freeze({
+    readRequest: readThinkingBudgetRequest,
+    applyRequest: applyThinkingBudgetRequest,
+    applySettings: applyPlaygroundSettings,
+  });
 }
 
 function buildChatRequestBody({ messages, temperature, thinkingBudget }) {
@@ -4679,10 +4716,7 @@ function buildChatRequestBody({ messages, temperature, thinkingBudget }) {
   const stop = parseChatStopSequences(document.getElementById('chat-stop-sequences')?.value);
   if (stop) body.stop = stop;
 
-  if (thinkingBudget?.mode && thinkingBudget.mode !== 'server') {
-    body.thinking_budget_tokens = thinkingBudget.tokens;
-    body.thinking_budget_ms = thinkingBudget.ms;
-  }
+  applyThinkingBudgetRequest(body, thinkingBudget);
 
   const enableThinking = document.getElementById('chat-enable-thinking');
   if (enableThinking && !enableThinking.checked) {
@@ -5776,7 +5810,8 @@ if (chatAdvBtn && chatAdvPanel) {
 
 const PLAYGROUND_SETTING_IDS = [
   'chat-temp', 'chat-max-tokens', 'chat-enable-thinking',
-  'chat-thinking-budget-mode', 'chat-thinking-budget-tokens', 'chat-thinking-budget-seconds',
+  'chat-thinking-budget-tokens-mode', 'chat-thinking-budget-time-mode',
+  'chat-thinking-budget-tokens', 'chat-thinking-budget-seconds',
   'chat-preset',
   'chat-top-p', 'chat-top-k', 'chat-min-p',
   'chat-presence-penalty', 'chat-frequency-penalty', 'chat-repetition-penalty',
@@ -5789,9 +5824,10 @@ PLAYGROUND_SETTING_IDS.forEach(id => {
   el.addEventListener(ev, persistPlaygroundSettingsSoon);
 });
 
-const thinkingBudgetMode = document.getElementById('chat-thinking-budget-mode');
-thinkingBudgetMode?.addEventListener('change', () => {
-  syncThinkingBudgetControls({ revealCustom: true });
+['chat-thinking-budget-tokens-mode', 'chat-thinking-budget-time-mode'].forEach(id => {
+  document.getElementById(id)?.addEventListener('change', () => {
+    syncThinkingBudgetControls({ revealCustom: true });
+  });
 });
 const thinkingEnabled = document.getElementById('chat-enable-thinking');
 thinkingEnabled?.addEventListener('change', () => {
