@@ -95,13 +95,31 @@ fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
     num_tokens.div_ceil(block_size)
 }
 
-/// Resolve the actor's `max_decode_batch` from the environment, falling back to
-/// the active backend's decode policy when `KILN_MAX_DECODE_BATCH` is unset or
-/// cannot be parsed as a positive integer. The actor caps `active.len()` at
-/// this value, so it is the effective concurrent-decode width.
+/// Resolve the actor's `max_decode_batch` from the reproducibility envelope,
+/// environment, or active backend policy. Deterministic inference stays
+/// single-row even when an operator also configured a wider batch: changing
+/// the request cohort can otherwise select a different BF16 GEMM shape and
+/// change a greedy token at a close logit boundary. The actor caps
+/// `active.len()` at this value, so it is the effective concurrent-decode
+/// width reported through health and metrics.
 pub(crate) fn env_max_decode_batch_for_policy(policy: Option<DecodeBatcherPolicy>) -> usize {
-    std::env::var("KILN_MAX_DECODE_BATCH")
-        .ok()
+    let configured = std::env::var("KILN_MAX_DECODE_BATCH").ok();
+    resolve_max_decode_batch_for_policy(
+        kiln_tensor::deterministic_enabled(),
+        configured.as_deref(),
+        policy,
+    )
+}
+
+fn resolve_max_decode_batch_for_policy(
+    deterministic: bool,
+    configured: Option<&str>,
+    policy: Option<DecodeBatcherPolicy>,
+) -> usize {
+    if deterministic {
+        return 1;
+    }
+    configured
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or_else(|| {
@@ -4839,34 +4857,44 @@ mod tests {
 
     #[test]
     fn max_decode_batch_default_is_backend_aware() {
-        let prior = std::env::var("KILN_MAX_DECODE_BATCH").ok();
-        // SAFETY: tests in this crate that touch this env var must not run in
-        // parallel; cargo defaults to serial within a single test binary.
-        unsafe {
-            std::env::remove_var("KILN_MAX_DECODE_BATCH");
-        }
         let vulkan_policy =
             DecodeBatcherPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0));
         let metal_policy = DecodeBatcherPolicy::for_backend("metal", kiln_tensor::Device::Metal(0));
-        assert_eq!(env_max_decode_batch_for_policy(None), 8);
+        assert_eq!(resolve_max_decode_batch_for_policy(false, None, None), 8);
         // CUDA: the legacy batcher stays serial (max_batch 1) but the
         // ENGINE width must be the engine default — the policy-routing
         // change that reused max_batch serialized all concurrent CUDA
         // requests.
         let cuda_policy = DecodeBatcherPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0));
         assert_eq!(cuda_policy.max_batch, 1);
-        assert_eq!(env_max_decode_batch_for_policy(Some(cuda_policy)), 8);
-        assert_eq!(env_max_decode_batch_for_policy(Some(vulkan_policy)), 64);
-        assert_eq!(env_max_decode_batch_for_policy(Some(metal_policy)), 8);
-        unsafe {
-            std::env::set_var("KILN_MAX_DECODE_BATCH", "24");
-        }
-        assert_eq!(env_max_decode_batch_for_policy(None), 24);
-        assert_eq!(env_max_decode_batch_for_policy(Some(vulkan_policy)), 24);
-        match prior {
-            Some(v) => unsafe { std::env::set_var("KILN_MAX_DECODE_BATCH", v) },
-            None => unsafe { std::env::remove_var("KILN_MAX_DECODE_BATCH") },
-        }
+        assert_eq!(
+            resolve_max_decode_batch_for_policy(false, None, Some(cuda_policy)),
+            8
+        );
+        assert_eq!(
+            resolve_max_decode_batch_for_policy(false, None, Some(vulkan_policy)),
+            64
+        );
+        assert_eq!(
+            resolve_max_decode_batch_for_policy(false, None, Some(metal_policy)),
+            8
+        );
+        assert_eq!(
+            resolve_max_decode_batch_for_policy(false, Some("24"), None),
+            24
+        );
+        assert_eq!(
+            resolve_max_decode_batch_for_policy(false, Some("24"), Some(vulkan_policy)),
+            24
+        );
+        assert_eq!(
+            resolve_max_decode_batch_for_policy(true, Some("24"), None),
+            1
+        );
+        assert_eq!(
+            resolve_max_decode_batch_for_policy(true, None, Some(vulkan_policy)),
+            1
+        );
     }
 
     #[test]

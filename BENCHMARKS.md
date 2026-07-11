@@ -83,6 +83,18 @@ Authenticated endpoints must opt in with `--api-key-env VARIABLE` (preferred)
 or `--api-key VALUE`. The driver never inherits `OPENAI_API_KEY` implicitly and
 never writes the credential or environment-variable name into a receipt.
 
+Treat exact output comparison as a reproducibility gate, not an unstated
+property of the throughput configuration. Start Kiln with
+`KILN_DETERMINISTIC=1` and verify that `/health` reports
+`decode_runtime.batching_engine.max_decode_batch = 1`; configure the reference
+engine for the same single-row deterministic execution. Default multi-row BF16
+serving may select different valid GEMM shapes as cohorts form, and a close
+greedy-logit boundary can then change the continuation. Preserve any such
+failed exact-comparison receipt as evidence; never relabel it as output parity.
+Run performance and deterministic correctness as separate receipts so the
+reproducibility guarantee does not silently disable the batching being
+measured.
+
 Commit detailed serving receipts under
 `benchmarks/receipts/<backend>/<host-id>/`. They intentionally do not belong
 under `qualification/receipts/`, whose files use the separate compact

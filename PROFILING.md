@@ -156,6 +156,8 @@ The default is `false` (perf-preferred). When set, the substrate:
 - Selects the deterministic-reduction-tree softmax/RMSNorm/cross-entropy bwd.
 - Disables any algorithm that uses warp-shuffle + cross-block reduction
   without a recorded determinism category.
+- Forces serving decode width to one so concurrent admission cannot change a
+  request's BF16 GEMM shape and greedy-token path.
 
 ### Migration enforcement
 

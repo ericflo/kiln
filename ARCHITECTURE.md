@@ -1005,7 +1005,11 @@ deterministic-`atomicAdd` embedding backward, the deterministic
 reduction-tree softmax / RMSNorm / cross-entropy backward, and
 warp-shuffle-free reductions. It is the single user-facing contract for
 "make this run match yesterday's run" — one env var, not a doc-read —
-and two runs at the same seed under the envelope are bit-reproducible.
+and two runs at the same seed under the envelope are bit-reproducible. For
+serving, the envelope also forces the batching actor's effective decode width
+to one. Multi-row BF16 GEMMs are individually bounded and valid, but changing
+the live request cohort changes their shape and can flip a close greedy-logit
+boundary; single-row decode removes that scheduler-dependent numerical path.
 
 **`KILN_DETECT_ANOMALY=1`** — a NaN/Inf trap on the autograd tape
 (`crates/kiln-autograd/src/anomaly.rs`, `anomaly_detection_enabled()`).
