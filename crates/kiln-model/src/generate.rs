@@ -650,6 +650,11 @@ pub enum PagedBatchedPrefillStart {
 
 /// Result of one bounded prefill quantum.
 pub struct PagedBatchedPrefillProgress {
+    /// Prompt tokens whose transformer work was admitted by this call. A
+    /// layer-resumable chunk reports its width exactly once, when selected;
+    /// later layer groups keep this at zero.
+    pub tokens_scheduled: usize,
+    /// Prompt tokens whose final transformer layer completed in this call.
     pub tokens_processed: usize,
     pub layers_processed: usize,
     pub decode_state: Option<PagedBatchedDecodeState>,
@@ -3900,9 +3905,11 @@ impl ModelRunner {
         )
     }
 
-    /// Execute at most `max_layers` of one `max_tokens` prompt chunk. A zero
-    /// `tokens_processed` result with no decode state means transformer-layer
-    /// progress was made and retained for the next call.
+    /// Execute at most `max_layers` of one `max_tokens` prompt chunk.
+    /// `tokens_scheduled` charges a new chunk exactly once; `tokens_processed`
+    /// reports only final-layer completion. A retained layer group may
+    /// therefore report zero for both token fields while still making layer
+    /// progress.
     pub fn advance_paged_batched_prefill_with_layer_budget(
         &self,
         prefill: &mut Option<PagedBatchedPrefillState>,
@@ -3912,7 +3919,6 @@ impl ModelRunner {
         max_layers: usize,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedPrefillProgress> {
-        anyhow::ensure!(max_tokens > 0, "prefill token quantum must be positive");
         anyhow::ensure!(max_layers > 0, "prefill layer quantum must be positive");
         check_cancelled(cancel)?;
 
@@ -3930,9 +3936,10 @@ impl ModelRunner {
             state.pending_logits.take();
         }
         let chunk_start = state.next_position;
-        let chunk_end = match state.pending_chunk_end {
-            Some(chunk_end) => chunk_end,
+        let (chunk_end, chunk_started) = match state.pending_chunk_end {
+            Some(chunk_end) => (chunk_end, false),
             None => {
+                anyhow::ensure!(max_tokens > 0, "prefill token quantum must be positive");
                 let mut chunk_end = chunk_start
                     .saturating_add(max_tokens)
                     .min(state.prompt_tokens.len());
@@ -3943,11 +3950,12 @@ impl ModelRunner {
                     chunk_end = split_pos;
                 }
                 state.pending_chunk_end = Some(chunk_end);
-                chunk_end
+                (chunk_end, true)
             }
         };
         let chunk_len = chunk_end.saturating_sub(chunk_start);
         anyhow::ensure!(chunk_len > 0, "prefill quantum made no progress");
+        let tokens_scheduled = usize::from(chunk_started).saturating_mul(chunk_len);
 
         let started = std::time::Instant::now();
         let layer_bounded = max_layers != usize::MAX || state.pending_layer_forward.is_some();
@@ -4006,6 +4014,7 @@ impl ModelRunner {
             );
             check_cancelled(cancel)?;
             return Ok(PagedBatchedPrefillProgress {
+                tokens_scheduled,
                 tokens_processed: 0,
                 layers_processed,
                 decode_state: None,
@@ -4033,6 +4042,7 @@ impl ModelRunner {
 
         if state.next_position < state.prompt_tokens.len() {
             return Ok(PagedBatchedPrefillProgress {
+                tokens_scheduled,
                 tokens_processed: chunk_len,
                 layers_processed,
                 decode_state: None,
@@ -4063,6 +4073,7 @@ impl ModelRunner {
             _ => None,
         };
         Ok(PagedBatchedPrefillProgress {
+            tokens_scheduled,
             tokens_processed: chunk_len,
             layers_processed,
             decode_state: Some(PagedBatchedDecodeState {

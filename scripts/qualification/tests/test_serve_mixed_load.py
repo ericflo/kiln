@@ -119,7 +119,6 @@ def health_fixture(
                 "total_prefill_forwards": 0,
                 "total_prefill_layers": 0,
                 "total_prefill_layer_yields": 0,
-                "total_prefill_token_budget_deferrals": 0,
                 "total_prefill_forward_ms": 0.0,
                 "max_prefill_forward_ms": 0.0,
                 "slow_prefill_forward_count": 0,
@@ -1252,7 +1251,6 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "response_backpressure_events": 3,
                 "response_backpressure_wait_ms": 100,
                 "response_stall_evictions": 2,
-                "total_prefill_token_budget_deferrals": 2,
             }
         )
         measurement_start["backend_runtime"]["external_yield_sync"] = [
@@ -1305,7 +1303,6 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "response_backpressure_events": 5,
                 "response_backpressure_wait_ms": 850,
                 "response_stall_evictions": 3,
-                "total_prefill_token_budget_deferrals": 7,
             }
         )
 
@@ -1343,7 +1340,6 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(values["batching_prefill_forward_count"], 5)
         self.assertEqual(values["batching_prefill_layer_count"], 0)
         self.assertEqual(values["batching_prefill_layer_yield_count"], 0)
-        self.assertEqual(values["batching_prefill_token_budget_deferral_count"], 5)
         self.assertEqual(values["batching_prefill_forward_ms_total"], 1_400.0)
         self.assertEqual(values["batching_prefill_forward_ms_max"], 600.0)
         self.assertEqual(values["batching_slow_prefill_forward_count"], 3)

@@ -249,7 +249,6 @@ pub struct BatchingEngineSnapshot {
     pub total_prefill_forwards: u64,
     pub total_prefill_layers: u64,
     pub total_prefill_layer_yields: u64,
-    pub total_prefill_token_budget_deferrals: u64,
     pub total_decode_tokens: u64,
     pub total_prefill_tokens: u64,
     pub total_errors: u64,
@@ -301,11 +300,13 @@ pub enum DecodeSlot {
 pub enum RequestPreparation {
     Prefilling {
         slot: DecodeSlot,
+        tokens_scheduled: usize,
         tokens_processed: usize,
         layers_processed: usize,
     },
     Ready {
         slot: DecodeSlot,
+        tokens_scheduled: usize,
         tokens_processed: usize,
         layers_processed: usize,
     },
@@ -367,6 +368,7 @@ pub trait DecodeForward: Send + Sync + 'static {
         );
         Ok(RequestPreparation::Ready {
             slot: self.prepare_request(req)?,
+            tokens_scheduled: req.prompt_tokens.len(),
             tokens_processed: req.prompt_tokens.len(),
             layers_processed: 0,
         })
@@ -795,6 +797,7 @@ impl DecodeForward for RealDecodeForward {
                     prefix_request,
                     first_token_pending: true,
                 },
+                tokens_scheduled: 0,
                 tokens_processed: 0,
                 layers_processed: 0,
             }),
@@ -803,6 +806,7 @@ impl DecodeForward for RealDecodeForward {
                     state: Some(state),
                     prefix_request,
                 },
+                tokens_scheduled: 0,
                 tokens_processed: 0,
                 layers_processed: 0,
             }),
@@ -861,6 +865,7 @@ impl DecodeForward for RealDecodeForward {
                         prefix_request,
                         first_token_pending: true,
                     },
+                    tokens_scheduled: progress.tokens_scheduled,
                     tokens_processed: progress.tokens_processed,
                     layers_processed: progress.layers_processed,
                 }),
@@ -869,6 +874,7 @@ impl DecodeForward for RealDecodeForward {
                         state,
                         prefix_request,
                     },
+                    tokens_scheduled: progress.tokens_scheduled,
                     tokens_processed: progress.tokens_processed,
                     layers_processed: progress.layers_processed,
                 }),
@@ -1594,7 +1600,7 @@ struct ActiveRequest {
 #[derive(Default)]
 struct AdmissionOutcome {
     submitted_first_tokens: bool,
-    tokens_processed: usize,
+    tokens_scheduled: usize,
 }
 
 struct EngineDeliveryResultSink {
@@ -1830,7 +1836,7 @@ impl BatchingEngineActor {
             }
             let decode_budget = self
                 .max_batch_tokens
-                .saturating_sub(admission.tokens_processed);
+                .saturating_sub(admission.tokens_scheduled);
             let decoded_tokens = if decode_budget > 0 && self.has_ready_decode_row() {
                 self.run_decode_batch_with_budget(decode_budget)
             } else {
@@ -1841,11 +1847,11 @@ impl BatchingEngineActor {
             }
             let prefill_budget = self
                 .max_batch_tokens
-                .saturating_sub(admission.tokens_processed)
+                .saturating_sub(admission.tokens_scheduled)
                 .saturating_sub(decoded_tokens)
                 .min(
                     self.max_prefill_tokens_per_cycle
-                        .saturating_sub(admission.tokens_processed),
+                        .saturating_sub(admission.tokens_scheduled),
                 );
             let advanced_prefill = self.run_prefill_budget(prefill_budget);
             if decoded_tokens > 0 || advanced_prefill {
@@ -2372,25 +2378,27 @@ impl BatchingEngineActor {
             );
             match preparation {
                 Ok(preparation) => {
-                    let (slot, tokens_processed, ready) = match preparation {
+                    let (slot, tokens_scheduled, tokens_processed, ready) = match preparation {
                         RequestPreparation::Prefilling {
                             slot,
+                            tokens_scheduled,
                             tokens_processed,
                             ..
-                        } => (slot, tokens_processed, false),
+                        } => (slot, tokens_scheduled, tokens_processed, false),
                         RequestPreparation::Ready {
                             slot,
+                            tokens_scheduled,
                             tokens_processed,
                             ..
-                        } => (slot, tokens_processed, true),
+                        } => (slot, tokens_scheduled, tokens_processed, true),
                     };
-                    if tokens_processed > token_budget {
+                    if tokens_scheduled > token_budget || tokens_processed > tokens_scheduled {
                         self.forward.discard_request(slot);
                         self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
                         self.terminate_delivery(
                             queued.delivery_key,
                             format!(
-                                "prefill admission processed {tokens_processed} tokens beyond the {token_budget}-token remainder"
+                                "prefill admission scheduled {tokens_scheduled} and completed {tokens_processed} tokens for a {token_budget}-token remainder"
                             ),
                         );
                         continue;
@@ -2400,7 +2408,7 @@ impl BatchingEngineActor {
                         .snapshot
                         .total_prefill_tokens
                         .saturating_add(tokens_processed as u64);
-                    token_budget -= tokens_processed;
+                    token_budget -= tokens_scheduled;
                     admitted += 1;
                     let active_idx = self.active.len();
                     self.active.push(ActiveRequest {
@@ -2448,7 +2456,7 @@ impl BatchingEngineActor {
         self.refresh_snapshot();
         AdmissionOutcome {
             submitted_first_tokens,
-            tokens_processed: initial_token_budget.saturating_sub(token_budget),
+            tokens_scheduled: initial_token_budget.saturating_sub(token_budget),
         }
     }
 
@@ -2458,27 +2466,32 @@ impl BatchingEngineActor {
             .submitted_first_tokens
     }
 
-    /// Spend at most one combined-cycle token remainder on resumable prefills.
-    /// Partial rows are selected round-robin so a 16K prompt cannot hide a 1K
-    /// prompt behind repeated quanta. Every forward returns to the actor before
-    /// another decode cohort or control-command drain.
+    /// Spend the combined-cycle remainder on newly selected prompt chunks.
+    /// Retained layer groups were charged when their chunk began and resume
+    /// without a second token charge; the independent layer ceiling still
+    /// bounds each forward. Partial rows are selected round-robin so a 16K
+    /// prompt cannot hide a 1K prompt behind repeated quanta.
     fn run_prefill_budget(&mut self, mut budget: usize) -> bool {
         let mut advanced = false;
-        while budget > 0 && !self.active.is_empty() {
+        while !self.active.is_empty() {
             let active_len = self.active.len();
             let Some(idx) = (0..active_len)
                 .map(|offset| (self.next_prefill_index + offset) % active_len)
                 .find(|&idx| {
                     self.active[idx].delivery_state == ActiveDeliveryState::Ready
                         && self.forward.is_prefilling(&self.active[idx].slot)
-                        && self
-                            .forward
-                            .inflight_prefill_token_width(&self.active[idx].slot)
-                            .is_none_or(|tokens| tokens <= budget)
+                        && (budget > 0
+                            || self
+                                .forward
+                                .inflight_prefill_token_width(&self.active[idx].slot)
+                                .is_some())
                 })
             else {
                 break;
             };
+            let reserved_width = self
+                .forward
+                .inflight_prefill_token_width(&self.active[idx].slot);
 
             let ActiveRequest {
                 req,
@@ -2520,18 +2533,33 @@ impl BatchingEngineActor {
                     continue;
                 }
             };
-            let (slot, tokens_processed, layers_processed, ready) = match preparation {
-                RequestPreparation::Prefilling {
-                    slot,
-                    tokens_processed,
-                    layers_processed,
-                } => (slot, tokens_processed, layers_processed, false),
-                RequestPreparation::Ready {
-                    slot,
-                    tokens_processed,
-                    layers_processed,
-                } => (slot, tokens_processed, layers_processed, true),
-            };
+            let (slot, tokens_scheduled, tokens_processed, layers_processed, ready) =
+                match preparation {
+                    RequestPreparation::Prefilling {
+                        slot,
+                        tokens_scheduled,
+                        tokens_processed,
+                        layers_processed,
+                    } => (
+                        slot,
+                        tokens_scheduled,
+                        tokens_processed,
+                        layers_processed,
+                        false,
+                    ),
+                    RequestPreparation::Ready {
+                        slot,
+                        tokens_scheduled,
+                        tokens_processed,
+                        layers_processed,
+                    } => (
+                        slot,
+                        tokens_scheduled,
+                        tokens_processed,
+                        layers_processed,
+                        true,
+                    ),
+                };
             if layers_processed == 0 || layers_processed > self.max_prefill_layers_per_cycle {
                 self.forward.discard_request(slot);
                 self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
@@ -2551,6 +2579,35 @@ impl BatchingEngineActor {
                 advanced = true;
                 continue;
             }
+            let reservation_valid = match reserved_width {
+                Some(width) => {
+                    tokens_scheduled == 0 && (tokens_processed == 0 || tokens_processed == width)
+                }
+                None => {
+                    tokens_scheduled > 0
+                        && tokens_scheduled <= budget
+                        && tokens_processed <= tokens_scheduled
+                }
+            };
+            if !reservation_valid {
+                self.forward.discard_request(slot);
+                self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                self.terminate_delivery(
+                    delivery_key,
+                    format!(
+                        "prefill forward violated token reservation: prior={reserved_width:?}, scheduled={tokens_scheduled}, completed={tokens_processed}, new-token budget={budget}"
+                    ),
+                );
+                self.next_prefill_index = if self.active.is_empty() {
+                    0
+                } else {
+                    idx % self.active.len()
+                };
+                self.refresh_snapshot();
+                advanced = true;
+                continue;
+            }
+            budget -= tokens_scheduled;
             self.snapshot.last_prefill_layers = layers_processed;
             self.snapshot.total_prefill_layers = self
                 .snapshot
@@ -2589,25 +2646,6 @@ impl BatchingEngineActor {
                 self.refresh_snapshot();
                 return true;
             }
-            if tokens_processed > budget {
-                self.forward.discard_request(slot);
-                self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
-                self.terminate_delivery(
-                    delivery_key,
-                    format!(
-                        "prefill forward reported {tokens_processed} tokens for a {budget}-token budget"
-                    ),
-                );
-                self.next_prefill_index = if self.active.is_empty() {
-                    0
-                } else {
-                    idx % self.active.len()
-                };
-                self.refresh_snapshot();
-                return true;
-            }
-
-            budget -= tokens_processed;
             self.snapshot.last_prefill_tokens = tokens_processed;
             self.snapshot.total_prefill_tokens = self
                 .snapshot
@@ -2629,23 +2667,14 @@ impl BatchingEngineActor {
             }
             self.refresh_snapshot();
             advanced = true;
+            // A resumed chunk already consumed its new-token budget when it
+            // was selected. Its final layer group still owns this cycle's
+            // layer quantum, so return to decode before starting more work.
+            if reserved_width.is_some() {
+                return true;
+            }
         }
-        let token_budget_deferred = self.active.iter().any(|active| {
-            active.delivery_state == ActiveDeliveryState::Ready
-                && self.forward.is_prefilling(&active.slot)
-                && self
-                    .forward
-                    .inflight_prefill_token_width(&active.slot)
-                    .is_some_and(|tokens| tokens > budget)
-        });
-        if token_budget_deferred {
-            self.snapshot.total_prefill_token_budget_deferrals = self
-                .snapshot
-                .total_prefill_token_budget_deferrals
-                .saturating_add(1);
-            self.refresh_snapshot();
-        }
-        advanced || token_budget_deferred
+        advanced
     }
 
     fn pending_first_token_at(&mut self, idx: usize) -> Option<TokenId> {
@@ -3183,6 +3212,7 @@ mod tests {
             if req.prompt_tokens.len() <= 1 {
                 return Ok(RequestPreparation::Ready {
                     slot,
+                    tokens_scheduled: 0,
                     tokens_processed: 0,
                     layers_processed: 0,
                 });
@@ -3193,6 +3223,7 @@ mod tests {
                 .insert(key, req.prompt_tokens.len());
             Ok(RequestPreparation::Prefilling {
                 slot,
+                tokens_scheduled: 0,
                 tokens_processed: 0,
                 layers_processed: 0,
             })
@@ -3215,19 +3246,26 @@ mod tests {
         ) -> Result<RequestPreparation> {
             anyhow::ensure!(!cancel.is_cancelled(), "synthetic prefill cancelled");
             let key = Self::slot_key(&slot);
-            let reserved_tokens = if self.layers_per_chunk == 0 {
-                None
+            let (reserved_tokens, tokens_scheduled) = if self.layers_per_chunk == 0 {
+                (None, 0)
             } else {
                 let remaining_tokens =
                     *self.remaining.lock().unwrap().get(&key).ok_or_else(|| {
                         anyhow::anyhow!("missing synthetic prefill state for {key}")
                     })?;
                 let mut pending_token_widths = self.pending_token_widths.lock().unwrap();
-                Some(
-                    *pending_token_widths
-                        .entry(key)
-                        .or_insert(remaining_tokens.min(max_tokens)),
-                )
+                match pending_token_widths.entry(key) {
+                    std::collections::hash_map::Entry::Occupied(entry) => (Some(*entry.get()), 0),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        anyhow::ensure!(
+                            max_tokens > 0,
+                            "synthetic prefill received an empty token budget"
+                        );
+                        let tokens = remaining_tokens.min(max_tokens);
+                        entry.insert(tokens);
+                        (Some(tokens), tokens)
+                    }
+                }
             };
             let layers_processed = if self.layers_per_chunk == 0 {
                 1
@@ -3262,6 +3300,7 @@ mod tests {
                 if remaining_after > 0 {
                     return Ok(RequestPreparation::Prefilling {
                         slot,
+                        tokens_scheduled,
                         tokens_processed: 0,
                         layers_processed: layers,
                     });
@@ -3286,6 +3325,11 @@ mod tests {
                 }
                 (tokens, remaining_after)
             };
+            let tokens_scheduled = if reserved_tokens.is_some() {
+                tokens_scheduled
+            } else {
+                tokens
+            };
             if reserved_tokens.is_some() {
                 self.pending_token_widths.lock().unwrap().remove(&key);
             }
@@ -3298,12 +3342,14 @@ mod tests {
             if remaining_after == 0 {
                 Ok(RequestPreparation::Ready {
                     slot,
+                    tokens_scheduled,
                     tokens_processed: tokens,
                     layers_processed,
                 })
             } else {
                 Ok(RequestPreparation::Prefilling {
                     slot,
+                    tokens_scheduled,
                     tokens_processed: tokens,
                     layers_processed,
                 })
@@ -5517,7 +5563,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_prefill_waits_for_its_original_token_width() {
+    fn retained_prefill_charges_its_token_width_only_when_selected() {
         const KEY: TokenId = 10_000;
 
         let forward = Arc::new(SyntheticPrefillForward {
@@ -5549,21 +5595,14 @@ mod tests {
             forward.inflight_prefill_token_width(&actor.active[0].slot),
             Some(64)
         );
-        let events_before_deferral = forward.events.lock().unwrap().len();
+        assert_eq!(actor.snapshot.total_prefill_tokens, 0);
+        assert_eq!(actor.snapshot.total_prefill_layers, 4);
+        assert_eq!(actor.snapshot.total_prefill_forwards, 1);
 
         assert!(
             actor.run_prefill_budget(32),
-            "a token-width deferral must keep the actor schedulable for its next cycle"
+            "a retained chunk must resume without competing for new-token budget"
         );
-        assert_eq!(forward.events.lock().unwrap().len(), events_before_deferral);
-        assert_eq!(actor.snapshot.total_prefill_token_budget_deferrals, 1);
-        assert_eq!(actor.snapshot.total_errors, 0);
-        assert_eq!(
-            forward.inflight_prefill_token_width(&actor.active[0].slot),
-            Some(64)
-        );
-
-        assert!(actor.run_prefill_budget(64));
         assert_eq!(actor.snapshot.total_prefill_tokens, 64);
         assert_eq!(actor.snapshot.total_prefill_layers, 8);
         assert_eq!(actor.snapshot.total_prefill_forwards, 2);

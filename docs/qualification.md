@@ -121,9 +121,11 @@ The stable serving run also attests the default 64-token prompt-work ceiling
 and resumable prefill share the token ceiling after ready decode rows reserve
 their tokens. A retained token chunk then yields between transformer-layer
 groups without replaying completed layers. The receipt records both effective
-values, processed-layer, layer-yield, and retained-width deferral counts, plus
-cumulative/max actor-phase times; a run that exercises no inter-layer yield
-fails. Any ITL outlier remains a failure even when its phase is explained.
+values, processed-layer and layer-yield counts, plus cumulative/max actor-phase
+times; a run that exercises no inter-layer yield fails. A chunk is charged to
+the new-token ceiling exactly once when selected, not again when its retained
+final layer completes. Any ITL outlier remains a failure even when its phase is
+explained.
 
 For the historical dynamic-runtime A/B, run each of `default`,
 `autoscale-off`, `graphs-off`, and `both-off` separately. These four arms now

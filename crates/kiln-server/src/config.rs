@@ -806,12 +806,14 @@ pub struct ServerConfig {
     /// control commands continue independently.
     pub stream_stall_grace_ms: StreamStallGrace,
     /// Combined token budget for one production batching-actor cycle. Ready
-    /// decode rows consume one token each; a resumable prefill may use only the
-    /// remainder before the actor yields back to decode and control commands.
+    /// decode rows consume one token each; newly selected prompt chunks use the
+    /// remainder once, while retained layer groups are bounded by the separate
+    /// layer ceiling.
     pub max_batch_tokens: BatchTokenBudget,
-    /// Independent prompt-token ceiling inside the combined actor-cycle budget.
-    /// Decode rows reserve their token first; admission and resumable prefill
-    /// share this remainder so a long prompt cannot monopolize the actor.
+    /// Independent new-prompt-token ceiling inside the combined actor-cycle
+    /// budget. Admission and new resumable chunks share this remainder so a
+    /// long prompt cannot monopolize the actor; retained layer groups do not
+    /// pay for the same tokens twice.
     pub max_prefill_tokens_per_cycle: PrefillTokenBudget,
     /// Transformer layers executed for an in-flight prefill chunk before the
     /// hidden state yields back to decode without completing/repeating tokens.

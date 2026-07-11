@@ -3086,6 +3086,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(
 
     let mut prefill = Some(prefill);
     let mut chunks = Vec::new();
+    let mut scheduled_chunks = Vec::new();
     let mut layer_yields = 0usize;
     let mut chunked = loop {
         let progress = runner
@@ -3101,6 +3102,10 @@ fn assert_resumable_paged_prefill_matches_monolithic(
         runner
             .synchronize_external_yield("resumable prefill parity quantum")
             .unwrap();
+        if progress.tokens_scheduled > 0 {
+            assert!((1..=17).contains(&progress.tokens_scheduled));
+            scheduled_chunks.push(progress.tokens_scheduled);
+        }
         if progress.tokens_processed == 0 {
             layer_yields += 1;
             assert!(progress.decode_state.is_none());
@@ -3108,6 +3113,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(
             continue;
         }
         assert!((1..=17).contains(&progress.tokens_processed));
+        assert_eq!(progress.tokens_scheduled, 0);
         chunks.push(progress.tokens_processed);
         if let Some(state) = progress.decode_state {
             break state;
@@ -3117,6 +3123,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(
 
     assert!(chunks.len() > 1, "prompt should span multiple quanta");
     assert_eq!(layer_yields, chunks.len());
+    assert_eq!(scheduled_chunks, chunks);
     assert_eq!(chunks.iter().sum::<usize>(), prompt.len());
     assert_eq!(chunked.next_token, control.next_token);
     assert_eq!(chunked.seq_len, control.seq_len);
@@ -3304,6 +3311,7 @@ fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
     };
     let RequestPreparation::Prefilling {
         slot,
+        tokens_scheduled,
         tokens_processed,
         ..
     } = forward
@@ -3312,10 +3320,12 @@ fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
     else {
         panic!("uncached prompt unexpectedly became decode-ready")
     };
+    assert_eq!(tokens_scheduled, 0);
     assert_eq!(tokens_processed, 0);
     assert!(block_manager.lock().unwrap().num_used() > 0);
     let RequestPreparation::Prefilling {
         slot,
+        tokens_scheduled,
         tokens_processed,
         layers_processed,
     } = forward
@@ -3324,6 +3334,7 @@ fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
     else {
         panic!("one layer unexpectedly completed an 81-token prefill")
     };
+    assert_eq!(tokens_scheduled, 17);
     assert_eq!(tokens_processed, 0);
     assert_eq!(layers_processed, 1);
     assert!(forward.has_inflight_prefill_layer_progress(&slot));
