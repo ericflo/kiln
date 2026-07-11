@@ -27,6 +27,8 @@ use kiln_server::api;
 use kiln_server::config::{ConfigValueSource, ServingProfile, ServingProfileSetting};
 use kiln_server::state::{AppState, ModelBackend};
 
+const ROLLOUT_CHAT_TEMPLATE: &str = "{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}<|im_start|>assistant\n";
+
 /// Create a tiny model config for testing.
 fn tiny_config() -> ModelConfig {
     ModelConfig {
@@ -135,16 +137,49 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
     }
 }
 
+fn tiny_weights_preferring_token(
+    config: &ModelConfig,
+    device: &Device,
+    preferred_id: u32,
+) -> GpuWeights {
+    let mut weights = tiny_weights(config, device);
+    let h = config.hidden_size;
+    let mut embeddings = vec![0.0_f32; config.vocab_size * h];
+    for row in 0..config.vocab_size {
+        embeddings[row * h] = 1.0;
+    }
+    embeddings[preferred_id as usize * h] = 2.0;
+    let embed =
+        Tensor::from_vec_on(device.clone(), embeddings, vec![config.vocab_size, h]).unwrap();
+    weights.embed_tokens = embed.clone();
+    weights.embed_tokens_t = embed.t().unwrap().contiguous().unwrap();
+    weights.final_norm = Tensor::ones((h,), DType::F32, device).unwrap();
+
+    let layer = &mut weights.layers[0];
+    let GpuAttentionWeights::Full(attention) = &mut layer.attention else {
+        unreachable!("tiny full-attention fixture changed shape")
+    };
+    attention.o_proj = Tensor::zeros(
+        (h, config.num_attention_heads * config.head_dim),
+        DType::F32,
+        device,
+    )
+    .unwrap();
+    attention.o_proj_t = attention.o_proj.t().unwrap().contiguous().unwrap();
+    layer.mlp.down_proj = Tensor::zeros((h, config.intermediate_size), DType::F32, device).unwrap();
+    layer.mlp.down_proj_t = layer.mlp.down_proj.t().unwrap().contiguous().unwrap();
+    weights
+}
+
 /// Create a minimal tokenizer for testing.
 ///
 /// The vocab includes ChatML special tokens so that `apply_chat_template`
 /// produces a prompt that can be tokenized (each special token maps to its own ID).
-fn test_tokenizer() -> KilnTokenizer {
+fn test_tokenizer_with_eos(include_eos: bool) -> KilnTokenizer {
     let mut vocab: HashMap<String, u32> = HashMap::new();
     // Reserve 0-19 for regular tokens
     for i in 0u32..20 {
-        let c = format!("t{i}");
-        vocab.insert(c, i);
+        vocab.insert(format!("t{i}"), i);
     }
     // ChatML-related tokens as regular vocab entries so BPE can emit them
     vocab.insert("<|im_start|>".to_string(), 20);
@@ -157,7 +192,7 @@ fn test_tokenizer() -> KilnTokenizer {
         vocab.insert(format!("x{i}"), i);
     }
 
-    let json = json!({
+    let mut json = json!({
         "version": "1.0",
         "model": {
             "type": "BPE",
@@ -194,9 +229,67 @@ fn test_tokenizer() -> KilnTokenizer {
             }
         ]
     });
+    if !include_eos {
+        json["added_tokens"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|token| token["content"] != "<|endoftext|>");
+    }
 
     let bytes = serde_json::to_vec(&json).unwrap();
     KilnTokenizer::from_bytes(&bytes).unwrap()
+}
+
+fn deterministic_eos_test_tokenizer() -> KilnTokenizer {
+    let vocab: HashMap<String, u32> = (0u32..20).map(|id| (format!("t{id}"), id)).collect();
+    let added_tokens = [
+        (20, "<|endoftext|>", true),
+        (21, "<|im_start|>", true),
+        (22, "<|im_end|>", true),
+        (23, "user", false),
+        (24, "assistant", false),
+        (25, "\n", false),
+    ]
+    .into_iter()
+    .map(|(id, content, special)| {
+        json!({
+            "id": id,
+            "content": content,
+            "single_word": false,
+            "lstrip": false,
+            "rstrip": false,
+            "normalized": false,
+            "special": special
+        })
+    })
+    .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&json!({
+        "version": "1.0",
+        "model": {
+            "type": "BPE",
+            "vocab": vocab,
+            "merges": []
+        },
+        "added_tokens": added_tokens
+    }))
+    .unwrap();
+    let tokenizer = KilnTokenizer::from_bytes(&bytes)
+        .unwrap()
+        .with_chat_template(ROLLOUT_CHAT_TEMPLATE.to_string());
+    assert!(
+        tokenizer.eos_token_ids().contains(&20),
+        "deterministic EOS fixture lost token ID 20: {:?}",
+        tokenizer.eos_token_ids()
+    );
+    tokenizer
+}
+
+fn test_tokenizer() -> KilnTokenizer {
+    test_tokenizer_with_eos(true)
+}
+
+fn rollout_test_tokenizer() -> KilnTokenizer {
+    test_tokenizer_with_eos(false).with_chat_template(ROLLOUT_CHAT_TEMPLATE.to_string())
 }
 
 fn synthetic_base_teacher_identity(
@@ -855,6 +948,275 @@ async fn test_real_model_chat_completion() {
     let usage = &resp["usage"];
     assert!(usage["completion_tokens"].as_u64().unwrap() > 0);
     assert!(usage["total_tokens"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn test_real_model_chat_completion_emits_exact_rollout_provenance() {
+    let config = tiny_config();
+    let device = Device::Cpu;
+    let weights = tiny_weights(&config, &device);
+    let tokenizer = rollout_test_tokenizer();
+    let runner = ModelRunner::new(weights, tokenizer.clone(), config.clone());
+    let expected_backend = runner.backend_name().to_string();
+    let base_identity = synthetic_base_teacher_identity(&config, &tokenizer, &expected_backend);
+    let state = AppState::new_real(
+        config,
+        runner,
+        tokenizer.clone(),
+        device,
+        std::path::PathBuf::from("/tmp/kiln-test-adapters"),
+        &kiln_server::config::MemoryConfig::default(),
+        kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
+        300,
+        "Qwen3.5-4B".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
+        Some(base_identity),
+    );
+    let state_for_assert = state.clone();
+    let app = api::router(state);
+    let request_body = json!({
+        "messages": [{"role": "user", "content": "t1 t2"}],
+        "max_tokens": 5,
+        "temperature": 1.0,
+        "seed": 42,
+        "chat_template_kwargs": {"enable_thinking": false},
+        "rollout_provenance": true
+    });
+
+    let mut responses = Vec::new();
+    for _ in 0..2 {
+        let response = match tokio::time::timeout(
+            Duration::from_secs(10),
+            app.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        {
+            Ok(response) => response.unwrap(),
+            Err(_) => {
+                let snapshot = match state_for_assert.backend.as_ref() {
+                    ModelBackend::Real {
+                        batching_engine: Some(engine),
+                        ..
+                    } => engine.cached_snapshot(),
+                    _ => panic!("rollout fixture lost its batching engine"),
+                };
+                panic!("seeded rollout-provenance request timed out: {snapshot:?}")
+            }
+        };
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        responses.push(serde_json::from_slice::<Value>(&bytes).unwrap());
+    }
+
+    assert_eq!(
+        state_for_assert.completion_cache.lock().unwrap().stats(),
+        0,
+        "provenance responses must not enter the text-only completion cache"
+    );
+    assert_eq!(
+        state_for_assert.chat_request_cache.lock().unwrap().stats(),
+        0,
+        "provenance responses must not enter the text-only request cache"
+    );
+
+    let first: kiln_train::RolloutProvenanceV1 =
+        serde_json::from_value(responses[0]["choices"][0]["rollout_provenance"].clone()).unwrap();
+    let second: kiln_train::RolloutProvenanceV1 =
+        serde_json::from_value(responses[1]["choices"][0]["rollout_provenance"].clone()).unwrap();
+    assert_eq!(first, second, "seeded trace capture must be repeatable");
+    first.validate().unwrap();
+    assert_eq!(first.seed, 42);
+    assert_eq!(first.generation_backend, expected_backend);
+    assert_eq!(first.behavior_policy.served_model_id, "Qwen3.5-4B");
+    assert_eq!(
+        first.behavior_policy.base_model_sha256,
+        format!("sha256:{}", "a".repeat(64))
+    );
+    assert!(first.behavior_policy.adapter.is_none());
+    assert_eq!(
+        first.tokenizer.chat_template_sha256,
+        tokenizer.chat_template_sha256().unwrap()
+    );
+    assert_eq!(
+        first.template_invocation.template_kwargs["enable_thinking"],
+        json!(false)
+    );
+
+    let messages = vec![kiln_core::tokenizer::ChatMessage {
+        role: "user".to_string(),
+        content: "t1 t2".to_string(),
+        ..Default::default()
+    }];
+    let mut kwargs = serde_json::Map::new();
+    kwargs.insert("enable_thinking".to_string(), json!(false));
+    let prompt_text = tokenizer
+        .apply_chat_template_full_with_options(
+            &messages,
+            None,
+            None,
+            kiln_core::tokenizer::ChatTemplateOptions {
+                template_kwargs: kwargs,
+            },
+        )
+        .unwrap();
+    let prompt_ids = tokenizer.encode(&prompt_text).unwrap();
+    assert_eq!(first.prompt_token_count, prompt_ids.len());
+    assert_eq!(
+        &first.input_token_ids[..first.prompt_token_count],
+        prompt_ids.as_slice()
+    );
+    assert_eq!(
+        first.action_tokens.len(),
+        first.input_token_ids.len() - first.prompt_token_count
+    );
+    for (offset, action) in first.action_tokens.iter().enumerate() {
+        assert_eq!(action.sequence_index, first.prompt_token_count + offset);
+        assert_eq!(
+            action.token_id,
+            first.input_token_ids[action.sequence_index]
+        );
+        assert_eq!(
+            action.source,
+            kiln_train::RolloutActionTokenSourceV1::Sampled
+        );
+        assert!(action.behavior_logprob.is_some_and(|value| value <= 0.0));
+    }
+    let scored = kiln_train::ScoredRollout::legacy(
+        responses[0]["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+        0.0,
+    );
+    assert_eq!(
+        first.scored_payload_sha256,
+        kiln_train::scored_rollout_payload_sha256(&scored).unwrap()
+    );
+
+    let unseeded_body = json!({
+        "messages": [{"role": "user", "content": "t1"}],
+        "max_tokens": 1,
+        "temperature": 1.0,
+        "rollout_provenance": true
+    });
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(unseeded_body.to_string()))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("unseeded rollout-provenance request timed out")
+    .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body["choices"][0]["rollout_provenance"]["seed"].is_u64());
+}
+
+#[tokio::test]
+async fn test_real_model_rollout_provenance_includes_terminal_eos_once() {
+    let config = tiny_config();
+    let device = Device::Cpu;
+    let weights = tiny_weights_preferring_token(&config, &device, 20);
+    let tokenizer = deterministic_eos_test_tokenizer();
+    let runner = ModelRunner::new(weights, tokenizer.clone(), config.clone());
+    let expected_backend = runner.backend_name().to_string();
+    let base_identity = synthetic_base_teacher_identity(&config, &tokenizer, &expected_backend);
+    let state = AppState::new_real(
+        config,
+        runner,
+        tokenizer,
+        device,
+        std::path::PathBuf::from("/tmp/kiln-test-adapters"),
+        &kiln_server::config::MemoryConfig::default(),
+        kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
+        300,
+        "Qwen3.5-4B".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
+        Some(base_identity),
+    );
+    let app = api::router(state);
+    let body = json!({
+        "messages": [{"role": "user", "content": "t1"}],
+        "max_tokens": 5,
+        "temperature": 0.0,
+        "seed": 7,
+        "rollout_provenance": true
+    });
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("EOS rollout-provenance request timed out")
+    .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["choices"][0]["finish_reason"], "stop", "{body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "");
+    assert_eq!(body["usage"]["completion_tokens"], 1);
+
+    let provenance: kiln_train::RolloutProvenanceV1 =
+        serde_json::from_value(body["choices"][0]["rollout_provenance"].clone()).unwrap();
+    provenance.validate().unwrap();
+    assert_eq!(
+        provenance.input_token_ids.len(),
+        provenance.prompt_token_count + 1
+    );
+    assert_eq!(provenance.action_tokens.len(), 1);
+    let eos = &provenance.action_tokens[0];
+    assert_eq!(eos.sequence_index, provenance.prompt_token_count);
+    assert_eq!(eos.token_id, provenance.input_token_ids[eos.sequence_index]);
+    assert_eq!(eos.source, kiln_train::RolloutActionTokenSourceV1::Sampled);
+    assert!(eos.behavior_logprob.is_some_and(|value| value <= 0.0));
 }
 
 #[tokio::test]

@@ -32,7 +32,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::batching_engine::{EngineEvent, EngineRequest};
+use crate::batching_engine::{EngineActionTokenSource, EngineEvent, EngineRequest};
 use crate::config::{SpecMethod, SpeculativeDecodingConfig};
 use crate::error::ApiError;
 use crate::metrics::RequestStatus;
@@ -2441,6 +2441,9 @@ fn deterministic_chat_request_cache_key_with_vocab_size_and_fold(
     fold_reasoning_into_content: bool,
     thinking_budget_tokens: Option<usize>,
 ) -> Result<Option<String>, ApiError> {
+    if req.rollout_provenance {
+        return Ok(None);
+    }
     if req.n.unwrap_or(1) != 1 {
         return Ok(None);
     }
@@ -3241,6 +3244,7 @@ fn response_from_cached_completion(
             },
             finish_reason,
             thinking_budget: thinking_budget_status,
+            rollout_provenance: None,
             completion_tokens,
         }],
         usage: Usage {
@@ -3357,6 +3361,7 @@ fn response_from_cached_chat_choices(
                 },
                 finish_reason: output.finish_reason,
                 thinking_budget: thinking_budget_status,
+                rollout_provenance: None,
                 completion_tokens,
             },
         )
@@ -4090,6 +4095,11 @@ pub struct ChatCompletionRequest {
     /// server config default decides.
     #[serde(default)]
     pub include_config_hashes: Option<bool>,
+    /// Kiln extension: capture an exact, behavior-policy-bound rollout record
+    /// suitable for GRPO importance correction. This correctness-first path is
+    /// non-streaming, single-choice, and requires the batching engine.
+    #[serde(default)]
+    pub rollout_provenance: bool,
 }
 
 /// A single source adapter for per-request composition.
@@ -4314,6 +4324,8 @@ pub struct Choice {
         serialize_with = "serialize_optional_thinking_budget_status"
     )]
     pub thinking_budget: Option<ThinkingBudgetStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollout_provenance: Option<kiln_train::RolloutProvenanceV1>,
     #[serde(skip)]
     pub completion_tokens: usize,
 }
@@ -5654,6 +5666,101 @@ async fn real_prompt_logprobs(
     prompt_logprobs_from_selections(state, prompt_tokens, &selections, Some(deadline))
 }
 
+fn fresh_rollout_seed() -> u64 {
+    let bytes = *Uuid::new_v4().as_bytes();
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
+}
+
+fn resolve_rollout_seed(req: &mut ChatCompletionRequest) {
+    if req.rollout_provenance && req.seed.is_none() {
+        req.seed = Some(fresh_rollout_seed());
+    }
+}
+
+fn validate_rollout_provenance_admission(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    n_per: usize,
+) -> Result<(), ApiError> {
+    if !req.rollout_provenance {
+        return Ok(());
+    }
+    if req.stream {
+        return Err(ApiError::rollout_provenance_unavailable(
+            "stream=true cannot atomically return the final token/action record",
+        ));
+    }
+    if n_per != 1 {
+        return Err(ApiError::rollout_provenance_unavailable(
+            "n must be exactly 1",
+        ));
+    }
+    if req.messages.iter().any(|message| {
+        message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+            || message.name.is_some()
+            || message.tool_call_id.is_some()
+    }) {
+        return Err(ApiError::rollout_provenance_unavailable(
+            "prior message tool_calls, name, and tool_call_id fields cannot yet be represented by the training prompt schema",
+        ));
+    }
+    match state.backend.as_ref() {
+        ModelBackend::Real {
+            batching_engine: Some(_),
+            ..
+        } => {}
+        ModelBackend::Real {
+            batching_engine: None,
+            ..
+        } => {
+            return Err(ApiError::rollout_provenance_unavailable(
+                "the server batching engine is disabled",
+            ));
+        }
+        ModelBackend::Mock { .. } => {
+            return Err(ApiError::rollout_provenance_unavailable(
+                "the mock backend has no behavior-policy identity or token probabilities",
+            ));
+        }
+    }
+    if state.base_teacher_identity.is_none() {
+        return Err(ApiError::rollout_provenance_unavailable(
+            "the real-model server did not publish a content-addressed base policy identity",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rollout_provenance_generation_capacity(
+    req: &ChatCompletionRequest,
+    sampling: &SamplingParams,
+) -> Result<(), ApiError> {
+    if !req.rollout_provenance {
+        return Ok(());
+    }
+    if sampling.max_tokens == 0 {
+        return Err(ApiError::chat_invalid_request(
+            "rollout_provenance=true requires an effective max_tokens greater than zero",
+        ));
+    }
+    if let Some(budget) = sampling
+        .thinking_budget
+        .as_ref()
+        .filter(|budget| sampling.max_tokens <= budget.close_token_count())
+    {
+        return Err(ApiError::chat_invalid_request(format!(
+            "rollout_provenance=true requires effective max_tokens greater than the active tokenizer's {}-token thinking close sequence so at least one sampled action can be recorded",
+            budget.close_token_count()
+        )));
+    }
+    Ok(())
+}
+
 async fn chat_completions_inner(
     state: &AppState,
     mut req: ChatCompletionRequest,
@@ -5680,6 +5787,8 @@ async fn chat_completions_inner(
     }
 
     apply_eval_mode_chat_defaults(state, &mut req);
+    validate_rollout_provenance_admission(state, &req, n_per)?;
+    resolve_rollout_seed(&mut req);
     let mut sampling = sampling_params_for_chat_request(&req);
     let effective_thinking_budget = effective_thinking_budget_for_request(state, &req);
 
@@ -5834,18 +5943,19 @@ async fn chat_completions_inner(
     let cache_adapter = stable_default_adapter
         .clone()
         .unwrap_or_else(|| state.loaded_adapter_identity());
-    let mut chat_request_cache_key = if effective_thinking_budget.max_time_ms.is_some() {
-        None
-    } else {
-        deterministic_chat_request_cache_key_with_vocab_size_and_fold(
-            &req,
-            &sampling,
-            state.model_config.vocab_size,
-            fold_reasoning_into_content_for_request(state, &req),
-            effective_thinking_budget.max_tokens,
-        )?
-        .map(|request| state.deterministic_cache_key(cache_adapter.clone(), request))
-    };
+    let mut chat_request_cache_key =
+        if effective_thinking_budget.max_time_ms.is_some() || req.rollout_provenance {
+            None
+        } else {
+            deterministic_chat_request_cache_key_with_vocab_size_and_fold(
+                &req,
+                &sampling,
+                state.model_config.vocab_size,
+                fold_reasoning_into_content_for_request(state, &req),
+                effective_thinking_budget.max_tokens,
+            )?
+            .map(|request| state.deterministic_cache_key(cache_adapter.clone(), request))
+        };
     let can_hit_chat_request_cache_before_adapter_work = stable_default_adapter.is_some();
     let mut chat_request_cache_owner = None;
     if can_hit_chat_request_cache_before_adapter_work
@@ -5929,6 +6039,7 @@ async fn chat_completions_inner(
     let prompt_tokens = encode_prompt_tokens(state, &prompt_text)?;
     enforce_context_window(state, &mut sampling, prompt_tokens.len())?;
     configure_thinking_budget_for_prompt(state, &req, &prompt_text, &mut sampling)?;
+    validate_rollout_provenance_generation_capacity(&req, &sampling)?;
 
     if sampling.max_tokens == 0 {
         let cache_value = DeterministicChatRequestCacheValue {
@@ -6009,13 +6120,17 @@ async fn chat_completions_inner(
         *key = rebound;
     }
 
-    let completion_cache_key = deterministic_completion_cache_key_for_adapter(
-        state,
-        request_adapter.clone(),
-        &prompt_tokens,
-        &sampling,
-        fold_reasoning_into_content_for_request(state, &req),
-    );
+    let completion_cache_key = if req.rollout_provenance {
+        None
+    } else {
+        deterministic_completion_cache_key_for_adapter(
+            state,
+            request_adapter.clone(),
+            &prompt_tokens,
+            &sampling,
+            fold_reasoning_into_content_for_request(state, &req),
+        )
+    };
     let mut completion_cache_owner = None;
     if let Some(key) = completion_cache_key.as_ref() {
         if req.stream {
@@ -6794,6 +6909,201 @@ async fn ensure_composed_adapter_for_request(
     Ok(())
 }
 
+fn rollout_sha256(value: &str) -> String {
+    if value.starts_with("sha256:") {
+        value.to_string()
+    } else {
+        format!("sha256:{value}")
+    }
+}
+
+fn build_rollout_provenance(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    adapter: Option<&LoadedAdapterIdentity>,
+    prompt_tokens: &[TokenId],
+    sampling: &SamplingParams,
+    output: &crate::batching_engine::BatchedGenerationOutput,
+    scored_text: &str,
+) -> Result<kiln_train::RolloutProvenanceV1, ApiError> {
+    let build = || -> anyhow::Result<kiln_train::RolloutProvenanceV1> {
+        let trace = output
+            .action_tokens
+            .as_ref()
+            .context("batching engine omitted the requested behavior action trace")?;
+        anyhow::ensure!(
+            trace.len() == output.completion_tokens,
+            "behavior action trace has {} entries for {} completion tokens",
+            trace.len(),
+            output.completion_tokens
+        );
+        let terminal_eos = matches!(&output.finish_reason, kiln_model::FinishReason::Eos);
+        anyhow::ensure!(
+            output.completion_tokens == output.token_ids.len() + usize::from(terminal_eos),
+            "batching output reports {} completion tokens for {} visible token IDs and terminal_eos={terminal_eos}",
+            output.completion_tokens,
+            output.token_ids.len()
+        );
+
+        let action_tokens = trace
+            .iter()
+            .enumerate()
+            .map(|(generated_index, action)| -> anyhow::Result<_> {
+                anyhow::ensure!(
+                    action.generated_index == generated_index,
+                    "behavior action trace index {} appears at generated position {generated_index}",
+                    action.generated_index
+                );
+                if let Some(&visible_token) = output.token_ids.get(generated_index) {
+                    anyhow::ensure!(
+                        visible_token == action.token_id,
+                        "behavior action token {} differs from generated token {visible_token} at position {generated_index}",
+                        action.token_id
+                    );
+                } else {
+                    anyhow::ensure!(
+                        terminal_eos && generated_index == output.token_ids.len(),
+                        "behavior action token {} at position {generated_index} has no generated-token counterpart",
+                        action.token_id
+                    );
+                    anyhow::ensure!(
+                        state.tokenizer.eos_token_ids().contains(&action.token_id),
+                        "terminal behavior action token {} is not an EOS token",
+                        action.token_id
+                    );
+                }
+                let sequence_index = prompt_tokens
+                    .len()
+                    .checked_add(generated_index)
+                    .context("rollout action sequence index overflow")?;
+                Ok(match action.source {
+                    EngineActionTokenSource::Sampled => {
+                        kiln_train::RolloutActionTokenV1::sampled(
+                            sequence_index,
+                            action.token_id,
+                            f64::from(action.behavior_logprob.context(
+                                "sampled behavior action is missing its selected-token log-probability",
+                            )?),
+                        )
+                    }
+                    EngineActionTokenSource::Forced => {
+                        anyhow::ensure!(
+                            action.behavior_logprob.is_none(),
+                            "forced behavior action unexpectedly carries a log-probability"
+                        );
+                        kiln_train::RolloutActionTokenV1::forced(sequence_index, action.token_id)
+                    }
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let base = state
+            .base_teacher_identity
+            .as_deref()
+            .context("server base behavior-policy identity is unavailable")?;
+        let behavior_policy = kiln_train::RolloutBehaviorPolicyIdentityV1 {
+            served_model_id: base.served_model_id().to_string(),
+            base_model_sha256: rollout_sha256(base.base_model_sha256()),
+            adapter: adapter.map(|adapter| kiln_train::RolloutAdapterIdentityV1 {
+                name: adapter.name.clone(),
+                content_sha256: rollout_sha256(&adapter.content_revision),
+            }),
+            inference_config_sha256: rollout_sha256(base.inference_config_sha256()),
+            implementation: base.implementation().to_string(),
+        };
+        let tokenizer = kiln_train::RolloutTokenizerIdentityV1 {
+            vocab_sha256: rollout_sha256(base.tokenizer_vocab_sha256()),
+            config_sha256: rollout_sha256(base.tokenizer_config_sha256()),
+            chat_template_sha256: state
+                .tokenizer
+                .chat_template_sha256()
+                .context("server tokenizer has no chat-template identity")?,
+        };
+        let thinking_budget =
+            sampling
+                .thinking_budget
+                .as_ref()
+                .map(|budget| kiln_train::RolloutThinkingBudgetV1 {
+                    max_tokens: budget.max_tokens(),
+                    max_time_ms: budget.max_time().map(duration_ms_u64),
+                    close_token_ids: budget.close_token_ids().to_vec(),
+                });
+        let sampling_config = kiln_train::RolloutSamplingConfigV1 {
+            temperature: sampling.temperature,
+            top_p: sampling.top_p,
+            top_k: sampling.top_k,
+            min_p: sampling.min_p,
+            max_tokens: sampling.max_tokens,
+            repetition_penalty: sampling.repetition_penalty,
+            presence_penalty: sampling.presence_penalty,
+            frequency_penalty: sampling.frequency_penalty,
+            stop: sampling.stop.clone(),
+            thinking_budget,
+        };
+        let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
+        let template_invocation = kiln_train::RolloutChatTemplateInvocationV1 {
+            tools: normalized_tools.map_or_else(Vec::new, <[_]>::to_vec),
+            tool_choice: normalized_tool_choice_for_cache(
+                normalized_tools,
+                req.tool_choice.as_ref(),
+            )
+            .cloned(),
+            template_kwargs: effective_chat_template_kwargs(
+                state.default_thinking_enabled,
+                req.chat_template_kwargs.as_ref(),
+            ),
+        };
+        let prompt_messages = req
+            .messages
+            .iter()
+            .map(|message| kiln_train::ChatMessage {
+                role: message.role.clone(),
+                content: message.content.clone(),
+            })
+            .collect::<Vec<_>>();
+        let prompt_messages_sha256 = kiln_train::rollout_prompt_messages_sha256(&prompt_messages)
+            .map_err(anyhow::Error::msg)?;
+        let scored_payload = kiln_train::ScoredRollout::legacy(scored_text.to_string(), 0.0);
+        let scored_payload_sha256 = kiln_train::scored_rollout_payload_sha256(&scored_payload)
+            .map_err(anyhow::Error::msg)?;
+        let mut input_token_ids = Vec::with_capacity(
+            prompt_tokens
+                .len()
+                .checked_add(trace.len())
+                .context("rollout input token count overflow")?,
+        );
+        input_token_ids.extend_from_slice(prompt_tokens);
+        input_token_ids.extend(trace.iter().map(|action| action.token_id));
+        let generation_backend = match state.backend.as_ref() {
+            ModelBackend::Real { runner, .. } => runner
+                .read()
+                .map_err(|_| anyhow::anyhow!("model runner lock poisoned"))?
+                .backend_name()
+                .to_string(),
+            ModelBackend::Mock { .. } => anyhow::bail!("mock backend cannot emit provenance"),
+        };
+
+        kiln_train::RolloutProvenanceV1::new(
+            input_token_ids,
+            prompt_tokens.len(),
+            prompt_messages_sha256,
+            scored_payload_sha256,
+            action_tokens,
+            behavior_policy,
+            tokenizer,
+            sampling_config,
+            sampling
+                .seed
+                .context("rollout sampling seed was not resolved")?,
+            generation_backend,
+        )
+        .and_then(|provenance| provenance.with_template_invocation(template_invocation))
+        .map_err(anyhow::Error::msg)
+    };
+
+    build().map_err(ApiError::generation_failed)
+}
+
 /// Generate using the real ModelRunner with paged KV cache.
 async fn generate_real_batched(
     state: &AppState,
@@ -6815,8 +7125,8 @@ async fn generate_real_batched(
             request_id,
             prompt_tokens: prompt_tokens.to_vec(),
             sampling: sampling.clone(),
-            adapter,
-            capture_behavior_logprobs: false,
+            adapter: adapter.clone(),
+            capture_behavior_logprobs: req.rollout_provenance,
             cancel: cancel.clone(),
         })
         .await
@@ -6871,8 +7181,7 @@ async fn generate_real_batched(
         .model
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
-    let completion_tokens =
-        completion_usage_tokens(output.completion_tokens, &output.finish_reason);
+    let completion_tokens = output.completion_tokens;
     let thinking_budget_status =
         finalized_thinking_budget_status(sampling.thinking_budget.as_ref(), completion_tokens);
     let assistant_output = assistant_output_from_model_output_stop_aware(
@@ -6888,6 +7197,19 @@ async fn generate_real_batched(
         assistant_output,
         fold_reasoning_into_content_for_request(state, req),
     );
+    let rollout_provenance = if req.rollout_provenance {
+        Some(build_rollout_provenance(
+            state,
+            req,
+            adapter.as_ref(),
+            prompt_tokens,
+            sampling,
+            &output,
+            &assistant_output.content,
+        )?)
+    } else {
+        None
+    };
     let preview_source = assistant_output.preview_source();
     let ttft = first_token_at.map(|instant| instant.duration_since(request_start));
     record_recent_request(
@@ -6932,6 +7254,7 @@ async fn generate_real_batched(
             },
             finish_reason,
             thinking_budget: None,
+            rollout_provenance,
             completion_tokens,
         }],
         usage: Usage {
@@ -7939,6 +8262,7 @@ async fn generate_real(
             },
             finish_reason,
             thinking_budget: None,
+            rollout_provenance: None,
             completion_tokens,
         }],
         usage: Usage {
@@ -9302,6 +9626,7 @@ async fn generate_mock(
             },
             finish_reason,
             thinking_budget: None,
+            rollout_provenance: None,
             completion_tokens,
         }],
         usage: Usage {
@@ -10700,6 +11025,7 @@ async fn batch_completions_inner(
                         fold_reasoning_into_content: None,
                         include_performance: None,
                         include_config_hashes: None,
+                        rollout_provenance: false,
                     };
                     let resp = if let Some((prompt_text, prompt_tokens)) = prepared_prompt.as_ref()
                     {
@@ -10958,6 +11284,7 @@ async fn generate_multi_chat_response(
             fold_reasoning_into_content: req.fold_reasoning_into_content,
             include_performance: req.include_performance,
             include_config_hashes: req.include_config_hashes,
+            rollout_provenance: false,
         };
         let resp = generate_one_response(state, synth_req, request_adapter.clone()).await?;
         responses.push((completion_idx, resp));
@@ -11013,6 +11340,7 @@ fn chat_response_from_multi_responses(
             message: choice.message,
             finish_reason: choice.finish_reason,
             thinking_budget: choice.thinking_budget,
+            rollout_provenance: choice.rollout_provenance,
             completion_tokens: choice.completion_tokens,
         });
     }
@@ -11545,6 +11873,110 @@ mod tests {
     }
 
     #[test]
+    fn rollout_provenance_request_is_opt_in_and_resolves_one_effective_seed() {
+        let default = parse_request(r#"{"messages":[{"role":"user","content":"hi"}]}"#);
+        assert!(!default.rollout_provenance);
+
+        let mut generated = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],"rollout_provenance":true}"#,
+        );
+        assert!(generated.rollout_provenance);
+        assert!(generated.seed.is_none());
+        resolve_rollout_seed(&mut generated);
+        let resolved = generated.seed.expect("rollout seed must be resolved");
+        resolve_rollout_seed(&mut generated);
+        assert_eq!(generated.seed, Some(resolved));
+
+        let mut explicit = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],"rollout_provenance":true,"seed":42}"#,
+        );
+        resolve_rollout_seed(&mut explicit);
+        assert_eq!(explicit.seed, Some(42));
+        let sampling = sampling_params_for_chat_request(&explicit);
+        assert!(
+            deterministic_chat_request_cache_key(&explicit, &sampling)
+                .unwrap()
+                .is_none(),
+            "trace-bearing responses must never use the text-only request cache"
+        );
+    }
+
+    #[test]
+    fn rollout_provenance_reserves_capacity_for_a_sampled_action() {
+        let req = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],"rollout_provenance":true}"#,
+        );
+        let mut sampling = SamplingParams {
+            max_tokens: 0,
+            ..SamplingParams::default()
+        };
+        let error = validate_rollout_provenance_generation_capacity(&req, &sampling).unwrap_err();
+        assert!(error.message.contains("greater than zero"));
+
+        sampling.max_tokens = 2;
+        sampling.thinking_budget = Some(
+            ThinkingBudget::new(Some(0), None, 2, vec![10, 11])
+                .expect("two-token completion can fit only the close sequence"),
+        );
+        let error = validate_rollout_provenance_generation_capacity(&req, &sampling).unwrap_err();
+        assert!(error.message.contains("at least one sampled action"));
+
+        sampling.max_tokens = 3;
+        sampling.thinking_budget = Some(
+            ThinkingBudget::new(Some(0), None, 3, vec![10, 11])
+                .expect("three-token completion leaves one sampled action"),
+        );
+        validate_rollout_provenance_generation_capacity(&req, &sampling).unwrap();
+
+        let ordinary = parse_request(r#"{"messages":[{"role":"user","content":"hi"}]}"#);
+        sampling.max_tokens = 0;
+        validate_rollout_provenance_generation_capacity(&ordinary, &sampling).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rollout_provenance_rejects_unsupported_paths_before_generation() {
+        let (status, body) = chat_post(
+            make_batch_test_state(),
+            r#"{"messages":[{"role":"user","content":"hi"}],"rollout_provenance":true}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["error"]["code"], "rollout_provenance_unavailable");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("mock backend")
+        );
+
+        let (status, body) = chat_post(
+            make_batch_test_state(),
+            r#"{"messages":[{"role":"user","content":"hi"}],"stream":true,"rollout_provenance":true}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::NOT_IMPLEMENTED);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("stream=true")
+        );
+
+        let (status, body) = chat_post(
+            make_batch_test_state(),
+            r#"{"messages":[{"role":"assistant","content":"","tool_calls":[{"type":"function"}]}],"rollout_provenance":true}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::NOT_IMPLEMENTED);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("tool_calls")
+        );
+    }
+
+    #[test]
     fn thinking_budget_request_fields_preserve_inherit_unlimited_and_zero() {
         let inherited = parse_request(r#"{"messages":[{"role":"user","content":"hi"}]}"#);
         assert_eq!(inherited.thinking_budget_tokens, BudgetOverride::Inherit);
@@ -11806,6 +12238,7 @@ mod tests {
                 },
                 finish_reason: "stop".to_string(),
                 thinking_budget: Some(status),
+                rollout_provenance: None,
                 completion_tokens: 10,
             }],
             usage: Usage {
@@ -12848,6 +13281,7 @@ mod tests {
                 },
                 finish_reason: assistant_output.finish_reason,
                 thinking_budget: None,
+                rollout_provenance: None,
                 completion_tokens: 4,
             }],
             usage: Usage {
@@ -12979,6 +13413,7 @@ mod tests {
                 },
                 finish_reason: "stop".to_string(),
                 thinking_budget: None,
+                rollout_provenance: None,
                 completion_tokens: 3,
             }],
             usage: Usage {
@@ -13988,6 +14423,7 @@ mod tests {
                 },
                 finish_reason: "tool_calls".to_string(),
                 thinking_budget: None,
+                rollout_provenance: None,
                 completion_tokens: 8,
             }],
             usage: Usage {

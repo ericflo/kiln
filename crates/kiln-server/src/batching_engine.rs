@@ -248,8 +248,9 @@ pub enum EngineActionTokenSource {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineActionToken {
-    /// Index within the generated suffix, before the API adds the prompt
-    /// boundary to produce a full-sequence provenance index.
+    /// Index within the generated suffix, including a terminal EOS decision,
+    /// before the API adds the prompt boundary to produce a full-sequence
+    /// provenance index.
     pub generated_index: usize,
     pub token_id: TokenId,
     pub source: EngineActionTokenSource,
@@ -2996,8 +2997,31 @@ impl BatchingEngineActor {
                 .apply_thinking_budget_with_source(generated_tokens, sampled.token_id)
         };
         let token = decision.token;
+        let action = self.active[idx]
+            .action_tokens
+            .as_ref()
+            .map(|_| EngineActionToken {
+                generated_index,
+                token_id: token,
+                source: match decision.source {
+                    ThinkingBudgetTokenSource::Sampled => EngineActionTokenSource::Sampled,
+                    ThinkingBudgetTokenSource::Forced => EngineActionTokenSource::Forced,
+                },
+                behavior_logprob: match decision.source {
+                    ThinkingBudgetTokenSource::Sampled => sampled.behavior_logprob,
+                    ThinkingBudgetTokenSource::Forced => None,
+                },
+            });
         match self.forward.is_eos_token(token) {
             Ok(true) => {
+                if let Some(action) = action {
+                    self.active[idx]
+                        .action_tokens
+                        .as_mut()
+                        .expect("action trace disappeared while recording terminal EOS")
+                        .push(action);
+                }
+                self.snapshot.total_decode_tokens += 1;
                 self.finish_active(idx, FinishReason::Eos, None);
                 return;
             }
@@ -3015,19 +3039,12 @@ impl BatchingEngineActor {
                 return;
             }
         };
-        if let Some(action_tokens) = self.active[idx].action_tokens.as_mut() {
-            let (source, behavior_logprob) = match decision.source {
-                ThinkingBudgetTokenSource::Sampled => {
-                    (EngineActionTokenSource::Sampled, sampled.behavior_logprob)
-                }
-                ThinkingBudgetTokenSource::Forced => (EngineActionTokenSource::Forced, None),
-            };
-            action_tokens.push(EngineActionToken {
-                generated_index,
-                token_id: token,
-                source,
-                behavior_logprob,
-            });
+        if let Some(action) = action {
+            self.active[idx]
+                .action_tokens
+                .as_mut()
+                .expect("action trace disappeared while recording accepted token")
+                .push(action);
         }
         self.snapshot.total_decode_tokens += 1;
 
@@ -3451,6 +3468,7 @@ mod tests {
     struct PendingFirstTokenForward {
         calls: StdMutex<Vec<Vec<TokenId>>>,
         prepare_delay: Duration,
+        eos_token: Option<TokenId>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3875,8 +3893,8 @@ mod tests {
                 .collect())
         }
 
-        fn is_eos_token(&self, _token: TokenId) -> Result<bool> {
-            Ok(false)
+        fn is_eos_token(&self, token: TokenId) -> Result<bool> {
+            Ok(self.eos_token == Some(token))
         }
 
         fn accept_token(&self, slot: &mut DecodeSlot, token: TokenId) -> Result<usize> {
@@ -5531,6 +5549,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn behavior_trace_records_terminal_eos_as_a_sampled_action() {
+        let handle = BatchingEngineHandle::start_with_options(
+            Arc::new(PendingFirstTokenForward {
+                eos_token: Some(110),
+                ..Default::default()
+            }),
+            8,
+        );
+        let mut req = request(100, 2);
+        req.capture_behavior_logprobs = true;
+        let mut rx = handle.enqueue(req).await.unwrap();
+
+        let Some(EngineEvent::Done { output }) = rx.recv().await else {
+            panic!("EOS-traced request did not finish")
+        };
+        assert_eq!(output.finish_reason, FinishReason::Eos);
+        assert!(output.token_ids.is_empty());
+        assert_eq!(output.completion_tokens, 1);
+        assert_eq!(
+            output.action_tokens,
+            Some(vec![EngineActionToken {
+                generated_index: 0,
+                token_id: 110,
+                source: EngineActionTokenSource::Sampled,
+                behavior_logprob: Some(-0.25),
+            }])
+        );
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.total_decode_tokens, 1);
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn behavior_trace_marks_every_controller_close_token_as_forced() {
         let handle = BatchingEngineHandle::start_with_options(
             Arc::new(PendingFirstTokenForward::default()),
@@ -5590,6 +5641,7 @@ mod tests {
             // prepared. Without the post-admission FIFO barrier this reliably
             // splits the first decode turn into a wide prefix plus one row.
             prepare_delay: Duration::from_millis(5),
+            eos_token: None,
         });
         let (command_tx, command_rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let (delivery_result_tx, delivery_results) = std_mpsc::channel();

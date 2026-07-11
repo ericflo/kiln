@@ -165,6 +165,16 @@ impl ApiError {
         }
     }
 
+    pub fn rollout_provenance_unavailable(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::NOT_IMPLEMENTED,
+            code: "rollout_provenance_unavailable",
+            message: format!("Rollout provenance is unavailable for this request: {detail}"),
+            hint: "Use one non-streaming choice on a real-model server with the batching engine enabled. Prior message tool-call metadata is not supported until the training message schema can represent it exactly.",
+            retry_after_seconds: None,
+        }
+    }
+
     pub fn completion_invalid_request(detail: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
