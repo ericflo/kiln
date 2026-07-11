@@ -39,6 +39,25 @@
       },
       "additionalProperties": true
     },
+    "serverDefaults": {
+      "type": "object",
+      "required": ["default_thinking_budget_tokens", "default_thinking_budget_ms"],
+      "properties": {
+        "default_thinking_budget_tokens": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 0 }
+          ]
+        },
+        "default_thinking_budget_ms": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 0 }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "effective": {
       "type": "object",
       "required": ["configured", "tokens_source", "time_source"],

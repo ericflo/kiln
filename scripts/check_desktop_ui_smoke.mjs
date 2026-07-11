@@ -5,6 +5,7 @@ import vm from 'node:vm';
 const files = {
   dashboard: 'desktop/ui/dashboard.html',
   settings: 'desktop/ui/settings.html',
+  thinkingBudgetContract: 'contracts/thinking-budget-v1.conformance.json',
 };
 
 const quickstartHref = 'https://ericflo.github.io/kiln/quickstart.html';
@@ -146,6 +147,22 @@ function checkSettings(html) {
   const unlimited = context.parsers.readThinkingBudget();
   if (unlimited.default_thinking_budget_tokens !== null || unlimited.default_thinking_budget_ms !== null) {
     throw new Error(`settings Unlimited mode produced ${JSON.stringify(unlimited)}`);
+  }
+
+  const contract = JSON.parse(read(files.thinkingBudgetContract));
+  if (contract.contract_version !== 1 || !Array.isArray(contract.server_default_cases)) {
+    throw new Error('thinking-budget contract is missing v1 server-default cases');
+  }
+  for (const testCase of contract.server_default_cases) {
+    context.thinkingBudgetMode = testCase.mode;
+    inputs.default_thinking_budget_tokens.validity.badInput = false;
+    inputs.default_thinking_budget_seconds.validity.badInput = false;
+    inputs.default_thinking_budget_tokens.value = testCase.tokens_input;
+    inputs.default_thinking_budget_seconds.value = testCase.seconds_input;
+    const actual = context.parsers.readThinkingBudget();
+    if (JSON.stringify(actual) !== JSON.stringify(testCase.settings)) {
+      throw new Error(`${testCase.name} produced ${JSON.stringify(actual)}; expected ${JSON.stringify(testCase.settings)}`);
+    }
   }
 }
 

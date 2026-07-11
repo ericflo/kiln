@@ -113,6 +113,48 @@
       }
     }
   ],
+  "server_default_cases": [
+    {
+      "name": "desktop_unlimited_pair",
+      "mode": "unlimited",
+      "tokens_input": "",
+      "seconds_input": "",
+      "settings": {
+        "default_thinking_budget_tokens": null,
+        "default_thinking_budget_ms": null
+      }
+    },
+    {
+      "name": "desktop_token_limit_time_unlimited",
+      "mode": "custom",
+      "tokens_input": "0",
+      "seconds_input": "",
+      "settings": {
+        "default_thinking_budget_tokens": 0,
+        "default_thinking_budget_ms": null
+      }
+    },
+    {
+      "name": "desktop_token_unlimited_time_limit",
+      "mode": "custom",
+      "tokens_input": "",
+      "seconds_input": "0.001",
+      "settings": {
+        "default_thinking_budget_tokens": null,
+        "default_thinking_budget_ms": 1
+      }
+    },
+    {
+      "name": "desktop_dual_limits",
+      "mode": "custom",
+      "tokens_input": "64",
+      "seconds_input": "1.25",
+      "settings": {
+        "default_thinking_budget_tokens": 64,
+        "default_thinking_budget_ms": 1250
+      }
+    }
+  ],
   "record_cases": [
     {
       "name": "configured_inert",
