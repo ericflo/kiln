@@ -324,6 +324,7 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ("vk_fill_f32", SPIR_V_VK_FILL_F32),
     ("vk_fill_f32_offset", SPIR_V_VK_FILL_F32_OFFSET),
     ("vk_reduce_sum_f32", SPIR_V_VK_REDUCE_SUM_F32),
+    ("vk_reduce_nonfinite", SPIR_V_VK_REDUCE_NONFINITE),
     ("vk_broadcast_scalar_f32", SPIR_V_VK_BROADCAST_SCALAR_F32),
     (
         "vk_broadcast_scalar_f32_offset",

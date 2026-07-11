@@ -882,6 +882,11 @@ impl Tensor {
     /// CI training-parity tests opt in.
     pub fn all_finite(&self) -> Result<bool> {
         use crate::DType;
+        // Universal quantification over an empty tensor is true, and no
+        // backend should launch a zero-workgroup reduction for it.
+        if self.element_count() == 0 {
+            return Ok(true);
+        }
         // Integer + packed dtypes have no NaN/Inf — vacuously finite.
         if matches!(self.dtype(), DType::U8 | DType::U32 | DType::I64) {
             return Ok(true);
@@ -932,6 +937,12 @@ impl Tensor {
                     }
                     let cpu_view = crate::rocm_to_host_copy(self)?;
                     return cpu_view.all_finite();
+                }
+            }
+            #[cfg(feature = "vulkan")]
+            {
+                if matches!(self.device(), crate::Device::Vulkan(_)) {
+                    return crate::vulkan_is_finite(self);
                 }
             }
             return Err(Error::Msg(format!(
@@ -1610,6 +1621,12 @@ mod tests {
     #[test]
     fn all_finite_integer_dtype_is_vacuously_true() {
         let t = Tensor::from_slice(&[1u32, 2, 3, 4], vec![2, 2]).unwrap();
+        assert!(t.all_finite().unwrap());
+    }
+
+    #[test]
+    fn all_finite_empty_tensor_is_vacuously_true() {
+        let t = Tensor::zeros_cpu(vec![0], DType::F32);
         assert!(t.all_finite().unwrap());
     }
 

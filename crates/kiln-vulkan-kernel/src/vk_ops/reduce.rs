@@ -185,6 +185,74 @@ fn dispatch_reduce_sum_pass(
     )
 }
 
+fn dispatch_reduce_nonfinite_pass(
+    device: &VulkanDevice,
+    src: &VulkanBuffer,
+    dst: &VulkanBuffer,
+    n_elements: usize,
+    input_kind: u32,
+    n_workgroups: u32,
+) -> Result<()> {
+    anyhow::ensure!(n_elements > 0, "vk_all_finite: empty reduction pass");
+    anyhow::ensure!(
+        n_workgroups <= device.max_compute_work_group_count(0),
+        "vk_all_finite: workgroups {n_workgroups} exceed device limit {}",
+        device.max_compute_work_group_count(0)
+    );
+    dispatch_simple(
+        device,
+        "vk_reduce_nonfinite",
+        &[src.handle(), dst.handle()],
+        &[n_elements as u32, input_kind],
+        n_workgroups,
+    )
+}
+
+/// Return whether every logical element is finite while reading only the
+/// final four-byte reduction flag back to the host.
+pub fn vk_all_finite(t: &VkTensor) -> Result<bool> {
+    let input_kind = match t.dtype() {
+        VkDType::F32 => 0,
+        VkDType::Bf16 => 1,
+    };
+    let n = t.num_elements();
+    anyhow::ensure!(n > 0, "vk_all_finite: empty tensor");
+    anyhow::ensure!(
+        n <= u32::MAX as usize,
+        "vk_all_finite: {n} elements exceed the shader index range"
+    );
+
+    let device = t.device();
+    let partial_count = 1024usize.min(n.div_ceil(256).max(1));
+    let partials = alloc_f32_buffer(device, partial_count)?;
+    dispatch_reduce_nonfinite_pass(
+        device,
+        t.buffer(),
+        &partials,
+        n,
+        input_kind,
+        partial_count as u32,
+    )?;
+
+    let final_flag = if partial_count == 1 {
+        partials
+    } else {
+        let flag = alloc_f32_buffer(device, 1)?;
+        dispatch_reduce_nonfinite_pass(device, &partials, &flag, partial_count, 2, 1)?;
+        flag
+    };
+    let bytes = VulkanBuffer::read_back_prefix(
+        device.device(),
+        device.host_visible_mem_type(),
+        device.queue(),
+        device.queue_family_index(),
+        &final_flag,
+        4,
+    )?;
+    let nonfinite = u32::from_le_bytes(bytes.try_into().expect("four-byte flag readback"));
+    Ok(nonfinite == 0)
+}
+
 /// Reduce-sum all elements to a scalar (1-element) F32 VkTensor. No
 /// autograd link.
 pub fn vk_sum_all_no_grad(t: &VkTensor) -> Result<VkTensor> {

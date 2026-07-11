@@ -676,12 +676,39 @@ impl VulkanBuffer {
         queue_family_index: u32,
         src: &VulkanBuffer,
     ) -> Result<Vec<u8>> {
+        Self::read_back_prefix(
+            device,
+            host_mem_type,
+            queue,
+            queue_family_index,
+            src,
+            src.size,
+        )
+    }
+
+    /// Read exactly `byte_len` bytes from the start of a device buffer.
+    /// This is useful for scalar reductions backed by a bucket-rounded pooled
+    /// buffer: only the logical result crosses the device/host boundary.
+    pub fn read_back_prefix(
+        device: &Arc<ash::Device>,
+        host_mem_type: u32,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        src: &VulkanBuffer,
+        byte_len: u64,
+    ) -> Result<Vec<u8>> {
+        anyhow::ensure!(byte_len > 0, "read_back_prefix: byte_len must be > 0");
+        anyhow::ensure!(
+            byte_len <= src.size,
+            "read_back_prefix: requested {byte_len} bytes from a {}-byte buffer",
+            src.size
+        );
         // Recycle the host-visible staging buffer instead of a fresh
         // `amdgpu_bo_alloc` per call. The pooled buffer may be
-        // bucket-larger than `src.size`; we copy and read exactly
-        // `src.size` bytes below, so behaviour is unchanged. When this
+        // bucket-larger than `byte_len`; we copy and read exactly
+        // `byte_len` bytes below. When this
         // `Arc` drops at function end the buffer returns to the pool.
-        let staging = crate::buffer_pool::pool_alloc_host_visible(device, host_mem_type, src.size)?;
+        let staging = crate::buffer_pool::pool_alloc_host_visible(device, host_mem_type, byte_len)?;
 
         // Create command buffer
         let pool_info = make_pool_info(queue_family_index);
@@ -704,7 +731,7 @@ impl VulkanBuffer {
                 .context("failed to begin command buffer")?
         };
 
-        let copy = vk::BufferCopy::default().size(src.size);
+        let copy = vk::BufferCopy::default().size(byte_len);
         unsafe {
             device.cmd_copy_buffer(cmd, src.buffer, staging.buffer, &[copy]);
         }
@@ -739,7 +766,7 @@ impl VulkanBuffer {
         };
 
         let data: Vec<u8> = unsafe {
-            std::slice::from_raw_parts(mapped_ptr as *const u8, src.size as usize).to_vec()
+            std::slice::from_raw_parts(mapped_ptr as *const u8, byte_len as usize).to_vec()
         };
 
         unsafe {

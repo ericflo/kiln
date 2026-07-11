@@ -1214,6 +1214,35 @@ pub fn vulkan_mean_all(x: &crate::Tensor) -> Result<crate::Tensor> {
     vulkan_reduce_all(x, true)
 }
 
+/// Vulkan implementation of [`crate::Tensor::all_finite`]. F32 and BF16
+/// inputs are reduced entirely on-device and only the final u32 flag is read
+/// back. Other floating formats use the existing host copy as a correctness
+/// fallback until their storage formats have native Vulkan kernels.
+pub fn vulkan_is_finite(x: &crate::Tensor) -> Result<bool> {
+    use kiln_vulkan_kernel::vk_ops::reduce::vk_all_finite;
+
+    if x.element_count() == 0 {
+        return Ok(true);
+    }
+    if !matches!(x.dtype(), DType::F32 | DType::BF16) {
+        return vulkan_to_host_copy(x)?.all_finite();
+    }
+
+    // VkTensor addresses a whole contiguous buffer. A contiguous narrow can
+    // still carry a non-zero offset, so force the resident gather in either
+    // case instead of relying on Tensor::contiguous's metadata fast path.
+    let materialized;
+    let input = if x.is_contiguous() && x.layout().start_offset() == 0 {
+        x
+    } else {
+        materialized = vulkan_contiguous(x)?;
+        &materialized
+    };
+    let vk = vk_tensor_from_kt(input)?;
+    vk_all_finite(&vk)
+        .map_err(|e| Error::Msg(format!("vulkan_is_finite: kernel dispatch failed: {e}")))
+}
+
 // ----------------------------------------------------------------------
 // Host ↔ Vulkan I/O — candle-free device staging (#1082 PR2)
 // ----------------------------------------------------------------------
@@ -2933,6 +2962,49 @@ mod tests {
             return None;
         }
         VulkanDevice::new().ok().map(Arc::new)
+    }
+
+    #[test]
+    fn vulkan_all_finite_reduces_f32_bf16_and_views() {
+        if maybe_vulkan_device().is_none() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+
+        let finite = vk_f32(vec![1.0, -2.5, 0.0, f32::MIN_POSITIVE], vec![2, 2]);
+        assert!(finite.all_finite().expect("finite F32 reduction"));
+
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let tensor = vk_f32(vec![1.0, bad, 3.0, 4.0], vec![2, 2]);
+            assert!(!tensor.all_finite().expect("non-finite F32 reduction"));
+            assert!(
+                !tensor
+                    .transpose(0, 1)
+                    .expect("transpose view")
+                    .all_finite()
+                    .expect("non-contiguous F32 reduction")
+            );
+        }
+
+        let offset = vk_f32(vec![f32::NAN, 1.0, 2.0, 3.0], vec![4])
+            .narrow(0, 1, 3)
+            .expect("offset narrow view");
+        assert!(offset.all_finite().expect("offset view reduction"));
+
+        let bf16_bytes = [
+            0x80, 0x3f, // 1.0
+            0x00, 0xc0, // -2.0
+            0x80, 0x7f, // +Inf
+            0xc0, 0x7f, // NaN
+        ];
+        let bf16 = crate::Tensor::from_raw_bytes_on(
+            Device::Vulkan(0),
+            DType::BF16,
+            bf16_bytes.to_vec(),
+            vec![4],
+        )
+        .expect("BF16 Vulkan tensor");
+        assert!(!bf16.all_finite().expect("non-finite BF16 reduction"));
     }
 
     #[test]

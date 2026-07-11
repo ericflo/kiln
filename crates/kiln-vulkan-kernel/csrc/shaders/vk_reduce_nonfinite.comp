@@ -1,0 +1,64 @@
+// Reduce an F32 or packed-BF16 buffer to a single "contains non-finite"
+// flag. Each workgroup writes one u32 partial. The same shader reduces those
+// partials on the second pass, so every destination word is overwritten and
+// no separate zero-fill dispatch is required.
+//
+// Push constants: [n_elements, input_kind]
+//   input_kind = 0: F32 bit patterns
+//   input_kind = 1: packed BF16 bit patterns
+//   input_kind = 2: u32 partial flags
+// Bindings: in (readonly), out (one u32 per workgroup)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+    uint input_kind;
+};
+
+layout(binding = 0) readonly buffer InBuf { uint data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { uint data_out[]; };
+
+shared uint scratch[256];
+
+uint element_is_nonfinite(uint logical_idx) {
+    if (input_kind == 0u) {
+        // IEEE-754 F32: an all-ones exponent identifies both Inf and NaN.
+        return (data_in[logical_idx] & 0x7f800000u) == 0x7f800000u ? 1u : 0u;
+    }
+    if (input_kind == 1u) {
+        uint word = data_in[logical_idx >> 1u];
+        uint bits = ((logical_idx & 1u) == 0u) ? (word & 0xffffu) : (word >> 16u);
+        return (bits & 0x7f80u) == 0x7f80u ? 1u : 0u;
+    }
+    return data_in[logical_idx] != 0u ? 1u : 0u;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint idx = gl_WorkGroupID.x * 256u + tid;
+    uint stride = gl_NumWorkGroups.x * 256u;
+    uint found = 0u;
+
+    while (idx < n_elements) {
+        found |= element_is_nonfinite(idx);
+        idx += stride;
+    }
+
+    scratch[tid] = found;
+    barrier();
+
+    for (uint width = 128u; width > 0u; width >>= 1u) {
+        if (tid < width) {
+            scratch[tid] |= scratch[tid + width];
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        data_out[gl_WorkGroupID.x] = scratch[0];
+    }
+}
