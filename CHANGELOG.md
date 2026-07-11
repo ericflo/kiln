@@ -2,6 +2,14 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
+- training correctness: GRPO is now locked to a source-pinned TRL 1.8.0 and
+  PyTorch 2.13.0 oracle for loss, ratios, clipping, K3, policy-logprob
+  gradients, and one AdamW step. The oracle exposed and fixed a second
+  completion-length division in GSPO and a two-sided PPO clamp in CISPO.
+  CISPO now has its own absolute upper-only `cispo_max_weight` control
+  (default 5.0), with matching receipts, API validation, audit semantics,
+  ROCm device-coefficient coverage, and Vulkan shader coverage.
+
 - inference: chat, streaming chat, multi-choice chat, and batch generation now
   accept `thinking_budget_tokens` and `thinking_budget_ms`. Kiln closes an open
   thinking block at the first active limit, feeds the close-tag tokens through

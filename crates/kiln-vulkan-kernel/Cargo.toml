@@ -36,3 +36,4 @@ kiln-tensor = { workspace = true }
 # Phase 0.9 probe writes a JSON report. Dev-only so production builds
 # don't pick it up.
 serde_json = { workspace = true }
+serde = { workspace = true }

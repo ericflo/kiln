@@ -59,7 +59,9 @@ void main() {
     float ratio = exp(log_ratio);
     float lo = 1.0 - clip_low;
     float hi = 1.0 + clip_high;
-    float clipped_ratio = clamp(ratio, lo, hi);
+    // CISPO's clip_high is an absolute upper IS-weight cap and deliberately
+    // has no lower floor. PPO/GRPO modes retain additive epsilon bounds.
+    float clipped_ratio = is_mode == 1u ? min(ratio, clip_high) : clamp(ratio, lo, hi);
 
     float kl_penalty = 0.0;
     float kl_grad = 0.0;

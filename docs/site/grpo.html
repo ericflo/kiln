@@ -380,7 +380,9 @@
           <div class="endpoint">
             <h3 class="font-semibold mb-2">Common config fields</h3>
             <ul class="space-y-2 text-sm" style="color: var(--fg-dim);">
-              <li><code>kl_coeff</code> and <code>clip_epsilon</code> tune the GRPO update; <code>learning_rate</code> is resolved per optimizer when omitted (Muon default: 2e-3).</li>
+              <li><code>kl_coeff</code> tunes the independent frozen-reference penalty; <code>learning_rate</code> is resolved per optimizer when omitted (Muon default: 2e-3).</li>
+              <li><code>is_level</code> selects token PPO (default), sequence GSPO, or CISPO. PPO/GSPO use <code>clip_epsilon</code> plus optional <code>clip_eps_high</code>.</li>
+              <li>CISPO instead uses the absolute upper-only <code>cispo_max_weight</code> cap (default 5.0); it has no PPO lower floor.</li>
               <li><code>behavior_policy</code> selects recorded rollout probabilities or an explicit fixed-one ratio; <code>kl_reference_policy</code> independently selects the frozen KL anchor.</li>
               <li><code>lora_rank</code> and <code>lora_alpha</code> control adapter capacity.</li>
               <li><code>base_adapter</code> continues from an existing adapter.</li>
@@ -446,7 +448,7 @@ curl -s http://localhost:8420/v1/adapters/$ADAPTER/receipt \
   | jq '.grpo.policy_audit'</code></pre>
         </section>
         <ul class="space-y-2 text-sm mt-5" style="color: var(--fg-dim);">
-          <li><code>importance_sampling</code> reports ratios against recorded behavior probabilities, or exact unit ratios in no-correction mode.</li>
+          <li><code>importance_sampling</code> reports ratios against recorded behavior probabilities, or exact unit ratios in no-correction mode. CISPO&rsquo;s below-clip count is always zero; its upper count is measured against <code>cispo_max_weight</code>.</li>
           <li><code>kl_reference</code> reports K1/K3 observations against the independently selected reference, including entropy-mask coverage.</li>
           <li><code>recorded_provenance</code> binds counts to content-addressed behavior model, adapter revision, tokenizer/template, sampling, and generation-backend identities.</li>
         </ul>

@@ -558,9 +558,9 @@ pub enum LossAggregation {
 /// Treat as a controlled experiment until ablated on the actual workload.
 ///
 /// `Cispo` implements CISPO (MiniMax-M1, arXiv:2506.13585): per-token gradient
-/// flow with the IS *weight* clipped (not the surrogate). Every token
-/// contributes a gradient; the clipped IS weight bounds variance. Less
-/// invasive than GSPO and keeps per-token gradient diversity.
+/// flow with the IS *weight* capped above (not the surrogate). Every token
+/// contributes a gradient; there is no lower weight floor. The absolute cap
+/// comes from [`GrpoConfig::cispo_max_weight`], not the PPO epsilon fields.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum IsLevel {
@@ -569,7 +569,7 @@ pub enum IsLevel {
     Token,
     /// GSPO sequence-level IS (arXiv:2507.18071).
     Sequence,
-    /// CISPO clipped-weight IS (arXiv:2506.13585).
+    /// CISPO upper-capped-weight IS (arXiv:2506.13585).
     Cispo,
 }
 
@@ -690,14 +690,23 @@ pub struct GrpoConfig {
     /// `clip_eps_high` is `Some(h)`, this field provides the lower epsilon
     /// (`1-ε_low`) and `h` provides the upper (`1+ε_high`). DAPO's
     /// "Clip-Higher" recommendation is `clip_epsilon = 0.20`,
-    /// `clip_eps_high = Some(0.28)` (arXiv:2503.14476).
+    /// `clip_eps_high = Some(0.28)` (arXiv:2503.14476). CISPO does not read
+    /// either PPO bound; use `cispo_max_weight` for that objective.
     #[serde(default = "default_clip_eps")]
     pub clip_epsilon: f64,
     /// Upper PPO clip epsilon for the asymmetric Clip-Higher recipe. `None`
     /// (default) preserves symmetric clipping using `clip_epsilon` on both
-    /// sides.
+    /// sides. Ignored when `is_level = "cispo"`.
     #[serde(default)]
     pub clip_eps_high: Option<f64>,
+    /// Absolute upper cap for the detached CISPO importance weight.
+    ///
+    /// This is not a PPO epsilon: `5.0` means `min(ratio, 5.0)`, matching the
+    /// MiniMax-M1 definition and TRL's `loss_type="cispo"` interpretation of
+    /// `epsilon_high`. CISPO intentionally has no lower weight floor, so
+    /// low-probability actions retain their natural (small) gradient weight.
+    #[serde(default = "default_cispo_max_weight")]
+    pub cispo_max_weight: f64,
     /// Advantage normalization mode. Defaults to `DrGrpo` (drops
     /// std-normalization per arXiv:2503.20783). Set to `Vanilla` for the
     /// historical DeepSeekMath/R1 form.
@@ -819,6 +828,9 @@ fn default_kl_coeff() -> f64 {
 }
 fn default_clip_eps() -> f64 {
     0.2
+}
+pub(crate) fn default_cispo_max_weight() -> f64 {
+    5.0
 }
 fn default_dynamic_sampling() -> bool {
     true
@@ -1115,6 +1127,25 @@ impl GrpoConfig {
                 self.kl_coeff
             ));
         }
+        if !self.clip_epsilon.is_finite() || !(0.0..1.0).contains(&self.clip_epsilon) {
+            return Err(format!(
+                "clip_epsilon must be finite and within [0, 1), got {}",
+                self.clip_epsilon
+            ));
+        }
+        if let Some(clip_high) = self.clip_eps_high {
+            if !clip_high.is_finite() || clip_high < 0.0 {
+                return Err(format!(
+                    "clip_eps_high must be finite and non-negative, got {clip_high}"
+                ));
+            }
+        }
+        if !self.cispo_max_weight.is_finite() || self.cispo_max_weight <= 0.0 {
+            return Err(format!(
+                "cispo_max_weight must be finite and greater than zero, got {}",
+                self.cispo_max_weight
+            ));
+        }
         if self.kl_penalty_enabled() && matches!(self.kl_reference_policy, KlReferencePolicy::None)
         {
             return Err(
@@ -1159,6 +1190,7 @@ impl Default for GrpoConfig {
             kl_coeff: default_kl_coeff(),
             clip_epsilon: default_clip_eps(),
             clip_eps_high: None,
+            cispo_max_weight: default_cispo_max_weight(),
             advantage_mode: AdvantageMode::default(),
             loss_aggregation: LossAggregation::default(),
             kl_estimator: KlEstimator::default(),
@@ -1334,15 +1366,64 @@ mod tests {
             BehaviorPolicy::NoImportanceCorrection
         );
         assert_eq!(config.kl_reference_policy, KlReferencePolicy::None);
+        assert_eq!(config.cispo_max_weight, 5.0);
         config.validate_policy_config().unwrap();
 
         let wire = serde_json::to_value(config).unwrap();
         assert!(wire.get("reference_policy").is_none());
         assert_eq!(wire["behavior_policy"], "no_importance_correction");
+        assert_eq!(wire["cispo_max_weight"], 5.0);
         assert_eq!(
             wire["kl_reference_policy"],
             serde_json::json!({"kind": "none"})
         );
+    }
+
+    #[test]
+    fn grpo_policy_config_rejects_invalid_clipping_controls() {
+        let invalid_clip_low = [-0.1, 1.0, f64::NAN, f64::INFINITY];
+        for clip_epsilon in invalid_clip_low {
+            let config = GrpoConfig {
+                clip_epsilon,
+                ..Default::default()
+            };
+            assert!(
+                config
+                    .validate_policy_config()
+                    .unwrap_err()
+                    .contains("clip_epsilon"),
+                "accepted clip_epsilon={clip_epsilon}"
+            );
+        }
+
+        for clip_eps_high in [-0.1, f64::NAN, f64::INFINITY] {
+            let config = GrpoConfig {
+                clip_eps_high: Some(clip_eps_high),
+                ..Default::default()
+            };
+            assert!(
+                config
+                    .validate_policy_config()
+                    .unwrap_err()
+                    .contains("clip_eps_high"),
+                "accepted clip_eps_high={clip_eps_high}"
+            );
+        }
+
+        for cispo_max_weight in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+            let config = GrpoConfig {
+                is_level: IsLevel::Cispo,
+                cispo_max_weight,
+                ..Default::default()
+            };
+            assert!(
+                config
+                    .validate_policy_config()
+                    .unwrap_err()
+                    .contains("cispo_max_weight"),
+                "accepted cispo_max_weight={cispo_max_weight}"
+            );
+        }
     }
 
     #[test]

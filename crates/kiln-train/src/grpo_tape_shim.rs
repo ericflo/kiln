@@ -272,12 +272,16 @@ impl BackwardOp for GrpoPgLossFromLogitsBackward {
 ///
 /// ⚠ DRIFT COUPLING with `grpo_loss`'s entropy-quantile block — keep in lockstep.
 #[cfg(any(
+    test,
     feature = "cuda",
     feature = "metal",
     feature = "vulkan",
     feature = "rocm"
 ))]
-fn entropy_aware_kl_mask(plp_host: &[f32], loss_params: &GrpoLossParams) -> Vec<f64> {
+fn entropy_aware_kl_mask(
+    plp_host: &[f32],
+    loss_params: &crate::trainer::GrpoLossParams,
+) -> Vec<f64> {
     let n = plp_host.len();
     match loss_params.entropy_aware_kl_quantile {
         Some(q) if q.is_finite() && (0.0..1.0).contains(&q) => {
@@ -368,6 +372,9 @@ fn vulkan_grpo_fused_kernel_params(
     }
 
     if !loss_params.clip_low.is_finite() || !loss_params.clip_high.is_finite() {
+        return None;
+    }
+    if matches!(loss_params.is_level, crate::IsLevel::Cispo) && loss_params.clip_high <= 0.0 {
         return None;
     }
 
@@ -670,18 +677,19 @@ fn vulkan_grpo_grad_from_saved_kt(
 }
 
 #[cfg(any(
+    test,
     feature = "cuda",
     feature = "metal",
     feature = "vulkan",
     feature = "rocm"
 ))]
-fn grpo_loss_coeff_from_policy_log_probs_kt(
+pub(crate) fn grpo_loss_coeff_from_policy_log_probs_kt(
     policy_log_probs: &kiln_tensor::Tensor,
     behavior_log_probs_kt: &kiln_tensor::Tensor,
     kl_reference_log_probs_kt: &kiln_tensor::Tensor,
-    loss_params: GrpoLossParams,
+    loss_params: crate::trainer::GrpoLossParams,
     num_active: usize,
-) -> Result<Vec<f32>> {
+) -> anyhow::Result<Vec<f32>> {
     use kiln_tensor::DType as KtDType;
 
     if num_active == 0 {
@@ -810,12 +818,12 @@ fn grpo_loss_coeff_from_policy_log_probs_kt(
                 let seq_ratio = mean_log_ratio.exp();
                 let pg_grad = if loss_params.advantage >= 0.0 {
                     if seq_ratio <= hi {
-                        -loss_params.advantage * seq_ratio / num_active as f64
+                        -loss_params.advantage * seq_ratio
                     } else {
                         0.0
                     }
                 } else if seq_ratio >= lo {
-                    -loss_params.advantage * seq_ratio / num_active as f64
+                    -loss_params.advantage * seq_ratio
                 } else {
                     0.0
                 };
@@ -833,7 +841,7 @@ fn grpo_loss_coeff_from_policy_log_probs_kt(
                 .enumerate()
                 .map(|(a, &importance_log_ratio)| {
                     let ratio = importance_log_ratio.exp();
-                    let clipped = ratio.clamp(lo, hi);
+                    let clipped = ratio.min(loss_params.clip_high);
                     let weight = clipped * loss_params.advantage;
                     let per_token = -weight + kl_mask[a] * kl_grad(kl_log_ratios[a]);
                     (loss_params.loss_normalizer * per_token) as f32
@@ -966,7 +974,7 @@ fn grpo_loss_coeff_col_device_fast_path_kt(
                     .contiguous()?;
                 let seq_zero = seq_ratio.affine(0.0, 0.0)?.contiguous()?;
                 let seq_pg_raw = seq_ratio
-                    .affine(-loss_params.advantage / num_active as f64, 0.0)?
+                    .affine(-loss_params.advantage, 0.0)?
                     .contiguous()?;
                 let seq_pg = if loss_params.advantage >= 0.0 {
                     let hi = seq_ratio
@@ -984,7 +992,7 @@ fn grpo_loss_coeff_col_device_fast_path_kt(
                 seq_pg.broadcast_as(vec![num_active])?.contiguous()?
             }
             crate::IsLevel::Cispo => ratio
-                .clamp(1.0 - loss_params.clip_low, 1.0 + loss_params.clip_high)?
+                .clamp(0.0, loss_params.clip_high)?
                 .affine(-loss_params.advantage, 0.0)?
                 .contiguous()?,
         }
@@ -2492,19 +2500,379 @@ mod tests {
     #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
     use super::grpo_pg_loss_from_logits_grad_kt;
     #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
-    use crate::trainer::GrpoLossParams;
-    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
-    use crate::trainer::{grpo_loss, token_log_probs};
-    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
+    use crate::trainer::token_log_probs;
+    use crate::trainer::{GrpoLossParams, grpo_loss};
     use crate::{IsLevel, KlEstimator};
     #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
     use kiln_model::backend::GrpoKlAuxiliaryRoute;
     #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
-    use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
+    use kiln_tensor::DType as KtDType;
+    use kiln_tensor::Tensor as KtTensor;
     #[cfg(feature = "cuda")]
     use rand::rngs::StdRng;
     #[cfg(feature = "cuda")]
     use rand::{RngExt, SeedableRng};
+
+    #[derive(serde::Deserialize)]
+    struct GrpoTrlOracleFixture {
+        schema: String,
+        oracle: GrpoTrlOracleIdentity,
+        adamw: GrpoTrlOracleAdamW,
+        tolerances: GrpoTrlOracleTolerances,
+        cases: Vec<GrpoTrlOracleCase>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct GrpoTrlOracleIdentity {
+        trl_version: String,
+        trl_commit: String,
+        trl_grpo_trainer_sha256: String,
+        torch_version: String,
+        torch_commit: String,
+        execution: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct GrpoTrlOracleAdamW {
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct GrpoTrlOracleTolerances {
+        loss_abs: f64,
+        metric_abs: f64,
+        gradient_abs: f64,
+        adamw_abs: f64,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct GrpoTrlOracleCase {
+        name: String,
+        policy_log_probs: Vec<f32>,
+        behavior_log_probs: Vec<f32>,
+        kl_reference_log_probs: Vec<f32>,
+        advantage: f64,
+        clip_low: f64,
+        clip_high: f64,
+        #[serde(default)]
+        cispo_max_weight: Option<f64>,
+        kl_coeff: f64,
+        is_level: String,
+        reinforce: bool,
+        loss_normalizer: f64,
+        expected: GrpoTrlOracleExpected,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct GrpoTrlOracleExpected {
+        loss: f64,
+        policy_log_prob_grad: Vec<f64>,
+        observed_importance_ratios: Vec<f64>,
+        below_clip_count: u64,
+        above_clip_count: u64,
+        mean_k3: f64,
+        adamw_parameter: Vec<f64>,
+        adamw_exp_avg: Vec<f64>,
+        adamw_exp_avg_sq: Vec<f64>,
+    }
+
+    fn assert_oracle_close(label: &str, actual: f64, expected: f64, tolerance: f64) {
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "{label}: got {actual:+.9e}, expected {expected:+.9e}, tolerance {tolerance:.1e}"
+        );
+    }
+
+    fn assert_oracle_vec_close(label: &str, actual: &[f32], expected: &[f64], tolerance: f64) {
+        assert_eq!(actual.len(), expected.len(), "{label}: length");
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert_oracle_close(
+                &format!("{label}[{index}]"),
+                f64::from(actual),
+                expected,
+                tolerance,
+            );
+        }
+    }
+
+    fn load_grpo_trl_oracle_fixture() -> GrpoTrlOracleFixture {
+        serde_json::from_str(include_str!("../tests/fixtures/grpo_trl_oracle_v1.json"))
+            .expect("parse pinned GRPO TRL oracle fixture")
+    }
+
+    fn assert_grpo_trl_oracle_identity(fixture: &GrpoTrlOracleFixture) {
+        assert_eq!(fixture.schema, "kiln.grpo-trl-oracle.v1");
+        assert_eq!(fixture.oracle.trl_version, "1.8.0");
+        assert_eq!(
+            fixture.oracle.trl_commit,
+            "95809b942eb5d11d0b06d749510d88be99230b73"
+        );
+        assert_eq!(
+            fixture.oracle.trl_grpo_trainer_sha256,
+            "sha256:52d9a6c1e298df35d0da4a6fa17874d750ee627f6ac15393c8860d74d1ba4917"
+        );
+        assert_eq!(fixture.oracle.torch_version, "2.13.0");
+        assert_eq!(
+            fixture.oracle.torch_commit,
+            "cf30153c4c131c8164ee7798e5022d810682e2cb"
+        );
+        assert_eq!(
+            fixture.oracle.execution,
+            "TRL GRPOTrainer._compute_loss + PyTorch autograd/AdamW"
+        );
+    }
+
+    fn grpo_trl_oracle_case_params(case: &GrpoTrlOracleCase) -> GrpoLossParams {
+        let is_level = match case.is_level.as_str() {
+            "token" => IsLevel::Token,
+            "sequence" => IsLevel::Sequence,
+            "cispo" => IsLevel::Cispo,
+            other => panic!("{}: unknown oracle IS level {other}", case.name),
+        };
+        let clip_high = if matches!(is_level, IsLevel::Cispo) {
+            case.cispo_max_weight
+                .unwrap_or_else(|| panic!("{}: missing CISPO cap", case.name))
+        } else {
+            case.clip_high
+        };
+        GrpoLossParams {
+            advantage: case.advantage,
+            clip_low: case.clip_low,
+            clip_high,
+            kl_coeff: case.kl_coeff,
+            kl_estimator: KlEstimator::K3,
+            loss_normalizer: case.loss_normalizer,
+            is_level,
+            reinforce: case.reinforce,
+            entropy_aware_kl_quantile: None,
+        }
+    }
+
+    #[test]
+    fn grpo_matches_pinned_trl_pytorch_oracle() {
+        use kiln_optim::{AdamW, AdamWHyperparameters, OptimStep};
+        use kiln_param::{AmpPolicy, ForwardStorage, Parameter};
+
+        let fixture = load_grpo_trl_oracle_fixture();
+        assert_grpo_trl_oracle_identity(&fixture);
+
+        let device = kiln_tensor::Device::Cpu;
+        for case in fixture.cases {
+            let num_active = case.policy_log_probs.len();
+            let params = grpo_trl_oracle_case_params(&case);
+            let policy =
+                KtTensor::from_vec_on(device, case.policy_log_probs.clone(), vec![num_active])
+                    .unwrap();
+            let behavior =
+                KtTensor::from_vec_on(device, case.behavior_log_probs.clone(), vec![num_active])
+                    .unwrap();
+            let kl_reference = KtTensor::from_vec_on(
+                device,
+                case.kl_reference_log_probs.clone(),
+                vec![num_active],
+            )
+            .unwrap();
+
+            let loss = grpo_loss(&policy, &behavior, &kl_reference, params, &device)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            assert_oracle_close(
+                &format!("{} loss", case.name),
+                f64::from(loss),
+                case.expected.loss,
+                fixture.tolerances.loss_abs,
+            );
+
+            let gradient = super::grpo_loss_coeff_from_policy_log_probs_kt(
+                &policy,
+                &behavior,
+                &kl_reference,
+                params,
+                num_active,
+            )
+            .unwrap();
+            assert_oracle_vec_close(
+                &format!("{} policy gradient", case.name),
+                &gradient,
+                &case.expected.policy_log_prob_grad,
+                fixture.tolerances.gradient_abs,
+            );
+
+            let mut audit = crate::train_receipt::GrpoPolicyAuditAccumulator::default();
+            audit
+                .observe_policy_values(
+                    &case.policy_log_probs,
+                    (!case.reinforce).then_some(case.behavior_log_probs.as_slice()),
+                    Some(&case.kl_reference_log_probs),
+                    params.is_level,
+                    case.clip_low,
+                    params.clip_high,
+                    KlEstimator::K3,
+                    None,
+                )
+                .unwrap();
+            let audit = audit.finish().unwrap();
+            let ratios = &case.expected.observed_importance_ratios;
+            assert_eq!(
+                audit.importance_sampling.ratio_observations,
+                ratios.len() as u64,
+                "{} ratio observations",
+                case.name
+            );
+            assert_eq!(
+                audit.importance_sampling.below_clip_count, case.expected.below_clip_count,
+                "{} below clip",
+                case.name
+            );
+            assert_eq!(
+                audit.importance_sampling.above_clip_count, case.expected.above_clip_count,
+                "{} above clip",
+                case.name
+            );
+            let expected_ratio_mean = ratios.iter().sum::<f64>() / ratios.len() as f64;
+            let expected_ratio_min = ratios.iter().copied().fold(f64::INFINITY, f64::min);
+            let expected_ratio_max = ratios.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            assert_oracle_close(
+                &format!("{} ratio mean", case.name),
+                audit.importance_sampling.mean_ratio.unwrap(),
+                expected_ratio_mean,
+                fixture.tolerances.metric_abs,
+            );
+            assert_oracle_close(
+                &format!("{} ratio min", case.name),
+                audit.importance_sampling.min_ratio.unwrap(),
+                expected_ratio_min,
+                fixture.tolerances.metric_abs,
+            );
+            assert_oracle_close(
+                &format!("{} ratio max", case.name),
+                audit.importance_sampling.max_ratio.unwrap(),
+                expected_ratio_max,
+                fixture.tolerances.metric_abs,
+            );
+            assert_oracle_close(
+                &format!("{} K3 mean", case.name),
+                audit.kl_reference.mean_estimator.unwrap(),
+                case.expected.mean_k3,
+                fixture.tolerances.metric_abs,
+            );
+
+            let initial =
+                KtTensor::from_vec_on(device, case.policy_log_probs.clone(), vec![num_active])
+                    .unwrap();
+            let mut parameter = Parameter::trainable(
+                ForwardStorage::Plain(initial.clone()),
+                initial,
+                AmpPolicy::fp32_reference(),
+            );
+            let gradient_tensor =
+                KtTensor::from_vec_on(device, gradient, vec![num_active]).unwrap();
+            let mut adamw = AdamW::new(AdamWHyperparameters {
+                lr: fixture.adamw.lr,
+                beta1: fixture.adamw.beta1,
+                beta2: fixture.adamw.beta2,
+                eps: fixture.adamw.eps,
+                weight_decay: fixture.adamw.weight_decay,
+            });
+            adamw.step(&mut parameter, &gradient_tensor).unwrap();
+            let updated = parameter
+                .backward_storage()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            assert_oracle_vec_close(
+                &format!("{} AdamW parameter", case.name),
+                &updated,
+                &case.expected.adamw_parameter,
+                fixture.tolerances.adamw_abs,
+            );
+            let moments = adamw.moments(parameter.tensor_id()).unwrap();
+            assert_oracle_vec_close(
+                &format!("{} AdamW exp_avg", case.name),
+                &moments.m,
+                &case.expected.adamw_exp_avg,
+                fixture.tolerances.adamw_abs,
+            );
+            assert_oracle_vec_close(
+                &format!("{} AdamW exp_avg_sq", case.name),
+                &moments.v,
+                &case.expected.adamw_exp_avg_sq,
+                fixture.tolerances.adamw_abs,
+            );
+        }
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn rocm_grpo_device_math_matches_pinned_trl_pytorch_oracle() {
+        if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+            eprintln!("skip ROCm GRPO TRL oracle: qualification off");
+            return;
+        }
+        assert!(
+            kiln_tensor::rocm_is_available(),
+            "ROCm qualification requested but no ROCm device is available"
+        );
+
+        let fixture = load_grpo_trl_oracle_fixture();
+        assert_grpo_trl_oracle_identity(&fixture);
+        let device = kiln_tensor::Device::Rocm(0);
+        for case in &fixture.cases {
+            let num_active = case.policy_log_probs.len();
+            let params = grpo_trl_oracle_case_params(case);
+            let policy =
+                KtTensor::from_vec_on(device, case.policy_log_probs.clone(), vec![num_active])
+                    .unwrap();
+            let behavior =
+                KtTensor::from_vec_on(device, case.behavior_log_probs.clone(), vec![num_active])
+                    .unwrap();
+            let kl_reference = KtTensor::from_vec_on(
+                device,
+                case.kl_reference_log_probs.clone(),
+                vec![num_active],
+            )
+            .unwrap();
+
+            let loss = grpo_loss(&policy, &behavior, &kl_reference, params, &device)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            assert_oracle_close(
+                &format!("{} ROCm loss", case.name),
+                f64::from(loss),
+                case.expected.loss,
+                fixture.tolerances.loss_abs,
+            );
+
+            let gradient = super::grpo_loss_coeff_col_device_fast_path_kt(
+                GrpoKlAuxiliaryRoute::CudaRocmDeviceFastPath,
+                &policy,
+                &behavior,
+                &kl_reference,
+                params,
+                num_active,
+                1.0,
+                &device,
+            )
+            .unwrap()
+            .unwrap_or_else(|| panic!("{}: ROCm coefficient fast path declined", case.name))
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+            assert_oracle_vec_close(
+                &format!("{} ROCm policy gradient", case.name),
+                &gradient,
+                &case.expected.policy_log_prob_grad,
+                fixture.tolerances.gradient_abs,
+            );
+        }
+    }
 
     #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
     #[test]
@@ -2577,7 +2945,11 @@ mod tests {
 
         let mut params = base;
         params.is_level = IsLevel::Cispo;
+        params.clip_high = 5.0;
         assert!(super::vulkan_grpo_fused_kernel_params(params, num_active).is_some());
+
+        params.clip_high = 0.0;
+        assert!(super::vulkan_grpo_fused_kernel_params(params, num_active).is_none());
 
         let mut params = base;
         params.is_level = IsLevel::Sequence;
@@ -3131,11 +3503,11 @@ mod tests {
                 },
             ),
             (
-                "cispo-k1",
+                "cispo-k1-upper-cap",
                 GrpoLossParams {
                     advantage: -0.4,
                     clip_low: 0.15,
-                    clip_high: 0.25,
+                    clip_high: 1.25,
                     kl_coeff: 0.03,
                     kl_estimator: KlEstimator::K1,
                     loss_normalizer: 0.75,
@@ -3328,11 +3700,11 @@ mod tests {
                 },
             ),
             (
-                "cispo-k1-asym",
+                "cispo-k1-upper-cap",
                 GrpoLossParams {
                     advantage: -0.4,
                     clip_low: 0.15,
-                    clip_high: 0.25,
+                    clip_high: 1.25,
                     kl_coeff: 0.03,
                     kl_estimator: KlEstimator::K1,
                     loss_normalizer: 0.75,
@@ -3557,11 +3929,11 @@ mod tests {
                 0.8,
             ),
             (
-                "cispo-negative-k1-asym",
+                "cispo-negative-k1-upper-cap",
                 GrpoLossParams {
                     advantage: -0.4,
                     clip_low: 0.15,
-                    clip_high: 0.25,
+                    clip_high: 1.25,
                     kl_coeff: 0.03,
                     kl_estimator: KlEstimator::K1,
                     loss_normalizer: 0.75,
@@ -3572,11 +3944,11 @@ mod tests {
                 1.2,
             ),
             (
-                "cispo-negative-k1-asym-entropy",
+                "cispo-negative-k1-upper-cap-entropy",
                 GrpoLossParams {
                     advantage: -0.4,
                     clip_low: 0.15,
-                    clip_high: 0.25,
+                    clip_high: 1.25,
                     kl_coeff: 0.03,
                     kl_estimator: KlEstimator::K1,
                     loss_normalizer: 0.75,

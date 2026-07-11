@@ -15,9 +15,9 @@ use half::bf16;
 use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::flce::{
-    VK_GRPO_IS_MODE_CISPO, VK_GRPO_KL_MODE_K3, flce_recommended_chunk_len_from_limits,
-    vk_flce_loss, vk_grpo_backward_with_saved_state, vk_grpo_loss,
-    vk_grpo_loss_with_saved_state_ext, vk_grpo_selected_log_probs_from_saved_state,
+    VK_GRPO_IS_MODE_CISPO, VK_GRPO_KL_MODE_K3, VK_GRPO_KL_MODE_NONE,
+    flce_recommended_chunk_len_from_limits, vk_flce_loss, vk_grpo_backward_with_saved_state,
+    vk_grpo_loss, vk_grpo_loss_with_saved_state_ext, vk_grpo_selected_log_probs_from_saved_state,
     vk_selected_log_probs,
 };
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
@@ -71,6 +71,65 @@ fn upload_bf16(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result
 
 fn bf16_rounded(data: &[f32], _shape: &[usize]) -> Result<Vec<f32>> {
     Ok(data.iter().map(|&v| bf16::from_f32(v).to_f32()).collect())
+}
+
+#[derive(serde::Deserialize)]
+struct GrpoTrlOracleFixture {
+    schema: String,
+    oracle: GrpoTrlOracleIdentity,
+    tolerances: GrpoTrlOracleTolerances,
+    cases: Vec<GrpoTrlOracleCase>,
+}
+
+#[derive(serde::Deserialize)]
+struct GrpoTrlOracleIdentity {
+    trl_commit: String,
+    trl_grpo_trainer_sha256: String,
+}
+
+#[derive(serde::Deserialize)]
+struct GrpoTrlOracleTolerances {
+    loss_abs: f64,
+    gradient_abs: f64,
+}
+
+#[derive(serde::Deserialize)]
+struct GrpoTrlOracleCase {
+    name: String,
+    policy_log_probs: Vec<f32>,
+    behavior_log_probs: Vec<f32>,
+    kl_reference_log_probs: Vec<f32>,
+    advantage: f32,
+    clip_low: f32,
+    cispo_max_weight: Option<f32>,
+    kl_coeff: f32,
+    is_level: String,
+    loss_normalizer: f32,
+    expected: GrpoTrlOracleExpected,
+}
+
+#[derive(serde::Deserialize)]
+struct GrpoTrlOracleExpected {
+    loss: f64,
+    mean_k3: f64,
+    policy_log_prob_grad: Vec<f64>,
+}
+
+fn pinned_grpo_trl_oracle() -> GrpoTrlOracleFixture {
+    let fixture: GrpoTrlOracleFixture = serde_json::from_str(include_str!(
+        "../../kiln-train/tests/fixtures/grpo_trl_oracle_v1.json"
+    ))
+    .expect("parse pinned GRPO TRL oracle fixture");
+    assert_eq!(fixture.schema, "kiln.grpo-trl-oracle.v1");
+    assert_eq!(
+        fixture.oracle.trl_commit,
+        "95809b942eb5d11d0b06d749510d88be99230b73"
+    );
+    assert_eq!(
+        fixture.oracle.trl_grpo_trainer_sha256,
+        "sha256:52d9a6c1e298df35d0da4a6fa17874d750ee627f6ac15393c8860d74d1ba4917"
+    );
+    fixture
 }
 
 /// CPU cross-entropy reference: loss = mean_i (-log(softmax(logit_i)[label_i]))
@@ -224,7 +283,11 @@ fn cpu_grpo_ext(
         let ratio = log_ratio.exp();
         let lo = 1.0 - clip_low;
         let hi = 1.0 + clip_high;
-        let clipped_ratio = ratio.clamp(lo, hi);
+        let clipped_ratio = if is_mode == VK_GRPO_IS_MODE_CISPO {
+            ratio.min(clip_high)
+        } else {
+            ratio.clamp(lo, hi)
+        };
 
         let (kl_penalty, kl_grad) = match kl_mode {
             1 => (kl_coeff * log_ratio, kl_coeff),
@@ -555,7 +618,7 @@ fn vk_selected_logprob_and_grpo_parity_small() -> Result<()> {
 }
 
 #[test]
-fn vk_grpo_ext_cispo_k3_asym_parity_small() -> Result<()> {
+fn vk_grpo_ext_cispo_k3_upper_cap_parity_small() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
     let num_active = 4;
     let hidden_dim = 7;
@@ -571,7 +634,7 @@ fn vk_grpo_ext_cispo_k3_asym_parity_small() -> Result<()> {
     let ref_log_probs = vec![-2.8_f32, -3.1, -2.3, -3.4];
     let advantage = -0.65_f32;
     let clip_low = 0.15_f32;
-    let clip_high = 0.35_f32;
+    let clip_high = 1.35_f32;
     let kl_coeff = 0.04_f32;
 
     let hidden = upload_f32(&dev, &h_data, &[num_active, hidden_dim])?;
@@ -624,6 +687,85 @@ fn vk_grpo_ext_cispo_k3_asym_parity_small() -> Result<()> {
         .map(|(g, e)| (g - e).abs())
         .fold(0.0_f32, f32::max);
     assert!(mad < 1e-4, "CISPO/K3 d_hidden mad {mad}");
+    Ok(())
+}
+
+#[test]
+fn vk_grpo_cispo_policy_term_matches_pinned_trl_pytorch_oracle() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let fixture = pinned_grpo_trl_oracle();
+    let case = fixture
+        .cases
+        .iter()
+        .find(|case| case.name == "cispo_upper_weight_cap_k3")
+        .expect("pinned CISPO oracle case");
+    assert_eq!(case.is_level, "cispo");
+    let num_active = case.policy_log_probs.len();
+    assert_eq!(case.loss_normalizer, 1.0 / num_active as f32);
+    assert_eq!(case.behavior_log_probs.len(), num_active);
+
+    // A two-class head with logits [h, 0] can reproduce each selected-token
+    // log-probability exactly enough for an independent shader check:
+    // log_softmax([h, 0])[0] = log(sigmoid(h)).
+    let hidden_data = case
+        .policy_log_probs
+        .iter()
+        .map(|&log_prob| {
+            let probability = log_prob.exp();
+            (probability / (1.0 - probability)).ln()
+        })
+        .collect::<Vec<_>>();
+    let hidden = upload_f32(&dev, &hidden_data, &[num_active, 1])?;
+    let weight = upload_f32(&dev, &[1.0, 0.0], &[2, 1])?;
+    let labels = vec![0_u32; num_active];
+    let behavior = upload_f32(&dev, &case.behavior_log_probs, &[num_active])?;
+    let cap = case.cispo_max_weight.expect("CISPO absolute cap");
+    let (loss, saved) = vk_grpo_loss_with_saved_state_ext(
+        &hidden,
+        &weight,
+        &labels,
+        &behavior,
+        case.advantage,
+        case.clip_low,
+        cap,
+        0.0,
+        VK_GRPO_KL_MODE_NONE,
+        VK_GRPO_IS_MODE_CISPO,
+        2,
+    )?;
+
+    let selected = vk_grpo_selected_log_probs_from_saved_state(&saved)?.to_vec_f32()?;
+    for (index, (&actual, &expected)) in selected.iter().zip(&case.policy_log_probs).enumerate() {
+        assert!(
+            (actual - expected).abs() <= fixture.tolerances.loss_abs as f32,
+            "selected log-probability {index}: Vulkan={actual}, TRL fixture={expected}"
+        );
+    }
+
+    let expected_policy_loss =
+        case.expected.loss - f64::from(case.kl_coeff) * case.expected.mean_k3;
+    let actual_loss = f64::from(loss.to_vec_f32()?[0]);
+    assert!(
+        (actual_loss - expected_policy_loss).abs() <= fixture.tolerances.loss_abs * 2.0,
+        "CISPO policy loss: Vulkan={actual_loss}, TRL fixture={expected_policy_loss}"
+    );
+
+    let grad_seed = upload_f32(&dev, &[1.0], &[1])?;
+    let hidden_grad =
+        vk_grpo_backward_with_saved_state(&hidden, &saved, &grad_seed)?.to_vec_f32()?;
+    for index in 0..num_active {
+        let policy = case.policy_log_probs[index];
+        let reference = case.kl_reference_log_probs[index];
+        let k3_grad = case.loss_normalizer * case.kl_coeff * (1.0 - (reference - policy).exp());
+        let expected_policy_grad = case.expected.policy_log_prob_grad[index] - f64::from(k3_grad);
+        let log_prob_jacobian = 1.0 - policy.exp();
+        let actual_policy_grad = f64::from(hidden_grad[index] / log_prob_jacobian);
+        assert!(
+            (actual_policy_grad - expected_policy_grad).abs()
+                <= fixture.tolerances.gradient_abs * 3.0,
+            "CISPO policy gradient {index}: Vulkan={actual_policy_grad}, TRL fixture={expected_policy_grad}"
+        );
+    }
     Ok(())
 }
 

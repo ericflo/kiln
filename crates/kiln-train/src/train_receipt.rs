@@ -200,6 +200,8 @@ pub struct GrpoReceipt {
     pub kl_coeff: f64,
     pub clip_epsilon: f64,
     pub clip_eps_high: Option<f64>,
+    #[serde(default = "crate::default_cispo_max_weight")]
+    pub cispo_max_weight: f64,
     pub dynamic_sampling: bool,
     pub dynamic_groups_filtered: usize,
     pub advantage_mode: serde_json::Value,
@@ -238,8 +240,13 @@ pub struct GrpoImportanceSamplingMetricsReceipt {
     pub mean_ratio: Option<f64>,
     pub min_ratio: Option<f64>,
     pub max_ratio: Option<f64>,
+    /// Ratios below the PPO/GSPO lower bound. Always zero for CISPO, which
+    /// deliberately has no lower importance-weight floor.
     pub below_clip_count: u64,
+    /// Ratios above the PPO/GSPO upper bound or the absolute CISPO weight cap.
     pub above_clip_count: u64,
+    /// Fraction outside the two-sided PPO/GSPO interval, or above the
+    /// upper-only CISPO cap.
     pub outside_clip_fraction: Option<f64>,
 }
 
@@ -429,13 +436,24 @@ impl GrpoPolicyAuditAccumulator {
             .action_tokens
             .saturating_add(policy_log_probs.len() as u64);
 
+        let (lower_clip, upper_clip) = match is_level {
+            crate::IsLevel::Cispo => (None, clip_high),
+            crate::IsLevel::Token | crate::IsLevel::Sequence => {
+                (Some(1.0 - clip_low), 1.0 + clip_high)
+            }
+        };
+        anyhow::ensure!(
+            upper_clip.is_finite() && upper_clip > 0.0,
+            "GRPO policy audit received an invalid upper clip bound {upper_clip}"
+        );
+
         if is_level == crate::IsLevel::Sequence {
             let mean_log_ratio =
                 importance_log_ratios.iter().sum::<f64>() / importance_log_ratios.len() as f64;
-            self.observe_ratio(mean_log_ratio.exp(), clip_low, clip_high)?;
+            self.observe_ratio(mean_log_ratio.exp(), lower_clip, upper_clip)?;
         } else {
             for log_ratio in importance_log_ratios {
-                self.observe_ratio(log_ratio.exp(), clip_low, clip_high)?;
+                self.observe_ratio(log_ratio.exp(), lower_clip, upper_clip)?;
             }
         }
 
@@ -474,7 +492,12 @@ impl GrpoPolicyAuditAccumulator {
         Ok(())
     }
 
-    fn observe_ratio(&mut self, ratio: f64, clip_low: f64, clip_high: f64) -> Result<()> {
+    fn observe_ratio(
+        &mut self,
+        ratio: f64,
+        lower_clip: Option<f64>,
+        upper_clip: f64,
+    ) -> Result<()> {
         anyhow::ensure!(
             ratio.is_finite(),
             "GRPO policy audit produced a non-finite importance ratio"
@@ -483,10 +506,10 @@ impl GrpoPolicyAuditAccumulator {
         self.ratio_sum += ratio;
         self.ratio_min = Some(self.ratio_min.map_or(ratio, |current| current.min(ratio)));
         self.ratio_max = Some(self.ratio_max.map_or(ratio, |current| current.max(ratio)));
-        if ratio < 1.0 - clip_low {
+        if lower_clip.is_some_and(|lower| ratio < lower) {
             self.below_clip_count = self.below_clip_count.saturating_add(1);
         }
-        if ratio > 1.0 + clip_high {
+        if ratio > upper_clip {
             self.above_clip_count = self.above_clip_count.saturating_add(1);
         }
         Ok(())
@@ -2320,6 +2343,31 @@ mod tests {
     }
 
     #[test]
+    fn grpo_policy_audit_cispo_reports_only_the_absolute_upper_cap() -> Result<()> {
+        let mut audit = GrpoPolicyAuditAccumulator::default();
+        audit.observe_policy_values(
+            &[-2.0, -0.1],
+            Some(&[-1.0, -1.0]),
+            None,
+            crate::IsLevel::Cispo,
+            0.2,
+            1.5,
+            crate::KlEstimator::None,
+            None,
+        )?;
+        let importance = audit.finish()?.importance_sampling;
+
+        assert_eq!(importance.ratio_scope.as_deref(), Some("token"));
+        assert_eq!(importance.ratio_observations, 2);
+        assert_eq!(importance.below_clip_count, 0);
+        assert_eq!(importance.above_clip_count, 1);
+        assert_near(importance.min_ratio.unwrap(), (-1.0_f64).exp());
+        assert_near(importance.max_ratio.unwrap(), 0.9_f64.exp());
+        assert_near(importance.outside_clip_fraction.unwrap(), 0.5);
+        Ok(())
+    }
+
+    #[test]
     fn grpo_policy_audit_behavior_manifest_is_exact_and_order_independent() -> Result<()> {
         let first = audit_provenance('8', 10);
         let same_source = audit_provenance('8', 11);
@@ -2374,6 +2422,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(receipt.behavior_policy, serde_json::Value::Null);
+        assert_eq!(receipt.cispo_max_weight, 5.0);
         assert_eq!(
             receipt.kl_reference_policy,
             serde_json::json!({"kind": "base_per_step"})
@@ -2383,6 +2432,7 @@ mod tests {
         let wire = serde_json::to_value(&receipt).unwrap();
         assert!(wire.get("reference_policy").is_none());
         assert_eq!(wire["behavior_policy"], serde_json::Value::Null);
+        assert_eq!(wire["cispo_max_weight"], 5.0);
     }
 
     #[test]

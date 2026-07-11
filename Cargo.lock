@@ -1750,6 +1750,7 @@ dependencies = [
  "kiln-tensor-id",
  "libc",
  "libloading 0.9.0",
+ "serde",
  "serde_json",
  "tracing",
 ]

@@ -386,9 +386,20 @@ server-side default, so omit anything you don't want to override:
   requests and receipts should use `kl_reference_policy`.
 - **`kl_estimator`** — `"k1"` by default; `"k3"` selects the non-negative
   estimator and `"none"` disables both the penalty and KL-reference forward.
-- **`clip_epsilon`** — defaults to `0.2`. The PPO/GRPO clip range on the
-  importance ratio when `behavior_policy` is `"recorded"`; it has no effect on
-  the fixed-one ratio in no-correction mode.
+- **`is_level`** — `"token"` (default) applies PPO clipping per action token.
+  `"sequence"` selects GSPO: it forms one geometric-mean ratio per completion,
+  broadcasts one sequence surrogate, and normalizes by completion length once.
+  `"cispo"` uses a detached per-token importance weight with an upper cap and
+  no lower floor. These modes share the same independently configured KL term.
+- **`clip_epsilon`** / **`clip_eps_high`** — `0.2` / `null` by default. Token
+  PPO and sequence GSPO use `[1 - clip_epsilon, 1 + clip_eps_high]`; a null
+  upper value uses `clip_epsilon` symmetrically. These bounds have no effect on
+  CISPO, or on the fixed-one ratio in no-correction mode.
+- **`cispo_max_weight`** — defaults to `5.0` and is used only with
+  `is_level: "cispo"`. This is an absolute cap (`min(ratio, 5.0)`), not an
+  additive epsilon (`1 + 5.0`). Ratios below one retain their natural weight;
+  Kiln does not impose the PPO lower floor. This matches MiniMax-M1 and TRL's
+  CISPO loss semantics.
 - **`lora_rank`** / **`lora_alpha`** — defaults `16` / `32`. The capacity of
   the adapter. Rank 8 is faster and still works for narrow tasks; rank 32+
   for broader behavioral shifts.
@@ -426,7 +437,10 @@ comparisons separate:
   and CISPO report one ratio observation per action token; sequence/GSPO
   reports one per completion while retaining the total action-token count.
   `no_importance_correction` reports an exact ratio of `1.0` and does not
-  borrow the KL reference as a denominator.
+  borrow the KL reference as a denominator. For token PPO and GSPO,
+  `below_clip_count` and `above_clip_count` describe the two-sided interval.
+  CISPO has no lower bound, so its below count is always zero and its above
+  count/fraction report only ratios beyond `cispo_max_weight`.
 - `kl_reference` uses `log p_policy - log p_reference`. Its K1/K3 means are
   reported before multiplying by `kl_coeff`; `mean_masked_estimator` includes
   zeros for entropy-masked tokens and remains normalized over every observed

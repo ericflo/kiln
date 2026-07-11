@@ -3502,6 +3502,12 @@ mod tests {
         missing_kl_reference.config.kl_reference_policy = kiln_train::KlReferencePolicy::None;
         let error = validate_grpo_submission_source(&missing_kl_reference, None).unwrap_err();
         assert!(error.message.contains("requires kl_estimator=none"));
+
+        let mut invalid_cispo = grpo_req(None, vec![grpo_group()]);
+        invalid_cispo.config.is_level = kiln_train::IsLevel::Cispo;
+        invalid_cispo.config.cispo_max_weight = 0.0;
+        let error = validate_grpo_submission_source(&invalid_cispo, None).unwrap_err();
+        assert!(error.message.contains("cispo_max_weight"));
     }
 
     /// ECHO env-CE trains again (resurrection PR2), so echo-enabled

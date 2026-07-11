@@ -633,6 +633,13 @@ recorded importance correction.
 
 For the full generate→score→train loop with three worked verifiable-reward examples (math correctness, JSON-validity, code-runs), see [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md).
 
+The training request's `config.is_level` selects token PPO (default), sequence
+GSPO, or CISPO. Token PPO and GSPO use `clip_epsilon` with optional
+`clip_eps_high`; CISPO instead uses the absolute upper-only
+`cispo_max_weight` cap (default `5.0`) and deliberately has no lower floor.
+See the [tuning reference](docs/GRPO_GUIDE.md#tuning-knobs) before changing
+these objective-level controls.
+
 For **multi-turn agentic** training (tool calls, command output, file contents) kiln ships **ECHO** (paper §3, MSR AI Frontiers 2026) on by default at λ=0.05. ECHO adds a length-normalized cross-entropy on environment-observation tokens with zero extra forward-pass cost; paper headline is ~2× pass@1 on TerminalBench-2.0. The canonical endpoint is `POST /v1/train/agentic` (alias of `/v1/train/grpo`); rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments. See [docs/ECHO_GUIDE.md](docs/ECHO_GUIDE.md) for CLI flags (`--echo-lambda`, `--no-echo`, `--no-policy-loss`), env-var overrides (`KILN_ECHO_*`), and the receipt-grade `env_ce_drop_pct` diagnostic.
 
 ```bash

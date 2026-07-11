@@ -144,6 +144,7 @@ impl Mode {
                 kl_estimator: KlEstimator::K1,
                 dynamic_sampling: true,
                 is_level: IsLevel::Cispo,
+                cispo_max_weight: 5.0,
                 ..base
             },
             Self::Phase1Reinforce => GrpoConfig {
@@ -754,7 +755,7 @@ fn main() -> Result<()> {
         .map(|c| format!("{}", c.lambda))
         .unwrap_or_else(|| "off".to_string());
     println!(
-        "config mode={} advantage_mode={:?} loss_aggregation={:?} clip=({},{:?}) \
+        "config mode={} advantage_mode={:?} loss_aggregation={:?} clip=({},{:?}) cispo_max_weight={} \
          kl_estimator={:?} dynamic_sampling={} is_level={:?} behavior_policy={:?} \
          kl_reference_policy={:?} \
          lr={} rank={} alpha={} seed={} echo_lambda={} filter_var_min={:?} \
@@ -764,6 +765,7 @@ fn main() -> Result<()> {
         config.loss_aggregation,
         config.clip_epsilon,
         config.clip_eps_high,
+        config.cispo_max_weight,
         config.kl_estimator,
         config.dynamic_sampling,
         config.is_level,

@@ -2055,6 +2055,7 @@ fn grpo_settings_receipt(
         kl_coeff: config.kl_coeff,
         clip_epsilon: config.clip_epsilon,
         clip_eps_high: config.clip_eps_high,
+        cispo_max_weight: config.cispo_max_weight,
         dynamic_sampling: config.dynamic_sampling,
         dynamic_groups_filtered,
         advantage_mode: serde_json::to_value(config.advantage_mode)
@@ -11553,6 +11554,8 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
 pub(crate) struct GrpoLossParams {
     pub advantage: f64,
     pub clip_low: f64,
+    /// Additive PPO upper epsilon for token/sequence GRPO; absolute upper
+    /// importance-weight cap for CISPO.
     pub clip_high: f64,
     pub kl_coeff: f64,
     pub kl_estimator: KlEstimator,
@@ -11575,7 +11578,12 @@ pub(crate) struct GrpoLossParams {
 
 impl GrpoLossParams {
     fn from_config(config: &GrpoConfig, advantage: f64, loss_normalizer: f64) -> Self {
-        let (clip_low, clip_high) = config.clip_bounds();
+        let (clip_low, ppo_clip_high) = config.clip_bounds();
+        let clip_high = if matches!(config.is_level, IsLevel::Cispo) {
+            config.cispo_max_weight
+        } else {
+            ppo_clip_high
+        };
         let reinforce = matches!(
             config.behavior_policy,
             BehaviorPolicy::NoImportanceCorrection
@@ -11710,11 +11718,11 @@ pub(crate) fn entropy_aware_kl_mask_kt(
 /// The structure of `per_token_loss` depends on `params.is_level`:
 ///   * `IsLevel::Token` — historical per-token PPO `min(r·A, clip(r)·A)`.
 ///   * `IsLevel::Sequence` — GSPO sequence-level scalar ratio
-///     `s = exp(mean(log_ratio))`, then `min(s·A, clip(s)·A)` distributed
-///     uniformly back to every active token at `surrogate/num_active`.
+///     `s = exp(mean(log_ratio))`, then `min(s·A, clip(s)·A)` broadcast to
+///     every active token before the configured loss aggregation.
 ///   * `IsLevel::Cispo` — CISPO weight clipping: the per-token gradient
-///     factor `stop_grad(clip(r))·A` multiplies `log π_θ`, so every token
-///     contributes a gradient even when the IS ratio is out of clip range.
+///     factor `stop_grad(min(r, cispo_max_weight))·A` multiplies `log π_θ`,
+///     so every token contributes a gradient without a lower weight floor.
 // `pub(crate)` so the GRPO tape-authoritative loss-root shim
 // (`crate::grpo_tape_shim`) can recompute the EXACT same scalar PG (+ KL)
 // loss inside its candle-autograd backward composite (#1082 CP-4).
@@ -11772,7 +11780,8 @@ pub(crate) fn grpo_loss_with_kl_auxiliary_route(
     let ratio_shape = ratio.dims().to_vec();
     let kl_log_ratio = (policy_log_probs - kl_reference_log_probs)?;
 
-    // Asymmetric PPO clip range: [1 - clip_low, 1 + clip_high].
+    // Asymmetric PPO clip range: [1 - clip_low, 1 + clip_high]. CISPO
+    // interprets clip_high separately below as its absolute upper weight cap.
     let lo_val = 1.0 - params.clip_low;
     let hi_val = 1.0 + params.clip_high;
 
@@ -11822,11 +11831,8 @@ pub(crate) fn grpo_loss_with_kl_auxiliary_route(
                 // GSPO: s = exp(mean(log_ratio)), surrogate at sequence level,
                 // gradient distributed back equally to every active token.
                 //
-                // The total surrogate contribution to the loss is exactly
-                // `min(s·A, clip(s)·A)`. To preserve the existing "sum of
-                // per-token loss times loss_normalizer" plumbing, we
-                // distribute that scalar over `num_active` positions as
-                // `surrogate / num_active`, replicated per token.
+                // The sequence surrogate is replicated over active tokens;
+                // the outer loss normalizer performs the sequence mean.
                 let u = importance_log_ratio.mean_keepdim(0)?;
                 let s = u.exp()?;
                 // (#1082) kt scalar clamp + scalar `affine` for the constant
@@ -11835,10 +11841,11 @@ pub(crate) fn grpo_loss_with_kl_auxiliary_route(
                 let surr1 = s.affine(params.advantage, 0.0)?;
                 let surr2 = clipped.affine(params.advantage, 0.0)?;
                 let surrogate = surr1.minimum(&surr2)?;
-                let per_token_scale = 1.0 / num_active as f64;
-                // Repeat scalar across active token positions, scaled so that
-                // sum(neg_surrogate) = -surrogate exactly.
-                let neg = surrogate.neg()?.affine(per_token_scale, 0.0)?;
+                // Repeat the sequence loss across its active token positions.
+                // The outer per-sample normalizer divides the sum by
+                // num_active, matching TRL/GSPO. The derivative of the shared
+                // sequence ratio already contributes its own 1/num_active.
+                let neg = surrogate.neg()?;
                 neg.broadcast_as(&ratio_shape)?
             }
             IsLevel::Cispo => {
@@ -11847,7 +11854,7 @@ pub(crate) fn grpo_loss_with_kl_auxiliary_route(
                 // is `-stop_grad(clip(r)) · A · log π_θ` per token.
                 // (#1082) kt scalar clamp; advantage folds into `affine`. `weight`
                 // is detached either way, so the constant scalar mul is exact.
-                let clipped_ratio = ratio.clamp(lo_val, hi_val)?.detach();
+                let clipped_ratio = ratio.clamp(0.0, params.clip_high)?.detach();
                 // log π_θ = policy_log_probs (already in tensor form).
                 let weight = clipped_ratio.affine(params.advantage, 0.0)?.detach();
                 (&weight * policy_log_probs)?.neg()?
@@ -13531,14 +13538,10 @@ pub(crate) mod tests {
         let loss =
             grpo_loss(&policy, &reference, &reference, params, &device)?.to_scalar::<f32>()?;
 
-        // Manual reference: u = mean(log_ratio), s = exp(u),
-        // surrogate = min(s*A, clip(s)*A). The candle scalar after the
-        // `1/num_active` normalizer is `-surrogate / num_active * num_active`
-        // = `-surrogate`. The per-token tile aggregates to `-surrogate`
-        // exactly, and the normalizer doesn't recover the original
-        // pre-distribution value — see the comment in grpo_loss.
-        // Concretely: each of N tokens contributes `-surrogate/N`, summed
-        // and normalized by 1/N gives `-surrogate/N`.
+        // Manual TRL/GSPO reference: u = mean(log_ratio), s = exp(u),
+        // surrogate = min(s*A, clip(s)*A). The sequence surrogate broadcasts
+        // to every token and the per-sample normalizer averages it back to
+        // exactly `-surrogate`.
         let pol = policy.to_vec1::<f32>()?;
         let refv = reference.to_vec1::<f32>()?;
         let log_ratios: Vec<f64> = pol
@@ -13551,7 +13554,7 @@ pub(crate) mod tests {
         let surr1 = s * advantage;
         let surr2 = s.clamp(1.0 - clip, 1.0 + clip) * advantage;
         let surrogate = surr1.min(surr2);
-        let expected = (-surrogate / num_active as f64) as f32;
+        let expected = -surrogate as f32;
         assert!(
             (loss - expected).abs() < 5e-6,
             "GSPO sequence-level loss drift: got {loss} want {expected}"
@@ -13560,22 +13563,23 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn grpo_loss_cispo_gradient_is_clipped_ratio_times_advantage() -> Result<()> {
-        // CISPO: per-token surrogate is `-stop_grad(clip(r)) * A * log_pi`,
+    fn grpo_loss_cispo_gradient_uses_upper_only_weight_cap() -> Result<()> {
+        // CISPO: per-token surrogate is `-stop_grad(min(r, cap)) * A * log_pi`,
         // so the loss (with kl_coeff=0) equals
-        //   sum_t -clip(r_t) * A * log_pi_t  /  num_active
+        //   sum_t -min(r_t, cap) * A * log_pi_t  /  num_active
+        // There is deliberately no lower weight floor.
         // Manual check against grpo_loss.
         let device = cpu_device();
         let policy = t1d(&[-0.6_f32, -1.4, -0.5, -1.0])?;
         let reference = t1d(&[-1.0_f32, -1.0, -1.0, -1.0])?;
         let advantage = 0.5_f64;
-        let clip = 0.2_f64;
+        let cap = 1.2_f64;
         let n = 4usize;
 
         let params = GrpoLossParams {
             advantage,
-            clip_low: clip,
-            clip_high: clip,
+            clip_low: 0.2,
+            clip_high: cap,
             kl_coeff: 0.0,
             kl_estimator: KlEstimator::None,
             loss_normalizer: 1.0 / n as f64,
@@ -13592,7 +13596,7 @@ pub(crate) mod tests {
         for (p, r) in pol.iter().zip(refv.iter()) {
             let log_ratio = (*p - *r) as f64;
             let ratio = log_ratio.exp();
-            let clipped = ratio.clamp(1.0 - clip, 1.0 + clip);
+            let clipped = ratio.min(cap);
             acc += -clipped * advantage * (*p as f64);
         }
         let expected = (acc / n as f64) as f32;
