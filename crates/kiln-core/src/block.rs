@@ -1,6 +1,13 @@
 use std::collections::VecDeque;
 use thiserror::Error;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlockState {
+    Free,
+    InUse,
+    Retired,
+}
+
 #[derive(Debug, Error)]
 pub enum BlockError {
     #[error("out of memory: no free blocks available (need {needed}, have {available})")]
@@ -17,6 +24,11 @@ pub struct BlockManager {
     block_size: usize,
     num_blocks: usize,
     free_blocks: VecDeque<u32>,
+    /// O(1) ownership checks for allocation/free and allocation-free lookup of
+    /// the live high-water mark. Keeping this alongside the free/retired queues
+    /// avoids rebuilding pool-sized hash sets while decode is paused for cache
+    /// cleanup or a physical resize.
+    block_states: Vec<BlockState>,
     /// Blocks taken OUT of circulation by a dynamic shrink (the memory governor
     /// lowering the inference KV footprint so a coexisting job / training run can
     /// use that VRAM). They are neither free nor in-use — `set_target_usable`
@@ -34,6 +46,7 @@ impl BlockManager {
             block_size,
             num_blocks,
             free_blocks,
+            block_states: vec![BlockState::Free; num_blocks],
             retired_blocks: VecDeque::new(),
             target_usable: num_blocks,
         }
@@ -95,6 +108,7 @@ impl BlockManager {
                 ids.sort_unstable();
                 let keep = ids.len() - to_retire;
                 for &id in &ids[keep..] {
+                    self.transition(id, BlockState::Free, BlockState::Retired);
                     self.retired_blocks.push_back(id);
                 }
                 // Keep the free list low-ID-biased so allocation reuses low
@@ -110,6 +124,7 @@ impl BlockManager {
                 ids.sort_unstable();
                 let restore = to_restore.min(ids.len());
                 for &id in &ids[..restore] {
+                    self.transition(id, BlockState::Retired, BlockState::Free);
                     self.free_blocks.push_back(id);
                 }
                 self.retired_blocks = ids[restore..].iter().copied().collect();
@@ -125,14 +140,10 @@ impl BlockManager {
     /// retired. This is the high-water mark that bounds how far the physical
     /// pool may be truncated — the tensor tail above this ID holds no live KV.
     pub fn highest_in_use_block(&self) -> Option<u32> {
-        if self.num_used() == 0 {
-            return None;
-        }
-        let free: std::collections::HashSet<u32> = self.free_blocks.iter().copied().collect();
-        let retired: std::collections::HashSet<u32> = self.retired_blocks.iter().copied().collect();
-        (0..self.num_blocks as u32)
-            .rev()
-            .find(|id| !free.contains(id) && !retired.contains(id))
+        self.block_states
+            .iter()
+            .rposition(|state| *state == BlockState::InUse)
+            .map(|id| id as u32)
     }
 
     /// Smallest `num_blocks` the physical pool could shrink to RIGHT NOW without
@@ -166,6 +177,7 @@ impl BlockManager {
         let cap = new_num_blocks as u32;
         self.free_blocks.retain(|&id| id < cap);
         self.retired_blocks.retain(|&id| id < cap);
+        self.block_states.truncate(new_num_blocks);
         self.num_blocks = new_num_blocks;
         self.target_usable = self.target_usable.min(new_num_blocks);
         Ok(())
@@ -182,8 +194,10 @@ impl BlockManager {
         for id in self.num_blocks as u32..new_num_blocks as u32 {
             if (id as usize) < self.target_usable {
                 self.free_blocks.push_back(id);
+                self.block_states.push(BlockState::Free);
             } else {
                 self.retired_blocks.push_back(id);
+                self.block_states.push(BlockState::Retired);
             }
         }
         self.num_blocks = new_num_blocks;
@@ -191,10 +205,15 @@ impl BlockManager {
 
     /// Allocate a single block. Returns the physical block ID.
     pub fn allocate_one(&mut self) -> Result<u32, BlockError> {
-        self.free_blocks.pop_front().ok_or(BlockError::OutOfMemory {
-            needed: 1,
-            available: 0,
-        })
+        let block_id = self
+            .free_blocks
+            .pop_front()
+            .ok_or(BlockError::OutOfMemory {
+                needed: 1,
+                available: 0,
+            })?;
+        self.transition(block_id, BlockState::Free, BlockState::InUse);
+        Ok(block_id)
     }
 
     /// Allocate `n` contiguous-in-ID blocks. Returns the block IDs.
@@ -206,9 +225,13 @@ impl BlockManager {
                 available: self.free_blocks.len(),
             });
         }
-        Ok((0..n)
+        let blocks: Vec<u32> = (0..n)
             .map(|_| self.free_blocks.pop_front().unwrap())
-            .collect())
+            .collect();
+        for &block_id in &blocks {
+            self.transition(block_id, BlockState::Free, BlockState::InUse);
+        }
+        Ok(blocks)
     }
 
     /// Free a single block. Normally returns it to the free list, but if a
@@ -217,8 +240,10 @@ impl BlockManager {
     /// requests drain).
     pub fn free_one(&mut self, block_id: u32) {
         if self.num_blocks - self.retired_blocks.len() > self.target_usable {
+            self.transition(block_id, BlockState::InUse, BlockState::Retired);
             self.retired_blocks.push_back(block_id);
         } else {
+            self.transition(block_id, BlockState::InUse, BlockState::Free);
             self.free_blocks.push_back(block_id);
         }
     }
@@ -236,20 +261,14 @@ impl BlockManager {
             },
             "BlockManager::free_all called with duplicate block IDs: {block_ids:?}",
         );
-        debug_assert!(
-            {
-                let free_set: std::collections::HashSet<u32> =
-                    self.free_blocks.iter().copied().collect();
-                block_ids.iter().all(|id| !free_set.contains(id))
-            },
-            "BlockManager::free_all called with block IDs already on the free list: incoming={block_ids:?}",
-        );
         for &id in block_ids {
             // Retire instead of free while a pending shrink keeps circulation
             // above the target (see free_one).
             if self.num_blocks - self.retired_blocks.len() > self.target_usable {
+                self.transition(id, BlockState::InUse, BlockState::Retired);
                 self.retired_blocks.push_back(id);
             } else {
+                self.transition(id, BlockState::InUse, BlockState::Free);
                 self.free_blocks.push_back(id);
             }
         }
@@ -258,6 +277,18 @@ impl BlockManager {
     /// Can we allocate `n` blocks right now?
     pub fn can_allocate(&self, n: usize) -> bool {
         self.free_blocks.len() >= n
+    }
+
+    fn transition(&mut self, block_id: u32, expected: BlockState, next: BlockState) {
+        let state = self
+            .block_states
+            .get_mut(block_id as usize)
+            .unwrap_or_else(|| panic!("BlockManager block ID {block_id} is out of range"));
+        assert_eq!(
+            *state, expected,
+            "BlockManager invalid block transition for ID {block_id}: expected {expected:?}, found {state:?}, next {next:?}"
+        );
+        *state = next;
     }
 }
 
@@ -400,6 +431,15 @@ mod tests {
 
         bm.free_all(&blocks);
         assert_eq!(bm.num_free(), 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid block transition")]
+    fn block_manager_rejects_double_free_without_scanning_the_free_pool() {
+        let mut bm = BlockManager::new(1_000_000, 16);
+        let block = bm.allocate_one().unwrap();
+        bm.free_one(block);
+        bm.free_one(block);
     }
 
     #[test]
