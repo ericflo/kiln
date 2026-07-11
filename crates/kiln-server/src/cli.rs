@@ -127,6 +127,8 @@ const TRAIN_GRPO_OVERVIEW: &str = r#"Train from GRPO data: either one JSON reque
 
 Use --adapter-smoke-test to compare base vs trained adapter logits and short greedy outputs before running a full eval.
 
+Use --checkpoint-interval N to emit exact resumable checkpoints every N optimizer groups. Resume with the same file and configuration plus --resume-checkpoint BASENAME.
+
 Open http://127.0.0.1:8420/ui/ for guided submission and training status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
 
@@ -141,7 +143,10 @@ const TRAIN_EXAMPLES: &str = r#"Examples:
       Train from one GRPO JSON request/batch with groups.
 
   kiln train grpo --file grpo-groups.jsonl --adapter support-bot
-      Train from GRPO JSONL, streaming one group per line through the Vulkan-native path.
+      Train from GRPO JSONL without retaining the full dataset in memory.
+
+  kiln train grpo --file grpo-groups.jsonl --adapter support-bot --checkpoint-interval 25
+      Publish an exact immutable resume point every 25 optimizer groups.
 
   kiln train status
       Show the training queue and recent jobs on the running server.
@@ -740,6 +745,14 @@ pub enum TrainCommands {
         /// Run an adapter-effect smoke test after successful training
         #[arg(long)]
         adapter_smoke_test: bool,
+
+        /// Emit an exact resumable checkpoint every N optimizer groups
+        #[arg(long)]
+        checkpoint_interval: Option<std::num::NonZeroUsize>,
+
+        /// Immutable .kiln-checkpoint basename reported by job status
+        #[arg(long)]
+        resume_checkpoint: Option<String>,
 
         /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value_t = default_server_url())]
@@ -2194,9 +2207,18 @@ pub async fn run_train_grpo(
     adapter: &str,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
+    checkpoint_interval: Option<usize>,
+    resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<()> {
     let body = if is_grpo_jsonl_path(file) {
-        build_grpo_jsonl_training_payload(file, adapter, lora_rank, adapter_smoke_test)?
+        build_grpo_jsonl_training_payload(
+            file,
+            adapter,
+            lora_rank,
+            adapter_smoke_test,
+            checkpoint_interval,
+            resume_checkpoint,
+        )?
     } else {
         let content = std::fs::read_to_string(file)
             .map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
@@ -2204,7 +2226,14 @@ pub async fn run_train_grpo(
         let body: serde_json::Value = serde_json::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in {file}: {e}"))?;
 
-        build_grpo_training_payload(body, adapter, lora_rank, adapter_smoke_test)?
+        build_grpo_training_payload(
+            body,
+            adapter,
+            lora_rank,
+            adapter_smoke_test,
+            checkpoint_interval,
+            resume_checkpoint,
+        )?
     };
 
     println!(
@@ -2313,6 +2342,8 @@ fn build_grpo_jsonl_training_payload(
     adapter: &str,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
+    checkpoint_interval: Option<usize>,
+    resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     let dataset_path = std::fs::canonicalize(file)
         .map_err(|e| anyhow::anyhow!("Failed to resolve GRPO JSONL file {file}: {e}"))?;
@@ -2328,6 +2359,12 @@ fn build_grpo_jsonl_training_payload(
     }
     if adapter_smoke_test {
         config["adapter_smoke_test"] = serde_json::json!(true);
+    }
+    if let Some(interval) = checkpoint_interval {
+        config["checkpoint_interval"] = serde_json::json!(interval);
+    }
+    if let Some(checkpoint) = resume_checkpoint {
+        config["resume_checkpoint"] = serde_json::json!(checkpoint);
     }
     Ok(serde_json::json!({
         "dataset_path": dataset_path,
@@ -2377,6 +2414,8 @@ fn build_grpo_training_payload(
     adapter: &str,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
+    checkpoint_interval: Option<usize>,
+    resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     let obj = body.as_object_mut().ok_or_else(|| {
         anyhow::anyhow!("GRPO request must be a JSON object with groups and config")
@@ -2395,6 +2434,12 @@ fn build_grpo_training_payload(
     }
     if adapter_smoke_test {
         config_obj.insert("adapter_smoke_test".into(), serde_json::json!(true));
+    }
+    if let Some(interval) = checkpoint_interval {
+        config_obj.insert("checkpoint_interval".into(), serde_json::json!(interval));
+    }
+    if let Some(checkpoint) = resume_checkpoint {
+        config_obj.insert("resume_checkpoint".into(), serde_json::json!(checkpoint));
     }
 
     Ok(body)
@@ -3784,12 +3829,25 @@ mod tests {
             .unwrap()
             .insert("adapter_name".to_string(), json!("legacy-top-level"));
 
-        let body = build_grpo_training_payload(body, "grpo-adapter", Some(16), true).unwrap();
+        let body = build_grpo_training_payload(
+            body,
+            "grpo-adapter",
+            Some(16),
+            true,
+            Some(25),
+            Some("grpo-adapter-checkpoint-step-00000025.kiln-checkpoint"),
+        )
+        .unwrap();
 
         assert_eq!(body["config"]["output_name"], "grpo-adapter");
         assert_eq!(body["config"]["learning_rate"], 5e-5);
         assert_eq!(body["config"]["lora_rank"], 16);
         assert_eq!(body["config"]["adapter_smoke_test"], true);
+        assert_eq!(body["config"]["checkpoint_interval"], 25);
+        assert_eq!(
+            body["config"]["resume_checkpoint"],
+            "grpo-adapter-checkpoint-step-00000025.kiln-checkpoint"
+        );
         assert!(body.get("adapter_name").is_none());
         assert!(body["config"].get("epochs").is_none());
         assert!(body["config"].get("num_epochs").is_none());
@@ -3804,7 +3862,8 @@ mod tests {
             }],
         });
 
-        let body = build_grpo_training_payload(body, "grpo-adapter", None, false).unwrap();
+        let body =
+            build_grpo_training_payload(body, "grpo-adapter", None, false, None, None).unwrap();
 
         assert_eq!(body["config"]["output_name"], "grpo-adapter");
         assert!(body["config"].get("lora_rank").is_none());
@@ -3822,13 +3881,24 @@ mod tests {
         .unwrap();
 
         assert!(is_grpo_jsonl_path(path.to_str().unwrap()));
-        let body =
-            build_grpo_jsonl_training_payload(path.to_str().unwrap(), "grpo-jsonl", Some(12), true)
-                .unwrap();
+        let body = build_grpo_jsonl_training_payload(
+            path.to_str().unwrap(),
+            "grpo-jsonl",
+            Some(12),
+            true,
+            Some(2),
+            Some("grpo-jsonl-checkpoint-step-00000002.kiln-checkpoint"),
+        )
+        .unwrap();
         assert!(body.get("groups").is_none());
         assert_eq!(body["config"]["output_name"], "grpo-jsonl");
         assert_eq!(body["config"]["lora_rank"], 12);
         assert_eq!(body["config"]["adapter_smoke_test"], true);
+        assert_eq!(body["config"]["checkpoint_interval"], 2);
+        assert_eq!(
+            body["config"]["resume_checkpoint"],
+            "grpo-jsonl-checkpoint-step-00000002.kiln-checkpoint"
+        );
         assert!(body["dataset_path"].as_str().unwrap().ends_with(".jsonl"));
         let _ = std::fs::remove_file(path);
     }
@@ -4064,6 +4134,57 @@ mod tests {
             }
             other => panic!("expected Train(Status), got {:?}", other.is_some()),
         }
+    }
+
+    #[test]
+    fn parses_grpo_exact_resume_options() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "kiln",
+            "train",
+            "grpo",
+            "--file",
+            "groups.jsonl",
+            "--adapter",
+            "demo",
+            "--checkpoint-interval",
+            "25",
+            "--resume-checkpoint",
+            "demo-checkpoint-step-00000025.kiln-checkpoint",
+        ])
+        .expect("parse failed");
+        match cli.command {
+            Some(Commands::Train(TrainCommands::Grpo {
+                checkpoint_interval,
+                resume_checkpoint,
+                ..
+            })) => {
+                assert_eq!(
+                    checkpoint_interval.map(std::num::NonZeroUsize::get),
+                    Some(25)
+                );
+                assert_eq!(
+                    resume_checkpoint.as_deref(),
+                    Some("demo-checkpoint-step-00000025.kiln-checkpoint")
+                );
+            }
+            other => panic!("expected Train(Grpo), got {:?}", other.is_some()),
+        }
+
+        let err = Cli::try_parse_from([
+            "kiln",
+            "train",
+            "grpo",
+            "--file",
+            "groups.jsonl",
+            "--adapter",
+            "demo",
+            "--checkpoint-interval",
+            "0",
+        ])
+        .err()
+        .expect("zero checkpoint interval must be rejected");
+        assert!(err.to_string().contains("invalid value '0'"));
     }
 
     #[test]

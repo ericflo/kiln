@@ -265,10 +265,20 @@ async fn main() -> Result<()> {
                 adapter,
                 lora_rank,
                 adapter_smoke_test,
+                checkpoint_interval,
+                resume_checkpoint,
                 url,
             } => {
-                return cli::run_train_grpo(url, file, adapter, *lora_rank, *adapter_smoke_test)
-                    .await;
+                return cli::run_train_grpo(
+                    url,
+                    file,
+                    adapter,
+                    *lora_rank,
+                    *adapter_smoke_test,
+                    checkpoint_interval.map(std::num::NonZeroUsize::get),
+                    resume_checkpoint.as_deref(),
+                )
+                .await;
             }
             TrainCommands::Status { job_id, url } => {
                 return cli::run_train_status(url, job_id.as_deref()).await;
