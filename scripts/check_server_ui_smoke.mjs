@@ -204,6 +204,19 @@ function validateGrpoPayload(body) {
   return null;
 }
 
+function validateOpdPayload(body) {
+  if (!Array.isArray(body?.prompts) || body.prompts.length !== 2) return 'OPD prompts should be the two-item sample array';
+  if (!body.prompts.every((prompt) => Array.isArray(prompt?.messages) && prompt.messages.length > 0)) return 'OPD sample prompts should preserve messages';
+  if (body?.teacher !== 'teacher-v1') return 'OPD should submit the selected registered teacher';
+  if (body?.config?.output_name !== 'opd-adapter') return 'OPD output_name should be nested under config';
+  if (body?.config?.training_mode !== 'on_policy') return 'OPD browser form should submit the on-policy mode it presents';
+  if (body?.config?.lora_rank !== 32) return 'OPD lora_rank should be numeric and nested under config';
+  if (body?.config?.checkpoint_interval !== 25) return 'OPD checkpoint_interval should preserve the exact-resume default';
+  if ('resume_checkpoint' in (body?.config || {})) return 'Fresh OPD submission should omit resume_checkpoint when the field is blank';
+  if (body?.config?.auto_load !== true) return 'OPD auto_load should be true by default';
+  return null;
+}
+
 function isPathSafeAdapterDirectoryName(name) {
   return typeof name === 'string'
     && name.length > 0
@@ -547,6 +560,14 @@ async function startServer({
   availableAdapters = availableAdapters.map((adapter) => ({ ...adapter }));
   let activeAdapter = availableAdapters.find((adapter) => adapter.active)?.name || null;
   const completedTrainingJobs = [];
+  const smokeTeacherRevision = `sha256:${'7'.repeat(64)}`;
+  const smokeTeachers = [{
+    spec: { alias: 'teacher-v1', kind: 'fixture', model_id: 'smoke-teacher-v1' },
+    usable: true,
+    status: 'configured',
+    identity_revision: smokeTeacherRevision,
+    capabilities: { teacher_id: 'teacher-v1', max_top_k: 32, vocab_size: 248320 },
+  }];
   // Mirrors the real server's single running slot. SFT submit lands here
   // (state Running) so the drill-modal Stop flow can exercise the
   // cooperative running-job cancel; DELETE /v1/train/queue/:id moves it to
@@ -999,6 +1020,10 @@ async function startServer({
       }), 75);
       return;
     }
+    if (url.pathname === '/v1/teachers' && req.method === 'GET') {
+      json(res, { teachers: smokeTeachers });
+      return;
+    }
     if (url.pathname === '/v1/train/queue' || url.pathname === '/v1/train/status') {
       json(res, { running: runningTrainingJob, queued: [], completed: completedTrainingJobs });
       return;
@@ -1124,6 +1149,46 @@ async function startServer({
         },
       });
       setTimeout(() => json(res, { message: 'GRPO job submitted', job_id: 'smoke-grpo' }), 75);
+      return;
+    }
+    if (url.pathname === '/v1/train/opd') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: 'Use POST for OPD training' }));
+        return;
+      }
+      const body = await readJsonBody(req);
+      const validationError = validateOpdPayload(body);
+      if (validationError) {
+        apiBadRequest(res, validationError);
+        return;
+      }
+      completedTrainingJobs.unshift({
+        job_id: 'smoke-opd',
+        job_type: 'opd',
+        state: 'Completed',
+        progress: 1,
+        adapter_name: body.config.output_name,
+        elapsed_secs: 2,
+        latest_checkpoint: {
+          resume_checkpoint: 'opd-adapter-checkpoint-step-00000002.kiln-checkpoint',
+          checkpoint_id: 'smoke-opd-checkpoint-2',
+          training_kind: 'opd',
+          data_source_kind: 'inline-opd-prompts-v1',
+          global_step: 2,
+          total_steps: 4,
+          next_epoch_index: 0,
+          next_cursor_in_epoch: 2,
+          complete: false,
+          created_at: '2026-07-10T12:05:00Z',
+          effective_config: { ...body.config, seed: 73 },
+          data_content_sha256: '9'.repeat(64),
+          data_item_count: body.prompts.length,
+          teacher_id: body.teacher,
+          teacher_content_revision: smokeTeacherRevision,
+        },
+      });
+      setTimeout(() => json(res, { message: 'OPD job submitted', job_id: 'smoke-opd' }), 75);
       return;
     }
     if (url.pathname === '/v1/models') {
@@ -3166,6 +3231,83 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await clickAndWait(page, '#grpo-form button[type="submit"]', 'Could not exercise invalid GRPO resume validation');
     await expectTrainingToast(page, 'GRPO resume checkpoint must be one direct .kiln-checkpoint basename, without a path.');
 
+    await goToPrimaryTab(page, 'distill');
+    await clickAndWait(page, '#distill-tab-opd', 'Could not open the OPD distillation form');
+    await waitForVisiblePanel(page, '#distill-tab-opd-pane', 'OPD distillation pane did not activate');
+    await page.waitForFunction(
+      () => Array.from(document.getElementById('opd-teacher')?.options || []).some((option) => option.value === 'teacher-v1'),
+      { timeout: 5000 },
+    ).catch(() => fail('OPD teacher dropdown did not load the usable registered teacher'));
+    await page.select('#opd-teacher', 'teacher-v1');
+    await clickAndWait(page, '#opd-use-sample', 'Could not insert OPD sample prompts');
+    const freshOpdState = await page.evaluate(() => ({
+      cadence: document.getElementById('opd-checkpoint-interval')?.value,
+      checkpoint: document.getElementById('opd-resume-checkpoint')?.value,
+      promptCount: JSON.parse(document.getElementById('opd-prompts')?.value || '[]').length,
+    }));
+    if (freshOpdState.cadence !== '25' || freshOpdState.checkpoint !== '' || freshOpdState.promptCount !== 2) {
+      fail(`Fresh OPD exact-checkpoint defaults are wrong: ${JSON.stringify(freshOpdState)}`);
+    }
+    const opdSubmitRequest = page.waitForRequest(
+      (request) => request.method() === 'POST' && request.url().endsWith('/v1/train/opd'),
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#opd-form button[type="submit"]', 'Could not submit the OPD sample payload');
+    await opdSubmitRequest.catch(() => fail('OPD form did not POST /v1/train/opd'));
+    await expectTrainingToast(page, 'OPD job submitted');
+    await expectActivePageAndHash(page, 'training', 'Submitting OPD should open the training queue', '#training/queue');
+    await waitForPanelText(page, '#tab-queue', /smoke-op/, 'Training queue should refresh after OPD submit');
+    await waitForPanelText(page, '#tab-queue', /Adapter:\s*opd-adapter/, 'Training queue should show the submitted OPD adapter name');
+
+    await clickAndWait(page, '[data-train-job-id="smoke-opd"]', 'Could not open the completed OPD job detail');
+    await waitForPanelText(page, '#train-drill-content', /OPD inline-opd-prompts-v1 · next candidate cursor 2/, 'OPD checkpoint status should use candidate-cursor wording');
+    await clickAndWait(page, '[data-prepare-training-resume]', 'Could not prepare the OPD resume form');
+    await waitForVisiblePanel(page, '#distill-tab-opd-pane', 'Preparing OPD resume should open the Distill form');
+    await expectActivePageAndHash(page, 'distill', 'Preparing OPD resume should deep-link to the Distill form', '#distill/opd');
+    await expectTrainingToast(page, 'OPD checkpoint loaded — reinsert the exact original prompts before submitting.');
+    const preparedOpd = await page.evaluate(() => ({
+      adapter: document.getElementById('opd-output-name')?.value,
+      teacher: document.getElementById('opd-teacher')?.value,
+      rank: document.getElementById('opd-rank')?.value,
+      cadence: document.getElementById('opd-checkpoint-interval')?.value,
+      checkpoint: document.getElementById('opd-resume-checkpoint')?.value,
+      prompts: document.getElementById('opd-prompts')?.value,
+      noteHidden: document.getElementById('opd-resume-note')?.hidden,
+      note: document.getElementById('opd-resume-note')?.textContent || '',
+    }));
+    if (preparedOpd.adapter !== 'opd-adapter'
+      || preparedOpd.teacher !== 'teacher-v1'
+      || preparedOpd.rank !== '32'
+      || preparedOpd.cadence !== '25'
+      || preparedOpd.checkpoint !== 'opd-adapter-checkpoint-step-00000002.kiln-checkpoint'
+      || preparedOpd.prompts !== ''
+      || preparedOpd.noteHidden
+      || !/2 training candidates \(data 999999999999…\)/.test(preparedOpd.note)) {
+      fail(`Prepared OPD resume fields were incomplete or unsafe: ${JSON.stringify(preparedOpd)}`);
+    }
+
+    await page.$eval('#opd-checkpoint-interval', (input) => { input.value = '0'; });
+    const opdZeroCadence = await page.$eval('#opd-checkpoint-interval', (input) => ({
+      valid: input.checkValidity(),
+      rangeUnderflow: input.validity.rangeUnderflow,
+      formValid: input.form?.checkValidity(),
+    }));
+    if (opdZeroCadence.valid || !opdZeroCadence.rangeUnderflow || opdZeroCadence.formValid) {
+      fail(`Native OPD checkpoint cadence validation should reject zero: ${JSON.stringify(opdZeroCadence)}`);
+    }
+    await page.$eval('#opd-checkpoint-interval', (input) => { input.value = '25'; });
+    await clickAndWait(page, '#opd-use-sample', 'Could not restore OPD prompts for validation checks');
+    await page.$eval('#opd-resume-checkpoint', (input) => { input.value = '../bad.kiln-checkpoint'; });
+    await clickAndWait(page, '#opd-form button[type="submit"]', 'Could not exercise invalid OPD resume validation');
+    await expectTrainingToast(page, 'OPD resume checkpoint must be one direct .kiln-checkpoint basename, without a path.');
+    await page.$eval('#opd-resume-checkpoint', (input) => { input.value = 'opd-adapter-checkpoint-step-00000002.kiln-checkpoint'; });
+    await page.$eval('#opd-form', (form) => { form.dataset.resumeTeacherRevision = `sha256:${'8'.repeat(64)}`; });
+    await clickAndWait(page, '#opd-form button[type="submit"]', 'Could not exercise OPD teacher-revision validation');
+    await expectTrainingToast(page, 'OPD resume requires the exact teacher revision recorded by the checkpoint. Restore or re-register that teacher before submitting.');
+    await page.$eval('#opd-form', (form) => { form.dataset.resumeTeacherRevision = ''; });
+    await clickAndWait(page, '#opd-form button[type="submit"]', 'Could not exercise OPD missing teacher-binding validation');
+    await expectTrainingToast(page, 'This OPD checkpoint does not expose an exact teacher identity and revision, so it cannot be prepared safely in the browser.');
+
     await goToPrimaryTab(page, 'playground');
     await expectDisabled(page, '#chat-send', true, 'Quick Inference send should start disabled until text is entered');
     await page.waitForFunction(() => document.getElementById('chat-thinking-budget-preview')?.dataset.state === 'ready', { timeout: 5000 })
@@ -3322,7 +3464,34 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await page.waitForFunction(() => (
       /Thinking tokens must be a whole number/.test(document.getElementById('toasts')?.textContent || '')
       && document.activeElement?.id === 'chat-thinking-budget-tokens'
-    ), { timeout: 5000 }).catch(() => fail('A decimal token budget should show an error and focus the token field'));
+    ), { timeout: 5000 }).catch(async () => {
+      const state = await page.evaluate(() => {
+        const input = document.getElementById('chat-thinking-budget-tokens');
+        const send = document.getElementById('chat-send');
+        return {
+          activeElement: document.activeElement?.id,
+          inputValue: input?.value,
+          inputValid: input?.checkValidity(),
+          inputBadInput: input?.validity?.badInput,
+          inputStepMismatch: input?.validity?.stepMismatch,
+          sendDisabled: send?.disabled,
+          sendText: send?.textContent,
+          stopHidden: document.getElementById('chat-stop')?.hidden,
+          compareToggle: document.getElementById('chat-compare-toggle')?.checked,
+          sendCenterTarget: (() => {
+            const rect = send?.getBoundingClientRect();
+            if (!rect) return null;
+            const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+            return { id: target?.id, tag: target?.tagName, className: target?.className };
+          })(),
+          visibleDialogs: Array.from(document.querySelectorAll('[role="dialog"]'))
+            .filter((dialog) => !dialog.hidden && getComputedStyle(dialog).display !== 'none')
+            .map((dialog) => dialog.id),
+          toasts: document.getElementById('toasts')?.textContent || '',
+        };
+      });
+      fail(`A decimal token budget should show an error and focus the token field: ${JSON.stringify(state)}`);
+    });
 
     await page.$eval('#toasts', (toasts) => toasts.replaceChildren());
     await page.$eval('#chat-thinking-budget-tokens', (input) => { input.value = ''; input.focus(); });

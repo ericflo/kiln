@@ -2521,6 +2521,18 @@ struct TrainingCheckpointSummary {
     next_cursor_in_epoch: u64,
     complete: bool,
     created_at: String,
+    /// Exact resolved configuration stored in the validated manifest. The UI
+    /// uses this rather than a best-effort reconstruction when preparing a
+    /// resume form.
+    effective_config: serde_json::Value,
+    data_content_sha256: String,
+    data_item_count: u64,
+    /// OPD-only teacher identity, extracted from the validated auxiliary
+    /// state. Absent for SFT/GRPO and legacy OPD checkpoints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    teacher_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    teacher_content_revision: Option<String>,
 }
 
 fn discover_latest_training_checkpoint(
@@ -2582,6 +2594,16 @@ fn discover_latest_training_checkpoint(
         if manifest.training_kind != expected_kind {
             continue;
         }
+        let teacher_id = manifest
+            .auxiliary_state
+            .pointer("/teacher_capabilities/teacher_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let teacher_content_revision = manifest
+            .auxiliary_state
+            .get("teacher_content_revision")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         let summary = TrainingCheckpointSummary {
             resume_checkpoint: name,
             checkpoint_id: manifest.checkpoint_id,
@@ -2593,6 +2615,11 @@ fn discover_latest_training_checkpoint(
             next_cursor_in_epoch: manifest.progress.cursor_in_epoch,
             complete: manifest.progress.global_step == manifest.progress.total_steps,
             created_at: manifest.created_at,
+            effective_config: manifest.effective_config,
+            data_content_sha256: manifest.data.content_sha256,
+            data_item_count: manifest.data.item_count,
+            teacher_id,
+            teacher_content_revision,
         };
         let replace = latest.as_ref().is_none_or(|current| {
             (
@@ -2859,6 +2886,14 @@ mod tests {
         let data_order = (global_step < total_steps)
             .then_some(vec![0])
             .unwrap_or_default();
+        let auxiliary_state = if training_kind == TrainingKind::Opd {
+            serde_json::json!({
+                "teacher_capabilities": {"teacher_id": "teacher-v1"},
+                "teacher_content_revision": format!("sha256:{}", "22".repeat(32)),
+            })
+        } else {
+            serde_json::json!({})
+        };
         let manifest = TrainingCheckpointManifest::new(
             format!("checkpoint-{global_step}"),
             training_kind,
@@ -2903,7 +2938,7 @@ mod tests {
                 reward_normalization_state: None,
                 loss_history: None,
             },
-            serde_json::json!({}),
+            auxiliary_state,
         );
         let artifacts = [CheckpointArtifact {
             relative_path: "adapter.safetensors".into(),
@@ -3001,6 +3036,15 @@ mod tests {
         let latest = latest.expect("latest valid OPD checkpoint");
         assert_eq!(latest.training_kind, TrainingKind::Opd);
         assert_eq!(latest.global_step, 7);
+        assert_eq!(latest.effective_config, serde_json::json!({"epochs": 8}));
+        assert_eq!(latest.data_content_sha256, "11".repeat(32));
+        assert_eq!(latest.data_item_count, 1);
+        assert_eq!(latest.teacher_id.as_deref(), Some("teacher-v1"));
+        let expected_teacher_revision = format!("sha256:{}", "22".repeat(32));
+        assert_eq!(
+            latest.teacher_content_revision.as_deref(),
+            Some(expected_teacher_revision.as_str())
+        );
         assert_eq!(
             latest.resume_checkpoint,
             "demo-checkpoint-step-00000007.kiln-checkpoint"

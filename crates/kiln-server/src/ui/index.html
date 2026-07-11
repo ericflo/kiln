@@ -1310,6 +1310,19 @@
               <input type="text" id="opd-top-p" name="top_p" value="0.9">
             </div>
           </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="opd-checkpoint-interval">Checkpoint interval</label>
+              <input type="number" id="opd-checkpoint-interval" name="checkpoint_interval" value="25" min="1" step="1">
+              <div class="form-help">Committed optimizer steps between exact immutable resume points. Blank uses the server default.</div>
+            </div>
+            <div class="form-group" style="flex:2;">
+              <label for="opd-resume-checkpoint">Resume checkpoint</label>
+              <input type="text" id="opd-resume-checkpoint" name="resume_checkpoint" value="" placeholder="adapter-checkpoint-step-….kiln-checkpoint" autocomplete="off" spellcheck="false">
+              <div class="form-help">Direct <code>.kiln-checkpoint</code> basename from job detail. Teacher, prompts, and settings must match.</div>
+            </div>
+          </div>
+          <div class="train-data-status is-good" id="opd-resume-note" role="status" aria-live="polite" hidden></div>
           <div class="form-group">
             <label for="opd-prompts">Prompts (JSON array)</label>
             <textarea id="opd-prompts" name="prompts" rows="8" placeholder='[{"messages":[{"role":"user","content":"Solve: 2x^2 - 5x + 3 = 0"},{"role":"assistant","content":"Use the quadratic formula..."}]}]'></textarea>

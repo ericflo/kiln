@@ -563,7 +563,7 @@ function toast(msg, type) {
     counter.className = 'toast-count';
     counter.style.cssText = 'margin-left:8px; opacity:0.7; font-variant-numeric: tabular-nums;';
     counter.textContent = `×${cnt}`;
-    last.appendChild(counter);
+    last.insertBefore(counter, last.querySelector('.toast-action-close'));
     clearTimeout(Number(last.dataset.toastTimer));
     last.dataset.toastTimer = String(setTimeout(() => last.remove(), 4000));
     return;
@@ -576,10 +576,16 @@ function toast(msg, type) {
     el.setAttribute('aria-live', 'assertive');
     el.setAttribute('aria-atomic', 'true');
   }
-  el.textContent = msg;
-  el.title = 'Click to dismiss';
-  el.style.cursor = 'pointer';
-  el.addEventListener('click', () => el.remove());
+  const text = document.createElement('span');
+  text.textContent = msg;
+  el.appendChild(text);
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'toast-action-close';
+  close.setAttribute('aria-label', 'Dismiss');
+  close.innerHTML = icon('close', 'icn-sm');
+  close.addEventListener('click', () => el.remove());
+  el.appendChild(close);
   c.appendChild(el);
   el.dataset.toastTimer = String(setTimeout(() => el.remove(), 4000));
 }
@@ -9432,7 +9438,7 @@ function renderTrainMetadata(j) {
 
 function checkpointTrainingKind(j, checkpoint) {
   const kind = String(checkpoint?.training_kind || j?.job_type || '').toLowerCase();
-  return kind === 'sft' || kind === 'grpo' ? kind : null;
+  return kind === 'sft' || kind === 'grpo' || kind === 'opd' ? kind : null;
 }
 
 function setTrainingFormValue(id, value) {
@@ -9452,6 +9458,75 @@ async function prepareTrainingResume(j, checkpoint) {
   const kind = checkpointTrainingKind(j, checkpoint);
   if (!kind) {
     toast('This checkpoint type cannot be resumed from the browser.', 'err');
+    return;
+  }
+
+  if (kind === 'opd') {
+    closeTrainDrillModal();
+    selectPage('distill');
+    document.getElementById('distill-tab-opd')?.click();
+
+    const form = document.getElementById('opd-form');
+    form?.reset();
+    const config = checkpoint?.effective_config || {};
+    setTrainingFormValue('opd-output-name', j.adapter_name || config.output_name || 'opd-adapter');
+    setTrainingFormValue('opd-lr', Number.isFinite(config.learning_rate) ? config.learning_rate : '');
+    setTrainingFormValue('opd-rank', Number.isInteger(config.lora_rank) && config.lora_rank > 0 ? config.lora_rank : 32);
+    setTrainingFormValue('opd-loss', typeof config.loss === 'string' ? config.loss : 'teacher_top_k');
+    setTrainingFormValue('opd-top-k', Number.isInteger(config.top_k) ? config.top_k : 16);
+    setTrainingFormValue('opd-samples', Number.isInteger(config.samples_per_prompt) && config.samples_per_prompt > 0 ? config.samples_per_prompt : 4);
+    setTrainingFormValue('opd-max-tokens', Number.isInteger(config.max_tokens) && config.max_tokens > 0 ? config.max_tokens : 7168);
+    setTrainingFormValue('opd-temperature', Number.isFinite(config.temperature) ? config.temperature : 1);
+    setTrainingFormValue('opd-top-p', Number.isFinite(config.top_p) ? config.top_p : 0.9);
+    setTrainingFormValue(
+      'opd-checkpoint-interval',
+      Number.isInteger(config.checkpoint_interval) && config.checkpoint_interval > 0
+        ? config.checkpoint_interval
+        : '',
+    );
+    setTrainingFormValue('opd-resume-checkpoint', checkpoint.resume_checkpoint);
+    const autoLoad = document.getElementById('opd-auto-load');
+    if (autoLoad && typeof config.auto_load === 'boolean') autoLoad.checked = config.auto_load;
+    setTrainingFormValue('opd-prompts', '');
+
+    let teachers = [];
+    try {
+      teachers = (await api('/v1/teachers'))?.teachers || [];
+      await refreshTeacherDropdowns(teachers);
+    } catch { /* Submission still performs authoritative server validation. */ }
+    const expectedTeacher = String(checkpoint.teacher_id || '');
+    const currentTeacher = teachers.find(t => t.spec?.alias === expectedTeacher && t.usable === true);
+    const teacherBound = Boolean(
+      expectedTeacher
+      && checkpoint.teacher_content_revision
+      && currentTeacher?.identity_revision === checkpoint.teacher_content_revision,
+    );
+    if (teacherBound) {
+      setTrainingFormValue('opd-teacher', expectedTeacher);
+    } else {
+      setTrainingFormValue('opd-teacher', '');
+    }
+
+    if (form) {
+      form.dataset.resumeCheckpoint = checkpoint.resume_checkpoint || '';
+      form.dataset.resumeTeacher = expectedTeacher;
+      form.dataset.resumeTeacherRevision = checkpoint.teacher_content_revision || '';
+    }
+    const note = document.getElementById('opd-resume-note');
+    if (note) {
+      const dataHash = String(checkpoint.data_content_sha256 || '').replace(/^sha256:/, '');
+      const count = Number.isInteger(checkpoint.data_item_count) ? checkpoint.data_item_count : '?';
+      note.hidden = false;
+      note.className = `train-data-status ${teacherBound ? 'is-good' : 'is-bad'}`;
+      note.textContent = teacherBound
+        ? `Exact checkpoint loaded for ${count} training candidate${count === 1 ? '' : 's'} (data ${dataHash.slice(0, 12)}…). Reinsert the identical prompt array before submitting.`
+        : `Checkpoint loaded, but its exact teacher ${expectedTeacher || 'identity'} is not currently registered. Restore that teacher revision and the identical prompt array before submitting.`;
+    }
+    document.getElementById('opd-prompts')?.focus();
+    toast(teacherBound
+      ? 'OPD checkpoint loaded — reinsert the exact original prompts before submitting.'
+      : 'OPD checkpoint loaded, but its exact teacher is unavailable.',
+      teacherBound ? undefined : 'err');
     return;
   }
 
@@ -9531,7 +9606,9 @@ function renderTrainCheckpoint(j) {
   const sourceKind = String(checkpoint.data_source_kind || '');
   const cursor = kind === 'grpo'
     ? `${sourceKind.startsWith('jsonl-') ? 'GRPO JSONL' : 'GRPO inline'} · next group cursor ${drillValue(checkpoint.next_cursor_in_epoch)}`
-    : `SFT · next epoch index ${drillValue(checkpoint.next_epoch_index)} · example cursor ${drillValue(checkpoint.next_cursor_in_epoch)}`;
+    : kind === 'opd'
+      ? `OPD ${sourceKind || 'source'} · next candidate cursor ${drillValue(checkpoint.next_cursor_in_epoch)}`
+      : `SFT · next epoch index ${drillValue(checkpoint.next_epoch_index)} · example cursor ${drillValue(checkpoint.next_cursor_in_epoch)}`;
   const state = String(j.state || '').toLowerCase();
   const prepareButton = kind && state !== 'queued' && state !== 'running'
     ? `<button class="btn btn-sm" type="button" data-prepare-training-resume title="Load this checkpoint and its recorded settings into the ${kind.toUpperCase()} form"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-arrow-right"></use></svg> Prepare resume</button>`
@@ -10496,10 +10573,18 @@ document.getElementById('opd-use-sample')?.addEventListener('click', () => {
   ], null, 2);
 });
 
+document.getElementById('opd-resume-checkpoint')?.addEventListener('input', (event) => {
+  const form = document.getElementById('opd-form');
+  if (!form || event.target.value.trim() === form.dataset.resumeCheckpoint) return;
+  const note = document.getElementById('opd-resume-note');
+  if (note) note.hidden = true;
+});
+
 document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target;
   try {
+    const outputName = parsePathSafeAdapterNameField(form.output_name);
     const promptsText = document.getElementById('opd-prompts').value.trim();
     const prompts = promptsText ? JSON.parse(promptsText) : [];
     if (!Array.isArray(prompts) || prompts.length === 0) {
@@ -10509,11 +10594,30 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
     if (!teacher) throw new Error('Pick a teacher first (Teachers tab)');
     const opdLearningRate = parseOptionalFiniteNumberField(
       document.getElementById('opd-lr').value, 'Learning rate');
+    const checkpointInterval = parseOptionalPositiveIntegerField(
+      form.checkpoint_interval.value, 'OPD checkpoint interval');
+    const resumeCheckpoint = parseResumeCheckpointField(
+      form.resume_checkpoint.value, 'OPD resume checkpoint');
+    if (resumeCheckpoint && resumeCheckpoint === form.dataset.resumeCheckpoint) {
+      const expectedTeacher = form.dataset.resumeTeacher;
+      const expectedRevision = form.dataset.resumeTeacherRevision;
+      if (!expectedTeacher || !expectedRevision) {
+        throw new Error('This OPD checkpoint does not expose an exact teacher identity and revision, so it cannot be prepared safely in the browser.');
+      }
+      if (teacher !== expectedTeacher) {
+        throw new Error(`OPD resume requires the checkpoint teacher ${expectedTeacher}.`);
+      }
+      const teachers = (await api('/v1/teachers'))?.teachers || [];
+      const current = teachers.find(t => t.spec?.alias === teacher && t.usable === true);
+      if (!current || current.identity_revision !== expectedRevision) {
+        throw new Error('OPD resume requires the exact teacher revision recorded by the checkpoint. Restore or re-register that teacher before submitting.');
+      }
+    }
     const body = {
       prompts,
       teacher,
       config: {
-        output_name: document.getElementById('opd-output-name').value.trim(),
+        output_name: outputName,
         loss: document.getElementById('opd-loss').value,
         top_k: parseInt(document.getElementById('opd-top-k').value, 10),
         samples_per_prompt: parseInt(document.getElementById('opd-samples').value, 10),
@@ -10531,10 +10635,16 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
     };
     // Blank lr is omitted so the server resolves the per-optimizer default.
     if (opdLearningRate !== null) body.config.learning_rate = opdLearningRate;
+    if (checkpointInterval !== null) body.config.checkpoint_interval = checkpointInterval;
+    if (resumeCheckpoint !== null) body.config.resume_checkpoint = resumeCheckpoint;
+    setTrainingSubmitBusy(form, true, 'Submitting OPD…');
     const res = await api('/v1/train/opd', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toast(res.message || 'Distillation job queued');
     selectPage('training');
+    document.getElementById('training-tab-queue')?.click();
+    pollTraining();
   } catch (err) { toast(err.message, 'err'); }
+  finally { setTrainingSubmitBusy(form, false, 'Submitting OPD…'); }
 });
 
 // --- Distill / Refresh (/v1/distill/refresh) ------------------------

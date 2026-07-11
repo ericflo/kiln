@@ -1828,7 +1828,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   font-size: var(--text-sm);
   box-shadow: var(--shadow-3);
   max-width: 360px;
-  pointer-events: auto;
+  /* Notifications can overlap scrolled controls. Keep their surface
+     click-through; only explicit action and dismiss buttons capture input. */
+  pointer-events: none;
   animation: toast-in var(--t-base) var(--ease-out);
   display: flex;
   align-items: flex-start;
@@ -3337,9 +3339,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
 
   /* Completion notices that carry the next action */
   .toast.toast-action { display: flex; align-items: center; gap: var(--space-3); cursor: default; padding-right: 8px; }
-  .toast-action-btn { flex-shrink: 0; }
+  .toast-action-btn { flex-shrink: 0; pointer-events: auto; }
   .toast-action-close { background: none; border: 0; color: var(--text-muted); font-size: 16px; line-height: 1;
-    cursor: pointer; padding: 2px 6px; flex-shrink: 0; }
+    cursor: pointer; padding: 2px 6px; flex-shrink: 0; pointer-events: auto; }
   .toast-action-close:hover { color: var(--text); }
 
   /* Small dialogs size to their content — no dead vertical space */

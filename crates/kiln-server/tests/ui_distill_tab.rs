@@ -119,6 +119,9 @@ async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
 
     // Forms each post to the right endpoint — guards against drift.
     assert!(html.contains(r#"id="opd-form""#), "OPD form missing");
+    assert!(html.contains(r#"id="opd-checkpoint-interval""#));
+    assert!(html.contains(r#"id="opd-resume-checkpoint""#));
+    assert!(html.contains(r#"id="opd-resume-note""#));
     assert!(
         html.contains(r#"id="teacher-form""#),
         "Teacher register form missing"
@@ -178,6 +181,11 @@ async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
         "Distill UI must not expose the removed unsafe cache import route"
     );
     assert!(app_js.contains("t.usable !== true"));
+    assert!(app_js.contains("body.config.checkpoint_interval = checkpointInterval"));
+    assert!(app_js.contains("body.config.resume_checkpoint = resumeCheckpoint"));
+    assert!(app_js.contains("kind === 'sft' || kind === 'grpo' || kind === 'opd'"));
+    assert!(app_js.contains("checkpoint.teacher_content_revision"));
+    assert!(app_js.contains("OPD checkpoint loaded"));
     assert!(app_js.contains("body.credential_id"));
     assert!(!app_js.contains("form.api_key_env"));
     assert!(!app_js.contains("body.max_top_k"));
