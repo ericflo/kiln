@@ -319,10 +319,10 @@
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/health</code> &mdash; /v1 compatibility alias for the same health and diagnostics response.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, and training progress.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, training progress, and bounded thinking-budget provenance/outcomes.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/ui</code> &mdash; embedded dashboard for status, adapters, training, and chat.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/decode</code> &mdash; live decode tokens/sec and inter-token latency stats used by the dashboard.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history for the dashboard's request panel.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history with effective thinking-budget provenance and outcomes for the dashboard's request panel.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return the current server configuration.</div>
         </div>
@@ -546,6 +546,22 @@ kiln serve --config kiln.toml</code></pre>
           <code>finish_reason</code> carries chat metadata and the final outcome before the optional
           usage chunk and <code>[DONE]</code>. Cached responses preserve their original outcome while
           reporting provenance for the current request.
+        </p>
+        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
+          Each <code>/v1/stats/recent-requests</code> row includes the same effective pair in
+          <code>thinking_budget</code>, plus <code>applied</code> and any final
+          <code>triggered</code>, <code>trigger</code>, <code>closed</code>,
+          <code>thinking_tokens</code>, and <code>thinking_time_ms</code> fields. Outcome fields are
+          absent for inert or not-yet-resolved budgets instead of fabricating a natural close. The
+          dashboard request drill renders the limits, independent sources, application state, and outcome.
+        </p>
+        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
+          Prometheus uses only closed label sets: <code>kiln_thinking_budget_source_total</code>
+          counts each dimension's provenance, <code>kiln_thinking_budget_outcomes_total</code>
+          counts unconfigured, inert, natural-close, forced-close, unclosed, interrupted, and
+          unresolved outcomes, and <code>kiln_thinking_budget_effective_tokens</code> plus
+          <code>kiln_thinking_budget_effective_seconds</code> are fixed-bucket histograms. Numeric
+          request limits never become labels.
         </p>
         <div class="endpoint mt-5">
           <h3 class="font-semibold mb-2">Server defaults</h3>

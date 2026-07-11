@@ -2342,6 +2342,59 @@ function formatUnixMs(ms) {
   } catch { return String(ms); }
 }
 
+function requestThinkingBudgetSource(source) {
+  return ({
+    request: 'request',
+    server_default: 'server default',
+    request_unlimited: 'request unlimited',
+    unlimited: 'unlimited',
+  })[source] || 'unknown';
+}
+
+function requestThinkingBudgetOutcome(r) {
+  const budget = r?.thinking_budget;
+  if (!budget || !budget.configured) return 'Not configured';
+  if (budget.applied == null) return 'Unresolved';
+  if (!budget.applied) return 'Inert';
+  if (budget.triggered) {
+    const trigger = ({
+      tokens: 'Token limit',
+      time: 'Time limit',
+      max_tokens: 'Completion limit',
+    })[budget.trigger] || 'Budget limit';
+    return `${trigger} · ${budget.closed ? 'closed' : 'close incomplete'}`;
+  }
+  if (budget.triggered === false && budget.closed === true) return 'Natural close';
+  if (['error', 'timeout', 'client_disconnect'].includes(r.finish_reason)) return 'Interrupted';
+  if (budget.closed === false) return 'Unclosed';
+  return 'Unresolved';
+}
+
+function requestThinkingBudgetSection(r) {
+  const budget = r?.thinking_budget;
+  if (!budget || typeof budget !== 'object') return '';
+  const tokenLimit = budget.max_tokens == null ? 'Unlimited' : `${budget.max_tokens} tokens`;
+  const timeLimit = budget.max_time_ms == null ? 'Unlimited' : fmtMsShort(budget.max_time_ms);
+  const applied = budget.applied == null ? 'Unresolved' : budget.applied ? 'Yes' : 'No';
+  const measured = [];
+  if (budget.thinking_tokens != null) measured.push(`${budget.thinking_tokens} tokens`);
+  if (budget.thinking_time_ms != null) measured.push(fmtMsShort(budget.thinking_time_ms));
+  const rows = [
+    ['Token limit', `${tokenLimit} · ${requestThinkingBudgetSource(budget.tokens_source)}`],
+    ['Time limit', `${timeLimit} · ${requestThinkingBudgetSource(budget.time_source)}`],
+    ['Applied', applied],
+    ['Outcome', requestThinkingBudgetOutcome(r)],
+  ];
+  if (measured.length) rows.push(['Measured thinking', measured.join(' · ')]);
+  return `
+    <div class="req-section req-thinking-budget" data-request-thinking-budget>
+      <div class="req-section-head">Thinking budget</div>
+      <div class="req-stats">
+        ${rows.map(([key, value]) => `<div class="req-stat"><span class="req-stat-k">${escapeHtml(key)}</span><span class="req-stat-v">${escapeHtml(value)}</span></div>`).join('')}
+      </div>
+    </div>`;
+}
+
 function openRequestDrillModal(id) {
   const modal = document.getElementById('request-drill-modal');
   if (!modal) return;
@@ -2401,6 +2454,7 @@ function openRequestDrillModal(id) {
   const errBlock = r.error
     ? `<div class="req-section req-error"><div class="req-section-head">Error</div><pre class="req-pre">${escapeHtml(r.error)}</pre></div>`
     : '';
+  const thinkingBudgetHtml = requestThinkingBudgetSection(r);
   // Latency breakdown — the experience pi actually felt: the wait for the first
   // token (TTFT), then how fast the rest streamed. Only meaningful when we have
   // both a TTFT and a total duration (i.e. a streamed completion).
@@ -2427,6 +2481,7 @@ function openRequestDrillModal(id) {
     <div class="req-detail">
       <div class="req-stats">${statRow}</div>
       ${latencyHtml}
+      ${thinkingBudgetHtml}
       ${errBlock}
       <div class="req-section">
         <div class="req-section-head">Prompt

@@ -503,7 +503,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of active model, adapters, config hashes, env flags, batching, thinking defaults, and cache counts; enabled only with `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
 | GET | `/ui/` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
-| GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history for the dashboard's request panel |
+| GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history, including effective thinking-budget provenance and outcomes, for the dashboard's request panel |
 | GET | `/health` | Server readiness and diagnostics; maintenance intentionally returns 503 |
 | GET | `/v1/health` | `/v1` compatibility alias for readiness and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
@@ -876,6 +876,28 @@ outcome. Durable request-log reassembly retains the same chat
 `metadata.thinking_budget` fields and restores the outcome at
 `response.choices[0].thinking_budget`, so streamed and non-streamed rows use the
 same mining paths.
+
+Every completed chat record returned by `/v1/stats/recent-requests` also has a
+`thinking_budget` object. It carries `configured`, the effective `max_tokens`
+and `max_time_ms` when finite, independent `tokens_source` and `time_source`,
+and `applied`. Once a terminal budget status exists it also carries
+`triggered`, `trigger`, `closed`, `thinking_tokens`, and `thinking_time_ms`.
+Outcome fields stay absent for an inert budget instead of resembling a natural
+close; `applied` stays absent only when a failure happened before applicability
+could be established. The dashboard request drill renders this configuration,
+provenance, and outcome directly.
+
+`/metrics` exports the same recorded-chat population without unbounded labels:
+
+- `kiln_thinking_budget_source_total{dimension,source}` counts token/time
+  provenance. `source` is limited to `request`, `server_default`,
+  `request_unlimited`, `unlimited`, or the defensive `unknown` fallback.
+- `kiln_thinking_budget_outcomes_total{outcome}` assigns exactly one of
+  `unconfigured`, `inert`, `natural_close`, `tokens`, `time`, `max_tokens`,
+  `unclosed`, `interrupted`, or `unresolved` to each recorded chat completion.
+- `kiln_thinking_budget_effective_tokens` and
+  `kiln_thinking_budget_effective_seconds` are fixed-bucket histograms of
+  finite effective limits. Request-supplied numbers never become labels.
 
 The Qwen3.5-4B profile expects adapters in `model.adapter_dir` when configured,
 otherwise `<model.path>/adapters`. Chat-template loading prefers

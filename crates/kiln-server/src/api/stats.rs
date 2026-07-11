@@ -153,7 +153,7 @@ mod tests {
 
     #[tokio::test]
     async fn recent_requests_endpoint_returns_newest_first() {
-        use crate::recent_requests::RequestRecord;
+        use crate::recent_requests::{RequestRecord, RequestThinkingBudget};
         let state = make_test_state();
         {
             let mut ring = state.recent_requests.lock().unwrap();
@@ -170,6 +170,19 @@ mod tests {
                     duration_ms: 50 + i as u64 * 10,
                     streamed: i % 2 == 0,
                     finish_reason: "stop".to_owned(),
+                    thinking_budget: (i == 2).then(|| RequestThinkingBudget {
+                        configured: true,
+                        max_tokens: Some(64),
+                        max_time_ms: Some(1_500),
+                        tokens_source: "request".to_string(),
+                        time_source: "server_default".to_string(),
+                        applied: Some(true),
+                        triggered: Some(true),
+                        trigger: Some("tokens".to_string()),
+                        closed: Some(true),
+                        thinking_tokens: Some(64),
+                        thinking_time_ms: Some(800),
+                    }),
                     ..Default::default()
                 });
             }
@@ -194,6 +207,12 @@ mod tests {
         assert_eq!(arr[2]["id"], "first");
         assert_eq!(arr[0]["completion_tokens"], 8);
         assert_eq!(arr[0]["finish_reason"], "stop");
+        assert_eq!(arr[0]["thinking_budget"]["max_tokens"], 64);
+        assert_eq!(arr[0]["thinking_budget"]["max_time_ms"], 1_500);
+        assert_eq!(arr[0]["thinking_budget"]["tokens_source"], "request");
+        assert_eq!(arr[0]["thinking_budget"]["time_source"], "server_default");
+        assert_eq!(arr[0]["thinking_budget"]["trigger"], "tokens");
+        assert_eq!(arr[0]["thinking_budget"]["closed"], true);
     }
 
     #[tokio::test]

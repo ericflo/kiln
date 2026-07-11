@@ -31,7 +31,9 @@ use crate::batching_engine::{EngineEvent, EngineRequest};
 use crate::config::{SpecMethod, SpeculativeDecodingConfig};
 use crate::error::ApiError;
 use crate::metrics::RequestStatus;
-use crate::recent_requests::{FULL_BODY_MAX_CHARS, RequestRecord, now_unix_ms, truncate_chars};
+use crate::recent_requests::{
+    FULL_BODY_MAX_CHARS, RequestRecord, RequestThinkingBudget, now_unix_ms, truncate_chars,
+};
 use crate::state::{
     AppState, DeterministicBatchCache, DeterministicBatchCacheClaim, DeterministicBatchCacheItem,
     DeterministicBatchCacheKey, DeterministicBatchCacheValue, DeterministicBatchInFlightState,
@@ -181,20 +183,12 @@ fn thinking_budget_metadata_for_request(
 }
 
 fn attach_thinking_budget_outcome(
-    sampling: &SamplingParams,
+    status: Option<ThinkingBudgetStatus>,
     response: &mut ChatCompletionResponse,
 ) {
-    let Some(budget) = sampling.thinking_budget.as_ref() else {
+    let Some(status) = status else {
         return;
     };
-    let mut status = budget.status();
-    if !status.closed {
-        status.thinking_tokens = response
-            .choices
-            .first()
-            .map(|choice| choice.completion_tokens)
-            .unwrap_or(status.thinking_tokens);
-    }
     apply_thinking_budget_status_to_metadata(&mut response.metadata.thinking_budget, status);
     if let Some(choice) = response.choices.first_mut() {
         choice.thinking_budget = Some(status);
@@ -210,6 +204,65 @@ fn apply_thinking_budget_status_to_metadata(
     metadata.closed = Some(status.closed);
     metadata.thinking_time_ms = Some(status.elapsed_ms);
     metadata.thinking_tokens = Some(status.thinking_tokens);
+}
+
+fn unresolved_request_thinking_budget(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+) -> RequestThinkingBudget {
+    let configuration = ThinkingBudgetConfigurationMetadata::from(
+        effective_thinking_budget_for_request(state, req),
+    );
+    RequestThinkingBudget {
+        configured: configuration.configured,
+        max_tokens: configuration
+            .max_tokens
+            .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
+        max_time_ms: configuration.max_time_ms,
+        tokens_source: configuration.tokens_source.to_string(),
+        time_source: configuration.time_source.to_string(),
+        applied: (!configuration.configured).then_some(false),
+        triggered: None,
+        trigger: None,
+        closed: None,
+        thinking_tokens: None,
+        thinking_time_ms: None,
+    }
+}
+
+fn recent_thinking_budget_from_metadata(
+    metadata: &ThinkingBudgetMetadata,
+) -> RequestThinkingBudget {
+    let has_outcome = metadata.closed.is_some();
+    RequestThinkingBudget {
+        configured: metadata.configured,
+        max_tokens: metadata
+            .max_tokens
+            .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
+        max_time_ms: metadata.max_time_ms,
+        tokens_source: metadata.tokens_source.to_string(),
+        time_source: metadata.time_source.to_string(),
+        applied: Some(metadata.applied),
+        triggered: has_outcome.then_some(metadata.triggered),
+        trigger: metadata.trigger.clone(),
+        closed: metadata.closed,
+        thinking_tokens: metadata
+            .thinking_tokens
+            .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
+        thinking_time_ms: metadata.thinking_time_ms,
+    }
+}
+
+fn recent_thinking_budget_with_status(
+    metadata: &ThinkingBudgetMetadata,
+    status: Option<ThinkingBudgetStatus>,
+) -> RequestThinkingBudget {
+    let mut metadata = metadata.clone();
+    if let Some(status) = status {
+        metadata.applied = true;
+        apply_thinking_budget_status_to_metadata(&mut metadata, status);
+    }
+    recent_thinking_budget_from_metadata(&metadata)
 }
 
 fn attach_cached_thinking_budget_outcome(response: &mut ChatCompletionResponse) {
@@ -674,6 +727,7 @@ fn apply_eval_mode_batch_defaults(state: &AppState, req: &mut BatchCompletionReq
 /// body. Each call site overrides the response-side fields (completion text,
 /// token counts, duration, finish reason, optional ttft / error).
 fn request_record_from_req(
+    state: &AppState,
     req: &ChatCompletionRequest,
     id: &str,
     model: &str,
@@ -695,6 +749,7 @@ fn request_record_from_req(
         prefix_cache: Some("unknown".to_string()),
         user_agent: req.user_agent.clone(),
         client: req.client.clone(),
+        thinking_budget: Some(unresolved_request_thinking_budget(state, req)),
         ..RequestRecord::default()
     }
 }
@@ -1726,11 +1781,15 @@ fn record_failed_chat_completion(
     state: &AppState,
     req: &ChatCompletionRequest,
     model: &str,
+    prompt_text: &str,
     request_start: std::time::Instant,
     prompt_tokens: usize,
     error: &ApiError,
 ) {
     let id = format!("chatcmpl-{}", Uuid::new_v4());
+    let thinking_budget = recent_thinking_budget_from_metadata(
+        &thinking_budget_metadata_for_request(state, req, prompt_starts_in_reasoning(prompt_text)),
+    );
     record_recent_request(
         state,
         RequestRecord {
@@ -1743,7 +1802,8 @@ fn record_failed_chat_completion(
             error: Some(error.to_string()),
             thinking_mode: Some(thinking_mode_for_request(req).to_string()),
             prefix_cache: Some("unknown".to_string()),
-            ..request_record_from_req(req, &id, model, false)
+            thinking_budget: Some(thinking_budget),
+            ..request_record_from_req(state, req, &id, model, false)
         },
     );
 }
@@ -3169,7 +3229,11 @@ fn response_from_cached_completion(
             duration_ms: request_start.elapsed().as_millis() as u64,
             finish_reason: cached_output.finish_reason.clone(),
             prefix_cache: Some("completion_cache_hit".to_string()),
-            ..request_record_from_req(req, &id, &model, false)
+            thinking_budget: Some(recent_thinking_budget_with_status(
+                &metadata.thinking_budget,
+                thinking_budget_status,
+            )),
+            ..request_record_from_req(state, req, &id, &model, false)
         },
     );
 
@@ -3265,6 +3329,12 @@ fn response_from_cached_chat_choices(
         .iter()
         .map(|(completion_tokens, _, _)| *completion_tokens)
         .sum::<usize>();
+    let recent_thinking_budget = recent_thinking_budget_with_status(
+        &metadata.thinking_budget,
+        cached_completions
+            .first()
+            .and_then(|(_, status, _)| *status),
+    );
     record_recent_request(
         state,
         RequestRecord {
@@ -3280,7 +3350,8 @@ fn response_from_cached_chat_choices(
                 .map(|(_, _, output)| output.finish_reason.clone())
                 .unwrap_or_else(|| "length".to_string()),
             prefix_cache: Some("chat_choices_cache_hit".to_string()),
-            ..request_record_from_req(req, &id, &model, false)
+            thinking_budget: Some(recent_thinking_budget),
+            ..request_record_from_req(state, req, &id, &model, false)
         },
     );
 
@@ -3373,7 +3444,10 @@ fn streaming_response_from_cached_completion(
             duration_ms: request_start.elapsed().as_millis() as u64,
             finish_reason: cached_output.finish_reason.clone(),
             prefix_cache: Some("completion_cache_hit".to_string()),
-            ..request_record_from_req(req, &id, &model, true)
+            thinking_budget: Some(recent_thinking_budget_from_metadata(
+                &thinking_budget_metadata,
+            )),
+            ..request_record_from_req(state, req, &id, &model, true)
         },
     );
 
@@ -6291,6 +6365,7 @@ async fn chat_completions_inner(
                             state,
                             &req,
                             &model,
+                            &prompt_text,
                             request_start,
                             prompt_tokens.len(),
                             &err,
@@ -6345,6 +6420,7 @@ async fn chat_completions_inner(
                             state,
                             &req,
                             &model,
+                            &prompt_text,
                             request_start,
                             prompt_tokens.len(),
                             &err,
@@ -6377,6 +6453,23 @@ async fn chat_completions_inner(
             }
         }
     };
+    if req.stream {
+        if let Err(error) = &result {
+            let model = req
+                .model
+                .clone()
+                .unwrap_or_else(|| state.served_model_id.clone());
+            record_failed_chat_completion(
+                state,
+                &req,
+                &model,
+                &prompt_text,
+                request_start,
+                prompt_tokens.len(),
+                error,
+            );
+        }
+    }
     result.map(|response| response_with_loaded_adapter_identity(response, &request_adapter))
 }
 
@@ -6936,6 +7029,8 @@ async fn generate_real_batched(
         .unwrap_or_else(|| state.served_model_id.clone());
     let completion_tokens =
         completion_usage_tokens(output.completion_tokens, &output.finish_reason);
+    let thinking_budget_status =
+        finalized_thinking_budget_status(sampling.thinking_budget.as_ref(), completion_tokens);
     let assistant_output = assistant_output_from_model_output_stop_aware(
         req,
         &output.text,
@@ -6967,7 +7062,11 @@ async fn generate_real_batched(
             model_decode_ms: Some(duration_ms_u64(output.decode_duration)),
             thinking_mode: Some(thinking_mode_for_prompt(prompt_text).to_string()),
             prefix_cache: Some("batching_engine".to_string()),
-            ..request_record_from_req(req, &id, &model, false)
+            thinking_budget: Some(recent_thinking_budget_with_status(
+                &metadata.thinking_budget,
+                thinking_budget_status,
+            )),
+            ..request_record_from_req(state, req, &id, &model, false)
         },
     );
 
@@ -6998,7 +7097,7 @@ async fn generate_real_batched(
         },
         metadata,
     };
-    attach_thinking_budget_outcome(sampling, &mut response);
+    attach_thinking_budget_outcome(thinking_budget_status, &mut response);
     attach_chat_performance_metadata(
         state,
         req,
@@ -7133,7 +7232,13 @@ async fn generate_real_batched_streaming(
                     model_prefill_ms: None,
                     model_decode_ms: None,
                     error,
-                    thinking_budget: None,
+                    thinking_budget: Some(recent_thinking_budget_with_status(
+                        &stream_thinking_budget_metadata,
+                        finalized_thinking_budget_status(
+                            thinking_budget.as_ref(),
+                            completion_tokens as usize,
+                        ),
+                    )),
                 };
                 record_recent_request(&state_for_record, record);
             };
@@ -7918,6 +8023,8 @@ async fn generate_real(
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
     let completion_tokens = completion_usage_tokens(output.token_ids.len(), &output.finish_reason);
+    let thinking_budget_status =
+        finalized_thinking_budget_status(sampling.thinking_budget.as_ref(), completion_tokens);
     let prefix_cache = *prefix_cache_diagnostic.lock().unwrap();
     // Qwen3.5's chat template prefills `<think>\n` into the assistant turn,
     // so the model emits chain-of-thought directly and closes with
@@ -7961,7 +8068,11 @@ async fn generate_real(
             model_decode_ms: decode_duration.map(duration_ms_u64),
             thinking_mode: Some(thinking_mode_for_prompt(prompt_text).to_string()),
             prefix_cache: Some(prefix_cache.to_string()),
-            ..request_record_from_req(req, &id, &model, false)
+            thinking_budget: Some(recent_thinking_budget_with_status(
+                &metadata.thinking_budget,
+                thinking_budget_status,
+            )),
+            ..request_record_from_req(state, req, &id, &model, false)
         },
     );
 
@@ -7992,7 +8103,7 @@ async fn generate_real(
         },
         metadata,
     };
-    attach_thinking_budget_outcome(sampling, &mut response);
+    attach_thinking_budget_outcome(thinking_budget_status, &mut response);
     attach_chat_performance_metadata(
         state,
         req,
@@ -8486,7 +8597,13 @@ async fn generate_real_streaming(
                     model_prefill_ms: None,
                     model_decode_ms: None,
                     error,
-                    thinking_budget: None,
+                    thinking_budget: Some(recent_thinking_budget_with_status(
+                        &stream_thinking_budget_metadata,
+                        finalized_thinking_budget_status(
+                            thinking_budget.as_ref(),
+                            completion_tokens as usize,
+                        ),
+                    )),
                 };
                 record_recent_request(&state_for_record, record);
             };
@@ -9284,6 +9401,8 @@ async fn generate_mock(
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
     let completion_tokens = output_tokens.len();
+    let thinking_budget_status =
+        finalized_thinking_budget_status(sampling.thinking_budget.as_ref(), completion_tokens);
     let assistant_output = assistant_output_from_split_parts(req, None, completion_text, "stop");
     let metadata =
         chat_completion_metadata_from_prompt_and_output(state, req, prompt_text, &assistant_output);
@@ -9311,7 +9430,11 @@ async fn generate_mock(
             finish_reason: assistant_output.finish_reason.clone(),
             thinking_mode: Some("mock".to_string()),
             prefix_cache: Some("not_applicable".to_string()),
-            ..request_record_from_req(req, &id, &model, false)
+            thinking_budget: Some(recent_thinking_budget_with_status(
+                &metadata.thinking_budget,
+                thinking_budget_status,
+            )),
+            ..request_record_from_req(state, req, &id, &model, false)
         },
     );
 
@@ -9343,7 +9466,7 @@ async fn generate_mock(
         },
         metadata,
     };
-    attach_thinking_budget_outcome(sampling, &mut response);
+    attach_thinking_budget_outcome(thinking_budget_status, &mut response);
     let ttft = first_token_at.map(|instant| instant.duration_since(request_start));
     attach_chat_performance_metadata(state, req, &mut response, request_start, ttft, None, None);
     Ok(response)
@@ -11458,6 +11581,7 @@ async fn generate_one_prepared_response(
                         state,
                         req,
                         &model,
+                        prompt_text,
                         request_start,
                         prompt_tokens.len(),
                         &err,
@@ -11511,6 +11635,7 @@ async fn generate_one_prepared_response(
                         state,
                         req,
                         &model,
+                        prompt_text,
                         request_start,
                         prompt_tokens.len(),
                         &err,
@@ -11680,6 +11805,48 @@ mod tests {
             chat_completion_metadata_from_prompt(&state, &zero, "<|im_start|>assistant\n<think>\n");
         assert!(metadata.thinking_budget.configured);
         assert!(!metadata.thinking_budget.applied);
+    }
+
+    #[test]
+    fn recent_thinking_budget_preserves_unresolved_inert_and_final_states() {
+        let mut state = make_qwen_template_test_state();
+        state.default_thinking_budget_tokens = Some(12);
+        state.default_thinking_budget_ms = Some(250);
+        let req = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],"max_tokens":64,
+                "thinking_budget_tokens":32,"thinking_budget_ms":null}"#,
+        );
+
+        let unresolved = unresolved_request_thinking_budget(&state, &req);
+        assert!(unresolved.configured);
+        assert_eq!(unresolved.max_tokens, Some(32));
+        assert_eq!(unresolved.max_time_ms, None);
+        assert_eq!(unresolved.tokens_source, "request");
+        assert_eq!(unresolved.time_source, "request_unlimited");
+        assert_eq!(unresolved.applied, None);
+
+        let inert_metadata = thinking_budget_metadata_for_request(&state, &req, false);
+        let inert = recent_thinking_budget_from_metadata(&inert_metadata);
+        assert_eq!(inert.applied, Some(false));
+        assert_eq!(inert.triggered, None);
+        assert_eq!(inert.closed, None);
+
+        let active_metadata = thinking_budget_metadata_for_request(&state, &req, true);
+        let closed = recent_thinking_budget_with_status(
+            &active_metadata,
+            Some(ThinkingBudgetStatus {
+                trigger: Some(kiln_core::sampling::ThinkingBudgetTrigger::Tokens),
+                closed: true,
+                thinking_tokens: 32,
+                elapsed_ms: 75,
+            }),
+        );
+        assert_eq!(closed.applied, Some(true));
+        assert_eq!(closed.triggered, Some(true));
+        assert_eq!(closed.trigger.as_deref(), Some("tokens"));
+        assert_eq!(closed.closed, Some(true));
+        assert_eq!(closed.thinking_tokens, Some(32));
+        assert_eq!(closed.thinking_time_ms, Some(75));
     }
 
     #[test]
@@ -14807,6 +14974,30 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         (status, body)
+    }
+
+    async fn metrics_get_text(state: AppState) -> String {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = crate::api::metrics::routes()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        String::from_utf8(
+            to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -20091,7 +20282,9 @@ mod tests {
             "messages": [{"role":"user","content":"cache me once"}],
             "temperature": 0.0,
             "max_tokens": 4,
-            "seed": 123
+            "seed": 123,
+            "thinking_budget_tokens": 64,
+            "thinking_budget_ms": null
         })
         .to_string();
 
@@ -20122,7 +20315,17 @@ mod tests {
             first["id"], second["id"],
             "cached chat responses should still get a fresh response id"
         );
-        assert_eq!(state.recent_requests.lock().unwrap().len(), 2);
+        let recent = state.recent_requests.lock().unwrap().snapshot();
+        assert_eq!(recent.len(), 2);
+        assert!(recent.iter().all(|record| {
+            record.thinking_budget.as_ref().is_some_and(|budget| {
+                budget.configured
+                    && budget.max_tokens == Some(64)
+                    && budget.tokens_source == "request"
+                    && budget.time_source == "request_unlimited"
+                    && budget.applied == Some(false)
+            })
+        }));
     }
 
     #[tokio::test]
@@ -20362,6 +20565,91 @@ mod tests {
             "max_tokens=0 should not enter model generation"
         );
         assert_eq!(state.recent_requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn recent_request_and_metrics_expose_effective_inert_budget() {
+        let state = make_batch_test_state();
+        let body = serde_json::json!({
+            "messages": [{"role":"user","content":"bounded but no output"}],
+            "max_tokens": 0,
+            "thinking_budget_tokens": 64,
+            "thinking_budget_ms": null
+        })
+        .to_string();
+
+        let (status, response) = chat_post(state.clone(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{response}");
+        let recent = state.recent_requests.lock().unwrap().snapshot();
+        let budget = recent[0].thinking_budget.as_ref().unwrap();
+        assert!(budget.configured);
+        assert_eq!(budget.max_tokens, Some(64));
+        assert_eq!(budget.max_time_ms, None);
+        assert_eq!(budget.tokens_source, "request");
+        assert_eq!(budget.time_source, "request_unlimited");
+        assert_eq!(budget.applied, Some(false));
+        assert_eq!(budget.triggered, None);
+        assert_eq!(budget.closed, None);
+
+        let body = metrics_get_text(state).await;
+        assert!(body.contains(
+            "kiln_thinking_budget_source_total{dimension=\"tokens\",source=\"request\"} 1"
+        ));
+        assert!(body.contains(
+            "kiln_thinking_budget_source_total{dimension=\"time\",source=\"request_unlimited\"} 1"
+        ));
+        assert!(body.contains("kiln_thinking_budget_outcomes_total{outcome=\"inert\"} 1"));
+        assert!(body.contains("kiln_thinking_budget_effective_tokens_count 1"));
+        assert!(body.contains("kiln_thinking_budget_effective_tokens_sum 64"));
+        assert!(body.contains("kiln_thinking_budget_effective_seconds_count 0"));
+    }
+
+    #[tokio::test]
+    async fn streaming_setup_failure_records_applied_budget_as_interrupted() {
+        let mut state = make_qwen_template_test_state();
+        let template =
+            include_str!("../../../kiln-core/test_fixtures/qwen35_4b_chat_template.jinja");
+        let tokenizer = kiln_core::tokenizer::KilnTokenizer::from_bytes(
+            br#"{
+                "version":"1.0",
+                "model":{
+                    "type":"WordLevel",
+                    "vocab":{"</think>":0,"<unk>":1},
+                    "unk_token":"<unk>"
+                }
+            }"#,
+        )
+        .unwrap()
+        .with_chat_template(template.to_string());
+        state.tokenizer = std::sync::Arc::new(tokenizer);
+        let body = serde_json::json!({
+            "messages": [{"role":"user","content":"stream from mock"}],
+            "stream": true,
+            "max_tokens": 64,
+            "thinking_budget_tokens": 32,
+            "thinking_budget_ms": null
+        })
+        .to_string();
+
+        let (status, response) = chat_post(state.clone(), &body).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::NOT_IMPLEMENTED,
+            "{response}"
+        );
+        assert_eq!(response["error"]["code"], "streaming_not_supported");
+        let recent = state.recent_requests.lock().unwrap().snapshot();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].finish_reason, "error");
+        let budget = recent[0].thinking_budget.as_ref().unwrap();
+        assert!(budget.configured);
+        assert_eq!(budget.max_tokens, Some(32));
+        assert_eq!(budget.applied, Some(true));
+        assert_eq!(budget.triggered, None);
+        assert_eq!(budget.closed, None);
+
+        let metrics = metrics_get_text(state).await;
+        assert!(metrics.contains("kiln_thinking_budget_outcomes_total{outcome=\"interrupted\"} 1"));
     }
 
     #[tokio::test]

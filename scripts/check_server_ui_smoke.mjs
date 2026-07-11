@@ -437,6 +437,19 @@ function smokeRecentRow(overrides = {}) {
     duration_ms: 120,
     streamed: false,
     finish_reason: 'stop',
+    thinking_budget: {
+      configured: true,
+      max_tokens: 64,
+      max_time_ms: 1500,
+      tokens_source: 'request',
+      time_source: 'server_default',
+      applied: true,
+      triggered: true,
+      trigger: 'tokens',
+      closed: true,
+      thinking_tokens: 64,
+      thinking_time_ms: 800,
+    },
     ...overrides,
   };
 }
@@ -2244,6 +2257,37 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       const cleanRow = piRow();
       setRecentRequests([cleanRow]);
       await waitForPanelText(page, '#recent-requests-panel', /hello from pi/, 'Clean pi row did not render before the attention-announcement checks');
+      await clickAndWait(
+        page,
+        `#recent-requests-panel .recent-row[data-id="${cleanRow.id}"]`,
+        'Could not open the recent-request drill for thinking-budget telemetry',
+      );
+      await page.waitForFunction(
+        () => document.getElementById('request-drill-modal')?.hidden === false
+          && !!document.querySelector('#request-drill-content [data-request-thinking-budget]'),
+        { timeout: 5000 },
+      ).catch(() => fail('Request drill did not render the thinking-budget section'));
+      const budgetText = await page.$eval(
+        '#request-drill-content [data-request-thinking-budget]',
+        (el) => el.textContent || '',
+      );
+      for (const expected of [
+        '64 tokens · request',
+        '1.5 s · server default',
+        'Applied',
+        'Yes',
+        'Token limit · closed',
+        '64 tokens · 800 ms',
+      ]) {
+        if (!budgetText.includes(expected)) {
+          fail(`Request drill thinking-budget telemetry is missing ${JSON.stringify(expected)}: ${JSON.stringify(budgetText)}`);
+        }
+      }
+      await clickAndWait(page, '#request-drill-close', 'Could not close the recent-request drill');
+      await page.waitForFunction(
+        () => document.getElementById('request-drill-modal')?.hidden === true,
+        { timeout: 5000 },
+      ).catch(() => fail('Request drill did not close after telemetry assertions'));
       await new Promise((resolve) => setTimeout(resolve, 2500)); // ≥1 recent-requests poll
       const routineText = await page.$eval('#recent-requests-status', (el) => el.textContent || '');
       if (routineText.trim() !== '') fail(`Routine traffic must not announce; #recent-requests-status got ${JSON.stringify(routineText)}`);
