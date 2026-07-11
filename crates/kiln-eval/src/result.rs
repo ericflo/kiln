@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 pub use kiln_core::thinking_budget::ThinkingBudgetOutcome as EvalThinkingBudgetOutcome;
+use kiln_core::thinking_budget::ThinkingBudgetSource;
 use serde::{Deserialize, Serialize};
 
 /// Lifecycle of an eval job (mirrors the training-job state machine so
@@ -47,8 +48,8 @@ pub struct EvalThinkingBudget {
     pub max_tokens: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_time_ms: Option<u64>,
-    pub tokens_source: String,
-    pub time_source: String,
+    pub tokens_source: ThinkingBudgetSource,
+    pub time_source: ThinkingBudgetSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<EvalThinkingBudgetOutcome>,
 }

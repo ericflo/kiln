@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 
+use kiln_core::thinking_budget::ThinkingBudgetSource;
 use serde::Serialize;
 
 /// Default upper bound on retained requests. Old entries are evicted FIFO.
@@ -82,8 +83,8 @@ pub struct RequestThinkingBudget {
     pub max_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_time_ms: Option<u64>,
-    pub tokens_source: String,
-    pub time_source: String,
+    pub tokens_source: ThinkingBudgetSource,
+    pub time_source: ThinkingBudgetSource,
     /// `None` means the request failed before prompt rendering established
     /// whether a configured budget could apply.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -276,8 +277,8 @@ mod tests {
             configured: true,
             max_tokens: Some(64),
             max_time_ms: None,
-            tokens_source: "server_default".to_string(),
-            time_source: "request_unlimited".to_string(),
+            tokens_source: "server_default".into(),
+            time_source: "request_unlimited".into(),
             applied: None,
             triggered: None,
             trigger: None,

@@ -98,8 +98,8 @@ fn resolved_thinking_budget(
         applied: false,
         max_tokens: effective.max_tokens,
         max_time_ms: effective.max_time_ms,
-        tokens_source: effective.tokens_source.to_string(),
-        time_source: effective.time_source.to_string(),
+        tokens_source: effective.tokens_source,
+        time_source: effective.time_source,
         outcome: None,
     }
 }

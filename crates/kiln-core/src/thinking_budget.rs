@@ -144,7 +144,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for ExplicitThinkingBudget<T> {
 
 /// Stable origin names used by API metadata, eval results, recent requests,
 /// durable logs, and bounded metrics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingBudgetSource {
     Unlimited,
@@ -157,6 +157,7 @@ pub enum ThinkingBudgetSource {
     RunOverrideUnlimited,
     Example,
     ExampleUnlimited,
+    Unknown,
 }
 
 impl ThinkingBudgetSource {
@@ -172,7 +173,51 @@ impl ThinkingBudgetSource {
             Self::RunOverrideUnlimited => "run_override_unlimited",
             Self::Example => "example",
             Self::ExampleUnlimited => "example_unlimited",
+            Self::Unknown => "unknown",
         }
+    }
+
+    pub fn from_str_lossy(value: &str) -> Self {
+        match value {
+            "unlimited" => Self::Unlimited,
+            "server_default" => Self::ServerDefault,
+            "request" => Self::Request,
+            "request_unlimited" => Self::RequestUnlimited,
+            "suite" => Self::Suite,
+            "suite_unlimited" => Self::SuiteUnlimited,
+            "run_override" => Self::RunOverride,
+            "run_override_unlimited" => Self::RunOverrideUnlimited,
+            "example" => Self::Example,
+            "example_unlimited" => Self::ExampleUnlimited,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ThinkingBudgetSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(|value| Self::from_str_lossy(&value))
+    }
+}
+
+impl From<&str> for ThinkingBudgetSource {
+    fn from(value: &str) -> Self {
+        Self::from_str_lossy(value)
+    }
+}
+
+impl From<String> for ThinkingBudgetSource {
+    fn from(value: String) -> Self {
+        Self::from_str_lossy(&value)
+    }
+}
+
+impl PartialEq<&str> for ThinkingBudgetSource {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
     }
 }
 
@@ -498,6 +543,22 @@ mod tests {
                 "thinking_time_ms": 7
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn provenance_deserialization_collapses_unknown_text() {
+        assert_eq!(
+            serde_json::from_str::<ThinkingBudgetSource>(r#""request""#).unwrap(),
+            ThinkingBudgetSource::Request
+        );
+        assert_eq!(
+            serde_json::from_str::<ThinkingBudgetSource>(r#""attacker-value""#).unwrap(),
+            ThinkingBudgetSource::Unknown
+        );
+        assert_eq!(
+            serde_json::to_string(&ThinkingBudgetSource::Unknown).unwrap(),
+            r#""unknown""#
         );
     }
 }

@@ -556,12 +556,12 @@ impl ApiCompletion {
                 .get("tokens_source")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
-                .to_string(),
+                .into(),
             time_source: metadata
                 .get("time_source")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
-                .to_string(),
+                .into(),
             outcome: budget_outcome,
         });
         Ok(Self {

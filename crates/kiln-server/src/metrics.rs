@@ -3,6 +3,7 @@
 //! Uses atomic counters and gauges — no external dependencies.
 //! The `/metrics` endpoint renders all metrics in Prometheus text exposition format.
 
+use kiln_core::thinking_budget::ThinkingBudgetSource;
 use kiln_model::{DecodeBatcherStats, ExternalYieldSyncStats};
 use kiln_scheduler::PrefixCacheStats;
 use std::sync::Arc;
@@ -51,12 +52,12 @@ const THINKING_BUDGET_TIME_BUCKETS_MS: [u64; 16] = [
     0, 1, 10, 50, 100, 250, 500, 1_000, 2_000, 5_000, 10_000, 30_000, 60_000, 300_000, 3_600_000,
     86_400_000,
 ];
-const THINKING_BUDGET_SOURCES: [&str; 5] = [
-    "request",
-    "server_default",
-    "request_unlimited",
-    "unlimited",
-    "unknown",
+const THINKING_BUDGET_SOURCES: [ThinkingBudgetSource; 5] = [
+    ThinkingBudgetSource::Request,
+    ThinkingBudgetSource::ServerDefault,
+    ThinkingBudgetSource::RequestUnlimited,
+    ThinkingBudgetSource::Unlimited,
+    ThinkingBudgetSource::Unknown,
 ];
 const THINKING_BUDGET_OUTCOMES: [&str; 9] = [
     "unconfigured",
@@ -477,7 +478,7 @@ impl Metrics {
                 "dimension",
                 "tokens",
                 "source",
-                source,
+                source.as_str(),
                 self.thinking_budget_token_sources[index].load(Ordering::Relaxed),
             );
             prom_counter2(
@@ -486,7 +487,7 @@ impl Metrics {
                 "dimension",
                 "time",
                 "source",
-                source,
+                source.as_str(),
                 self.thinking_budget_time_sources[index].load(Ordering::Relaxed),
             );
         }
@@ -1680,10 +1681,10 @@ fn observe_bucket(buckets: &[AtomicU64], bounds: &[u64], value: u64) {
     buckets[index].fetch_add(1, Ordering::Relaxed);
 }
 
-fn thinking_budget_source_index(source: &str) -> usize {
+fn thinking_budget_source_index(source: &ThinkingBudgetSource) -> usize {
     THINKING_BUDGET_SOURCES
         .iter()
-        .position(|candidate| *candidate == source)
+        .position(|candidate| candidate == source)
         .unwrap_or(THINKING_BUDGET_SOURCES.len() - 1)
 }
 
@@ -1801,8 +1802,8 @@ mod tests {
             configured,
             max_tokens: None,
             max_time_ms: None,
-            tokens_source: tokens_source.to_string(),
-            time_source: time_source.to_string(),
+            tokens_source: tokens_source.into(),
+            time_source: time_source.into(),
             applied: None,
             triggered: None,
             trigger: None,

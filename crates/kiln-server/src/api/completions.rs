@@ -18,6 +18,7 @@ use kiln_core::sampling::{SamplingParams, ThinkingBudget, ThinkingBudgetStatus};
 use kiln_core::thinking_budget::{
     EffectiveThinkingBudget, ThinkingBudgetDefaults, ThinkingBudgetOutcome,
     ThinkingBudgetOverride as BudgetOverride, ThinkingBudgetOverrides, ThinkingBudgetScope,
+    ThinkingBudgetSource,
 };
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, ChatTemplateOptions, TokenizerError};
@@ -220,8 +221,8 @@ fn unresolved_request_thinking_budget(
             .max_tokens
             .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
         max_time_ms: configuration.max_time_ms,
-        tokens_source: configuration.tokens_source.to_string(),
-        time_source: configuration.time_source.to_string(),
+        tokens_source: configuration.tokens_source,
+        time_source: configuration.time_source,
         applied: (!configuration.configured).then_some(false),
         triggered: None,
         trigger: None,
@@ -241,8 +242,8 @@ fn recent_thinking_budget_from_metadata(
             .max_tokens
             .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
         max_time_ms: metadata.max_time_ms,
-        tokens_source: metadata.tokens_source.to_string(),
-        time_source: metadata.time_source.to_string(),
+        tokens_source: metadata.tokens_source,
+        time_source: metadata.time_source,
         applied: Some(metadata.applied),
         triggered: has_outcome.then_some(metadata.triggered),
         trigger: metadata.trigger.clone(),
@@ -4261,8 +4262,8 @@ pub struct ThinkingBudgetMetadata {
     pub max_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_time_ms: Option<u64>,
-    pub tokens_source: &'static str,
-    pub time_source: &'static str,
+    pub tokens_source: ThinkingBudgetSource,
+    pub time_source: ThinkingBudgetSource,
     pub triggered: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger: Option<String>,
@@ -4283,8 +4284,8 @@ pub struct ThinkingBudgetConfigurationMetadata {
     pub max_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_time_ms: Option<u64>,
-    pub tokens_source: &'static str,
-    pub time_source: &'static str,
+    pub tokens_source: ThinkingBudgetSource,
+    pub time_source: ThinkingBudgetSource,
 }
 
 impl From<EffectiveThinkingBudget> for ThinkingBudgetConfigurationMetadata {
@@ -4293,8 +4294,8 @@ impl From<EffectiveThinkingBudget> for ThinkingBudgetConfigurationMetadata {
             configured: effective.configured(),
             max_tokens: effective.max_tokens,
             max_time_ms: effective.max_time_ms,
-            tokens_source: effective.tokens_source.as_str(),
-            time_source: effective.time_source.as_str(),
+            tokens_source: effective.tokens_source,
+            time_source: effective.time_source,
         }
     }
 }
@@ -4305,8 +4306,8 @@ impl Default for ThinkingBudgetConfigurationMetadata {
             configured: false,
             max_tokens: None,
             max_time_ms: None,
-            tokens_source: "unlimited",
-            time_source: "unlimited",
+            tokens_source: ThinkingBudgetSource::Unlimited,
+            time_source: ThinkingBudgetSource::Unlimited,
         }
     }
 }
@@ -4318,8 +4319,8 @@ impl Default for ThinkingBudgetMetadata {
             applied: false,
             max_tokens: None,
             max_time_ms: None,
-            tokens_source: "unlimited",
-            time_source: "unlimited",
+            tokens_source: ThinkingBudgetSource::Unlimited,
+            time_source: ThinkingBudgetSource::Unlimited,
             triggered: false,
             trigger: None,
             closed: None,
