@@ -951,6 +951,11 @@ pub(crate) struct TokenizedOpdPrompt {
     pub(crate) total_obs_len: usize,
 }
 
+struct PreparedOpdPrompt {
+    source_index: usize,
+    tokenized: TokenizedOpdPrompt,
+}
+
 pub(crate) fn tokenize_opd_prompt_for_training(
     prompt: &OpdPrompt,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
@@ -991,6 +996,38 @@ pub(crate) fn tokenize_opd_prompt_for_training(
         env_mask: masked.env_mask,
         total_obs_len,
     })
+}
+
+fn prepare_opd_prompts_for_training(
+    prompts: &[OpdPrompt],
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    echo: Option<&crate::EchoConfig>,
+) -> Vec<PreparedOpdPrompt> {
+    let mut prepared = Vec::with_capacity(prompts.len());
+    for (source_index, prompt) in prompts.iter().enumerate() {
+        match tokenize_opd_prompt_for_training(prompt, tokenizer, echo) {
+            Ok(tokenized) if tokenized.action_mask.iter().any(|&active| active) => {
+                prepared.push(PreparedOpdPrompt {
+                    source_index,
+                    tokenized,
+                });
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    prompt_idx = source_index,
+                    "skipping OPD prompt with no action tokens"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    prompt_idx = source_index,
+                    error = %error,
+                    "skipping OPD prompt"
+                );
+            }
+        }
+    }
+    prepared
 }
 
 pub fn parse_off_policy_distillation_jsonl_str(
@@ -3284,24 +3321,7 @@ pub fn opd_train_to(
     // pass) and skip any prompts that produce no supervised action
     // tokens — same shape as sft_train's validity probe, with optional
     // trajectory ECHO masks for off-policy agentic data.
-    let mut tokenized: Vec<TokenizedOpdPrompt> = Vec::with_capacity(prompts.len());
-    for (idx, prompt) in prompts.iter().enumerate() {
-        match tokenize_opd_prompt_for_training(prompt, tokenizer, config.echo.as_ref()) {
-            Ok(pair) => {
-                if pair.action_mask.iter().any(|&active| active) {
-                    tokenized.push(pair);
-                } else {
-                    tracing::warn!(
-                        prompt_idx = idx,
-                        "skipping OPD prompt with no action tokens"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(prompt_idx = idx, error = %e, "skipping OPD prompt");
-            }
-        }
-    }
+    let tokenized = prepare_opd_prompts_for_training(prompts, tokenizer, config.echo.as_ref());
     if tokenized.is_empty() {
         data_stats.examples_filtered = prompts.len();
         let message = "opd_train: no valid prompts after tokenization";
@@ -3474,7 +3494,9 @@ pub fn opd_train_to(
     }
 
     for epoch in 0..epochs {
-        for (prompt_idx, tokenized_prompt) in tokenized.iter().enumerate() {
+        for prepared_prompt in &tokenized {
+            let prompt_idx = prepared_prompt.source_index;
+            let tokenized_prompt = &prepared_prompt.tokenized;
             // Build the rollout prompt from the pre-rendered chat-template
             // prefix (see above — drops the dummy assistant turn and lets
             // the template emit the proper assistant cue marker tokens).
@@ -5689,6 +5711,46 @@ mod tests {
         assert!(matches!(cfg.loss, OpdLossGranularity::TeacherTopK));
         assert_eq!(cfg.checkpoint_interval, Some(25));
         cfg.validate_runtime_contract().unwrap();
+    }
+
+    #[test]
+    fn filtered_opd_prompts_retain_their_source_index() -> Result<()> {
+        let tokenizer = off_policy_smoke_tokenizer()?;
+        let prompts = vec![
+            OpdPrompt {
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "filtered".into(),
+                }],
+                teacher_extra_messages: Vec::new(),
+                trajectory: Vec::new(),
+            },
+            OpdPrompt {
+                messages: vec![
+                    ChatMessage {
+                        role: "user".into(),
+                        content: "kept".into(),
+                    },
+                    ChatMessage {
+                        role: "assistant".into(),
+                        content: "answer".into(),
+                    },
+                ],
+                teacher_extra_messages: vec![ChatMessage {
+                    role: "system".into(),
+                    content: "teacher-only context".into(),
+                }],
+                trajectory: Vec::new(),
+            },
+        ];
+
+        let prepared = prepare_opd_prompts_for_training(&prompts, &tokenizer, None);
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].source_index, 1);
+        let expected = tokenize_opd_prompt_for_training(&prompts[1], &tokenizer, None)?;
+        assert_eq!(prepared[0].tokenized.input_ids, expected.input_ids);
+        assert_eq!(prepared[0].tokenized.action_mask, expected.action_mask);
+        Ok(())
     }
 
     #[test]
