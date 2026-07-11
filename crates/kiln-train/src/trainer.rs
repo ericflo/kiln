@@ -3,7 +3,7 @@
 //! Trains LoRA adapter weights directly on the already-loaded model's GPU
 //! tensors. No Python sidecar, no second model copy, single process.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -538,7 +538,9 @@ use crate::cd_types::*;
 // keyed by `Parameter::tensor_id()`). These REPLACE the candle `Var` +
 // `AdamWMoments{m,v:Var}` + `OptimizerState` machinery.
 use kiln_optim::{
-    AdamW as KtAdamW, AdamWHyperparameters as KtAdamWHyperparameters, Muon as KtMuon, OptimStep,
+    AdamW as KtAdamW, AdamWHyperparameters as KtAdamWHyperparameters,
+    AdamWMoments as KtHostAdamWMoments, MomentLocation as KtMomentLocation, Muon as KtMuon,
+    MuonState as KtHostMuonState, OptimStep,
 };
 use kiln_param::{AmpPolicy as KtAmpPolicy, ForwardStorage as KtForwardStorage, Parameter};
 // kt tensor types used directly for LoRA param construction + grads.
@@ -549,16 +551,23 @@ use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 // grad-map sites here name it via this explicit alias.
 use kiln_tensor::TensorId as KtTensorId;
 
-/// (#1082) AMP policy for a trainable LoRA `Parameter`: BF16 master +
-/// BF16 forward/backward compute. Matches the production
-/// `TrainableLoraParams::initialize` BF16-only LoRA storage; the kt
-/// fused tape adapters are BF16-only (see `base_dtype_supports_tape` /
-/// note `kiln-cp4-tape-adapters-bf16-only`).
+/// AMP policy for a trainable LoRA parameter, derived from the backend-selected
+/// LoRA storage dtype. Vulkan and the portable reference use F32 LoRA tensors;
+/// stamping those parameters with the historical hard-coded BF16 policy made
+/// the first host optimizer step silently narrow their master to BF16.
 #[inline]
-fn lora_amp_policy() -> KtAmpPolicy {
-    // `AmpPolicy::default()` is the BF16/BF16/BF16 tuple (see
-    // crates/kiln-param/src/amp_policy.rs).
-    KtAmpPolicy::default()
+fn lora_amp_policy(dtype: KtDType) -> KtAmpPolicy {
+    match dtype {
+        KtDType::F32 => KtAmpPolicy::fp32_reference(),
+        KtDType::BF16 => KtAmpPolicy::qwen3p5_4b_default(),
+        KtDType::F16 => KtAmpPolicy {
+            forward_compute_dtype: KtDType::F16,
+            backward_compute_dtype: KtDType::F16,
+            master_dtype: KtDType::F16,
+            accumulation_dtype: KtDType::F32,
+        },
+        _ => unreachable!("LoRA parameters require F32, BF16, or F16 storage, got {dtype}"),
+    }
 }
 
 /// (#1082) Build a trainable LoRA `Parameter` from a kt master tensor.
@@ -569,11 +578,8 @@ fn lora_amp_policy() -> KtAmpPolicy {
 /// moment key.
 #[inline]
 fn lora_parameter_from_kt(master: KtTensor) -> Parameter {
-    Parameter::trainable(
-        KtForwardStorage::Plain(master.clone()),
-        master,
-        lora_amp_policy(),
-    )
+    let policy = lora_amp_policy(master.dtype());
+    Parameter::trainable(KtForwardStorage::Plain(master.clone()), master, policy)
 }
 
 /// Sample a Kaiming-uniform LoRA-A initialization.
@@ -1213,6 +1219,7 @@ impl TrainableLoraParams {
         Ok(OptimizerState::AdamW {
             adamw: KtAdamW::new(hp),
             moments,
+            host_authoritative: HashSet::new(),
             step: 0,
         })
     }
@@ -1243,6 +1250,7 @@ impl TrainableLoraParams {
         Ok(OptimizerState::Muon {
             muon: KtMuon::new(lr as f32, momentum, nesterov, ns_iters, weight_decay),
             momenta,
+            host_authoritative: HashSet::new(),
             step: 0,
         })
     }
@@ -1299,11 +1307,13 @@ pub enum OptimizerState {
     AdamW {
         adamw: KtAdamW,
         moments: HashMap<KtTensorId, KtAdamWMoments>,
+        host_authoritative: HashSet<KtTensorId>,
         step: u32,
     },
     Muon {
         muon: KtMuon,
         momenta: HashMap<KtTensorId, KtMuonMomentum>,
+        host_authoritative: HashSet<KtTensorId>,
         step: u32,
     },
 }
@@ -1383,6 +1393,335 @@ impl OptimizerState {
             OptimizerState::AdamW { .. } => None,
         }
     }
+
+    /// Pull resident device optimizer buffers into their kt tensor owners.
+    /// Host fallback state already lives in `adamw`/`muon` and needs no sync.
+    pub fn sync_to_master(&mut self, backend: &dyn BackendRuntime) -> Result<usize> {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
+            return Ok(0);
+        }
+        fn sync_one(backend: &dyn BackendRuntime, tensor: &mut KtTensor) -> Result<bool> {
+            if !ResidencyBackend::runtime_has_resident_activation(backend, tensor) {
+                return Ok(false);
+            }
+            let dims = tensor.dims().to_vec();
+            let dtype = tensor.dtype();
+            if let Some(resolved) = ResidencyBackend::runtime_resolve_resident_activation(
+                backend, tensor, &dims, dtype,
+            )? {
+                *tensor = resolved;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+
+        let mut synced = 0;
+        match self {
+            OptimizerState::AdamW { moments, .. } => {
+                for state in moments.values_mut() {
+                    synced += usize::from(sync_one(backend, &mut state.m)?);
+                    synced += usize::from(sync_one(backend, &mut state.v)?);
+                }
+            }
+            OptimizerState::Muon { momenta, .. } => {
+                for state in momenta.values_mut() {
+                    synced += usize::from(sync_one(backend, &mut state.m)?);
+                }
+            }
+        }
+        Ok(synced)
+    }
+
+    /// Save optimizer tensors by stable parameter name. Device buffers and
+    /// CPU fallback state share one F32 safetensors representation; per-param
+    /// counters are U32 scalar tensors.
+    pub fn save_checkpoint_state(
+        &mut self,
+        params: &TrainableLoraParams,
+        backend: &dyn BackendRuntime,
+        path: &Path,
+    ) -> Result<()> {
+        self.sync_to_master(backend)?;
+        let mut owned: Vec<(String, KtTensor)> = Vec::new();
+        match self {
+            OptimizerState::AdamW {
+                adamw,
+                moments,
+                host_authoritative,
+                step,
+            } => {
+                for (key, param) in params.checkpoint_params() {
+                    let id = param.tensor_id();
+                    let shape = param.forward_storage().primary_tensor().dims().to_vec();
+                    let (m, v, param_step) = if host_authoritative.contains(&id) {
+                        let host = adamw.moments(id).with_context(|| {
+                            format!("checkpoint AdamW authoritative host moments missing for {key}")
+                        })?;
+                        anyhow::ensure!(
+                            host.m.len() == param.forward_storage().primary_tensor().elem_count()
+                                && host.v.len()
+                                    == param.forward_storage().primary_tensor().elem_count(),
+                            "checkpoint AdamW host moment shape drift for {key}"
+                        );
+                        (
+                            KtTensor::from_vec_on(
+                                kiln_tensor::Device::Cpu,
+                                host.m.clone(),
+                                shape.clone(),
+                            )?,
+                            KtTensor::from_vec_on(kiln_tensor::Device::Cpu, host.v.clone(), shape)?,
+                            u32::try_from(host.step).with_context(|| {
+                                format!("checkpoint AdamW per-param step overflow for {key}")
+                            })?,
+                        )
+                    } else {
+                        let state = moments.get(&id).with_context(|| {
+                            format!("checkpoint AdamW device moments missing for {key}")
+                        })?;
+                        (
+                            checkpoint_tensor_to_cpu_f32(&state.m, &format!("{key}.adamw.m"))?,
+                            checkpoint_tensor_to_cpu_f32(&state.v, &format!("{key}.adamw.v"))?,
+                            *step,
+                        )
+                    };
+                    checkpoint_ensure_finite_f32(&m, &format!("{key}.adamw.m"))?;
+                    checkpoint_ensure_finite_f32(&v, &format!("{key}.adamw.v"))?;
+                    owned.push((format!("{key}.adamw.m"), m));
+                    owned.push((format!("{key}.adamw.v"), v));
+                    owned.push((
+                        format!("{key}.adamw.step"),
+                        KtTensor::from_vec_on(kiln_tensor::Device::Cpu, vec![param_step], vec![1])?,
+                    ));
+                }
+            }
+            OptimizerState::Muon {
+                muon,
+                momenta,
+                host_authoritative,
+                step,
+            } => {
+                for (key, param) in params.checkpoint_params() {
+                    let id = param.tensor_id();
+                    let shape = param.forward_storage().primary_tensor().dims().to_vec();
+                    let (momentum, param_step) = if host_authoritative.contains(&id) {
+                        let host = muon.momentum_for(id).with_context(|| {
+                            format!("checkpoint Muon authoritative host momentum missing for {key}")
+                        })?;
+                        anyhow::ensure!(
+                            host.m.len() == param.forward_storage().primary_tensor().elem_count(),
+                            "checkpoint Muon host momentum shape drift for {key}"
+                        );
+                        (
+                            KtTensor::from_vec_on(kiln_tensor::Device::Cpu, host.m.clone(), shape)?,
+                            u32::try_from(host.step).with_context(|| {
+                                format!("checkpoint Muon per-param step overflow for {key}")
+                            })?,
+                        )
+                    } else {
+                        let state = momenta.get(&id).with_context(|| {
+                            format!("checkpoint Muon device momentum missing for {key}")
+                        })?;
+                        (
+                            checkpoint_tensor_to_cpu_f32(
+                                &state.m,
+                                &format!("{key}.muon.momentum"),
+                            )?,
+                            *step,
+                        )
+                    };
+                    checkpoint_ensure_finite_f32(&momentum, &format!("{key}.muon.momentum"))?;
+                    owned.push((format!("{key}.muon.momentum"), momentum));
+                    owned.push((
+                        format!("{key}.muon.step"),
+                        KtTensor::from_vec_on(kiln_tensor::Device::Cpu, vec![param_step], vec![1])?,
+                    ));
+                }
+            }
+        }
+        let tensors: HashMap<&str, &KtTensor> = owned
+            .iter()
+            .map(|(key, tensor)| (key.as_str(), tensor))
+            .collect();
+        kiln_tensor::safetensors::save_cpu(&tensors, path)
+            .map_err(|error| anyhow::anyhow!("save checkpoint optimizer state: {error}"))
+    }
+
+    /// Restore optimizer tensors into both the device-owned buffers and the
+    /// CPU fallback optimizer. Populating both prevents a post-resume routing
+    /// change from silently resetting momentum.
+    pub fn load_checkpoint_state(
+        &mut self,
+        params: &TrainableLoraParams,
+        path: &Path,
+        expected_step: u32,
+    ) -> Result<()> {
+        let mut loaded = kiln_tensor::safetensors::load_cpu(path)
+            .map_err(|error| anyhow::anyhow!("load checkpoint optimizer state: {error}"))?;
+        let suffixes: &[&str] = match self {
+            OptimizerState::AdamW { .. } => &["adamw.m", "adamw.v", "adamw.step"],
+            OptimizerState::Muon { .. } => &["muon.momentum", "muon.step"],
+        };
+        let expected: BTreeSet<_> = params
+            .checkpoint_param_keys()
+            .into_iter()
+            .flat_map(|key| suffixes.iter().map(move |suffix| format!("{key}.{suffix}")))
+            .collect();
+        let actual: BTreeSet<_> = loaded.keys().cloned().collect();
+        anyhow::ensure!(
+            actual == expected,
+            "checkpoint optimizer tensor set mismatch: expected {expected:?}, found {actual:?}"
+        );
+
+        match self {
+            OptimizerState::AdamW {
+                adamw,
+                moments,
+                host_authoritative,
+                step,
+            } => {
+                host_authoritative.clear();
+                for (key, param) in params.checkpoint_params() {
+                    let id = param.tensor_id();
+                    let m_key = format!("{key}.adamw.m");
+                    let v_key = format!("{key}.adamw.v");
+                    let step_key = format!("{key}.adamw.step");
+                    let m = loaded.remove(&m_key).expect("validated AdamW m must exist");
+                    let v = loaded.remove(&v_key).expect("validated AdamW v must exist");
+                    checkpoint_validate_f32_state_shape(&m, param, &m_key)?;
+                    checkpoint_validate_f32_state_shape(&v, param, &v_key)?;
+                    checkpoint_ensure_finite_f32(&m, &m_key)?;
+                    checkpoint_ensure_finite_f32(&v, &v_key)?;
+                    let param_step = checkpoint_read_step(
+                        &loaded
+                            .remove(&step_key)
+                            .expect("validated AdamW step must exist"),
+                        &step_key,
+                    )?;
+                    anyhow::ensure!(
+                        param_step <= expected_step,
+                        "checkpoint AdamW step {param_step} for {key} exceeds global step {expected_step}"
+                    );
+                    let state = moments.get_mut(&id).with_context(|| {
+                        format!("checkpoint AdamW destination moments missing for {key}")
+                    })?;
+                    state.m = checkpoint_restore_state_tensor(&m, &state.m, &m_key)?;
+                    state.v = checkpoint_restore_state_tensor(&v, &state.v, &v_key)?;
+                    adamw.restore_moments(
+                        id,
+                        KtHostAdamWMoments {
+                            m: m.to_vec::<f32>()?,
+                            v: v.to_vec::<f32>()?,
+                            step: u64::from(param_step),
+                            location: KtMomentLocation::Device,
+                        },
+                    )?;
+                }
+                *step = expected_step;
+            }
+            OptimizerState::Muon {
+                muon,
+                momenta,
+                host_authoritative,
+                step,
+            } => {
+                host_authoritative.clear();
+                for (key, param) in params.checkpoint_params() {
+                    let id = param.tensor_id();
+                    let momentum_key = format!("{key}.muon.momentum");
+                    let step_key = format!("{key}.muon.step");
+                    let momentum = loaded
+                        .remove(&momentum_key)
+                        .expect("validated Muon momentum must exist");
+                    checkpoint_validate_f32_state_shape(&momentum, param, &momentum_key)?;
+                    checkpoint_ensure_finite_f32(&momentum, &momentum_key)?;
+                    let param_step = checkpoint_read_step(
+                        &loaded
+                            .remove(&step_key)
+                            .expect("validated Muon step must exist"),
+                        &step_key,
+                    )?;
+                    anyhow::ensure!(
+                        param_step <= expected_step,
+                        "checkpoint Muon step {param_step} for {key} exceeds global step {expected_step}"
+                    );
+                    let state = momenta.get_mut(&id).with_context(|| {
+                        format!("checkpoint Muon destination momentum missing for {key}")
+                    })?;
+                    state.m = checkpoint_restore_state_tensor(&momentum, &state.m, &momentum_key)?;
+                    muon.restore_momentum(
+                        id,
+                        KtHostMuonState {
+                            m: momentum.to_vec::<f32>()?,
+                            step: u64::from(param_step),
+                        },
+                    )?;
+                }
+                *step = expected_step;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn checkpoint_tensor_to_cpu_f32(tensor: &KtTensor, label: &str) -> Result<KtTensor> {
+    tensor
+        .to_dtype(KtDType::F32)
+        .and_then(|tensor| tensor.to_device(kiln_tensor::Device::Cpu))
+        .and_then(|tensor| tensor.contiguous())
+        .map_err(|error| anyhow::anyhow!("checkpoint optimizer tensor {label}: {error}"))
+}
+
+fn checkpoint_ensure_finite_f32(tensor: &KtTensor, label: &str) -> Result<()> {
+    anyhow::ensure!(
+        tensor.dtype() == KtDType::F32,
+        "checkpoint optimizer tensor {label} must be F32, found {}",
+        tensor.dtype()
+    );
+    anyhow::ensure!(
+        tensor
+            .to_vec::<f32>()?
+            .iter()
+            .all(|value| value.is_finite()),
+        "checkpoint optimizer tensor {label} contains non-finite values"
+    );
+    Ok(())
+}
+
+fn checkpoint_validate_f32_state_shape(
+    tensor: &KtTensor,
+    param: &Parameter,
+    label: &str,
+) -> Result<()> {
+    checkpoint_ensure_finite_f32(tensor, label)?;
+    let expected = param.forward_storage().primary_tensor().dims();
+    anyhow::ensure!(
+        tensor.dims() == expected,
+        "checkpoint optimizer tensor {label} shape mismatch: expected {expected:?}, found {:?}",
+        tensor.dims()
+    );
+    Ok(())
+}
+
+fn checkpoint_restore_state_tensor(
+    source_f32: &KtTensor,
+    destination: &KtTensor,
+    label: &str,
+) -> Result<KtTensor> {
+    source_f32
+        .to_dtype(destination.dtype())
+        .and_then(|tensor| tensor.to_device(destination.device()))
+        .map_err(|error| anyhow::anyhow!("restore checkpoint optimizer tensor {label}: {error}"))
+}
+
+fn checkpoint_read_step(tensor: &KtTensor, label: &str) -> Result<u32> {
+    anyhow::ensure!(
+        tensor.dtype() == KtDType::U32 && tensor.dims() == [1],
+        "checkpoint optimizer step tensor {label} must be U32[1], found {}{:?}",
+        tensor.dtype(),
+        tensor.dims()
+    );
+    Ok(tensor.to_vec::<u32>()?[0])
 }
 
 /// (#1082) Build `Option<OptimizerState>` from the configured optimizer:
@@ -1542,6 +1881,117 @@ impl TrainableLoraParams {
             }
         }
         out
+    }
+
+    /// Stable PEFT-compatible names for the main-loop trainable parameters.
+    /// Tensor IDs are process-local and must never appear in durable optimizer
+    /// state, so checkpoint save/restore joins state through this ordering.
+    fn checkpoint_param_keys(&self) -> Vec<String> {
+        self.all_params_with_modules()
+            .into_iter()
+            .map(|entry| {
+                let sub = if matches!(
+                    entry.module,
+                    "q_proj"
+                        | "k_proj"
+                        | "v_proj"
+                        | "o_proj"
+                        | "in_proj_qkv"
+                        | "in_proj_z"
+                        | "out_proj"
+                ) {
+                    "self_attn"
+                } else {
+                    "mlp"
+                };
+                format!(
+                    "base_model.model.model.layers.{}.{sub}.{}.lora_{}.weight",
+                    entry.layer_idx, entry.module, entry.matrix
+                )
+            })
+            .collect()
+    }
+
+    fn checkpoint_params(&self) -> Vec<(String, &Parameter)> {
+        self.checkpoint_param_keys()
+            .into_iter()
+            .zip(self.all_params())
+            .collect()
+    }
+
+    fn checkpoint_params_mut(&mut self) -> Vec<(String, &mut Parameter)> {
+        let keys = self.checkpoint_param_keys();
+        keys.into_iter().zip(self.all_params_mut()).collect()
+    }
+
+    /// Save exact main-loop adapter parameters without PEFT receipts/config.
+    /// The enclosing checkpoint writer owns atomicity and checksums.
+    pub fn save_checkpoint_parameters(&self, path: &Path) -> Result<()> {
+        let mut owned = Vec::with_capacity(self.all_params().len());
+        for (key, param) in self.checkpoint_params() {
+            let tensor = param
+                .forward_storage()
+                .primary_tensor()
+                .to_device(kiln_tensor::Device::Cpu)
+                .and_then(|tensor| tensor.contiguous())
+                .map_err(|error| {
+                    anyhow::anyhow!("checkpoint adapter parameter {key}: to CPU: {error}")
+                })?;
+            owned.push((key, tensor));
+        }
+        let tensors: HashMap<&str, &KtTensor> = owned
+            .iter()
+            .map(|(key, tensor)| (key.as_str(), tensor))
+            .collect();
+        kiln_tensor::safetensors::save_cpu(&tensors, path)
+            .map_err(|error| anyhow::anyhow!("save checkpoint adapter parameters: {error}"))
+    }
+
+    /// Restore exact main-loop adapter parameters by stable name. Missing,
+    /// extra, shape-drifted, or dtype-drifted tensors fail before mutation.
+    pub fn load_checkpoint_parameters(&mut self, path: &Path) -> Result<()> {
+        let mut loaded = kiln_tensor::safetensors::load_cpu(path)
+            .map_err(|error| anyhow::anyhow!("load checkpoint adapter parameters: {error}"))?;
+        let expected: BTreeSet<_> = self.checkpoint_param_keys().into_iter().collect();
+        let actual: BTreeSet<_> = loaded.keys().cloned().collect();
+        anyhow::ensure!(
+            actual == expected,
+            "checkpoint adapter parameter set mismatch: expected {expected:?}, found {actual:?}"
+        );
+
+        // Validate the entire file before replacing the first live parameter.
+        for (key, param) in self.checkpoint_params() {
+            let tensor = loaded
+                .get(&key)
+                .with_context(|| format!("checkpoint adapter parameter {key} missing"))?;
+            let current = param.forward_storage().primary_tensor();
+            anyhow::ensure!(
+                tensor.dims() == current.dims(),
+                "checkpoint adapter parameter {key} shape mismatch: expected {:?}, found {:?}",
+                current.dims(),
+                tensor.dims()
+            );
+            anyhow::ensure!(
+                tensor.dtype() == current.dtype(),
+                "checkpoint adapter parameter {key} dtype mismatch: expected {}, found {}",
+                current.dtype(),
+                tensor.dtype()
+            );
+        }
+
+        for (key, param) in self.checkpoint_params_mut() {
+            let current_device = param.forward_storage().primary_tensor().device();
+            let tensor = loaded
+                .remove(&key)
+                .expect("validated checkpoint parameter must exist")
+                .to_device(current_device)
+                .map_err(|error| {
+                    anyhow::anyhow!("checkpoint adapter parameter {key}: to device: {error}")
+                })?;
+            param.replace_forward_storage(KtForwardStorage::Plain(tensor.clone()));
+            param.replace_backward_storage(Some(tensor));
+        }
+        Ok(())
     }
 
     /// Load a previously-saved PEFT adapter into the existing Vars,
@@ -8997,6 +9447,12 @@ fn apply_sgd_update_kt(
 /// production) — the kt tape produces grads in the activation dtype, so
 /// we cast defensively to the policy dtype before the host step.
 #[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OptimizerStateAuthority {
+    Device,
+    Host,
+}
+
 fn apply_adamw_update_kt(
     backend: &dyn BackendRuntime,
     param: &mut Parameter,
@@ -9010,7 +9466,7 @@ fn apply_adamw_update_kt(
     weight_decay: f32,
     step: u32,
     resident_activation: bool,
-) -> Result<()> {
+) -> Result<OptimizerStateAuthority> {
     let primary = param.forward_storage().primary_tensor().clone();
     // On-device registry path: param + grad + the REAL per-param m/v must
     // all be resident, then the CUDA kernel updates param/m/v in place.
@@ -9046,7 +9502,7 @@ fn apply_adamw_update_kt(
                 // re-assert residency of the param buffer for the next fwd.
                 ResidencyBackend::runtime_evict_resident_activation(backend, grad);
                 ResidencyBackend::runtime_update_resident_activation(backend, &primary)?;
-                return Ok(());
+                return Ok(OptimizerStateAuthority::Device);
             }
             ResidencyBackend::runtime_evict_resident_activation(backend, grad);
         }
@@ -9080,7 +9536,7 @@ fn apply_adamw_update_kt(
             param.forward_storage().primary_tensor(),
         )?;
     }
-    Ok(())
+    Ok(OptimizerStateAuthority::Host)
 }
 
 /// (#1082) Apply one Muon step to a single LoRA `Parameter`.
@@ -9116,7 +9572,7 @@ fn apply_muon_update_kt(
     ns_iters: u32,
     weight_decay: f32,
     resident_activation: bool,
-) -> Result<()> {
+) -> Result<OptimizerStateAuthority> {
     let primary = param.forward_storage().primary_tensor().clone();
     // On-device registry path: param + grad + the per-param momentum
     // must all be resident, then the kernel updates param/momentum in
@@ -9150,7 +9606,7 @@ fn apply_muon_update_kt(
                 // is already live; re-assert residency for the next fwd.
                 ResidencyBackend::runtime_evict_resident_activation(backend, grad);
                 ResidencyBackend::runtime_update_resident_activation(backend, &primary)?;
-                return Ok(());
+                return Ok(OptimizerStateAuthority::Device);
             }
             ResidencyBackend::runtime_evict_resident_activation(backend, grad);
         }
@@ -9188,7 +9644,7 @@ fn apply_muon_update_kt(
             param.forward_storage().primary_tensor(),
         )?;
     }
-    Ok(())
+    Ok(OptimizerStateAuthority::Host)
 }
 
 /// (#1082) Accumulate kt gradients from a kt-native [`kiln_autograd::GradStore`]
@@ -9280,14 +9736,16 @@ pub(crate) fn optimizer_step_from_map(
                 OptimizerState::AdamW {
                     adamw,
                     moments,
+                    host_authoritative,
                     step,
                 } => {
                     *step = step.saturating_add(1);
                     let step = *step;
                     for param in params.all_params_mut() {
-                        if let Some(grad) = grads.get(&param.tensor_id()) {
-                            let m = moments.get(&param.tensor_id());
-                            apply_adamw_update_kt(
+                        let id = param.tensor_id();
+                        if let Some(grad) = grads.get(&id) {
+                            let m = moments.get(&id);
+                            let authority = apply_adamw_update_kt(
                                 backend,
                                 param,
                                 adamw,
@@ -9301,6 +9759,14 @@ pub(crate) fn optimizer_step_from_map(
                                 step,
                                 resident_activation,
                             )?;
+                            match authority {
+                                OptimizerStateAuthority::Device => {
+                                    host_authoritative.remove(&id);
+                                }
+                                OptimizerStateAuthority::Host => {
+                                    host_authoritative.insert(id);
+                                }
+                            }
                         }
                     }
                     Ok(())
@@ -9325,13 +9791,15 @@ pub(crate) fn optimizer_step_from_map(
                 OptimizerState::Muon {
                     muon,
                     momenta,
+                    host_authoritative,
                     step,
                 } => {
                     *step = step.saturating_add(1);
                     for param in params.all_params_mut() {
-                        if let Some(grad) = grads.get(&param.tensor_id()) {
-                            let mom = momenta.get(&param.tensor_id());
-                            apply_muon_update_kt(
+                        let id = param.tensor_id();
+                        if let Some(grad) = grads.get(&id) {
+                            let mom = momenta.get(&id);
+                            let authority = apply_muon_update_kt(
                                 backend,
                                 param,
                                 muon,
@@ -9344,6 +9812,14 @@ pub(crate) fn optimizer_step_from_map(
                                 weight_decay,
                                 resident_activation,
                             )?;
+                            match authority {
+                                OptimizerStateAuthority::Device => {
+                                    host_authoritative.remove(&id);
+                                }
+                                OptimizerStateAuthority::Host => {
+                                    host_authoritative.insert(id);
+                                }
+                            }
                         }
                     }
                     Ok(())
@@ -9408,14 +9884,16 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
                 OptimizerState::AdamW {
                     adamw,
                     moments,
+                    host_authoritative,
                     step,
                 } => {
                     *step = step.saturating_add(1);
                     let step = *step;
                     for param in params.all_params_mut() {
-                        if let Some(kt_grad) = grads.get(param.tensor_id()) {
-                            let m = moments.get(&param.tensor_id());
-                            apply_adamw_update_kt(
+                        let id = param.tensor_id();
+                        if let Some(kt_grad) = grads.get(id) {
+                            let m = moments.get(&id);
+                            let authority = apply_adamw_update_kt(
                                 backend,
                                 param,
                                 adamw,
@@ -9429,6 +9907,14 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
                                 step,
                                 resident_activation,
                             )?;
+                            match authority {
+                                OptimizerStateAuthority::Device => {
+                                    host_authoritative.remove(&id);
+                                }
+                                OptimizerStateAuthority::Host => {
+                                    host_authoritative.insert(id);
+                                }
+                            }
                         }
                     }
                     Ok(())
@@ -9453,13 +9939,15 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
                 OptimizerState::Muon {
                     muon,
                     momenta,
+                    host_authoritative,
                     step,
                 } => {
                     *step = step.saturating_add(1);
                     for param in params.all_params_mut() {
-                        if let Some(kt_grad) = grads.get(param.tensor_id()) {
-                            let mom = momenta.get(&param.tensor_id());
-                            apply_muon_update_kt(
+                        let id = param.tensor_id();
+                        if let Some(kt_grad) = grads.get(id) {
+                            let mom = momenta.get(&id);
+                            let authority = apply_muon_update_kt(
                                 backend,
                                 param,
                                 muon,
@@ -9472,6 +9960,14 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
                                 weight_decay,
                                 resident_activation,
                             )?;
+                            match authority {
+                                OptimizerStateAuthority::Device => {
+                                    host_authoritative.remove(&id);
+                                }
+                                OptimizerStateAuthority::Host => {
+                                    host_authoritative.insert(id);
+                                }
+                            }
                         }
                     }
                     Ok(())
@@ -15508,6 +16004,196 @@ pub(crate) mod tests {
         }
 
         Ok(())
+    }
+
+    fn checkpoint_test_grad_map(params: &TrainableLoraParams, value: f32) -> Result<GradMap> {
+        let mut grads = GradMap::new();
+        for param in params.all_params() {
+            let master = param.forward_storage().primary_tensor();
+            let grad = KtTensor::from_vec_on(
+                master.device(),
+                vec![value; master.elem_count()],
+                master.dims().to_vec(),
+            )?
+            .to_dtype(param.amp_policy().backward_compute_dtype)?;
+            grads.insert(param.tensor_id(), grad);
+        }
+        Ok(grads)
+    }
+
+    fn assert_checkpoint_params_equal(
+        left: &TrainableLoraParams,
+        right: &TrainableLoraParams,
+    ) -> Result<()> {
+        let left = left.checkpoint_params();
+        let right = right.checkpoint_params();
+        anyhow::ensure!(left.len() == right.len(), "checkpoint param count drift");
+        for ((left_key, left), (right_key, right)) in left.into_iter().zip(right) {
+            anyhow::ensure!(left_key == right_key, "checkpoint param key drift");
+            let left = left
+                .forward_storage()
+                .primary_tensor()
+                .to_dtype(KtDType::F32)?
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec::<f32>()?;
+            let right = right
+                .forward_storage()
+                .primary_tensor()
+                .to_dtype(KtDType::F32)?
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec::<f32>()?;
+            anyhow::ensure!(left == right, "checkpoint param {left_key} differs");
+        }
+        Ok(())
+    }
+
+    fn checkpoint_optimizer_continuation_round_trip(
+        device: Device,
+        optimizer: Optimizer,
+        lr: f64,
+    ) -> Result<()> {
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+        let backend = backend::for_device_kt(&device);
+        let mut uninterrupted =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(11))?;
+        let mut resumed =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(99))?;
+        let mut uninterrupted_state = make_opt_state(&uninterrupted, optimizer, lr, &device)?
+            .context("stateful checkpoint optimizer required")?;
+        let mut resumed_state = make_opt_state(&resumed, optimizer, lr, &device)?
+            .context("stateful checkpoint optimizer required")?;
+        uninterrupted.register_with_backend(&*backend)?;
+        uninterrupted_state.register_with_backend(&*backend)?;
+
+        for value in [0.015_f32, -0.025_f32] {
+            let grads = checkpoint_test_grad_map(&uninterrupted, value)?;
+            optimizer_step_from_map(
+                &*backend,
+                &mut uninterrupted,
+                &grads,
+                lr,
+                optimizer,
+                Some(&mut uninterrupted_state),
+            )?;
+        }
+        anyhow::ensure!(uninterrupted_state.step_count() == 2);
+
+        let temp = tempfile::tempdir()?;
+        let params_path = temp.path().join("adapter.safetensors");
+        let optimizer_path = temp.path().join("optimizer.safetensors");
+        uninterrupted.sync_to_master(&*backend)?;
+        uninterrupted.save_checkpoint_parameters(&params_path)?;
+        uninterrupted_state.save_checkpoint_state(&uninterrupted, &*backend, &optimizer_path)?;
+        resumed.load_checkpoint_parameters(&params_path)?;
+        resumed_state.load_checkpoint_state(&resumed, &optimizer_path, 2)?;
+        resumed.register_with_backend(&*backend)?;
+        resumed_state.register_with_backend(&*backend)?;
+        assert_checkpoint_params_equal(&uninterrupted, &resumed)?;
+        anyhow::ensure!(resumed_state.step_count() == 2);
+
+        for (params, state) in [
+            (&mut uninterrupted, &mut uninterrupted_state),
+            (&mut resumed, &mut resumed_state),
+        ] {
+            let grads = checkpoint_test_grad_map(params, 0.035)?;
+            optimizer_step_from_map(&*backend, params, &grads, lr, optimizer, Some(state))?;
+        }
+        assert_checkpoint_params_equal(&uninterrupted, &resumed)?;
+        anyhow::ensure!(uninterrupted_state.step_count() == 3);
+        anyhow::ensure!(resumed_state.step_count() == 3);
+
+        let uninterrupted_params = temp.path().join("uninterrupted-adapter.safetensors");
+        let resumed_params = temp.path().join("resumed-adapter.safetensors");
+        let uninterrupted_optimizer = temp.path().join("uninterrupted-optimizer.safetensors");
+        let resumed_optimizer = temp.path().join("resumed-optimizer.safetensors");
+        uninterrupted.sync_to_master(&*backend)?;
+        resumed.sync_to_master(&*backend)?;
+        uninterrupted.save_checkpoint_parameters(&uninterrupted_params)?;
+        resumed.save_checkpoint_parameters(&resumed_params)?;
+        uninterrupted_state.save_checkpoint_state(
+            &uninterrupted,
+            &*backend,
+            &uninterrupted_optimizer,
+        )?;
+        resumed_state.save_checkpoint_state(&resumed, &*backend, &resumed_optimizer)?;
+        anyhow::ensure!(
+            std::fs::read(uninterrupted_params)? == std::fs::read(resumed_params)?,
+            "restored adapter bytes differ after the next optimizer step"
+        );
+        anyhow::ensure!(
+            std::fs::read(uninterrupted_optimizer)? == std::fs::read(resumed_optimizer)?,
+            "restored optimizer bytes differ after the next optimizer step"
+        );
+        uninterrupted_state.evict_from_backend(&*backend);
+        resumed_state.evict_from_backend(&*backend);
+        uninterrupted.evict_from_backend(&*backend);
+        resumed.evict_from_backend(&*backend);
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_codec_preserves_adamw_continuation() -> Result<()> {
+        checkpoint_optimizer_continuation_round_trip(
+            cpu_device(),
+            Optimizer::AdamW {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: 0.01,
+            },
+            1e-3,
+        )
+    }
+
+    #[test]
+    fn checkpoint_codec_preserves_muon_continuation() -> Result<()> {
+        checkpoint_optimizer_continuation_round_trip(
+            cpu_device(),
+            Optimizer::Muon {
+                momentum: 0.95,
+                nesterov: true,
+                ns_iters: 5,
+                weight_decay: 0.01,
+            },
+            2e-2,
+        )
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn rocm_checkpoint_codec_preserves_stateful_optimizer_continuation() -> Result<()> {
+        if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+            eprintln!(
+                "skip rocm_checkpoint_codec_preserves_stateful_optimizer_continuation: qualification off"
+            );
+            return Ok(());
+        }
+        anyhow::ensure!(
+            kiln_tensor::rocm_is_available(),
+            "ROCm qualification requested but no ROCm device is available"
+        );
+        let device = Device::Rocm(0);
+        checkpoint_optimizer_continuation_round_trip(
+            device,
+            Optimizer::AdamW {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: 0.01,
+            },
+            1e-3,
+        )?;
+        checkpoint_optimizer_continuation_round_trip(
+            device,
+            Optimizer::Muon {
+                momentum: 0.95,
+                nesterov: true,
+                ns_iters: 5,
+                weight_decay: 0.01,
+            },
+            2e-2,
+        )
     }
 
     #[test]

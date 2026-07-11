@@ -34,8 +34,16 @@ state file or in the manifest's versioned auxiliary state.
 
 ## Integration status
 
-The schema and atomic storage API are available. Native SFT, GRPO, and OPD loop
-integration is being completed as part of the confidence-hardening program;
-until a training surface documents a `resume_checkpoint` field, its existing
-`checkpoint_interval` output remains a PEFT weight snapshot and is not
-resumable.
+The schema and atomic storage API are available. The native parameter codec can
+save and restore exact adapter tensors plus AdamW moments or Muon momentum by
+stable PEFT-compatible parameter name. It validates the complete tensor set,
+shape, dtype, finite values, and optimizer step before mutation, and restores
+both resident-device and host-fallback state so a later routing change cannot
+silently reset momentum. CPU and ROCm continuation tests prove that the next
+optimizer step produces byte-identical adapter and optimizer files.
+
+Native SFT, GRPO, and OPD loop integration is still being completed as part of
+the confidence-hardening program. The codec alone does not turn an existing
+weight snapshot into a resumable checkpoint. Until a training surface
+documents a `resume_checkpoint` field, its existing `checkpoint_interval`
+output remains a PEFT weight snapshot and is not resumable.

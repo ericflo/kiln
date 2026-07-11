@@ -97,6 +97,37 @@ impl AdamW {
     pub fn parameter_count(&self) -> usize {
         self.moments.len()
     }
+
+    /// Install validated moments for a checkpoint-restored parameter.
+    ///
+    /// Checkpoint formats key state by stable parameter name. After a process
+    /// restart the caller resolves that name to the new process-local
+    /// [`TensorId`] and installs the exact FP32 moment vectors here.
+    pub fn restore_moments(
+        &mut self,
+        id: TensorId,
+        moments: AdamWMoments,
+    ) -> Result<(), StepError> {
+        if moments.m.len() != moments.v.len() {
+            return Err(StepError::Tensor(kiln_tensor::Error::Msg(format!(
+                "AdamW: restored m/v lengths differ ({} != {})",
+                moments.m.len(),
+                moments.v.len()
+            ))));
+        }
+        if moments
+            .m
+            .iter()
+            .chain(&moments.v)
+            .any(|value| !value.is_finite())
+        {
+            return Err(StepError::Tensor(kiln_tensor::Error::Msg(
+                "AdamW: restored moments contain non-finite values".to_string(),
+            )));
+        }
+        self.moments.insert(id, moments);
+        Ok(())
+    }
 }
 
 impl Default for AdamW {

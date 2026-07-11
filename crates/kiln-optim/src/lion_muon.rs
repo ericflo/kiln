@@ -401,6 +401,20 @@ impl Muon {
     pub fn parameter_count(&self) -> usize {
         self.momenta.len()
     }
+
+    /// Install validated momentum for a checkpoint-restored parameter.
+    ///
+    /// The checkpoint owner resolves its stable parameter name to the new
+    /// process-local [`TensorId`] before calling this method.
+    pub fn restore_momentum(&mut self, id: TensorId, state: MuonState) -> Result<(), StepError> {
+        if state.m.iter().any(|value| !value.is_finite()) {
+            return Err(StepError::Tensor(kiln_tensor::Error::Msg(
+                "Muon: restored momentum contains non-finite values".to_string(),
+            )));
+        }
+        self.momenta.insert(id, state);
+        Ok(())
+    }
 }
 
 impl OptimStep for Muon {
