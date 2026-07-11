@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kiln — your model gets better every time you use it</title>
-  <meta name="description" content="A pure-Rust single-GPU inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT + GRPO over HTTP. Tuned for Qwen3.5-4B on a single A6000.">
+  <meta name="description" content="A pure-Rust single-GPU inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT, GRPO, and OPD over HTTP. Tuned for Qwen3.5-4B.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/">
@@ -16,7 +16,7 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Kiln">
   <meta property="og:title" content="Kiln — your model gets better every time you use it">
-  <meta property="og:description" content="A pure-Rust single-GPU inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT + GRPO over HTTP.">
+  <meta property="og:description" content="A pure-Rust single-GPU inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT, GRPO, and OPD over HTTP.">
   <meta property="og:url" content="https://ericflo.github.io/kiln/">
   <meta property="og:image" content="https://ericflo.github.io/kiln/assets/og-image.png">
   <meta property="og:image:width" content="1200">
@@ -24,7 +24,7 @@
   <meta property="og:image:alt" content="Kiln — pure-Rust single-GPU inference + live LoRA training. OpenAI-compatible. 44.75 tok/s decode on Qwen3.5-4B (A6000).">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Kiln — your model gets better every time you use it">
-  <meta name="twitter:description" content="A pure-Rust single-GPU inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, SFT + GRPO over HTTP.">
+  <meta name="twitter:description" content="A pure-Rust single-GPU inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT, GRPO, and OPD over HTTP.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image.png">
 
   <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-400.woff2" crossorigin>
@@ -40,7 +40,7 @@
     "name": "Kiln",
     "operatingSystem": "Linux, macOS, Windows",
     "applicationCategory": "DeveloperApplication",
-    "description": "Pure-Rust single-GPU LLM inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, SFT + GRPO over HTTP.",
+    "description": "Pure-Rust single-GPU LLM inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT, GRPO, and OPD over HTTP.",
     "url": "https://ericflo.github.io/kiln/",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
     "license": "https://opensource.org/license/MIT"
@@ -492,8 +492,8 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
             <p>Adapters live alongside the base weights. Applied per request. Switch policies in milliseconds, no reload.</p>
           </div>
           <div class="feature feature--compact">
-            <h3>SFT + GRPO trainer</h3>
-            <p>In-process trainer with gradient checkpointing. Your reward, your data, served by the same binary that serves traffic.</p>
+            <h3>SFT + GRPO + OPD trainer</h3>
+            <p>In-process training with exact resume points. Your data, rewards, and identity-bound teachers, served by the same binary that serves traffic.</p>
           </div>
           <div class="feature feature--compact">
             <h3>FP8 KV (opt-in)</h3>

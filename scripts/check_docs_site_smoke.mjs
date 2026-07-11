@@ -85,8 +85,8 @@ const expectedQuickstartSections = [
   { label: 'first inference checkpoint', terms: ['first inference checkpoint'] },
   { label: 'SFT next step', terms: ['sft corrections', '/v1/train/sft'] },
   { label: 'GRPO next step', terms: ['grpo guide', 'generate', 'score', 'train'] },
-  { label: 'training payload shapes', terms: ['sft jsonl', 'one chat correction per line', 'messages array', 'grpo json request/batch', 'jsonl with one group per line', 'groups', 'candidate completions', 'reward scores', 'kiln train sft', 'kiln train grpo'] },
-  { label: 'exact training resume', terms: ['checkpoint-interval', '.kiln-checkpoint', 'resume-checkpoint', 'identical source', 'exact optimizer and loop state'] },
+  { label: 'training payload shapes', terms: ['sft jsonl', 'one chat correction per line', 'messages array', 'grpo json request/batch', 'jsonl with one group per line', 'groups', 'candidate completions', 'reward scores', 'opd request object', 'kiln train sft', 'kiln train grpo', 'kiln train opd', 'registered exact teacher identity'] },
+  { label: 'exact training resume', terms: ['checkpoint-interval', '.kiln-checkpoint', 'resume-checkpoint', 'identical source', 'exact optimizer and loop state', 'opd defaults to 25', 'exact registered teacher revision'] },
   { label: 'Where to go next', terms: ['where to go next'] },
 ];
 
@@ -193,7 +193,7 @@ const expectedApiSections = [
   { label: 'OpenAI-compatible generation', terms: ['openai-compatible generation'] },
   { label: 'adapter lifecycle', terms: ['lora lifecycle'] },
   { label: 'training', terms: ['training'] },
-  { label: 'exact SFT/GRPO resume', terms: ['exact sft/grpo resume checkpoint', 'checkpoint_interval', 'resume_checkpoint', 'training_kind', 'data_source_kind', 'opd periodic snapshots remain peft-only'] },
+  { label: 'exact SFT/GRPO/OPD resume', terms: ['latest exact sft/grpo/opd resume checkpoint', '/v1/train/opd', 'checkpoint_interval', 'resume_checkpoint', 'training_kind', 'data_source_kind', 'candidate cursor', 'teacher content revision', 'peft snapshots remain serving-only'] },
   { label: 'training data safety', terms: ['training data changes', 'adapter'] },
   { label: 'response shapes', terms: ['response shapes'] },
 ];
@@ -203,6 +203,7 @@ const expectedApiCodeExamples = [
   { label: 'first SFT', terms: ['/v1/train/sft', 'examples', 'config', 'epochs'] },
   { label: 'first GRPO', terms: ['/v1/train/grpo', 'groups', 'completions', 'reward'] },
   { label: 'exact GRPO resume', terms: ['/v1/train/grpo', 'scored-groups.jsonl', 'checkpoint_interval', 'resume_checkpoint'] },
+  { label: 'exact OPD resume', terms: ['/v1/train/opd', 'qwen35@vllm', 'distilled-bot', 'checkpoint_interval', 'resume_checkpoint'] },
   { label: 'training status', terms: ['/v1/train/status'] },
   { label: 'batch completions', terms: ['/v1/completions/batch', 'prompts'] },
   { label: 'adapter download/upload', terms: ['/v1/adapters/default/download', '/v1/adapters/upload'] },
@@ -217,10 +218,11 @@ const expectedCliSections = [
   { label: 'no-subcommand serve path', terms: ['running kiln with no subcommand starts the server'] },
   { label: 'health/readiness path', terms: ['check server readiness', 'kiln health'] },
   { label: 'pi setup path', terms: ['pi integration', 'kiln pi-setup', 'Qwen3.5-4B'] },
-  { label: 'SFT/GRPO training path', terms: ['submit sft and grpo jobs', 'kiln train sft', 'kiln train grpo'] },
+  { label: 'SFT/GRPO/OPD training path', terms: ['submit sft, grpo, and opd jobs', 'kiln train sft', 'kiln train grpo', 'kiln train opd'] },
   { label: 'SFT payload shape', terms: ['sft reads jsonl', 'one chat correction example per line', 'messages array'] },
   { label: 'GRPO payload shape', terms: ['grpo accepts either one json request/batch', 'streamed jsonl with one group per line', 'groups', 'messages', 'candidate completions', 'text', 'reward scores'] },
-  { label: 'exact training resume', terms: ['checkpoint-interval', 'resume-checkpoint', 'exact resume requires the identical file, route, adapter, and options'] },
+  { label: 'OPD payload shape', terms: ['opd reads one', '/v1/train/opd', 'json prompt array', '--teacher', 'exact content revision'] },
+  { label: 'exact training resume', terms: ['checkpoint-interval', 'resume-checkpoint', 'exact resume requires the identical file, route, adapter, and options', 'opd defaults to an exact checkpoint every 25 committed optimizer steps'] },
   { label: 'adapter lifecycle path', terms: ['manage lora adapters', 'kiln adapters list', 'kiln adapters load', 'kiln adapters unload'] },
   { label: 'config validation path', terms: ['validate config', 'kiln config --file'] },
   { label: 'help and verbosity flags', terms: ['--help', '--verbose', '--quiet', '-vv'] },
@@ -234,6 +236,7 @@ const expectedCliCodeExamples = [
   { label: 'pi setup command', terms: ['kiln pi-setup', '--kiln-url http://office-kiln:8420'] },
   { label: 'SFT training command', terms: ['kiln train sft', '--file corrections.jsonl', '--adapter support-bot', '--checkpoint-interval 25'] },
   { label: 'GRPO training command', terms: ['kiln train grpo', '--file scored-groups.jsonl', '--adapter support-bot', '--checkpoint-interval 25', '--resume-checkpoint'] },
+  { label: 'OPD training command', terms: ['kiln train opd', '--file opd-request.json', '--adapter distilled-bot', '--teacher qwen35@vllm', '--checkpoint-interval 25', '--resume-checkpoint'] },
   { label: 'training status command', terms: ['kiln train status'] },
   { label: 'adapter commands', terms: ['kiln adapters list', 'kiln adapters load support-bot', 'kiln adapters unload'] },
   { label: 'config validation commands', terms: ['kiln config --file kiln.toml', 'kiln serve --config kiln.toml'] },
@@ -893,6 +896,7 @@ function validateCliHelpOnboardingCopy() {
       'TRAIN_OVERVIEW',
       'TRAIN_SFT_OVERVIEW',
       'TRAIN_GRPO_OVERVIEW',
+      'TRAIN_OPD_OVERVIEW',
       'TRAIN_EXAMPLES',
       'ADAPTERS_EXAMPLES',
       'CONFIG_EXAMPLES',
@@ -909,6 +913,7 @@ function validateCliHelpOnboardingCopy() {
       'kiln health',
       'kiln train sft',
       'kiln train grpo',
+      'kiln train opd',
       'kiln adapters list',
     ]],
     ['TOP_LEVEL_EXAMPLES', [
@@ -916,6 +921,7 @@ function validateCliHelpOnboardingCopy() {
       'kiln health',
       'kiln train sft --file examples.jsonl --adapter my-task',
       'kiln train grpo --file grpo-batch.json --adapter my-task',
+      'kiln train opd --file opd-request.json --adapter distilled-task --teacher teacher-v1',
       'kiln adapters list',
     ]],
     ['SERVE_OVERVIEW', [
@@ -1056,6 +1062,7 @@ function validateQuickstartCliReference() {
     'kiln config -f kiln.toml',
     'kiln train sft --file corrections.jsonl --adapter support-bot',
     'kiln train grpo --file grpo-batch.json --adapter support-bot',
+    'kiln train opd --file opd-request.json --adapter distilled-bot --teacher qwen35@vllm',
     'kiln train status --job-id train_123',
     'kiln adapters list',
     'kiln adapters load support-bot',
@@ -1074,6 +1081,8 @@ function validateQuickstartCliReference() {
     'groups',
     'completions',
     'reward scores',
+    'OPD request object',
+    'registered teacher',
   ];
   const missingTrainingPayloadTerms = expectedTrainingPayloadTerms.filter((term) => !cliReferenceCodeBlock.includes(term));
   if (missingTrainingPayloadTerms.length > 0) {
@@ -1089,6 +1098,7 @@ function validateQuickstartCliReference() {
     ['Commands::Adapters', /pub enum Commands[\s\S]*?Adapters\(AdapterCommands\)/],
     ['TrainCommands::Sft', /pub enum TrainCommands[\s\S]*?\n\s+Sft\s*\{[\s\S]*?file:\s*String[\s\S]*?adapter:\s*String[\s\S]*?url:\s*String/],
     ['TrainCommands::Grpo', /pub enum TrainCommands[\s\S]*?\n\s+Grpo\s*\{[\s\S]*?file:\s*String[\s\S]*?adapter:\s*String[\s\S]*?url:\s*String/],
+    ['TrainCommands::Opd', /pub enum TrainCommands[\s\S]*?\n\s+Opd\s*\{[\s\S]*?file:\s*String[\s\S]*?adapter:\s*String[\s\S]*?teacher:\s*Option<String>[\s\S]*?url:\s*String/],
     ['TrainCommands::Status', /pub enum TrainCommands[\s\S]*?\n\s+Status\s*\{[\s\S]*?job_id:\s*Option<String>[\s\S]*?url:\s*String/],
     ['AdapterCommands::List', /pub enum AdapterCommands[\s\S]*?\n\s+List\s*\{[\s\S]*?url:\s*String/],
     ['AdapterCommands::Load', /pub enum AdapterCommands[\s\S]*?\n\s+Load\s*\{[\s\S]*?name:\s*String[\s\S]*?url:\s*String/],

@@ -1,6 +1,6 @@
 # Quickstart: Zero to Running in 5 Minutes
 
-This guide gets you from a fresh machine to your first Kiln inference. Stop after the checkpoint if all you want is “server running + one chat + dashboard”; SFT and GRPO are next steps after that.
+This guide gets you from a fresh machine to your first Kiln inference. Stop after the checkpoint if all you want is “server running + one chat + dashboard”; SFT, GRPO, and OPD are next steps after that.
 
 ## Choose your path
 
@@ -299,7 +299,7 @@ Kiln ships with an embedded web dashboard. Open [http://localhost:8420/ui/](http
 
 - **Server Status** — live GPU VRAM breakdown (model / KV cache / training / free) plus scheduler queue depth
 - **Adapters** — list available LoRA adapters and switch the active one
-- **Training** — submit SFT or GRPO jobs from a form, watch the queue, and review recently completed runs
+- **Training / Distill** — submit SFT, GRPO, or OPD jobs from a form, watch the queue, and review recently completed runs
 - **Quick Inference** — chat with the model directly (per-request adapter and temperature pickers) without writing curl
 
 ![Kiln dashboard showing server status, adapters, training controls, and quick inference chat panels](docs/site/assets/server-ui-dashboard.png)
@@ -315,6 +315,7 @@ Next steps are optional:
 
 - Train a small adapter with [SFT](#6-submit-sft-training).
 - Run generate→score→train loops with [GRPO](docs/GRPO_GUIDE.md).
+- Distill a registered local or vLLM teacher with [OPD](docs/training-checkpoints.md#opd).
 - Use [advanced API examples](#9-advanced-api-examples) for tools, batch generation, adapter import/export, TIES merge, composition, webhooks, and troubleshooting notes.
 - Open the website [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html) page if setup is not clean yet.
 
@@ -367,9 +368,9 @@ curl -s http://localhost:8420/v1/train/sft \
 ```
 
 Training runs in the background. Final adapter weights, receipt, and replay
-data remain in a staging tree until the job finishes; exact SFT and GRPO
-checkpoints are published durably in the adapter registry as committed steps or
-optimizer groups complete. Under
+data remain in a staging tree until the job finishes; exact SFT, GRPO, and OPD
+checkpoints are published durably in the adapter registry as committed steps,
+optimizer groups, or OPD candidates complete. Under
 `experimental`, the model continues serving while the writer-priority training
 operation runs. Under `maintenance`, inference is disabled. At completion Kiln
 publishes the adapter atomically; with the default `auto_load=true`, subsequent
@@ -378,22 +379,34 @@ same-name adapter that was already serving is reloaded inside that publication
 barrier even when `auto_load=false`, because its on-disk bytes cannot change
 behind the loaded weights.
 
-For an interruptible SFT or GRPO run, add `"checkpoint_interval": 25` to
-`config` or pass `--checkpoint-interval 25` to the matching CLI command. For
-example:
+For an interruptible SFT, GRPO, or OPD run, add `"checkpoint_interval": 25`
+to `config` or pass `--checkpoint-interval 25` to the matching CLI command.
+OPD already defaults to 25. For example:
 
 ```bash
 ./target/release/kiln train grpo \
   --file scored-groups.jsonl \
   --adapter reward-bot \
   --checkpoint-interval 25
+
+./target/release/kiln train opd \
+  --file opd-request.json \
+  --adapter distilled-bot \
+  --teacher qwen35@vllm \
+  --checkpoint-interval 25
 ```
+
+`opd-request.json` is one `/v1/train/opd` request object with `prompts`, a
+registered `teacher`, and `config`; `--teacher` may supply or override that
+alias. The complete request and resume shape is in
+[Native Training Checkpoints](docs/training-checkpoints.md#api-cli-and-browser-workflow).
 
 `kiln train status --job-id JOB_ID` prints the newest immutable checkpoint
 basename. Continue with the identical file, route, adapter, and training
-options plus `--resume-checkpoint BASENAME`. Resume validates the complete
-adapter/optimizer/reference/loop state and checksums before GPU work; it is not
-a weights-only warm start. See
+options plus `--resume-checkpoint BASENAME`. OPD additionally requires the
+identical prompt/dataset identity and exact registered teacher revision. Resume
+validates the complete adapter/optimizer/reference/loop state and checksums
+before continuation; it is not a weights-only warm start. See
 [Native Training Checkpoints](docs/training-checkpoints.md).
 
 ## 7. Check Training Status
@@ -888,6 +901,9 @@ kiln train sft --file corrections.jsonl --adapter support-bot
 kiln train grpo --file grpo-batch.json --adapter support-bot
     Submit one GRPO JSON request/batch with groups, candidate completions, and reward scores.
 
+kiln train opd --file opd-request.json --adapter distilled-bot --teacher qwen35@vllm
+    Submit one OPD request object (or a prompt array plus --teacher) against a registered teacher.
+
 kiln train status --job-id train_123
     Check a specific training job; omit --job-id to show the queue.
 
@@ -948,8 +964,10 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | POST | `/v1/train/sft` | Submit SFT training examples (`experimental` or `maintenance`) |
 | POST | `/v1/train/grpo` | Submit GRPO training batch in `experimental` or `maintenance` (supports new `agentic_groups` shape with multi-turn trajectories; ECHO on by default) |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — semantically-honest name for multi-turn rollouts |
+| POST | `/v1/train/opd` | Submit on-policy/off-policy distillation against a registered exact teacher identity; exact checkpoint cadence defaults to 25 steps |
 | GET | `/v1/train/status` | Training queue status |
 | GET | `/v1/train/status/{job_id}` | Individual job status |
+| GET | `/v1/train/jobs/{job_id}` | Rich job detail including the latest exact SFT/GRPO/OPD checkpoint metadata |
 | GET | `/v1/train/queue` | List queued training jobs |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
 | (config) | `[training].webhook_url` | Fire-and-forget POST on training completion — set in `kiln.toml` or via `KILN_TRAINING_WEBHOOK_URL` (see [9.9](#99-training-completion-webhooks)). |

@@ -47,6 +47,9 @@ const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
   kiln train grpo --file grpo-batch.json --adapter my-task
       Improve an adapter from scored completions using GRPO rewards.
 
+  kiln train opd --file opd-request.json --adapter distilled-task --teacher teacher-v1
+      Distill an adapter from a registered teacher with exact resume points.
+
   kiln adapters list
       Show saved adapters and which adapter is active on the running server.
 "#;

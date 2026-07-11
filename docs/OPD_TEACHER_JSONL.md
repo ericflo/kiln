@@ -85,3 +85,26 @@ Objectives:
 When `trajectory` includes `kind: "observation"` segments and OPD config has
 `echo` enabled, kiln adds ECHO env-CE to the same OPD training step and records
 OPD action tokens and ECHO env tokens separately in `train_receipt.json`.
+
+## Exact checkpoint and resume
+
+Set `config.checkpoint_interval` to a positive number of committed optimizer
+steps (OPD defaults to 25). Kiln publishes an immutable
+`NAME-checkpoint-step-NNNNNNNN.kiln-checkpoint` directory beneath the adapter
+registry and reports its basename through `GET /v1/train/jobs/{job_id}` and
+`kiln train status --job-id JOB_ID`. Cooperative cancellation also publishes
+at the next settled source/sample candidate boundary.
+
+Resume by submitting the identical JSONL path and exact bytes, teacher alias,
+training mode, output adapter, and effective configuration with
+`config.resume_checkpoint`, or by adding `--resume-checkpoint BASENAME` to the
+same `kiln train opd --file ...` command. Kiln revalidates the JSONL content
+hash, manifest identity, teacher content revision, model/base weights,
+tokenizer, backend, precision, adapter/optimizer tensors, RNG streams, and
+candidate cursor before continuing. Reformatting the manifest, replacing a
+same-name teacher, or changing even an already-consumed row is a hard error.
+
+The `.kiln-checkpoint` directory is exact optimizer continuation state. A PEFT
+adapter snapshot is serving state only and cannot replace it. See
+[Native Training Checkpoints](training-checkpoints.md#opd) for the complete
+durability and browser handoff contract.

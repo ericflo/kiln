@@ -44,9 +44,9 @@ state file or in the manifest's versioned auxiliary state.
 
 ## Integration status
 
-Native SFT and GRPO support exact resume. OPD does not yet. A legacy PEFT
-snapshot from any training mode remains serving-only and is never accepted as
-an exact checkpoint.
+Native SFT, inline and streamed-JSONL GRPO, and OPD support exact resume. A
+legacy PEFT snapshot from any training mode remains serving-only and is never
+accepted as an exact checkpoint.
 
 ### SFT
 
@@ -99,18 +99,55 @@ cancelled-and-resumed runs for both routes. Losses, final adapter bytes,
 intermediate adapter/optimizer/reference artifacts, EMA cadence, and diagnostic
 state match exactly.
 
-### OPD and legacy snapshots
+### OPD
 
-OPD `checkpoint_interval` output remains a PEFT adapter snapshot without exact
-optimizer, cursor, RNG, or reference state. It is not resumable. The strict
-loader likewise rejects older SFT/GRPO PEFT snapshots that lack
-`checkpoint_manifest.json`. Capability-distillation modes must explicitly
-document exact resume support before their snapshots may be treated as
-checkpoints.
+`OpdConfig.checkpoint_interval` defaults to 25 and publishes an exact
+checkpoint after every N committed optimizer steps. Cooperative cancellation
+publishes at the next settled source/sample candidate boundary. OPD keeps the
+optimizer-step counter separate from the candidate cursor because a sampled
+rollout can be empty and consume a deterministic candidate without applying an
+update. OPD restores:
+
+- adapter parameters plus AdamW moments or Muon momentum by stable parameter
+  name (SGD has no optimizer artifact), with optimizer/scheduler step;
+- the next epoch and source/sample candidate cursor, prepared source order,
+  loss history, token/data/ECHO/gradient diagnostics, phase and GPU-writer
+  timings, and stateful collapse-guardrail accumulators;
+- independent LoRA-initialization and on-policy rollout RNG streams, including
+  the one effective seed resolved for the original run;
+- effective configuration, auto-resolved sample count, precision policy,
+  prompt or off-policy dataset identity, model config, base-weight content,
+  tokenizer identity, backend runtime, and any requested `base_adapter`;
+- teacher capabilities, canonical teacher identity when one exists, and the
+  authoritative content revision of the exact numeric source. Deterministic or
+  composite fixture teachers bind their generated numeric rows or algorithm
+  contract rather than pretending to be a model identity.
+
+Resume requires the identical prompt array or off-policy dataset bytes,
+training mode and effective configuration, output adapter, and exact teacher
+content revision. A same-name teacher that was re-registered with different
+model, tokenizer, runtime, adapter, protocol, scoring bounds, fixture rows, or
+algorithm identity is rejected. The complete immutable bundle is restored
+before continuation; a `base_adapter` is not a substitute for checkpoint
+state.
+
+Real ROCm BF16 and Vulkan F32 qualification compares uninterrupted OPD with a
+cancelled-and-resumed run. Loss history, final and intermediate adapter bytes,
+optimizer tensors, cursor/RNG state, and diagnostics match exactly, while
+inference can acquire the shared device between settled candidate phases.
+
+### Legacy snapshots
+
+The strict loader rejects older SFT, GRPO, and OPD PEFT snapshots that lack
+`checkpoint_manifest.json`. Capability-distillation modes use the same OPD
+checkpoint contract, but a generated teacher that is not available as a
+registered alias cannot be prepared automatically by the browser. Restore the
+exact source and submit through a compatible API/CLI route; never relabel a
+serving snapshot as a checkpoint.
 
 ## API, CLI, and browser workflow
 
-Start checkpointed SFT or GRPO from the CLI:
+Start checkpointed SFT, GRPO, or OPD from the CLI:
 
 ```bash
 kiln train sft \
@@ -122,6 +159,12 @@ kiln train sft \
 kiln train grpo \
   --file scored-groups.jsonl \
   --adapter reward-bot \
+  --checkpoint-interval 25
+
+kiln train opd \
+  --file opd-request.json \
+  --adapter distilled-bot \
+  --teacher qwen35@vllm \
   --checkpoint-interval 25
 ```
 
@@ -154,6 +197,34 @@ For inline GRPO, replace `dataset_path` with the exact `groups` array. Named
 datasets submitted by the browser are resolved to the server's JSONL copy and
 use the streamed route.
 
+The direct OPD API uses the same configuration fields. OPD defaults to a
+25-step cadence, but spelling it out makes the durability policy visible:
+
+```json
+{
+  "prompts": [
+    {"messages": [{"role": "user", "content": "Explain why the sky is blue."}]}
+  ],
+  "teacher": "qwen35@vllm",
+  "config": {
+    "output_name": "distilled-bot",
+    "checkpoint_interval": 25
+  }
+}
+```
+
+Submit that object from `opd-request.json`, or continue it with the identical
+file and the exact basename reported by status:
+
+```bash
+kiln train opd \
+  --file opd-request.json \
+  --adapter distilled-bot \
+  --teacher qwen35@vllm \
+  --checkpoint-interval 25 \
+  --resume-checkpoint distilled-bot-checkpoint-step-00000025.kiln-checkpoint
+```
+
 Exact checkpoints are direct children of the configured adapter registry, for
 example:
 
@@ -163,16 +234,20 @@ support-bot-checkpoint-step-00000025.kiln-checkpoint/
 
 They are published there while training is running, independently of the
 temporary final-adapter staging tree. A process crash can therefore lose the
-in-flight step or group, but not the last committed checkpoint.
+in-flight step, group, or OPD candidate, but not the last committed checkpoint.
 
 `GET /v1/train/jobs/{job_id}` reports `latest_checkpoint`, including the
 `resume_checkpoint` basename, `training_kind`, `data_source_kind`, committed
-step, total steps, next epoch/group cursor, and completion state. `kiln train
+step, total steps, next epoch/group/candidate cursor, and completion state. Job
+detail also exposes the validated effective configuration, data hash/count,
+and OPD teacher alias/content revision used by the browser handoff. `kiln train
 status --job-id JOB_ID` prints the same basename. The training detail panel
-labels SFT epoch/example cursors separately from inline/JSONL GRPO group
-cursors, provides copy and prepare-resume actions, and exposes checkpoint fields
-in both advanced forms. Preparing a resume clears inline data that cannot be
-verified from replay metadata; select the identical source before submit.
+labels SFT epoch/example, inline/JSONL GRPO group, and OPD candidate cursors
+separately and provides copy and prepare-resume actions. Preparation clears
+inline SFT/GRPO data and OPD prompts that cannot be recovered from replay
+metadata. OPD preparation selects a teacher only when the currently registered
+alias has the checkpoint's exact revision; missing legacy bindings or teacher
+drift fail closed. Reinsert the identical source before submit.
 
 Status discovery validates the bounded strict manifest without rehashing large
 state files on every poll. Resume admission performs the full file-set, size,

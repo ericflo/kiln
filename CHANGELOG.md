@@ -2,14 +2,15 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
-- training durability: native SFT and both inline and streamed-JSONL GRPO can
+- training durability: native SFT, inline and streamed-JSONL GRPO, and OPD
   publish immutable exact checkpoints at a configured cadence and on
   cooperative cancellation. Resume restores policy/adapter, optimizer,
-  reference/EMA, cursor, RNG, loss history, and diagnostic state only after
-  complete artifact, checksum, route, data, configuration, model, tokenizer,
-  precision, and backend validation. The API, CLI, job detail, and browser
-  forms expose the same checkpoint basename contract; OPD snapshots remain
-  PEFT-only and are not resumable.
+  reference/EMA where applicable, distinct optimizer/data cursors, RNG, loss
+  history, and diagnostic state only after complete artifact, checksum, route,
+  data, configuration, model, tokenizer, precision, backend, and OPD teacher
+  identity validation. The API, CLI, job detail, and browser forms expose the
+  same checkpoint basename contract; serving-only PEFT snapshots remain
+  deliberately separate and are never accepted as resumable state.
 - training correctness: GRPO is now locked to a source-pinned TRL 1.8.0 and
   PyTorch 2.13.0 oracle for loss, ratios, clipping, K3, policy-logprob
   gradients, and one AdamW step. The oracle exposed and fixed a second

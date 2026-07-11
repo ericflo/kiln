@@ -76,10 +76,11 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **Embedded agent runs** — the server drives pi itself (`POST /v1/agent/runs`): spawns `pi --mode rpc` against its own model, streams the trajectory live with steer/abort, and auto-indexes finished sessions into the trace layer the self-improvement flywheel trains on.
 - **SFT training** over HTTP — submit examples in `experimental` or drained `maintenance`; publication is atomic.
 - **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function; GPU ownership follows the selected serving profile.
+- **On-policy distillation (OPD)** over HTTP — train against an identity-bound local or vLLM teacher, with exact candidate-boundary checkpoints and resume.
 - **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes. Auto-detect picks the right scorer per example (`numeric_tolerance`, `multiple_choice`, `json_validity`, `regex`, `contains`, `tool_call`, `code`, `llm_judge`, `all`/`any` composites).
 - **Dataset → eval synthesis** — upload an SFT JSONL and Kiln decomposes it into an eval suite (final-assistant / first-turn / every-turn / tool-call-prediction strategies). No separate eval harness to write.
 - **Judgment flywheel** — A/B-judge two adapters in `/ui/`, save your picks into a judgment dataset, compile to SFT, train a *local* judge LoRA, validate it on a held-out slice. The dashboard ships a streaming side-by-side viewer with `A`/`B`/`Tie`/`Skip` keyboard shortcuts.
-- **Post-training auto-eval** — in `experimental`, attach `post_eval` to any SFT/GRPO request and the produced adapter is graded immediately, with results back-linked to the training job.
+- **Post-training auto-eval** — in `experimental`, attach `post_eval` to any SFT/GRPO/OPD request and the produced adapter is graded immediately, with results back-linked to the training job.
 - **Adapter smoke tests** — pass `--adapter-smoke-test` on SFT/GRPO CLI submissions to record base-vs-adapter canary metrics in `train_receipt.json` before a full eval.
 - **Muon optimizer (default)** — momentum-orthogonalized SGD with fused on-device Newton-Schulz kernels for every backend (CUDA, ROCm, Vulkan, Metal). Converges LoRA fine-tunes in fewer steps than AdamW at roughly half the optimizer state (one momentum buffer vs Adam's two moments). AdamW and SGD remain selectable per-request via `{"optimizer": {"kind": "adam_w"}}` / `{"kind": "sgd"}`. Omit `learning_rate` and the server picks the per-optimizer default (Muon ~2e-2 vs AdamW ~1e-4 for SFT LoRA).
 - **Atomic LoRA transitions** — `experimental` supports live hot-swap; `maintenance` supports drained activation; `stable` rejects real weight transitions before GPU ownership changes.
@@ -188,6 +189,16 @@ tokens separately.
 
 See [docs/OPD_TEACHER_JSONL.md](docs/OPD_TEACHER_JSONL.md) for the JSONL
 schema and the `reverse_kl` vs `cross_entropy` objective contract.
+
+OPD publishes immutable exact `.kiln-checkpoint` bundles every 25 committed
+optimizer steps by default and on cooperative cancellation. Resume binds the
+adapter and optimizer tensors, separate optimizer-step and source/sample
+candidate cursors, RNG streams, diagnostics, effective configuration, exact
+prompt/dataset identity, and authoritative teacher content revision. Use
+`kiln train status --job-id JOB_ID` to get the basename, then resubmit the
+identical request with `config.resume_checkpoint` or
+`kiln train opd --resume-checkpoint BASENAME`. See
+[Native Training Checkpoints](docs/training-checkpoints.md#opd).
 
 ### Remote vLLM teachers
 
@@ -450,9 +461,10 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/train/sft` | Submit SFT training examples under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`) |
 | POST | `/v1/train/grpo` | Submit GRPO scored completions under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — same handler, semantically-honest name for multi-turn rollouts |
+| POST | `/v1/train/opd` | Submit on-policy or off-policy distillation against a registered, identity-bound teacher; exact checkpoints default to every 25 committed optimizer steps |
 | GET | `/v1/train/status` | Training queue and job status |
 | GET | `/v1/train/status/{job_id}` | Inspect one training job |
-| GET | `/v1/train/jobs/{job_id}` | Rich training job detail (loss curve + linked-eval back-references) |
+| GET | `/v1/train/jobs/{job_id}` | Rich training job detail (loss curve, linked evals, and latest exact SFT/GRPO/OPD checkpoint metadata) |
 | GET | `/v1/train/queue` | List queued training jobs |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a job (queued: dequeued; running: stops at the next step boundary) |
 | GET | `/v1/stats/mtp-acceptance` | Per-adapter MTP draft acceptance (live alpha) |
@@ -650,13 +662,12 @@ When `post_eval.min_accuracy` is set, a loaded same-name rewrite is rejected
 before GPU training instead of serving unapproved weights; unload it or choose
 a versioned `config.output_name`.
 
-SFT and GRPO can also publish immutable exact `.kiln-checkpoint` directories
+SFT, GRPO, and OPD can also publish immutable exact `.kiln-checkpoint` directories
 directly beneath the adapter registry while the final adapter remains staged.
 They restore optimizer, cursor/RNG, and objective-specific reference state, not
 just PEFT weights; admission validates the complete bundle and exact data route
 before GPU work. See [Native Training Checkpoints](docs/training-checkpoints.md)
-for API, CLI, browser, cancellation, and resume semantics. OPD periodic
-snapshots remain PEFT-only.
+for API, CLI, browser, cancellation, teacher-identity, and resume semantics.
 
 ## Architecture
 
@@ -672,7 +683,8 @@ Single Rust binary:
                       │
                       ├── Training worker (background thread, shares GPU)
                       │   ├── SFT (cross-entropy on LoRA parameters)
-                      │   └── GRPO (advantage-weighted policy gradient)
+                      │   ├── GRPO (advantage-weighted policy gradient)
+                      │   └── OPD (identity-bound teacher distillation)
                       │
                       └── Eval worker (background thread, shares GPU)
                           ├── Suite registry + dataset registry + judgment store on disk
@@ -693,7 +705,7 @@ crates/
   kiln-model/            Model loading, forward pass, LoRA, sampling
   kiln-scheduler/        Continuous batching scheduler with chunked prefill
   kiln-server/           HTTP server, CLI, training queue, eval queue, metrics, config
-  kiln-train/            SFT and GRPO training loops with gradient checkpointing
+  kiln-train/            SFT, GRPO, and OPD training loops with gradient checkpointing
   kiln-eval/             Suites, scorers, results, dataset → eval synthesis (pure CPU, no GPU dep)
   kiln-nvtx/             Thin NVTX range wrapper for nsys attribution (no-op when off)
   kiln-flce-kernel/      Fused Linear Cross-Entropy (chunked CE without [T, V] logits)

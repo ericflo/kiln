@@ -650,14 +650,15 @@ KILN_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
 
       <article class="card p-6">
         <div class="label mb-3">Training</div>
-        <h2 id="training" class="text-2xl font-semibold mb-4">SFT, GRPO, status, and queue control</h2>
+        <h2 id="training" class="text-2xl font-semibold mb-4">SFT, GRPO, OPD, status, and queue control</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/sft</code> &mdash; submit supervised fine-tuning examples.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/grpo</code> &mdash; submit a GRPO batch of prompts, completions, and rewards.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/agentic</code> &mdash; canonical alias of <code>/v1/train/grpo</code> for multi-turn trajectory rollouts (ECHO applies automatically).</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/train/opd</code> &mdash; submit on-policy or off-policy distillation prompts against a registered, identity-bound teacher.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status</code> &mdash; summarize training queue and job state.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status/{job_id}</code> &mdash; inspect one training job.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/train/jobs/{job_id}</code> &mdash; rich job detail (loss curve, linked evals, and latest exact SFT/GRPO resume checkpoint).</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/train/jobs/{job_id}</code> &mdash; rich job detail (loss curve, linked evals, and latest exact SFT/GRPO/OPD resume checkpoint).</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/train/jobs/{job_id}</code> &mdash; remove an archived terminal job.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/queue</code> &mdash; list queued training jobs.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/train/queue/{job_id}</code> &mdash; cancel a job: queued jobs leave the queue; running jobs stop at the next step boundary.</div>
@@ -685,9 +686,19 @@ curl -s http://localhost:8420/v1/train/grpo \
 
 curl -s http://localhost:8420/v1/train/grpo \
   -H 'content-type: application/json' \
-  -d '{"dataset_path":"/data/scored-groups.jsonl","config":{"output_name":"reward-bot","checkpoint_interval":25,"resume_checkpoint":"reward-bot-checkpoint-step-00000025.kiln-checkpoint"}}'</code></pre></div>
+  -d '{"dataset_path":"/data/scored-groups.jsonl","config":{"output_name":"reward-bot","checkpoint_interval":25,"resume_checkpoint":"reward-bot-checkpoint-step-00000025.kiln-checkpoint"}}'
+
+# OPD defaults to an exact checkpoint every 25 committed optimizer steps
+curl -s http://localhost:8420/v1/train/opd \
+  -H 'content-type: application/json' \
+  -d '{"prompts":[{"messages":[{"role":"user","content":"Explain why the sky is blue."}]}],"teacher":"qwen35@vllm","config":{"output_name":"distilled-bot","checkpoint_interval":25}}'
+
+# Resume with identical prompts/config and the exact registered teacher revision
+curl -s http://localhost:8420/v1/train/opd \
+  -H 'content-type: application/json' \
+  -d '{"prompts":[{"messages":[{"role":"user","content":"Explain why the sky is blue."}]}],"teacher":"qwen35@vllm","config":{"output_name":"distilled-bot","checkpoint_interval":25,"resume_checkpoint":"distilled-bot-checkpoint-step-00000025.kiln-checkpoint"}}'</code></pre></div>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          SFT and GRPO checkpoints are immutable <code>.kiln-checkpoint</code> directories published directly beneath the adapter registry while training runs. Cancellation checkpoints at the next committed SFT step or GRPO group. Resume requires the same output name, data bytes and inline/JSONL route, effective configuration, precision, model/base weights, tokenizer, and backend; the server validates the complete adapter, optimizer, reference/EMA, loop-state artifact set and checksums before GPU work. Job detail reports <code>training_kind</code>, <code>data_source_kind</code>, and the next epoch/group cursor. OPD periodic snapshots remain PEFT-only and are not resumable. See <a href="https://github.com/ericflo/kiln/blob/main/docs/training-checkpoints.md">Native Training Checkpoints</a> for the exact contract.
+          SFT, GRPO, and OPD checkpoints are immutable <code>.kiln-checkpoint</code> directories published directly beneath the adapter registry while training runs. Cancellation checkpoints at the next committed SFT step, GRPO group, or settled OPD candidate boundary. Resume requires the same output name, data bytes and route, effective configuration, precision, model/base weights, tokenizer, and backend; OPD additionally binds the exact teacher content revision and keeps its optimizer-step and candidate cursors separate. The server validates the complete adapter, optimizer, reference/EMA where applicable, loop-state artifact set, and checksums before continuation. Job detail reports <code>training_kind</code>, <code>data_source_kind</code>, the next epoch/group/candidate cursor, validated effective configuration and data identity, plus OPD teacher identity. PEFT snapshots remain serving-only. See <a href="https://github.com/ericflo/kiln/blob/main/docs/training-checkpoints.md">Native Training Checkpoints</a> for the exact contract.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           Training writes every artifact beneath a hidden staging root and captures the target&rsquo;s starting content revision. Publication compares that revision again: if another operation won, the job fails with <code>adapter_revision_conflict</code> and preserves the newer adapter. An ungated same-name adapter that is already loaded is reloaded atomically with the directory replacement, even when <code>auto_load=false</code>. A gated <code>post_eval.min_accuracy</code> rewrite of a physically loaded same-name target is rejected before GPU work; unload it or choose a versioned <code>config.output_name</code>.
@@ -730,6 +741,9 @@ curl -s http://localhost:8420/v1/train/grpo \
           a server-owned <code>credential_id</code> configured under <code>[teachers.credentials]</code>; API
           callers never submit an environment-variable name or secret. See the
           <a href="https://github.com/ericflo/kiln/blob/main/docs/VLLM_TEACHER_IDENTITY.md">immutable teacher guide</a>.
+        </p>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          OPD checkpoints store both the teacher alias and authoritative content revision. Re-registering the same alias with different model, tokenizer, adapter, runtime, protocol, or scoring bounds does not authorize resume; restore the exact teacher revision first. The dashboard prepares an OPD resume only when <code>GET /v1/teachers</code> reports that exact usable revision and deliberately leaves prompts blank for the operator to reinsert.
         </p>
       </article>
 

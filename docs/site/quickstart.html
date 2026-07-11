@@ -589,10 +589,11 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
         <p style="color: var(--fg-dim);">
           <code>kiln train sft</code> reads <strong>SFT JSONL</strong>: one chat correction per line, each with a <code>messages</code> array.
           <code>kiln train grpo</code> reads either a <strong>GRPO JSON request/batch</strong> or <strong>JSONL with one group per line</strong>: groups of candidate completions with reward scores.
+          <code>kiln train opd</code> reads one <strong>OPD request object</strong>, or a JSON prompt array with <code>--teacher</code>, and requires a registered exact teacher identity.
           See the <a href="grpo.html">GRPO Guide</a> for the generate &rarr; score &rarr; train loop and the <a href="cli.html">CLI Reference</a> for full command examples.
         </p>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">
-          For interruptible SFT or GRPO, add <code>--checkpoint-interval N</code>. Job status reports the newest immutable <code>.kiln-checkpoint</code> basename; continue with the identical source, route, adapter, and options plus <code>--resume-checkpoint BASENAME</code>. This restores exact optimizer and loop state, not just adapter weights.
+          For interruptible SFT, GRPO, or OPD, add <code>--checkpoint-interval N</code>; OPD defaults to 25. Job status reports the newest immutable <code>.kiln-checkpoint</code> basename. Continue with the identical source, route, adapter, and options plus <code>--resume-checkpoint BASENAME</code>; OPD also requires the exact registered teacher revision. This restores exact optimizer and loop state, not just adapter weights.
         </p>
       </div>
       <div class="card p-5 mb-4" style="background: rgba(249, 115, 22, 0.08); border-color: rgba(249, 115, 22, 0.22);">
@@ -602,7 +603,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
         </p>
       </div>
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
-      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
         <a class="card p-5 block" href="api.html#training">
           <h3 id="sft-corrections" class="font-semibold mb-2">SFT corrections</h3>
           <p style="color: var(--fg-dim);">Post simple fixes to <code>/v1/train/sft</code> or use <code>kiln train sft</code> after first inference, then run <code>kiln train status</code> to confirm the job finished before the next chat request.</p>
@@ -610,6 +611,10 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
         <a class="card p-5 block" href="grpo.html">
           <h3 class="font-semibold mb-2">GRPO Guide</h3>
           <p style="color: var(--fg-dim);">Run the generate &rarr; score &rarr; train loop against the same server.</p>
+        </a>
+        <a class="card p-5 block" href="api.html#training">
+          <h3 class="font-semibold mb-2">OPD distillation</h3>
+          <p style="color: var(--fg-dim);">Train against an identity-bound local or vLLM teacher, then resume from exact candidate-boundary checkpoints.</p>
         </a>
         <a class="card p-5 block" href="evals.html">
           <h3 class="font-semibold mb-2">Evals Guide</h3>

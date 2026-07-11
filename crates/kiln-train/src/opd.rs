@@ -807,8 +807,8 @@ pub struct OpdConfig {
     #[serde(default = "default_auto_load")]
     pub auto_load: bool,
 
-    /// Auto-checkpoint cadence (§3.9 auto-rollback). Every N steps.
-    /// Default 10. Corporate-tier picks 5.
+    /// Auto-checkpoint cadence (§3.9 auto-rollback). Every N committed
+    /// optimizer steps. Defaults to 25.
     #[serde(default = "default_opd_checkpoint_interval")]
     pub checkpoint_interval: Option<usize>,
 
