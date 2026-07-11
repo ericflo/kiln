@@ -444,6 +444,13 @@ impl KilnTokenizer {
         self.inner.get_vocab_size(true)
     }
 
+    /// Highest numeric token ID assigned by the tokenizer, including added
+    /// tokens. Model embedding/logit tables may be wider than this when their
+    /// vocabulary dimension includes reserved padding rows.
+    pub fn max_token_id(&self) -> Option<u32> {
+        self.inner.get_vocab(true).into_values().max()
+    }
+
     fn render_jinja_template(
         &self,
         template: &str,
@@ -887,10 +894,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(with_added.vocab_size(), 3);
+        assert_eq!(with_added.max_token_id(), Some(2));
         assert_ne!(
             base.vocab_identity_sha256(),
             with_added.vocab_identity_sha256()
         );
+    }
+
+    #[test]
+    fn max_token_id_reports_sparse_numeric_upper_bound() {
+        let tokenizer = tokenizer_with_vocab(r#"{"a": 0, "b": 7}"#);
+        assert_eq!(tokenizer.vocab_size(), 2);
+        assert_eq!(tokenizer.max_token_id(), Some(7));
     }
 
     #[test]

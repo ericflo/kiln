@@ -2008,6 +2008,32 @@ def _load_tokenizer_contract(model_path: Path) -> tuple[Mapping[str, int], str, 
     return vocab, backend_json, vocab_size
 
 
+def _model_vocab_size(model_config: Mapping[str, Any]) -> int:
+    """Resolve the model's embedding/logit width from common HF config layouts."""
+
+    candidates: list[tuple[str, Any]] = []
+    if "vocab_size" in model_config and model_config["vocab_size"] is not None:
+        candidates.append(("config.json vocab_size", model_config["vocab_size"]))
+    text_config = model_config.get("text_config")
+    if isinstance(text_config, Mapping) and text_config.get("vocab_size") is not None:
+        candidates.append(
+            ("config.json text_config.vocab_size", text_config["vocab_size"])
+        )
+    if not candidates:
+        raise TeacherLaunchError(
+            "config.json must declare vocab_size or text_config.vocab_size"
+        )
+
+    for label, value in candidates:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise TeacherLaunchError(f"{label} must be a positive integer")
+    values = {value for _, value in candidates}
+    if len(values) != 1:
+        rendered = ", ".join(f"{label}={value}" for label, value in candidates)
+        raise TeacherLaunchError(f"config.json vocabulary sizes disagree: {rendered}")
+    return candidates[0][1]
+
+
 def fingerprint_adapter(adapter_path: Path, name: str) -> dict[str, Any]:
     root = _normal_directory(adapter_path, "adapter path")
     try:
@@ -3247,17 +3273,17 @@ def _identity_inputs(args: argparse.Namespace) -> dict[str, Any]:
         _read_strict_regular_file(model_path / "config.json", "config.json"),
         "config.json",
     )
-    declared_vocab_size = model_config.get("vocab_size")
-    if (
-        isinstance(declared_vocab_size, bool)
-        or not isinstance(declared_vocab_size, int)
-        or declared_vocab_size <= 0
-    ):
-        raise TeacherLaunchError("config.json vocab_size must be a positive integer")
-    if declared_vocab_size != vocab_size:
+    model_vocab_size = _model_vocab_size(model_config)
+    if vocab_size > model_vocab_size:
         raise TeacherLaunchError(
-            "config.json vocab_size does not match the backend tokenizer: "
-            f"{declared_vocab_size} != {vocab_size}"
+            "backend tokenizer vocabulary entry count exceeds the model vocabulary: "
+            f"{vocab_size} > {model_vocab_size}"
+        )
+    max_token_id = max(vocab.values())
+    if max_token_id >= model_vocab_size:
+        raise TeacherLaunchError(
+            "backend tokenizer maximum token ID is outside the model vocabulary: "
+            f"{max_token_id} >= {model_vocab_size}"
         )
     if args.adapter_path is not None:
         adapter = fingerprint_adapter(args.adapter_path, args.served_model_id)
@@ -3277,7 +3303,7 @@ def _identity_inputs(args: argparse.Namespace) -> dict[str, Any]:
         "tokenizer_config_sha256": tokenizer_config_hash,
         "adapter": adapter,
         "adapter_max_rank": max_adapter_rank,
-        "vocab_size": vocab_size,
+        "vocab_size": model_vocab_size,
         "implementation": f"vllm:{vllm_version}",
         "runtime_versions": runtime_versions,
         "runtime_content_sha256": runtime_content.sha256,

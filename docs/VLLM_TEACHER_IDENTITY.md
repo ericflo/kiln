@@ -205,8 +205,13 @@ record count, then each little-endian `u64` length and raw 32-byte digest.
 `tokenizer_vocab_sha256` hashes the complete Transformers `get_vocab()` map.
 Pairs are sorted by `(u32 ID, raw UTF-8 token bytes)` and encoded under the
 `kiln.tokenizer-vocab.v1\0` domain. The map pair count, backend tokenizer
-`get_vocab_size(with_added_tokens=true)`, and `config.json.vocab_size` must all
-agree before launch.
+`get_vocab_size(with_added_tokens=true)` must agree. The model's embedding and
+logit width comes from `config.json.vocab_size` or
+`config.json.text_config.vocab_size`; both must agree when present. That width
+may exceed the tokenizer entry count because some models reserve padded rows,
+but the entry count and every assigned token ID must fit within it. The
+canonical teacher identity records the model width, not the tokenizer entry
+count.
 
 `tokenizer_config_sha256` hashes the exact UTF-8 fast-tokenizer backend JSON
 returned by `backend_tokenizer.to_str()`, corresponding to Rust

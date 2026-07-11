@@ -801,7 +801,7 @@ class RuntimeContractTests(unittest.TestCase):
         ):
             return vllm_teacher._identity_inputs(self._args(self.model))
 
-    def test_identity_inputs_require_vocab_map_backend_and_model_config_agreement(self) -> None:
+    def test_identity_inputs_bind_model_width_and_allow_reserved_padding(self) -> None:
         inputs = self._identity_inputs({"a": 0, "b": 1, "c": 2}, 3)
         self.assertEqual(inputs["vocab_size"], 3)
         self.assertEqual(inputs["runtime_versions"], RUNTIME_VERSIONS)
@@ -811,7 +811,27 @@ class RuntimeContractTests(unittest.TestCase):
             self._identity_inputs({"a": 0, "b": 1}, 3)
 
         (self.model / "config.json").write_text('{"vocab_size":4}')
-        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "does not match"):
+        inputs = self._identity_inputs({"a": 0, "b": 1, "c": 2}, 3)
+        self.assertEqual(inputs["vocab_size"], 4)
+
+        (self.model / "config.json").write_text(
+            '{"vocab_size":null,"text_config":{"vocab_size":4}}'
+        )
+        inputs = self._identity_inputs({"a": 0, "b": 1, "c": 2}, 3)
+        self.assertEqual(inputs["vocab_size"], 4)
+
+    def test_identity_inputs_reject_out_of_range_or_ambiguous_model_vocab(self) -> None:
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "maximum token ID"):
+            self._identity_inputs({"a": 0, "b": 1, "c": 3}, 3)
+
+        (self.model / "config.json").write_text('{"vocab_size":2}')
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "entry count"):
+            self._identity_inputs({"a": 0, "b": 1, "c": 1}, 3)
+
+        (self.model / "config.json").write_text(
+            '{"vocab_size":3,"text_config":{"vocab_size":4}}'
+        )
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "sizes disagree"):
             self._identity_inputs({"a": 0, "b": 1, "c": 2}, 3)
 
     def test_installed_runtime_versions_bind_exact_package_versions(self) -> None:

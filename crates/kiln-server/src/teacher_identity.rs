@@ -77,10 +77,20 @@ pub fn build_base_teacher_identity(
         !backend.is_empty() && backend.trim() == backend && !backend.chars().any(char::is_control),
         "inference backend name must be non-empty, trimmed, and contain no control characters"
     );
+    let tokenizer_vocab_size = tokenizer.vocab_size();
     ensure!(
-        tokenizer.vocab_size() == model_config.vocab_size,
-        "tokenizer vocabulary size {} does not match model vocabulary size {}",
-        tokenizer.vocab_size(),
+        tokenizer_vocab_size <= model_config.vocab_size,
+        "tokenizer vocabulary entry count {tokenizer_vocab_size} exceeds model vocabulary size {}",
+        model_config.vocab_size
+    );
+    let max_token_id = tokenizer
+        .max_token_id()
+        .context("tokenizer vocabulary must not be empty")?;
+    ensure!(
+        usize::try_from(max_token_id)
+            .map(|token_id| token_id < model_config.vocab_size)
+            .unwrap_or(false),
+        "tokenizer maximum token ID {max_token_id} is outside model vocabulary size {}",
         model_config.vocab_size
     );
 
@@ -759,6 +769,25 @@ mod tests {
     }
 
     #[test]
+    fn constructs_identity_with_padded_model_vocabulary() {
+        let mut config = model_config();
+        config.vocab_size = 768;
+        let identity = build_base_teacher_identity(
+            "kiln-test",
+            &format!("sha256:{}", "a".repeat(64)),
+            &tokenizer(),
+            &config,
+            "cpu",
+            EXECUTABLE_HASH,
+            RUNTIME_HASH,
+        )
+        .unwrap();
+
+        assert_eq!(identity.vocab_size(), 768);
+        assert_eq!(identity.max_top_k(), 256);
+    }
+
+    #[test]
     fn local_adapter_identity_uses_exact_loader_owned_source() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -810,12 +839,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_tokenizer_and_model_vocab_mismatch() {
+    fn rejects_tokenizer_entry_count_exceeding_model_vocabulary() {
+        let mut config = model_config();
+        config.vocab_size = 511;
         let error = build_base_teacher_identity(
             "kiln-test",
             &format!("sha256:{}", "a".repeat(64)),
             &tokenizer(),
-            &ModelConfig::qwen3_5_4b(),
+            &config,
             "cpu",
             EXECUTABLE_HASH,
             RUNTIME_HASH,
@@ -824,7 +855,37 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("does not match model vocabulary size")
+                .contains("entry count 512 exceeds model vocabulary size 511")
+        );
+    }
+
+    #[test]
+    fn rejects_tokenizer_id_outside_model_vocabulary() {
+        let tokenizer = KilnTokenizer::from_bytes(
+            br#"{
+                "version": "1.0",
+                "model": {
+                    "type": "BPE",
+                    "vocab": {"token-0": 0, "token-512": 512},
+                    "merges": []
+                }
+            }"#,
+        )
+        .unwrap();
+        let error = build_base_teacher_identity(
+            "kiln-test",
+            &format!("sha256:{}", "a".repeat(64)),
+            &tokenizer,
+            &model_config(),
+            "cpu",
+            EXECUTABLE_HASH,
+            RUNTIME_HASH,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("maximum token ID 512 is outside model vocabulary size 512")
         );
     }
 
