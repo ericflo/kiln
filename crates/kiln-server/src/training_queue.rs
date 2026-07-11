@@ -425,6 +425,69 @@ pub fn gc_tracked_jobs(state: &AppState) -> usize {
 /// tracking); the legacy CUDA-native path doesn't yet plumb replay so it drops
 /// the context. When the binary is built without `--features cuda`, the native
 /// route flag falls through to the shared kt-tape path with a warning.
+fn normalize_sft_resume_checkpoint(
+    config: &mut kiln_train::SftConfig,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+) -> Result<(), String> {
+    let Some(raw) = config.resume_checkpoint.as_deref() else {
+        return Ok(());
+    };
+    if raw.trim().is_empty() {
+        return Err("SFT resume_checkpoint must not be empty".to_string());
+    }
+    let supplied = std::path::Path::new(raw);
+    let candidate = if supplied.is_absolute() {
+        supplied.to_path_buf()
+    } else {
+        let mut components = supplied.components();
+        let basename = match (components.next(), components.next()) {
+            (Some(std::path::Component::Normal(name)), None) => name,
+            _ => {
+                return Err(
+                    "SFT resume_checkpoint must be one checkpoint basename, without traversal or nested directories"
+                        .to_string(),
+                );
+            }
+        };
+        adapter_dir.join(basename)
+    };
+    if candidate.parent() != Some(adapter_dir) {
+        return Err(format!(
+            "SFT resume_checkpoint must be an immutable checkpoint directly beneath {}",
+            adapter_dir.display()
+        ));
+    }
+    if !candidate
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.ends_with(kiln_train::checkpoint::TRAINING_CHECKPOINT_DIRECTORY_SUFFIX)
+        })
+    {
+        return Err(format!(
+            "SFT resume_checkpoint must end with {}",
+            kiln_train::checkpoint::TRAINING_CHECKPOINT_DIRECTORY_SUFFIX
+        ));
+    }
+    let checkpoint = kiln_train::checkpoint::load_training_checkpoint(&candidate)
+        .map_err(|error| format!("validate SFT resume_checkpoint: {error:#}"))?;
+    if checkpoint.manifest.training_kind != kiln_train::checkpoint::TrainingKind::Sft {
+        return Err(format!(
+            "SFT resume_checkpoint contains {:?} state",
+            checkpoint.manifest.training_kind
+        ));
+    }
+    if checkpoint.manifest.adapter_name != adapter_name {
+        return Err(format!(
+            "SFT resume_checkpoint adapter {:?} does not match output adapter {:?}",
+            checkpoint.manifest.adapter_name, adapter_name
+        ));
+    }
+    config.resume_checkpoint = Some(candidate.display().to_string());
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_sft(
     native_route_enabled: bool,
@@ -474,7 +537,7 @@ fn run_sft(
                 native_route_env,
                 "backend native training route enabled - routing to cuda_native_sft_train"
             );
-            return kiln_train::cuda_train::cuda_native_sft_train_to(
+            return kiln_train::cuda_train::cuda_native_sft_train_to_with_checkpoint_root(
                 examples,
                 &req.config,
                 model_config,
@@ -482,6 +545,7 @@ fn run_sft(
                 tokenizer,
                 adapter_dir,
                 output_adapter_dir,
+                adapter_dir,
                 adapter_name,
                 Some(progress_cb),
                 gpu_step_coordination,
@@ -499,7 +563,7 @@ fn run_sft(
             );
         }
     }
-    trainer::sft_train_to(
+    trainer::sft_train_to_with_checkpoint_root(
         examples,
         &req.config,
         model_config,
@@ -507,6 +571,7 @@ fn run_sft(
         tokenizer,
         adapter_dir,
         output_adapter_dir,
+        adapter_dir,
         adapter_name,
         Some(progress_cb),
         Some(replay_ctx),
@@ -1730,6 +1795,7 @@ fn run_distill_refresh(
         output_name: Some(midtrain_name.clone()),
         auto_load: false,
         checkpoint_interval: None,
+        resume_checkpoint: None,
         grad_checkpoint_segments: None,
         seed: req.config.seed,
         optimizer: req.config.optimizer,
@@ -2813,31 +2879,43 @@ fn publish_training_checkpoints_locked(
     _serial: &crate::adapter_swap::AdapterMutationGuard<'_>,
 ) {
     let prefix = format!("{adapter_name}-checkpoint-");
+    let resumable_suffix = kiln_train::checkpoint::TRAINING_CHECKPOINT_DIRECTORY_SUFFIX;
+    let staged_legacy_checkpoints: Vec<_> = std::fs::read_dir(staging_root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(&prefix) && !name.ends_with(resumable_suffix)
+        })
+        .collect();
+    if staged_legacy_checkpoints.is_empty() {
+        return;
+    }
+
     if let Ok(entries) = std::fs::read_dir(&state.adapter_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with(&prefix)
+                && !name.ends_with(resumable_suffix)
                 && let Err(error) = std::fs::remove_dir_all(entry.path())
             {
                 tracing::warn!(checkpoint = %name, %error, "failed to remove stale training checkpoint");
             }
         }
     }
-    if let Ok(entries) = std::fs::read_dir(staging_root) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(&prefix) {
-                let destination = state.adapter_dir.join(&name);
-                if let Err(error) = std::fs::rename(entry.path(), &destination) {
-                    tracing::warn!(checkpoint = %name, %error, "failed to publish training checkpoint");
-                }
-            }
+    for entry in staged_legacy_checkpoints {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let destination = state.adapter_dir.join(&name);
+        if let Err(error) = std::fs::rename(entry.path(), &destination) {
+            tracing::warn!(checkpoint = %name, %error, "failed to publish training checkpoint");
         }
     }
 }
 
 /// Execute a single training job (runs on a blocking thread).
-fn execute_job(state: AppState, entry: QueueEntry) {
+fn execute_job(state: AppState, mut entry: QueueEntry) {
     let job_id = entry.job_id.clone();
 
     {
@@ -2916,6 +2994,13 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         let job = jobs.get(&job_id).unwrap();
         (job.auto_load, job.adapter_name.clone(), job.job_type)
     };
+    if let QueuedJob::Sft(request) = &mut entry.job
+        && let Err(error) =
+            normalize_sft_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
+    {
+        reject_queued_training_job(&state, &job_id, error, "invalid_resume_checkpoint");
+        return;
+    }
     // Capture the post-eval hook before the job request is consumed by the
     // trainer. A gated same-name rewrite of physically loaded bytes must be
     // rejected before GPU work: reloading would violate the gate, while
@@ -3088,18 +3173,14 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 let request_body = serde_json::to_value(&req).unwrap_or_else(
                     |_| serde_json::json!({"error": "failed to serialize SftRequest"}),
                 );
-                let _replay_ctx = trainer::ReplayContext {
+                let replay_ctx = trainer::ReplayContext {
                     request_id: job_id.clone(),
                     kind: kiln_train::ReplayKind::Sft,
                     request_body,
                     base_model: base_model.clone(),
                 };
-                // Per-STEP GPU coordination (the state.rs contract): the
-                // trainer acquires the write lock around each step's
-                // forward/backward/optimizer instead of this arm holding it
-                // job-long — in-flight inference streams interleave between
-                // steps rather than freezing mid-token for the whole job
-                // (which the [agent] scheduler now triggers unattended).
+                // SFT acquires the write lock per optimizer step so healthy
+                // inference can run between step boundaries.
                 let guard = runner_arc.read().unwrap();
                 let training_dispatch = guard.backend_capabilities().training.server_dispatch;
                 let native_route_enabled = training_dispatch.native_route_enabled();
@@ -3114,7 +3195,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     output_adapter_dir,
                     &adapter_name,
                     progress_cb,
-                    _replay_ctx,
+                    replay_ctx,
                     &job_id,
                     Some(trainer::GpuStepCoordination::new(
                         state.gpu_lock.clone(),
@@ -3637,11 +3718,155 @@ mod tests {
     use super::*;
     use crate::state::TrainingJobInfo;
     use kiln_model::{ServerTrainingDispatchPolicy, ServerTrainingNativeRoute};
+    use kiln_train::checkpoint::{
+        CheckpointArtifact, CheckpointFileRole, TrainingCheckpointData, TrainingCheckpointManifest,
+        TrainingCheckpointOptimizer, TrainingCheckpointPrecision, TrainingCheckpointProgress,
+        TrainingCheckpointScheduler, TrainingCheckpointStateFiles, TrainingKind,
+        write_training_checkpoint_atomic,
+    };
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn write_resume_checkpoint_fixture(
+        root: &std::path::Path,
+        directory_name: &str,
+        manifest_adapter_name: &str,
+        training_kind: TrainingKind,
+    ) {
+        let manifest = TrainingCheckpointManifest::new(
+            "step-1",
+            training_kind,
+            manifest_adapter_name,
+            serde_json::json!({"epochs": 2}),
+            TrainingCheckpointPrecision {
+                parameter_dtype: "f32".into(),
+                optimizer_state_dtype: "none".into(),
+                activation_dtype: "f32".into(),
+                gradient_dtype: "f32".into(),
+                stochastic_rounding: serde_json::json!({"mode": "round_to_nearest"}),
+            },
+            TrainingCheckpointProgress {
+                global_step: 1,
+                total_steps: 2,
+                epoch_index: 1,
+                cursor_in_epoch: 0,
+                data_order: vec![0],
+            },
+            TrainingCheckpointData {
+                source_kind: "test".into(),
+                content_sha256: "22".repeat(32),
+                item_count: 1,
+            },
+            Default::default(),
+            TrainingCheckpointOptimizer {
+                kind: "sgd".into(),
+                step: 1,
+                hyperparameters: serde_json::json!({"learning_rate": 0.1}),
+                state_file: None,
+            },
+            TrainingCheckpointScheduler {
+                kind: "constant".into(),
+                step: 1,
+                state: serde_json::json!({"learning_rate": 0.1}),
+            },
+            TrainingCheckpointStateFiles {
+                adapter_parameters: "adapter.safetensors".into(),
+                optimizer_state: None,
+                reference_state: None,
+                ema_state: None,
+                reward_normalization_state: None,
+                loss_history: None,
+            },
+            serde_json::json!({}),
+        );
+        write_training_checkpoint_atomic(
+            &root.join(directory_name),
+            manifest,
+            &[CheckpointArtifact {
+                relative_path: "adapter.safetensors".into(),
+                role: CheckpointFileRole::AdapterParameters,
+            }],
+            |staging| {
+                std::fs::write(staging.join("adapter.safetensors"), b"fixture")?;
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn sft_resume_admission_normalizes_a_valid_stable_basename() {
+        let temp = tempfile::tempdir().unwrap();
+        let name = "target-checkpoint-step-00000001.kiln-checkpoint";
+        write_resume_checkpoint_fixture(temp.path(), name, "target", TrainingKind::Sft);
+        let mut config = kiln_train::SftConfig {
+            resume_checkpoint: Some(name.into()),
+            ..Default::default()
+        };
+
+        normalize_sft_resume_checkpoint(&mut config, temp.path(), "target").unwrap();
+
+        assert_eq!(
+            config.resume_checkpoint.as_deref(),
+            temp.path().join(name).to_str()
+        );
+    }
+
+    #[test]
+    fn sft_resume_admission_rejects_ambiguous_or_incompatible_inputs() {
+        let temp = tempfile::tempdir().unwrap();
+        for raw in ["", "../escape.kiln-checkpoint", "nested/x.kiln-checkpoint"] {
+            let mut config = kiln_train::SftConfig {
+                resume_checkpoint: Some(raw.into()),
+                ..Default::default()
+            };
+            assert!(
+                normalize_sft_resume_checkpoint(&mut config, temp.path(), "target").is_err(),
+                "resume input {raw:?} must fail closed"
+            );
+        }
+
+        let peft_name = "target-checkpoint-peft.kiln-checkpoint";
+        let peft = temp.path().join(peft_name);
+        std::fs::create_dir(&peft).unwrap();
+        std::fs::write(peft.join("adapter_config.json"), b"{}").unwrap();
+        let mut peft_config = kiln_train::SftConfig {
+            resume_checkpoint: Some(peft_name.into()),
+            ..Default::default()
+        };
+        let error =
+            normalize_sft_resume_checkpoint(&mut peft_config, temp.path(), "target").unwrap_err();
+        assert!(error.contains("not resumable"), "{error}");
+
+        let grpo_name = "target-checkpoint-grpo.kiln-checkpoint";
+        write_resume_checkpoint_fixture(temp.path(), grpo_name, "target", TrainingKind::Grpo);
+        let mut grpo_config = kiln_train::SftConfig {
+            resume_checkpoint: Some(grpo_name.into()),
+            ..Default::default()
+        };
+        let error =
+            normalize_sft_resume_checkpoint(&mut grpo_config, temp.path(), "target").unwrap_err();
+        assert!(error.contains("Grpo state"), "{error}");
+
+        let wrong_adapter_name = "target-checkpoint-other.kiln-checkpoint";
+        write_resume_checkpoint_fixture(
+            temp.path(),
+            wrong_adapter_name,
+            "other",
+            TrainingKind::Sft,
+        );
+        let mut wrong_adapter_config = kiln_train::SftConfig {
+            resume_checkpoint: Some(wrong_adapter_name.into()),
+            ..Default::default()
+        };
+        let error =
+            normalize_sft_resume_checkpoint(&mut wrong_adapter_config, temp.path(), "target")
+                .unwrap_err();
+        assert!(error.contains("does not match output adapter"), "{error}");
+    }
 
     struct BlockingVerifiedTeacher {
         identity: kiln_train::TeacherIdentityV1,
@@ -3828,6 +4053,11 @@ mod tests {
         write_revisioned_adapter(tmp.path(), "target", 1.0);
         std::fs::create_dir_all(tmp.path().join("target-checkpoint-1")).unwrap();
         std::fs::write(tmp.path().join("target-checkpoint-1/marker"), b"old").unwrap();
+        let resumable = tmp
+            .path()
+            .join("target-checkpoint-step-00000001.kiln-checkpoint");
+        std::fs::create_dir_all(&resumable).unwrap();
+        std::fs::write(resumable.join("marker"), b"immutable").unwrap();
         let publication = prepare_training_publication(&state, "target", true).unwrap();
         write_revisioned_adapter(publication.output_root(), "target", 2.0);
         std::fs::create_dir_all(publication.output_root().join("target-checkpoint-2")).unwrap();
@@ -3861,6 +4091,11 @@ mod tests {
         assert_eq!(
             std::fs::read(tmp.path().join("target-checkpoint-2/marker")).unwrap(),
             b"new"
+        );
+        assert_eq!(
+            std::fs::read(resumable.join("marker")).unwrap(),
+            b"immutable",
+            "publishing final adapter weights must preserve immutable resumable checkpoints"
         );
     }
 

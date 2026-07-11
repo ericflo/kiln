@@ -243,6 +243,8 @@ async fn main() -> Result<()> {
                 epochs,
                 lora_rank,
                 adapter_smoke_test,
+                checkpoint_interval,
+                resume_checkpoint,
                 url,
             } => {
                 return cli::run_train_sft(
@@ -253,6 +255,8 @@ async fn main() -> Result<()> {
                     *epochs,
                     *lora_rank,
                     *adapter_smoke_test,
+                    checkpoint_interval.map(std::num::NonZeroUsize::get),
+                    resume_checkpoint.as_deref(),
                 )
                 .await;
             }

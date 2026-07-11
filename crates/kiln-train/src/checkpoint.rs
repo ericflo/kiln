@@ -573,10 +573,14 @@ where
     Ok(target.to_path_buf())
 }
 
-/// Load a checkpoint only after strict manifest, file-set, and checksum
-/// validation. Incomplete staging directories and PEFT adapter directories are
-/// rejected rather than partially interpreted as resumable state.
-pub fn load_training_checkpoint(path: &Path) -> Result<ValidatedTrainingCheckpoint> {
+/// Read and validate checkpoint metadata without hashing state artifacts.
+///
+/// This is intended for low-cost discovery surfaces that may poll while a job
+/// is running. It still rejects non-directories, symlinks, incomplete writes,
+/// oversized or hard-linked manifests, unknown fields, and invalid manifest
+/// semantics. Call [`load_training_checkpoint`] before restoring any state;
+/// that path additionally validates the complete file set and every checksum.
+pub fn read_training_checkpoint_manifest(path: &Path) -> Result<TrainingCheckpointManifest> {
     let root_meta = fs::symlink_metadata(path)
         .with_context(|| format!("stat training checkpoint {}", path.display()))?;
     ensure!(
@@ -614,6 +618,14 @@ pub fn load_training_checkpoint(path: &Path) -> Result<ValidatedTrainingCheckpoi
     let manifest: TrainingCheckpointManifest =
         serde_json::from_slice(&bytes).context("parse strict training checkpoint manifest")?;
     manifest.validate()?;
+    Ok(manifest)
+}
+
+/// Load a checkpoint only after strict manifest, file-set, and checksum
+/// validation. Incomplete staging directories and PEFT adapter directories are
+/// rejected rather than partially interpreted as resumable state.
+pub fn load_training_checkpoint(path: &Path) -> Result<ValidatedTrainingCheckpoint> {
+    let manifest = read_training_checkpoint_manifest(path)?;
 
     let actual = collect_files(path)?;
     let expected: BTreeSet<_> = manifest
@@ -1019,6 +1031,13 @@ mod tests {
         let target = temp.path().join("corrupt.kiln-checkpoint");
         write_training_checkpoint_atomic(&target, manifest(), &artifacts(), write_artifacts)?;
         fs::write(target.join("optimizer.safetensors"), b"tampered!")?;
+        assert_eq!(
+            read_training_checkpoint_manifest(&target)?
+                .progress
+                .global_step,
+            2,
+            "metadata discovery deliberately avoids reading large state artifacts"
+        );
         let error = load_training_checkpoint(&target).unwrap_err().to_string();
         assert!(error.contains("checksum mismatch") || error.contains("size mismatch"));
         Ok(())

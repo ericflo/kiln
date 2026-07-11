@@ -127,6 +127,7 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
     .unwrap();
 
     GpuWeights {
+        source_content_sha256: None,
         embed_tokens: embed,
         embed_tokens_t: embed_t,
         layers: vec![layer],
@@ -2466,6 +2467,7 @@ fn tiny_gdn_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
     .unwrap();
 
     GpuWeights {
+        source_content_sha256: None,
         embed_tokens: embed,
         embed_tokens_t: embed_t,
         layers: vec![gdn_layer, full_layer],
@@ -3109,6 +3111,7 @@ fn tiny_gdn_weights_f32(config: &ModelConfig, device: &Device) -> GpuWeights {
     .unwrap();
 
     GpuWeights {
+        source_content_sha256: None,
         embed_tokens: embed,
         embed_tokens_t: embed_t,
         layers: vec![gdn_layer, full_layer],

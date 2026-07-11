@@ -2072,7 +2072,8 @@ pub(crate) fn tensor_l2_norm_kt(tensor: &kt::Tensor) -> Result<f64> {
     Ok(f64::from(sum).sqrt())
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct LoraGradNormAccumulator {
     by_module: BTreeMap<String, GradNormAccumulator>,
 }
@@ -2093,7 +2094,8 @@ impl LoraGradNormAccumulator {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 struct GradNormAccumulator {
     sample_count: usize,
     sum: f64,

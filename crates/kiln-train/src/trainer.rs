@@ -540,7 +540,7 @@ use crate::cd_types::*;
 use kiln_optim::{
     AdamW as KtAdamW, AdamWHyperparameters as KtAdamWHyperparameters,
     AdamWMoments as KtHostAdamWMoments, MomentLocation as KtMomentLocation, Muon as KtMuon,
-    MuonState as KtHostMuonState, OptimStep,
+    MuonState as KtHostMuonState, OptimStep, StochasticRoundingPolicy,
 };
 use kiln_param::{AmpPolicy as KtAmpPolicy, ForwardStorage as KtForwardStorage, Parameter};
 // kt tensor types used directly for LoRA param construction + grads.
@@ -1146,8 +1146,9 @@ impl TrainableLoraParams {
             if let Some(resolved) = ResidencyBackend::runtime_resolve_resident_activation(
                 backend, &primary, &dims, dtype,
             )? {
-                param.replace_forward_storage(KtForwardStorage::Plain(resolved.clone()));
-                param.replace_backward_storage(Some(resolved));
+                param
+                    .replace_plain_trainable_tensor(resolved)
+                    .map_err(|error| anyhow::anyhow!("sync LoRA parameter identity: {error}"))?;
                 *synced += 1;
             }
             Ok(())
@@ -1376,6 +1377,28 @@ impl OptimizerState {
         }
     }
 
+    fn checkpoint_rounding_policy(&self) -> StochasticRoundingPolicy {
+        match self {
+            OptimizerState::AdamW { adamw, .. } => adamw.rounding_policy(),
+            OptimizerState::Muon { muon, .. } => muon.rounding_policy(),
+        }
+    }
+
+    fn checkpoint_state_dtype(&self) -> Result<KtDType> {
+        match self {
+            OptimizerState::AdamW { moments, .. } => moments
+                .values()
+                .next()
+                .map(|state| state.m.dtype())
+                .context("AdamW checkpoint state has no parameter moments"),
+            OptimizerState::Muon { momenta, .. } => momenta
+                .values()
+                .next()
+                .map(|state| state.m.dtype())
+                .context("Muon checkpoint state has no parameter momentum"),
+        }
+    }
+
     /// AdamW per-param moment map, if this is AdamW state (diagnostic /
     /// test accessor).
     pub fn adamw_moments(&self) -> Option<&HashMap<KtTensorId, KtAdamWMoments>> {
@@ -1404,12 +1427,13 @@ impl OptimizerState {
             if !ResidencyBackend::runtime_has_resident_activation(backend, tensor) {
                 return Ok(false);
             }
+            let id = tensor.id();
             let dims = tensor.dims().to_vec();
             let dtype = tensor.dtype();
             if let Some(resolved) = ResidencyBackend::runtime_resolve_resident_activation(
                 backend, tensor, &dims, dtype,
             )? {
-                *tensor = resolved;
+                *tensor = checkpoint_tensor_with_id(resolved, id, "optimizer resident sync")?;
                 Ok(true)
             } else {
                 Ok(false)
@@ -1708,10 +1732,17 @@ fn checkpoint_restore_state_tensor(
     destination: &KtTensor,
     label: &str,
 ) -> Result<KtTensor> {
-    source_f32
+    let restored = source_f32
         .to_dtype(destination.dtype())
         .and_then(|tensor| tensor.to_device(destination.device()))
-        .map_err(|error| anyhow::anyhow!("restore checkpoint optimizer tensor {label}: {error}"))
+        .map_err(|error| anyhow::anyhow!("restore checkpoint optimizer tensor {label}: {error}"))?;
+    checkpoint_tensor_with_id(restored, destination.id(), label)
+}
+
+fn checkpoint_tensor_with_id(tensor: KtTensor, id: KtTensorId, label: &str) -> Result<KtTensor> {
+    KtTensor::from_parts(tensor.storage().clone(), tensor.layout().clone(), id).map_err(|error| {
+        anyhow::anyhow!("preserve checkpoint tensor identity for {label}: {error}")
+    })
 }
 
 fn checkpoint_read_step(tensor: &KtTensor, label: &str) -> Result<u32> {
@@ -1988,8 +2019,11 @@ impl TrainableLoraParams {
                 .map_err(|error| {
                     anyhow::anyhow!("checkpoint adapter parameter {key}: to device: {error}")
                 })?;
-            param.replace_forward_storage(KtForwardStorage::Plain(tensor.clone()));
-            param.replace_backward_storage(Some(tensor));
+            param
+                .replace_plain_trainable_tensor(tensor)
+                .map_err(|error| {
+                    anyhow::anyhow!("restore checkpoint adapter parameter {key}: {error}")
+                })?;
         }
         Ok(())
     }
@@ -2031,8 +2065,9 @@ impl TrainableLoraParams {
             let kt = t
                 .to_device(*device)
                 .map_err(|e| anyhow::anyhow!("load adapter {key}: to device: {e}"))?;
-            param.replace_forward_storage(KtForwardStorage::Plain(kt.clone()));
-            param.replace_backward_storage(Some(kt));
+            param
+                .replace_plain_trainable_tensor(kt)
+                .map_err(|error| anyhow::anyhow!("load PEFT adapter parameter {key}: {error}"))?;
             Ok(())
         };
 
@@ -2435,6 +2470,491 @@ fn epoch_order(seed: u64, epoch: usize, n: usize) -> Vec<usize> {
         order.swap(i, j);
     }
     order
+}
+
+const SFT_CHECKPOINT_LOOP_STATE_SCHEMA_VERSION: u32 = 1;
+const SFT_CHECKPOINT_LOOP_STATE_TYPE: &str = "kiln.sft-loop-state.v1";
+const SFT_CHECKPOINT_ADAPTER_FILE: &str = "adapter.safetensors";
+const SFT_CHECKPOINT_OPTIMIZER_FILE: &str = "optimizer.safetensors";
+const SFT_CHECKPOINT_LOOP_STATE_FILE: &str = "sft_loop_state.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct SftCheckpointLoopState {
+    schema_version: u32,
+    state_type: String,
+    global_step: u64,
+    epoch_index: u64,
+    cursor_in_epoch: u64,
+    loss_history: Vec<f64>,
+    last_loss: f64,
+    current_epoch_loss_sum: f64,
+    current_epoch_items: u64,
+    first_epoch_loss: Option<f64>,
+    best_epoch_loss: Option<f64>,
+    lora_grad_norms: crate::train_receipt::LoraGradNormAccumulator,
+}
+
+impl SftCheckpointLoopState {
+    #[allow(clippy::too_many_arguments)]
+    fn capture(
+        global_step: usize,
+        epoch_index: usize,
+        cursor_in_epoch: usize,
+        loss_history: &[f64],
+        last_loss: f64,
+        current_epoch_loss_sum: f64,
+        current_epoch_items: usize,
+        first_epoch_loss: Option<f64>,
+        best_epoch_loss: f64,
+        lora_grad_norms: &crate::train_receipt::LoraGradNormAccumulator,
+    ) -> Self {
+        Self {
+            schema_version: SFT_CHECKPOINT_LOOP_STATE_SCHEMA_VERSION,
+            state_type: SFT_CHECKPOINT_LOOP_STATE_TYPE.to_string(),
+            global_step: global_step as u64,
+            epoch_index: epoch_index as u64,
+            cursor_in_epoch: cursor_in_epoch as u64,
+            loss_history: loss_history.to_vec(),
+            last_loss,
+            current_epoch_loss_sum,
+            current_epoch_items: current_epoch_items as u64,
+            first_epoch_loss,
+            best_epoch_loss: best_epoch_loss.is_finite().then_some(best_epoch_loss),
+            lora_grad_norms: lora_grad_norms.clone(),
+        }
+    }
+
+    fn validate(&self, progress: &crate::checkpoint::TrainingCheckpointProgress) -> Result<()> {
+        anyhow::ensure!(
+            self.schema_version == SFT_CHECKPOINT_LOOP_STATE_SCHEMA_VERSION
+                && self.state_type == SFT_CHECKPOINT_LOOP_STATE_TYPE,
+            "unsupported SFT checkpoint loop-state contract"
+        );
+        anyhow::ensure!(
+            self.global_step == progress.global_step
+                && self.epoch_index == progress.epoch_index
+                && self.cursor_in_epoch == progress.cursor_in_epoch,
+            "SFT checkpoint loop state disagrees with manifest progress"
+        );
+        anyhow::ensure!(
+            self.loss_history.len() as u64 == self.global_step,
+            "SFT checkpoint loss-history length {} does not match global step {}",
+            self.loss_history.len(),
+            self.global_step
+        );
+        anyhow::ensure!(
+            self.loss_history.iter().all(|loss| loss.is_finite()),
+            "SFT checkpoint loss history contains a non-finite value"
+        );
+        anyhow::ensure!(
+            self.last_loss.is_finite()
+                && self.current_epoch_loss_sum.is_finite()
+                && self.first_epoch_loss.is_none_or(f64::is_finite)
+                && self.best_epoch_loss.is_none_or(f64::is_finite),
+            "SFT checkpoint loop state contains a non-finite scalar"
+        );
+        anyhow::ensure!(
+            self.loss_history.last().copied() == Some(self.last_loss),
+            "SFT checkpoint last_loss does not match loss history"
+        );
+        anyhow::ensure!(
+            self.current_epoch_items == self.cursor_in_epoch,
+            "SFT checkpoint current-epoch item count does not match cursor"
+        );
+        anyhow::ensure!(
+            self.first_epoch_loss.is_some() == (self.epoch_index > 0)
+                && self.best_epoch_loss.is_some() == (self.epoch_index > 0),
+            "SFT checkpoint completed-epoch loss state is inconsistent"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SftCheckpointDescriptor {
+    adapter_name: String,
+    effective_config: serde_json::Value,
+    precision_policy: crate::checkpoint::TrainingCheckpointPrecision,
+    data: crate::checkpoint::TrainingCheckpointData,
+    init_seed: u64,
+    shuffle_seed: u64,
+    optimizer: Optimizer,
+    learning_rate: f64,
+    total_steps: usize,
+    base_model_weights_sha256: Option<String>,
+    auxiliary_state: serde_json::Value,
+}
+
+impl SftCheckpointDescriptor {
+    fn optimizer_state_file(&self) -> Option<String> {
+        (!matches!(self.optimizer, Optimizer::Sgd))
+            .then(|| SFT_CHECKPOINT_OPTIMIZER_FILE.to_string())
+    }
+
+    fn optimizer_manifest(
+        &self,
+        step: u64,
+    ) -> Result<crate::checkpoint::TrainingCheckpointOptimizer> {
+        let kind = match self.optimizer {
+            Optimizer::Sgd => "sgd",
+            Optimizer::AdamW { .. } => "adam_w",
+            Optimizer::Muon { .. } => "muon",
+        };
+        let hyperparameters = canonical_checkpoint_json_value(serde_json::json!({
+            "learning_rate": self.learning_rate,
+            "optimizer": serde_json::to_value(self.optimizer)
+                .context("serialize SFT checkpoint optimizer")?,
+        }))?;
+        Ok(crate::checkpoint::TrainingCheckpointOptimizer {
+            kind: kind.to_string(),
+            step,
+            hyperparameters,
+            state_file: self.optimizer_state_file(),
+        })
+    }
+
+    fn scheduler_manifest(&self, step: u64) -> crate::checkpoint::TrainingCheckpointScheduler {
+        crate::checkpoint::TrainingCheckpointScheduler {
+            kind: "constant".to_string(),
+            step,
+            state: serde_json::json!({"learning_rate": self.learning_rate}),
+        }
+    }
+
+    fn rng_states(
+        &self,
+        epoch_index: u64,
+    ) -> BTreeMap<String, crate::checkpoint::TrainingCheckpointRngState> {
+        BTreeMap::from([
+            (
+                "epoch-order".to_string(),
+                crate::checkpoint::TrainingCheckpointRngState {
+                    algorithm: "kiln.epoch-order.v1".to_string(),
+                    seed: self.shuffle_seed,
+                    position: epoch_index,
+                    state_file: None,
+                },
+            ),
+            (
+                "lora-init".to_string(),
+                crate::checkpoint::TrainingCheckpointRngState {
+                    algorithm: "kiln.seeded-lora-init.v1".to_string(),
+                    seed: self.init_seed,
+                    position: 0,
+                    state_file: None,
+                },
+            ),
+        ])
+    }
+
+    fn manifest(
+        &self,
+        progress: crate::checkpoint::TrainingCheckpointProgress,
+    ) -> Result<crate::checkpoint::TrainingCheckpointManifest> {
+        let step = progress.global_step;
+        let optimizer_state = self.optimizer_state_file();
+        Ok(crate::checkpoint::TrainingCheckpointManifest::new(
+            format!("sft-step-{step:08}"),
+            crate::checkpoint::TrainingKind::Sft,
+            &self.adapter_name,
+            self.effective_config.clone(),
+            self.precision_policy.clone(),
+            progress.clone(),
+            self.data.clone(),
+            self.rng_states(progress.epoch_index),
+            self.optimizer_manifest(step)?,
+            self.scheduler_manifest(step),
+            crate::checkpoint::TrainingCheckpointStateFiles {
+                adapter_parameters: SFT_CHECKPOINT_ADAPTER_FILE.to_string(),
+                optimizer_state,
+                reference_state: None,
+                ema_state: None,
+                reward_normalization_state: None,
+                loss_history: Some(SFT_CHECKPOINT_LOOP_STATE_FILE.to_string()),
+            },
+            self.auxiliary_state.clone(),
+        ))
+    }
+
+    fn validate_resume(
+        &self,
+        checkpoint: &crate::checkpoint::ValidatedTrainingCheckpoint,
+        loop_state: &SftCheckpointLoopState,
+    ) -> Result<()> {
+        let manifest = &checkpoint.manifest;
+        anyhow::ensure!(
+            manifest.training_kind == crate::checkpoint::TrainingKind::Sft,
+            "resume checkpoint is {:?}, not SFT",
+            manifest.training_kind
+        );
+        anyhow::ensure!(
+            manifest.adapter_name == self.adapter_name,
+            "resume checkpoint adapter {:?} does not match output adapter {:?}",
+            manifest.adapter_name,
+            self.adapter_name
+        );
+        anyhow::ensure!(
+            manifest.effective_config == self.effective_config,
+            "resume checkpoint effective SFT configuration differs from this request: checkpoint={}, request={}",
+            manifest.effective_config,
+            self.effective_config
+        );
+        anyhow::ensure!(
+            manifest.precision_policy == self.precision_policy,
+            "resume checkpoint precision policy differs from this runtime"
+        );
+        anyhow::ensure!(
+            manifest.data == self.data,
+            "resume checkpoint training data identity differs from this request"
+        );
+        anyhow::ensure!(
+            manifest.progress.total_steps == self.total_steps as u64,
+            "resume checkpoint total step count {} differs from this run {}",
+            manifest.progress.total_steps,
+            self.total_steps
+        );
+        anyhow::ensure!(
+            manifest.optimizer == self.optimizer_manifest(manifest.progress.global_step)?,
+            "resume checkpoint optimizer contract differs from this request"
+        );
+        anyhow::ensure!(
+            manifest.scheduler == self.scheduler_manifest(manifest.progress.global_step),
+            "resume checkpoint scheduler contract differs from this request"
+        );
+        anyhow::ensure!(
+            manifest.rng_states == self.rng_states(manifest.progress.epoch_index),
+            "resume checkpoint RNG streams differ from this request"
+        );
+        anyhow::ensure!(
+            manifest.auxiliary_state == self.auxiliary_state,
+            "resume checkpoint model/tokenizer/runtime identity differs from this run"
+        );
+        let epochs = self.total_steps as u64 / self.data.item_count;
+        anyhow::ensure!(
+            manifest.progress.epoch_index < epochs,
+            "resume checkpoint epoch index {} is outside {epochs} configured epochs",
+            manifest.progress.epoch_index
+        );
+        let expected_step = manifest
+            .progress
+            .epoch_index
+            .checked_mul(self.data.item_count)
+            .and_then(|base| base.checked_add(manifest.progress.cursor_in_epoch))
+            .context("resume checkpoint progress overflow")?;
+        anyhow::ensure!(
+            expected_step == manifest.progress.global_step,
+            "resume checkpoint cursor implies step {expected_step}, not {}",
+            manifest.progress.global_step
+        );
+        let expected_order: Vec<u64> = epoch_order(
+            self.shuffle_seed,
+            manifest.progress.epoch_index as usize,
+            self.data.item_count as usize,
+        )
+        .into_iter()
+        .map(|index| index as u64)
+        .collect();
+        anyhow::ensure!(
+            manifest.progress.data_order == expected_order,
+            "resume checkpoint data order does not match its seeded epoch order"
+        );
+        loop_state.validate(&manifest.progress)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save(
+        &self,
+        output_root: &Path,
+        backend: &dyn BackendRuntime,
+        params: &mut TrainableLoraParams,
+        opt_state: &mut Option<OptimizerState>,
+        epoch_index: usize,
+        cursor_in_epoch: usize,
+        data_order: &[usize],
+        loop_state: &SftCheckpointLoopState,
+    ) -> Result<PathBuf> {
+        anyhow::ensure!(
+            self.base_model_weights_sha256.is_some(),
+            "exact SFT checkpointing requires base-model weights loaded with a content identity"
+        );
+        let progress = crate::checkpoint::TrainingCheckpointProgress {
+            global_step: loop_state.global_step,
+            total_steps: self.total_steps as u64,
+            epoch_index: epoch_index as u64,
+            cursor_in_epoch: cursor_in_epoch as u64,
+            data_order: data_order.iter().map(|&index| index as u64).collect(),
+        };
+        loop_state.validate(&progress)?;
+        let manifest = self.manifest(progress)?;
+        let target = output_root.join(format!(
+            "{}-checkpoint-step-{:08}.kiln-checkpoint",
+            self.adapter_name, loop_state.global_step
+        ));
+        params.sync_to_master(backend)?;
+
+        let mut artifacts = vec![
+            crate::checkpoint::CheckpointArtifact {
+                relative_path: SFT_CHECKPOINT_ADAPTER_FILE.to_string(),
+                role: crate::checkpoint::CheckpointFileRole::AdapterParameters,
+            },
+            crate::checkpoint::CheckpointArtifact {
+                relative_path: SFT_CHECKPOINT_LOOP_STATE_FILE.to_string(),
+                role: crate::checkpoint::CheckpointFileRole::LossHistory,
+            },
+        ];
+        if opt_state.is_some() {
+            artifacts.push(crate::checkpoint::CheckpointArtifact {
+                relative_path: SFT_CHECKPOINT_OPTIMIZER_FILE.to_string(),
+                role: crate::checkpoint::CheckpointFileRole::OptimizerState,
+            });
+        }
+        let loop_state_bytes =
+            serde_json::to_vec_pretty(loop_state).context("serialize SFT checkpoint loop state")?;
+        crate::checkpoint::write_training_checkpoint_atomic(
+            &target,
+            manifest,
+            &artifacts,
+            |staging| {
+                params.save_checkpoint_parameters(&staging.join(SFT_CHECKPOINT_ADAPTER_FILE))?;
+                if let Some(state) = opt_state.as_mut() {
+                    state.save_checkpoint_state(
+                        params,
+                        backend,
+                        &staging.join(SFT_CHECKPOINT_OPTIMIZER_FILE),
+                    )?;
+                }
+                std::fs::write(
+                    staging.join(SFT_CHECKPOINT_LOOP_STATE_FILE),
+                    &loop_state_bytes,
+                )
+                .context("write SFT checkpoint loop state")?;
+                Ok(())
+            },
+        )
+    }
+}
+
+fn checkpoint_dtype_name(dtype: KtDType) -> String {
+    dtype.to_string().to_ascii_lowercase()
+}
+
+fn sft_checkpoint_precision(
+    params: &TrainableLoraParams,
+    opt_state: Option<&OptimizerState>,
+) -> Result<crate::checkpoint::TrainingCheckpointPrecision> {
+    let parameter = params
+        .all_params()
+        .into_iter()
+        .next()
+        .context("SFT checkpoint has no trainable parameters")?;
+    let amp = parameter.amp_policy();
+    let (optimizer_state_dtype, rounding) = match opt_state {
+        Some(state) => {
+            let policy = state.checkpoint_rounding_policy();
+            let rounding = match policy {
+                StochasticRoundingPolicy::RoundToNearest => {
+                    serde_json::json!({"mode": "round_to_nearest"})
+                }
+                StochasticRoundingPolicy::Stochastic { seed } => {
+                    serde_json::json!({"mode": "stochastic", "seed": seed})
+                }
+                _ => serde_json::json!({"mode": policy.name()}),
+            };
+            (
+                checkpoint_dtype_name(state.checkpoint_state_dtype()?),
+                rounding,
+            )
+        }
+        None => (
+            "none".to_string(),
+            serde_json::json!({"mode": "round_to_nearest"}),
+        ),
+    };
+    Ok(crate::checkpoint::TrainingCheckpointPrecision {
+        parameter_dtype: checkpoint_dtype_name(amp.master_dtype),
+        optimizer_state_dtype,
+        activation_dtype: checkpoint_dtype_name(amp.forward_compute_dtype),
+        gradient_dtype: checkpoint_dtype_name(amp.backward_compute_dtype),
+        stochastic_rounding: rounding,
+    })
+}
+
+fn sft_checkpoint_effective_config(
+    config: &SftConfig,
+    learning_rate: f64,
+    effective_seed: u64,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(config).context("serialize effective SFT config")?;
+    let object = value
+        .as_object_mut()
+        .context("serialized SFT config is not an object")?;
+    object.remove("resume_checkpoint");
+    object.insert(
+        "learning_rate".to_string(),
+        serde_json::json!(learning_rate),
+    );
+    object.insert("seed".to_string(), serde_json::json!(effective_seed));
+    canonical_checkpoint_json_value(value)
+}
+
+fn canonical_checkpoint_json_value(value: serde_json::Value) -> Result<serde_json::Value> {
+    let encoded = serde_json::to_vec(&value).context("encode canonical checkpoint JSON")?;
+    serde_json::from_slice(&encoded).context("decode canonical checkpoint JSON")
+}
+
+fn sft_checkpoint_auxiliary_state(
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    precision_policy: TrainingPrecisionPolicy,
+    valid_indices: &[usize],
+    base_model_weights_sha256: Option<&str>,
+    backend_runtime: &str,
+    gradient_checkpoint_plan_sha256: &str,
+) -> Result<serde_json::Value> {
+    let hashes =
+        kiln_core::config_hashes::ConfigHashes::from_model_tokenizer(model_config, tokenizer, None);
+    let valid_indices_sha256 = crate::train_receipt::sha256_json_serializable(&valid_indices)
+        .context("hash SFT valid-example index set")?;
+    Ok(serde_json::json!({
+        "loop_state_type": SFT_CHECKPOINT_LOOP_STATE_TYPE,
+        "model_config_sha256": hashes.model_config_hash,
+        "tokenizer_config_sha256": hashes.tokenizer_config_hash,
+        "chat_template_sha256": hashes.chat_template_hash,
+        "base_model_weights_sha256": base_model_weights_sha256,
+        "backend_runtime": backend_runtime,
+        "kiln_train_version": env!("CARGO_PKG_VERSION"),
+        "gradient_checkpoint_plan_sha256": gradient_checkpoint_plan_sha256,
+        "training_precision_policy": precision_policy.name,
+        "valid_indices_sha256": valid_indices_sha256,
+    }))
+}
+
+fn checkpoint_sha256_hex(prefixed: Option<&str>, label: &str) -> Result<String> {
+    let value = prefixed.with_context(|| format!("compute {label} SHA-256"))?;
+    value
+        .strip_prefix("sha256:")
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("{label} SHA-256 lacks sha256: prefix"))
+}
+
+fn load_sft_checkpoint_loop_state(
+    checkpoint: &crate::checkpoint::ValidatedTrainingCheckpoint,
+) -> Result<SftCheckpointLoopState> {
+    let relative = checkpoint
+        .manifest
+        .state_files
+        .loss_history
+        .as_deref()
+        .context("SFT resume checkpoint has no loop-state file")?;
+    anyhow::ensure!(
+        relative == SFT_CHECKPOINT_LOOP_STATE_FILE,
+        "unsupported SFT loop-state artifact {relative:?}"
+    );
+    let path = checkpoint.artifact_path(relative)?;
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read SFT checkpoint loop state {}", path.display()))?;
+    serde_json::from_slice(&bytes).context("parse strict SFT checkpoint loop state")
 }
 
 fn sft_hyperparameters(
@@ -3694,7 +4214,45 @@ pub fn sft_train_to(
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    sft_train_to_with_checkpoint_root(
+        examples,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        output_adapter_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+        gpu_step_coordination,
+    )
+}
+
+/// Staged-output SFT with a separate durable checkpoint root. Server training
+/// uses this entry point so a process crash cannot discard already-published
+/// resumable checkpoints with the temporary final-adapter staging tree.
+#[allow(clippy::too_many_arguments)]
+pub fn sft_train_to_with_checkpoint_root(
+    examples: &[SftExample],
+    config: &SftConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+    gpu_step_coordination: Option<GpuStepCoordination>,
+) -> Result<PathBuf> {
     let run_started = Instant::now();
+    anyhow::ensure!(
+        config.checkpoint_interval != Some(0),
+        "SFT checkpoint_interval must be greater than zero"
+    );
     let output_dir = output_adapter_dir.join(adapter_name);
     let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&examples);
     let mut data_stats = crate::train_receipt::DataStatsReceipt {
@@ -3741,6 +4299,42 @@ pub fn sft_train_to(
         "starting SFT training"
     );
 
+    let resume_checkpoint = config
+        .resume_checkpoint
+        .as_deref()
+        .map(Path::new)
+        .map(crate::checkpoint::load_training_checkpoint)
+        .transpose()
+        .context("load SFT resume checkpoint")?;
+    if config.checkpoint_interval.is_some() || resume_checkpoint.is_some() {
+        checkpoint_sha256_hex(
+            weights.source_content_sha256.as_deref(),
+            "base-model weights content identity",
+        )?;
+    }
+    let resume_init_seed = resume_checkpoint
+        .as_ref()
+        .map(|checkpoint| {
+            let state = checkpoint
+                .manifest
+                .rng_states
+                .get("lora-init")
+                .context("SFT resume checkpoint has no lora-init RNG state")?;
+            anyhow::ensure!(
+                state.algorithm == "kiln.seeded-lora-init.v1" && state.position == 0,
+                "unsupported SFT lora-init RNG state"
+            );
+            Ok(state.seed)
+        })
+        .transpose()?;
+    if let (Some(requested), Some(restored)) = (config.seed, resume_init_seed) {
+        anyhow::ensure!(
+            requested == restored,
+            "SFT resume seed {restored} differs from requested seed {requested}"
+        );
+    }
+    let requested_effective_seed = resume_init_seed.or(config.seed);
+
     let alpha_over_rank = match crate::lora_scaling::validate_lora_scaling(
         config.lora_rank,
         config.lora_alpha,
@@ -3778,30 +4372,73 @@ pub fn sft_train_to(
     // Open replay state (writes request record + lineage.json *before* the
     // optimizer step, so a crash mid-step still leaves a recoverable trail)
     // and resolve the effective seed.
+    let replay_parent_adapter = resume_checkpoint
+        .is_none()
+        .then_some(config.base_adapter.as_deref())
+        .flatten();
     let (replay_state, effective_seed) = match replay_ctx.as_ref() {
         Some(ctx) => {
             let (state, seed) = open_replay_state_to(
                 ctx,
-                config.seed,
-                config.base_adapter.as_deref(),
+                requested_effective_seed,
+                replay_parent_adapter,
                 adapter_dir,
                 output_adapter_dir,
                 adapter_name,
             )?;
             (Some(state), Some(seed))
         }
-        None => (None, config.seed),
+        None => (
+            None,
+            Some(requested_effective_seed.unwrap_or_else(rand::random)),
+        ),
     };
+    let effective_seed_value = effective_seed.expect("SFT always resolves an effective seed");
+    let effective_checkpoint_config =
+        sft_checkpoint_effective_config(config, learning_rate, effective_seed_value)?;
+    let training_data_checkpoint_sha256 =
+        checkpoint_sha256_hex(training_data_sha256.as_deref(), "SFT training data")?;
+    let resume_loop_state = resume_checkpoint
+        .as_ref()
+        .map(load_sft_checkpoint_loop_state)
+        .transpose()?;
+    if let Some(checkpoint) = resume_checkpoint.as_ref() {
+        anyhow::ensure!(
+            checkpoint.manifest.training_kind == crate::checkpoint::TrainingKind::Sft,
+            "resume checkpoint is not an SFT checkpoint"
+        );
+        anyhow::ensure!(
+            checkpoint.manifest.adapter_name == adapter_name,
+            "resume checkpoint adapter {:?} does not match {:?}",
+            checkpoint.manifest.adapter_name,
+            adapter_name
+        );
+        anyhow::ensure!(
+            checkpoint.manifest.effective_config == effective_checkpoint_config,
+            "resume checkpoint effective SFT configuration differs from this request: checkpoint={}, request={}",
+            checkpoint.manifest.effective_config,
+            effective_checkpoint_config
+        );
+        anyhow::ensure!(
+            checkpoint.manifest.data.content_sha256 == training_data_checkpoint_sha256,
+            "resume checkpoint training data hash differs from this request"
+        );
+    }
 
-    let base_adapter_dir = match resolve_and_validate_base_adapter_from_roots(
-        config.base_adapter.as_deref(),
-        adapter_dir,
-        output_adapter_dir,
-        adapter_name,
-        model_config,
-        config.lora_rank,
-        config.allow_adapter_shape_conversion,
-    ) {
+    let base_adapter_result = if resume_checkpoint.is_some() {
+        Ok(None)
+    } else {
+        resolve_and_validate_base_adapter_from_roots(
+            config.base_adapter.as_deref(),
+            adapter_dir,
+            output_adapter_dir,
+            adapter_name,
+            model_config,
+            config.lora_rank,
+            config.allow_adapter_shape_conversion,
+        )
+    };
+    let base_adapter_dir = match base_adapter_result {
         Ok(value) => value,
         Err(err) => {
             let message = format!("{err:#}");
@@ -3843,7 +4480,16 @@ pub fn sft_train_to(
     );
     let lora_grad_index = LoraGradNormIndex::new(&params);
 
-    if let Some(base_dir) = base_adapter_dir.as_deref() {
+    if let Some(checkpoint) = resume_checkpoint.as_ref() {
+        let adapter_path =
+            checkpoint.artifact_path(&checkpoint.manifest.state_files.adapter_parameters)?;
+        params.load_checkpoint_parameters(&adapter_path)?;
+        tracing::info!(
+            checkpoint = %checkpoint.root.display(),
+            step = checkpoint.manifest.progress.global_step,
+            "restored exact SFT adapter parameters"
+        );
+    } else if let Some(base_dir) = base_adapter_dir.as_deref() {
         let n_loaded = params.load_from_safetensors(base_dir, &device)?;
         tracing::info!(
             base = %base_dir.display(),
@@ -3852,18 +4498,40 @@ pub fn sft_train_to(
         );
     }
 
-    // Phase 4.1: register LoRA Vars in the resident activation
-    // registry. Forward LoRA dispatches via `lora_delta_resident`
-    // (CustomOp3 with autograd backward) and the optimizer step
-    // dispatches on-device against the registry buffers.
-    params.register_with_backend(&*backend)?;
-
     // Allocate AdamW state if selected; SGD has no per-param state.
     // Register the per-param `m`/`v` device moment tensors alongside the
     // LoRA params so the on-device AdamW kernel's
     // `has_resident_activation(m/v)` gate passes (C1 fix — without this the
     // device path declines and a no-op interim corrupted the param).
     let mut opt_state = make_opt_state(&params, config.optimizer, learning_rate, &device)?;
+    if let Some(checkpoint) = resume_checkpoint.as_ref() {
+        let state_path = checkpoint
+            .manifest
+            .state_files
+            .optimizer_state
+            .as_deref()
+            .map(|relative| checkpoint.artifact_path(relative))
+            .transpose()?;
+        match (opt_state.as_mut(), state_path) {
+            (Some(state), Some(path)) => {
+                let step = u32::try_from(checkpoint.manifest.progress.global_step)
+                    .context("SFT resume optimizer step exceeds u32")?;
+                state.load_checkpoint_state(&params, &path, step)?;
+            }
+            (None, None) => {}
+            (Some(_), None) => {
+                anyhow::bail!("stateful SFT optimizer checkpoint has no optimizer artifact")
+            }
+            (None, Some(_)) => {
+                anyhow::bail!("SGD SFT checkpoint unexpectedly contains optimizer state")
+            }
+        }
+    }
+
+    // Register only after checkpoint restoration. Registry identity is
+    // process-local, so loading into already-registered tensors would leave
+    // the restored host object and the resident device object out of sync.
+    params.register_with_backend(&*backend)?;
     if let Some(state) = opt_state.as_ref() {
         state.register_with_backend(&*backend)?;
     }
@@ -3878,6 +4546,7 @@ pub fn sft_train_to(
         let mut valid_indices = Vec::new();
         let mut one_epoch_counts = crate::train_receipt::TokenCountReceipt::default();
         let mut max_seq_len_tokens: usize = 0;
+        let mut valid_seq_lens = Vec::new();
         for (idx, ex) in examples.iter().enumerate() {
             match tokenize_for_training(ex, tokenizer) {
                 Ok((input_ids, label_mask)) => {
@@ -3892,6 +4561,7 @@ pub fn sft_train_to(
                         max_seq_len_tokens = input_ids.len();
                     }
                     valid_indices.push(idx);
+                    valid_seq_lens.push(input_ids.len());
                 }
                 Err(e) => {
                     tracing::warn!("skipping example: {e}");
@@ -3930,25 +4600,142 @@ pub fn sft_train_to(
         );
 
         let total_steps = config.epochs * valid_indices.len();
-        let mut global_step = 0;
-        let mut last_loss = 0.0;
-        let mut first_epoch_loss: Option<f64> = None;
-        let mut best_epoch_loss = f64::INFINITY;
+        let shuffle_seed = match resume_checkpoint.as_ref() {
+            Some(checkpoint) => {
+                let state = checkpoint
+                    .manifest
+                    .rng_states
+                    .get("epoch-order")
+                    .context("SFT resume checkpoint has no epoch-order RNG state")?;
+                anyhow::ensure!(
+                    state.algorithm == "kiln.epoch-order.v1" && state.state_file.is_none(),
+                    "unsupported SFT epoch-order RNG state"
+                );
+                state.seed
+            }
+            None => effective_seed_value,
+        };
+        let gradient_checkpoint_plan: Vec<_> = valid_seq_lens
+            .iter()
+            .map(|&seq_len| {
+                let config_for_step = checkpoint_config_for_training_step(
+                    weights,
+                    &device,
+                    config.grad_checkpoint_segments,
+                    model_config.num_layers,
+                    seq_len,
+                    model_config.hidden_size,
+                    model_config.intermediate_size,
+                    model_config.vocab_size,
+                    2,
+                    activation_bytes_per_elem,
+                );
+                let boundaries =
+                    checkpoint_segments_for_config(weights, &device, seq_len, config_for_step);
+                serde_json::json!({
+                    "seq_len": seq_len,
+                    "enabled": config_for_step.enabled,
+                    "num_segments": config_for_step.num_segments,
+                    "auto_configured": config_for_step.auto_configured,
+                    "boundaries": boundaries,
+                })
+            })
+            .collect();
+        let gradient_checkpoint_plan_sha256 =
+            crate::train_receipt::sha256_json_serializable(&gradient_checkpoint_plan)
+                .context("hash SFT gradient-checkpoint plan")?;
+        let checkpoint_descriptor = SftCheckpointDescriptor {
+            adapter_name: adapter_name.to_string(),
+            effective_config: effective_checkpoint_config.clone(),
+            precision_policy: sft_checkpoint_precision(&params, opt_state.as_ref())?,
+            data: crate::checkpoint::TrainingCheckpointData {
+                source_kind: "sft-valid-example-order-v1".to_string(),
+                content_sha256: training_data_checkpoint_sha256.clone(),
+                item_count: valid_indices.len() as u64,
+            },
+            init_seed: effective_seed_value,
+            shuffle_seed,
+            optimizer: config.optimizer,
+            learning_rate,
+            total_steps,
+            base_model_weights_sha256: weights.source_content_sha256.clone(),
+            auxiliary_state: sft_checkpoint_auxiliary_state(
+                model_config,
+                tokenizer,
+                training_precision_policy,
+                &valid_indices,
+                weights.source_content_sha256.as_deref(),
+                backend.name(),
+                &gradient_checkpoint_plan_sha256,
+            )?,
+        };
+        if let (Some(checkpoint), Some(loop_state)) =
+            (resume_checkpoint.as_ref(), resume_loop_state.as_ref())
+        {
+            checkpoint_descriptor.validate_resume(checkpoint, loop_state)?;
+        }
+
+        let mut global_step = resume_loop_state
+            .as_ref()
+            .map_or(0, |state| state.global_step as usize);
+        let mut loss_history = resume_loop_state
+            .as_ref()
+            .map_or_else(Vec::new, |state| state.loss_history.clone());
+        let mut last_loss = resume_loop_state
+            .as_ref()
+            .map_or(0.0, |state| state.last_loss);
+        let mut first_epoch_loss = resume_loop_state
+            .as_ref()
+            .and_then(|state| state.first_epoch_loss);
+        let mut best_epoch_loss = resume_loop_state
+            .as_ref()
+            .and_then(|state| state.best_epoch_loss)
+            .unwrap_or(f64::INFINITY);
+        if let Some(state) = resume_loop_state.as_ref() {
+            lora_grad_norms = state.lora_grad_norms.clone();
+        }
+        let start_epoch = resume_loop_state
+            .as_ref()
+            .map_or(0, |state| state.epoch_index as usize);
+        let start_cursor = resume_loop_state
+            .as_ref()
+            .map_or(0, |state| state.cursor_in_epoch as usize);
         let mut last_ckpt_log_key: Option<(bool, usize)> = None;
+        let mut last_saved_step = resume_loop_state
+            .as_ref()
+            .map(|state| state.global_step as usize);
         const SFT_DIVERGENCE_RATIO: f64 = 8.0;
         const SFT_DIVERGENCE_MIN_INCREASE: f64 = 5.0;
 
         let pb = make_step_progress(total_steps, "sft training");
+        if let Some(pb) = &pb {
+            pb.set_position(global_step as u64);
+        }
 
-        // Shuffle example order per epoch. Seeded runs (and replays, which
-        // always record a seed) stay exactly reproducible; unseeded runs
-        // draw a fresh order, matching the init-noise determinism contract.
-        let shuffle_seed = effective_seed.unwrap_or_else(rand::random);
+        for epoch in start_epoch..config.epochs {
+            let order = epoch_order(shuffle_seed, epoch, valid_indices.len());
+            let cursor_start = (epoch == start_epoch).then_some(start_cursor).unwrap_or(0);
+            let mut epoch_loss = if epoch == start_epoch {
+                resume_loop_state
+                    .as_ref()
+                    .map_or(0.0, |state| state.current_epoch_loss_sum)
+            } else {
+                0.0
+            };
+            let mut epoch_items = if epoch == start_epoch {
+                resume_loop_state
+                    .as_ref()
+                    .map_or(0, |state| state.current_epoch_items as usize)
+            } else {
+                0
+            };
+            anyhow::ensure!(
+                cursor_start <= order.len() && epoch_items == cursor_start,
+                "SFT resume cursor is outside the current epoch"
+            );
+            let mut checkpoint_after_epoch = false;
 
-        for epoch in 0..config.epochs {
-            let mut epoch_loss = 0.0;
-
-            for &order_idx in &epoch_order(shuffle_seed, epoch, valid_indices.len()) {
+            for (cursor, &order_idx) in order.iter().enumerate().skip(cursor_start) {
                 let ex_idx = valid_indices[order_idx];
                 let (input_ids, label_mask) =
                     tokenize_for_training(&examples[ex_idx], tokenizer)
@@ -4082,25 +4869,47 @@ pub fn sft_train_to(
                 drop(_step_gpu);
 
                 epoch_loss += loss_val;
+                epoch_items += 1;
                 last_loss = loss_val;
+                loss_history.push(loss_val);
 
                 global_step += 1;
 
-                // Periodic adapter checkpoint
-                if let Some(interval) = config.checkpoint_interval {
-                    if interval > 0 && global_step % interval == 0 && global_step < total_steps {
-                        let ckpt_dir = output_adapter_dir
-                            .join(format!("{adapter_name}-checkpoint-{global_step}"));
-                        // Pull current Var values from registry into candle
-                        // CPU storage before save_peft serializes them.
-                        if let Err(e) = params.sync_to_master(&*backend) {
-                            tracing::warn!(step = global_step, error = %e, "failed to sync LoRA Vars to candle for checkpoint");
-                        }
-                        if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
-                            tracing::warn!(step = global_step, error = %e, "failed to save training checkpoint");
-                        } else {
-                            tracing::info!(step = global_step, "saved training checkpoint");
-                        }
+                let checkpoint_due = config.checkpoint_interval.is_some_and(|interval| {
+                    interval > 0 && global_step % interval == 0 && global_step < total_steps
+                });
+                if checkpoint_due {
+                    if cursor + 1 == order.len() {
+                        checkpoint_after_epoch = true;
+                    } else {
+                        let loop_state = SftCheckpointLoopState::capture(
+                            global_step,
+                            epoch,
+                            cursor + 1,
+                            &loss_history,
+                            last_loss,
+                            epoch_loss,
+                            epoch_items,
+                            first_epoch_loss,
+                            best_epoch_loss,
+                            &lora_grad_norms,
+                        );
+                        let path = checkpoint_descriptor.save(
+                            checkpoint_output_dir,
+                            &*backend,
+                            &mut params,
+                            &mut opt_state,
+                            epoch,
+                            cursor + 1,
+                            &order,
+                            &loop_state,
+                        )?;
+                        last_saved_step = Some(global_step);
+                        tracing::info!(
+                            step = global_step,
+                            checkpoint = %path.display(),
+                            "saved resumable SFT checkpoint"
+                        );
                     }
                 }
 
@@ -4113,7 +4922,36 @@ pub fn sft_train_to(
                         loss: loss_val,
                         progress: global_step as f32 / total_steps as f32,
                     });
-                    if control == TrainControl::Stop {
+                    if control == TrainControl::Stop && global_step < total_steps {
+                        if last_saved_step != Some(global_step) {
+                            let loop_state = SftCheckpointLoopState::capture(
+                                global_step,
+                                epoch,
+                                cursor + 1,
+                                &loss_history,
+                                last_loss,
+                                epoch_loss,
+                                epoch_items,
+                                first_epoch_loss,
+                                best_epoch_loss,
+                                &lora_grad_norms,
+                            );
+                            let path = checkpoint_descriptor.save(
+                                checkpoint_output_dir,
+                                &*backend,
+                                &mut params,
+                                &mut opt_state,
+                                epoch,
+                                cursor + 1,
+                                &order,
+                                &loop_state,
+                            )?;
+                            tracing::info!(
+                                step = global_step,
+                                checkpoint = %path.display(),
+                                "saved resumable SFT checkpoint before cancellation"
+                            );
+                        }
                         anyhow::bail!(
                             "training cancelled by user (stop requested at step boundary)"
                         );
@@ -4136,7 +4974,13 @@ pub fn sft_train_to(
                 }
             }
 
-            let avg_loss = epoch_loss / valid_indices.len() as f64;
+            anyhow::ensure!(
+                epoch_items == valid_indices.len(),
+                "SFT epoch {} completed with {epoch_items} items, expected {}",
+                epoch + 1,
+                valid_indices.len()
+            );
+            let avg_loss = epoch_loss / epoch_items as f64;
             anyhow::ensure!(
                 avg_loss.is_finite(),
                 "SFT epoch {} average loss became non-finite: {avg_loss}",
@@ -4159,11 +5003,48 @@ pub fn sft_train_to(
                 avg_loss = format!("{avg_loss:.6}"),
                 "epoch complete"
             );
+            if checkpoint_after_epoch && global_step < total_steps {
+                let next_epoch = epoch + 1;
+                let next_order = epoch_order(shuffle_seed, next_epoch, valid_indices.len());
+                let loop_state = SftCheckpointLoopState::capture(
+                    global_step,
+                    next_epoch,
+                    0,
+                    &loss_history,
+                    last_loss,
+                    0.0,
+                    0,
+                    first_epoch_loss,
+                    best_epoch_loss,
+                    &lora_grad_norms,
+                );
+                let path = checkpoint_descriptor.save(
+                    checkpoint_output_dir,
+                    &*backend,
+                    &mut params,
+                    &mut opt_state,
+                    next_epoch,
+                    0,
+                    &next_order,
+                    &loop_state,
+                )?;
+                last_saved_step = Some(global_step);
+                tracing::info!(
+                    step = global_step,
+                    checkpoint = %path.display(),
+                    "saved resumable SFT checkpoint at epoch boundary"
+                );
+            }
         }
 
         if let Some(pb) = pb {
             pb.finish_and_clear();
         }
+        anyhow::ensure!(
+            global_step == total_steps && loss_history.len() == total_steps,
+            "SFT loop completed with inconsistent progress ({global_step}/{total_steps}, {} losses)",
+            loss_history.len()
+        );
 
         // MTP alignment phase (PR-B): train the native draft block's LoRA
         // against the freshly-tuned model so speculative decoding keeps its
@@ -9408,8 +10289,9 @@ fn apply_sgd_update_kt(
     let updated = updated_f32
         .to_dtype(dtype)
         .map_err(|e| anyhow::anyhow!("apply_sgd_update_kt: back to {dtype:?}: {e}"))?;
-    param.replace_backward_storage(Some(updated.clone()));
-    param.replace_forward_storage(KtForwardStorage::Plain(updated));
+    param
+        .replace_plain_trainable_tensor(updated)
+        .map_err(|error| anyhow::anyhow!("apply_sgd_update_kt: preserve identity: {error}"))?;
     if resident_activation {
         ResidencyBackend::runtime_update_resident_activation(
             backend,
@@ -9528,7 +10410,9 @@ fn apply_adamw_update_kt(
     // (preserving tensor_id). Refresh the forward storage from the new
     // master so the next forward reads the updated weights.
     if let Some(new_master) = param.backward_storage().cloned() {
-        param.replace_forward_storage(KtForwardStorage::Plain(new_master));
+        param
+            .replace_plain_trainable_tensor(new_master)
+            .map_err(|error| anyhow::anyhow!("AdamW preserve parameter identity: {error}"))?;
     }
     if resident_activation {
         ResidencyBackend::runtime_update_resident_activation(
@@ -9636,7 +10520,9 @@ fn apply_muon_update_kt(
     // (preserving tensor_id). Refresh the forward storage from the new
     // master so the next forward reads the updated weights.
     if let Some(new_master) = param.backward_storage().cloned() {
-        param.replace_forward_storage(KtForwardStorage::Plain(new_master));
+        param
+            .replace_plain_trainable_tensor(new_master)
+            .map_err(|error| anyhow::anyhow!("Muon preserve parameter identity: {error}"))?;
     }
     if resident_activation {
         ResidencyBackend::runtime_update_resident_activation(
@@ -14805,6 +15691,7 @@ pub(crate) mod tests {
         )?;
 
         Ok(GpuWeights {
+            source_content_sha256: Some(format!("sha256:{}", "33".repeat(32))),
             embed_tokens,
             embed_tokens_t,
             layers,
@@ -14958,6 +15845,7 @@ pub(crate) mod tests {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(GpuWeights {
+            source_content_sha256: f32_weights.source_content_sha256.clone(),
             embed_tokens: to_bf16_contig(&f32_weights.embed_tokens)?,
             embed_tokens_t: to_bf16_contig(&f32_weights.embed_tokens_t)?,
             layers,
@@ -16194,6 +17082,182 @@ pub(crate) mod tests {
             },
             2e-2,
         )
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn rocm_sft_cancel_resume_matches_uninterrupted_training() -> Result<()> {
+        if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+            eprintln!(
+                "skip rocm_sft_cancel_resume_matches_uninterrupted_training: qualification off"
+            );
+            return Ok(());
+        }
+        anyhow::ensure!(
+            kiln_tensor::rocm_is_available(),
+            "ROCm qualification requested but no ROCm device is available"
+        );
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+        }
+
+        let device = Device::Rocm(0);
+        let model_config = tiny_config_full_attn_bf16();
+        let weights = tiny_weights_bf16(&model_config, &device)?;
+        let tokenizer = minimal_training_tokenizer(
+            "{% for message in messages %}{{ message.content }}{% endfor %}",
+        );
+        let examples: Vec<crate::SftExample> = (1..=3)
+            .map(|index| crate::SftExample {
+                messages: vec![
+                    crate::ChatMessage {
+                        role: "user".to_string(),
+                        content: format!("a{index}"),
+                    },
+                    crate::ChatMessage {
+                        role: "assistant".to_string(),
+                        content: format!("b{index}"),
+                    },
+                ],
+            })
+            .collect();
+        let config = crate::SftConfig {
+            epochs: 2,
+            learning_rate: Some(1e-3),
+            lora_rank: 4,
+            lora_alpha: 8.0,
+            train_mtp: Some(false),
+            auto_load: false,
+            checkpoint_interval: Some(5),
+            grad_checkpoint_segments: Some(1),
+            seed: Some(0x5F7),
+            optimizer: Optimizer::AdamW {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: 0.01,
+            },
+            ..crate::SftConfig::default()
+        };
+
+        let uninterrupted_root = tempfile::tempdir()?;
+        let uninterrupted_losses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uninterrupted_capture = uninterrupted_losses.clone();
+        let uninterrupted_output = sft_train(
+            &examples,
+            &config,
+            &model_config,
+            &weights,
+            &tokenizer,
+            uninterrupted_root.path(),
+            "exact-sft",
+            Some(Box::new(move |progress| {
+                uninterrupted_capture.lock().unwrap().push(progress.loss);
+                TrainControl::Continue
+            })),
+            None,
+            None,
+        )?;
+
+        let resumed_root = tempfile::tempdir()?;
+        let interrupted_losses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let interrupted_capture = interrupted_losses.clone();
+        let interrupted = sft_train(
+            &examples,
+            &config,
+            &model_config,
+            &weights,
+            &tokenizer,
+            resumed_root.path(),
+            "exact-sft",
+            Some(Box::new(move |progress| {
+                interrupted_capture.lock().unwrap().push(progress.loss);
+                if progress.step == 2 {
+                    TrainControl::Stop
+                } else {
+                    TrainControl::Continue
+                }
+            })),
+            None,
+            None,
+        )
+        .expect_err("injected SFT cancellation must stop at step 2");
+        anyhow::ensure!(interrupted.to_string().contains("cancelled by user"));
+
+        let resume_path = resumed_root
+            .path()
+            .join("exact-sft-checkpoint-step-00000002.kiln-checkpoint");
+        crate::checkpoint::load_training_checkpoint(&resume_path)?;
+        let resumed_losses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let resumed_capture = resumed_losses.clone();
+        let resumed_config = crate::SftConfig {
+            resume_checkpoint: Some(resume_path.display().to_string()),
+            ..config.clone()
+        };
+        let resumed_output = sft_train(
+            &examples,
+            &resumed_config,
+            &model_config,
+            &weights,
+            &tokenizer,
+            resumed_root.path(),
+            "exact-sft",
+            Some(Box::new(move |progress| {
+                resumed_capture.lock().unwrap().push(progress.loss);
+                TrainControl::Continue
+            })),
+            None,
+            None,
+        )?;
+
+        let uninterrupted_losses = uninterrupted_losses.lock().unwrap().clone();
+        let mut combined_losses = interrupted_losses.lock().unwrap().clone();
+        combined_losses.extend(resumed_losses.lock().unwrap().iter().copied());
+        anyhow::ensure!(
+            uninterrupted_losses == combined_losses,
+            "resumed SFT loss trajectory differs: uninterrupted={uninterrupted_losses:?}, resumed={combined_losses:?}"
+        );
+        anyhow::ensure!(
+            std::fs::read(uninterrupted_output.join("adapter_model.safetensors"))?
+                == std::fs::read(resumed_output.join("adapter_model.safetensors"))?,
+            "resumed SFT final adapter differs"
+        );
+
+        let uninterrupted_step_five = crate::checkpoint::load_training_checkpoint(
+            &uninterrupted_root
+                .path()
+                .join("exact-sft-checkpoint-step-00000005.kiln-checkpoint"),
+        )?;
+        let resumed_step_five = crate::checkpoint::load_training_checkpoint(
+            &resumed_root
+                .path()
+                .join("exact-sft-checkpoint-step-00000005.kiln-checkpoint"),
+        )?;
+        for relative in [
+            SFT_CHECKPOINT_ADAPTER_FILE,
+            SFT_CHECKPOINT_OPTIMIZER_FILE,
+            SFT_CHECKPOINT_LOOP_STATE_FILE,
+        ] {
+            let uninterrupted = std::fs::read(uninterrupted_step_five.artifact_path(relative)?)?;
+            let resumed = std::fs::read(resumed_step_five.artifact_path(relative)?)?;
+            if uninterrupted != resumed {
+                if relative == SFT_CHECKPOINT_LOOP_STATE_FILE {
+                    let uninterrupted: serde_json::Value = serde_json::from_slice(&uninterrupted)?;
+                    let resumed: serde_json::Value = serde_json::from_slice(&resumed)?;
+                    anyhow::ensure!(
+                        uninterrupted == resumed,
+                        "resumed SFT checkpoint loop state differs: uninterrupted={uninterrupted}, resumed={resumed}"
+                    );
+                    continue;
+                }
+                anyhow::bail!("resumed SFT checkpoint artifact {relative} differs");
+            }
+        }
+        Ok(())
     }
 
     #[test]

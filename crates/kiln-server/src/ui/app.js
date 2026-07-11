@@ -9399,6 +9399,32 @@ function renderTrainMetadata(j) {
   </div>`;
 }
 
+function renderTrainCheckpoint(j) {
+  const checkpoint = j.latest_checkpoint || null;
+  const error = j.checkpoint_error
+    ? `<div class="training-card-error" style="margin-top:10px;">${icon('warning', 'icn-sm')} ${escapeHtml(j.checkpoint_error)}</div>`
+    : '';
+  if (!checkpoint) {
+    return `<div class="detail-section">
+      <h4>Resume checkpoint</h4>
+      <div class="hint">None</div>
+      ${error}
+    </div>`;
+  }
+  const status = checkpoint.complete
+    ? 'complete'
+    : `step ${drillValue(checkpoint.global_step)} / ${drillValue(checkpoint.total_steps)}`;
+  return `<div class="detail-section">
+    <h4>Resume checkpoint</h4>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <code style="background:var(--surface); padding:4px 8px; border-radius:4px; border:1px solid var(--border); overflow-wrap:anywhere;">${escapeHtml(checkpoint.resume_checkpoint)}</code>
+      <button class="btn btn-sm btn-ghost" type="button" data-copy-resume-checkpoint="${escapeHtml(checkpoint.resume_checkpoint)}" title="Copy resume checkpoint basename" aria-label="Copy resume checkpoint basename"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg></button>
+      <span class="hint tabular-nums">${escapeHtml(status)} · epoch index ${drillValue(checkpoint.next_epoch_index)} · cursor ${drillValue(checkpoint.next_cursor_in_epoch)}</span>
+    </div>
+    ${error}
+  </div>`;
+}
+
 function renderTrainDrillBody(j) {
   const linkedIds = j.linked_eval_job_ids || [];
   const linkedHtml = linkedIds.length
@@ -9442,6 +9468,7 @@ function renderTrainDrillBody(j) {
     <div id="train-drill-curve-host"></div>
   </div>
   ${renderTrainMetadata(j)}
+  ${renderTrainCheckpoint(j)}
   <div class="detail-section">
     <h4>Adapter</h4>
     <div style="display:flex; gap:8px; align-items:center;">
@@ -9462,6 +9489,21 @@ function renderTrainDrillBody(j) {
         selectPage('evals');
         document.getElementById('evals-tab-jobs')?.click();
         openDrillModal(b.dataset.linkedEval);
+      });
+    });
+    document.querySelectorAll('[data-copy-resume-checkpoint]').forEach(b => {
+      b.addEventListener('click', () => {
+        const value = b.dataset.copyResumeCheckpoint;
+        if (!value) return;
+        const writeText = navigator.clipboard?.writeText
+          ? navigator.clipboard.writeText.bind(navigator.clipboard)
+          : (text) => { fallbackCopyText(text); return Promise.resolve(); };
+        writeText(value)
+          .then(() => toast('Resume checkpoint copied', 'ok'))
+          .catch(() => {
+            try { fallbackCopyText(value); toast('Resume checkpoint copied', 'ok'); }
+            catch { toast('Copy failed', 'err'); }
+          });
       });
     });
   }, 0);

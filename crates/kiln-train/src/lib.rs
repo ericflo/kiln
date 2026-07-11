@@ -370,9 +370,16 @@ pub struct SftConfig {
     /// Automatically load the resulting adapter when training completes (default true).
     #[serde(default = "default_auto_load")]
     pub auto_load: bool,
-    /// Save adapter weights every N training steps. None = only save at the end.
+    /// Publish an exact resumable checkpoint every N committed optimizer
+    /// steps. Cancellation also checkpoints at the next step boundary.
+    /// `None` disables periodic checkpoints.
     #[serde(default)]
     pub checkpoint_interval: Option<usize>,
+    /// Resume from an immutable `.kiln-checkpoint` directory. This is not a
+    /// PEFT adapter path: the checkpoint must contain the exact optimizer,
+    /// cursor, RNG, and loop state produced by this training mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_checkpoint: Option<String>,
     /// Internal submit-time resolution of dynamic gradient checkpointing.
     /// None means the trainer should auto-tune from the workload shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -430,6 +437,7 @@ impl Default for SftConfig {
             output_name: None,
             auto_load: default_auto_load(),
             checkpoint_interval: None,
+            resume_checkpoint: None,
             grad_checkpoint_segments: None,
             seed: None,
             optimizer: Optimizer::default(),
@@ -1542,6 +1550,7 @@ mod tests {
     fn test_sft_config_default_checkpoint_interval_is_none() {
         let config = SftConfig::default();
         assert!(config.checkpoint_interval.is_none());
+        assert!(config.resume_checkpoint.is_none());
     }
 
     #[test]
@@ -1564,6 +1573,25 @@ mod tests {
         let config: SftConfig = serde_json::from_str(json).unwrap();
         assert!(config.checkpoint_interval.is_none());
         assert_eq!(config.epochs, 5);
+    }
+
+    #[test]
+    fn test_sft_config_round_trips_resume_checkpoint() {
+        let name = "support-checkpoint-step-00000025.kiln-checkpoint";
+        let config: SftConfig =
+            serde_json::from_value(serde_json::json!({"resume_checkpoint": name})).unwrap();
+        assert_eq!(config.resume_checkpoint.as_deref(), Some(name));
+        assert_eq!(
+            serde_json::to_value(config).unwrap()["resume_checkpoint"],
+            name
+        );
+        assert!(
+            serde_json::to_value(SftConfig::default())
+                .unwrap()
+                .get("resume_checkpoint")
+                .is_none(),
+            "unset resume state should not add noise to API payloads"
+        );
     }
 
     #[test]

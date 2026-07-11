@@ -80,6 +80,35 @@ pub fn cuda_native_sft_train_to(
     progress_cb: Option<ProgressCallback>,
     gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    cuda_native_sft_train_to_with_checkpoint_root(
+        examples,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        output_adapter_dir,
+        adapter_name,
+        progress_cb,
+        gpu_step_coordination,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_native_sft_train_to_with_checkpoint_root(
+    examples: &[SftExample],
+    config: &SftConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
+) -> Result<PathBuf> {
     tracing::info!(
         num_examples = examples.len(),
         epochs = config.epochs,
@@ -90,7 +119,7 @@ pub fn cuda_native_sft_train_to(
         path = "backend_runtime_via_sft_train",
         "cuda_native_sft_train: routing through the trainer BackendRuntime path"
     );
-    crate::trainer::sft_train_to(
+    crate::trainer::sft_train_to_with_checkpoint_root(
         examples,
         config,
         model_config,
@@ -98,6 +127,7 @@ pub fn cuda_native_sft_train_to(
         tokenizer,
         adapter_dir,
         output_adapter_dir,
+        checkpoint_output_dir,
         adapter_name,
         progress_cb,
         None,

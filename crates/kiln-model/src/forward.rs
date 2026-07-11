@@ -3601,6 +3601,11 @@ fn flash_attention_forward_head_major(
 /// handle to the loaded model and score rollouts on demand.
 #[derive(Clone)]
 pub struct GpuWeights {
+    /// Content revision of the exact base-model shard bytes that produced
+    /// these tensors. Production loaders always populate it; synthetic test
+    /// weights may leave it absent. Exact training checkpoints bind to this
+    /// identity so shape-compatible model replacements cannot resume silently.
+    pub source_content_sha256: Option<String>,
     /// Token embedding table: [vocab_size, hidden_size]
     pub embed_tokens: Tensor,
     /// Pre-transposed token embedding table for tied LM head: [hidden_size, vocab_size], contiguous.
@@ -7122,6 +7127,7 @@ impl GpuWeights {
             Some(slot) => Some(slot.to_device_deep(device, &mv_layer)?),
         };
         Ok(GpuWeights {
+            source_content_sha256: self.source_content_sha256.clone(),
             embed_tokens: mv(&self.embed_tokens)?,
             embed_tokens_t: mv(&self.embed_tokens_t)?,
             layers,
@@ -7703,6 +7709,7 @@ impl GpuWeights {
         }
 
         Ok(Self {
+            source_content_sha256: weights.source_content_sha256.clone(),
             embed_tokens,
             embed_tokens_t,
             lm_head_w8,
@@ -33869,6 +33876,7 @@ mod tests {
         }
         let rotary_inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, device)?;
         Ok(GpuWeights {
+            source_content_sha256: None,
             embed_tokens,
             embed_tokens_t,
             lm_head_w8: None,
@@ -34057,6 +34065,7 @@ mod tests {
         let rotary_inv_freq =
             compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)?;
         Ok(GpuWeights {
+            source_content_sha256: None,
             embed_tokens,
             embed_tokens_t,
             lm_head_w8: None,
@@ -36533,6 +36542,7 @@ mod tests {
         let rotary_inv_freq = compute_rotary_inv_freq(head_dim, 10000.0, device)?;
 
         Ok(GpuWeights {
+            source_content_sha256: None,
             embed_tokens,
             embed_tokens_t,
             lm_head_w8: None,
@@ -37016,6 +37026,7 @@ mod tests {
         let rotary_inv_freq = compute_rotary_inv_freq(head_dim, 10000.0, device)?;
 
         Ok(GpuWeights {
+            source_content_sha256: None,
             embed_tokens,
             embed_tokens_t,
             lm_head_w8: None,

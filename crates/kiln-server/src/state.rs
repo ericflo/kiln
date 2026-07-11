@@ -2425,8 +2425,10 @@ pub struct AppState {
     pub started_at: std::time::Instant,
     /// True once startup inference prewarm has finished or was not needed.
     pub inference_prewarm_complete: Arc<AtomicBool>,
-    /// Server-level default for adapter checkpoint interval during training.
-    /// Per-job config overrides this. None = only save at the end.
+    /// Server-level default checkpoint interval during training. SFT writes
+    /// exact resumable checkpoints; legacy modes may still emit PEFT-only
+    /// snapshots. Per-job config overrides this. `None` disables periodic
+    /// checkpoints.
     pub checkpoint_interval: Option<usize>,
     /// Optional URL to POST a JSON notification to whenever a training
     /// job completes or fails. `None` disables webhook firing entirely.

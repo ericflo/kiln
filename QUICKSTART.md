@@ -366,15 +366,23 @@ curl -s http://localhost:8420/v1/train/sft \
   }' | python3 -m json.tool
 ```
 
-Training runs in the background and keeps its weights, receipt, replay data,
-and checkpoints hidden until the job finishes. Under `experimental`, the model
-continues serving while the writer-priority training operation runs. Under
-`maintenance`, inference is disabled. At completion Kiln publishes the adapter
-atomically; with the default `auto_load=true`, subsequent requests in
-`experimental` use the new revision. A
+Training runs in the background. Final adapter weights, receipt, and replay
+data remain in a staging tree until the job finishes; exact SFT checkpoints are
+published durably in the adapter registry as committed steps complete. Under
+`experimental`, the model continues serving while the writer-priority training
+operation runs. Under `maintenance`, inference is disabled. At completion Kiln
+publishes the adapter atomically; with the default `auto_load=true`, subsequent
+requests in `experimental` use the new revision. A
 same-name adapter that was already serving is reloaded inside that publication
 barrier even when `auto_load=false`, because its on-disk bytes cannot change
 behind the loaded weights.
+
+For an interruptible run, add `"checkpoint_interval": 25` to `config` or pass
+`--checkpoint-interval 25` to the CLI. `kiln train status --job-id JOB_ID`
+prints the newest immutable checkpoint basename. Continue with the same file,
+adapter, and training options plus `--resume-checkpoint BASENAME`. Resume
+validates the complete state and checksums before GPU work; it is not a
+weights-only warm start. See [Native Training Checkpoints](docs/training-checkpoints.md).
 
 ## 7. Check Training Status
 

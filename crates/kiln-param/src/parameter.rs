@@ -489,9 +489,60 @@ impl Parameter {
     /// resets the flag since there's nothing to be stale against.)
     pub fn replace_backward_storage(&mut self, new: Option<Tensor>) {
         let was_some = new.is_some();
-        self.backward_storage = new;
+        self.backward_storage = new.map(|tensor| {
+            Tensor::from_parts(
+                tensor.storage().clone(),
+                tensor.layout().clone(),
+                self.tensor_id,
+            )
+            .expect("rebinding an already-valid tensor layout cannot fail")
+        });
         self.forward_stale = was_some;
         // tensor_id intentionally unchanged.
+    }
+
+    /// Replace both storages of a plain trainable parameter while preserving
+    /// the logical tensor identity used by autograd and optimizer state.
+    ///
+    /// Checkpoint restore, resident-buffer synchronization, and host optimizer
+    /// updates must use this operation. Merely preserving `Parameter::tensor_id`
+    /// while installing a fresh primary `TensorId` causes the tape to emit
+    /// gradients under a key the optimizer never queries.
+    pub fn replace_plain_trainable_tensor(&mut self, tensor: Tensor) -> Result<()> {
+        let current = self.forward_storage.primary_tensor();
+        if !matches!(&self.forward_storage, ForwardStorage::Plain(_)) {
+            return Err(kiln_tensor::Error::Msg(
+                "replace_plain_trainable_tensor requires plain forward storage".to_string(),
+            ));
+        }
+        if self.backward_storage.is_none() {
+            return Err(kiln_tensor::Error::Msg(
+                "replace_plain_trainable_tensor requires backward storage".to_string(),
+            ));
+        }
+        if tensor.dims() != current.dims()
+            || tensor.dtype() != current.dtype()
+            || tensor.device() != current.device()
+        {
+            return Err(kiln_tensor::Error::Msg(format!(
+                "replace_plain_trainable_tensor contract mismatch: expected {}{:?} on {}, found {}{:?} on {}",
+                current.dtype(),
+                current.dims(),
+                current.device(),
+                tensor.dtype(),
+                tensor.dims(),
+                tensor.device()
+            )));
+        }
+        let tensor = Tensor::from_parts(
+            tensor.storage().clone(),
+            tensor.layout().clone(),
+            self.tensor_id,
+        )?;
+        self.forward_storage = ForwardStorage::Plain(tensor.clone());
+        self.backward_storage = Some(tensor);
+        self.forward_stale = false;
+        Ok(())
     }
 
     /// Borrow the transposed cache if present.
@@ -700,7 +751,32 @@ mod tests {
         // Parameter tensor_id is unchanged; backward_storage now
         // reports the new content.
         assert_eq!(p.tensor_id(), original_id);
-        assert!(p.backward_storage().is_some());
+        assert_eq!(p.backward_storage().unwrap().id(), original_id);
+    }
+
+    #[test]
+    fn replace_plain_trainable_tensor_preserves_tape_identity() {
+        let original = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
+        let mut p = Parameter::trainable(
+            ForwardStorage::Plain(original.clone()),
+            original,
+            AmpPolicy::fp32_reference(),
+        );
+        let id = p.tensor_id();
+        let replacement = Tensor::from_slice(&[3.0f32, 4.0], vec![2]).unwrap();
+        assert_ne!(replacement.id(), id);
+
+        p.replace_plain_trainable_tensor(replacement).unwrap();
+
+        assert_eq!(p.forward_storage().primary_tensor().id(), id);
+        assert_eq!(p.backward_storage().unwrap().id(), id);
+        assert_eq!(
+            p.forward_storage()
+                .primary_tensor()
+                .to_vec::<f32>()
+                .unwrap(),
+            vec![3.0, 4.0]
+        );
     }
 
     #[test]

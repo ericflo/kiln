@@ -1130,6 +1130,11 @@ async fn submit_sft(
         req.config.lora_alpha,
         req.config.allow_high_lora_scale,
     )?;
+    if req.config.checkpoint_interval == Some(0) {
+        return Err(ApiError::training_invalid_request(
+            "SFT checkpoint_interval must be greater than zero",
+        ));
+    }
     let adapter_name = req
         .config
         .output_name
@@ -2486,9 +2491,121 @@ struct TrainingJobDetail {
     /// Replay request summary from `replay.jsonl`. Large inline datasets are
     /// reduced to counts so the drill-in remains usable.
     replay_request: Option<serde_json::Value>,
+    /// Newest manifest-valid immutable checkpoint for this SFT adapter. The
+    /// basename can be sent back as `config.resume_checkpoint`; submission
+    /// performs the full artifact/checksum validation before GPU work.
+    latest_checkpoint: Option<TrainingCheckpointSummary>,
+    /// Non-fatal discovery errors for checkpoint-shaped directories. A valid
+    /// older checkpoint may still be returned in `latest_checkpoint`.
+    checkpoint_error: Option<String>,
     /// Non-fatal metadata read/parse error. Missing metadata is represented
     /// by null fields rather than an error.
     metadata_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct TrainingCheckpointSummary {
+    /// Stable basename accepted by `SftConfig.resume_checkpoint`.
+    resume_checkpoint: String,
+    checkpoint_id: String,
+    global_step: u64,
+    total_steps: u64,
+    next_epoch_index: u64,
+    next_cursor_in_epoch: u64,
+    complete: bool,
+    created_at: String,
+}
+
+fn discover_latest_sft_checkpoint(
+    adapter_root: &Path,
+    adapter_name: &str,
+) -> (Option<TrainingCheckpointSummary>, Option<String>) {
+    const MAX_REPORTED_ERRORS: usize = 4;
+
+    let entries = match std::fs::read_dir(adapter_root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return (
+                None,
+                Some(format!(
+                    "read checkpoint root {}: {error}",
+                    adapter_root.display()
+                )),
+            );
+        }
+    };
+    let prefix = format!("{adapter_name}-checkpoint-");
+    let suffix = kiln_train::checkpoint::TRAINING_CHECKPOINT_DIRECTORY_SUFFIX;
+    let mut candidates = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            (name.starts_with(&prefix) && name.ends_with(suffix)).then_some((name, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut latest: Option<TrainingCheckpointSummary> = None;
+    let mut errors = Vec::new();
+    let mut omitted_errors = 0_usize;
+    for (name, path) in candidates {
+        let manifest = match kiln_train::checkpoint::read_training_checkpoint_manifest(&path) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                if errors.len() < MAX_REPORTED_ERRORS {
+                    errors.push(format!("{name}: {error:#}"));
+                } else {
+                    omitted_errors += 1;
+                }
+                continue;
+            }
+        };
+        if manifest.adapter_name != adapter_name {
+            if errors.len() < MAX_REPORTED_ERRORS {
+                errors.push(format!(
+                    "{name}: manifest adapter {:?} does not match {:?}",
+                    manifest.adapter_name, adapter_name
+                ));
+            } else {
+                omitted_errors += 1;
+            }
+            continue;
+        }
+        if manifest.training_kind != kiln_train::checkpoint::TrainingKind::Sft {
+            continue;
+        }
+        let summary = TrainingCheckpointSummary {
+            resume_checkpoint: name,
+            checkpoint_id: manifest.checkpoint_id,
+            global_step: manifest.progress.global_step,
+            total_steps: manifest.progress.total_steps,
+            next_epoch_index: manifest.progress.epoch_index,
+            next_cursor_in_epoch: manifest.progress.cursor_in_epoch,
+            complete: manifest.progress.global_step == manifest.progress.total_steps,
+            created_at: manifest.created_at,
+        };
+        let replace = latest.as_ref().is_none_or(|current| {
+            (
+                summary.global_step,
+                &summary.created_at,
+                &summary.resume_checkpoint,
+            ) > (
+                current.global_step,
+                &current.created_at,
+                &current.resume_checkpoint,
+            )
+        });
+        if replace {
+            latest = Some(summary);
+        }
+    }
+    if omitted_errors > 0 {
+        errors.push(format!(
+            "{omitted_errors} additional checkpoint errors omitted"
+        ));
+    }
+    let error = (!errors.is_empty()).then(|| errors.join("; "));
+    (latest, error)
 }
 
 fn training_job_adapter_dir(
@@ -2624,6 +2741,8 @@ async fn job_detail(
                 loss_history: job.loss_history.clone(),
                 train_receipt: None,
                 replay_request: None,
+                latest_checkpoint: None,
+                checkpoint_error: None,
                 metadata_error: None,
             },
             training_job_adapter_dir(
@@ -2638,6 +2757,12 @@ async fn job_detail(
     detail.train_receipt = train_receipt;
     detail.replay_request = replay_request;
     detail.metadata_error = metadata_error;
+    if let (TrainingJobType::Sft, Some(adapter_name)) =
+        (detail.job_type, detail.status.adapter_name.as_deref())
+    {
+        (detail.latest_checkpoint, detail.checkpoint_error) =
+            discover_latest_sft_checkpoint(&state.adapter_dir, adapter_name);
+    }
     Ok(Json(detail))
 }
 
@@ -2693,6 +2818,12 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_train::checkpoint::{
+        CheckpointArtifact, CheckpointFileRole, TrainingCheckpointData, TrainingCheckpointManifest,
+        TrainingCheckpointOptimizer, TrainingCheckpointPrecision, TrainingCheckpointProgress,
+        TrainingCheckpointScheduler, TrainingCheckpointStateFiles, TrainingKind,
+        write_training_checkpoint_atomic,
+    };
     use kiln_train::opd::StableOpdMode;
     use kiln_train::opd::{OpdConfig, OpdPrompt};
     use kiln_train::{
@@ -2701,6 +2832,129 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex, RwLock};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn write_discovery_checkpoint(
+        root: &Path,
+        directory_name: &str,
+        adapter_name: &str,
+        training_kind: TrainingKind,
+        global_step: u64,
+        total_steps: u64,
+    ) {
+        let data_order = (global_step < total_steps)
+            .then_some(vec![0])
+            .unwrap_or_default();
+        let manifest = TrainingCheckpointManifest::new(
+            format!("checkpoint-{global_step}"),
+            training_kind,
+            adapter_name,
+            serde_json::json!({"epochs": total_steps}),
+            TrainingCheckpointPrecision {
+                parameter_dtype: "f32".into(),
+                optimizer_state_dtype: "none".into(),
+                activation_dtype: "f32".into(),
+                gradient_dtype: "f32".into(),
+                stochastic_rounding: serde_json::json!({"mode": "round_to_nearest"}),
+            },
+            TrainingCheckpointProgress {
+                global_step,
+                total_steps,
+                epoch_index: global_step,
+                cursor_in_epoch: 0,
+                data_order,
+            },
+            TrainingCheckpointData {
+                source_kind: "test".into(),
+                content_sha256: "11".repeat(32),
+                item_count: 1,
+            },
+            Default::default(),
+            TrainingCheckpointOptimizer {
+                kind: "sgd".into(),
+                step: global_step,
+                hyperparameters: serde_json::json!({"learning_rate": 0.1}),
+                state_file: None,
+            },
+            TrainingCheckpointScheduler {
+                kind: "constant".into(),
+                step: global_step,
+                state: serde_json::json!({"learning_rate": 0.1}),
+            },
+            TrainingCheckpointStateFiles {
+                adapter_parameters: "adapter.safetensors".into(),
+                optimizer_state: None,
+                reference_state: None,
+                ema_state: None,
+                reward_normalization_state: None,
+                loss_history: None,
+            },
+            serde_json::json!({}),
+        );
+        let artifacts = [CheckpointArtifact {
+            relative_path: "adapter.safetensors".into(),
+            role: CheckpointFileRole::AdapterParameters,
+        }];
+        write_training_checkpoint_atomic(
+            &root.join(directory_name),
+            manifest,
+            &artifacts,
+            |staging| {
+                std::fs::write(staging.join("adapter.safetensors"), b"test adapter")?;
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn checkpoint_discovery_returns_latest_sft_resume_basename_and_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        write_discovery_checkpoint(
+            temp.path(),
+            "demo-checkpoint-step-00000002.kiln-checkpoint",
+            "demo",
+            TrainingKind::Sft,
+            2,
+            8,
+        );
+        write_discovery_checkpoint(
+            temp.path(),
+            "demo-checkpoint-step-00000004.kiln-checkpoint",
+            "demo",
+            TrainingKind::Sft,
+            4,
+            8,
+        );
+        write_discovery_checkpoint(
+            temp.path(),
+            "demo-checkpoint-step-00000006.kiln-checkpoint",
+            "demo",
+            TrainingKind::Grpo,
+            6,
+            8,
+        );
+        let corrupt = temp
+            .path()
+            .join("demo-checkpoint-step-00000009.kiln-checkpoint");
+        std::fs::create_dir(&corrupt).unwrap();
+        std::fs::write(corrupt.join("checkpoint_manifest.json"), b"{}").unwrap();
+
+        let (latest, error) = discover_latest_sft_checkpoint(temp.path(), "demo");
+        let latest = latest.expect("latest valid SFT checkpoint");
+        assert_eq!(latest.global_step, 4);
+        assert_eq!(latest.total_steps, 8);
+        assert_eq!(
+            latest.resume_checkpoint,
+            "demo-checkpoint-step-00000004.kiln-checkpoint"
+        );
+        assert!(!latest.complete);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("step-00000009")),
+            "corrupt checkpoint candidates must remain visible to operators"
+        );
+    }
 
     fn pending_sft_job(job_id: impl Into<String>) -> (TrainingJobInfo, QueueEntry) {
         let job_id = job_id.into();

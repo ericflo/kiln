@@ -402,6 +402,11 @@ impl Muon {
         self.momenta.len()
     }
 
+    /// Rounding policy captured when this optimizer was constructed.
+    pub fn rounding_policy(&self) -> StochasticRoundingPolicy {
+        self.rounding
+    }
+
     /// Install validated momentum for a checkpoint-restored parameter.
     ///
     /// The checkpoint owner resolves its stable parameter name to the new

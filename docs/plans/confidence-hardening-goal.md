@@ -455,9 +455,9 @@ desktop configuration with identical effective semantics and provenance.
 - [ ] Save and restore adapter parameters, optimizer moments/momentum, scheduler,
   global step, epoch, data cursor/order, all RNG states, reference/EMA state,
   precision policy, and effective configuration.
-- [ ] Write checkpoints atomically with an incomplete sentinel and checksum
+- [x] Write checkpoints atomically with an incomplete sentinel and checksum
   validation.
-- [ ] Distinguish resumable checkpoints from exportable PEFT adapter snapshots
+- [x] Distinguish resumable checkpoints from exportable PEFT adapter snapshots
   in names, API, UI, and docs.
 - [ ] Add crash/fault interruption tests.
 - [ ] Prove uninterrupted versus stop/resume training produces the same loss
@@ -931,6 +931,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-10 | Production GRPO parity with pinned TRL/PyTorch | `sha256:ef6c13d04929` | this commit | portable + Strix Halo ROCm/Vulkan | 392 portable, 397 ROCm, and 408 Vulkan train tests passed with one pre-existing ignore per suite; all 5 oracle cases matched production loss, ratios, clip tails, K3, policy-logprob gradients, and CPU AdamW state; all 5 matched the ROCm device coefficient path; pinned CISPO policy loss/gradient matched the Vulkan shader; 6/6 Vulkan FLCE tests; API admission; portable/ROCm/Vulkan/server all-target checks; release/docs contracts and real Chromium smoke | passed | Consuming the independent fixture exposed two real semantic defects: GSPO divided by completion length both inside its broadcast surrogate and again in the outer normalizer, while CISPO used a two-sided additive PPO interval instead of MiniMax-M1/TRL's detached absolute upper-only weight cap. Every scalar, host analytic, ROCm device, and Vulkan shader route now applies one GSPO length normalization and `min(ratio, cispo_max_weight)` with no lower floor. The new public cap defaults to 5.0, is independently validated at API admission, survives old config/receipt deserialization, is recorded in receipts and ablation output, and drives policy-audit tail counts without overloading PPO's `clip_epsilon` fields. Public Markdown, Quickstart, API, site, and changelog documentation define the distinction. This closes the Phase 3.1 pinned-oracle item; broader backend qualification and soak gates remain open. |
 | 2026-07-10 | Versioned exact-resume checkpoint foundation | `sha256:ecf1f8e70ddb` | this commit | portable; ROCm/Vulkan compile gates | 10 focused adversarial storage tests; 400 portable train tests with one pre-existing ignore; ROCm/Vulkan all-target checks; formatting and diff hygiene | passed | Resumable `.kiln-checkpoint` directories are now a distinct immutable artifact type from PEFT exports. Schema v1 types exact config, precision, progress/order, RNG streams, optimizer/scheduler, objective state, and checksummed files; the writer stages behind an incomplete sentinel and fsync/rename boundary, while the loader rejects unknown fields, traversal, symlinks, hard links, untracked files, invalid item order, incomplete state, and checksum/size drift. Trainer-loop save/restore integration remains open. |
 | 2026-07-10 | Stable-name adapter and optimizer checkpoint codec | `sha256:d4642d046862` | this commit | portable + Strix Halo ROCm; Vulkan compile gate | exact AdamW and Muon continuation on CPU and ROCm; 404 portable train tests with one pre-existing ignore; complete optimizer suite; ROCm/Vulkan train all-target checks; formatting and diff hygiene | passed | Adapter tensors and stateful optimizer buffers now serialize by stable PEFT-compatible parameter name rather than process-local tensor identity. Restore validates the exact tensor set, shapes, dtypes, finite values, and per-parameter step before mutation; seeds both host and resident-device copies; and explicitly tracks which copy each subsequent update made authoritative. The ROCm gate exposed and fixed stale-host serialization after a resumed device step. Both AdamW and Muon now produce byte-identical adapter and optimizer files after the next uninterrupted versus resumed step. Scheduler/cursor/RNG/objective state and public loop/API wiring remain open. |
+| 2026-07-10 | Exact SFT stop/resume integration | `sha256:0a575c6ee13d` | this commit | portable + Strix Halo ROCm; ROCm/Vulkan compile gates | 405 train library tests with one pre-existing ignore; 839 server library tests; 66 parameter tests; complete optimizer suite; 10 adversarial checkpoint-storage tests; real ROCm uninterrupted versus cancelled/resumed exact-equivalence qualification; portable, ROCm, and Vulkan server all-target checks; JavaScript syntax, formatting, and diff hygiene | passed | SFT now checkpoints and restores exact adapter, AdamW/Muon, scheduler, shuffled order/cursor, RNG, partial-objective, diagnostics, precision, effective configuration, base-weight shard, tokenizer, runtime, and derived gradient-checkpoint-plan identity. Immutable checkpoints publish independently of final PEFT staging; strict API admission validates full checksums before GPU work; job status, CLI, Playground, Quickstart, and the checkpoint guide expose the resume workflow. The real ROCm gate matched every loss plus final adapter and intermediate optimizer bytes. GRPO/OPD exact loop state and process-kill fault qualification remain open. |
 | 2026-07-09 | First reduced-CI measurement | `sha256:cda13f3f84e5` | `3c71cc4002f8` | GitHub Actions | run `29049575526` | passed | Three active jobs completed in 3m52s wall and about 4m36s aggregate time; all GPU backend jobs were skipped |
 
 ## Known Starting Defects
@@ -957,9 +958,9 @@ These are anchors, not an exhaustive substitute for the checklist:
   label training rows as held out: `crates/kiln-eval/src/suite.rs`,
   `crates/kiln-eval/src/result.rs`, `crates/kiln-eval/src/synthesis.rs`, and
   `docs/site/evals.html`.
-- Training checkpoints save adapter weights without complete optimizer/cursor/
-  RNG/reference state: `crates/kiln-train/src/trainer.rs` and
-  `crates/kiln-train/src/opd.rs`.
+- GRPO/OPD periodic snapshots remain PEFT-only and lack optimizer/cursor/RNG/
+  reference state; SFT exact resume is complete: `crates/kiln-train/src/trainer.rs`
+  and `crates/kiln-train/src/opd.rs`.
 - Thinking-budget configuration, streaming logs, batch/compare surfaces, recent
   requests, and desktop semantics are not yet one conformance-tested contract:
   `crates/kiln-server/src/config.rs`,

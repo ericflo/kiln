@@ -98,6 +98,11 @@ impl AdamW {
         self.moments.len()
     }
 
+    /// Rounding policy captured when this optimizer was constructed.
+    pub fn rounding_policy(&self) -> StochasticRoundingPolicy {
+        self.rounding
+    }
+
     /// Install validated moments for a checkpoint-restored parameter.
     ///
     /// Checkpoint formats key state by stable parameter name. After a process

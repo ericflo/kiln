@@ -118,6 +118,8 @@ const TRAIN_SFT_OVERVIEW: &str = r#"Train from SFT JSONL: one chat correction ex
 
 Use --adapter-smoke-test to compare base vs trained adapter logits and short greedy outputs before running a full eval.
 
+Use --checkpoint-interval N to emit exact resumable checkpoints every N optimizer steps. Resume with the same file and configuration plus --resume-checkpoint BASENAME.
+
 Open http://127.0.0.1:8420/ui/ for guided submission and training status.
 "#;
 
@@ -707,6 +709,14 @@ pub enum TrainCommands {
         /// Run an adapter-effect smoke test after successful training
         #[arg(long)]
         adapter_smoke_test: bool,
+
+        /// Emit an exact resumable checkpoint every N optimizer steps
+        #[arg(long)]
+        checkpoint_interval: Option<std::num::NonZeroUsize>,
+
+        /// Immutable .kiln-checkpoint basename reported by job status
+        #[arg(long)]
+        resume_checkpoint: Option<String>,
 
         /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value_t = default_server_url())]
@@ -2086,6 +2096,8 @@ pub async fn run_train_sft(
     epochs: u32,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
+    checkpoint_interval: Option<usize>,
+    resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<()> {
     let body = if is_sft_jsonl_path(file) {
         println!(
@@ -2093,7 +2105,16 @@ pub async fn run_train_sft(
             style("→").cyan().bold(),
             style(adapter).white().bold()
         );
-        build_sft_jsonl_training_payload(file, adapter, lr, epochs, lora_rank, adapter_smoke_test)?
+        build_sft_jsonl_training_payload(
+            file,
+            adapter,
+            lr,
+            epochs,
+            lora_rank,
+            adapter_smoke_test,
+            checkpoint_interval,
+            resume_checkpoint,
+        )?
     } else {
         let content = std::fs::read_to_string(file)
             .map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
@@ -2116,7 +2137,16 @@ pub async fn run_train_sft(
             style(adapter).white().bold()
         );
 
-        build_sft_training_payload(examples, adapter, lr, epochs, lora_rank, adapter_smoke_test)
+        build_sft_training_payload(
+            examples,
+            adapter,
+            lr,
+            epochs,
+            lora_rank,
+            adapter_smoke_test,
+            checkpoint_interval,
+            resume_checkpoint,
+        )
     };
 
     let client = reqwest::Client::new();
@@ -2244,6 +2274,8 @@ fn build_sft_jsonl_training_payload(
     epochs: u32,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
+    checkpoint_interval: Option<usize>,
+    resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     let dataset_path = std::fs::canonicalize(file)
         .map_err(|e| anyhow::anyhow!("Failed to resolve SFT JSONL file {file}: {e}"))?;
@@ -2263,6 +2295,12 @@ fn build_sft_jsonl_training_payload(
     }
     if adapter_smoke_test {
         config["adapter_smoke_test"] = serde_json::json!(true);
+    }
+    if let Some(interval) = checkpoint_interval {
+        config["checkpoint_interval"] = serde_json::json!(interval);
+    }
+    if let Some(checkpoint) = resume_checkpoint {
+        config["resume_checkpoint"] = serde_json::json!(checkpoint);
     }
     Ok(serde_json::json!({
         "dataset_path": dataset_path,
@@ -2304,6 +2342,8 @@ fn build_sft_training_payload(
     epochs: u32,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
+    checkpoint_interval: Option<usize>,
+    resume_checkpoint: Option<&str>,
 ) -> serde_json::Value {
     let mut config = serde_json::json!({
         "output_name": adapter,
@@ -2318,6 +2358,12 @@ fn build_sft_training_payload(
     }
     if adapter_smoke_test {
         config["adapter_smoke_test"] = serde_json::json!(true);
+    }
+    if let Some(interval) = checkpoint_interval {
+        config["checkpoint_interval"] = serde_json::json!(interval);
+    }
+    if let Some(checkpoint) = resume_checkpoint {
+        config["resume_checkpoint"] = serde_json::json!(checkpoint);
     }
 
     serde_json::json!({
@@ -2354,11 +2400,7 @@ fn build_grpo_training_payload(
     Ok(body)
 }
 
-/// Run the `train status` CLI subcommand.
-///
-/// With `job_id` set, GETs `/v1/train/status/{id}` and prints a one-job summary.
-/// Without `job_id`, GETs `/v1/train/status` (overall list) and prints all jobs
-/// grouped by state: running first, then queued, then completed/failed.
+/// Run the `train cancel` CLI subcommand.
 pub async fn run_train_cancel(url: &str, job_id: &str) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let resp = client
@@ -2395,6 +2437,11 @@ pub async fn run_train_cancel(url: &str, job_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run the `train status` CLI subcommand.
+///
+/// With `job_id` set, GETs `/v1/train/jobs/{id}` and prints a one-job summary.
+/// Without `job_id`, GETs `/v1/train/status` (overall list) and prints all jobs
+/// grouped by state: running first, then queued, then completed/failed.
 pub async fn run_train_status(url: &str, job_id: Option<&str>) -> anyhow::Result<()> {
     if let Some(id) = job_id {
         return print_single_job_status(url, id).await;
@@ -2403,7 +2450,7 @@ pub async fn run_train_status(url: &str, job_id: Option<&str>) -> anyhow::Result
 }
 
 async fn print_single_job_status(url: &str, id: &str) -> anyhow::Result<()> {
-    let resp = reqwest::get(format!("{url}/v1/train/status/{id}"))
+    let resp = reqwest::get(format!("{url}/v1/train/jobs/{id}"))
         .await
         .map_err(|e| handle_request_error(url, e))?;
     let status = resp.status();
@@ -2538,6 +2585,26 @@ fn print_job_summary(job: &serde_json::Value) {
         if let Some(err) = job.get("error").and_then(|v| v.as_str()) {
             println!("  {} {}", style("Error:").red().bold(), style(err).red());
         }
+    }
+    if let Some(checkpoint) = job.get("latest_checkpoint") {
+        if let Some(name) = checkpoint.get("resume_checkpoint").and_then(|v| v.as_str()) {
+            let step = checkpoint
+                .get("global_step")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let total = checkpoint
+                .get("total_steps")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            println!(
+                "  {} {} (step {step}/{total})",
+                style("Resume checkpoint:").dim(),
+                style(name).white()
+            );
+        }
+    }
+    if let Some(error) = job.get("checkpoint_error").and_then(|v| v.as_str()) {
+        println!("  {} {}", style("Checkpoint warning:").yellow(), error);
     }
 }
 
@@ -3623,6 +3690,8 @@ mod tests {
             3,
             Some(8),
             false,
+            None,
+            None,
         );
 
         assert_eq!(body["config"]["output_name"], "sft-adapter");
@@ -3635,7 +3704,16 @@ mod tests {
 
     #[test]
     fn build_sft_training_payload_omits_unset_lora_rank() {
-        let body = build_sft_training_payload(vec![], "sft-adapter", Some(1e-4), 1, None, false);
+        let body = build_sft_training_payload(
+            vec![],
+            "sft-adapter",
+            Some(1e-4),
+            1,
+            None,
+            false,
+            None,
+            None,
+        );
 
         assert_eq!(body["config"]["output_name"], "sft-adapter");
         assert!(body["config"].get("lora_rank").is_none());
@@ -3646,7 +3724,8 @@ mod tests {
     fn build_sft_training_payload_omits_unset_learning_rate() {
         // No --lr → no learning_rate key, so the server resolves the
         // per-optimizer default instead of an AdamW-era pin.
-        let body = build_sft_training_payload(vec![], "sft-adapter", None, 1, None, false);
+        let body =
+            build_sft_training_payload(vec![], "sft-adapter", None, 1, None, false, None, None);
 
         assert!(body["config"].get("learning_rate").is_none());
         assert_eq!(body["config"]["epochs"], 1);
@@ -3654,9 +3733,38 @@ mod tests {
 
     #[test]
     fn build_sft_training_payload_sets_adapter_smoke_test_when_requested() {
-        let body = build_sft_training_payload(vec![], "sft-adapter", Some(1e-4), 1, None, true);
+        let body = build_sft_training_payload(
+            vec![],
+            "sft-adapter",
+            Some(1e-4),
+            1,
+            None,
+            true,
+            None,
+            None,
+        );
 
         assert_eq!(body["config"]["adapter_smoke_test"], true);
+    }
+
+    #[test]
+    fn build_sft_training_payload_sets_exact_resume_options() {
+        let body = build_sft_training_payload(
+            vec![],
+            "sft-adapter",
+            None,
+            2,
+            None,
+            false,
+            Some(25),
+            Some("sft-adapter-checkpoint-step-00000025.kiln-checkpoint"),
+        );
+
+        assert_eq!(body["config"]["checkpoint_interval"], 25);
+        assert_eq!(
+            body["config"]["resume_checkpoint"],
+            "sft-adapter-checkpoint-step-00000025.kiln-checkpoint"
+        );
     }
 
     #[test]
