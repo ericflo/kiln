@@ -19803,16 +19803,34 @@ pub(crate) mod tests {
         let device = Device::Vulkan(0);
         let model_config = tiny_config_full_attn();
         let weights = tiny_weights(&model_config, &device)?;
-        let mut params = TrainableLoraParams::initialize_seeded(
-            &model_config,
-            &weights,
-            4,
-            8.0,
-            &device,
-            Some(7),
-        )?;
         let backend = backend::for_device_kt(&device);
-        params.register_with_backend(&*backend)?;
+        let gpu_lock = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+        let coordination =
+            GpuStepCoordination::new(gpu_lock.clone(), kiln_model::BackendHealthHandle::default());
+        let mut writer_timings = GrpoGpuWriterTimings::default();
+        let mut params = run_coordinated_grpo_gpu_phase(
+            Some(&coordination),
+            &*backend,
+            &mut writer_timings,
+            "Vulkan qualification setup",
+            || {
+                let params = TrainableLoraParams::initialize_seeded(
+                    &model_config,
+                    &weights,
+                    4,
+                    8.0,
+                    &device,
+                    Some(7),
+                )?;
+                params.register_with_backend(&*backend)?;
+                Ok(params)
+            },
+        )?;
+        let between_setup_and_step = gpu_lock
+            .clone()
+            .try_read_owned()
+            .expect("Vulkan GRPO setup must yield to inference before the optimizer group");
+        drop(between_setup_and_step);
 
         let tokenizer = make_echo_smoke_tokenizer()?;
         let mut group = dry_run_group(vec![crate::ScoredRollout::legacy("b".to_string(), 1.0)]);
@@ -19829,20 +19847,44 @@ pub(crate) mod tests {
             ..GrpoConfig::default()
         };
 
-        let result = grpo_benchmark_training_step(
+        let report = run_coordinated_grpo_gpu_phase(
+            Some(&coordination),
             &*backend,
-            &group,
-            &weights,
-            &model_config,
-            &mut params,
-            &config,
-            None,
-            &device,
-            &tokenizer,
-            None,
-        );
-        params.evict_from_backend(&*backend);
-        let report = result?;
+            &mut writer_timings,
+            "Vulkan qualification optimizer group",
+            || {
+                grpo_benchmark_training_step(
+                    &*backend,
+                    &group,
+                    &weights,
+                    &model_config,
+                    &mut params,
+                    &config,
+                    None,
+                    &device,
+                    &tokenizer,
+                    None,
+                )
+            },
+        )?;
+        let between_step_and_cleanup = gpu_lock
+            .clone()
+            .try_read_owned()
+            .expect("Vulkan GRPO optimizer group must settle before yielding to inference");
+        drop(between_step_and_cleanup);
+        run_coordinated_grpo_gpu_phase(
+            Some(&coordination),
+            &*backend,
+            &mut writer_timings,
+            "Vulkan qualification cleanup",
+            || {
+                params.evict_from_backend(&*backend);
+                Ok(())
+            },
+        )?;
+        assert_eq!(writer_timings.acquisitions, 3);
+        assert!(writer_timings.wait_ms.is_finite());
+        assert!(writer_timings.held_ms > 0.0);
         assert_recorded_policy_audit_report(&report);
         Ok(())
     }
