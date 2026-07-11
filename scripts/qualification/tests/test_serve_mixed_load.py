@@ -831,6 +831,20 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             ],
         )
 
+    def test_snapshot_residue_ignores_empty_tempdirs_but_not_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / ".kiln-model-snapshot-test"
+            snapshot.mkdir()
+            self.assertEqual(serve.snapshot_payload_residue(root), [])
+
+            payload = snapshot / "model.safetensors"
+            payload.write_bytes(b"weights")
+            self.assertEqual(
+                serve.snapshot_payload_residue(root),
+                [".kiln-model-snapshot-test/model.safetensors"],
+            )
+
     def test_http_send_buffer_attestation_is_platform_strict(self) -> None:
         linux = {
             "send_buffer_requested_bytes": 4096,

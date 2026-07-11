@@ -1289,6 +1289,16 @@ def terminate_process(process: subprocess.Popen[str]) -> ShutdownOutcome:
     )
 
 
+def snapshot_payload_residue(snapshot_dir: Path) -> list[str]:
+    if not snapshot_dir.is_dir():
+        return []
+    return sorted(
+        str(path.relative_to(snapshot_dir))
+        for path in snapshot_dir.rglob("*")
+        if path.is_symlink() or not path.is_dir()
+    )[:8]
+
+
 def wait_ready(
     port: int,
     process: subprocess.Popen[str],
@@ -2476,11 +2486,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         sampler.close()
         shutdown_outcome = terminate_process(process)
         server_log.join()
-        if snapshot_dir.is_dir():
-            snapshot_residue = sorted(
-                str(path.relative_to(snapshot_dir))
-                for path in snapshot_dir.rglob("*")
-            )[:8]
+        snapshot_residue = snapshot_payload_residue(snapshot_dir)
         trace(
             "server_shutdown",
             elapsed_ms=shutdown_outcome.elapsed_ms,
@@ -2504,7 +2510,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         )
     if snapshot_residue:
         lifecycle_failures.append(
-            "server left private model snapshot entries after shutdown: "
+            "server left private model snapshot payload after shutdown: "
             + ", ".join(snapshot_residue)
         )
     if lifecycle_failures:
