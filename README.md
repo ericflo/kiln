@@ -744,11 +744,11 @@ selects that chunk; later layer groups resume the same width without competing
 for a second new-token budget, shrinking the chunk, or replaying completed
 layers. Three of every four prefill dispatches remain round-robin. The fourth
 may accelerate the shortest remaining prompt tail only when it is no more than
-four token chunks and has strictly less than half the remaining work of the
-round-robin row. Equal-work cohorts therefore stay aligned instead of creating
-an artificial readiness staircase, while a materially shorter interactive
-request need not wait a full long-prompt rotation and the round-robin lane
-retains 75% of dispatch capacity.
+four token chunks and its admission-time prompt work is strictly smaller than
+the round-robin row's. Comparing immutable work classes keeps equal-work
+cohorts aligned instead of creating an artificial readiness staircase, while a
+genuinely shorter interactive request need not wait a full long-prompt rotation
+and the round-robin lane retains 75% of dispatch capacity.
 Cancellation and
 shutdown release partial KV ownership
 only after the backend synchronization boundary; an unsettled device failure is

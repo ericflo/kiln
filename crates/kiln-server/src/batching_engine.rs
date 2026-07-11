@@ -1638,6 +1638,10 @@ struct ActiveRequest {
     delivery_key: DeliveryKey,
     delivery_state: ActiveDeliveryState,
     next_delivery_sequence: u64,
+    /// Actual prompt work remaining when this request entered the active set.
+    /// This is immutable so the short-prefill lane compares request classes,
+    /// not mutable progress that would split an equal-work cohort.
+    initial_prefill_work_tokens: Option<usize>,
     slot: DecodeSlot,
 }
 
@@ -2458,11 +2462,17 @@ impl BatchingEngineActor {
                     token_budget -= tokens_scheduled;
                     admitted += 1;
                     let active_idx = self.active.len();
+                    let initial_prefill_work_tokens = if ready {
+                        None
+                    } else {
+                        self.forward.remaining_prefill_tokens(&slot)
+                    };
                     self.active.push(ActiveRequest {
                         req: queued.req,
                         delivery_key: queued.delivery_key,
                         delivery_state: ActiveDeliveryState::Ready,
                         next_delivery_sequence: 0,
+                        initial_prefill_work_tokens,
                         slot,
                     });
                     // Publish admission before first-token delivery, which can
@@ -2538,9 +2548,7 @@ impl BatchingEngineActor {
         let short_tail_limit = self
             .max_prefill_tokens_per_cycle
             .saturating_mul(SHORT_PREFILL_PRIORITY_MAX_CHUNKS);
-        let Some(round_robin_remaining) = self
-            .forward
-            .remaining_prefill_tokens(&self.active[round_robin].slot)
+        let Some(round_robin_initial_work) = self.active[round_robin].initial_prefill_work_tokens
         else {
             return Some((round_robin, false));
         };
@@ -2550,13 +2558,12 @@ impl BatchingEngineActor {
                 let remaining = self
                     .forward
                     .remaining_prefill_tokens(&self.active[idx].slot)?;
-                // The priority lane is for materially shorter work, not for
-                // an equal prompt that happens to win a tie after normal
-                // round-robin progress. The strict half comparison keeps
-                // equal-sized cohorts aligned even after one row completes a
-                // token chunk, while 128-vs-1K interactive tails still pass.
-                (remaining <= short_tail_limit
-                    && remaining.saturating_mul(2) < round_robin_remaining)
+                let initial_work = self.active[idx].initial_prefill_work_tokens?;
+                // Compare immutable admission-time work classes. Mutable
+                // remainders made equal prompts look shorter after ordinary
+                // progress, while a half-remainder threshold withheld the
+                // lane from legitimately shorter late arrivals.
+                (remaining <= short_tail_limit && initial_work < round_robin_initial_work)
                     .then_some((idx, remaining))
             })
             .min_by_key(|&(idx, remaining)| {
@@ -2612,6 +2619,7 @@ impl BatchingEngineActor {
                 delivery_key,
                 delivery_state,
                 next_delivery_sequence,
+                initial_prefill_work_tokens,
                 slot,
             } = self.active.remove(idx);
             let started = Instant::now();
@@ -2735,6 +2743,7 @@ impl BatchingEngineActor {
                         delivery_key,
                         delivery_state,
                         next_delivery_sequence,
+                        initial_prefill_work_tokens,
                         slot,
                     },
                 );
@@ -2756,6 +2765,7 @@ impl BatchingEngineActor {
                     delivery_key,
                     delivery_state,
                     next_delivery_sequence,
+                    initial_prefill_work_tokens,
                     slot,
                 },
             );
@@ -3788,11 +3798,13 @@ mod tests {
         let delivery_key = actor
             .register_delivery(req.request_id, response_tx)
             .expect("test delivery lane registers");
+        let initial_prefill_work_tokens = actor.forward.remaining_prefill_tokens(&slot);
         actor.active.push(ActiveRequest {
             req,
             delivery_key,
             delivery_state: ActiveDeliveryState::Ready,
             next_delivery_sequence: 0,
+            initial_prefill_work_tokens,
             slot,
         });
     }
@@ -5803,6 +5815,45 @@ mod tests {
         for active in &actor.active[..4] {
             assert!(forward.is_prefilling(&active.slot));
         }
+
+        actor.fail_all("test complete");
+    }
+
+    #[test]
+    fn shorter_admission_uses_priority_without_a_half_remainder_gap() {
+        const LONG: TokenId = 40_001;
+        const SHORT: TokenId = 40_002;
+
+        let forward = Arc::new(SyntheticPrefillForward {
+            layers_per_chunk: 8,
+            ..SyntheticPrefillForward::default()
+        });
+        let (_command_tx, command_rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let mut actor = test_actor(
+            command_rx,
+            forward.clone(),
+            2,
+            false,
+            2,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        for (key, tokens) in [(LONG, 432), (SHORT, 238)] {
+            let req = request_with_tokens(vec![key; tokens], 1);
+            let RequestPreparation::Prefilling { slot, .. } = forward
+                .prepare_request_chunked(&req, 64)
+                .expect("initialize synthetic prefill")
+            else {
+                panic!("synthetic prompt unexpectedly became ready")
+            };
+            let (response_tx, _response_rx) = mpsc::channel(8);
+            push_test_active(&mut actor, req, response_tx, slot);
+        }
+
+        actor.next_prefill_index = 0;
+        actor.short_prefill_priority_cursor = SHORT_PREFILL_PRIORITY_INTERVAL - 1;
+        assert_eq!(actor.select_prefill_index(64), Some((1, true)));
+        assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 1);
 
         actor.fail_all("test complete");
     }

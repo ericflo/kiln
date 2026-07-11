@@ -1,0 +1,43 @@
+name: Qualification contract
+
+# Keep hardware qualification local, but validate its portable contracts and
+# checked-in evidence on the inexpensive GitHub-hosted CPU runner. This is a
+# separate workflow so a receipt-only commit does not rebuild the Rust workspace.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/qualification/**'
+      - 'scripts/bench-concurrent-batch.py'
+      - 'qualification/**'
+      - 'benchmarks/receipts/**'
+      - '.github/workflows/qualification-contract.yml'
+  pull_request:
+    paths:
+      - 'scripts/qualification/**'
+      - 'scripts/bench-concurrent-batch.py'
+      - 'qualification/**'
+      - 'benchmarks/receipts/**'
+      - '.github/workflows/qualification-contract.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Portable qualification evidence
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate tooling and receipts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/qualification/tests -v
+          mapfile -d '' receipts < <(find qualification/receipts -type f -name '*.json' -print0 | sort -z)
+          if [ "${#receipts[@]}" -gt 0 ]; then
+            python3 scripts/qualification/receipt.py "${receipts[@]}"
+          fi
+          mapfile -d '' benchmark_receipts < <(find benchmarks/receipts -type f -name '*.json' -print0 | sort -z)
+          if [ "${#benchmark_receipts[@]}" -gt 0 ]; then
+            python3 scripts/bench-concurrent-batch.py --validate-receipt "${benchmark_receipts[@]}"
+          fi
