@@ -132,6 +132,12 @@ reassembled into the final-message shape). Each row carries the wire-format
 `adapter` that served it (key omitted for base-model rows), so the corpus
 splits cleanly per adapter.
 
+For completed chat streams, reassembly retains the finish chunk's
+`metadata.thinking_budget` object and restores its final outcome at
+`response.choices[0].thinking_budget`, matching the non-streaming log shape.
+An interrupted stream is marked `stream_interrupted=true`; if it ended before
+the finish chunk, the log does not invent a budget outcome.
+
 ```bash
 # SFT dataset from successful chats (request messages + assistant reply):
 zcat -f ~/models/Qwen3.5-4B/adapters/.requests/requests-*.jsonl* \

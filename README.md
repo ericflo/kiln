@@ -867,7 +867,10 @@ reports the effective limits and whether each came from the request, a server
 default, or an explicit unlimited override. For SSE, that metadata and the
 final outcome are attached to the chunk containing `finish_reason`, immediately
 before the optional usage chunk and `[DONE]`. Cached token-budget responses
-preserve the original outcome.
+preserve the original outcome. Durable request-log reassembly retains the same
+`metadata.thinking_budget` fields and restores the outcome at
+`response.choices[0].thinking_budget`, so streamed and non-streamed rows use the
+same mining paths.
 
 The Qwen3.5-4B profile expects adapters in `model.adapter_dir` when configured,
 otherwise `<model.path>/adapters`. Chat-template loading prefers

@@ -585,8 +585,10 @@ fn sse_saw_done(buf: &[u8]) -> bool {
 }
 
 /// Reassemble an accumulated SSE byte buffer into the non-streaming response
-/// shape (`{id, model, choices: [{message, finish_reason}], usage}`), so
-/// streamed and non-streamed rows are uniformly minable. Unparseable buffers
+/// shape (`{id, model, choices: [{message, finish_reason}], usage, metadata}`),
+/// so streamed and non-streamed rows are uniformly minable. Final
+/// thinking-budget metadata is retained and its per-choice outcome is restored
+/// to the same location used by non-streaming responses. Unparseable buffers
 /// degrade to `{"_raw": ...}`.
 fn reassemble_sse(buf: &[u8]) -> serde_json::Value {
     let text = String::from_utf8_lossy(buf);
@@ -596,6 +598,7 @@ fn reassemble_sse(buf: &[u8]) -> serde_json::Value {
     let mut reasoning = String::new();
     let mut finish_reason = None;
     let mut usage = None;
+    let mut metadata = None;
     let mut tool_calls: Vec<serde_json::Value> = Vec::new();
     let mut parsed_any = false;
 
@@ -619,6 +622,11 @@ fn reassemble_sse(buf: &[u8]) -> serde_json::Value {
         if let Some(u) = chunk.get("usage") {
             if !u.is_null() {
                 usage = Some(u.clone());
+            }
+        }
+        if let Some(value) = chunk.get("metadata") {
+            if !value.is_null() {
+                metadata = Some(value.clone());
             }
         }
         let Some(choice) = chunk.get("choices").and_then(|c| c.get(0)) else {
@@ -652,13 +660,18 @@ fn reassemble_sse(buf: &[u8]) -> serde_json::Value {
     if !tool_calls.is_empty() {
         message["tool_calls"] = serde_json::Value::Array(tool_calls);
     }
-    let mut out = serde_json::json!({
-        "choices": [{
-            "index": 0,
-            "message": message,
-            "finish_reason": finish_reason,
-        }],
+    let mut choice = serde_json::json!({
+        "index": 0,
+        "message": message,
+        "finish_reason": finish_reason,
     });
+    if let Some(outcome) = metadata
+        .as_ref()
+        .and_then(thinking_budget_outcome_from_metadata)
+    {
+        choice["thinking_budget"] = outcome;
+    }
+    let mut out = serde_json::json!({ "choices": [choice] });
     if let Some(id) = id {
         out["id"] = id;
     }
@@ -668,7 +681,30 @@ fn reassemble_sse(buf: &[u8]) -> serde_json::Value {
     if let Some(usage) = usage {
         out["usage"] = usage;
     }
+    if let Some(metadata) = metadata {
+        out["metadata"] = metadata;
+    }
     out
+}
+
+fn thinking_budget_outcome_from_metadata(
+    metadata: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let budget = metadata.get("thinking_budget")?;
+    let triggered = budget.get("triggered")?.as_bool()?;
+    let closed = budget.get("closed")?.as_bool()?;
+    let thinking_tokens = budget.get("thinking_tokens")?.as_u64()?;
+    let thinking_time_ms = budget.get("thinking_time_ms")?.as_u64()?;
+    let mut outcome = serde_json::json!({
+        "triggered": triggered,
+        "closed": closed,
+        "thinking_tokens": thinking_tokens,
+        "thinking_time_ms": thinking_time_ms,
+    });
+    if let Some(trigger) = budget.get("trigger").and_then(|value| value.as_str()) {
+        outcome["trigger"] = serde_json::Value::String(trigger.to_string());
+    }
+    Some(outcome)
 }
 
 /// Merge one chunk's `delta.tool_calls` into the accumulated list. Streaming
@@ -854,6 +890,151 @@ mod tests {
         assert_eq!(out["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(out["usage"]["completion_tokens"], 7);
         assert!(sse_saw_done(sse.as_bytes()));
+    }
+
+    fn reassemble_budget_stream(metadata: &serde_json::Value) -> serde_json::Value {
+        let first = serde_json::json!({
+            "id": "chatcmpl-budget",
+            "model": "m",
+            "choices": [{"delta": {
+                "role": "assistant",
+                "reasoning_content": "reason",
+                "content": "answer"
+            }}]
+        });
+        let finish = serde_json::json!({
+            "id": "chatcmpl-budget",
+            "model": "m",
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "metadata": metadata,
+        });
+        let usage = serde_json::json!({
+            "id": "chatcmpl-budget",
+            "model": "m",
+            "choices": [],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 7, "total_tokens": 10},
+        });
+        let sse = format!("data: {first}\n\ndata: {finish}\n\ndata: {usage}\n\ndata: [DONE]\n\n");
+        reassemble_sse(sse.as_bytes())
+    }
+
+    #[test]
+    fn durable_budget_fields_match_non_streaming_shape() {
+        let cases = [
+            (
+                "token trigger",
+                serde_json::json!({"thinking_budget": {
+                    "configured": true,
+                    "applied": true,
+                    "max_tokens": 8,
+                    "tokens_source": "request",
+                    "time_source": "unlimited",
+                    "triggered": true,
+                    "trigger": "tokens",
+                    "closed": true,
+                    "thinking_tokens": 8,
+                    "thinking_time_ms": 17
+                }}),
+                Some(serde_json::json!({
+                    "triggered": true,
+                    "trigger": "tokens",
+                    "closed": true,
+                    "thinking_tokens": 8,
+                    "thinking_time_ms": 17
+                })),
+            ),
+            (
+                "natural close",
+                serde_json::json!({"thinking_budget": {
+                    "configured": true,
+                    "applied": true,
+                    "max_time_ms": 50,
+                    "tokens_source": "unlimited",
+                    "time_source": "server_default",
+                    "triggered": false,
+                    "closed": true,
+                    "thinking_tokens": 5,
+                    "thinking_time_ms": 9
+                }}),
+                Some(serde_json::json!({
+                    "triggered": false,
+                    "closed": true,
+                    "thinking_tokens": 5,
+                    "thinking_time_ms": 9
+                })),
+            ),
+            (
+                "partial forced close",
+                serde_json::json!({"thinking_budget": {
+                    "configured": true,
+                    "applied": true,
+                    "max_tokens": 0,
+                    "tokens_source": "request",
+                    "time_source": "unlimited",
+                    "triggered": true,
+                    "trigger": "tokens",
+                    "closed": false,
+                    "thinking_tokens": 0,
+                    "thinking_time_ms": 2
+                }}),
+                Some(serde_json::json!({
+                    "triggered": true,
+                    "trigger": "tokens",
+                    "closed": false,
+                    "thinking_tokens": 0,
+                    "thinking_time_ms": 2
+                })),
+            ),
+            (
+                "configured but inert",
+                serde_json::json!({"thinking_budget": {
+                    "configured": true,
+                    "applied": false,
+                    "max_tokens": 8,
+                    "tokens_source": "request",
+                    "time_source": "unlimited",
+                    "triggered": false
+                }}),
+                None,
+            ),
+        ];
+
+        for (name, metadata, expected_outcome) in cases {
+            let streamed = reassemble_budget_stream(&metadata);
+            let mut non_streaming_choice = serde_json::json!({
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "answer",
+                    "reasoning_content": "reason"
+                },
+                "finish_reason": "stop"
+            });
+            if let Some(outcome) = expected_outcome {
+                non_streaming_choice["thinking_budget"] = outcome;
+            }
+            let non_streaming = serde_json::json!({
+                "id": "chatcmpl-budget",
+                "model": "m",
+                "choices": [non_streaming_choice],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 7, "total_tokens": 10},
+                "metadata": metadata,
+            });
+
+            for pointer in [
+                "/choices/0/message",
+                "/choices/0/finish_reason",
+                "/choices/0/thinking_budget",
+                "/usage",
+                "/metadata/thinking_budget",
+            ] {
+                assert_eq!(
+                    streamed.pointer(pointer),
+                    non_streaming.pointer(pointer),
+                    "{name}: durable response mismatch at {pointer}"
+                );
+            }
+        }
     }
 
     #[test]

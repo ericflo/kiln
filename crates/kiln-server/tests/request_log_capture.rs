@@ -178,7 +178,7 @@ async fn sse_responses_are_reassembled_through_the_tap() {
         let body = concat!(
             "data: {\"id\":\"chatcmpl-x\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hi \"}}]}\n\n",
             "data: {\"id\":\"chatcmpl-x\",\"choices\":[{\"delta\":{\"content\":\"there\"}}]}\n\n",
-            "data: {\"id\":\"chatcmpl-x\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":2}}\n\n",
+            "data: {\"id\":\"chatcmpl-x\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":2},\"metadata\":{\"thinking_budget\":{\"configured\":true,\"applied\":true,\"max_tokens\":8,\"tokens_source\":\"request\",\"time_source\":\"unlimited\",\"triggered\":true,\"trigger\":\"tokens\",\"closed\":true,\"thinking_tokens\":8,\"thinking_time_ms\":17}}}\n\n",
             "data: [DONE]\n\n",
         );
         (
@@ -218,6 +218,24 @@ async fn sse_responses_are_reassembled_through_the_tap() {
     assert_eq!(message["content"], "Hi there");
     assert_eq!(row["response"]["choices"][0]["finish_reason"], "stop");
     assert_eq!(row["response"]["usage"]["completion_tokens"], 2);
+    assert_eq!(
+        row["response"]["metadata"]["thinking_budget"]["max_tokens"],
+        8
+    );
+    assert_eq!(
+        row["response"]["metadata"]["thinking_budget"]["tokens_source"],
+        "request"
+    );
+    assert_eq!(
+        row["response"]["choices"][0]["thinking_budget"],
+        json!({
+            "triggered": true,
+            "trigger": "tokens",
+            "closed": true,
+            "thinking_tokens": 8,
+            "thinking_time_ms": 17
+        })
+    );
     assert_eq!(row["request"]["messages"][0]["content"], "stream");
 }
 
