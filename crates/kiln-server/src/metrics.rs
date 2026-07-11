@@ -690,6 +690,16 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_max_decode_batch Effective concurrent decode-row ceiling after startup policy and token-budget constraints.\n");
+        out.push_str("# TYPE kiln_batching_engine_max_decode_batch gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_max_decode_batch {}",
+                gauges.batching_engine.max_decode_batch
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_last_batch_size Last decode batch size selected by the real-model batching engine.\n");
         out.push_str("# TYPE kiln_batching_engine_last_batch_size gauge\n");
         push_line(
@@ -1615,6 +1625,7 @@ mod tests {
                 max_prefill_tokens_per_cycle: 64,
                 max_prefill_layers_per_cycle: 4,
                 max_prefill_admission_quantum: 2,
+                max_decode_batch: 8,
                 last_batch_size: 3,
                 max_observed_batch_size: 4,
                 last_forward_ms: 12.5,
@@ -1716,6 +1727,7 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_max_prefill_tokens_per_cycle 64"));
         assert!(output.contains("kiln_batching_engine_max_prefill_layers_per_cycle 4"));
         assert!(output.contains("kiln_batching_engine_prefill_admission_quantum 2"));
+        assert!(output.contains("kiln_batching_engine_max_decode_batch 8"));
         assert!(output.contains("kiln_batching_engine_last_batch_size 3"));
         assert!(output.contains("kiln_batching_engine_max_observed_batch 4"));
         assert!(output.contains("kiln_batching_engine_last_forward_ms 12.500000"));

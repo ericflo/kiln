@@ -230,6 +230,9 @@ pub struct BatchingEngineSnapshot {
     pub max_prefill_layers_per_cycle: usize,
     pub max_prefill_layers_per_cycle_source: ConfigValueSource,
     pub max_prefill_admission_quantum: usize,
+    /// Effective concurrent decode-row ceiling after the combined token budget
+    /// has constrained the configured/backend-selected width.
+    pub max_decode_batch: usize,
     pub current_batch_size: usize,
     pub last_batch_size: usize,
     pub max_observed_batch_size: usize,
@@ -1749,6 +1752,7 @@ impl BatchingEngineActor {
             max_prefill_layers_per_cycle,
             max_prefill_layers_per_cycle_source,
             max_prefill_admission_quantum: max_prefill_admissions_per_cycle,
+            max_decode_batch,
             stream_stall_grace_ms: duration_millis_saturating(
                 response_delivery_policy.stream_stall_grace,
             ),
@@ -5137,6 +5141,7 @@ mod tests {
         let calls = forward.calls.lock().unwrap().clone();
         assert_eq!(calls, vec![vec![101, 202]]);
         let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.max_decode_batch, 8);
         assert_eq!(snapshot.last_batch_size, 2);
         assert_eq!(snapshot.max_observed_batch_size, 2);
         assert_eq!(snapshot.total_decode_forwards, 1);

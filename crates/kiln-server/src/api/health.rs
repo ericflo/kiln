@@ -338,6 +338,7 @@ struct BatchingEngineInfo {
     max_prefill_layers_per_cycle: usize,
     max_prefill_layers_per_cycle_source: ConfigValueSource,
     max_prefill_admission_quantum: usize,
+    max_decode_batch: usize,
     current_batch_size: usize,
     last_batch_size: usize,
     max_observed_batch_size: usize,
@@ -885,6 +886,7 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             max_prefill_layers_per_cycle: snapshot.max_prefill_layers_per_cycle,
             max_prefill_layers_per_cycle_source: snapshot.max_prefill_layers_per_cycle_source,
             max_prefill_admission_quantum: snapshot.max_prefill_admission_quantum,
+            max_decode_batch: snapshot.max_decode_batch,
             current_batch_size: snapshot.current_batch_size,
             last_batch_size: snapshot.last_batch_size,
             max_observed_batch_size: snapshot.max_observed_batch_size,
@@ -1022,6 +1024,7 @@ mod tests {
             max_prefill_tokens_per_cycle_source: ConfigValueSource::Environment,
             max_prefill_layers_per_cycle: 4,
             max_prefill_layers_per_cycle_source: ConfigValueSource::ConfigFile,
+            max_decode_batch: 16,
             last_prefill_tokens: 251,
             last_prefill_layers: 4,
             max_decode_forward_ms: 125.0,
@@ -1059,6 +1062,7 @@ mod tests {
         assert_eq!(json["max_prefill_tokens_per_cycle_source"], "environment");
         assert_eq!(json["max_prefill_layers_per_cycle"], 4);
         assert_eq!(json["max_prefill_layers_per_cycle_source"], "config_file");
+        assert_eq!(json["max_decode_batch"], 16);
         assert_eq!(json["last_prefill_tokens"], 251);
         assert_eq!(json["last_prefill_layers"], 4);
         assert_eq!(json["max_decode_forward_ms"], 125.0);
