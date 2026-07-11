@@ -37,6 +37,10 @@ const MAX_ROLLOUT_BACKEND_BYTES: usize = 64;
 const MAX_ROLLOUT_TOKEN_COUNT: usize = 16_777_216;
 const MAX_ROLLOUT_STOP_SEQUENCES: usize = 256;
 const MAX_ROLLOUT_STOP_BYTES: usize = 16 * 1024;
+const MAX_ROLLOUT_TEMPLATE_TOOLS: usize = 256;
+const MAX_ROLLOUT_TEMPLATE_KWARGS: usize = 256;
+const MAX_ROLLOUT_TEMPLATE_KEY_BYTES: usize = 256;
+const MAX_ROLLOUT_TEMPLATE_INVOCATION_BYTES: usize = 1024 * 1024;
 
 /// Whether an action token came from the model distribution or a deterministic
 /// runtime controller such as thinking-budget closure.
@@ -110,6 +114,60 @@ pub struct RolloutTokenizerIdentityV1 {
     pub chat_template_sha256: String,
 }
 
+/// Non-default inputs supplied to the exact chat-template invocation that
+/// produced the rollout prompt. Empty/default values preserve the historical
+/// `apply_chat_template(messages)` behavior.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutChatTemplateInvocationV1 {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub template_kwargs: serde_json::Map<String, serde_json::Value>,
+}
+
+impl RolloutChatTemplateInvocationV1 {
+    fn is_default(&self) -> bool {
+        self.tools.is_empty() && self.tool_choice.is_none() && self.template_kwargs.is_empty()
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.tools.len() > MAX_ROLLOUT_TEMPLATE_TOOLS {
+            return Err(format!(
+                "rollout template invocation contains {} tools; maximum is {MAX_ROLLOUT_TEMPLATE_TOOLS}",
+                self.tools.len()
+            ));
+        }
+        if self.template_kwargs.len() > MAX_ROLLOUT_TEMPLATE_KWARGS {
+            return Err(format!(
+                "rollout template invocation contains {} template kwargs; maximum is {MAX_ROLLOUT_TEMPLATE_KWARGS}",
+                self.template_kwargs.len()
+            ));
+        }
+        if let Some(key) = self
+            .template_kwargs
+            .keys()
+            .find(|key| key.is_empty() || key.len() > MAX_ROLLOUT_TEMPLATE_KEY_BYTES)
+        {
+            return Err(format!(
+                "rollout template kwarg key has {} bytes; expected 1..={MAX_ROLLOUT_TEMPLATE_KEY_BYTES}",
+                key.len()
+            ));
+        }
+        let encoded = serde_json::to_vec(self)
+            .map_err(|error| format!("serialize rollout template invocation: {error}"))?;
+        if encoded.len() > MAX_ROLLOUT_TEMPLATE_INVOCATION_BYTES {
+            return Err(format!(
+                "rollout template invocation has {} serialized bytes; maximum is {MAX_ROLLOUT_TEMPLATE_INVOCATION_BYTES}",
+                encoded.len()
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Effective thinking-budget controls that can replace sampled tokens.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,6 +218,11 @@ pub struct RolloutProvenanceV1 {
     pub action_tokens: Vec<RolloutActionTokenV1>,
     pub behavior_policy: RolloutBehaviorPolicyIdentityV1,
     pub tokenizer: RolloutTokenizerIdentityV1,
+    #[serde(
+        default,
+        skip_serializing_if = "RolloutChatTemplateInvocationV1::is_default"
+    )]
+    pub template_invocation: RolloutChatTemplateInvocationV1,
     pub sampling: RolloutSamplingConfigV1,
     pub seed: u64,
     pub generation_backend: String,
@@ -176,6 +239,8 @@ struct RolloutProvenanceV1Wire {
     action_tokens: Vec<RolloutActionTokenV1>,
     behavior_policy: RolloutBehaviorPolicyIdentityV1,
     tokenizer: RolloutTokenizerIdentityV1,
+    #[serde(default)]
+    template_invocation: RolloutChatTemplateInvocationV1,
     sampling: RolloutSamplingConfigV1,
     seed: u64,
     generation_backend: String,
@@ -232,6 +297,7 @@ impl RolloutProvenanceV1 {
             action_tokens,
             behavior_policy,
             tokenizer,
+            template_invocation: RolloutChatTemplateInvocationV1::default(),
             sampling,
             seed,
             generation_backend: generation_backend.into(),
@@ -248,6 +314,15 @@ impl RolloutProvenanceV1 {
         self.action_tokens
             .iter()
             .filter(|token| token.source == RolloutActionTokenSourceV1::Sampled)
+    }
+
+    pub fn with_template_invocation(
+        mut self,
+        template_invocation: RolloutChatTemplateInvocationV1,
+    ) -> Result<Self, String> {
+        self.template_invocation = template_invocation;
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -383,6 +458,7 @@ impl RolloutProvenanceV1 {
             "tokenizer.chat_template_sha256",
             &self.tokenizer.chat_template_sha256,
         )?;
+        self.template_invocation.validate()?;
         validate_identity_text(
             "generation_backend",
             &self.generation_backend,
@@ -423,6 +499,7 @@ impl<'de> Deserialize<'de> for RolloutProvenanceV1 {
             action_tokens: wire.action_tokens,
             behavior_policy: wire.behavior_policy,
             tokenizer: wire.tokenizer,
+            template_invocation: wire.template_invocation,
             sampling: wire.sampling,
             seed: wire.seed,
             generation_backend: wire.generation_backend,
@@ -787,6 +864,67 @@ mod tests {
         assert_eq!(parsed.schema(), ROLLOUT_PROVENANCE_SCHEMA_V1);
         assert_eq!(parsed.sampled_action_tokens().count(), 2);
         assert!(json.contains(ROLLOUT_PROVENANCE_SCHEMA_V1));
+    }
+
+    #[test]
+    fn rollout_provenance_records_template_invocation_and_reads_older_v1() {
+        let mut template_kwargs = serde_json::Map::new();
+        template_kwargs.insert(
+            "enable_thinking".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        let provenance = valid_provenance()
+            .with_template_invocation(RolloutChatTemplateInvocationV1 {
+                tools: vec![serde_json::json!({
+                    "type": "function",
+                    "function": {"name": "lookup"}
+                })],
+                tool_choice: Some(serde_json::json!("required")),
+                template_kwargs,
+            })
+            .unwrap();
+        let value = serde_json::to_value(&provenance).unwrap();
+        assert_eq!(
+            value["template_invocation"]["template_kwargs"]["enable_thinking"],
+            serde_json::json!(false)
+        );
+        let parsed: RolloutProvenanceV1 = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(parsed, provenance);
+
+        let mut older_v1 = value;
+        older_v1
+            .as_object_mut()
+            .unwrap()
+            .remove("template_invocation");
+        let parsed: RolloutProvenanceV1 = serde_json::from_value(older_v1).unwrap();
+        assert!(parsed.template_invocation.is_default());
+        assert!(
+            serde_json::to_value(parsed).unwrap()["template_invocation"].is_null(),
+            "default invocation should stay omitted on the wire"
+        );
+    }
+
+    #[test]
+    fn rollout_provenance_rejects_unbounded_template_invocation() {
+        let mut template_kwargs = serde_json::Map::new();
+        template_kwargs.insert(String::new(), serde_json::json!(true));
+        let error = valid_provenance()
+            .with_template_invocation(RolloutChatTemplateInvocationV1 {
+                template_kwargs,
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert!(error.contains("expected 1..="), "{error}");
+
+        let error = valid_provenance()
+            .with_template_invocation(RolloutChatTemplateInvocationV1 {
+                tools: (0..=MAX_ROLLOUT_TEMPLATE_TOOLS)
+                    .map(serde_json::Value::from)
+                    .collect(),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert!(error.contains("maximum is 256"), "{error}");
     }
 
     #[test]

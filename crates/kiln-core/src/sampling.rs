@@ -165,6 +165,10 @@ impl ThinkingBudget {
         self.close_token_ids.len()
     }
 
+    pub fn close_token_ids(&self) -> &[TokenId] {
+        &self.close_token_ids
+    }
+
     /// Apply the budget decision at the current token boundary.
     pub fn apply(&self, generated: &[TokenId], sampled: TokenId) -> TokenId {
         self.apply_with_source(generated, sampled).token

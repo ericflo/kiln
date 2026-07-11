@@ -6986,14 +6986,38 @@ fn tokenize_grpo_group_timed(
                 provenance.scored_payload_sha256 == scored_payload_sha256,
                 "completion {completion_idx} scored text/trajectory differs from rollout provenance"
             );
+
+            let recorded_prompt_text = tokenizer
+                .apply_chat_template_full_with_options(
+                    &prompt_messages,
+                    (!provenance.template_invocation.tools.is_empty())
+                        .then_some(provenance.template_invocation.tools.as_slice()),
+                    provenance.template_invocation.tool_choice.as_ref(),
+                    kiln_core::tokenizer::ChatTemplateOptions {
+                        template_kwargs: provenance
+                            .template_invocation
+                            .template_kwargs
+                            .clone(),
+                    },
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "completion {completion_idx} could not replay its recorded chat-template invocation: {error}"
+                    )
+                })?;
+            let recorded_prompt_ids = tokenizer.encode(&recorded_prompt_text).map_err(|error| {
+                anyhow::anyhow!(
+                    "completion {completion_idx} could not tokenize its replayed rollout prompt: {error}"
+                )
+            })?;
             anyhow::ensure!(
-                provenance.prompt_token_count == prompt_ids.len(),
+                provenance.prompt_token_count == recorded_prompt_ids.len(),
                 "completion {completion_idx} rollout prompt boundary {} differs from the rendered prompt length {}",
                 provenance.prompt_token_count,
-                prompt_ids.len()
+                recorded_prompt_ids.len()
             );
             anyhow::ensure!(
-                provenance.input_token_ids[..provenance.prompt_token_count] == prompt_ids,
+                provenance.input_token_ids[..provenance.prompt_token_count] == recorded_prompt_ids,
                 "completion {completion_idx} rollout input prefix differs from the rendered prompt tokens"
             );
 
@@ -12255,6 +12279,100 @@ pub(crate) mod tests {
                 .to_string()
                 .contains("scored text/trajectory differs"),
             "{payload_error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_rollout_provenance_replays_template_kwargs_exactly() -> Result<()> {
+        let tokenizer = minimal_training_tokenizer(
+            "{% if enable_thinking %}a{% else %}b{% endif %}{% for message in messages %}{{ message.content }}{% endfor %}",
+        );
+        let mut group = dry_run_group(vec![crate::ScoredRollout::legacy("b".to_string(), 1.0)]);
+        let prompt_messages = to_core_messages(&group.messages);
+        let mut template_kwargs = serde_json::Map::new();
+        template_kwargs.insert("enable_thinking".to_string(), serde_json::json!(true));
+        let invocation = crate::RolloutChatTemplateInvocationV1 {
+            template_kwargs,
+            ..Default::default()
+        };
+        let prompt_text = tokenizer.apply_chat_template_full_with_options(
+            &prompt_messages,
+            None,
+            None,
+            kiln_core::tokenizer::ChatTemplateOptions {
+                template_kwargs: invocation.template_kwargs.clone(),
+            },
+        )?;
+        let prompt_ids = tokenizer.encode(&prompt_text)?;
+        let generated = tokenizer.encode("b")?;
+        anyhow::ensure!(
+            generated.len() == 1,
+            "fixture must produce one action token"
+        );
+        let mut input_token_ids = prompt_ids.clone();
+        input_token_ids.extend_from_slice(&generated);
+        let hash = |ch: char| format!("sha256:{}", ch.to_string().repeat(64));
+        let provenance = crate::RolloutProvenanceV1::new(
+            input_token_ids,
+            prompt_ids.len(),
+            crate::rollout_prompt_messages_sha256(&group.messages).map_err(anyhow::Error::msg)?,
+            crate::scored_rollout_payload_sha256(&group.completions[0])
+                .map_err(anyhow::Error::msg)?,
+            vec![crate::RolloutActionTokenV1::sampled(
+                prompt_ids.len(),
+                generated[0],
+                -0.25,
+            )],
+            crate::RolloutBehaviorPolicyIdentityV1 {
+                served_model_id: "test-model".to_string(),
+                base_model_sha256: hash('a'),
+                adapter: None,
+                inference_config_sha256: hash('b'),
+                implementation: "kiln-test".to_string(),
+            },
+            crate::RolloutTokenizerIdentityV1 {
+                vocab_sha256: tokenizer.vocab_identity_sha256(),
+                config_sha256: tokenizer.tokenizer_config_sha256()?,
+                chat_template_sha256: tokenizer
+                    .chat_template_sha256()
+                    .context("test tokenizer must have a chat template")?,
+            },
+            crate::RolloutSamplingConfigV1 {
+                temperature: 0.7,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                max_tokens: 64,
+                repetition_penalty: 1.0,
+                presence_penalty: 0.0,
+                frequency_penalty: 0.0,
+                stop: Vec::new(),
+                thinking_budget: None,
+            },
+            123,
+            "test",
+        )
+        .map_err(anyhow::Error::msg)?
+        .with_template_invocation(invocation)
+        .map_err(anyhow::Error::msg)?;
+        group.completions[0].provenance = Some(provenance);
+
+        let tokenized = tokenize_grpo_group(&group, &tokenizer)?;
+        validate_tokenized_behavior_policy(&tokenized, BehaviorPolicy::Recorded)?;
+
+        group.completions[0]
+            .provenance
+            .as_mut()
+            .unwrap()
+            .template_invocation = Default::default();
+        let error = match tokenize_grpo_group(&group, &tokenizer) {
+            Ok(_) => panic!("template-invocation drift must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("input prefix differs"),
+            "{error:#}"
         );
         Ok(())
     }
