@@ -2548,7 +2548,10 @@ impl BatchingEngineActor {
         let short_tail_limit = self
             .max_prefill_tokens_per_cycle
             .saturating_mul(SHORT_PREFILL_PRIORITY_MAX_CHUNKS);
-        let Some(round_robin_initial_work) = self.active[round_robin].initial_prefill_work_tokens
+        let Some(largest_initial_work) = (0..active_len)
+            .filter(|&idx| eligible(idx))
+            .filter_map(|idx| self.active[idx].initial_prefill_work_tokens)
+            .max()
         else {
             return Some((round_robin, false));
         };
@@ -2563,7 +2566,7 @@ impl BatchingEngineActor {
                 // remainders made equal prompts look shorter after ordinary
                 // progress, while a half-remainder threshold withheld the
                 // lane from legitimately shorter late arrivals.
-                (remaining <= short_tail_limit && initial_work < round_robin_initial_work)
+                (remaining <= short_tail_limit && initial_work < largest_initial_work)
                     .then_some((idx, remaining))
             })
             .min_by_key(|&(idx, remaining)| {
@@ -5809,7 +5812,7 @@ mod tests {
                 LONG_D, SHORT,
             ]
         );
-        assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 2);
+        assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 3);
         assert_eq!(actor.snapshot.total_errors, 0);
         assert!(!forward.is_prefilling(&actor.active[4].slot));
         for active in &actor.active[..4] {
@@ -5820,7 +5823,7 @@ mod tests {
     }
 
     #[test]
-    fn shorter_admission_uses_priority_without_a_half_remainder_gap() {
+    fn shorter_round_robin_row_uses_priority_without_a_half_remainder_gap() {
         const LONG: TokenId = 40_001;
         const SHORT: TokenId = 40_002;
 
@@ -5838,7 +5841,7 @@ mod tests {
             false,
             ResponseDeliveryPolicy::default(),
         );
-        for (key, tokens) in [(LONG, 432), (SHORT, 238)] {
+        for (key, tokens) in [(SHORT, 238), (LONG, 432)] {
             let req = request_with_tokens(vec![key; tokens], 1);
             let RequestPreparation::Prefilling { slot, .. } = forward
                 .prepare_request_chunked(&req, 64)
@@ -5852,7 +5855,7 @@ mod tests {
 
         actor.next_prefill_index = 0;
         actor.short_prefill_priority_cursor = SHORT_PREFILL_PRIORITY_INTERVAL - 1;
-        assert_eq!(actor.select_prefill_index(64), Some((1, true)));
+        assert_eq!(actor.select_prefill_index(64), Some((0, true)));
         assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 1);
 
         actor.fail_all("test complete");
