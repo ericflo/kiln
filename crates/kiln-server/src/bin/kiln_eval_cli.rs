@@ -1146,11 +1146,7 @@ fn generation_override_json(
 }
 
 fn eval_budget_override<T>(value: Option<ThinkingBudgetArg<T>>) -> EvalBudgetOverride<T> {
-    match value {
-        None => EvalBudgetOverride::Inherit,
-        Some(ThinkingBudgetArg::Unlimited) => EvalBudgetOverride::Unlimited,
-        Some(ThinkingBudgetArg::Limited(value)) => EvalBudgetOverride::Limited(value),
-    }
+    value.into()
 }
 
 async fn cmd_compare(client: &reqwest::Client, server: &str, args: CompareArgs) -> Result<()> {

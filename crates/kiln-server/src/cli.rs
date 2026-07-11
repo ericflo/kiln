@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use console::style;
+pub use kiln_core::thinking_budget::ExplicitThinkingBudget as ThinkingBudgetArg;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_train::trajectory_inspect::{
     RolloutInspection, SegmentInspection, TrajectoryInspectReport, inspect_trajectory_file,
@@ -14,55 +15,6 @@ use crate::adapter_verify::{
     AdapterVerifyOptions, AdapterVerifyServerReceipt, DEFAULT_VERIFY_PROMPT,
     DETERMINISTIC_GREEDY_TEXT_NOTE, finalize_status, push_check, verify_adapter_offline,
 };
-
-/// CLI value for a thinking-budget flag. Omitting the flag inherits the
-/// server or template value; a present flag is either a numeric limit or an
-/// explicit request for no limit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThinkingBudgetArg<T> {
-    Unlimited,
-    Limited(T),
-}
-
-impl<T> std::str::FromStr for ThinkingBudgetArg<T>
-where
-    T: std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    type Err = String;
-
-    fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        let value = raw.trim();
-        if value.eq_ignore_ascii_case("unlimited") {
-            return Ok(Self::Unlimited);
-        }
-        value.parse::<T>().map(Self::Limited).map_err(|err| {
-            format!("invalid thinking budget `{raw}`: expected a non-negative integer or `unlimited` ({err})")
-        })
-    }
-}
-
-impl<T: serde::Serialize> serde::Serialize for ThinkingBudgetArg<T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Self::Unlimited => serializer.serialize_none(),
-            Self::Limited(value) => value.serialize(serializer),
-        }
-    }
-}
-
-impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for ThinkingBudgetArg<T> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Option::<T>::deserialize(deserializer)
-            .map(|value| value.map_or(Self::Unlimited, Self::Limited))
-    }
-}
 
 const TOP_LEVEL_OVERVIEW: &str = r#"Kiln serves Qwen3.5-4B from one Rust process and lets you adapt it with live LoRA training.
 

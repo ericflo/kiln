@@ -15,6 +15,10 @@ use uuid::Uuid;
 use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::request::Request;
 use kiln_core::sampling::{SamplingParams, ThinkingBudget, ThinkingBudgetStatus};
+use kiln_core::thinking_budget::{
+    EffectiveThinkingBudget, ThinkingBudgetDefaults, ThinkingBudgetOverride as BudgetOverride,
+    ThinkingBudgetOverrides, ThinkingBudgetScope,
+};
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, ChatTemplateOptions, TokenizerError};
 use kiln_eval::qwen3::ParsedToolCall;
@@ -130,14 +134,6 @@ fn effective_thinking_enabled_for_request(
     request_thinking_enabled(req).or(state.default_thinking_enabled)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EffectiveThinkingBudget {
-    tokens: Option<usize>,
-    ms: Option<u64>,
-    tokens_source: &'static str,
-    ms_source: &'static str,
-}
-
 fn effective_thinking_budget_for_request(
     state: &AppState,
     req: &ChatCompletionRequest,
@@ -150,12 +146,17 @@ fn resolve_effective_thinking_budget(
     tokens: BudgetOverride<usize>,
     ms: BudgetOverride<u64>,
 ) -> EffectiveThinkingBudget {
-    EffectiveThinkingBudget {
-        tokens: tokens.resolve(state.default_thinking_budget_tokens),
-        ms: ms.resolve(state.default_thinking_budget_ms),
-        tokens_source: tokens.source(state.default_thinking_budget_tokens),
-        ms_source: ms.source(state.default_thinking_budget_ms),
-    }
+    EffectiveThinkingBudget::resolve(
+        ThinkingBudgetOverrides {
+            tokens,
+            time_ms: ms,
+        },
+        ThinkingBudgetDefaults {
+            tokens: state.default_thinking_budget_tokens,
+            time_ms: state.default_thinking_budget_ms,
+        },
+        ThinkingBudgetScope::Request,
+    )
 }
 
 fn thinking_budget_metadata_for_request(
@@ -289,7 +290,7 @@ fn configure_thinking_budget_for_prompt(
         return Ok(());
     }
     let effective = effective_thinking_budget_for_request(state, req);
-    if effective.tokens.is_none() && effective.ms.is_none() {
+    if !effective.configured() {
         sampling.thinking_budget = None;
         return Ok(());
     }
@@ -324,8 +325,8 @@ fn configure_thinking_budget_for_prompt(
     };
     sampling.thinking_budget = Some(
         ThinkingBudget::new(
-            effective.tokens,
-            effective.ms.map(std::time::Duration::from_millis),
+            effective.max_tokens,
+            effective.max_time_ms.map(std::time::Duration::from_millis),
             max_completion_tokens,
             close_token_ids,
         )
@@ -3086,7 +3087,7 @@ fn store_chat_request_cache_from_chat_choices_response(
     vocab_size: usize,
 ) -> Result<(), ApiError> {
     if effective_thinking_budget_for_request(state, req)
-        .ms
+        .max_time_ms
         .is_some()
         || chat_request_max_tokens(req) != 0
         || req.adapter.is_explicit()
@@ -3971,90 +3972,6 @@ pub struct StreamOptions {
     pub include_usage: bool,
 }
 
-/// A request override that preserves the semantic difference between an
-/// omitted JSON property and an explicit `null`.
-///
-/// Thinking budgets use all three states: omitted inherits the server
-/// default, `null` means unlimited, and a number (including zero) is a
-/// request-local limit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BudgetOverride<T> {
-    Inherit,
-    Unlimited,
-    Limited(T),
-}
-
-impl<T> Default for BudgetOverride<T> {
-    fn default() -> Self {
-        Self::Inherit
-    }
-}
-
-impl<T: Copy> BudgetOverride<T> {
-    fn resolve(self, server_default: Option<T>) -> Option<T> {
-        match self {
-            Self::Inherit => server_default,
-            Self::Unlimited => None,
-            Self::Limited(value) => Some(value),
-        }
-    }
-
-    fn source(self, server_default: Option<T>) -> &'static str {
-        match self {
-            Self::Inherit if server_default.is_some() => "server_default",
-            Self::Inherit => "unlimited",
-            Self::Unlimited => "request_unlimited",
-            Self::Limited(_) => "request",
-        }
-    }
-}
-
-impl<'de, T> Deserialize<'de> for BudgetOverride<T>
-where
-    T: Deserialize<'de>,
-{
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct OverrideVisitor<T>(std::marker::PhantomData<T>);
-
-        impl<'de, T> serde::de::Visitor<'de> for OverrideVisitor<T>
-        where
-            T: Deserialize<'de>,
-        {
-            type Value = BudgetOverride<T>;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("null or a non-negative numeric thinking budget")
-            }
-
-            fn visit_none<E>(self) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(BudgetOverride::Unlimited)
-            }
-
-            fn visit_unit<E>(self) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(BudgetOverride::Unlimited)
-            }
-
-            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                T::deserialize(deserializer).map(BudgetOverride::Limited)
-            }
-        }
-
-        deserializer.deserialize_option(OverrideVisitor(std::marker::PhantomData))
-    }
-}
-
 /// OpenAI-compatible chat completion request.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
@@ -4373,11 +4290,11 @@ pub struct ThinkingBudgetConfigurationMetadata {
 impl From<EffectiveThinkingBudget> for ThinkingBudgetConfigurationMetadata {
     fn from(effective: EffectiveThinkingBudget) -> Self {
         Self {
-            configured: effective.tokens.is_some() || effective.ms.is_some(),
-            max_tokens: effective.tokens,
-            max_time_ms: effective.ms,
-            tokens_source: effective.tokens_source,
-            time_source: effective.ms_source,
+            configured: effective.configured(),
+            max_tokens: effective.max_tokens,
+            max_time_ms: effective.max_time_ms,
+            tokens_source: effective.tokens_source.as_str(),
+            time_source: effective.time_source.as_str(),
         }
     }
 }
@@ -5870,7 +5787,7 @@ async fn chat_completions_inner(
         let cache_adapter = stable_default_adapter
             .clone()
             .unwrap_or_else(|| state.loaded_adapter_identity());
-        let mut chat_choices_cache_key = if effective_thinking_budget.ms.is_some() {
+        let mut chat_choices_cache_key = if effective_thinking_budget.max_time_ms.is_some() {
             None
         } else {
             deterministic_chat_choices_cache_key_with_vocab_size_and_fold(
@@ -5879,7 +5796,7 @@ async fn chat_completions_inner(
                 &sampling,
                 state.model_config.vocab_size,
                 fold_reasoning_into_content_for_request(state, &req),
-                effective_thinking_budget.tokens,
+                effective_thinking_budget.max_tokens,
             )?
             .map(|request| state.deterministic_cache_key(cache_adapter.clone(), request))
         };
@@ -5991,7 +5908,7 @@ async fn chat_completions_inner(
     let cache_adapter = stable_default_adapter
         .clone()
         .unwrap_or_else(|| state.loaded_adapter_identity());
-    let mut chat_request_cache_key = if effective_thinking_budget.ms.is_some() {
+    let mut chat_request_cache_key = if effective_thinking_budget.max_time_ms.is_some() {
         None
     } else {
         deterministic_chat_request_cache_key_with_vocab_size_and_fold(
@@ -5999,7 +5916,7 @@ async fn chat_completions_inner(
             &sampling,
             state.model_config.vocab_size,
             fold_reasoning_into_content_for_request(state, &req),
-            effective_thinking_budget.tokens,
+            effective_thinking_budget.max_tokens,
         )?
         .map(|request| state.deterministic_cache_key(cache_adapter.clone(), request))
     };
@@ -10063,7 +9980,7 @@ fn batch_response_from_chat_request_cache_hits(
     vocab_size: usize,
 ) -> Result<Option<BatchCompletionResponse>, ApiError> {
     let budget = effective_batch_thinking_budget_for_request(state, req);
-    if (budget.tokens.is_some() || budget.ms.is_some())
+    if budget.configured()
         || req.n.unwrap_or(1) != 1
         || req.adapter.is_some()
         || req.adapters.is_some()
@@ -10113,11 +10030,7 @@ fn batch_response_from_chat_choices_cache_hits(
 ) -> Result<Option<BatchCompletionResponse>, ApiError> {
     let n_per = req.n.unwrap_or(1);
     let budget = effective_batch_thinking_budget_for_request(state, req);
-    if (budget.tokens.is_some() || budget.ms.is_some())
-        || n_per <= 1
-        || req.adapter.is_some()
-        || req.adapters.is_some()
-    {
+    if budget.configured() || n_per <= 1 || req.adapter.is_some() || req.adapters.is_some() {
         return Ok(None);
     }
 
@@ -10211,11 +10124,7 @@ fn store_chat_request_cache_from_batch_response(
 ) -> Result<(), ApiError> {
     let n_per = req.n.unwrap_or(1);
     let budget = effective_batch_thinking_budget_for_request(state, req);
-    if (budget.tokens.is_some() || budget.ms.is_some())
-        || n_per == 0
-        || req.adapter.is_some()
-        || req.adapters.is_some()
-    {
+    if budget.configured() || n_per == 0 || req.adapter.is_some() || req.adapters.is_some() {
         return Ok(());
     }
 
@@ -10317,11 +10226,7 @@ fn store_chat_choices_cache_from_batch_response(
 ) -> Result<(), ApiError> {
     let n_per = req.n.unwrap_or(1);
     let budget = effective_batch_thinking_budget_for_request(state, req);
-    if (budget.tokens.is_some() || budget.ms.is_some())
-        || n_per <= 1
-        || req.adapter.is_some()
-        || req.adapters.is_some()
-    {
+    if budget.configured() || n_per <= 1 || req.adapter.is_some() || req.adapters.is_some() {
         return Ok(());
     }
 
@@ -10372,7 +10277,7 @@ fn store_chat_caches_from_batch_response(
     vocab_size: usize,
 ) -> Result<(), ApiError> {
     let budget = effective_batch_thinking_budget_for_request(state, req);
-    if budget.tokens.is_some() || budget.ms.is_some() {
+    if budget.configured() {
         return Ok(());
     }
     store_chat_request_cache_from_batch_response(state, adapter, req, resp, vocab_size)?;
@@ -10470,7 +10375,7 @@ async fn batch_completions_inner(
         .clone()
         .unwrap_or_else(|| state.loaded_adapter_identity());
 
-    let mut batch_cache_key = if effective_thinking_budget.ms.is_some() {
+    let mut batch_cache_key = if effective_thinking_budget.max_time_ms.is_some() {
         None
     } else {
         deterministic_batch_cache_key_with_vocab_size_and_fold(
@@ -10478,7 +10383,7 @@ async fn batch_completions_inner(
             total_outputs,
             state.model_config.vocab_size,
             state.fold_reasoning_into_content,
-            effective_thinking_budget.tokens,
+            effective_thinking_budget.max_tokens,
         )
         .map(|request| state.deterministic_cache_key(cache_adapter.clone(), request))
     };
@@ -10527,17 +10432,16 @@ async fn batch_completions_inner(
         }
     }
 
-    let chat_choices_cache_key =
-        if effective_thinking_budget.tokens.is_some() || effective_thinking_budget.ms.is_some() {
-            None
-        } else {
-            deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size_and_fold(
-                &req,
-                state.model_config.vocab_size,
-                state.fold_reasoning_into_content,
-            )?
-            .map(|request| state.deterministic_cache_key(cache_adapter.clone(), request))
-        };
+    let chat_choices_cache_key = if effective_thinking_budget.configured() {
+        None
+    } else {
+        deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size_and_fold(
+            &req,
+            state.model_config.vocab_size,
+            state.fold_reasoning_into_content,
+        )?
+        .map(|request| state.deterministic_cache_key(cache_adapter.clone(), request))
+    };
     if can_hit_batch_cache_before_adapter_work && let Some(key) = chat_choices_cache_key.as_ref() {
         let probe = state.chat_choices_cache.lock().unwrap().probe(key);
         match probe {
@@ -10773,10 +10677,10 @@ async fn batch_completions_inner(
     // (`temp=0`) duplicates go further: the output is deterministic, so one
     // decode can serve each prompt-local `n` group and every identical prompt
     // row in the group.
-    let clone_greedy_completions =
-        effective_thinking_budget.ms.is_none() && batch_can_clone_deterministic_completions(&req);
-    let clone_greedy_prompt_groups =
-        effective_thinking_budget.ms.is_none() && batch_can_clone_identical_prompt_groups(&req);
+    let clone_greedy_completions = effective_thinking_budget.max_time_ms.is_none()
+        && batch_can_clone_deterministic_completions(&req);
+    let clone_greedy_prompt_groups = effective_thinking_budget.max_time_ms.is_none()
+        && batch_can_clone_identical_prompt_groups(&req);
     let prompt_count = req.prompts.len();
     let prompt_groups = batch_prompt_groups(&req.prompts);
     let prepare_prompt_groups = !batch_prepared_prompts_disabled() && !clone_greedy_completions;
@@ -11081,7 +10985,7 @@ async fn generate_multi_chat_response(
     let request_adapter = state.loaded_adapter_identity();
 
     let clone_greedy_choices = effective_thinking_budget_for_request(state, req)
-        .ms
+        .max_time_ms
         .is_none()
         && request_values_are_effectively_greedy(req.temperature, req.top_k);
     let completion_count = if clone_greedy_choices { 1 } else { n_per };
@@ -11324,7 +11228,7 @@ async fn generate_one_response(
     let mut sampling = sampling_params_for_chat_request(&req);
 
     let chat_request_cache_key = if effective_thinking_budget_for_request(state, &req)
-        .ms
+        .max_time_ms
         .is_some()
     {
         None
@@ -11334,7 +11238,7 @@ async fn generate_one_response(
             &sampling,
             state.model_config.vocab_size,
             fold_reasoning_into_content_for_request(state, &req),
-            effective_thinking_budget_for_request(state, &req).tokens,
+            effective_thinking_budget_for_request(state, &req).max_tokens,
         )?
         .map(|request| state.deterministic_cache_key(request_adapter.clone(), request))
     };
@@ -11407,7 +11311,7 @@ async fn generate_one_prepared_prompt_response(
     let mut sampling = sampling_params_for_chat_request(&req);
 
     let chat_request_cache_key = if effective_thinking_budget_for_request(state, &req)
-        .ms
+        .max_time_ms
         .is_some()
     {
         None
@@ -11417,7 +11321,7 @@ async fn generate_one_prepared_prompt_response(
             &sampling,
             state.model_config.vocab_size,
             fold_reasoning_into_content_for_request(state, &req),
-            effective_thinking_budget_for_request(state, &req).tokens,
+            effective_thinking_budget_for_request(state, &req).max_tokens,
         )?
         .map(|request| state.deterministic_cache_key(request_adapter.clone(), request))
     };

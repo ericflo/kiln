@@ -6,6 +6,7 @@ pub mod env_flag;
 pub mod prefix_cache;
 pub mod request;
 pub mod sampling;
+pub mod thinking_budget;
 pub mod token;
 pub mod tokenizer;
 

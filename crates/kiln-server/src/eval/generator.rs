@@ -23,11 +23,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use kiln_core::sampling::{SamplingParams, ThinkingBudget};
+use kiln_core::thinking_budget::{
+    EffectiveThinkingBudget, ThinkingBudgetDefaults, ThinkingBudgetOverrides, ThinkingBudgetScope,
+};
 use kiln_core::token::TokenId;
+#[cfg(test)]
+use kiln_eval::EvalBudgetOverride;
 use kiln_eval::scorers::JudgeRunner;
 use kiln_eval::{
-    EvalBudgetOverride, EvalChatMessage, EvalGenerationParams, EvalThinkingBudget,
-    EvalThinkingBudgetOutcome,
+    EvalChatMessage, EvalGenerationParams, EvalThinkingBudget, EvalThinkingBudgetOutcome,
 };
 use uuid::Uuid;
 
@@ -65,36 +69,12 @@ pub enum EvalGenerationSource {
 }
 
 impl EvalGenerationSource {
-    fn as_str(self) -> &'static str {
+    fn budget_scope(self) -> ThinkingBudgetScope {
         match self {
-            Self::Suite => "suite",
-            Self::RunOverride => "run_override",
-            Self::Example => "example",
+            Self::Suite => ThinkingBudgetScope::Suite,
+            Self::RunOverride => ThinkingBudgetScope::RunOverride,
+            Self::Example => ThinkingBudgetScope::Example,
         }
-    }
-
-    fn unlimited_str(self) -> &'static str {
-        match self {
-            Self::Suite => "suite_unlimited",
-            Self::RunOverride => "run_override_unlimited",
-            Self::Example => "example_unlimited",
-        }
-    }
-}
-
-fn budget_source<T>(
-    value: EvalBudgetOverride<T>,
-    server_default: Option<T>,
-    generation_source: EvalGenerationSource,
-) -> String
-where
-    T: Copy,
-{
-    match value {
-        EvalBudgetOverride::Inherit if server_default.is_some() => "server_default".into(),
-        EvalBudgetOverride::Inherit => "unlimited".into(),
-        EvalBudgetOverride::Unlimited => generation_source.unlimited_str().into(),
-        EvalBudgetOverride::Limited(_) => generation_source.as_str().into(),
     }
 }
 
@@ -104,19 +84,24 @@ fn resolved_thinking_budget(
     default_ms: Option<u64>,
     generation_source: EvalGenerationSource,
 ) -> EvalThinkingBudget {
-    let max_tokens = params.thinking_budget_tokens.resolve(default_tokens);
-    let max_time_ms = params.thinking_budget_ms.resolve(default_ms);
+    let effective = EffectiveThinkingBudget::resolve(
+        ThinkingBudgetOverrides {
+            tokens: params.thinking_budget_tokens,
+            time_ms: params.thinking_budget_ms,
+        },
+        ThinkingBudgetDefaults {
+            tokens: default_tokens,
+            time_ms: default_ms,
+        },
+        generation_source.budget_scope(),
+    );
     EvalThinkingBudget {
-        configured: max_tokens.is_some() || max_time_ms.is_some(),
+        configured: effective.configured(),
         applied: false,
-        max_tokens,
-        max_time_ms,
-        tokens_source: budget_source(
-            params.thinking_budget_tokens,
-            default_tokens,
-            generation_source,
-        ),
-        time_source: budget_source(params.thinking_budget_ms, default_ms, generation_source),
+        max_tokens: effective.max_tokens,
+        max_time_ms: effective.max_time_ms,
+        tokens_source: effective.tokens_source.to_string(),
+        time_source: effective.time_source.to_string(),
         outcome: None,
     }
 }
