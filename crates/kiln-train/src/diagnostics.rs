@@ -359,7 +359,8 @@ pub fn build_snapshot_with_alignment(
 ///
 /// The guardrail watches the snapshot stream and decides on auto-
 /// mitigation per Luo et al. 2026 + §3.9 of the grand plan.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuardrailDecision {
     /// All metrics within healthy bounds — no action required.
     Ok,
@@ -414,7 +415,8 @@ pub enum GuardrailDecision {
 }
 
 /// The specific paper-cited trigger that fired the guardrail.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuardrailTrigger {
     /// RepRate above [`REPETITION_GUARDRAIL_THRESHOLD`] in `recent`
     /// consecutive validation passes (default 2 per Luo et al.).
@@ -470,7 +472,8 @@ pub enum GuardrailTrigger {
 /// mitigation. Implements the named §3.9 rules:
 /// `LengthInflation`, `OverlapStagnation`, `EntropyGapWidening`. The
 /// trainer holds one of these for the duration of a run.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct LengthInflationGuardrail {
     /// Consecutive snapshots with RepRate above the threshold.
     consecutive_high_rep: usize,
@@ -700,6 +703,17 @@ impl LengthInflationGuardrail {
         self.last_decision
     }
 
+    pub(crate) fn checkpoint_state_is_finite(&self) -> bool {
+        self.overlap_history.iter().all(|value| value.is_finite())
+            && self
+                .entropy_gap_history
+                .iter()
+                .all(|value| value.is_finite())
+            && self.last_diversity.is_finite()
+            && self.last_self_play_kl.is_finite()
+            && self.last_decision.checkpoint_state_is_finite()
+    }
+
     /// Overlap stagnation: the window has filled AND
     /// `max(overlap) - min(overlap) < OVERLAP_STAGNATION_MIN_DELTA`.
     fn overlap_stagnation_fires(&self) -> bool {
@@ -738,6 +752,48 @@ impl LengthInflationGuardrail {
 impl Default for GuardrailDecision {
     fn default() -> Self {
         Self::Ok
+    }
+}
+
+impl GuardrailDecision {
+    fn checkpoint_state_is_finite(self) -> bool {
+        match self {
+            Self::ReduceLearningRate { factor, reason } => {
+                factor.is_finite() && reason.checkpoint_state_is_finite()
+            }
+            Self::HalveLrAndCapTokens {
+                new_lr_factor,
+                reason,
+                ..
+            } => new_lr_factor.is_finite() && reason.checkpoint_state_is_finite(),
+            Self::Ok => true,
+            Self::BumpStableOpd { reason }
+            | Self::RollBackAndPause { reason }
+            | Self::PauseAndRecommendColdStart { reason }
+            | Self::CapRolloutLength { reason, .. }
+            | Self::RefuseRun { reason }
+            | Self::IncreaseLoRARank { reason, .. }
+            | Self::SuggestAsymmetricDivergence { reason }
+            | Self::StopIteratingAndSwitchTeacher { reason } => reason.checkpoint_state_is_finite(),
+        }
+    }
+}
+
+impl GuardrailTrigger {
+    fn checkpoint_state_is_finite(self) -> bool {
+        match self {
+            Self::ThinkingPatternMismatch { observed_overlap } => observed_overlap.is_finite(),
+            Self::CapacityGap { ratio } => ratio.is_finite(),
+            Self::DiversityCollapse { observed, .. } => observed.is_finite(),
+            Self::SelfPlaySaturation { observed_kl, .. } => observed_kl.is_finite(),
+            Self::RepetitionRateAbove { .. }
+            | Self::TruncationSpike { .. }
+            | Self::OverlapStagnation { .. }
+            | Self::EntropyGapWidening { .. }
+            | Self::LongTailRewardDecay { .. }
+            | Self::FlawedPrefixCollapse { .. }
+            | Self::TokenizerDrift => true,
+        }
     }
 }
 
@@ -1125,6 +1181,32 @@ mod tests {
             }
             other => panic!("expected IncreaseLoRARank, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn guardrail_checkpoint_state_round_trips_and_rejects_non_finite_values() {
+        let guardrail = LengthInflationGuardrail {
+            consecutive_high_rep: 1,
+            consecutive_high_trunc: 2,
+            overlap_history: vec![0.25, 0.5],
+            entropy_gap_history: vec![0.1, 0.2],
+            consecutive_low_diversity: 1,
+            last_diversity: 0.125,
+            consecutive_low_self_play_kl: 1,
+            last_self_play_kl: 0.004,
+            last_decision: GuardrailDecision::ReduceLearningRate {
+                factor: 0.5,
+                reason: GuardrailTrigger::EntropyGapWidening { window: 2 },
+            },
+        };
+        assert!(guardrail.checkpoint_state_is_finite());
+        let encoded = serde_json::to_value(&guardrail).unwrap();
+        let restored: LengthInflationGuardrail = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored, guardrail);
+
+        let mut invalid = guardrail;
+        invalid.last_diversity = f64::NAN;
+        assert!(!invalid.checkpoint_state_is_finite());
     }
 
     #[test]

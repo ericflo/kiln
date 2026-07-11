@@ -3013,6 +3013,140 @@ impl OpdTeacherProvenance {
     }
 }
 
+const OPD_CHECKPOINT_LOOP_STATE_SCHEMA_VERSION: u32 = 1;
+const OPD_CHECKPOINT_LOOP_STATE_TYPE: &str = "kiln.opd-loop-state.v1";
+const OPD_CHECKPOINT_LOOP_STATE_FILE: &str = "opd_loop_state.json";
+
+/// CPU-owned OPD state at the next source/sample candidate boundary. The
+/// candidate cursor is intentionally distinct from `global_step`: a sampled
+/// rollout may be empty and consume a deterministic candidate without
+/// committing an optimizer update.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct OpdCheckpointLoopState {
+    schema_version: u32,
+    state_type: String,
+    global_step: u64,
+    epoch_index: u64,
+    cursor_in_epoch: u64,
+    loss_history: Vec<f64>,
+    last_loss: Option<f64>,
+    data_stats: crate::train_receipt::DataStatsReceipt,
+    token_counts: crate::train_receipt::TokenCountReceipt,
+    run_env_ce: Option<f64>,
+    lora_grad_norms: crate::train_receipt::LoraGradNormAccumulator,
+    guardrail: crate::diagnostics::LengthInflationGuardrail,
+}
+
+impl OpdCheckpointLoopState {
+    #[allow(clippy::too_many_arguments)]
+    fn capture(
+        global_step: usize,
+        epoch_index: usize,
+        cursor_in_epoch: usize,
+        loss_history: &[f64],
+        data_stats: &crate::train_receipt::DataStatsReceipt,
+        token_counts: &crate::train_receipt::TokenCountReceipt,
+        run_env_ce: Option<f64>,
+        lora_grad_norms: &crate::train_receipt::LoraGradNormAccumulator,
+        guardrail: &crate::diagnostics::LengthInflationGuardrail,
+    ) -> Self {
+        Self {
+            schema_version: OPD_CHECKPOINT_LOOP_STATE_SCHEMA_VERSION,
+            state_type: OPD_CHECKPOINT_LOOP_STATE_TYPE.to_string(),
+            global_step: global_step as u64,
+            epoch_index: epoch_index as u64,
+            cursor_in_epoch: cursor_in_epoch as u64,
+            loss_history: loss_history.to_vec(),
+            last_loss: loss_history.last().copied(),
+            data_stats: data_stats.clone(),
+            token_counts: token_counts.clone(),
+            run_env_ce,
+            lora_grad_norms: lora_grad_norms.clone(),
+            guardrail: guardrail.clone(),
+        }
+    }
+
+    fn validate(
+        &self,
+        progress: &crate::checkpoint::TrainingCheckpointProgress,
+        candidates_per_epoch: usize,
+        total_epochs: usize,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.schema_version == OPD_CHECKPOINT_LOOP_STATE_SCHEMA_VERSION
+                && self.state_type == OPD_CHECKPOINT_LOOP_STATE_TYPE,
+            "unsupported OPD checkpoint loop-state contract"
+        );
+        anyhow::ensure!(
+            candidates_per_epoch > 0 && total_epochs > 0,
+            "OPD checkpoint has an empty training schedule"
+        );
+        anyhow::ensure!(
+            self.global_step == progress.global_step
+                && self.epoch_index == progress.epoch_index
+                && self.cursor_in_epoch == progress.cursor_in_epoch,
+            "OPD checkpoint loop state disagrees with manifest progress"
+        );
+        let scheduled_candidates = candidates_per_epoch
+            .checked_mul(total_epochs)
+            .context("OPD checkpoint schedule overflows usize")?;
+        anyhow::ensure!(
+            progress.total_steps == scheduled_candidates as u64
+                && progress.data_order.len() == candidates_per_epoch,
+            "OPD checkpoint manifest schedule differs from its loop state"
+        );
+        anyhow::ensure!(
+            self.epoch_index < total_epochs as u64,
+            "OPD checkpoint next epoch {} exceeds configured epochs {}",
+            self.epoch_index,
+            total_epochs
+        );
+        anyhow::ensure!(
+            self.cursor_in_epoch < candidates_per_epoch as u64,
+            "OPD checkpoint candidate cursor exceeds one epoch"
+        );
+        let consumed_candidates = self
+            .epoch_index
+            .checked_mul(candidates_per_epoch as u64)
+            .and_then(|value| value.checked_add(self.cursor_in_epoch))
+            .context("OPD checkpoint candidate cursor overflows u64")?;
+        anyhow::ensure!(
+            self.global_step <= consumed_candidates,
+            "OPD checkpoint has more optimizer steps than consumed candidates"
+        );
+        anyhow::ensure!(
+            self.loss_history.len() as u64 == self.global_step,
+            "OPD checkpoint loss-history length {} does not match global step {}",
+            self.loss_history.len(),
+            self.global_step
+        );
+        anyhow::ensure!(
+            self.loss_history.iter().all(|loss| loss.is_finite()),
+            "OPD checkpoint loss history contains a non-finite value"
+        );
+        match (self.loss_history.last().copied(), self.last_loss) {
+            (None, None) => {}
+            (Some(expected), Some(actual)) if expected == actual && actual.is_finite() => {}
+            _ => anyhow::bail!("OPD checkpoint last_loss does not match loss history"),
+        }
+        anyhow::ensure!(
+            self.data_stats.examples_filtered <= self.data_stats.examples_read
+                && self.data_stats.examples_trained as u64 == self.global_step,
+            "OPD checkpoint data counters are inconsistent"
+        );
+        anyhow::ensure!(
+            self.run_env_ce.is_none_or(f64::is_finite),
+            "OPD checkpoint contains a non-finite ECHO measurement"
+        );
+        anyhow::ensure!(
+            self.guardrail.checkpoint_state_is_finite(),
+            "OPD checkpoint contains non-finite guardrail state"
+        );
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn opd_train(
     prompts: &[OpdPrompt],
@@ -5750,6 +5884,60 @@ mod tests {
         let expected = tokenize_opd_prompt_for_training(&prompts[1], &tokenizer, None)?;
         assert_eq!(prepared[0].tokenized.input_ids, expected.input_ids);
         assert_eq!(prepared[0].tokenized.action_mask, expected.action_mask);
+        Ok(())
+    }
+
+    #[test]
+    fn opd_checkpoint_loop_state_is_strict_and_candidate_aware() -> Result<()> {
+        let data_stats = crate::train_receipt::DataStatsReceipt {
+            examples_read: 3,
+            examples_filtered: 1,
+            examples_trained: 2,
+            ..Default::default()
+        };
+        let token_counts = crate::train_receipt::TokenCountReceipt {
+            action_tokens: 11,
+            context_tokens: 7,
+            ..Default::default()
+        };
+        let state = OpdCheckpointLoopState::capture(
+            2,
+            0,
+            3,
+            &[0.75, 0.5],
+            &data_stats,
+            &token_counts,
+            Some(0.25),
+            &crate::train_receipt::LoraGradNormAccumulator::default(),
+            &crate::diagnostics::LengthInflationGuardrail::default(),
+        );
+        let progress = crate::checkpoint::TrainingCheckpointProgress {
+            global_step: 2,
+            total_steps: 8,
+            epoch_index: 0,
+            cursor_in_epoch: 3,
+            data_order: (0..4).collect(),
+        };
+        state.validate(&progress, 4, 2)?;
+
+        let encoded = serde_json::to_value(&state)?;
+        let restored: OpdCheckpointLoopState = serde_json::from_value(encoded.clone())?;
+        assert_eq!(restored, state);
+
+        let mut unknown = encoded.clone();
+        unknown
+            .as_object_mut()
+            .unwrap()
+            .insert("future_field".into(), serde_json::json!(true));
+        assert!(serde_json::from_value::<OpdCheckpointLoopState>(unknown).is_err());
+
+        let mut wrong_cursor = progress.clone();
+        wrong_cursor.cursor_in_epoch = 2;
+        assert!(state.validate(&wrong_cursor, 4, 2).is_err());
+
+        let mut wrong_history: OpdCheckpointLoopState = serde_json::from_value(encoded)?;
+        wrong_history.last_loss = Some(0.25);
+        assert!(wrong_history.validate(&progress, 4, 2).is_err());
         Ok(())
     }
 
