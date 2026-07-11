@@ -180,6 +180,10 @@ jobs:
           if [ "${#receipts[@]}" -gt 0 ]; then
             python3 scripts/qualification/receipt.py "${receipts[@]}"
           fi
+          mapfile -d '' benchmark_receipts < <(find benchmarks/receipts -type f -name '*.json' -print0 | sort -z)
+          if [ "${#benchmark_receipts[@]}" -gt 0 ]; then
+            python3 scripts/bench-concurrent-batch.py --validate-receipt "${benchmark_receipts[@]}"
+          fi
 
   linux-vulkan:
     name: Linux / Vulkan

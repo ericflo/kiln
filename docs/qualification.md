@@ -6,6 +6,11 @@ qualification run starts from a clean commit, executes a checked-in workload,
 keeps bounded raw output under `.qualification/`, and writes one compact JSON
 receipt under `qualification/receipts/`.
 
+Detailed Kiln/vLLM serving sweeps use the separate protocol in
+[`BENCHMARKS.md`](../BENCHMARKS.md) and belong under `benchmarks/receipts/`.
+Do not place that schema in `qualification/receipts/`; both trees have their
+own strict validator and CI checks both.
+
 ## Prepare A Machine
 
 Fetch and fast-forward `main`, then confirm that the checkout is clean. Do this

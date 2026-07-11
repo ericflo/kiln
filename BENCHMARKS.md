@@ -83,6 +83,17 @@ Authenticated endpoints must opt in with `--api-key-env VARIABLE` (preferred)
 or `--api-key VALUE`. The driver never inherits `OPENAI_API_KEY` implicitly and
 never writes the credential or environment-variable name into a receipt.
 
+Commit detailed serving receipts under
+`benchmarks/receipts/<backend>/<host-id>/`. They intentionally do not belong
+under `qualification/receipts/`, whose files use the separate compact
+`receipt-v1` schema. CI validates both families: standard qualification
+receipts with `scripts/qualification/receipt.py`, and detailed serving receipts
+with `scripts/bench-concurrent-batch.py --validate-receipt PATH...`. The latter
+rejects unknown or missing fields, non-finite metrics, inconsistent gates,
+dirty passed sources, workload/run mismatches, and an invalid canonical
+self-hash. It also rejects a run if the repository identity changes while
+measurement is in progress.
+
 ## Historical CUDA setup
 
 | Component | Value |

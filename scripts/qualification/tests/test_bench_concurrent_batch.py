@@ -333,30 +333,45 @@ class ServingBenchmarkTests(unittest.TestCase):
     def test_cli_writes_a_self_hashing_passed_receipt(self) -> None:
         with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "receipt.json"
-            return_code = bench.main(
-                [
-                    "--base-url",
-                    fake.base_url,
-                    "--model",
-                    "test-model",
-                    "--runtime-identity",
-                    "test-runtime",
-                    "--run-id",
-                    "cli-fixture-v1",
-                    "--sizes",
-                    "1",
-                    "--max-tokens",
-                    "3",
-                    "--warmup-requests",
-                    "0",
-                    "--memory-path",
-                    "none",
-                    "--allow-dirty",
-                    "--out",
-                    str(output),
-                ]
-            )
+            clean_repository = {
+                "commit": "a" * 40,
+                "dirty": False,
+                "source_tree_sha256": "sha256:" + "b" * 64,
+            }
+            with mock.patch.object(
+                bench, "repository_identity", return_value=clean_repository
+            ):
+                return_code = bench.main(
+                    [
+                        "--base-url",
+                        fake.base_url,
+                        "--model",
+                        "test-model",
+                        "--runtime-identity",
+                        "test-runtime",
+                        "--run-id",
+                        "cli-fixture-v1",
+                        "--sizes",
+                        "1",
+                        "--max-tokens",
+                        "3",
+                        "--warmup-requests",
+                        "0",
+                        "--memory-path",
+                        "none",
+                        "--out",
+                        str(output),
+                    ]
+                )
             receipt = bench.strict_json_loads(output.read_bytes())
+            self.assertEqual(bench.main(["--validate-receipt", str(output)]), 0)
+
+            tampered = json.loads(json.dumps(receipt))
+            tampered["unexpected"] = True
+            tampered.pop("receipt_sha256")
+            tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
+            with self.assertRaisesRegex(bench.BenchmarkError, "unknown keys"):
+                bench.validate_benchmark_receipt(tampered)
 
         self.assertEqual(return_code, 0)
         self.assertEqual(receipt["schema"], bench.SCHEMA)
@@ -392,6 +407,17 @@ class ServingBenchmarkTests(unittest.TestCase):
             args = bench.parse_args(["--api-key-env", "BENCH_FIXTURE_KEY"])
         self.assertEqual(args.api_key, "fixture-secret")
         self.assertEqual(args.api_key_source, "environment")
+
+    def test_source_mutation_during_measurement_is_rejected(self) -> None:
+        before = {
+            "commit": "a" * 40,
+            "dirty": False,
+            "source_tree_sha256": "sha256:" + "b" * 64,
+        }
+        after = dict(before, dirty=True)
+        with mock.patch.object(bench, "repository_identity", return_value=after):
+            with self.assertRaisesRegex(bench.BenchmarkError, "changed during measurement"):
+                bench.require_repository_unchanged(before)
 
 
 if __name__ == "__main__":

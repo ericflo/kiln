@@ -3,7 +3,9 @@
 Kiln uses GitHub Actions as a small platform-independent safety net. It does
 not use hosted CI as proof that a GPU backend is correct, stable, or fast.
 Backend qualification runs locally on named hardware and produces compact,
-validated receipts under `qualification/receipts/`.
+validated receipts under `qualification/receipts/`. Detailed cross-engine
+serving measurements live separately under `benchmarks/receipts/` and are
+validated by the shared serving driver.
 
 ## Automatic Work
 
@@ -109,6 +111,12 @@ mapfile -d '' receipts < <(
   find qualification/receipts -type f -name '*.json' -print0 | sort -z
 )
 python3 scripts/qualification/receipt.py "${receipts[@]}"
+
+mapfile -d '' benchmark_receipts < <(
+  find benchmarks/receipts -type f -name '*.json' -print0 | sort -z
+)
+python3 scripts/bench-concurrent-batch.py \
+  --validate-receipt "${benchmark_receipts[@]}"
 ```
 
 On the machine that still has ignored raw artifacts, also require local hashes

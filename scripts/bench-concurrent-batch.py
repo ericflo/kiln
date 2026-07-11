@@ -84,6 +84,57 @@ COUNTER_FIELDS = (
     "total_errors",
 )
 
+SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+RECEIPT_KEYS = {
+    "schema",
+    "driver_version",
+    "created_at",
+    "engine",
+    "driver_environment",
+    "workload",
+    "workload_fingerprint",
+    "memory_sampler",
+    "diagnostics",
+    "warmup",
+    "runs",
+    "verdict",
+    "receipt_sha256",
+}
+RUN_KEYS = {
+    "concurrency",
+    "repeat",
+    "elapsed_s",
+    "request_count",
+    "success_count",
+    "error_count",
+    "completion_tokens",
+    "client_visible_stream_event_count",
+    "request_throughput_per_s",
+    "output_token_throughput_per_s",
+    "slo_good_request_count",
+    "slo_goodput_requests_per_s",
+    "slo_goodput_tokens_per_s",
+    "dispatch_spread_ms",
+    "ttft_ms_p50",
+    "ttft_ms_p99",
+    "ttft_ms_p999",
+    "client_visible_itl_ms_p50",
+    "client_visible_itl_ms_p99",
+    "client_visible_itl_ms_p999",
+    "e2e_ms_p50",
+    "e2e_ms_p99",
+    "e2e_ms_p999",
+    "prompt_tokens_min",
+    "prompt_tokens_max",
+    "prompt_set_sha256",
+    "output_set_sha256",
+    "memory",
+    "server",
+    "errors",
+    "gates",
+    "verdict",
+}
+
 
 class BenchmarkError(RuntimeError):
     """A benchmark contract or preflight failure."""
@@ -98,6 +149,311 @@ def canonical_sha256(value: Any) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _object(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise BenchmarkError(f"{label} must be an object")
+    return value
+
+
+def _exact_keys(
+    value: dict[str, Any], required: set[str], label: str, optional: set[str] | None = None
+) -> None:
+    optional = optional or set()
+    missing = sorted(required - value.keys())
+    unknown = sorted(value.keys() - required - optional)
+    if missing:
+        raise BenchmarkError(f"{label} missing keys: {', '.join(missing)}")
+    if unknown:
+        raise BenchmarkError(f"{label} has unknown keys: {', '.join(unknown)}")
+
+
+def _sha256(value: Any, label: str) -> str:
+    if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+        raise BenchmarkError(f"{label} must be sha256:<64 lowercase hex>")
+    return value
+
+
+def _nonnegative_number(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BenchmarkError(f"{label} must be a finite non-negative number")
+    converted = float(value)
+    if not math.isfinite(converted) or converted < 0:
+        raise BenchmarkError(f"{label} must be a finite non-negative number")
+    return converted
+
+
+def _positive_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise BenchmarkError(f"{label} must be a positive integer")
+    return value
+
+
+def validate_benchmark_run(
+    value: Any,
+    *,
+    label: str,
+    concurrency: int,
+    repeat: int,
+    max_tokens: int,
+) -> None:
+    row = _object(value, label)
+    _exact_keys(row, RUN_KEYS, label)
+    if row["concurrency"] != concurrency or row["repeat"] != repeat:
+        raise BenchmarkError(f"{label} does not match its declared concurrency/repeat")
+    if row["request_count"] != concurrency:
+        raise BenchmarkError(f"{label}.request_count must equal concurrency")
+    for name in (
+        "success_count",
+        "error_count",
+        "completion_tokens",
+        "client_visible_stream_event_count",
+        "slo_good_request_count",
+    ):
+        value = row[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise BenchmarkError(f"{label}.{name} must be a non-negative integer")
+    for name in (
+        "elapsed_s",
+        "request_throughput_per_s",
+        "output_token_throughput_per_s",
+        "slo_goodput_requests_per_s",
+        "slo_goodput_tokens_per_s",
+        "dispatch_spread_ms",
+    ):
+        _nonnegative_number(row[name], f"{label}.{name}")
+    for name in (
+        "ttft_ms_p50",
+        "ttft_ms_p99",
+        "ttft_ms_p999",
+        "client_visible_itl_ms_p50",
+        "client_visible_itl_ms_p99",
+        "client_visible_itl_ms_p999",
+        "e2e_ms_p50",
+        "e2e_ms_p99",
+        "e2e_ms_p999",
+    ):
+        if row[name] is not None:
+            _nonnegative_number(row[name], f"{label}.{name}")
+    _sha256(row["prompt_set_sha256"], f"{label}.prompt_set_sha256")
+    _sha256(row["output_set_sha256"], f"{label}.output_set_sha256")
+
+    errors = row["errors"]
+    if not isinstance(errors, list) or any(not isinstance(error, str) for error in errors):
+        raise BenchmarkError(f"{label}.errors must be an array of strings")
+    if len(errors) != row["error_count"]:
+        raise BenchmarkError(f"{label}.error_count does not match errors")
+    gates = row["gates"]
+    if not isinstance(gates, list) or not gates:
+        raise BenchmarkError(f"{label}.gates must be a non-empty array")
+    gate_names: set[str] = set()
+    for index, gate_value in enumerate(gates):
+        gate = _object(gate_value, f"{label}.gates[{index}]")
+        _exact_keys(gate, {"name", "detail", "passed"}, f"{label}.gates[{index}]")
+        if not isinstance(gate["name"], str) or not gate["name"] or gate["name"] in gate_names:
+            raise BenchmarkError(f"{label}.gates has an empty or duplicate name")
+        if not isinstance(gate["detail"], str) or not isinstance(gate["passed"], bool):
+            raise BenchmarkError(f"{label}.gates[{index}] has invalid field types")
+        gate_names.add(gate["name"])
+
+    if row["memory"] is not None:
+        memory = _object(row["memory"], f"{label}.memory")
+        _exact_keys(memory, {"baseline_bytes", "peak_bytes", "peak_delta_bytes", "samples"}, f"{label}.memory")
+        for name, item in memory.items():
+            if item is not None:
+                _nonnegative_number(item, f"{label}.memory.{name}")
+    if row["server"] is not None:
+        server = _object(row["server"], f"{label}.server")
+        required_server = set(COUNTER_FIELDS) | {
+            "total_batched_decode_forwards",
+            "effective_max_decode_batch",
+            "process_max_observed_batch",
+            "mean_decode_rows_per_forward",
+            "batched_decode_forward_fraction",
+        }
+        _exact_keys(server, required_server, f"{label}.server")
+        for name, item in server.items():
+            if item is not None:
+                _nonnegative_number(item, f"{label}.server.{name}")
+
+    passed = (
+        row["success_count"] == concurrency
+        and row["error_count"] == 0
+        and row["completion_tokens"] == concurrency * max_tokens
+        and all(gate["passed"] for gate in gates)
+    )
+    expected_verdict = "passed" if passed else "failed"
+    if row["verdict"] != expected_verdict:
+        raise BenchmarkError(f"{label}.verdict is inconsistent with its requests and gates")
+
+
+def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
+    receipt = _object(value, "receipt")
+    _exact_keys(receipt, RECEIPT_KEYS, "receipt", {"comparison"})
+    if receipt["schema"] != SCHEMA or receipt["driver_version"] != DRIVER_VERSION:
+        raise BenchmarkError(f"receipt must use {SCHEMA} driver version {DRIVER_VERSION}")
+    try:
+        created_at = dt.datetime.fromisoformat(receipt["created_at"])
+    except (TypeError, ValueError) as exc:
+        raise BenchmarkError("receipt.created_at must be an ISO-8601 timestamp") from exc
+    if created_at.tzinfo is None:
+        raise BenchmarkError("receipt.created_at must include a timezone")
+    recorded_hash = _sha256(receipt["receipt_sha256"], "receipt.receipt_sha256")
+    unhashed = dict(receipt)
+    unhashed.pop("receipt_sha256")
+    if canonical_sha256(unhashed) != recorded_hash:
+        raise BenchmarkError("receipt.receipt_sha256 does not match canonical content")
+
+    engine = _object(receipt["engine"], "receipt.engine")
+    engine_keys = {
+        "name",
+        "runtime_identity",
+        "reported_version",
+        "base_url",
+        "model",
+        "available_models",
+        "authentication_configured",
+    }
+    _exact_keys(engine, engine_keys, "receipt.engine", {"authentication_source"})
+    if engine["name"] not in {"kiln", "vllm"}:
+        raise BenchmarkError("receipt.engine.name must be kiln or vllm")
+    for name in ("runtime_identity", "base_url", "model"):
+        if not isinstance(engine[name], str) or not engine[name]:
+            raise BenchmarkError(f"receipt.engine.{name} must be a non-empty string")
+    if not isinstance(engine["authentication_configured"], bool):
+        raise BenchmarkError("receipt.engine.authentication_configured must be boolean")
+    if "authentication_source" in engine:
+        if engine["authentication_source"] not in {"none", "argument", "environment"}:
+            raise BenchmarkError("receipt.engine.authentication_source is invalid")
+        if engine["authentication_configured"] != (engine["authentication_source"] != "none"):
+            raise BenchmarkError("receipt.engine authentication fields disagree")
+
+    driver_environment = _object(receipt["driver_environment"], "receipt.driver_environment")
+    _exact_keys(
+        driver_environment,
+        {"hostname", "platform", "machine", "python", "repository"},
+        "receipt.driver_environment",
+    )
+    repository = _object(driver_environment["repository"], "receipt.driver_environment.repository")
+    _exact_keys(repository, {"commit", "dirty", "source_tree_sha256"}, "receipt.driver_environment.repository")
+    if not isinstance(repository["commit"], str) or re.fullmatch(r"[0-9a-f]{40}", repository["commit"]) is None:
+        raise BenchmarkError("receipt repository commit must be 40 lowercase hex characters")
+    if not isinstance(repository["dirty"], bool):
+        raise BenchmarkError("receipt repository dirty flag must be boolean")
+    _sha256(repository["source_tree_sha256"], "receipt repository source_tree_sha256")
+
+    workload = _object(receipt["workload"], "receipt.workload")
+    workload_keys = {
+        "schema",
+        "prompt_template_version",
+        "run_id",
+        "model",
+        "endpoint",
+        "stream",
+        "stream_include_usage",
+        "concurrency",
+        "repeats",
+        "warmup_requests",
+        "max_tokens",
+        "sampling",
+        "chat_template_kwargs",
+        "arrival_pattern",
+        "require_max_tokens",
+        "require_uniform_prompt_tokens",
+        "max_dispatch_spread_ms",
+        "slo",
+    }
+    _exact_keys(workload, workload_keys, "receipt.workload")
+    if workload["schema"] != WORKLOAD_SCHEMA or workload["prompt_template_version"] != PROMPT_TEMPLATE_VERSION:
+        raise BenchmarkError("receipt workload schema or prompt template version is unsupported")
+    sizes = workload["concurrency"]
+    if not isinstance(sizes, list) or any(isinstance(size, bool) or not isinstance(size, int) for size in sizes):
+        raise BenchmarkError("receipt.workload.concurrency must be an integer array")
+    if sizes != sorted(set(sizes)) or not sizes or any(size <= 0 or size > 4096 for size in sizes):
+        raise BenchmarkError("receipt.workload.concurrency must be unique, increasing, and in 1..=4096")
+    repeats = _positive_int(workload["repeats"], "receipt.workload.repeats")
+    max_tokens = _positive_int(workload["max_tokens"], "receipt.workload.max_tokens")
+    warmup_requests = workload["warmup_requests"]
+    if isinstance(warmup_requests, bool) or not isinstance(warmup_requests, int) or warmup_requests < 0:
+        raise BenchmarkError("receipt.workload.warmup_requests must be a non-negative integer")
+    if canonical_sha256(workload) != _sha256(receipt["workload_fingerprint"], "receipt.workload_fingerprint"):
+        raise BenchmarkError("receipt.workload_fingerprint does not match workload")
+
+    memory_sampler = _object(receipt["memory_sampler"], "receipt.memory_sampler")
+    _exact_keys(memory_sampler, {"source", "path", "interval_ms"}, "receipt.memory_sampler")
+    diagnostics = _object(receipt["diagnostics"], "receipt.diagnostics")
+    _exact_keys(diagnostics, {"url", "timed_request_path_affected"}, "receipt.diagnostics")
+    if diagnostics["timed_request_path_affected"] is not False:
+        raise BenchmarkError("receipt diagnostics must remain outside the timed request path")
+
+    if warmup_requests:
+        if receipt["warmup"] is None:
+            raise BenchmarkError("receipt omits its declared warmup")
+        validate_benchmark_run(
+            receipt["warmup"],
+            label="receipt.warmup",
+            concurrency=warmup_requests,
+            repeat=-1,
+            max_tokens=min(16, max_tokens),
+        )
+    elif receipt["warmup"] is not None:
+        raise BenchmarkError("receipt has an undeclared warmup")
+
+    runs = receipt["runs"]
+    if not isinstance(runs, list):
+        raise BenchmarkError("receipt.runs must be an array")
+    expected_pairs = [(size, repeat) for size in sizes for repeat in range(repeats)]
+    actual_pairs: list[tuple[int, int]] = []
+    for index, row in enumerate(runs):
+        row_object = _object(row, f"receipt.runs[{index}]")
+        pair = (row_object.get("concurrency"), row_object.get("repeat"))
+        actual_pairs.append(pair)
+        if pair in expected_pairs:
+            validate_benchmark_run(
+                row,
+                label=f"receipt.runs[{index}]",
+                concurrency=pair[0],
+                repeat=pair[1],
+                max_tokens=max_tokens,
+            )
+    if actual_pairs != expected_pairs:
+        raise BenchmarkError("receipt.runs do not exactly match declared concurrency and repeats")
+
+    comparison_passed = True
+    if "comparison" in receipt:
+        comparison = _object(receipt["comparison"], "receipt.comparison")
+        _exact_keys(
+            comparison,
+            {"reference_receipt_sha256", "reference_engine", "matched", "mismatches"},
+            "receipt.comparison",
+        )
+        _sha256(comparison["reference_receipt_sha256"], "receipt.comparison.reference_receipt_sha256")
+        if not isinstance(comparison["matched"], bool) or not isinstance(comparison["mismatches"], list):
+            raise BenchmarkError("receipt.comparison has invalid field types")
+        comparison_passed = comparison["matched"]
+    passed = (
+        not repository["dirty"]
+        and (receipt["warmup"] is None or receipt["warmup"]["verdict"] == "passed")
+        and all(row["verdict"] == "passed" for row in runs)
+        and comparison_passed
+    )
+    if receipt["verdict"] != ("passed" if passed else "failed"):
+        raise BenchmarkError("receipt.verdict is inconsistent with source, runs, or comparison")
+    return receipt
+
+
+def validate_benchmark_receipt_path(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise BenchmarkError(f"benchmark receipt is not a regular file: {path}")
+    data = path.read_bytes()
+    if len(data) > 64 * 1024 * 1024:
+        raise BenchmarkError(f"benchmark receipt exceeds 64 MiB: {path}")
+    try:
+        value = strict_json_loads(data)
+    except Exception as exc:
+        raise BenchmarkError(f"cannot load benchmark receipt {path}: {exc}") from exc
+    return validate_benchmark_receipt(value)
 
 
 def text_sha256(value: str) -> str:
@@ -862,6 +1218,14 @@ def repository_identity() -> dict[str, Any]:
     }
 
 
+def require_repository_unchanged(expected: dict[str, Any]) -> None:
+    current = repository_identity()
+    if current != expected:
+        raise BenchmarkError(
+            "repository identity changed during measurement; discard the run and retry"
+        )
+
+
 def probe_models(base_url: str, headers: dict[str, str], timeout_secs: float) -> list[str]:
     value = fetch_json(f"{base_url}/v1/models", headers, timeout_secs)
     data = value.get("data")
@@ -995,6 +1359,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Name of the environment variable containing the bearer token",
     )
     parser.add_argument("--reference-receipt", type=Path)
+    parser.add_argument(
+        "--validate-receipt",
+        nargs="+",
+        type=Path,
+        metavar="PATH",
+        help="Validate committed kiln.serving-benchmark.v1 receipts and exit",
+    )
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--out", type=Path)
     parser.add_argument(
@@ -1044,6 +1415,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        if args.validate_receipt is not None:
+            if args.out is not None or args.reference_receipt is not None:
+                raise BenchmarkError(
+                    "--validate-receipt cannot be combined with --out or --reference-receipt"
+                )
+            for path in args.validate_receipt:
+                validate_benchmark_receipt_path(path)
+                print(f"OK {path}")
+            return 0
         if args.out is not None and args.out.exists():
             raise BenchmarkError(f"refusing to overwrite existing receipt: {args.out}")
         sizes = parse_sizes(args.sizes)
@@ -1117,6 +1497,7 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             sampler.stop()
 
+        require_repository_unchanged(repo)
         workload = workload_contract(args, sizes)
         health_version = None
         if diagnostics_url is not None:
