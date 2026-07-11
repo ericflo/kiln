@@ -683,8 +683,40 @@ fn grpo_loss_coeff_from_policy_log_probs_kt(
     );
 
     let coeff: Vec<f32> = if loss_params.reinforce {
-        let c = (-loss_params.advantage * loss_params.loss_normalizer) as f32;
-        vec![c; num_active]
+        let policy_host = policy_log_probs
+            .to_dtype(KtDType::F32)
+            .and_then(|tensor| tensor.flatten_all())
+            .and_then(|tensor| tensor.to_vec1::<f32>())
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "grpo_loss_coeff_from_policy_log_probs_kt: reinforce policy host: {error}"
+                )
+            })?;
+        let kl_reference_host = kl_reference_log_probs_kt
+            .to_dtype(KtDType::F32)
+            .and_then(|tensor| tensor.flatten_all())
+            .and_then(|tensor| tensor.to_vec1::<f32>())
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "grpo_loss_coeff_from_policy_log_probs_kt: reinforce KL-reference host: {error}"
+                )
+            })?;
+        let kl_mask = entropy_aware_kl_mask(&policy_host, &loss_params);
+        policy_host
+            .iter()
+            .zip(&kl_reference_host)
+            .enumerate()
+            .map(|(index, (&policy, &reference))| {
+                let kl_log_ratio = f64::from(policy - reference);
+                let kl_grad = match loss_params.kl_estimator {
+                    crate::KlEstimator::None => 0.0,
+                    crate::KlEstimator::K1 => loss_params.kl_coeff,
+                    crate::KlEstimator::K3 => loss_params.kl_coeff * (1.0 - (-kl_log_ratio).exp()),
+                };
+                (loss_params.loss_normalizer * (-loss_params.advantage + kl_mask[index] * kl_grad))
+                    as f32
+            })
+            .collect()
     } else {
         let plp_host: Vec<f32> = policy_log_probs
             .to_dtype(KtDType::F32)
@@ -846,14 +878,6 @@ fn grpo_loss_coeff_col_device_fast_path_kt(
         return Ok(None);
     }
 
-    if loss_params.reinforce {
-        let coeff = -loss_params.advantage * loss_params.loss_normalizer * grad_scalar;
-        return KtTensor::ones(vec![num_active, 1], KtDType::F32, device)
-            .and_then(|t| t.affine(coeff, 0.0))
-            .map(Some)
-            .map_err(Into::into);
-    }
-
     let policy = policy_log_probs
         .to_dtype(KtDType::F32)?
         .flatten_all()?
@@ -869,7 +893,11 @@ fn grpo_loss_coeff_col_device_fast_path_kt(
         .flatten_all()?
         .reshape(vec![num_active])?
         .contiguous()?;
-    let importance_log_ratio = (&policy - &behavior)?.contiguous()?;
+    let importance_log_ratio = if loss_params.reinforce {
+        policy.affine(0.0, 0.0)?.contiguous()?
+    } else {
+        (&policy - &behavior)?.contiguous()?
+    };
     let ratio = importance_log_ratio.exp()?.contiguous()?;
     let kl_log_ratio = (&policy - &kl_reference)?.contiguous()?;
 
@@ -896,51 +924,55 @@ fn grpo_loss_coeff_col_device_fast_path_kt(
     };
 
     let zero = ratio.affine(0.0, 0.0)?.contiguous()?;
-    let pg_grad = match loss_params.is_level {
-        crate::IsLevel::Token => {
-            let pg_raw = ratio.affine(-loss_params.advantage, 0.0)?.contiguous()?;
-            if loss_params.advantage >= 0.0 {
-                let hi = ratio
-                    .affine(0.0, 1.0 + loss_params.clip_high)?
-                    .contiguous()?;
-                let unclipped = kiln_tensor::ops::le(&ratio, &hi)?;
-                unclipped.where_cond(&pg_raw, &zero)?
-            } else {
-                let lo = ratio
-                    .affine(0.0, 1.0 - loss_params.clip_low)?
-                    .contiguous()?;
-                let unclipped = kiln_tensor::ops::ge(&ratio, &lo)?;
-                unclipped.where_cond(&pg_raw, &zero)?
+    let pg_grad = if loss_params.reinforce {
+        policy.affine(0.0, -loss_params.advantage)?.contiguous()?
+    } else {
+        match loss_params.is_level {
+            crate::IsLevel::Token => {
+                let pg_raw = ratio.affine(-loss_params.advantage, 0.0)?.contiguous()?;
+                if loss_params.advantage >= 0.0 {
+                    let hi = ratio
+                        .affine(0.0, 1.0 + loss_params.clip_high)?
+                        .contiguous()?;
+                    let unclipped = kiln_tensor::ops::le(&ratio, &hi)?;
+                    unclipped.where_cond(&pg_raw, &zero)?
+                } else {
+                    let lo = ratio
+                        .affine(0.0, 1.0 - loss_params.clip_low)?
+                        .contiguous()?;
+                    let unclipped = kiln_tensor::ops::ge(&ratio, &lo)?;
+                    unclipped.where_cond(&pg_raw, &zero)?
+                }
             }
-        }
-        crate::IsLevel::Sequence => {
-            let seq_ratio = importance_log_ratio
-                .mean_keepdim(0usize)?
-                .exp()?
-                .contiguous()?;
-            let seq_zero = seq_ratio.affine(0.0, 0.0)?.contiguous()?;
-            let seq_pg_raw = seq_ratio
-                .affine(-loss_params.advantage / num_active as f64, 0.0)?
-                .contiguous()?;
-            let seq_pg = if loss_params.advantage >= 0.0 {
-                let hi = seq_ratio
-                    .affine(0.0, 1.0 + loss_params.clip_high)?
+            crate::IsLevel::Sequence => {
+                let seq_ratio = importance_log_ratio
+                    .mean_keepdim(0usize)?
+                    .exp()?
                     .contiguous()?;
-                let unclipped = kiln_tensor::ops::le(&seq_ratio, &hi)?;
-                unclipped.where_cond(&seq_pg_raw, &seq_zero)?
-            } else {
-                let lo = seq_ratio
-                    .affine(0.0, 1.0 - loss_params.clip_low)?
+                let seq_zero = seq_ratio.affine(0.0, 0.0)?.contiguous()?;
+                let seq_pg_raw = seq_ratio
+                    .affine(-loss_params.advantage / num_active as f64, 0.0)?
                     .contiguous()?;
-                let unclipped = kiln_tensor::ops::ge(&seq_ratio, &lo)?;
-                unclipped.where_cond(&seq_pg_raw, &seq_zero)?
-            };
-            seq_pg.broadcast_as(vec![num_active])?.contiguous()?
+                let seq_pg = if loss_params.advantage >= 0.0 {
+                    let hi = seq_ratio
+                        .affine(0.0, 1.0 + loss_params.clip_high)?
+                        .contiguous()?;
+                    let unclipped = kiln_tensor::ops::le(&seq_ratio, &hi)?;
+                    unclipped.where_cond(&seq_pg_raw, &seq_zero)?
+                } else {
+                    let lo = seq_ratio
+                        .affine(0.0, 1.0 - loss_params.clip_low)?
+                        .contiguous()?;
+                    let unclipped = kiln_tensor::ops::ge(&seq_ratio, &lo)?;
+                    unclipped.where_cond(&seq_pg_raw, &seq_zero)?
+                };
+                seq_pg.broadcast_as(vec![num_active])?.contiguous()?
+            }
+            crate::IsLevel::Cispo => ratio
+                .clamp(1.0 - loss_params.clip_low, 1.0 + loss_params.clip_high)?
+                .affine(-loss_params.advantage, 0.0)?
+                .contiguous()?,
         }
-        crate::IsLevel::Cispo => ratio
-            .clamp(1.0 - loss_params.clip_low, 1.0 + loss_params.clip_high)?
-            .affine(-loss_params.advantage, 0.0)?
-            .contiguous()?,
     };
 
     let coeff = (&pg_grad + &kl_grad)?
@@ -3551,6 +3583,21 @@ mod tests {
                 },
                 1.1,
             ),
+            (
+                "reinforce-with-k3",
+                GrpoLossParams {
+                    advantage: 0.3,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.09,
+                    kl_estimator: KlEstimator::K3,
+                    loss_normalizer: 0.25,
+                    is_level: IsLevel::Token,
+                    reinforce: true,
+                    entropy_aware_kl_quantile: None,
+                },
+                0.8,
+            ),
         ];
 
         for (name, params, grad_scalar) in variants {
@@ -3590,6 +3637,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn no_importance_coeff_preserves_kl_on_rocm_device_path() {
+        if !kiln_tensor::rocm_is_available() {
+            assert_ne!(
+                std::env::var("KILN_QUALIFICATION").as_deref(),
+                Ok("1"),
+                "ROCm qualification requested but no ROCm device is available"
+            );
+            eprintln!("[GRPO-ROCm] no ROCm device; skipping coefficient parity");
+            return;
+        }
+
+        let device = kiln_tensor::Device::Rocm(0);
+        let policy = KtTensor::from_vec_on(device, vec![-1.0_f32, -1.2], vec![2]).unwrap();
+        let behavior = KtTensor::from_vec_on(device, vec![-9.0_f32, -8.0], vec![2]).unwrap();
+        let kl_reference = KtTensor::from_vec_on(device, vec![-0.7_f32, -1.8], vec![2]).unwrap();
+        let params = GrpoLossParams {
+            advantage: 0.4,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 0.2,
+            kl_estimator: KlEstimator::K3,
+            loss_normalizer: 0.5,
+            is_level: IsLevel::Token,
+            reinforce: true,
+            entropy_aware_kl_quantile: None,
+        };
+
+        let host = super::grpo_loss_coeff_from_policy_log_probs_kt(
+            &policy,
+            &behavior,
+            &kl_reference,
+            params,
+            2,
+        )
+        .unwrap();
+        let device_coeff = super::grpo_loss_coeff_col_device_fast_path_kt(
+            GrpoKlAuxiliaryRoute::CudaRocmDeviceFastPath,
+            &policy,
+            &behavior,
+            &kl_reference,
+            params,
+            2,
+            1.0,
+            &device,
+        )
+        .unwrap()
+        .expect("ROCm coefficient fast path")
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+
+        for (index, (host, device)) in host.iter().zip(&device_coeff).enumerate() {
+            assert!(
+                (host - device).abs() < 1e-6,
+                "coefficient {index}: host={host}, device={device}"
+            );
+        }
+        assert!(
+            host.iter()
+                .any(|coefficient| (*coefficient + 0.2).abs() > 1e-3),
+            "fixture must fail if the KL gradient is dropped"
+        );
     }
 
     #[cfg(feature = "cuda")]

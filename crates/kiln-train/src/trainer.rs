@@ -11322,29 +11322,6 @@ pub(crate) fn grpo_loss_with_kl_auxiliary_route(
         return zeros_f32_on((), device).map_err(Into::into);
     }
 
-    // REINFORCE short-circuit: when `reinforce` is set, the IS ratio is
-    // fixed at 1.0 and there is no reference distribution. The per-token
-    // loss is `-advantage * (1 + log π_θ - log π_θ.detach()) = -advantage *
-    // surrogate_in_policy_grad_form`. To preserve gradient flow we build
-    // this via a `ratio` tensor that equals 1.0 at evaluation but whose
-    // gradient w.r.t. policy_log_probs is well-defined:
-    //
-    //   ratio = exp(policy_log_probs - policy_log_probs.detach())
-    //
-    // is mathematically 1 at every point but differentiable.
-    if params.reinforce {
-        let log_ratio = (policy_log_probs - policy_log_probs.detach())?;
-        let ratio = log_ratio.exp()?;
-        // (#1082) advantage is a constant scalar; fold the broadcast-mul into a
-        // single `affine` (gradient flows through `ratio`, identical math, no
-        // constant tensor allocation).
-        let per_token_loss = ratio.affine(-(params.advantage), 0.0)?;
-        let total = per_token_loss.sum_all()?;
-        return total
-            .affine(params.loss_normalizer, 0.0)
-            .map_err(Into::into);
-    }
-
     anyhow::ensure!(
         behavior_log_probs.elem_count() == num_active,
         "GRPO behavior log-probability count {} did not match policy count {num_active}",
@@ -11356,7 +11333,14 @@ pub(crate) fn grpo_loss_with_kl_auxiliary_route(
         kl_reference_log_probs.elem_count()
     );
 
-    let importance_log_ratio = (policy_log_probs - behavior_log_probs)?;
+    // `reinforce` is the explicit no-importance-correction mode. Its ratio is
+    // one by value while retaining the policy gradient; the independently
+    // configured KL term below still uses `kl_reference_log_probs`.
+    let importance_log_ratio = if params.reinforce {
+        (policy_log_probs - policy_log_probs.detach())?
+    } else {
+        (policy_log_probs - behavior_log_probs)?
+    };
     let ratio = importance_log_ratio.exp()?;
     let ratio_shape = ratio.dims().to_vec();
     let kl_log_ratio = (policy_log_probs - kl_reference_log_probs)?;
@@ -11393,50 +11377,54 @@ pub(crate) fn grpo_loss_with_kl_auxiliary_route(
         kl_penalty_raw
     };
 
-    let neg_surrogate = match params.is_level {
-        IsLevel::Token => {
-            // Per-token surrogate: -min(r·A, clip(r)·A).
-            // (#1082) kt `clamp` takes scalar bounds directly; advantage folds
-            // into `affine` (constant scalar, gradient flows through the ratio).
-            let clipped_ratio = ratio.clamp(lo_val, hi_val)?;
-            let surr1 = ratio.affine(params.advantage, 0.0)?;
-            let surr2 = clipped_ratio.affine(params.advantage, 0.0)?;
-            let surrogate = surr1.minimum(&surr2)?;
-            surrogate.neg()?
-        }
-        IsLevel::Sequence => {
-            // GSPO: s = exp(mean(log_ratio)), surrogate at sequence level,
-            // gradient distributed back equally to every active token.
-            //
-            // The total surrogate contribution to the loss is exactly
-            // `min(s·A, clip(s)·A)`. To preserve the existing "sum of
-            // per-token loss times loss_normalizer" plumbing, we
-            // distribute that scalar over `num_active` positions as
-            // `surrogate / num_active`, replicated per token.
-            let u = importance_log_ratio.mean_keepdim(0)?;
-            let s = u.exp()?;
-            // (#1082) kt scalar clamp + scalar `affine` for the constant
-            // advantage (gradient flows through `s`).
-            let clipped = s.clamp(lo_val, hi_val)?;
-            let surr1 = s.affine(params.advantage, 0.0)?;
-            let surr2 = clipped.affine(params.advantage, 0.0)?;
-            let surrogate = surr1.minimum(&surr2)?;
-            let per_token_scale = 1.0 / num_active as f64;
-            // Repeat scalar across active token positions, scaled so that
-            // sum(neg_surrogate) = -surrogate exactly.
-            let neg = surrogate.neg()?.affine(per_token_scale, 0.0)?;
-            neg.broadcast_as(&ratio_shape)?
-        }
-        IsLevel::Cispo => {
-            // CISPO: gradient through `log π_θ` only; the IS weight is the
-            // *clipped* ratio with stop-gradient. The total loss contribution
-            // is `-stop_grad(clip(r)) · A · log π_θ` per token.
-            // (#1082) kt scalar clamp; advantage folds into `affine`. `weight`
-            // is detached either way, so the constant scalar mul is exact.
-            let clipped_ratio = ratio.clamp(lo_val, hi_val)?.detach();
-            // log π_θ = policy_log_probs (already in tensor form).
-            let weight = clipped_ratio.affine(params.advantage, 0.0)?.detach();
-            (&weight * policy_log_probs)?.neg()?
+    let neg_surrogate = if params.reinforce {
+        ratio.affine(-params.advantage, 0.0)?
+    } else {
+        match params.is_level {
+            IsLevel::Token => {
+                // Per-token surrogate: -min(r·A, clip(r)·A).
+                // (#1082) kt `clamp` takes scalar bounds directly; advantage folds
+                // into `affine` (constant scalar, gradient flows through the ratio).
+                let clipped_ratio = ratio.clamp(lo_val, hi_val)?;
+                let surr1 = ratio.affine(params.advantage, 0.0)?;
+                let surr2 = clipped_ratio.affine(params.advantage, 0.0)?;
+                let surrogate = surr1.minimum(&surr2)?;
+                surrogate.neg()?
+            }
+            IsLevel::Sequence => {
+                // GSPO: s = exp(mean(log_ratio)), surrogate at sequence level,
+                // gradient distributed back equally to every active token.
+                //
+                // The total surrogate contribution to the loss is exactly
+                // `min(s·A, clip(s)·A)`. To preserve the existing "sum of
+                // per-token loss times loss_normalizer" plumbing, we
+                // distribute that scalar over `num_active` positions as
+                // `surrogate / num_active`, replicated per token.
+                let u = importance_log_ratio.mean_keepdim(0)?;
+                let s = u.exp()?;
+                // (#1082) kt scalar clamp + scalar `affine` for the constant
+                // advantage (gradient flows through `s`).
+                let clipped = s.clamp(lo_val, hi_val)?;
+                let surr1 = s.affine(params.advantage, 0.0)?;
+                let surr2 = clipped.affine(params.advantage, 0.0)?;
+                let surrogate = surr1.minimum(&surr2)?;
+                let per_token_scale = 1.0 / num_active as f64;
+                // Repeat scalar across active token positions, scaled so that
+                // sum(neg_surrogate) = -surrogate exactly.
+                let neg = surrogate.neg()?.affine(per_token_scale, 0.0)?;
+                neg.broadcast_as(&ratio_shape)?
+            }
+            IsLevel::Cispo => {
+                // CISPO: gradient through `log π_θ` only; the IS weight is the
+                // *clipped* ratio with stop-gradient. The total loss contribution
+                // is `-stop_grad(clip(r)) · A · log π_θ` per token.
+                // (#1082) kt scalar clamp; advantage folds into `affine`. `weight`
+                // is detached either way, so the constant scalar mul is exact.
+                let clipped_ratio = ratio.clamp(lo_val, hi_val)?.detach();
+                // log π_θ = policy_log_probs (already in tensor form).
+                let weight = clipped_ratio.affine(params.advantage, 0.0)?.detach();
+                (&weight * policy_log_probs)?.neg()?
+            }
         }
     };
 
@@ -12793,6 +12781,53 @@ pub(crate) mod tests {
         assert!(
             (loss - expected).abs() < 5e-6,
             "REINFORCE loss drift: got {loss} want {expected}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_loss_no_importance_correction_preserves_frozen_reference_kl() -> Result<()> {
+        let device = cpu_device();
+        let policy = t1d(&[-1.0_f32, -1.2])?;
+        let unrelated_behavior = t1d(&[-9.0_f32, -8.0])?;
+        let other_behavior = t1d(&[-0.1_f32, -0.2])?;
+        let kl_reference = t1d(&[-0.7_f32, -1.8])?;
+        let params = GrpoLossParams {
+            advantage: 0.4,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 0.2,
+            kl_estimator: KlEstimator::K3,
+            loss_normalizer: 0.5,
+            is_level: IsLevel::Token,
+            reinforce: true,
+            entropy_aware_kl_quantile: None,
+        };
+
+        let got = grpo_loss(&policy, &unrelated_behavior, &kl_reference, params, &device)?
+            .to_scalar::<f32>()? as f64;
+        let with_other_behavior =
+            grpo_loss(&policy, &other_behavior, &kl_reference, params, &device)?
+                .to_scalar::<f32>()? as f64;
+        let expected = [-0.3_f64, 0.6]
+            .into_iter()
+            .map(|kl_log_ratio| {
+                -params.advantage + params.kl_coeff * ((-kl_log_ratio).exp() - 1.0 + kl_log_ratio)
+            })
+            .sum::<f64>()
+            * params.loss_normalizer;
+
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "got {got}, expected {expected}"
+        );
+        assert!(
+            (got - with_other_behavior).abs() < 1e-7,
+            "no-correction loss must not inspect behavior log-probability values"
+        );
+        assert!(
+            (got + params.advantage).abs() > 1e-3,
+            "fixture must fail if the independently configured KL term is dropped"
         );
         Ok(())
     }
