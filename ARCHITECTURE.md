@@ -983,8 +983,10 @@ and fall through to CPU on `Ok(None)`.
 `Constructive` (bit-identical across runs) or
 `ToleranceBounded { dtype_band_key }`. The band keys reference rows
 in `bench-results/parity-tolerance.csv` (Phase 0.4) which carries 416
-`{op, dtype, backend}` cells. `KILN_DETERMINISTIC=1` selects the
-deterministic variant of every tolerance-bounded op.
+`{op, dtype, backend}` cells. `server.deterministic = true` (or the strict
+`KILN_DETERMINISTIC=1` override) freezes the process-wide selector that kernel
+implementations can consume. The metadata and selector do not, by themselves,
+prove that every tolerance-bounded op has or selects a deterministic variant.
 
 Anti-pattern 2 (every materializing `contiguous()` is logged) is wired
 through `kiln_tensor::profile::emit_contiguous_copy()`, which
@@ -992,24 +994,24 @@ through `kiln_tensor::profile::emit_contiguous_copy()`, which
 
 ### Reproducibility & anomaly-detection flags
 
-Two environment flags give the SFT/GRPO loop reproducibility and fail-fast
-corruption detection. Both are **off by default** (release + CI); the
-training-parity CI suite turns them on so a regression surfaces at the
-producing op, not 100 steps later when loss diverges.
+The following controls cover different parts of the reproducibility and
+fail-fast surface. They are **off by default**.
 
-**`KILN_DETERMINISTIC=1`** — selects the deterministic variant of every
-`Determinism::ToleranceBounded` op
-(`crates/kiln-tensor/src/determinism.rs`, `deterministic_enabled()`):
-cuBLAS workspace pin (`CUBLAS_WORKSPACE_CONFIG=:4096:8`), the
-deterministic-`atomicAdd` embedding backward, the deterministic
-reduction-tree softmax / RMSNorm / cross-entropy backward, and
-warp-shuffle-free reductions. It is the single user-facing contract for
-"make this run match yesterday's run" — one env var, not a doc-read —
-and two runs at the same seed under the envelope are bit-reproducible. For
-serving, the envelope also forces the batching actor's effective decode width
-to one. Multi-row BF16 GEMMs are individually bounded and valid, but changing
-the live request cohort changes their shape and can flip a close greedy-logit
-boundary; single-row decode removes that scheduler-dependent numerical path.
+**`server.deterministic = true` / `KILN_DETERMINISTIC=1`** is the typed,
+immutable serving-repeatability selector
+(`crates/kiln-tensor/src/determinism.rs`, `deterministic_enabled()`). The server
+validates it before tensor initialization and forces the batching actor's
+effective decode width to one. Multi-row BF16 GEMMs are individually bounded
+and valid, but changing the live request cohort changes their shape and can
+flip a close greedy-logit boundary; single-row decode removes that
+scheduler-dependent numerical path and is covered by same-hardware restart
+receipts.
+
+This is not yet a blanket bitwise-deterministic kernel or training guarantee.
+Kiln does not currently export `CUBLAS_WORKSPACE_CONFIG` from this setting, and
+several tolerance-bounded backward implementations do not route through the
+selector. Those require explicit backend controls and local hardware evidence;
+the `Determinism` metadata is the audit inventory, not proof of implementation.
 
 **`KILN_DETECT_ANOMALY=1`** — a NaN/Inf trap on the autograd tape
 (`crates/kiln-autograd/src/anomaly.rs`, `anomaly_detection_enabled()`).

@@ -96,7 +96,8 @@ pub use activation_registry::{
 pub use allocator::{Allocator, AllocatorMode, allocator_frozen_error};
 pub use cpu_allocator::CpuAllocator;
 pub use determinism::{
-    DETERMINISTIC_CACHED, Determinism, DeterministicCache, deterministic_enabled,
+    DETERMINISTIC_CACHED, Determinism, DeterministicCache, DeterministicConfigurationError,
+    deterministic_enabled,
 };
 pub use device::{Backend, Device, DeviceLocation};
 pub use device_op::{BackwardOp, DeviceOp1, DeviceOp2, DeviceOp3, dispatch1, dispatch2, dispatch3};

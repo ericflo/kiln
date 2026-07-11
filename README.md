@@ -704,8 +704,8 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `server.max_batch_tokens` | `KILN_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per batching-actor cycle (2–65536). Ready decode rows consume one token each first; admission and resumable prefill share the remainder. Invalid values stop startup; health/debug report value and source |
 | `server.max_prefill_tokens_per_cycle` | `KILN_MAX_PREFILL_TOKENS_PER_CYCLE` | 64 | Prompt-only ceiling inside the combined actor-cycle budget (1–65536). Decode reserves its rows first, then partial prefills advance round-robin by at most this many tokens before the next decode cohort. Lower values favor ITL; higher values favor prefill throughput. Invalid values stop startup; health/debug report the effective value and source |
 | `server.max_prefill_layers_per_cycle` | `KILN_MAX_PREFILL_LAYERS_PER_CYCLE` | 4 | Transformer-layer ceiling for each retained prompt chunk (1–1024). A partial chunk yields to ready decode after this many layers and later resumes from its hidden state without replay. Lower values favor ITL; higher values reduce scheduling and synchronization overhead. Invalid values stop startup; health/debug report value and source |
-| — | `KILN_MAX_DECODE_BATCH` | backend policy | Maximum concurrent decode rows; the effective ceiling is reported by health/debug and `kiln_batching_engine_max_decode_batch` |
-| — | `KILN_DETERMINISTIC` | false | Reproducibility envelope. A true value forces effective decode width 1, even when a wider batch is configured, so request-cohort changes cannot select different BF16 batched-GEMM shapes at close greedy-logit boundaries. This trades throughput for bit-repeatable inference |
+| `server.max_decode_batch` | `KILN_MAX_DECODE_BATCH` | `auto` (backend policy) | Concurrent decode-row ceiling (`auto` or 1–65536). Invalid values stop startup. Deterministic mode and `max_batch_tokens` may lower it; startup, health, config, debug, and `kiln_batching_engine_max_decode_batch` report the final effective value |
+| `server.deterministic` | `KILN_DETERMINISTIC` | false | Serving repeatability envelope. Strict boolean parsing rejects malformed values. True freezes the process-wide determinism selector and forces effective decode width 1 even when a wider batch is configured, preventing request-cohort changes from selecting different BF16 batched-GEMM shapes at close greedy-logit boundaries. This does not by itself make every accelerator kernel bitwise deterministic |
 | `server.default_thinking_enabled` | `KILN_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
 | `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block |
 | `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget before Kiln closes an open thinking block |
@@ -729,6 +729,20 @@ so response handling cannot fragment a wide batch into per-row forwards.
 Current in-flight, backpressured, and pending-terminal counts are reported by
 `/health`, `/v1/debug/model-state`, and the
 `kiln_batching_engine_response_delivery_*` Prometheus gauges.
+
+`/v1/config` and `/health` expose `decode_runtime` diagnostics with the
+deterministic value and source plus the configured, backend-policy, and final
+effective decode ceilings. The effective source is one of `backend_policy`,
+`config_file`, `environment`, `deterministic`, or `max_batch_tokens`. This makes
+an intentional reproducibility run distinguishable from an accidentally
+serialized throughput run without inspecting process environment.
+
+The current deterministic serving contract is deliberately narrower than
+cross-backend bitwise determinism: it removes concurrent decode-shape variation
+and exposes one immutable selector to tensor/kernel implementations. It does not
+automatically set CUDA library controls such as `CUBLAS_WORKSPACE_CONFIG`, and
+not every tolerance-bounded backward kernel consumes that selector yet. Treat
+exact training replay and cross-device equality as separate qualification gates.
 
 Real-model serving initializes paged prefill ownership without running an
 unbounded prompt forward. Each actor cycle reserves one token for every ready

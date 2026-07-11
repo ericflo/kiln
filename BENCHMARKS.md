@@ -85,8 +85,11 @@ never writes the credential or environment-variable name into a receipt.
 
 Treat exact output comparison as a reproducibility gate, not an unstated
 property of the throughput configuration. Start Kiln with
-`KILN_DETERMINISTIC=1` and verify that `/health` reports
-`decode_runtime.batching_engine.max_decode_batch = 1`; configure the reference
+`server.deterministic = true` (or `KILN_DETERMINISTIC=1`) and verify that
+`/health` reports `decode_runtime.configuration.deterministic.enabled = true`,
+`decode_runtime.configuration.max_decode_batch.effective_source` as
+`"deterministic"`, and `decode_runtime.batching_engine.max_decode_batch = 1`;
+configure the reference
 engine for the same single-row deterministic execution. Default multi-row BF16
 serving may select different valid GEMM shapes as cohorts form, and a close
 greedy-logit boundary can then change the continuation. Preserve any such

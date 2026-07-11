@@ -57,6 +57,12 @@ pub const MAX_PREFILL_LAYERS_PER_CYCLE_MIN: usize = 1;
 pub const MAX_PREFILL_LAYERS_PER_CYCLE_MAX: usize = 1_024;
 /// Strict startup selector for the serving-safety contract.
 pub const SERVING_PROFILE_ENV: &str = "KILN_SERVING_PROFILE";
+/// Strict startup selector for the process-lifetime reproducibility envelope.
+pub const DETERMINISTIC_ENV: &str = "KILN_DETERMINISTIC";
+/// Strict startup override for the concurrent decode-row ceiling.
+pub const MAX_DECODE_BATCH_ENV: &str = "KILN_MAX_DECODE_BATCH";
+pub const MAX_DECODE_BATCH_MIN: usize = 1;
+pub const MAX_DECODE_BATCH_MAX: usize = MAX_BATCH_TOKENS_MAX;
 
 /// Provenance of a resolved startup configuration value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -76,6 +82,219 @@ impl fmt::Display for ConfigValueSource {
             Self::Environment => "environment",
         })
     }
+}
+
+/// Validated process-lifetime deterministic-inference selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeterministicInference {
+    enabled: bool,
+    source: ConfigValueSource,
+}
+
+impl DeterministicInference {
+    pub const fn new(enabled: bool, source: ConfigValueSource) -> Self {
+        Self { enabled, source }
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        let enabled = parse_bool_env(raw).with_context(|| {
+            format!(
+                "{DETERMINISTIC_ENV} must be one of true, false, 1, 0, yes, no, on, off; got {raw:?}"
+            )
+        })?;
+        Ok(Self::new(enabled, ConfigValueSource::Environment))
+    }
+
+    pub const fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+
+    pub const fn diagnostics(self) -> DeterministicInferenceDiagnostics {
+        DeterministicInferenceDiagnostics {
+            enabled: self.enabled,
+            source: self.source,
+        }
+    }
+}
+
+impl Default for DeterministicInference {
+    fn default() -> Self {
+        Self::new(false, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for DeterministicInference {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bool(self.enabled)
+    }
+}
+
+impl<'de> Deserialize<'de> for DeterministicInference {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::new(
+            bool::deserialize(deserializer)?,
+            ConfigValueSource::ConfigFile,
+        ))
+    }
+}
+
+/// Health/config representation of the deterministic-inference selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DeterministicInferenceDiagnostics {
+    pub enabled: bool,
+    pub source: ConfigValueSource,
+}
+
+/// Optional operator ceiling for concurrent decode rows.
+///
+/// `None` means the active backend policy selects the width. A present value
+/// remains visible even when deterministic inference or the combined actor
+/// token budget lowers the effective width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaxDecodeBatch {
+    limit: Option<usize>,
+    source: ConfigValueSource,
+}
+
+impl MaxDecodeBatch {
+    pub(crate) fn new(limit: Option<usize>, source: ConfigValueSource) -> Result<Self> {
+        if let Some(limit) = limit {
+            validate_max_decode_batch(limit)?;
+        }
+        Ok(Self { limit, source })
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        let trimmed = raw.trim();
+        if is_auto_decode_batch(trimmed) {
+            return Ok(Self {
+                limit: None,
+                source: ConfigValueSource::Environment,
+            });
+        }
+        let limit = trimmed.parse::<usize>().with_context(|| {
+            format!(
+                "{MAX_DECODE_BATCH_ENV} must be 'auto' or a decimal integer in {MAX_DECODE_BATCH_MIN}..={MAX_DECODE_BATCH_MAX}, got {raw:?}"
+            )
+        })?;
+        Self::new(Some(limit), ConfigValueSource::Environment)
+            .with_context(|| format!("invalid {MAX_DECODE_BATCH_ENV} value {raw:?}"))
+    }
+
+    pub const fn limit(self) -> Option<usize> {
+        self.limit
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for MaxDecodeBatch {
+    fn default() -> Self {
+        Self {
+            limit: None,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for MaxDecodeBatch {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.limit {
+            Some(limit) => serializer.serialize_u64(limit as u64),
+            None => serializer.serialize_str("auto"),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawMaxDecodeBatch {
+    Limit(usize),
+    Mode(String),
+}
+
+impl<'de> Deserialize<'de> for MaxDecodeBatch {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawMaxDecodeBatch::deserialize(deserializer)?;
+        match raw {
+            RawMaxDecodeBatch::Limit(limit) => {
+                Self::new(Some(limit), ConfigValueSource::ConfigFile)
+                    .map_err(serde::de::Error::custom)
+            }
+            RawMaxDecodeBatch::Mode(mode) if is_auto_decode_batch(&mode) => Ok(Self {
+                limit: None,
+                source: ConfigValueSource::ConfigFile,
+            }),
+            RawMaxDecodeBatch::Mode(mode) => Err(serde::de::Error::custom(format!(
+                "server.max_decode_batch must be 'auto' or an integer in {MAX_DECODE_BATCH_MIN}..={MAX_DECODE_BATCH_MAX}, got {mode:?}"
+            ))),
+        }
+    }
+}
+
+fn is_auto_decode_batch(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "auto" | "backend" | "backend_policy"
+    )
+}
+
+/// Final authority that selected the effective concurrent decode width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecodeBatchEffectiveSource {
+    BackendPolicy,
+    ConfigFile,
+    Environment,
+    Deterministic,
+    MaxBatchTokens,
+}
+
+impl fmt::Display for DecodeBatchEffectiveSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::BackendPolicy => "backend_policy",
+            Self::ConfigFile => "config_file",
+            Self::Environment => "environment",
+            Self::Deterministic => "deterministic",
+            Self::MaxBatchTokens => "max_batch_tokens",
+        })
+    }
+}
+
+/// Resolved process-lifetime decode policy exposed by startup, health, config,
+/// and debug diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DecodeRuntimeConfig {
+    pub deterministic: DeterministicInferenceDiagnostics,
+    pub max_decode_batch: MaxDecodeBatchDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MaxDecodeBatchDiagnostics {
+    pub configured: Option<usize>,
+    pub configured_source: ConfigValueSource,
+    pub backend_policy: usize,
+    pub effective: usize,
+    pub effective_source: DecodeBatchEffectiveSource,
 }
 
 /// Process-lifetime serving policy.
@@ -792,6 +1011,9 @@ pub struct ServerConfig {
     /// experimental or maintenance requires an explicit file/env setting and
     /// a process restart.
     pub serving_profile: ServingProfileSetting,
+    /// Process-lifetime reproducibility envelope. Deterministic inference uses
+    /// deterministic tensor paths and a single concurrent decode row.
+    pub deterministic: DeterministicInference,
     pub host: String,
     pub port: u16,
     pub request_timeout_secs: u64,
@@ -818,6 +1040,10 @@ pub struct ServerConfig {
     /// Transformer layers executed for an in-flight prefill chunk before the
     /// hidden state yields back to decode without completing/repeating tokens.
     pub max_prefill_layers_per_cycle: PrefillLayerBudget,
+    /// Optional operator ceiling for concurrent decode rows. `auto` delegates
+    /// to the active backend policy; deterministic mode and the combined token
+    /// budget can still lower the effective value.
+    pub max_decode_batch: MaxDecodeBatch,
     /// Enable deterministic eval-serving behavior for `kiln serve`.
     pub eval_mode: bool,
     /// Server-level default for chat-template `enable_thinking`. `None`
@@ -1213,6 +1439,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             serving_profile: ServingProfileSetting::default(),
+            deterministic: DeterministicInference::default(),
             host: "127.0.0.1".into(),
             port: 8420,
             request_timeout_secs: 600,
@@ -1221,6 +1448,7 @@ impl Default for ServerConfig {
             max_batch_tokens: BatchTokenBudget::default(),
             max_prefill_tokens_per_cycle: PrefillTokenBudget::default(),
             max_prefill_layers_per_cycle: PrefillLayerBudget::default(),
+            max_decode_batch: MaxDecodeBatch::default(),
             eval_mode: false,
             default_thinking_enabled: None,
             default_thinking_budget_tokens: None,
@@ -1431,10 +1659,12 @@ impl KilnConfig {
         config.apply_env_overrides();
         config.apply_http_send_buffer_env_override()?;
         config.apply_serving_profile_env_override()?;
+        config.apply_deterministic_env_override()?;
         config.apply_stream_stall_grace_env_override()?;
         config.apply_max_batch_tokens_env_override()?;
         config.apply_max_prefill_tokens_per_cycle_env_override()?;
         config.apply_max_prefill_layers_per_cycle_env_override()?;
+        config.apply_max_decode_batch_env_override()?;
         config.request_log.apply_env_overrides();
         config.validate()?;
         Ok(config)
@@ -1456,6 +1686,26 @@ impl KilnConfig {
     fn apply_serving_profile_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
             self.server.serving_profile = ServingProfileSetting::from_environment_value(raw)?;
+        }
+        Ok(())
+    }
+
+    /// Resolve deterministic inference once, before model or tensor runtime
+    /// initialization. Present malformed values are fatal.
+    fn apply_deterministic_env_override(&mut self) -> Result<()> {
+        let raw = match std::env::var(DETERMINISTIC_ENV) {
+            Ok(raw) => raw,
+            Err(std::env::VarError::NotPresent) => return Ok(()),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("{DETERMINISTIC_ENV} must be valid UTF-8")
+            }
+        };
+        self.apply_deterministic_env_value(Some(&raw))
+    }
+
+    fn apply_deterministic_env_value(&mut self, raw: Option<&str>) -> Result<()> {
+        if let Some(raw) = raw {
+            self.server.deterministic = DeterministicInference::from_environment_value(raw)?;
         }
         Ok(())
     }
@@ -1804,6 +2054,26 @@ impl KilnConfig {
         Ok(())
     }
 
+    /// Resolve the optional decode-row ceiling once at startup. The batching
+    /// actor receives only the typed value and never reads process environment.
+    fn apply_max_decode_batch_env_override(&mut self) -> Result<()> {
+        let raw = match std::env::var(MAX_DECODE_BATCH_ENV) {
+            Ok(raw) => raw,
+            Err(std::env::VarError::NotPresent) => return Ok(()),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("{MAX_DECODE_BATCH_ENV} must be valid UTF-8")
+            }
+        };
+        self.apply_max_decode_batch_env_value(Some(&raw))
+    }
+
+    fn apply_max_decode_batch_env_value(&mut self, raw: Option<&str>) -> Result<()> {
+        if let Some(raw) = raw {
+            self.server.max_decode_batch = MaxDecodeBatch::from_environment_value(raw)?;
+        }
+        Ok(())
+    }
+
     /// Validate configuration values. Returns an error describing the first invalid value.
     fn validate(&self) -> Result<()> {
         if self.server.port == 0 {
@@ -1915,6 +2185,17 @@ fn validate_max_prefill_layers_per_cycle(layers: usize) -> Result<()> {
     Ok(())
 }
 
+fn validate_max_decode_batch(limit: usize) -> Result<()> {
+    if !(MAX_DECODE_BATCH_MIN..=MAX_DECODE_BATCH_MAX).contains(&limit) {
+        anyhow::bail!(
+            "server.max_decode_batch must be between {} and {} rows, got {limit}",
+            MAX_DECODE_BATCH_MIN,
+            MAX_DECODE_BATCH_MAX
+        );
+    }
+    Ok(())
+}
+
 fn parse_bool_env(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -1969,6 +2250,16 @@ mod tests {
         );
         assert_eq!(
             config.server.serving_profile.source(),
+            ConfigValueSource::Default
+        );
+        assert!(!config.server.deterministic.enabled());
+        assert_eq!(
+            config.server.deterministic.source(),
+            ConfigValueSource::Default
+        );
+        assert_eq!(config.server.max_decode_batch.limit(), None);
+        assert_eq!(
+            config.server.max_decode_batch.source(),
             ConfigValueSource::Default
         );
         assert_eq!(config.server.host, "127.0.0.1");
@@ -2185,6 +2476,7 @@ api_key_env = "{ENV}"
     fn test_parse_full_toml() {
         let toml_str = r#"
 [server]
+deterministic = true
 host = "127.0.0.1"
 port = 9000
 request_timeout_secs = 60
@@ -2193,6 +2485,7 @@ stream_stall_grace_ms = 1500
 max_batch_tokens = 1024
 max_prefill_tokens_per_cycle = 192
 max_prefill_layers_per_cycle = 6
+max_decode_batch = 24
 eval_mode = true
 default_thinking_enabled = false
 default_thinking_budget_tokens = 256
@@ -2252,6 +2545,11 @@ composed_cache_max_entries = 8
 "#;
         let config: KilnConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.host, "127.0.0.1");
+        assert!(config.server.deterministic.enabled());
+        assert_eq!(
+            config.server.deterministic.source(),
+            ConfigValueSource::ConfigFile
+        );
         assert_eq!(config.server.port, 9000);
         assert_eq!(config.server.request_timeout_secs, 60);
         assert_eq!(config.server.http_send_buffer_bytes, Some(8192));
@@ -2273,6 +2571,11 @@ composed_cache_max_entries = 8
         assert_eq!(config.server.max_prefill_layers_per_cycle.layers(), 6);
         assert_eq!(
             config.server.max_prefill_layers_per_cycle.source(),
+            ConfigValueSource::ConfigFile
+        );
+        assert_eq!(config.server.max_decode_batch.limit(), Some(24));
+        assert_eq!(
+            config.server.max_decode_batch.source(),
             ConfigValueSource::ConfigFile
         );
         assert!(config.server.eval_mode);
@@ -2548,6 +2851,32 @@ port = 3000
     }
 
     #[test]
+    fn load_rejects_malformed_decode_runtime_environment() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("kiln.toml");
+        std::fs::write(&path, "").unwrap();
+        let path = path.to_str().unwrap();
+
+        for (name, invalid) in [
+            (DETERMINISTIC_ENV, "sometimes"),
+            (MAX_DECODE_BATCH_ENV, "wide-ish"),
+            (MAX_DECODE_BATCH_ENV, "0"),
+        ] {
+            unsafe {
+                std::env::set_var(name, invalid);
+            }
+            let error = KilnConfig::load(Some(path)).unwrap_err();
+            unsafe {
+                std::env::remove_var(name);
+            }
+            let detail = format!("{error:#}");
+            assert!(detail.contains(name), "{detail}");
+            assert!(detail.contains(invalid), "{detail}");
+        }
+    }
+
+    #[test]
     fn test_http_send_buffer_env_override_is_strict() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::tempdir().unwrap();
@@ -2690,6 +3019,115 @@ max_batch_tokens = 1024
                 "unexpected error for {invalid:?}: {error:#}"
             );
         }
+    }
+
+    #[test]
+    fn deterministic_inference_is_strict_and_source_tracked() {
+        let mut config: KilnConfig = toml::from_str(
+            r#"
+[server]
+deterministic = true
+"#,
+        )
+        .unwrap();
+        assert!(config.server.deterministic.enabled());
+        assert_eq!(
+            config.server.deterministic.source(),
+            ConfigValueSource::ConfigFile
+        );
+
+        config.apply_deterministic_env_value(Some(" off ")).unwrap();
+        assert!(!config.server.deterministic.enabled());
+        assert_eq!(
+            config.server.deterministic.source(),
+            ConfigValueSource::Environment
+        );
+
+        for invalid in ["", "2", "truthy", "false-ish"] {
+            let error = DeterministicInference::from_environment_value(invalid).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(DETERMINISTIC_ENV) && message.contains(&format!("{invalid:?}")),
+                "unexpected error for {invalid:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_decode_batch_is_strict_and_source_tracked() {
+        let mut config: KilnConfig = toml::from_str(
+            r#"
+[server]
+max_decode_batch = 24
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.server.max_decode_batch.limit(), Some(24));
+        assert_eq!(
+            config.server.max_decode_batch.source(),
+            ConfigValueSource::ConfigFile
+        );
+
+        config
+            .apply_max_decode_batch_env_value(Some(" 12 "))
+            .unwrap();
+        assert_eq!(config.server.max_decode_batch.limit(), Some(12));
+        assert_eq!(
+            config.server.max_decode_batch.source(),
+            ConfigValueSource::Environment
+        );
+
+        config
+            .apply_max_decode_batch_env_value(Some(" auto "))
+            .unwrap();
+        assert_eq!(config.server.max_decode_batch.limit(), None);
+        assert_eq!(
+            config.server.max_decode_batch.source(),
+            ConfigValueSource::Environment
+        );
+
+        for invalid in ["", "0", "65537", "-1", "not-a-number"] {
+            let error = MaxDecodeBatch::from_environment_value(invalid).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(MAX_DECODE_BATCH_ENV) && message.contains(&format!("{invalid:?}")),
+                "unexpected error for {invalid:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_decode_batch_toml_supports_auto_and_validates_bounds() {
+        for mode in ["auto", "backend", "backend_policy"] {
+            let config: KilnConfig =
+                toml::from_str(&format!("[server]\nmax_decode_batch = {mode:?}\n")).unwrap();
+            assert_eq!(config.server.max_decode_batch.limit(), None);
+            assert_eq!(
+                config.server.max_decode_batch.source(),
+                ConfigValueSource::ConfigFile
+            );
+        }
+
+        for valid in [MAX_DECODE_BATCH_MIN, MAX_DECODE_BATCH_MAX] {
+            let config: KilnConfig =
+                toml::from_str(&format!("[server]\nmax_decode_batch = {valid}\n")).unwrap();
+            assert_eq!(config.server.max_decode_batch.limit(), Some(valid));
+        }
+
+        for invalid in [0, MAX_DECODE_BATCH_MAX + 1] {
+            let error =
+                toml::from_str::<KilnConfig>(&format!("[server]\nmax_decode_batch = {invalid}\n"))
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("server.max_decode_batch"),
+                "unexpected error for {invalid}: {error:#}"
+            );
+        }
+
+        let error =
+            toml::from_str::<KilnConfig>("[server]\nmax_decode_batch = \"unbounded-ish\"\n")
+                .unwrap_err();
+        assert!(error.to_string().contains("server.max_decode_batch"));
     }
 
     #[test]

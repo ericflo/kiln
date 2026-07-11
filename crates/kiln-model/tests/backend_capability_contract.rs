@@ -3833,8 +3833,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "decode buffer max-batch default should not rebuild policy from a backend name"
     );
     assert!(
-        generate_source.contains("decode_buffer_max_batch(self.backend.as_ref())"),
-        "decode buffer config should pass the active backend to max-batch policy"
+        generate_source
+            .contains("decode_buffer_max_batch(backend.as_ref(), options.max_decode_batch)")
+            && generate_source.contains("self.decode_buffer_max_batch"),
+        "decode buffer config should resolve the active backend under the injected hard ceiling once at construction"
     );
     let decode_debug_policy_section = source_between(
         &capability_source,
@@ -3871,6 +3873,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         generate_source.contains("pub fn from_env_for_policy(policy: DecodeBatcherPolicy)"),
         "decode batcher config should expose a policy-consuming constructor"
     );
+    assert!(
+        generate_source.contains("pub fn from_env_for_policy_with_max_batch(")
+            && !generate_source.contains("env_positive_usize(\"KILN_MAX_DECODE_BATCH\")"),
+        "the server's validated shared decode ceiling should be injected instead of reread from env"
+    );
     let server_startup_policy_section = source_between(
         &server_state_source,
         "let backend_name = runner.backend_name();",
@@ -3879,7 +3886,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         server_startup_policy_section.contains("runner.backend_capabilities()")
             && server_startup_policy_section.contains("decode_batcher_policy")
-            && server_startup_policy_section.contains("from_env_for_policy")
+            && server_startup_policy_section.contains("from_env_for_policy_with_max_batch")
             && server_startup_policy_section.contains("warm_resident_decode_pool_on_startup")
             && server_startup_policy_section.contains("batching_engine_default_enabled")
             && server_startup_policy_section.contains("kv_cache_device_memory_pressure"),
@@ -4319,7 +4326,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "kiln-bench SFT dispatch should not read the legacy CUDA native-training env locally"
     );
     assert!(
-        server_batching_source.contains("env_max_decode_batch_for_policy")
+        server_batching_source.contains("resolve_decode_runtime_config")
             && server_batching_source.contains("env_prefill_admission_quantum_for_policy")
             && server_batching_source.contains("DecodeBatcherPolicy"),
         "kiln-server batching engine defaults should consume DecodeBatcherPolicy"

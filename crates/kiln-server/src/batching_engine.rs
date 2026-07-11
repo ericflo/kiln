@@ -24,7 +24,9 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::config::{
-    BatchTokenBudget, ConfigValueSource, PrefillLayerBudget, PrefillTokenBudget, StreamStallGrace,
+    BatchTokenBudget, ConfigValueSource, DecodeBatchEffectiveSource, DecodeRuntimeConfig,
+    DeterministicInference, MaxDecodeBatch, MaxDecodeBatchDiagnostics, PrefillLayerBudget,
+    PrefillTokenBudget, StreamStallGrace,
 };
 use crate::response_delivery::{
     DeliveryBarrierError, DeliveryBatch, DeliveryCommand, DeliveryKey, DeliveryResult,
@@ -96,40 +98,53 @@ fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
 }
 
 /// Resolve the actor's `max_decode_batch` from the reproducibility envelope,
-/// environment, or active backend policy. Deterministic inference stays
+/// typed startup configuration, or active backend policy. Deterministic inference stays
 /// single-row even when an operator also configured a wider batch: changing
 /// the request cohort can otherwise select a different BF16 GEMM shape and
 /// change a greedy token at a close logit boundary. The actor caps
 /// `active.len()` at this value, so it is the effective concurrent-decode
 /// width reported through health and metrics.
-pub(crate) fn env_max_decode_batch_for_policy(policy: Option<DecodeBatcherPolicy>) -> usize {
-    let configured = std::env::var("KILN_MAX_DECODE_BATCH").ok();
-    resolve_max_decode_batch_for_policy(
-        kiln_tensor::deterministic_enabled(),
-        configured.as_deref(),
-        policy,
-    )
-}
-
-fn resolve_max_decode_batch_for_policy(
-    deterministic: bool,
-    configured: Option<&str>,
+pub fn resolve_decode_runtime_config(
+    deterministic: DeterministicInference,
+    configured: MaxDecodeBatch,
     policy: Option<DecodeBatcherPolicy>,
-) -> usize {
-    if deterministic {
-        return 1;
+    max_batch_tokens: BatchTokenBudget,
+) -> DecodeRuntimeConfig {
+    let backend_policy = policy.map_or(DEFAULT_MAX_DECODE_BATCH, |policy| {
+        // The engine's width, not the legacy batcher's: CUDA keeps its serial
+        // legacy row loop (max_batch 1) while the engine decodes concurrently.
+        policy.engine_max_decode_batch.unwrap_or(policy.max_batch)
+    });
+    let selected = configured.limit().unwrap_or(backend_policy);
+    let selected_source = match (configured.limit(), configured.source()) {
+        (Some(_), ConfigValueSource::ConfigFile) => DecodeBatchEffectiveSource::ConfigFile,
+        (Some(_), ConfigValueSource::Environment) => DecodeBatchEffectiveSource::Environment,
+        _ => DecodeBatchEffectiveSource::BackendPolicy,
+    };
+    let (selected, selected_source) = if deterministic.enabled() {
+        (1, DecodeBatchEffectiveSource::Deterministic)
+    } else {
+        (selected, selected_source)
+    };
+    let (effective, effective_source) = if max_batch_tokens.tokens() < selected {
+        (
+            max_batch_tokens.tokens(),
+            DecodeBatchEffectiveSource::MaxBatchTokens,
+        )
+    } else {
+        (selected, selected_source)
+    };
+
+    DecodeRuntimeConfig {
+        deterministic: deterministic.diagnostics(),
+        max_decode_batch: MaxDecodeBatchDiagnostics {
+            configured: configured.limit(),
+            configured_source: configured.source(),
+            backend_policy,
+            effective,
+            effective_source,
+        },
     }
-    configured
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or_else(|| {
-            policy.map_or(DEFAULT_MAX_DECODE_BATCH, |policy| {
-                // The engine's width, not the legacy batcher's: CUDA keeps
-                // its serial legacy row loop (max_batch 1) while the engine
-                // decodes concurrently.
-                policy.engine_max_decode_batch.unwrap_or(policy.max_batch)
-            })
-        })
 }
 
 fn env_prefix_aware_admission() -> bool {
@@ -1288,7 +1303,7 @@ pub struct BatchingEngineHandle {
 
 impl BatchingEngineHandle {
     pub fn start(forward: Arc<dyn DecodeForward>) -> Self {
-        Self::start_with_options(forward, env_max_decode_batch_for_policy(None))
+        Self::start_with_options(forward, DEFAULT_MAX_DECODE_BATCH)
     }
 
     pub fn start_with_options(forward: Arc<dyn DecodeForward>, max_decode_batch: usize) -> Self {
@@ -4872,10 +4887,26 @@ mod tests {
 
     #[test]
     fn max_decode_batch_default_is_backend_aware() {
+        let resolve = |deterministic: bool,
+                       configured: Option<usize>,
+                       source: ConfigValueSource,
+                       policy: Option<DecodeBatcherPolicy>| {
+            resolve_decode_runtime_config(
+                DeterministicInference::new(deterministic, source),
+                MaxDecodeBatch::new(configured, source).unwrap(),
+                policy,
+                BatchTokenBudget::default(),
+            )
+        };
         let vulkan_policy =
             DecodeBatcherPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0));
         let metal_policy = DecodeBatcherPolicy::for_backend("metal", kiln_tensor::Device::Metal(0));
-        assert_eq!(resolve_max_decode_batch_for_policy(false, None, None), 8);
+        assert_eq!(
+            resolve(false, None, ConfigValueSource::Default, None)
+                .max_decode_batch
+                .effective,
+            8
+        );
         // CUDA: the legacy batcher stays serial (max_batch 1) but the
         // ENGINE width must be the engine default — the policy-routing
         // change that reused max_batch serialized all concurrent CUDA
@@ -4883,32 +4914,72 @@ mod tests {
         let cuda_policy = DecodeBatcherPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0));
         assert_eq!(cuda_policy.max_batch, 1);
         assert_eq!(
-            resolve_max_decode_batch_for_policy(false, None, Some(cuda_policy)),
+            resolve(false, None, ConfigValueSource::Default, Some(cuda_policy))
+                .max_decode_batch
+                .effective,
             8
         );
         assert_eq!(
-            resolve_max_decode_batch_for_policy(false, None, Some(vulkan_policy)),
+            resolve(false, None, ConfigValueSource::Default, Some(vulkan_policy))
+                .max_decode_batch
+                .effective,
             64
         );
         assert_eq!(
-            resolve_max_decode_batch_for_policy(false, None, Some(metal_policy)),
+            resolve(false, None, ConfigValueSource::Default, Some(metal_policy))
+                .max_decode_batch
+                .effective,
             8
         );
+        let configured = resolve(false, Some(24), ConfigValueSource::Environment, None);
+        assert_eq!(configured.max_decode_batch.effective, 24);
         assert_eq!(
-            resolve_max_decode_batch_for_policy(false, Some("24"), None),
+            configured.max_decode_batch.effective_source,
+            DecodeBatchEffectiveSource::Environment
+        );
+        assert_eq!(
+            resolve(
+                false,
+                Some(24),
+                ConfigValueSource::ConfigFile,
+                Some(vulkan_policy)
+            )
+            .max_decode_batch
+            .effective,
             24
         );
+        let deterministic = resolve(true, Some(24), ConfigValueSource::Environment, None);
+        assert_eq!(deterministic.max_decode_batch.effective, 1);
         assert_eq!(
-            resolve_max_decode_batch_for_policy(false, Some("24"), Some(vulkan_policy)),
-            24
+            deterministic.max_decode_batch.effective_source,
+            DecodeBatchEffectiveSource::Deterministic
         );
         assert_eq!(
-            resolve_max_decode_batch_for_policy(true, Some("24"), None),
+            resolve(
+                true,
+                None,
+                ConfigValueSource::Environment,
+                Some(vulkan_policy)
+            )
+            .max_decode_batch
+            .effective,
             1
         );
+    }
+
+    #[test]
+    fn combined_token_budget_constrains_configured_decode_width() {
+        let resolved = resolve_decode_runtime_config(
+            DeterministicInference::default(),
+            MaxDecodeBatch::new(Some(256), ConfigValueSource::ConfigFile).unwrap(),
+            None,
+            BatchTokenBudget::new(128, ConfigValueSource::Environment).unwrap(),
+        );
+        assert_eq!(resolved.max_decode_batch.configured, Some(256));
+        assert_eq!(resolved.max_decode_batch.effective, 128);
         assert_eq!(
-            resolve_max_decode_batch_for_policy(true, None, Some(vulkan_policy)),
-            1
+            resolved.max_decode_batch.effective_source,
+            DecodeBatchEffectiveSource::MaxBatchTokens
         );
     }
 

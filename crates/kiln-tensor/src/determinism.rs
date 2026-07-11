@@ -8,10 +8,10 @@
 //!
 //! # User-facing contract
 //!
-//! Setting `KILN_DETERMINISTIC=1` enables the deterministic variant of
-//! every `tolerance_bounded` op (cuBLAS workspace pin, deterministic
-//! atomicAdd embedding-bwd, deterministic-reduction-tree softmax / RMSNorm /
-//! cross-entropy bwd, no warp-shuffle + cross-block reduction).
+//! `KILN_DETERMINISTIC=1` selects one immutable process-wide policy value that
+//! tensor and kernel implementations can consult. This module does not claim
+//! that every `tolerance_bounded` op currently consumes the selector, nor does
+//! it configure external library controls such as `CUBLAS_WORKSPACE_CONFIG`.
 //!
 //! ```ignore
 //! use kiln_tensor::determinism::deterministic_enabled;
@@ -95,28 +95,27 @@ impl fmt::Display for Determinism {
     }
 }
 
-/// Read `KILN_DETERMINISTIC` from the environment.
+/// Return the process-lifetime deterministic runtime selection.
 ///
-/// Returns `true` iff the env var is `"1"`, `"true"`, or `"yes"`
-/// (case-insensitive, whitespace-trimmed). Mirrors `kiln_core::env_flag`
-/// — kiln-tensor cannot depend on kiln-core directly (kiln-core depends
-/// on kiln-tensor in subsequent phases), so we inline the same predicate.
-///
-/// Hot-path callers should cache the result rather than calling this
-/// per-op: env-var lookup is a syscall + a `String` allocation. See
-/// [`DETERMINISTIC_CACHED`].
+/// Standalone tensor consumers lazily resolve `KILN_DETERMINISTIC`. Servers
+/// should validate their typed configuration and call
+/// [`DeterministicCache::configure`] before initializing any tensor runtime.
 pub fn deterministic_enabled() -> bool {
+    DETERMINISTIC_CACHED.is_on()
+}
+
+fn deterministic_env_enabled() -> bool {
     match std::env::var("KILN_DETERMINISTIC").ok().as_deref() {
         Some(v) => {
             let v = v.trim().to_ascii_lowercase();
-            matches!(v.as_str(), "1" | "true" | "yes")
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
         }
         None => false,
     }
 }
 
-/// Cached, lazy `deterministic_enabled()`. Reads the env var once
-/// per process; subsequent calls are a relaxed atomic load.
+/// Process-lifetime deterministic selection. Standalone use reads the env var
+/// once; typed server startup may configure it before the first operation.
 ///
 /// Hot-path entry points should call this:
 ///
@@ -153,17 +152,42 @@ impl DeterministicCache {
         let v = self.state.load(Ordering::Relaxed);
         match v {
             0 => {
-                let on = deterministic_enabled();
+                let on = deterministic_env_enabled();
                 let encoded = if on { 2 } else { 1 };
-                // Best-effort CAS — race-tolerant since both racers
-                // read the same env var and write the same value.
-                let _ =
-                    self.state
-                        .compare_exchange(0, encoded, Ordering::Relaxed, Ordering::Relaxed);
-                on
+                match self
+                    .state
+                    .compare_exchange(0, encoded, Ordering::Relaxed, Ordering::Relaxed)
+                {
+                    Ok(_) => on,
+                    Err(active) => active == 2,
+                }
             }
             1 => false,
             _ => true,
+        }
+    }
+
+    /// Fix the process-lifetime selection before tensor initialization.
+    ///
+    /// Repeating the same selection is harmless. A conflicting selection is
+    /// rejected because changing deterministic kernels after an operation has
+    /// run would make one process internally irreproducible.
+    pub fn configure(
+        &self,
+        enabled: bool,
+    ) -> core::result::Result<(), DeterministicConfigurationError> {
+        use core::sync::atomic::Ordering;
+        let requested = if enabled { 2 } else { 1 };
+        match self
+            .state
+            .compare_exchange(0, requested, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => Ok(()),
+            Err(active) if active == requested => Ok(()),
+            Err(active) => Err(DeterministicConfigurationError {
+                requested: enabled,
+                active: active == 2,
+            }),
         }
     }
 
@@ -182,6 +206,26 @@ impl DeterministicCache {
         self.state.store(0, Ordering::Relaxed);
     }
 }
+
+/// A process attempted to change deterministic tensor behavior after it was
+/// already fixed by startup configuration or first use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeterministicConfigurationError {
+    pub requested: bool,
+    pub active: bool,
+}
+
+impl fmt::Display for DeterministicConfigurationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "deterministic tensor runtime is already configured as {}; cannot change it to {}",
+            self.active, self.requested
+        )
+    }
+}
+
+impl std::error::Error for DeterministicConfigurationError {}
 
 impl Default for DeterministicCache {
     fn default() -> Self {
@@ -223,6 +267,21 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_cache_configuration_is_immutable() {
+        let cache = DeterministicCache::new();
+        cache.configure(true).unwrap();
+        cache.configure(true).unwrap();
+        assert_eq!(
+            cache.configure(false).unwrap_err(),
+            DeterministicConfigurationError {
+                requested: false,
+                active: true,
+            }
+        );
+        assert!(cache.is_on());
+    }
+
+    #[test]
     fn deterministic_cache_reads_env_lazily() {
         let cache = DeterministicCache::new();
         // Reset to unread, then ensure subsequent is_on() reads the
@@ -238,6 +297,10 @@ mod tests {
 
         cache._reset_for_test();
         unsafe { std::env::set_var("KILN_DETERMINISTIC", "1") };
+        assert!(cache.is_on());
+
+        cache._reset_for_test();
+        unsafe { std::env::set_var("KILN_DETERMINISTIC", "on") };
         assert!(cache.is_on());
 
         cache._reset_for_test();

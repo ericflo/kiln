@@ -10,7 +10,8 @@ use std::sync::atomic::Ordering;
 
 use crate::batching_engine::BatchingEngineSnapshot;
 use crate::config::{
-    ConfigValueSource, ModelDefaultsProfile, ServingProfileDiagnostics, ServingRuntimePolicy,
+    ConfigValueSource, DecodeRuntimeConfig, ModelDefaultsProfile, ServingProfileDiagnostics,
+    ServingRuntimePolicy,
 };
 use crate::recent_requests::RequestRecord;
 use crate::state::{AppState, ModelBackend};
@@ -200,6 +201,7 @@ struct PromptCacheInfo {
 
 #[derive(Serialize)]
 struct DecodeRuntimeInfo {
+    configuration: DecodeRuntimeConfig,
     cuda_graphs: GraphInfo,
     rocm_graphs: RocmGraphInfo,
     metal_graphs: GraphInfo,
@@ -526,6 +528,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let recent_requests = recent_request_metrics(&state);
     let prompt_caches = prompt_caches(&state);
     let decode_runtime = DecodeRuntimeInfo {
+        configuration: state.decode_runtime_config,
         cuda_graphs,
         rocm_graphs,
         metal_graphs,
@@ -1189,6 +1192,14 @@ mod tests {
         assert_eq!(json["prefix_cache"]["pending_release_entries"], 0);
         assert!(json["prompt_caches"].is_object());
         assert!(json["decode_runtime"].is_object());
+        assert_eq!(
+            json["decode_runtime"]["configuration"]["deterministic"]["enabled"],
+            false
+        );
+        assert_eq!(
+            json["decode_runtime"]["configuration"]["max_decode_batch"]["effective"],
+            8
+        );
         for backend in ["cuda_graphs", "rocm_graphs", "metal_graphs"] {
             assert_eq!(json["decode_runtime"][backend]["enabled"], false);
             assert_eq!(json["decode_runtime"][backend]["state"], "disabled");

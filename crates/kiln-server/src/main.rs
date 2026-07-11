@@ -20,22 +20,29 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::MockEngine;
 use kiln_model::forward::GpuWeights;
-use kiln_model::{ModelRunner, ModelRunnerRuntimeOptions, StartupCapabilities};
+use kiln_model::{
+    BackendCapabilityQueries, ModelRunner, ModelRunnerRuntimeOptions, StartupCapabilities,
+};
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use state::{AppState, GpuCoordinationLock, ModelBackend};
 
 fn resolve_model_runner_runtime_options(
     policy: kiln_server::config::ServingRuntimePolicy,
     cuda_graphs_requested: bool,
+    max_decode_batch: Option<usize>,
 ) -> ModelRunnerRuntimeOptions {
     if policy.live_graph_capture {
         ModelRunnerRuntimeOptions {
             cuda_graphs: cuda_graphs_requested,
             rocm_graphs: true,
             metal_graphs: true,
+            max_decode_batch,
         }
     } else {
-        ModelRunnerRuntimeOptions::eager_only()
+        ModelRunnerRuntimeOptions {
+            max_decode_batch,
+            ..ModelRunnerRuntimeOptions::eager_only()
+        }
     }
 }
 
@@ -356,6 +363,9 @@ async fn main() -> Result<()> {
 
     // --- Server startup ---
     let config = KilnConfig::load(args.config.as_deref())?;
+    kiln_tensor::DETERMINISTIC_CACHED
+        .configure(config.server.deterministic.enabled())
+        .context("failed to fix deterministic tensor behavior from startup configuration")?;
     let serving_policy = config.server.serving_profile.runtime_policy();
 
     let level = args.effective_log_level(&config.logging.level);
@@ -480,9 +490,19 @@ async fn main() -> Result<()> {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::debug!("loading model weights from {mp}");
         let load_spinner = cli::make_startup_spinner("selecting device");
-        let graph_options =
-            resolve_model_runner_runtime_options(serving_policy, config.memory.cuda_graphs);
+        let mut graph_options =
+            resolve_model_runner_runtime_options(serving_policy, config.memory.cuda_graphs, None);
         let device_kt = select_device_with_options_kt(graph_options.cuda_graphs)?;
+        let decode_batcher_policy = kiln_model::backend::for_device_kt(&device_kt)
+            .backend_capabilities()
+            .decode_batcher;
+        let startup_decode_runtime = kiln_server::batching_engine::resolve_decode_runtime_config(
+            config.server.deterministic,
+            config.server.max_decode_batch,
+            Some(decode_batcher_policy),
+            config.server.max_batch_tokens,
+        );
+        graph_options.max_decode_batch = Some(startup_decode_runtime.max_decode_batch.effective);
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message(format!("loading model weights from {mp}"));
         }
@@ -568,6 +588,7 @@ async fn main() -> Result<()> {
             adapter_dir,
             &config.memory,
             response_delivery_policy,
+            startup_decode_runtime,
             config.server.max_batch_tokens,
             config.server.max_prefill_tokens_per_cycle,
             config.server.max_prefill_layers_per_cycle,
@@ -591,15 +612,34 @@ async fn main() -> Result<()> {
         let num_blocks = 8192;
         let scheduler = Scheduler::new(scheduler_config, num_blocks);
         let engine = MockEngine::new(model_config.clone());
-        AppState::new_mock(
+        let mut state = AppState::new_mock(
             model_config,
             scheduler,
             Arc::new(engine),
             tokenizer,
             config.server.request_timeout_secs,
             served_model_id,
-        )
+        );
+        state.decode_runtime_config = kiln_server::batching_engine::resolve_decode_runtime_config(
+            config.server.deterministic,
+            config.server.max_decode_batch,
+            None,
+            config.server.max_batch_tokens,
+        );
+        state
     };
+
+    let decode_runtime = state.decode_runtime_config;
+    tracing::info!(
+        deterministic = decode_runtime.deterministic.enabled,
+        deterministic_source = %decode_runtime.deterministic.source,
+        max_decode_batch_configured = ?decode_runtime.max_decode_batch.configured,
+        max_decode_batch_configured_source = %decode_runtime.max_decode_batch.configured_source,
+        max_decode_batch_backend_policy = decode_runtime.max_decode_batch.backend_policy,
+        max_decode_batch_effective = decode_runtime.max_decode_batch.effective,
+        max_decode_batch_effective_source = %decode_runtime.max_decode_batch.effective_source,
+        "decode runtime configuration resolved"
+    );
 
     // Apply server-level checkpoint_interval from config
     state.serving_profile = config.server.serving_profile;
@@ -1404,8 +1444,15 @@ mod tests {
             kiln_server::config::ServingProfile::Stable,
             kiln_server::config::ServingProfile::Maintenance,
         ] {
-            let options = resolve_model_runner_runtime_options(profile.runtime_policy(), true);
-            assert_eq!(options, ModelRunnerRuntimeOptions::eager_only());
+            let options =
+                resolve_model_runner_runtime_options(profile.runtime_policy(), true, Some(17));
+            assert_eq!(
+                options,
+                ModelRunnerRuntimeOptions {
+                    max_decode_batch: Some(17),
+                    ..ModelRunnerRuntimeOptions::eager_only()
+                }
+            );
         }
     }
 
@@ -1413,14 +1460,15 @@ mod tests {
     fn experimental_profile_preserves_explicit_graph_eligibility() {
         let policy = kiln_server::config::ServingProfile::Experimental.runtime_policy();
         assert_eq!(
-            resolve_model_runner_runtime_options(policy, true),
+            resolve_model_runner_runtime_options(policy, true, Some(17)),
             ModelRunnerRuntimeOptions {
                 cuda_graphs: true,
                 rocm_graphs: true,
                 metal_graphs: true,
+                max_decode_batch: Some(17),
             }
         );
-        assert!(!resolve_model_runner_runtime_options(policy, false).cuda_graphs);
+        assert!(!resolve_model_runner_runtime_options(policy, false, Some(17)).cuda_graphs);
     }
 
     #[test]

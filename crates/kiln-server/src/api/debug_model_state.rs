@@ -13,7 +13,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::batching_engine::BatchingEngineSnapshot;
-use crate::config::{ConfigValueSource, ModelDefaultsProfile};
+use crate::config::{ConfigValueSource, DecodeRuntimeConfig, ModelDefaultsProfile};
 use crate::state::{AppState, ModelBackend};
 
 const DEBUG_ENDPOINT_ENV: &str = "KILN_DEBUG_ENDPOINTS";
@@ -30,6 +30,7 @@ struct ModelStateResponse {
     adapters: AdapterDebugState,
     config_hashes: ConfigHashes,
     http: HttpDebugState,
+    decode_runtime: DecodeRuntimeConfig,
     env_flags: BTreeMap<&'static str, EnvFlagState>,
     batching_engine: BatchingEngineDebugState,
     thinking: ThinkingDebugState,
@@ -258,6 +259,7 @@ async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
             send_buffer_kernel_readback_bytes: state.http_send_buffer_preflight_actual_bytes,
             send_buffer_effective_bytes: state.http_send_buffer_preflight_effective_bytes,
         },
+        decode_runtime: state.decode_runtime_config,
         env_flags: selected_env_flags(),
         batching_engine: batching_engine_state(state).await,
         thinking: thinking_state(state),
@@ -406,6 +408,8 @@ fn selected_env_flags() -> BTreeMap<&'static str, EnvFlagState> {
         "KILN_MAX_BATCH_TOKENS",
         "KILN_MAX_PREFILL_TOKENS_PER_CYCLE",
         "KILN_MAX_PREFILL_LAYERS_PER_CYCLE",
+        "KILN_MAX_DECODE_BATCH",
+        "KILN_DETERMINISTIC",
     ]
     .into_iter()
     .map(|name| {
@@ -757,6 +761,8 @@ mod tests {
         assert_eq!(json["http"]["send_buffer_requested_bytes"], 4096);
         assert_eq!(json["http"]["send_buffer_kernel_readback_bytes"], 8192);
         assert_eq!(json["http"]["send_buffer_effective_bytes"], 4096);
+        assert_eq!(json["decode_runtime"]["deterministic"]["enabled"], false);
+        assert_eq!(json["decode_runtime"]["max_decode_batch"]["effective"], 8);
         assert!(json["caches"]["rendered_prompt"].is_object());
         assert!(json["caches"]["prefix_cache"].is_object());
         assert_eq!(json["caches"]["prefix_cache"]["active_leases"], 0);

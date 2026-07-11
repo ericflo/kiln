@@ -306,6 +306,10 @@ pub struct ModelRunner {
     /// (`decode_buffer_max_batch()`), so subsequent decode steps just need a
     /// `get()` (load-acquire) instead of a `Mutex::lock()` per step.
     decode_buffers: OnceLock<DecodeBuffers>,
+    /// Startup-resolved decode-buffer width. The owning product surface can
+    /// impose a typed ceiling; backend policy and model-only debug overrides
+    /// are resolved once during construction rather than on the hot path.
+    decode_buffer_max_batch: usize,
     /// Phase A.5: lazily built on first hot-path access via `ensure_decode_buffers()`.
     /// Mirrors the lazy registry pattern above so `ModelRunner::new` doesn't validate
     /// shapes that decode hasn't asked for yet.
@@ -333,6 +337,9 @@ pub struct ModelRunnerRuntimeOptions {
     pub cuda_graphs: bool,
     pub rocm_graphs: bool,
     pub metal_graphs: bool,
+    /// Exact width required by an owning scheduler. `None` leaves standalone
+    /// model consumers on backend/debug defaults.
+    pub max_decode_batch: Option<usize>,
 }
 
 impl ModelRunnerRuntimeOptions {
@@ -341,6 +348,7 @@ impl ModelRunnerRuntimeOptions {
             cuda_graphs: false,
             rocm_graphs: false,
             metal_graphs: false,
+            max_decode_batch: None,
         }
     }
 }
@@ -811,7 +819,13 @@ fn env_positive_usize(name: &str) -> Option<usize> {
         .filter(|&value| value > 0)
 }
 
-fn decode_buffer_max_batch(backend: &dyn BackendRuntime) -> usize {
+fn decode_buffer_max_batch(
+    backend: &dyn BackendRuntime,
+    scheduler_max_decode_batch: Option<usize>,
+) -> usize {
+    if let Some(required) = scheduler_max_decode_batch {
+        return required.max(1);
+    }
     let explicit = env_positive_usize("KILN_DECODE_BUFFER_MAX_BATCH");
     if let Some(value) = explicit {
         return value;
@@ -820,12 +834,10 @@ fn decode_buffer_max_batch(backend: &dyn BackendRuntime) -> usize {
     // the first large batch does not immediately error with `decode batch N
     // exceeds buffer max_batch M`. Vulkan gets a wider unconfigured default
     // because its resident path keeps scaling past b16 on this target.
-    let actor_max = env_positive_usize("KILN_MAX_DECODE_BATCH").unwrap_or(0);
     let live_batcher_max = env_positive_usize("KILN_DECODE_BATCH_MAX").unwrap_or(0);
-    let backend_default = BackendCapabilityQueries::backend_capabilities(backend)
-        .decode_batcher
-        .max_batch;
-    actor_max.max(live_batcher_max).max(backend_default)
+    let policy = BackendCapabilityQueries::backend_capabilities(backend).decode_batcher;
+    let backend_default = policy.engine_max_decode_batch.unwrap_or(policy.max_batch);
+    live_batcher_max.max(backend_default).max(1)
 }
 
 enum PrefillSampleSource {
@@ -1066,8 +1078,8 @@ enum StreamTokenDisposition {
 /// than rowwise scheduling. Set `KILN_DECODE_BATCHER=0` to force the legacy
 /// direct rowwise path, `KILN_DECODE_BATCH_WAIT_US` to override the admission
 /// delay, `KILN_DECODE_BATCH_MAX` to force this worker's batch size for A/B
-/// testing, or `KILN_MAX_DECODE_BATCH` to set the shared actor/worker batch
-/// width. Vulkan defaults to a longer wait because same-position peers tend
+/// testing. The owning server supplies its validated shared actor/worker
+/// ceiling directly. Vulkan defaults to a longer wait because same-position peers tend
 /// to arrive just outside a short polling window after independent prefills.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeBatcherConfig {
@@ -1116,8 +1128,7 @@ impl DecodeBatcherConfig {
     pub fn from_env_for_policy(policy: DecodeBatcherPolicy) -> Self {
         let mut config = Self::from_env();
         if env_positive_usize("KILN_DECODE_BATCH_MAX").is_none() {
-            config.max_batch =
-                env_positive_usize("KILN_MAX_DECODE_BATCH").unwrap_or(policy.max_batch);
+            config.max_batch = policy.max_batch;
         }
         if std::env::var_os("KILN_DECODE_BATCH_WAIT_US").is_none() {
             config.wait = std::time::Duration::from_micros(policy.wait_micros);
@@ -1125,6 +1136,17 @@ impl DecodeBatcherConfig {
         if env_flag_value("KILN_DECODE_BATCH_MIXED_SEQ").is_none() {
             config.allow_mixed_seq_lens = policy.allow_mixed_seq_lens;
         }
+        config
+    }
+
+    /// Apply the owning scheduler's validated hard ceiling to the backend and
+    /// model-only debug policy. This is the server entry point.
+    pub fn from_env_for_policy_with_max_batch(
+        policy: DecodeBatcherPolicy,
+        max_batch: usize,
+    ) -> Self {
+        let mut config = Self::from_env_for_policy(policy);
+        config.max_batch = config.max_batch.min(max_batch.max(1));
         config
     }
 
@@ -2300,6 +2322,7 @@ impl ModelRunner {
                 cuda_graphs,
                 rocm_graphs: true,
                 metal_graphs: true,
+                max_decode_batch: None,
             },
         )
     }
@@ -2324,6 +2347,8 @@ impl ModelRunner {
         let rocm_graph = RocmGraphRunner::new(&kt_device, options.rocm_graphs);
         let metal_graph = MetalGraphRunner::new(&kt_device, options.metal_graphs);
         let training_caps = TrainingLossBackend::runtime_training_capabilities(backend.as_ref());
+        let decode_buffer_max_batch =
+            decode_buffer_max_batch(backend.as_ref(), options.max_decode_batch);
         tracing::info!(
             backend = BackendIdentity::runtime_name(backend.as_ref()),
             projection_training = training_caps.projection_training,
@@ -2351,6 +2376,7 @@ impl ModelRunner {
             metal_graph: Mutex::new(metal_graph),
             packed_weight_registry: OnceLock::new(),
             decode_buffers: OnceLock::new(),
+            decode_buffer_max_batch,
             decode_buffer_config: OnceLock::new(),
             batched_state_cache: Mutex::new(None),
             backend,
@@ -2549,7 +2575,7 @@ impl ModelRunner {
             .decode_buffer_config
             .get_or_init(|| {
                 DecodeBufferConfig::graph_bucket(
-                    decode_buffer_max_batch(self.backend.as_ref()),
+                    self.decode_buffer_max_batch,
                     self.config.max_position_embeddings,
                     1,
                     16,
@@ -10753,43 +10779,47 @@ mod tests {
 
     #[test]
     fn test_decode_batcher_max_batch_env_policy() {
-        let prior_specific = std::env::var("KILN_DECODE_BATCH_MAX").ok();
-        let prior_shared = std::env::var("KILN_MAX_DECODE_BATCH").ok();
-        // SAFETY: tests in this module that touch these env vars restore them
-        // before returning.
-        unsafe {
-            std::env::remove_var("KILN_DECODE_BATCH_MAX");
-            std::env::remove_var("KILN_MAX_DECODE_BATCH");
-        }
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvRestore::clear(&["KILN_DECODE_BATCH_MAX"]);
 
         let device = kiln_tensor::Device::Cpu;
+        let policy = DecodeBatcherPolicy::for_backend("vulkan", device);
         assert_eq!(
             DecodeBatcherConfig::from_env_for_backend_kt(&device, "vulkan").max_batch,
             64
         );
-        unsafe {
-            std::env::set_var("KILN_MAX_DECODE_BATCH", "24");
-        }
         assert_eq!(
-            DecodeBatcherConfig::from_env_for_backend_kt(&device, "vulkan").max_batch,
+            DecodeBatcherConfig::from_env_for_policy_with_max_batch(policy, 24).max_batch,
             24
         );
         unsafe {
             std::env::set_var("KILN_DECODE_BATCH_MAX", "12");
         }
         assert_eq!(
-            DecodeBatcherConfig::from_env_for_backend_kt(&device, "vulkan").max_batch,
+            DecodeBatcherConfig::from_env_for_policy_with_max_batch(policy, 24).max_batch,
             12
         );
+        unsafe {
+            std::env::set_var("KILN_DECODE_BATCH_MAX", "48");
+        }
+        assert_eq!(
+            DecodeBatcherConfig::from_env_for_policy_with_max_batch(policy, 24).max_batch,
+            24
+        );
+    }
 
-        match prior_specific {
-            Some(v) => unsafe { std::env::set_var("KILN_DECODE_BATCH_MAX", v) },
-            None => unsafe { std::env::remove_var("KILN_DECODE_BATCH_MAX") },
-        }
-        match prior_shared {
-            Some(v) => unsafe { std::env::set_var("KILN_MAX_DECODE_BATCH", v) },
-            None => unsafe { std::env::remove_var("KILN_MAX_DECODE_BATCH") },
-        }
+    #[test]
+    fn decode_buffer_width_honors_injected_scheduler_requirement() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvRestore::clear(&["KILN_DECODE_BUFFER_MAX_BATCH", "KILN_DECODE_BATCH_MAX"]);
+        let vulkan = NamedTestBackend {
+            name: "vulkan",
+            device: kiln_tensor::Device::Cpu,
+        };
+
+        assert_eq!(decode_buffer_max_batch(&vulkan, None), 64);
+        assert_eq!(decode_buffer_max_batch(&vulkan, Some(24)), 24);
+        assert_eq!(decode_buffer_max_batch(&vulkan, Some(1)), 1);
     }
 
     #[test]

@@ -1,12 +1,13 @@
 use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
-use crate::config::ServingProfileDiagnostics;
+use crate::config::{DecodeRuntimeConfig, ServingProfileDiagnostics};
 use crate::state::{AppState, ModelBackend};
 
 #[derive(Serialize)]
 struct ConfigResponse {
     serving_profile: ServingProfileDiagnostics,
+    decode_runtime: DecodeRuntimeConfig,
     vram: VramConfig,
     kv_cache: KvCacheConfig,
     training: TrainingConfig,
@@ -96,6 +97,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
 
     Json(ConfigResponse {
         serving_profile: state.serving_profile.diagnostics(),
+        decode_runtime: state.decode_runtime_config,
         vram: VramConfig {
             detected_gb: vram.total_bytes as f64 / 1e9,
             source: vram.source.to_string(),
@@ -185,6 +187,14 @@ mod tests {
         assert_eq!(json["serving_profile"]["source"], "environment");
         assert_eq!(json["serving_profile"]["immutable_after_startup"], true);
         assert_eq!(json["serving_profile"]["request_overrides_allowed"], false);
+        assert_eq!(json["decode_runtime"]["deterministic"]["enabled"], false);
+        assert_eq!(json["decode_runtime"]["deterministic"]["source"], "default");
+        assert!(json["decode_runtime"]["max_decode_batch"]["configured"].is_null());
+        assert_eq!(json["decode_runtime"]["max_decode_batch"]["effective"], 8);
+        assert_eq!(
+            json["decode_runtime"]["max_decode_batch"]["effective_source"],
+            "backend_policy"
+        );
         let policy = &json["serving_profile"]["effective_policy"];
         for field in [
             "inference_admission",

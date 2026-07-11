@@ -164,6 +164,8 @@ path = "./Qwen3.5-4B"
 
 [server]
 serving_profile = "stable"
+deterministic = false
+max_decode_batch = "auto"
 port = 8420
 ```
 
@@ -874,7 +876,7 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | POST | `/v1/judgments/{name}/rows` | Append one A/B/Tie/Skip preference |
 | POST | `/v1/judgments/{name}/compile` | Compile judgments into an SFT dataset for a judge LoRA |
 | POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
-| GET | `/v1/config` | Current server configuration, serving-profile source, and every effective policy field |
+| GET | `/v1/config` | Current server configuration, source attribution, and effective serving/decode policy fields |
 
 ## Configuration
 
@@ -888,6 +890,8 @@ Key settings:
 | `server.port` | `KILN_PORT` | 8420 | Server listen port |
 | `server.serving_profile` | `KILN_SERVING_PROFILE` | `stable` | Immutable GPU ownership policy: `stable`, `experimental`, or `maintenance` |
 | `server.max_batch_tokens` | `KILN_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per actor cycle; lower values favor decode latency during long prefills, higher values favor prefill throughput |
+| `server.max_decode_batch` | `KILN_MAX_DECODE_BATCH` | `auto` | Concurrent decode-row ceiling (`auto` or 1–65536); malformed values fail startup, and deterministic mode or `max_batch_tokens` may lower the reported effective value |
+| `server.deterministic` | `KILN_DETERMINISTIC` | false | Strict serving-repeatability mode; freezes the process-wide determinism selector and forces effective decode width 1. It does not make every accelerator kernel bitwise deterministic |
 | `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default token budget for an open thinking block |
 | `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference (rest for training) |

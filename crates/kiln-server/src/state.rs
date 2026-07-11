@@ -2316,6 +2316,9 @@ pub struct SelfImproveSchedulerStatus {
 pub struct AppState {
     /// Immutable process-lifetime serving policy and its startup provenance.
     pub serving_profile: crate::config::ServingProfileSetting,
+    /// Immutable deterministic and concurrent-decode policy, including the
+    /// configured, backend-selected, and final effective values.
+    pub decode_runtime_config: crate::config::DecodeRuntimeConfig,
     pub model_config: ModelConfig,
     /// Configured model directory path for real inference mode. `None` in mock mode.
     pub model_path: Option<PathBuf>,
@@ -2736,8 +2739,15 @@ impl AppState {
         served_model_id: String,
     ) -> Self {
         let config_hashes = ConfigHashes::from_model_tokenizer(&model_config, &tokenizer, None);
+        let decode_runtime_config = crate::batching_engine::resolve_decode_runtime_config(
+            crate::config::DeterministicInference::default(),
+            crate::config::MaxDecodeBatch::default(),
+            None,
+            crate::config::BatchTokenBudget::default(),
+        );
         Self {
             serving_profile: crate::config::ServingProfileSetting::default(),
+            decode_runtime_config,
             model_config,
             model_path: None,
             base_teacher_identity: None,
@@ -2856,6 +2866,12 @@ impl AppState {
         prefix_cache_cfg: &crate::config::PrefixCacheConfig,
         base_teacher_identity: Option<Arc<kiln_train::TeacherIdentityV1>>,
     ) -> Self {
+        let decode_runtime_config = crate::batching_engine::resolve_decode_runtime_config(
+            crate::config::DeterministicInference::default(),
+            crate::config::MaxDecodeBatch::default(),
+            Some(runner.backend_capabilities().decode_batcher),
+            max_batch_tokens,
+        );
         Self::new_real_with_serving_profile(
             model_config,
             runner,
@@ -2864,6 +2880,7 @@ impl AppState {
             adapter_dir,
             memory_cfg,
             response_delivery_policy,
+            decode_runtime_config,
             max_batch_tokens,
             crate::config::PrefillTokenBudget::default(),
             crate::config::PrefillLayerBudget::default(),
@@ -2886,6 +2903,7 @@ impl AppState {
         adapter_dir: PathBuf,
         memory_cfg: &crate::config::MemoryConfig,
         response_delivery_policy: crate::batching_engine::ResponseDeliveryPolicy,
+        decode_runtime_config: crate::config::DecodeRuntimeConfig,
         max_batch_tokens: crate::config::BatchTokenBudget,
         max_prefill_tokens_per_cycle: crate::config::PrefillTokenBudget,
         max_prefill_layers_per_cycle: crate::config::PrefillLayerBudget,
@@ -3359,10 +3377,20 @@ impl AppState {
         let gpu_lock = Arc::new(RwLock::new(()));
         let loaded_adapter = Arc::new(std::sync::RwLock::new(None));
         let decode_batcher_policy = backend_capabilities.decode_batcher;
-        let max_decode_batch =
-            crate::batching_engine::env_max_decode_batch_for_policy(Some(decode_batcher_policy));
-        let decode_batcher_config = DecodeBatcherConfig::enabled_for_device_kt(&device_kt)
-            .then(|| DecodeBatcherConfig::from_env_for_policy(decode_batcher_policy));
+        debug_assert_eq!(
+            decode_runtime_config.max_decode_batch.backend_policy,
+            decode_batcher_policy
+                .engine_max_decode_batch
+                .unwrap_or(decode_batcher_policy.max_batch)
+        );
+        let max_decode_batch = decode_runtime_config.max_decode_batch.effective;
+        let decode_batcher_config =
+            DecodeBatcherConfig::enabled_for_device_kt(&device_kt).then(|| {
+                DecodeBatcherConfig::from_env_for_policy_with_max_batch(
+                    decode_batcher_policy,
+                    max_decode_batch,
+                )
+            });
         if decode_batcher_policy.warm_resident_decode_pool_on_startup
             && backend_capabilities.decode.resident_decode.is_native()
         {
@@ -3405,6 +3433,12 @@ impl AppState {
             tracing::info!(
                 backend = backend_name,
                 max_decode_batch,
+                max_decode_batch_configured = ?decode_runtime_config.max_decode_batch.configured,
+                max_decode_batch_configured_source = %decode_runtime_config.max_decode_batch.configured_source,
+                max_decode_batch_backend_policy = decode_runtime_config.max_decode_batch.backend_policy,
+                max_decode_batch_effective_source = %decode_runtime_config.max_decode_batch.effective_source,
+                deterministic = decode_runtime_config.deterministic.enabled,
+                deterministic_source = %decode_runtime_config.deterministic.source,
                 max_batch_tokens = max_batch_tokens.tokens(),
                 max_batch_tokens_source = %max_batch_tokens.source(),
                 max_prefill_tokens_per_cycle = max_prefill_tokens_per_cycle.tokens(),
@@ -3485,6 +3519,7 @@ impl AppState {
         let config_hashes = ConfigHashes::from_model_tokenizer(&model_config, &tokenizer, None);
         Self {
             serving_profile,
+            decode_runtime_config,
             model_config,
             model_path: None,
             base_teacher_identity,

@@ -23,6 +23,12 @@ serving_profile = "stable"              # Immutable process-lifetime GPU ownersh
                                         # maintenance: inference disabled, drained exclusive work.
                                         # KILN_SERVING_PROFILE overrides this strictly. See
                                         # docs/SERVING_PROFILES.md for the restart workflow.
+deterministic = false                    # Serving repeatability envelope. True freezes the process-
+                                        # wide determinism selector and forces one concurrent decode
+                                        # row, even when max_decode_batch is wider. It does not make
+                                        # every accelerator kernel bitwise deterministic. Override
+                                        # strictly with KILN_DETERMINISTIC; malformed values fail
+                                        # startup instead of silently disabling determinism.
 host = "127.0.0.1"                    # Kiln has no built-in auth. Set "0.0.0.0" to accept
                                       # remote connections ONLY behind an authenticated
                                       # reverse proxy or on a private network (WireGuard,
@@ -69,6 +75,12 @@ max_prefill_layers_per_cycle = 4         # Transformer layers processed before a
                                         # strictly with KILN_MAX_PREFILL_LAYERS_PER_CYCLE.
                                         # Three dispatches remain round-robin; every fourth may
                                         # accelerate the shortest tail of at most four token chunks.
+max_decode_batch = "auto"                # Concurrent decode-row ceiling. "auto" selects the active
+                                        # backend policy; an integer in 1..=65536 sets an operator
+                                        # ceiling. Deterministic mode and max_batch_tokens may lower
+                                        # the effective value. KILN_MAX_DECODE_BATCH overrides this
+                                        # strictly and also accepts "auto". Startup, /health,
+                                        # /v1/config, and debug report all sources and constraints.
 # eval_mode = false
 # default_thinking_enabled = false     # Optional. Qwen3.5-4B profile preserves the
                                       # official template thinking default unless this

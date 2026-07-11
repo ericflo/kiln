@@ -54,8 +54,9 @@ The pin lives in:
 - The bench harness (`scripts/bench-*.sh`).
 - The release-builds CI workflow.
 
-A future kiln-tensor `KILN_DETERMINISTIC=1` envelope (Phase 9 item) sets
-this var alongside the other three categories below.
+The current Kiln selector does not set this CUDA library variable. CUDA
+determinism qualification must export `CUBLAS_WORKSPACE_CONFIG=:4096:8`
+explicitly until that behavior is wired and proven before cuBLAS startup.
 
 #### 2. atomicAdd in embedding bwd + scatter-add — tolerance-bounded, with deterministic variant
 
@@ -133,31 +134,23 @@ because softmax-bwd in BF16 and matmul-bwd in BF16 have structurally
 different tolerance**. The 2e-2 grad_w band documented at
 `rmsnorm-kernel/src/lib.rs:5036` is an example.
 
-### KILN_DETERMINISTIC=1 envelope (Phase 9 item)
+### Deterministic runtime envelope
 
-A single env var forces every "deterministic by construction" option in
-every category above. The CI training-parity test runs under the
-envelope and validates bit-reproducibility across two runs at the same
-seed.
+A typed `server.deterministic` setting, strictly overridable with
+`KILN_DETERMINISTIC`, is validated before tensor initialization. Startup fixes
+the process-lifetime selector exactly once, rejects malformed overrides instead
+of treating them as false, and forces serving decode width to one so concurrent
+admission cannot change a request's BF16 GEMM shape and greedy-token path.
+`/v1/config`, health, and debug diagnostics report its source and effective
+decode width.
 
-In code, the envelope is wired in `kiln-core::env_flag::deterministic()`
-and reads:
-
-```rust
-pub fn deterministic() -> bool {
-    env_flag("KILN_DETERMINISTIC", false)
-}
-```
-
-The default is `false` (perf-preferred). When set, the substrate:
-
-- Exports `CUBLAS_WORKSPACE_CONFIG=:4096:8` to the cuBLAS handle context.
-- Selects the deterministic-atomicAdd embedding-bwd variant.
-- Selects the deterministic-reduction-tree softmax/RMSNorm/cross-entropy bwd.
-- Disables any algorithm that uses warp-shuffle + cross-block reduction
-  without a recorded determinism category.
-- Forces serving decode width to one so concurrent admission cannot change a
-  request's BF16 GEMM shape and greedy-token path.
+That is the implemented serving-repeatability contract. It does **not** yet
+export `CUBLAS_WORKSPACE_CONFIG`, select every deterministic atomic/reduction
+variant, or establish bitwise training replay across backends. The default is
+`false` (performance-preferred). Kernel consumers may consult
+`kiln_tensor::deterministic_enabled()`, but each claimed path still needs an
+implementation test and local hardware receipt. Do not infer coverage from the
+presence of `Determinism` metadata alone.
 
 ### Migration enforcement
 
