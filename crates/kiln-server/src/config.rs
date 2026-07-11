@@ -45,7 +45,7 @@ pub const MAX_BATCH_TOKENS_MAX: usize = 65_536;
 /// Default prompt-token work allowed between decode cohorts. The stable
 /// serving default is intentionally lower than the combined batch budget so a
 /// long prompt cannot turn one actor cycle into a visible decode pause.
-pub const DEFAULT_MAX_PREFILL_TOKENS_PER_CYCLE: usize = 32;
+pub const DEFAULT_MAX_PREFILL_TOKENS_PER_CYCLE: usize = 64;
 pub const MAX_PREFILL_TOKENS_PER_CYCLE_MIN: usize = 1;
 pub const MAX_PREFILL_TOKENS_PER_CYCLE_MAX: usize = MAX_BATCH_TOKENS_MAX;
 /// Strict startup selector for the serving-safety contract.

@@ -54,7 +54,7 @@ max_batch_tokens = 512                   # Combined decode-plus-prefill token bu
                                         # Valid range:
                                         # 2..=65536. KILN_MAX_BATCH_TOKENS overrides this strictly;
                                         # the effective value and source are in health/debug state.
-max_prefill_tokens_per_cycle = 32        # Independent prompt-token ceiling inside the combined
+max_prefill_tokens_per_cycle = 64        # Independent prompt-token ceiling inside the combined
                                         # budget. Decode reserves its rows first, then prompt work
                                         # advances round-robin by at most this many tokens before the
                                         # next decode cohort. Lower values favor ITL; higher values
