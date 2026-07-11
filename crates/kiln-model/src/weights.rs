@@ -433,6 +433,7 @@ impl Drop for ModelSnapshotLease {
                 cleanup_retries = 0,
                 "private model snapshot removed"
             ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(initial_error) => {
                 let initial_error_text = initial_error.to_string();
                 match remove_snapshot_path(&path) {
