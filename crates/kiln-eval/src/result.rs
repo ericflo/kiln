@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+pub use kiln_core::thinking_budget::ThinkingBudgetOutcome as EvalThinkingBudgetOutcome;
 use serde::{Deserialize, Serialize};
 
 /// Lifecycle of an eval job (mirrors the training-job state machine so
@@ -33,20 +34,6 @@ pub enum EvalOutcomeKind {
     /// rejected by sampler). Counted as a failure for headline accuracy but
     /// surfaced separately for triage.
     Error,
-}
-
-/// Runtime result of applying a thinking budget to one completion.
-///
-/// This deliberately mirrors the server's chat-completion metadata without
-/// depending on `kiln-core`, keeping the eval data crate portable.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EvalThinkingBudgetOutcome {
-    pub triggered: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trigger: Option<String>,
-    pub closed: bool,
-    pub thinking_tokens: usize,
-    pub thinking_time_ms: u64,
 }
 
 /// Effective thinking-budget configuration and provenance for one eval
@@ -829,13 +816,12 @@ mod tests {
             max_time_ms: None,
             tokens_source: "server_default".into(),
             time_source: "example_unlimited".into(),
-            outcome: Some(EvalThinkingBudgetOutcome {
-                triggered: true,
-                trigger: Some("tokens".into()),
-                closed: true,
-                thinking_tokens: 12,
-                thinking_time_ms: 41,
-            }),
+            outcome: Some(EvalThinkingBudgetOutcome::new(
+                Some(kiln_core::sampling::ThinkingBudgetTrigger::Tokens),
+                true,
+                12,
+                41,
+            )),
         });
 
         let json = serde_json::to_value(&outcome).unwrap();

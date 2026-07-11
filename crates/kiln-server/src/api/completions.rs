@@ -16,8 +16,8 @@ use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::request::Request;
 use kiln_core::sampling::{SamplingParams, ThinkingBudget, ThinkingBudgetStatus};
 use kiln_core::thinking_budget::{
-    EffectiveThinkingBudget, ThinkingBudgetDefaults, ThinkingBudgetOverride as BudgetOverride,
-    ThinkingBudgetOverrides, ThinkingBudgetScope,
+    EffectiveThinkingBudget, ThinkingBudgetDefaults, ThinkingBudgetOutcome,
+    ThinkingBudgetOverride as BudgetOverride, ThinkingBudgetOverrides, ThinkingBudgetScope,
 };
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, ChatTemplateOptions, TokenizerError};
@@ -4329,28 +4329,6 @@ impl Default for ThinkingBudgetMetadata {
     }
 }
 
-#[derive(Serialize)]
-struct ThinkingBudgetOutcomeWire<'a> {
-    triggered: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    trigger: Option<&'a str>,
-    closed: bool,
-    thinking_tokens: usize,
-    thinking_time_ms: u64,
-}
-
-impl<'a> From<&'a ThinkingBudgetStatus> for ThinkingBudgetOutcomeWire<'a> {
-    fn from(status: &'a ThinkingBudgetStatus) -> Self {
-        Self {
-            triggered: status.trigger.is_some(),
-            trigger: status.trigger.map(|trigger| trigger.as_str()),
-            closed: status.closed,
-            thinking_tokens: status.thinking_tokens,
-            thinking_time_ms: status.elapsed_ms,
-        }
-    }
-}
-
 fn serialize_optional_thinking_budget_status<S>(
     status: &Option<ThinkingBudgetStatus>,
     serializer: S,
@@ -4359,7 +4337,7 @@ where
     S: serde::Serializer,
 {
     match status {
-        Some(status) => ThinkingBudgetOutcomeWire::from(status).serialize(serializer),
+        Some(status) => ThinkingBudgetOutcome::from(status).serialize(serializer),
         None => serializer.serialize_none(),
     }
 }

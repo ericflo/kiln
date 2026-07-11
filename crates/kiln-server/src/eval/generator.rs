@@ -30,9 +30,7 @@ use kiln_core::token::TokenId;
 #[cfg(test)]
 use kiln_eval::EvalBudgetOverride;
 use kiln_eval::scorers::JudgeRunner;
-use kiln_eval::{
-    EvalChatMessage, EvalGenerationParams, EvalThinkingBudget, EvalThinkingBudgetOutcome,
-};
+use kiln_eval::{EvalChatMessage, EvalGenerationParams, EvalThinkingBudget};
 use uuid::Uuid;
 
 use crate::api::completions::{
@@ -565,18 +563,11 @@ impl EvalGenerator for LiveEvalGenerator {
             };
             cancel.clear_prefill_progress();
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-            if let Some(status) = thinking_budget_handle.map(|budget| budget.status()) {
-                thinking_budget_record.outcome = Some(EvalThinkingBudgetOutcome {
-                    triggered: status.trigger.is_some(),
-                    trigger: status.trigger.map(|trigger| trigger.as_str().to_string()),
-                    closed: status.closed,
-                    thinking_tokens: if status.closed {
-                        status.thinking_tokens
-                    } else {
-                        output.completion_tokens
-                    },
-                    thinking_time_ms: status.elapsed_ms,
-                });
+            if let Some(mut status) = thinking_budget_handle.map(|budget| budget.status()) {
+                if !status.closed {
+                    status.thinking_tokens = output.completion_tokens;
+                }
+                thinking_budget_record.outcome = Some(status.into());
             }
             let raw_text = output.text;
             Ok(EvalCompletion {

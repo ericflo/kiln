@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::sampling::{ThinkingBudgetStatus, ThinkingBudgetTrigger};
+
 /// An optional request/config override where omission and explicit `null`
 /// have different meanings.
 ///
@@ -261,6 +263,82 @@ impl EffectiveThinkingBudget {
     }
 }
 
+/// Canonical terminal/runtime outcome serialized by chat, batch, eval, and
+/// durable result surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ThinkingBudgetOutcome {
+    pub triggered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<ThinkingBudgetTrigger>,
+    pub closed: bool,
+    pub thinking_tokens: usize,
+    pub thinking_time_ms: u64,
+}
+
+impl ThinkingBudgetOutcome {
+    pub const fn new(
+        trigger: Option<ThinkingBudgetTrigger>,
+        closed: bool,
+        thinking_tokens: usize,
+        thinking_time_ms: u64,
+    ) -> Self {
+        Self {
+            triggered: trigger.is_some(),
+            trigger,
+            closed,
+            thinking_tokens,
+            thinking_time_ms,
+        }
+    }
+}
+
+impl From<ThinkingBudgetStatus> for ThinkingBudgetOutcome {
+    fn from(status: ThinkingBudgetStatus) -> Self {
+        Self::new(
+            status.trigger,
+            status.closed,
+            status.thinking_tokens,
+            status.elapsed_ms,
+        )
+    }
+}
+
+impl From<&ThinkingBudgetStatus> for ThinkingBudgetOutcome {
+    fn from(status: &ThinkingBudgetStatus) -> Self {
+        (*status).into()
+    }
+}
+
+impl<'de> Deserialize<'de> for ThinkingBudgetOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            triggered: bool,
+            #[serde(default)]
+            trigger: Option<ThinkingBudgetTrigger>,
+            closed: bool,
+            thinking_tokens: usize,
+            thinking_time_ms: u64,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.triggered != wire.trigger.is_some() {
+            return Err(serde::de::Error::custom(
+                "thinking-budget triggered must agree with trigger presence",
+            ));
+        }
+        Ok(Self::new(
+            wire.trigger,
+            wire.closed,
+            wire.thinking_tokens,
+            wire.thinking_time_ms,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +468,36 @@ mod tests {
         assert_eq!(
             ThinkingBudgetOverride::from(Some(ExplicitThinkingBudget::<usize>::Unlimited)),
             ThinkingBudgetOverride::Unlimited
+        );
+    }
+
+    #[test]
+    fn outcome_wire_shape_is_shared_and_rejects_inconsistent_trigger_state() {
+        let outcome = ThinkingBudgetOutcome::new(Some(ThinkingBudgetTrigger::Tokens), true, 12, 41);
+        let json = serde_json::to_value(outcome).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "triggered": true,
+                "trigger": "tokens",
+                "closed": true,
+                "thinking_tokens": 12,
+                "thinking_time_ms": 41
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ThinkingBudgetOutcome>(json).unwrap(),
+            outcome
+        );
+        assert!(
+            serde_json::from_value::<ThinkingBudgetOutcome>(serde_json::json!({
+                "triggered": false,
+                "trigger": "time",
+                "closed": false,
+                "thinking_tokens": 3,
+                "thinking_time_ms": 7
+            }))
+            .is_err()
         );
     }
 }

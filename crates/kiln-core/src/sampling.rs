@@ -10,7 +10,8 @@ use crate::token::TokenId;
 
 /// The limit that caused Kiln to take over generation and force the model's
 /// closing `</think>` token sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ThinkingBudgetTrigger {
     Tokens,
     Time,
