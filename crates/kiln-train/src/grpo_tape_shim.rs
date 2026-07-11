@@ -61,8 +61,9 @@
 //! lineage from the leaf to the loss, so `grads.get(leaf)` was always `None` and
 //! GRPO training was fully broken — the analytic kt derivation above replaces it.
 //!
-//! The candle `logits` / `ref_log_probs` are bridged into kt ONCE per backward
-//! and the final `[1, T, V]` grad bridged back to candle for the return type
+//! The candle `logits` and detached behavior-policy / KL-reference log-probs
+//! are bridged into kt ONCE per backward, and the final `[1, T, V]` grad is
+//! bridged back to candle for the return type
 //! (eliminating those I/O copies is a separate later #1082 task); the gradient
 //! math is otherwise entirely kt on-device.
 //!
@@ -131,8 +132,8 @@ use kiln_autograd::{BackwardOp, Tape, tape_forward_enabled, with_active_tape};
 
 /// Fused backward for the GRPO scalar PG (+ KL) loss taken from the full
 /// `[1, T, V]` policy logits. Saves the candle `logits` (an `Arc` bump on the
-/// candle storage), the host-side `input_ids` / `action_mask`, the
-/// (detached, constant) `ref_log_probs`, and the `GrpoLossParams`. The backward
+/// candle storage), the host-side `input_ids` / `action_mask`, the detached
+/// behavior-policy and KL-reference log-probs, and the `GrpoLossParams`. The backward
 /// (#1082 C2) derives `dL/d(logits)` ANALYTICALLY in kt on-device — the
 /// log-softmax JVP `coeff_a · (onehot − softmax)` with a numeric `coeff` from
 /// `grpo_loss` — producing a single `[1, T, V]` kt grad (input count 1). No
@@ -157,9 +158,12 @@ struct GrpoPgLossFromLogitsBackward {
     input_ids: Vec<u32>,
     /// Action-token mask (true at supervised completion positions).
     action_mask: Vec<bool>,
-    /// Detached, constant reference log-probs `[num_active]` (the IS-ratio
-    /// denominator). Never differentiated — saved as a kt tensor (#1082 step 8).
-    ref_log_probs: kiln_tensor::Tensor,
+    /// Detached behavior-policy log-probs `[num_active]`, used only as the
+    /// importance-ratio denominator.
+    behavior_log_probs: kiln_tensor::Tensor,
+    /// Detached frozen-reference log-probs `[num_active]`, used only by the KL
+    /// estimator.
+    kl_reference_log_probs: kiln_tensor::Tensor,
     /// GRPO surrogate / KL parameters (advantage, clip bounds, KL estimator,
     /// loss normalizer, IS level, reinforce flag, entropy-aware quantile).
     loss_params: GrpoLossParams,
@@ -243,7 +247,8 @@ impl BackwardOp for GrpoPgLossFromLogitsBackward {
             &self.logits,
             &self.input_ids,
             &self.action_mask,
-            &self.ref_log_probs,
+            &self.behavior_log_probs,
+            &self.kl_reference_log_probs,
             self.loss_params,
             self.grpo_kl_auxiliary_route,
             grad_scalar,
@@ -507,23 +512,23 @@ fn prepare_vulkan_grpo_active_hidden(
 }
 
 #[cfg(feature = "vulkan")]
-fn prepare_vulkan_grpo_ref_log_probs(
-    ref_log_probs: &kiln_tensor::Tensor,
+fn prepare_vulkan_grpo_reference_log_probs(
+    reference_log_probs: &kiln_tensor::Tensor,
     num_active: usize,
 ) -> kiln_tensor::Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
-    if !matches!(ref_log_probs.device(), kiln_tensor::Device::Vulkan(_)) {
+    if !matches!(reference_log_probs.device(), kiln_tensor::Device::Vulkan(_)) {
         return Err(vulkan_tensor_err(format!(
-            "vulkan GRPO: ref_log_probs must be Vulkan-backed, got {}",
-            ref_log_probs.device()
+            "vulkan GRPO: reference log-probs must be Vulkan-backed, got {}",
+            reference_log_probs.device()
         )));
     }
-    if ref_log_probs.elem_count() != num_active {
+    if reference_log_probs.elem_count() != num_active {
         return Err(vulkan_tensor_err(format!(
-            "vulkan GRPO: ref_log_probs len {} != num_active {num_active}",
-            ref_log_probs.elem_count()
+            "vulkan GRPO: reference log-probs len {} != num_active {num_active}",
+            reference_log_probs.elem_count()
         )));
     }
-    let ref_f32 = ref_log_probs
+    let ref_f32 = reference_log_probs
         .to_dtype(kiln_tensor::DType::F32)?
         .flatten_all()?
         .reshape(vec![num_active])?;
@@ -533,7 +538,7 @@ fn prepare_vulkan_grpo_ref_log_probs(
         ref_f32.contiguous()?
     };
     kiln_tensor::vk_tensor_from_kt(&ref_contig)
-        .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO: bridge ref_log_probs: {e}")))
+        .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO: bridge reference log-probs: {e}")))
 }
 
 #[cfg(feature = "vulkan")]
@@ -543,7 +548,8 @@ fn vulkan_grpo_loss_kt(
     weight: &kiln_tensor::Tensor,
     input_ids: &[u32],
     action_mask: &[bool],
-    ref_log_probs: &kiln_tensor::Tensor,
+    behavior_log_probs: &kiln_tensor::Tensor,
+    kl_reference_log_probs: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
 ) -> Result<
     Option<(
@@ -554,6 +560,13 @@ fn vulkan_grpo_loss_kt(
         usize,
     )>,
 > {
+    // The current fused-kernel ABI accepts one denominator and historically
+    // reused it for both PPO and KL. Preserve the fast path only when the
+    // caller intentionally supplies the same tensor for both roles; distinct
+    // behavior and KL-reference policies take the generic, separated path.
+    if !std::ptr::eq(behavior_log_probs, kl_reference_log_probs) {
+        return Ok(None);
+    }
     let num_active = action_mask
         .get(1..)
         .map_or(0, |m| m.iter().filter(|&&v| v).count());
@@ -571,7 +584,7 @@ fn vulkan_grpo_loss_kt(
     };
     let weight_vk = kiln_tensor::vk_tensor_from_kt(&weight_kt)
         .map_err(|e| anyhow::anyhow!("vulkan GRPO fused loss: bridge weight: {e}"))?;
-    let ref_vk = prepare_vulkan_grpo_ref_log_probs(ref_log_probs, active_labels.len())
+    let ref_vk = prepare_vulkan_grpo_reference_log_probs(behavior_log_probs, active_labels.len())
         .context("vulkan GRPO fused loss: ref log-probs")?;
     let (loss_vk, saved) = kiln_vulkan_kernel::vk_ops::flce::vk_grpo_loss_with_saved_state_ext(
         &active_hidden_vk,
@@ -649,7 +662,8 @@ fn vulkan_grpo_grad_from_saved_kt(
 ))]
 fn grpo_loss_coeff_from_policy_log_probs_kt(
     policy_log_probs: &kiln_tensor::Tensor,
-    ref_log_probs_kt: &kiln_tensor::Tensor,
+    behavior_log_probs_kt: &kiln_tensor::Tensor,
+    kl_reference_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     num_active: usize,
 ) -> Result<Vec<f32>> {
@@ -659,10 +673,13 @@ fn grpo_loss_coeff_from_policy_log_probs_kt(
         return Ok(Vec::new());
     }
     anyhow::ensure!(
-        policy_log_probs.elem_count() == num_active && ref_log_probs_kt.elem_count() == num_active,
-        "grpo_loss_coeff_from_policy_log_probs_kt: policy/ref len mismatch ({} / {} vs {num_active})",
+        policy_log_probs.elem_count() == num_active
+            && behavior_log_probs_kt.elem_count() == num_active
+            && kl_reference_log_probs_kt.elem_count() == num_active,
+        "grpo_loss_coeff_from_policy_log_probs_kt: policy/behavior/KL-reference len mismatch ({} / {} / {} vs {num_active})",
         policy_log_probs.elem_count(),
-        ref_log_probs_kt.elem_count()
+        behavior_log_probs_kt.elem_count(),
+        kl_reference_log_probs_kt.elem_count()
     );
 
     let coeff: Vec<f32> = if loss_params.reinforce {
@@ -676,24 +693,39 @@ fn grpo_loss_coeff_from_policy_log_probs_kt(
             .map_err(|e| {
                 anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: plp host: {e}")
             })?;
-        let ref_host: Vec<f32> = ref_log_probs_kt
+        let behavior_host: Vec<f32> = behavior_log_probs_kt
             .to_dtype(KtDType::F32)
             .and_then(|t| t.flatten_all())
             .and_then(|t| t.to_vec1::<f32>())
             .map_err(|e| {
-                anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: ref host: {e}")
+                anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: behavior host: {e}")
+            })?;
+        let kl_reference_host: Vec<f32> = kl_reference_log_probs_kt
+            .to_dtype(KtDType::F32)
+            .and_then(|t| t.flatten_all())
+            .and_then(|t| t.to_vec1::<f32>())
+            .map_err(|e| {
+                anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: KL-reference host: {e}")
             })?;
         anyhow::ensure!(
-            plp_host.len() == num_active && ref_host.len() == num_active,
-            "grpo_loss_coeff_from_policy_log_probs_kt: plp/ref len mismatch ({} / {} vs {num_active})",
+            plp_host.len() == num_active
+                && behavior_host.len() == num_active
+                && kl_reference_host.len() == num_active,
+            "grpo_loss_coeff_from_policy_log_probs_kt: policy/behavior/KL-reference len mismatch ({} / {} / {} vs {num_active})",
             plp_host.len(),
-            ref_host.len()
+            behavior_host.len(),
+            kl_reference_host.len()
         );
         let lo = 1.0 - loss_params.clip_low;
         let hi = 1.0 + loss_params.clip_high;
-        let log_ratios: Vec<f64> = plp_host
+        let importance_log_ratios: Vec<f64> = plp_host
             .iter()
-            .zip(ref_host.iter())
+            .zip(behavior_host.iter())
+            .map(|(&p, &r)| (p - r) as f64)
+            .collect();
+        let kl_log_ratios: Vec<f64> = plp_host
+            .iter()
+            .zip(kl_reference_host.iter())
             .map(|(&p, &r)| (p - r) as f64)
             .collect();
         let kl_mask = entropy_aware_kl_mask(&plp_host, &loss_params);
@@ -706,11 +738,11 @@ fn grpo_loss_coeff_from_policy_log_probs_kt(
         };
 
         match loss_params.is_level {
-            crate::IsLevel::Token => log_ratios
+            crate::IsLevel::Token => importance_log_ratios
                 .iter()
                 .enumerate()
-                .map(|(a, &log_ratio)| {
-                    let ratio = log_ratio.exp();
+                .map(|(a, &importance_log_ratio)| {
+                    let ratio = importance_log_ratio.exp();
                     let pg_grad = if loss_params.advantage >= 0.0 {
                         if ratio <= hi {
                             -loss_params.advantage * ratio
@@ -722,12 +754,12 @@ fn grpo_loss_coeff_from_policy_log_probs_kt(
                     } else {
                         0.0
                     };
-                    let per_token = pg_grad + kl_mask[a] * kl_grad(log_ratio);
+                    let per_token = pg_grad + kl_mask[a] * kl_grad(kl_log_ratios[a]);
                     (loss_params.loss_normalizer * per_token) as f32
                 })
                 .collect(),
             crate::IsLevel::Sequence => {
-                let mean_log_ratio = log_ratios.iter().sum::<f64>() / num_active as f64;
+                let mean_log_ratio = importance_log_ratios.iter().sum::<f64>() / num_active as f64;
                 let seq_ratio = mean_log_ratio.exp();
                 let pg_grad = if loss_params.advantage >= 0.0 {
                     if seq_ratio <= hi {
@@ -740,23 +772,23 @@ fn grpo_loss_coeff_from_policy_log_probs_kt(
                 } else {
                     0.0
                 };
-                log_ratios
+                importance_log_ratios
                     .iter()
                     .enumerate()
-                    .map(|(a, &log_ratio)| {
-                        let per_token = pg_grad + kl_mask[a] * kl_grad(log_ratio);
+                    .map(|(a, _)| {
+                        let per_token = pg_grad + kl_mask[a] * kl_grad(kl_log_ratios[a]);
                         (loss_params.loss_normalizer * per_token) as f32
                     })
                     .collect()
             }
-            crate::IsLevel::Cispo => log_ratios
+            crate::IsLevel::Cispo => importance_log_ratios
                 .iter()
                 .enumerate()
-                .map(|(a, &log_ratio)| {
-                    let ratio = log_ratio.exp();
+                .map(|(a, &importance_log_ratio)| {
+                    let ratio = importance_log_ratio.exp();
                     let clipped = ratio.clamp(lo, hi);
                     let weight = clipped * loss_params.advantage;
-                    let per_token = -weight + kl_mask[a] * kl_grad(log_ratio);
+                    let per_token = -weight + kl_mask[a] * kl_grad(kl_log_ratios[a]);
                     (loss_params.loss_normalizer * per_token) as f32
                 })
                 .collect(),
@@ -775,7 +807,8 @@ fn grpo_loss_coeff_from_policy_log_probs_kt(
 fn grpo_loss_coeff_col_device_fast_path_kt(
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     policy_log_probs: &kiln_tensor::Tensor,
-    ref_log_probs_kt: &kiln_tensor::Tensor,
+    behavior_log_probs_kt: &kiln_tensor::Tensor,
+    kl_reference_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     num_active: usize,
     grad_scalar: f64,
@@ -787,10 +820,13 @@ fn grpo_loss_coeff_col_device_fast_path_kt(
         return Ok(Some(KtTensor::zeros(vec![0, 1], KtDType::F32, *device)?));
     }
     anyhow::ensure!(
-        policy_log_probs.elem_count() == num_active && ref_log_probs_kt.elem_count() == num_active,
-        "grpo_loss_coeff_col_device_fast_path_kt: policy/ref len mismatch ({} / {} vs {num_active})",
+        policy_log_probs.elem_count() == num_active
+            && behavior_log_probs_kt.elem_count() == num_active
+            && kl_reference_log_probs_kt.elem_count() == num_active,
+        "grpo_loss_coeff_col_device_fast_path_kt: policy/behavior/KL-reference len mismatch ({} / {} / {} vs {num_active})",
         policy_log_probs.elem_count(),
-        ref_log_probs_kt.elem_count()
+        behavior_log_probs_kt.elem_count(),
+        kl_reference_log_probs_kt.elem_count()
     );
 
     let device_supported = matches!(
@@ -823,19 +859,25 @@ fn grpo_loss_coeff_col_device_fast_path_kt(
         .flatten_all()?
         .reshape(vec![num_active])?
         .contiguous()?;
-    let reference = ref_log_probs_kt
+    let behavior = behavior_log_probs_kt
         .to_dtype(KtDType::F32)?
         .flatten_all()?
         .reshape(vec![num_active])?
         .contiguous()?;
-    let log_ratio = (&policy - &reference)?.contiguous()?;
-    let ratio = log_ratio.exp()?.contiguous()?;
+    let kl_reference = kl_reference_log_probs_kt
+        .to_dtype(KtDType::F32)?
+        .flatten_all()?
+        .reshape(vec![num_active])?
+        .contiguous()?;
+    let importance_log_ratio = (&policy - &behavior)?.contiguous()?;
+    let ratio = importance_log_ratio.exp()?.contiguous()?;
+    let kl_log_ratio = (&policy - &kl_reference)?.contiguous()?;
 
     let kl_grad_raw = match loss_params.kl_estimator {
         crate::KlEstimator::None => ratio.affine(0.0, 0.0)?,
         crate::KlEstimator::K1 => ratio.affine(0.0, loss_params.kl_coeff)?,
         crate::KlEstimator::K3 => {
-            let exp_neg_log_ratio = log_ratio.neg()?.exp()?;
+            let exp_neg_log_ratio = kl_log_ratio.neg()?.exp()?;
             exp_neg_log_ratio.affine(-loss_params.kl_coeff, loss_params.kl_coeff)?
         }
     };
@@ -872,7 +914,10 @@ fn grpo_loss_coeff_col_device_fast_path_kt(
             }
         }
         crate::IsLevel::Sequence => {
-            let seq_ratio = log_ratio.mean_keepdim(0usize)?.exp()?.contiguous()?;
+            let seq_ratio = importance_log_ratio
+                .mean_keepdim(0usize)?
+                .exp()?
+                .contiguous()?;
             let seq_zero = seq_ratio.affine(0.0, 0.0)?.contiguous()?;
             let seq_pg_raw = seq_ratio
                 .affine(-loss_params.advantage / num_active as f64, 0.0)?
@@ -1218,6 +1263,7 @@ pub(crate) fn echo_env_grad_from_normed_hidden_kt(
         // derivation. Pass the env log-probs for shape-compatible refs.
         &echo.env_log_probs,
         &echo.env_log_probs,
+        &echo.env_log_probs,
         loss_params,
         grpo_kl_auxiliary_route,
         grad_scalar,
@@ -1245,7 +1291,8 @@ struct GrpoPgLossFromNormedHiddenBackward {
     running_sumexp: kiln_tensor::Tensor,
     active_idx: kiln_tensor::Tensor,
     active_labels: Vec<u32>,
-    ref_log_probs: kiln_tensor::Tensor,
+    behavior_log_probs: kiln_tensor::Tensor,
+    kl_reference_log_probs: kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     device: Device,
@@ -1310,7 +1357,8 @@ impl BackwardOp for GrpoPgLossFromNormedHiddenBackward {
                 &self.active_idx,
                 &self.active_labels,
                 &self.policy_log_probs,
-                &self.ref_log_probs,
+                &self.behavior_log_probs,
+                &self.kl_reference_log_probs,
                 self.loss_params,
                 self.grpo_kl_auxiliary_route,
                 grad_scalar,
@@ -1372,7 +1420,8 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_grad_kt(
     input_ids: &[u32],
     action_mask: &[bool],
     policy_log_probs_kt: &kiln_tensor::Tensor,
-    ref_log_probs_kt: &kiln_tensor::Tensor,
+    behavior_log_probs_kt: &kiln_tensor::Tensor,
+    kl_reference_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     grad_scalar: f64,
@@ -1394,7 +1443,8 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_grad_kt(
         &state.active_idx,
         &state.active_labels,
         policy_log_probs_kt,
-        ref_log_probs_kt,
+        behavior_log_probs_kt,
+        kl_reference_log_probs_kt,
         loss_params,
         grpo_kl_auxiliary_route,
         grad_scalar,
@@ -1419,7 +1469,8 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
     active_idx: &kiln_tensor::Tensor,
     active_labels: &[u32],
     policy_log_probs_kt: &kiln_tensor::Tensor,
-    ref_log_probs_kt: &kiln_tensor::Tensor,
+    behavior_log_probs_kt: &kiln_tensor::Tensor,
+    kl_reference_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     grad_scalar: f64,
@@ -1510,7 +1561,8 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
         match grpo_loss_coeff_col_device_fast_path_kt(
             grpo_kl_auxiliary_route,
             policy_log_probs_kt,
-            ref_log_probs_kt,
+            behavior_log_probs_kt,
+            kl_reference_log_probs_kt,
             loss_params,
             num_active,
             grad_scalar,
@@ -1522,7 +1574,8 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
             None => {
                 let coeff = grpo_loss_coeff_from_policy_log_probs_kt(
                     policy_log_probs_kt,
-                    ref_log_probs_kt,
+                    behavior_log_probs_kt,
+                    kl_reference_log_probs_kt,
                     loss_params,
                     num_active,
                 )
@@ -1657,7 +1710,8 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
     head_t: &kiln_tensor::Tensor,
     input_ids: &[u32],
     action_mask: &[bool],
-    ref_log_probs_kt: &kiln_tensor::Tensor,
+    behavior_log_probs_kt: &kiln_tensor::Tensor,
+    kl_reference_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     grad_scalar: f64,
@@ -1678,7 +1732,8 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
     let loss_kt = grpo_loss_with_kl_auxiliary_route(
         grpo_kl_auxiliary_route,
         &state.policy_log_probs,
-        ref_log_probs_kt,
+        behavior_log_probs_kt,
+        kl_reference_log_probs_kt,
         loss_params,
         device,
     )
@@ -1689,7 +1744,8 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
         &state.active_idx,
         &state.active_labels,
         &state.policy_log_probs,
-        ref_log_probs_kt,
+        behavior_log_probs_kt,
+        kl_reference_log_probs_kt,
         loss_params,
         grpo_kl_auxiliary_route,
         grad_scalar,
@@ -1768,7 +1824,10 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
 /// * `logits_kt` — `[1, T, V]` policy logits (any float dtype; cast to F32
 ///   internally to match `token_log_probs`).
 /// * `input_ids` / `action_mask` — host-side gather metadata (`len == T`).
-/// * `ref_log_probs_kt` — `[num_active]` detached reference log-probs.
+/// * `behavior_log_probs_kt` — `[num_active]` detached behavior-policy
+///   log-probs for the importance ratio.
+/// * `kl_reference_log_probs_kt` — `[num_active]` detached frozen-reference
+///   log-probs for the KL estimator.
 /// * `loss_params` — the GRPO surrogate / KL params.
 /// * `grad_scalar` — the upstream scalar seed `dL/dloss` (backward is linear).
 #[cfg(any(
@@ -1781,7 +1840,8 @@ fn grpo_pg_loss_from_logits_grad_kt(
     logits_kt: &kiln_tensor::Tensor,
     input_ids: &[u32],
     action_mask: &[bool],
-    ref_log_probs_kt: &kiln_tensor::Tensor,
+    behavior_log_probs_kt: &kiln_tensor::Tensor,
+    kl_reference_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     grad_scalar: f64,
@@ -1865,7 +1925,8 @@ fn grpo_pg_loss_from_logits_grad_kt(
     let coeff_col = match grpo_loss_coeff_col_device_fast_path_kt(
         grpo_kl_auxiliary_route,
         &policy_log_probs,
-        ref_log_probs_kt,
+        behavior_log_probs_kt,
+        kl_reference_log_probs_kt,
         loss_params,
         num_active,
         grad_scalar,
@@ -1878,7 +1939,8 @@ fn grpo_pg_loss_from_logits_grad_kt(
             // coeff_a = dL/d(policy_log_prob_a).
             let coeff = grpo_loss_coeff_from_policy_log_probs_kt(
                 &policy_log_probs,
-                ref_log_probs_kt,
+                behavior_log_probs_kt,
+                kl_reference_log_probs_kt,
                 loss_params,
                 num_active,
             )
@@ -1973,7 +2035,8 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
     logits_kt: &kiln_tensor::Tensor,
     input_ids: &[u32],
     action_mask: &[bool],
-    ref_log_probs_kt: &kiln_tensor::Tensor,
+    behavior_log_probs_kt: &kiln_tensor::Tensor,
+    kl_reference_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     device: &Device,
@@ -2020,13 +2083,15 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
     // lm_head tape output passed DIRECTLY by the trainer (#1082 step 8: no more
     // [1,T,V] kt->candle copy), so recording against it keeps the tape CONNECTED
     // back through the LoRA forward (consumer input id == producer output id).
-    // `ref_log_probs_kt` is the detached constant denominator.
+    // Both policy anchors are detached constants: behavior log-probs define
+    // the importance-ratio denominator, while the frozen reference defines KL.
     let policy_log_probs = token_log_probs(logits_kt, input_ids, action_mask, device)
         .context("try_tape_grpo_pg_loss_from_logits_kt: token_log_probs")?;
     let loss_kt_forward = grpo_loss_with_kl_auxiliary_route(
         grpo_kl_auxiliary_route,
         &policy_log_probs,
-        ref_log_probs_kt,
+        behavior_log_probs_kt,
+        kl_reference_log_probs_kt,
         loss_params,
         device,
     )
@@ -2034,7 +2099,8 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
 
     // Record the fused node: OUTPUT is the OWNED kt loss; the single input is the
     // CONNECTED kt logits. Saved state: kt logits (Arc bump) + host gather
-    // metadata + kt ref_log_probs + params (the kt-native backward recomputes).
+    // metadata + both detached log-prob tensors + params (the kt-native
+    // backward recomputes).
     let loss_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
         let loss_kt = loss_kt_forward;
         tape.record(
@@ -2044,7 +2110,8 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
                 logits: logits_kt.clone(),
                 input_ids: input_ids.to_vec(),
                 action_mask: action_mask.to_vec(),
-                ref_log_probs: ref_log_probs_kt.clone(),
+                behavior_log_probs: behavior_log_probs_kt.clone(),
+                kl_reference_log_probs: kl_reference_log_probs_kt.clone(),
                 loss_params,
                 grpo_kl_auxiliary_route,
                 device: *device,
@@ -2085,7 +2152,8 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
     head_t: &kiln_tensor::Tensor,
     input_ids: &[u32],
     action_mask: &[bool],
-    ref_log_probs_kt: &kiln_tensor::Tensor,
+    behavior_log_probs_kt: &kiln_tensor::Tensor,
+    kl_reference_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     device: &Device,
@@ -2135,7 +2203,8 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
     let loss_kt_forward = grpo_loss_with_kl_auxiliary_route(
         grpo_kl_auxiliary_route,
         &selected_state.policy_log_probs,
-        ref_log_probs_kt,
+        behavior_log_probs_kt,
+        kl_reference_log_probs_kt,
         loss_params,
         device,
     )
@@ -2192,7 +2261,8 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
                 running_sumexp: selected_state.running_sumexp.clone(),
                 active_idx: selected_state.active_idx.clone(),
                 active_labels: selected_state.active_labels.clone(),
-                ref_log_probs: ref_log_probs_kt.clone(),
+                behavior_log_probs: behavior_log_probs_kt.clone(),
+                kl_reference_log_probs: kl_reference_log_probs_kt.clone(),
                 loss_params,
                 grpo_kl_auxiliary_route,
                 device: *device,
@@ -2259,7 +2329,8 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
     weight: &kiln_tensor::Tensor,
     input_ids: &[u32],
     action_mask: &[bool],
-    ref_log_probs: &kiln_tensor::Tensor,
+    behavior_log_probs: &kiln_tensor::Tensor,
+    kl_reference_log_probs: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
 ) -> Result<Option<kiln_tensor::Tensor>> {
     if !tape_forward_enabled() {
@@ -2267,7 +2338,11 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
     }
     if !matches!(normed_hidden.device(), kiln_tensor::Device::Vulkan(_))
         || !matches!(weight.device(), kiln_tensor::Device::Vulkan(_))
-        || !matches!(ref_log_probs.device(), kiln_tensor::Device::Vulkan(_))
+        || !matches!(behavior_log_probs.device(), kiln_tensor::Device::Vulkan(_))
+        || !matches!(
+            kl_reference_log_probs.device(),
+            kiln_tensor::Device::Vulkan(_)
+        )
     {
         return Ok(None);
     }
@@ -2280,7 +2355,8 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
         weight,
         input_ids,
         action_mask,
-        ref_log_probs,
+        behavior_log_probs,
+        kl_reference_log_probs,
         loss_params,
     )
     .context("vulkan GRPO scalar kt loss")?
@@ -2316,7 +2392,8 @@ pub(crate) fn vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
     weight: &kiln_tensor::Tensor,
     input_ids: &[u32],
     action_mask: &[bool],
-    ref_log_probs: &kiln_tensor::Tensor,
+    behavior_log_probs: &kiln_tensor::Tensor,
+    kl_reference_log_probs: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
 ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
     let Some((loss, saved, active_positions, seq_len, device_index)) = vulkan_grpo_loss_kt(
@@ -2324,7 +2401,8 @@ pub(crate) fn vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
         weight,
         input_ids,
         action_mask,
-        ref_log_probs,
+        behavior_log_probs,
+        kl_reference_log_probs,
         loss_params,
     )
     .context("vulkan GRPO tail loss")?
@@ -2367,6 +2445,54 @@ mod tests {
     use rand::rngs::StdRng;
     #[cfg(feature = "cuda")]
     use rand::{RngExt, SeedableRng};
+
+    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
+    #[test]
+    fn analytic_coeff_separates_behavior_ratio_from_kl_reference() {
+        let device = kiln_tensor::Device::Cpu;
+        let policy = KtTensor::from_vec_on(device, vec![-1.0_f32, -1.2], vec![2]).unwrap();
+        let behavior = KtTensor::from_vec_on(device, vec![-1.3_f32, -0.9], vec![2]).unwrap();
+        let kl_reference = KtTensor::from_vec_on(device, vec![-0.7_f32, -1.8], vec![2]).unwrap();
+        let params = GrpoLossParams {
+            advantage: 0.4,
+            clip_low: 0.5,
+            clip_high: 0.5,
+            kl_coeff: 0.2,
+            kl_estimator: KlEstimator::K3,
+            loss_normalizer: 0.5,
+            is_level: IsLevel::Token,
+            reinforce: false,
+            entropy_aware_kl_quantile: None,
+        };
+
+        let got = super::grpo_loss_coeff_from_policy_log_probs_kt(
+            &policy,
+            &behavior,
+            &kl_reference,
+            params,
+            2,
+        )
+        .unwrap();
+        let policy = [-1.0_f64, -1.2];
+        let behavior = [-1.3_f64, -0.9];
+        let kl_reference = [-0.7_f64, -1.8];
+        let expected: Vec<f32> = (0..2)
+            .map(|index| {
+                let importance_ratio = (policy[index] - behavior[index]).exp();
+                let pg_grad = -params.advantage * importance_ratio;
+                let kl_log_ratio = policy[index] - kl_reference[index];
+                let kl_grad = params.kl_coeff * (1.0 - (-kl_log_ratio).exp());
+                (params.loss_normalizer * (pg_grad + kl_grad)) as f32
+            })
+            .collect();
+
+        for (index, (got, expected)) in got.iter().zip(&expected).enumerate() {
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "coefficient {index}: got {got}, expected {expected}"
+            );
+        }
+    }
 
     #[cfg(feature = "vulkan")]
     #[test]
@@ -2590,6 +2716,7 @@ mod tests {
                 &input_ids,
                 &action_mask,
                 &ref_kt,
+                &ref_kt,
                 params,
                 GrpoKlAuxiliaryRoute::HostComposite,
                 1.0,
@@ -2605,6 +2732,7 @@ mod tests {
                 &head_t,
                 &input_ids,
                 &action_mask,
+                &ref_kt,
                 &ref_kt,
                 params,
                 GrpoKlAuxiliaryRoute::HostComposite,
@@ -2639,6 +2767,7 @@ mod tests {
             &input_ids,
             &action_mask,
             &ref_kt,
+            &ref_kt,
             params,
             GrpoKlAuxiliaryRoute::HostComposite,
             1.0,
@@ -2653,6 +2782,7 @@ mod tests {
             &head_t,
             &input_ids,
             &action_mask,
+            &ref_kt,
             &ref_kt,
             params,
             GrpoKlAuxiliaryRoute::HostComposite,
@@ -2746,6 +2876,7 @@ mod tests {
                 &input_ids,
                 &action_mask,
                 &ref_kt,
+                &ref_kt,
                 params,
                 GrpoKlAuxiliaryRoute::HostComposite,
                 1.0,
@@ -2768,6 +2899,7 @@ mod tests {
                 &head_t,
                 &input_ids,
                 &action_mask,
+                &ref_kt,
                 &ref_kt,
                 params,
                 GrpoKlAuxiliaryRoute::HostComposite,
@@ -2971,6 +3103,7 @@ mod tests {
                 &input_ids,
                 &action_mask,
                 &ref_kt,
+                &ref_kt,
                 params,
                 GrpoKlAuxiliaryRoute::HostComposite,
                 1.0,
@@ -2993,6 +3126,7 @@ mod tests {
                 &action_mask,
                 &plp_hidden,
                 &ref_kt,
+                &ref_kt,
                 params,
                 GrpoKlAuxiliaryRoute::HostComposite,
                 1.0,
@@ -3000,13 +3134,14 @@ mod tests {
                 3,
             )
             .unwrap();
-            let loss_expected = grpo_loss(&plp_hidden, &ref_kt, params, &device).unwrap();
+            let loss_expected = grpo_loss(&plp_hidden, &ref_kt, &ref_kt, params, &device).unwrap();
             let (loss_cached, cached_hidden, _env_ce) =
                 super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
                     &normed_hidden,
                     &head_t,
                     &input_ids,
                     &action_mask,
+                    &ref_kt,
                     &ref_kt,
                     params,
                     GrpoKlAuxiliaryRoute::HostComposite,
@@ -3419,9 +3554,10 @@ mod tests {
         ];
 
         for (name, params, grad_scalar) in variants {
-            let host =
-                super::grpo_loss_coeff_from_policy_log_probs_kt(&plp, &ref_kt, params, num_active)
-                    .unwrap();
+            let host = super::grpo_loss_coeff_from_policy_log_probs_kt(
+                &plp, &ref_kt, &ref_kt, params, num_active,
+            )
+            .unwrap();
             let expected: Vec<f32> = host
                 .iter()
                 .map(|c| (*c as f64 * grad_scalar) as f32)
@@ -3429,6 +3565,7 @@ mod tests {
             let got = super::grpo_loss_coeff_col_device_fast_path_kt(
                 GrpoKlAuxiliaryRoute::CudaRocmDeviceFastPath,
                 &plp,
+                &ref_kt,
                 &ref_kt,
                 params,
                 num_active,
@@ -3538,15 +3675,16 @@ mod tests {
         };
         let loss_of = |host: &[f32], params: GrpoLossParams| -> f64 {
             let p = KtTensor::from_vec_on(device, host.to_vec(), vec![num_active]).unwrap();
-            let loss = grpo_loss(&p, &ref_kt, params, &device).unwrap();
+            let loss = grpo_loss(&p, &ref_kt, &ref_kt, params, &device).unwrap();
             read_scalar(&loss)
         };
 
         const EPS: f32 = 1e-2;
         for (name, params) in variants {
-            let coeff =
-                super::grpo_loss_coeff_from_policy_log_probs_kt(&plp, &ref_kt, params, num_active)
-                    .unwrap();
+            let coeff = super::grpo_loss_coeff_from_policy_log_probs_kt(
+                &plp, &ref_kt, &ref_kt, params, num_active,
+            )
+            .unwrap();
             assert_eq!(coeff.len(), num_active, "{name}: coeff len");
             for a in 0..num_active {
                 let mut plus = plp_host.clone();
@@ -3625,6 +3763,7 @@ mod tests {
                 &logits,
                 &input_ids,
                 &action_mask,
+                &ref_kt,
                 &ref_kt,
                 params,
                 GrpoKlAuxiliaryRoute::HostComposite,
@@ -3722,14 +3861,14 @@ mod tests {
             KtTensor::from_vec_on(device_kt, logits_host.clone(), vec![1, seq_len, vocab])
                 .expect("logits kt");
 
-        // Reference log-probs: a detached constant [num_active] vector built from
-        // the fixture's OWN policy log-probs so the IS ratio r = exp(plp - ref) =
+        // Behavior log-probs: a detached constant [num_active] vector built from
+        // the fixture's OWN policy log-probs so the IS ratio r = exp(plp - old) =
         // exp(0.1) ≈ 1.105 lands INSIDE the clip range [1-clip_low, 1+clip_high] =
         // [0.8, 1.2]. With random logits and an arbitrary fixed ref the ratio is
         // ~exp(-1.8) ≈ 0.17 (far below the 0.8 floor), which fully clips the PPO
         // surrogate into a flat region → ZERO gradient everywhere → a vacuous
         // test. Keeping r in-range leaves the surrogate UNCLIPPED (nonzero grad)
-        // and gives log_ratio=0.1 to exercise the K1 KL term.
+        // while the separately constructed KL reference exercises the K1 term.
         let plp_fixture: Vec<f32> =
             token_log_probs(&logits_kt, &input_ids, &action_mask, &device_kt)
                 .expect("fixture token_log_probs")
@@ -3739,8 +3878,14 @@ mod tests {
                 .expect("plp flat")
                 .to_vec1::<f32>()
                 .expect("plp host");
-        let ref_host: Vec<f32> = plp_fixture.iter().map(|&p| p - 0.1).collect();
-        let ref_kt = KtTensor::from_vec_on(device_kt, ref_host, vec![num_active]).expect("ref kt");
+        let behavior_host: Vec<f32> = plp_fixture.iter().map(|&p| p - 0.1).collect();
+        let behavior_kt =
+            KtTensor::from_vec_on(device_kt, behavior_host, vec![num_active]).expect("behavior kt");
+        // Deliberately different frozen reference: the KL gradient must use
+        // this tensor while the PPO gradient continues to use behavior_kt.
+        let kl_reference_host: Vec<f32> = plp_fixture.iter().map(|&p| p + 0.25).collect();
+        let kl_reference_kt = KtTensor::from_vec_on(device_kt, kl_reference_host, vec![num_active])
+            .expect("KL-reference kt");
 
         // Param variants to test.
         let mk_params = |is_level: IsLevel, kl: KlEstimator, reinforce: bool| GrpoLossParams {
@@ -3786,7 +3931,8 @@ mod tests {
                 .expect("fd logits kt");
             let plp = token_log_probs(&lk, &input_ids, &action_mask, &device_kt)
                 .expect("fd token_log_probs");
-            let loss = grpo_loss(&plp, &ref_kt, *params, &device_kt).expect("fd grpo_loss");
+            let loss = grpo_loss(&plp, &behavior_kt, &kl_reference_kt, *params, &device_kt)
+                .expect("fd grpo_loss");
             read_scalar(&loss)
         };
 
@@ -3833,7 +3979,8 @@ mod tests {
                 &logits_kt,
                 &input_ids,
                 &action_mask,
-                &ref_kt,
+                &behavior_kt,
+                &kl_reference_kt,
                 *params,
                 GrpoKlAuxiliaryRoute::HostComposite,
                 1.0,

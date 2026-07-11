@@ -6331,6 +6331,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         params,
                         &comp.action_mask,
                         &ref_log_probs,
+                        &ref_log_probs,
                         loss_params,
                         segs,
                         device,
@@ -6362,6 +6363,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         model_config,
                         params,
                         &comp.action_mask,
+                        &ref_log_probs,
                         &ref_log_probs,
                         loss_params,
                         device,
@@ -10749,7 +10751,8 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     model_config: &ModelConfig,
     params: &TrainableLoraParams,
     action_mask: &[bool],
-    ref_log_probs: &Tensor,
+    behavior_log_probs: &Tensor,
+    kl_reference_log_probs: &Tensor,
     loss_params: GrpoLossParams,
     device: &Device,
     comp_idx: usize,
@@ -10791,7 +10794,8 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                         &weights.embed_tokens,
                         input_ids,
                         action_mask,
-                        &ref_log_probs,
+                        behavior_log_probs,
+                        kl_reference_log_probs,
                         loss_params,
                     )
                     .context("GRPO tape-authoritative(kt) Vulkan fused scalar loss")
@@ -10809,7 +10813,8 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                         &weights.embed_tokens_t,
                         input_ids,
                         action_mask,
-                        &ref_log_probs,
+                        behavior_log_probs,
+                        kl_reference_log_probs,
                         loss_params,
                         grpo_kl_auxiliary_route_for_backend(backend),
                         device,
@@ -10922,7 +10927,8 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     model_config: &ModelConfig,
     params: &TrainableLoraParams,
     action_mask: &[bool],
-    ref_log_probs: &Tensor,
+    behavior_log_probs: &Tensor,
+    kl_reference_log_probs: &Tensor,
     loss_params: GrpoLossParams,
     segments: &[(usize, usize)],
     device: &Device,
@@ -10991,7 +10997,8 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
                     &weights.embed_tokens,
                     input_ids,
                     action_mask,
-                    ref_log_probs,
+                    behavior_log_probs,
+                    kl_reference_log_probs,
                     loss_params,
                 )
                 .context("checkpointed GRPO Vulkan fused tail loss/gradient")?
@@ -11008,7 +11015,8 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
             &weights.embed_tokens_t,
             input_ids,
             action_mask,
-            ref_log_probs,
+            behavior_log_probs,
+            kl_reference_log_probs,
             loss_params,
             grpo_kl_auxiliary_route_for_backend(backend),
             1.0,
@@ -11266,7 +11274,8 @@ pub(crate) fn entropy_aware_kl_mask_kt(
         .map_err(Into::into)
 }
 
-/// Compute the GRPO loss from policy and reference log-probs.
+/// Compute the GRPO loss from policy, behavior-policy, and KL-reference
+/// log-probs.
 ///
 /// Returns a scalar loss tensor suitable for backward(). The scalar is
 /// `params.loss_normalizer * sum_over_active_tokens(per_token_loss)`.
@@ -11284,14 +11293,16 @@ pub(crate) fn entropy_aware_kl_mask_kt(
 // loss inside its candle-autograd backward composite (#1082 CP-4).
 pub(crate) fn grpo_loss(
     policy_log_probs: &Tensor,
-    ref_log_probs: &Tensor,
+    behavior_log_probs: &Tensor,
+    kl_reference_log_probs: &Tensor,
     params: GrpoLossParams,
     device: &Device,
 ) -> Result<Tensor> {
     grpo_loss_with_kl_auxiliary_route(
         GrpoKlAuxiliaryRoute::HostComposite,
         policy_log_probs,
-        ref_log_probs,
+        behavior_log_probs,
+        kl_reference_log_probs,
         params,
         device,
     )
@@ -11300,7 +11311,8 @@ pub(crate) fn grpo_loss(
 pub(crate) fn grpo_loss_with_kl_auxiliary_route(
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     policy_log_probs: &Tensor,
-    ref_log_probs: &Tensor,
+    behavior_log_probs: &Tensor,
+    kl_reference_log_probs: &Tensor,
     params: GrpoLossParams,
     device: &Device,
 ) -> Result<Tensor> {
@@ -11333,9 +11345,21 @@ pub(crate) fn grpo_loss_with_kl_auxiliary_route(
             .map_err(Into::into);
     }
 
-    let log_ratio = (policy_log_probs - ref_log_probs)?;
-    let ratio = log_ratio.exp()?;
+    anyhow::ensure!(
+        behavior_log_probs.elem_count() == num_active,
+        "GRPO behavior log-probability count {} did not match policy count {num_active}",
+        behavior_log_probs.elem_count()
+    );
+    anyhow::ensure!(
+        kl_reference_log_probs.elem_count() == num_active,
+        "GRPO KL-reference log-probability count {} did not match policy count {num_active}",
+        kl_reference_log_probs.elem_count()
+    );
+
+    let importance_log_ratio = (policy_log_probs - behavior_log_probs)?;
+    let ratio = importance_log_ratio.exp()?;
     let ratio_shape = ratio.dims().to_vec();
+    let kl_log_ratio = (policy_log_probs - kl_reference_log_probs)?;
 
     // Asymmetric PPO clip range: [1 - clip_low, 1 + clip_high].
     let lo_val = 1.0 - params.clip_low;
@@ -11344,10 +11368,10 @@ pub(crate) fn grpo_loss_with_kl_auxiliary_route(
     // Per-token KL term selected by KlEstimator (shared across IS levels).
     let kl_penalty_raw = match params.kl_estimator {
         KlEstimator::None => zeros_f32_on(ratio.shape(), device)?,
-        KlEstimator::K1 => log_ratio.affine(params.kl_coeff, 0.0)?,
+        KlEstimator::K1 => kl_log_ratio.affine(params.kl_coeff, 0.0)?,
         KlEstimator::K3 => {
-            let neg_log_ratio = log_ratio.neg()?;
-            let term = (neg_log_ratio.exp()?.affine(1.0, -1.0)? + &log_ratio)?;
+            let neg_log_ratio = kl_log_ratio.neg()?;
+            let term = (neg_log_ratio.exp()?.affine(1.0, -1.0)? + &kl_log_ratio)?;
             term.affine(params.kl_coeff, 0.0)?
         }
     };
@@ -11389,7 +11413,7 @@ pub(crate) fn grpo_loss_with_kl_auxiliary_route(
             // per-token loss times loss_normalizer" plumbing, we
             // distribute that scalar over `num_active` positions as
             // `surrogate / num_active`, replicated per token.
-            let u = log_ratio.mean_keepdim(0)?;
+            let u = importance_log_ratio.mean_keepdim(0)?;
             let s = u.exp()?;
             // (#1082) kt scalar clamp + scalar `affine` for the constant
             // advantage (gradient flows through `s`).
@@ -12290,7 +12314,8 @@ pub(crate) mod tests {
             reinforce: false,
             entropy_aware_kl_quantile: None,
         };
-        let new_loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
+        let new_loss =
+            grpo_loss(&policy, &reference, &reference, params, &device)?.to_scalar::<f32>()?;
 
         // Manual reference computation.
         let mut acc = 0.0_f64;
@@ -12307,6 +12332,62 @@ pub(crate) mod tests {
         assert!(
             (new_loss - expected).abs() < 5e-6,
             "K1 loss drift: got {new_loss} want {expected}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_loss_uses_behavior_for_ratio_and_frozen_reference_for_kl() -> Result<()> {
+        let device = cpu_device();
+        let policy = t1d(&[-1.0_f32, -1.2])?;
+        let behavior = t1d(&[-1.3_f32, -0.9])?;
+        let kl_reference = t1d(&[-0.7_f32, -1.8])?;
+        let params = GrpoLossParams {
+            advantage: 0.4,
+            clip_low: 0.5,
+            clip_high: 0.5,
+            kl_coeff: 0.2,
+            kl_estimator: KlEstimator::K3,
+            loss_normalizer: 0.5,
+            is_level: IsLevel::Token,
+            reinforce: false,
+            entropy_aware_kl_quantile: None,
+        };
+
+        let got = grpo_loss(&policy, &behavior, &kl_reference, params, &device)?
+            .to_scalar::<f32>()? as f64;
+        let policy = policy.to_vec1::<f32>()?;
+        let behavior = behavior.to_vec1::<f32>()?;
+        let kl_reference = kl_reference.to_vec1::<f32>()?;
+        let mut expected = 0.0_f64;
+        let mut historically_conflated = 0.0_f64;
+        for ((policy, behavior), kl_reference) in policy.iter().zip(&behavior).zip(&kl_reference) {
+            let importance_log_ratio = f64::from(*policy - *behavior);
+            let importance_ratio = importance_log_ratio.exp();
+            let surrogate = (importance_ratio * params.advantage).min(
+                importance_ratio.clamp(1.0 - params.clip_low, 1.0 + params.clip_high)
+                    * params.advantage,
+            );
+            let kl_log_ratio = f64::from(*policy - *kl_reference);
+            let kl = (-kl_log_ratio).exp() - 1.0 + kl_log_ratio;
+            expected += -surrogate + params.kl_coeff * kl;
+
+            let wrong_ratio = kl_log_ratio.exp();
+            let wrong_surrogate = (wrong_ratio * params.advantage).min(
+                wrong_ratio.clamp(1.0 - params.clip_low, 1.0 + params.clip_high) * params.advantage,
+            );
+            historically_conflated += -wrong_surrogate + params.kl_coeff * kl;
+        }
+        expected *= params.loss_normalizer;
+        historically_conflated *= params.loss_normalizer;
+
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "got {got}, expected {expected}"
+        );
+        assert!(
+            (got - historically_conflated).abs() > 1e-3,
+            "fixture must fail when the KL reference is reused as the behavior policy"
         );
         Ok(())
     }
@@ -12329,7 +12410,8 @@ pub(crate) mod tests {
             reinforce: false,
             entropy_aware_kl_quantile: None,
         };
-        let none_loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
+        let none_loss =
+            grpo_loss(&policy, &reference, &reference, params, &device)?.to_scalar::<f32>()?;
 
         // Compare to manual surrogate-only mean (no KL).
         let mut acc = 0.0_f64;
@@ -12369,7 +12451,8 @@ pub(crate) mod tests {
             reinforce: false,
             entropy_aware_kl_quantile: None,
         };
-        let loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
+        let loss =
+            grpo_loss(&policy, &reference, &reference, params, &device)?.to_scalar::<f32>()?;
         assert!(
             loss >= 0.0,
             "K3 per-token KL must be non-negative; got {loss}"
@@ -12400,8 +12483,10 @@ pub(crate) mod tests {
             reinforce: false,
             entropy_aware_kl_quantile: None,
         };
-        let tight = grpo_loss(&policy, &reference, make(0.2), &device)?.to_scalar::<f32>()?;
-        let wide = grpo_loss(&policy, &reference, make(0.5), &device)?.to_scalar::<f32>()?;
+        let tight =
+            grpo_loss(&policy, &reference, &reference, make(0.2), &device)?.to_scalar::<f32>()?;
+        let wide =
+            grpo_loss(&policy, &reference, &reference, make(0.5), &device)?.to_scalar::<f32>()?;
         assert!(
             wide < tight + 1e-6,
             "Clip-Higher should not increase loss for positive advantage and ratio > 1; \
@@ -12433,8 +12518,10 @@ pub(crate) mod tests {
             loss_normalizer: 1.0 / 6.0,
             ..base
         };
-        let l_full = grpo_loss(&policy, &reference, base, &device)?.to_scalar::<f32>()?;
-        let l_half = grpo_loss(&policy, &reference, half_norm, &device)?.to_scalar::<f32>()?;
+        let l_full =
+            grpo_loss(&policy, &reference, &reference, base, &device)?.to_scalar::<f32>()?;
+        let l_half =
+            grpo_loss(&policy, &reference, &reference, half_norm, &device)?.to_scalar::<f32>()?;
         assert!(
             (l_full - 2.0 * l_half).abs() < 5e-6,
             "scaling normalizer by 1/2 should halve the loss: l_full={l_full} l_half={l_half}"
@@ -12467,9 +12554,10 @@ pub(crate) mod tests {
             reinforce: false,
             entropy_aware_kl_quantile: None,
         };
-        let full = grpo_loss(&policy, &reference, base, &device)?.to_scalar::<f32>()?;
+        let full = grpo_loss(&policy, &reference, &reference, base, &device)?.to_scalar::<f32>()?;
         let selective = grpo_loss(
             &policy,
+            &reference,
             &reference,
             GrpoLossParams {
                 entropy_aware_kl_quantile: Some(0.5),
@@ -12516,9 +12604,11 @@ pub(crate) mod tests {
             reinforce: false,
             entropy_aware_kl_quantile: None,
         };
-        let with_none = grpo_loss(&policy, &reference, base, &device)?.to_scalar::<f32>()?;
+        let with_none =
+            grpo_loss(&policy, &reference, &reference, base, &device)?.to_scalar::<f32>()?;
         let with_zero = grpo_loss(
             &policy,
+            &reference,
             &reference,
             GrpoLossParams {
                 entropy_aware_kl_quantile: Some(0.0),
@@ -12601,7 +12691,8 @@ pub(crate) mod tests {
             reinforce: false,
             entropy_aware_kl_quantile: None,
         };
-        let loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
+        let loss =
+            grpo_loss(&policy, &reference, &reference, params, &device)?.to_scalar::<f32>()?;
 
         // Manual reference: u = mean(log_ratio), s = exp(u),
         // surrogate = min(s*A, clip(s)*A). The candle scalar after the
@@ -12655,7 +12746,8 @@ pub(crate) mod tests {
             reinforce: false,
             entropy_aware_kl_quantile: None,
         };
-        let got = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
+        let got =
+            grpo_loss(&policy, &reference, &reference, params, &device)?.to_scalar::<f32>()?;
 
         let pol = policy.to_vec1::<f32>()?;
         let refv = reference.to_vec1::<f32>()?;
@@ -12695,7 +12787,8 @@ pub(crate) mod tests {
             reinforce: true,
             entropy_aware_kl_quantile: None,
         };
-        let loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
+        let loss =
+            grpo_loss(&policy, &reference, &reference, params, &device)?.to_scalar::<f32>()?;
         let expected = -advantage as f32; // sum of -A * n / n = -A
         assert!(
             (loss - expected).abs() < 5e-6,
@@ -15807,6 +15900,7 @@ pub(crate) mod tests {
             &params,
             &action_mask,
             &ref_log_probs,
+            &ref_log_probs,
             loss_params,
             &segments,
             &device,
@@ -16100,6 +16194,7 @@ pub(crate) mod tests {
             &params,
             &action_mask,
             &ref_log_probs,
+            &ref_log_probs,
             loss_params,
             &device,
             0,          // comp_idx
@@ -16335,6 +16430,7 @@ pub(crate) mod tests {
             &config,
             &params,
             &action_mask,
+            &ref_log_probs,
             &ref_log_probs,
             loss_params,
             &device,
