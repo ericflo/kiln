@@ -44,9 +44,15 @@ state file or in the manifest's versioned auxiliary state.
 
 ## Integration status
 
-Native SFT supports exact resume. `SftConfig.checkpoint_interval` publishes a
-resumable directory after every N committed optimizer steps. Cooperative
-cancellation also publishes one at the next step boundary. SFT restores:
+Native SFT and GRPO support exact resume. OPD does not yet. A legacy PEFT
+snapshot from any training mode remains serving-only and is never accepted as
+an exact checkpoint.
+
+### SFT
+
+`SftConfig.checkpoint_interval` publishes a resumable directory after every N
+committed optimizer steps. Cooperative cancellation also publishes one at the
+next step boundary. SFT restores:
 
 - adapter parameters and AdamW moments or Muon momentum by stable parameter
   name (SGD has no optimizer artifact);
@@ -64,14 +70,47 @@ silently reset momentum. CPU and ROCm continuation tests cover byte-identical
 next-step state; the ROCm SFT qualification compares an uninterrupted run with
 a cancelled-and-resumed run through final adapter and optimizer artifacts.
 
-GRPO and OPD have not yet migrated their full loop state. Their existing
-`checkpoint_interval` directories are PEFT snapshots and are not resumable.
-The strict loader rejects them. Capability-distillation modes must explicitly
-document resume support before their snapshots may be treated as checkpoints.
+### GRPO
 
-## SFT API and CLI
+`GrpoConfig.checkpoint_interval` publishes an exact checkpoint after every N
+committed optimizer groups. Cooperative cancellation publishes one after the
+current group settles. GRPO restores:
 
-Start a checkpointed SFT job with either interface:
+- policy adapter parameters and AdamW moments or Muon momentum by stable name;
+- the frozen/EMA reference tensors and exact EMA refresh cadence;
+- committed group cursor, loss history, data/token/gradient/ECHO/policy-audit
+  accumulators, and phase plus GPU-writer timings;
+- effective configuration, precision, model/base-weight/tokenizer/backend
+  identities, RNG streams, trainable parameter order, and the derived
+  gradient-checkpoint plan;
+- for inline batches, the exact filtered group order and content identity;
+- for streamed JSONL, the physical line number and byte offset plus every
+  consumed line hash, token count, and gradient plan.
+
+The JSONL route performs a memory-bounded CPU preflight before model upload.
+Resume loads and validates the complete bundle before GPU setup, seeks directly
+to the committed JSONL offset, and revalidates each next group before its
+optimizer step. The route is part of checkpoint identity: an inline checkpoint
+must resume from identical inline groups, and a JSONL checkpoint must resume
+from the identical JSONL bytes through the streamed route.
+
+Real ROCm and Vulkan qualification compares uninterrupted runs with
+cancelled-and-resumed runs for both routes. Losses, final adapter bytes,
+intermediate adapter/optimizer/reference artifacts, EMA cadence, and diagnostic
+state match exactly.
+
+### OPD and legacy snapshots
+
+OPD `checkpoint_interval` output remains a PEFT adapter snapshot without exact
+optimizer, cursor, RNG, or reference state. It is not resumable. The strict
+loader likewise rejects older SFT/GRPO PEFT snapshots that lack
+`checkpoint_manifest.json`. Capability-distillation modes must explicitly
+document exact resume support before their snapshots may be treated as
+checkpoints.
+
+## API, CLI, and browser workflow
+
+Start checkpointed SFT or GRPO from the CLI:
 
 ```bash
 kiln train sft \
@@ -79,7 +118,16 @@ kiln train sft \
   --adapter support-bot \
   --epochs 3 \
   --checkpoint-interval 25
+
+kiln train grpo \
+  --file scored-groups.jsonl \
+  --adapter reward-bot \
+  --checkpoint-interval 25
 ```
+
+The GRPO command treats `.jsonl` as the memory-bounded streamed route and a
+JSON request/batch containing `groups` as the inline route. The equivalent
+streamed API requests are:
 
 ```json
 {
@@ -92,6 +140,20 @@ kiln train sft \
 }
 ```
 
+```json
+{
+  "dataset_path": "/absolute/path/scored-groups.jsonl",
+  "config": {
+    "output_name": "reward-bot",
+    "checkpoint_interval": 25
+  }
+}
+```
+
+For inline GRPO, replace `dataset_path` with the exact `groups` array. Named
+datasets submitted by the browser are resolved to the server's JSONL copy and
+use the streamed route.
+
 Exact checkpoints are direct children of the configured adapter registry, for
 example:
 
@@ -101,17 +163,22 @@ support-bot-checkpoint-step-00000025.kiln-checkpoint/
 
 They are published there while training is running, independently of the
 temporary final-adapter staging tree. A process crash can therefore lose the
-in-flight step, but not the last committed checkpoint.
+in-flight step or group, but not the last committed checkpoint.
 
 `GET /v1/train/jobs/{job_id}` reports `latest_checkpoint`, including the
-`resume_checkpoint` basename, committed step, total steps, next epoch/cursor,
-and completion state. `kiln train status --job-id JOB_ID` prints the same
-basename, and the training detail panel provides a copy action. Discovery
-validates the bounded strict manifest without rehashing large state files on
-every UI poll. Resume admission performs the full file-set, size, and checksum
-validation before GPU work.
+`resume_checkpoint` basename, `training_kind`, `data_source_kind`, committed
+step, total steps, next epoch/group cursor, and completion state. `kiln train
+status --job-id JOB_ID` prints the same basename. The training detail panel
+labels SFT epoch/example cursors separately from inline/JSONL GRPO group
+cursors, provides copy and prepare-resume actions, and exposes checkpoint fields
+in both advanced forms. Preparing a resume clears inline data that cannot be
+verified from replay metadata; select the identical source before submit.
 
-Resume with the identical dataset and training configuration:
+Status discovery validates the bounded strict manifest without rehashing large
+state files on every poll. Resume admission performs the full file-set, size,
+and checksum validation before GPU work.
+
+Resume with the identical dataset, route, and training configuration:
 
 ```bash
 kiln train sft \
@@ -120,16 +187,21 @@ kiln train sft \
   --epochs 3 \
   --checkpoint-interval 25 \
   --resume-checkpoint support-bot-checkpoint-step-00000025.kiln-checkpoint
+
+kiln train grpo \
+  --file scored-groups.jsonl \
+  --adapter reward-bot \
+  --checkpoint-interval 25 \
+  --resume-checkpoint reward-bot-checkpoint-step-00000025.kiln-checkpoint
 ```
 
 ```json
 {
-  "dataset_path": "/absolute/path/corrections.jsonl",
+  "dataset_path": "/absolute/path/scored-groups.jsonl",
   "config": {
-    "output_name": "support-bot",
-    "epochs": 3,
+    "output_name": "reward-bot",
     "checkpoint_interval": 25,
-    "resume_checkpoint": "support-bot-checkpoint-step-00000025.kiln-checkpoint"
+    "resume_checkpoint": "reward-bot-checkpoint-step-00000025.kiln-checkpoint"
   }
 }
 ```
@@ -139,11 +211,12 @@ accepts an absolute path only when that path is directly beneath the same
 registry. Traversal, nested paths, other training kinds, and an adapter-name
 mismatch fail before final-adapter staging or GPU training.
 
-Resume is continuation, not warm-starting. The output name, data bytes,
-resolved learning rate, optimizer, epochs, LoRA shape/scaling, precision,
-model and base-weight shard, tokenizer, seed, backend runtime, and derived
-gradient-checkpoint segmentation must match the checkpoint. Use `base_adapter`
-for a weights-only warm start instead.
+Resume is continuation, not warm-starting. The output name, data bytes and
+route, resolved learning rate, optimizer, SFT epochs or GRPO objective/filter
+settings, LoRA shape/scaling, precision, model and base-weight shards,
+tokenizer, seed, backend runtime, and derived gradient-checkpoint segmentation
+must match the checkpoint. Use `base_adapter` for a weights-only warm start
+instead.
 
 Checkpoint names are immutable. Prefer the newest checkpoint. If deliberately
 resuming an older checkpoint, first archive any later same-adapter checkpoints

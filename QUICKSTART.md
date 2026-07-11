@@ -367,8 +367,9 @@ curl -s http://localhost:8420/v1/train/sft \
 ```
 
 Training runs in the background. Final adapter weights, receipt, and replay
-data remain in a staging tree until the job finishes; exact SFT checkpoints are
-published durably in the adapter registry as committed steps complete. Under
+data remain in a staging tree until the job finishes; exact SFT and GRPO
+checkpoints are published durably in the adapter registry as committed steps or
+optimizer groups complete. Under
 `experimental`, the model continues serving while the writer-priority training
 operation runs. Under `maintenance`, inference is disabled. At completion Kiln
 publishes the adapter atomically; with the default `auto_load=true`, subsequent
@@ -377,12 +378,23 @@ same-name adapter that was already serving is reloaded inside that publication
 barrier even when `auto_load=false`, because its on-disk bytes cannot change
 behind the loaded weights.
 
-For an interruptible run, add `"checkpoint_interval": 25` to `config` or pass
-`--checkpoint-interval 25` to the CLI. `kiln train status --job-id JOB_ID`
-prints the newest immutable checkpoint basename. Continue with the same file,
-adapter, and training options plus `--resume-checkpoint BASENAME`. Resume
-validates the complete state and checksums before GPU work; it is not a
-weights-only warm start. See [Native Training Checkpoints](docs/training-checkpoints.md).
+For an interruptible SFT or GRPO run, add `"checkpoint_interval": 25` to
+`config` or pass `--checkpoint-interval 25` to the matching CLI command. For
+example:
+
+```bash
+./target/release/kiln train grpo \
+  --file scored-groups.jsonl \
+  --adapter reward-bot \
+  --checkpoint-interval 25
+```
+
+`kiln train status --job-id JOB_ID` prints the newest immutable checkpoint
+basename. Continue with the identical file, route, adapter, and training
+options plus `--resume-checkpoint BASENAME`. Resume validates the complete
+adapter/optimizer/reference/loop state and checksums before GPU work; it is not
+a weights-only warm start. See
+[Native Training Checkpoints](docs/training-checkpoints.md).
 
 ## 7. Check Training Status
 

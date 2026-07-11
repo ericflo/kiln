@@ -236,6 +236,58 @@ Inspect `phase_timings.gpu_writer_wait_ms`, `gpu_writer_held_ms`, and
 fields distinguish expected group-level contention from time spent outside GPU
 ownership.
 
+### Exact checkpoint and resume
+
+Set a cadence when a run must survive cancellation or process failure:
+
+```bash
+kiln train grpo \
+  --file math.rollouts.jsonl \
+  --adapter math-grpo \
+  --checkpoint-interval 25
+```
+
+The cadence counts committed optimizer groups. Cooperative cancellation waits
+for the current group to settle and publishes an immutable
+`.kiln-checkpoint`; a process crash can lose only the in-flight group after the
+newest committed checkpoint. `kiln train status --job-id JOB_ID` and
+`GET /v1/train/jobs/{job_id}` report its direct basename. The browser job drill
+also labels whether the checkpoint came from inline or JSONL GRPO and can
+prepare the matching form.
+
+Resume with the identical source, route, adapter name, and configuration:
+
+```bash
+kiln train grpo \
+  --file math.rollouts.jsonl \
+  --adapter math-grpo \
+  --checkpoint-interval 25 \
+  --resume-checkpoint math-grpo-checkpoint-step-00000025.kiln-checkpoint
+```
+
+For the API, put the same two fields under `config`:
+
+```json
+{
+  "dataset_path": "/absolute/path/math.rollouts.jsonl",
+  "config": {
+    "behavior_policy": "recorded",
+    "output_name": "math-grpo",
+    "checkpoint_interval": 25,
+    "resume_checkpoint": "math-grpo-checkpoint-step-00000025.kiln-checkpoint"
+  }
+}
+```
+
+Resume restores adapter and optimizer tensors, frozen/EMA reference state and
+cadence, exact inline order or JSONL line/byte cursor, RNG streams, loss
+history, policy/ECHO/gradient diagnostics, and phase timings. Before GPU setup,
+Kiln validates the complete artifact set and checksums plus exact data,
+configuration, model/base weights, tokenizer, precision, backend, and derived
+gradient plan. A PEFT adapter snapshot is a serving/warm-start artifact, not a
+resume point. See [Native Training Checkpoints](training-checkpoints.md) for the
+full fail-closed and immutable-name contract.
+
 ## Worked example 2: JSON-validity reward (format compliance)
 
 A reward function doesn't have to be binary. Partial credit for *almost*

@@ -650,6 +650,14 @@ When `post_eval.min_accuracy` is set, a loaded same-name rewrite is rejected
 before GPU training instead of serving unapproved weights; unload it or choose
 a versioned `config.output_name`.
 
+SFT and GRPO can also publish immutable exact `.kiln-checkpoint` directories
+directly beneath the adapter registry while the final adapter remains staged.
+They restore optimizer, cursor/RNG, and objective-specific reference state, not
+just PEFT weights; admission validates the complete bundle and exact data route
+before GPU work. See [Native Training Checkpoints](docs/training-checkpoints.md)
+for API, CLI, browser, cancellation, and resume semantics. OPD periodic
+snapshots remain PEFT-only.
+
 ## Architecture
 
 ```
