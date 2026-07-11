@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::batching_engine::BatchingEngineSnapshot;
+use crate::recent_requests::RequestThinkingBudget;
 
 const LATENCY_BUCKETS_SECONDS: [f64; 13] = [
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
@@ -41,6 +42,32 @@ const REQUEST_LATENCY_BUCKETS_US: [u64; REQUEST_LATENCY_BUCKETS_SECONDS.len()] =
     420_000_000,
     600_000_000,
     900_000_000,
+];
+
+const THINKING_BUDGET_TOKEN_BUCKETS: [u64; 17] = [
+    0, 1, 8, 16, 32, 64, 128, 256, 512, 1_024, 2_048, 4_096, 8_192, 16_384, 32_768, 65_536, 131_072,
+];
+const THINKING_BUDGET_TIME_BUCKETS_MS: [u64; 16] = [
+    0, 1, 10, 50, 100, 250, 500, 1_000, 2_000, 5_000, 10_000, 30_000, 60_000, 300_000, 3_600_000,
+    86_400_000,
+];
+const THINKING_BUDGET_SOURCES: [&str; 5] = [
+    "request",
+    "server_default",
+    "request_unlimited",
+    "unlimited",
+    "unknown",
+];
+const THINKING_BUDGET_OUTCOMES: [&str; 9] = [
+    "unconfigured",
+    "inert",
+    "natural_close",
+    "tokens",
+    "time",
+    "max_tokens",
+    "unclosed",
+    "interrupted",
+    "unresolved",
 ];
 
 /// Atomically tracked metrics for the kiln server.
@@ -78,6 +105,19 @@ pub struct Metrics {
     pub decode_duration_sum_us: AtomicU64,
     pub decode_duration_buckets: [AtomicU64; LATENCY_BUCKETS_US.len() + 1],
 
+    /// Fixed-cardinality thinking-budget telemetry. Effective numeric limits
+    /// are histograms, never labels; source and outcome labels come only from
+    /// the closed sets above.
+    thinking_budget_token_sources: [AtomicU64; THINKING_BUDGET_SOURCES.len()],
+    thinking_budget_time_sources: [AtomicU64; THINKING_BUDGET_SOURCES.len()],
+    thinking_budget_outcomes: [AtomicU64; THINKING_BUDGET_OUTCOMES.len()],
+    thinking_budget_token_limit_count: AtomicU64,
+    thinking_budget_token_limit_sum: AtomicU64,
+    thinking_budget_token_limit_buckets: [AtomicU64; THINKING_BUDGET_TOKEN_BUCKETS.len() + 1],
+    thinking_budget_time_limit_count: AtomicU64,
+    thinking_budget_time_limit_sum_ms: AtomicU64,
+    thinking_budget_time_limit_buckets: [AtomicU64; THINKING_BUDGET_TIME_BUCKETS_MS.len() + 1],
+
     // Training counters
     pub training_sft_completed: AtomicU64,
     pub training_sft_failed: AtomicU64,
@@ -110,6 +150,15 @@ impl Metrics {
             decode_duration_count: AtomicU64::new(0),
             decode_duration_sum_us: AtomicU64::new(0),
             decode_duration_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            thinking_budget_token_sources: std::array::from_fn(|_| AtomicU64::new(0)),
+            thinking_budget_time_sources: std::array::from_fn(|_| AtomicU64::new(0)),
+            thinking_budget_outcomes: std::array::from_fn(|_| AtomicU64::new(0)),
+            thinking_budget_token_limit_count: AtomicU64::new(0),
+            thinking_budget_token_limit_sum: AtomicU64::new(0),
+            thinking_budget_token_limit_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            thinking_budget_time_limit_count: AtomicU64::new(0),
+            thinking_budget_time_limit_sum_ms: AtomicU64::new(0),
+            thinking_budget_time_limit_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
             training_sft_completed: AtomicU64::new(0),
             training_sft_failed: AtomicU64::new(0),
             training_sft_cancelled: AtomicU64::new(0),
@@ -160,6 +209,45 @@ impl Metrics {
         let us = (secs * 1_000_000.0) as u64;
         self.decode_duration_sum_us.fetch_add(us, Ordering::Relaxed);
         observe_bucket(&self.decode_duration_buckets, &LATENCY_BUCKETS_US, us);
+    }
+
+    /// Record the effective thinking-budget configuration and one bounded
+    /// outcome category for a completed recent-request record.
+    pub fn observe_thinking_budget(&self, budget: &RequestThinkingBudget, finish_reason: &str) {
+        let token_source = thinking_budget_source_index(&budget.tokens_source);
+        self.thinking_budget_token_sources[token_source].fetch_add(1, Ordering::Relaxed);
+        let time_source = thinking_budget_source_index(&budget.time_source);
+        self.thinking_budget_time_sources[time_source].fetch_add(1, Ordering::Relaxed);
+
+        if let Some(limit) = budget.max_tokens {
+            self.thinking_budget_token_limit_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.thinking_budget_token_limit_sum
+                .fetch_add(limit, Ordering::Relaxed);
+            observe_bucket(
+                &self.thinking_budget_token_limit_buckets,
+                &THINKING_BUDGET_TOKEN_BUCKETS,
+                limit,
+            );
+        }
+        if let Some(limit_ms) = budget.max_time_ms {
+            self.thinking_budget_time_limit_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.thinking_budget_time_limit_sum_ms
+                .fetch_add(limit_ms, Ordering::Relaxed);
+            observe_bucket(
+                &self.thinking_budget_time_limit_buckets,
+                &THINKING_BUDGET_TIME_BUCKETS_MS,
+                limit_ms,
+            );
+        }
+
+        let outcome = thinking_budget_outcome(budget, finish_reason);
+        let outcome_index = THINKING_BUDGET_OUTCOMES
+            .iter()
+            .position(|candidate| *candidate == outcome)
+            .expect("thinking-budget outcome must use the closed metric vocabulary");
+        self.thinking_budget_outcomes[outcome_index].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Add generated token count.
@@ -377,6 +465,91 @@ impl Metrics {
             &format!(
                 "kiln_request_decode_duration_seconds_sum {:.6}",
                 decode_sum_us as f64 / 1_000_000.0
+            ),
+        );
+
+        out.push_str("# HELP kiln_thinking_budget_source_total Recorded chat completion thinking-budget provenance by dimension.\n");
+        out.push_str("# TYPE kiln_thinking_budget_source_total counter\n");
+        for (index, source) in THINKING_BUDGET_SOURCES.iter().enumerate() {
+            prom_counter2(
+                &mut out,
+                "kiln_thinking_budget_source_total",
+                "dimension",
+                "tokens",
+                "source",
+                source,
+                self.thinking_budget_token_sources[index].load(Ordering::Relaxed),
+            );
+            prom_counter2(
+                &mut out,
+                "kiln_thinking_budget_source_total",
+                "dimension",
+                "time",
+                "source",
+                source,
+                self.thinking_budget_time_sources[index].load(Ordering::Relaxed),
+            );
+        }
+
+        out.push_str("# HELP kiln_thinking_budget_outcomes_total Recorded chat completion thinking-budget outcomes.\n");
+        out.push_str("# TYPE kiln_thinking_budget_outcomes_total counter\n");
+        for (index, outcome) in THINKING_BUDGET_OUTCOMES.iter().enumerate() {
+            prom_counter(
+                &mut out,
+                "kiln_thinking_budget_outcomes_total",
+                "outcome",
+                outcome,
+                self.thinking_budget_outcomes[index].load(Ordering::Relaxed),
+            );
+        }
+
+        out.push_str("# HELP kiln_thinking_budget_effective_tokens Effective configured thinking-token limits on recorded chat completions.\n");
+        out.push_str("# TYPE kiln_thinking_budget_effective_tokens histogram\n");
+        render_integer_histogram_buckets(
+            &mut out,
+            "kiln_thinking_budget_effective_tokens",
+            &THINKING_BUDGET_TOKEN_BUCKETS,
+            &self.thinking_budget_token_limit_buckets,
+        );
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_thinking_budget_effective_tokens_count {}",
+                self.thinking_budget_token_limit_count
+                    .load(Ordering::Relaxed)
+            ),
+        );
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_thinking_budget_effective_tokens_sum {}",
+                self.thinking_budget_token_limit_sum.load(Ordering::Relaxed)
+            ),
+        );
+
+        out.push_str("# HELP kiln_thinking_budget_effective_seconds Effective configured thinking-time limits on recorded chat completions.\n");
+        out.push_str("# TYPE kiln_thinking_budget_effective_seconds histogram\n");
+        render_millisecond_histogram_buckets_as_seconds(
+            &mut out,
+            "kiln_thinking_budget_effective_seconds",
+            &THINKING_BUDGET_TIME_BUCKETS_MS,
+            &self.thinking_budget_time_limit_buckets,
+        );
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_thinking_budget_effective_seconds_count {}",
+                self.thinking_budget_time_limit_count
+                    .load(Ordering::Relaxed)
+            ),
+        );
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_thinking_budget_effective_seconds_sum {:.6}",
+                self.thinking_budget_time_limit_sum_ms
+                    .load(Ordering::Relaxed) as f64
+                    / 1_000.0
             ),
         );
 
@@ -1499,12 +1672,47 @@ fn push_line(out: &mut String, line: &str) {
     out.push('\n');
 }
 
-fn observe_bucket(buckets: &[AtomicU64], bounds_us: &[u64], value_us: u64) {
-    let index = bounds_us
+fn observe_bucket(buckets: &[AtomicU64], bounds: &[u64], value: u64) {
+    let index = bounds
         .iter()
-        .position(|&bound| value_us <= bound)
-        .unwrap_or(bounds_us.len());
+        .position(|&bound| value <= bound)
+        .unwrap_or(bounds.len());
     buckets[index].fetch_add(1, Ordering::Relaxed);
+}
+
+fn thinking_budget_source_index(source: &str) -> usize {
+    THINKING_BUDGET_SOURCES
+        .iter()
+        .position(|candidate| *candidate == source)
+        .unwrap_or(THINKING_BUDGET_SOURCES.len() - 1)
+}
+
+fn thinking_budget_outcome(budget: &RequestThinkingBudget, finish_reason: &str) -> &'static str {
+    if !budget.configured {
+        return "unconfigured";
+    }
+    match budget.applied {
+        None => return "unresolved",
+        Some(false) => return "inert",
+        Some(true) => {}
+    }
+
+    match budget.trigger.as_deref() {
+        Some("tokens") => return "tokens",
+        Some("time") => return "time",
+        Some("max_tokens") => return "max_tokens",
+        _ => {}
+    }
+    if budget.triggered == Some(false) && budget.closed == Some(true) {
+        return "natural_close";
+    }
+    if matches!(finish_reason, "error" | "timeout" | "client_disconnect") {
+        return "interrupted";
+    }
+    if budget.closed == Some(false) {
+        return "unclosed";
+    }
+    "unresolved"
 }
 
 fn update_peak(peak: &AtomicU64, value: u64) {
@@ -1535,6 +1743,43 @@ fn render_histogram_buckets(
     push_line(out, &format!("{name}_bucket{{le=\"+Inf\"}} {cumulative}"));
 }
 
+fn render_integer_histogram_buckets(
+    out: &mut String,
+    name: &str,
+    bounds: &[u64],
+    buckets: &[AtomicU64],
+) {
+    let mut cumulative = 0;
+    for (idx, bound) in bounds.iter().enumerate() {
+        cumulative += buckets[idx].load(Ordering::Relaxed);
+        push_line(
+            out,
+            &format!("{name}_bucket{{le=\"{bound}\"}} {cumulative}"),
+        );
+    }
+    cumulative += buckets[bounds.len()].load(Ordering::Relaxed);
+    push_line(out, &format!("{name}_bucket{{le=\"+Inf\"}} {cumulative}"));
+}
+
+fn render_millisecond_histogram_buckets_as_seconds(
+    out: &mut String,
+    name: &str,
+    bounds_ms: &[u64],
+    buckets: &[AtomicU64],
+) {
+    let mut cumulative = 0;
+    for (idx, bound_ms) in bounds_ms.iter().enumerate() {
+        cumulative += buckets[idx].load(Ordering::Relaxed);
+        let bound_seconds = *bound_ms as f64 / 1_000.0;
+        push_line(
+            out,
+            &format!("{name}_bucket{{le=\"{bound_seconds}\"}} {cumulative}"),
+        );
+    }
+    cumulative += buckets[bounds_ms.len()].load(Ordering::Relaxed);
+    push_line(out, &format!("{name}_bucket{{le=\"+Inf\"}} {cumulative}"));
+}
+
 fn prom_counter(out: &mut String, name: &str, label: &str, value: &str, count: u64) {
     out.push_str(&format!("{name}{{{label}=\"{value}\"}} {count}\n"));
 }
@@ -1546,6 +1791,26 @@ fn prom_counter2(out: &mut String, name: &str, l1: &str, v1: &str, l2: &str, v2:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_thinking_budget(
+        configured: bool,
+        tokens_source: &str,
+        time_source: &str,
+    ) -> RequestThinkingBudget {
+        RequestThinkingBudget {
+            configured,
+            max_tokens: None,
+            max_time_ms: None,
+            tokens_source: tokens_source.to_string(),
+            time_source: time_source.to_string(),
+            applied: None,
+            triggered: None,
+            trigger: None,
+            closed: None,
+            thinking_tokens: None,
+            thinking_time_ms: None,
+        }
+    }
 
     #[test]
     fn test_metrics_render() {
@@ -1562,6 +1827,32 @@ mod tests {
         m.dec_active();
         m.request_prefill_tokens_completed
             .store(8192, std::sync::atomic::Ordering::Relaxed);
+
+        let mut token_closed = test_thinking_budget(true, "request", "server_default");
+        token_closed.max_tokens = Some(64);
+        token_closed.max_time_ms = Some(1_500);
+        token_closed.applied = Some(true);
+        token_closed.triggered = Some(true);
+        token_closed.trigger = Some("tokens".to_string());
+        token_closed.closed = Some(true);
+        m.observe_thinking_budget(&token_closed, "stop");
+
+        let mut natural_close =
+            test_thinking_budget(true, "hostile-user-controlled-source", "request_unlimited");
+        natural_close.max_tokens = Some(32);
+        natural_close.applied = Some(true);
+        natural_close.triggered = Some(false);
+        natural_close.closed = Some(true);
+        m.observe_thinking_budget(&natural_close, "stop");
+
+        let mut interrupted = test_thinking_budget(true, "request", "request");
+        interrupted.max_time_ms = Some(250);
+        interrupted.applied = Some(true);
+        m.observe_thinking_budget(&interrupted, "error");
+
+        let mut inert = test_thinking_budget(true, "unlimited", "unlimited");
+        inert.applied = Some(false);
+        m.observe_thinking_budget(&inert, "stop");
 
         let gauges = SnapshotGauges {
             backend_quarantined: true,
@@ -1791,6 +2082,60 @@ mod tests {
         assert!(output.contains(r#"kiln_request_decode_duration_seconds_bucket{le="1"} 1"#));
         assert!(output.contains("kiln_request_decode_duration_seconds_count 1"));
         assert!(output.contains("kiln_request_decode_duration_seconds_sum 0.75"));
+        assert!(output.contains(
+            "kiln_thinking_budget_source_total{dimension=\"tokens\",source=\"request\"} 2"
+        ));
+        assert!(output.contains(
+            "kiln_thinking_budget_source_total{dimension=\"tokens\",source=\"unknown\"} 1"
+        ));
+        assert!(output.contains(
+            "kiln_thinking_budget_source_total{dimension=\"time\",source=\"request_unlimited\"} 1"
+        ));
+        assert!(!output.contains("hostile-user-controlled-source"));
+        assert!(output.contains("kiln_thinking_budget_outcomes_total{outcome=\"tokens\"} 1"));
+        assert!(
+            output.contains("kiln_thinking_budget_outcomes_total{outcome=\"natural_close\"} 1")
+        );
+        assert!(output.contains("kiln_thinking_budget_outcomes_total{outcome=\"interrupted\"} 1"));
+        assert!(output.contains("kiln_thinking_budget_outcomes_total{outcome=\"inert\"} 1"));
+        assert!(output.contains("kiln_thinking_budget_effective_tokens_bucket{le=\"32\"} 1"));
+        assert!(output.contains("kiln_thinking_budget_effective_tokens_bucket{le=\"64\"} 2"));
+        assert!(output.contains("kiln_thinking_budget_effective_tokens_count 2"));
+        assert!(output.contains("kiln_thinking_budget_effective_tokens_sum 96"));
+        assert!(output.contains("kiln_thinking_budget_effective_seconds_bucket{le=\"0.25\"} 1"));
+        assert!(output.contains("kiln_thinking_budget_effective_seconds_bucket{le=\"2\"} 2"));
+        assert!(output.contains("kiln_thinking_budget_effective_seconds_count 2"));
+        assert!(output.contains("kiln_thinking_budget_effective_seconds_sum 1.750000"));
+    }
+
+    #[test]
+    fn thinking_budget_outcomes_use_only_the_closed_vocabulary() {
+        let mut budget = test_thinking_budget(false, "unlimited", "unlimited");
+        assert_eq!(thinking_budget_outcome(&budget, "stop"), "unconfigured");
+
+        budget.configured = true;
+        assert_eq!(thinking_budget_outcome(&budget, "error"), "unresolved");
+        budget.applied = Some(false);
+        assert_eq!(thinking_budget_outcome(&budget, "stop"), "inert");
+
+        budget.applied = Some(true);
+        budget.closed = Some(false);
+        assert_eq!(thinking_budget_outcome(&budget, "length"), "unclosed");
+        assert_eq!(thinking_budget_outcome(&budget, "timeout"), "interrupted");
+
+        budget.closed = Some(true);
+        budget.triggered = Some(false);
+        assert_eq!(thinking_budget_outcome(&budget, "stop"), "natural_close");
+
+        budget.triggered = Some(true);
+        for trigger in ["tokens", "time", "max_tokens"] {
+            budget.trigger = Some(trigger.to_string());
+            assert_eq!(thinking_budget_outcome(&budget, "stop"), trigger);
+        }
+        budget.trigger = Some("future-user-supplied-value".to_string());
+        budget.triggered = None;
+        budget.closed = None;
+        assert_eq!(thinking_budget_outcome(&budget, "stop"), "unresolved");
     }
 
     #[test]

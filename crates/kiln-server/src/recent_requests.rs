@@ -69,6 +69,37 @@ pub struct RequestRecord {
     /// real external agent. Additive: absent for every other caller.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    /// Effective request-wide thinking-budget configuration plus the final
+    /// outcome when generation progressed far enough to know it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<RequestThinkingBudget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RequestThinkingBudget {
+    pub configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_time_ms: Option<u64>,
+    pub tokens_source: String,
+    pub time_source: String,
+    /// `None` means the request failed before prompt rendering established
+    /// whether a configured budget could apply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied: Option<bool>,
+    /// Outcome fields remain absent for an unlimited or inert budget. This
+    /// distinguishes those states from a completed natural close.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triggered: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_time_ms: Option<u64>,
 }
 
 /// Cap on full prompt / completion body size kept in the ring (chars).
@@ -236,6 +267,50 @@ mod tests {
         record.client = Some("dashboard".to_owned());
         let json = serde_json::to_value(&record).unwrap();
         assert_eq!(json["client"], "dashboard");
+    }
+
+    #[test]
+    fn thinking_budget_record_distinguishes_unresolved_inert_and_final_outcomes() {
+        let mut record = make_record("budget");
+        record.thinking_budget = Some(RequestThinkingBudget {
+            configured: true,
+            max_tokens: Some(64),
+            max_time_ms: None,
+            tokens_source: "server_default".to_string(),
+            time_source: "request_unlimited".to_string(),
+            applied: None,
+            triggered: None,
+            trigger: None,
+            closed: None,
+            thinking_tokens: None,
+            thinking_time_ms: None,
+        });
+        let unresolved = serde_json::to_value(&record).unwrap();
+        assert_eq!(unresolved["thinking_budget"]["max_tokens"], 64);
+        assert_eq!(
+            unresolved["thinking_budget"]["tokens_source"],
+            "server_default"
+        );
+        assert!(unresolved["thinking_budget"].get("applied").is_none());
+        assert!(unresolved["thinking_budget"].get("triggered").is_none());
+
+        let budget = record.thinking_budget.as_mut().unwrap();
+        budget.applied = Some(false);
+        let inert = serde_json::to_value(&record).unwrap();
+        assert_eq!(inert["thinking_budget"]["applied"], false);
+        assert!(inert["thinking_budget"].get("triggered").is_none());
+
+        let budget = record.thinking_budget.as_mut().unwrap();
+        budget.applied = Some(true);
+        budget.triggered = Some(false);
+        budget.closed = Some(true);
+        budget.thinking_tokens = Some(17);
+        budget.thinking_time_ms = Some(42);
+        let natural = serde_json::to_value(&record).unwrap();
+        assert_eq!(natural["thinking_budget"]["triggered"], false);
+        assert_eq!(natural["thinking_budget"]["closed"], true);
+        assert_eq!(natural["thinking_budget"]["thinking_tokens"], 17);
+        assert_eq!(natural["thinking_budget"]["thinking_time_ms"], 42);
     }
 
     #[test]

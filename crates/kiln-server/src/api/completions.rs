@@ -1711,6 +1711,11 @@ fn tool_call_deltas_from_openai_calls(calls: &[serde_json::Value]) -> Vec<serde_
 /// recording must not fail the user's request.
 fn record_recent_request(state: &AppState, record: RequestRecord) {
     maybe_log_slow_chat_completion(state, &record);
+    if let Some(budget) = record.thinking_budget.as_ref() {
+        state
+            .metrics
+            .observe_thinking_budget(budget, &record.finish_reason);
+    }
     match state.recent_requests.lock() {
         Ok(mut ring) => ring.record(record),
         Err(poisoned) => poisoned.into_inner().record(record),
@@ -7128,6 +7133,7 @@ async fn generate_real_batched_streaming(
                     model_prefill_ms: None,
                     model_decode_ms: None,
                     error,
+                    thinking_budget: None,
                 };
                 record_recent_request(&state_for_record, record);
             };
@@ -8480,6 +8486,7 @@ async fn generate_real_streaming(
                     model_prefill_ms: None,
                     model_decode_ms: None,
                     error,
+                    thinking_budget: None,
                 };
                 record_recent_request(&state_for_record, record);
             };
