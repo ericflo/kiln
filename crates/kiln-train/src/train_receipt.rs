@@ -303,7 +303,8 @@ struct GrpoBehaviorSourceManifestV1<'a> {
     sources: &'a [GrpoRecordedBehaviorSourceReceipt],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 struct GrpoRecordedBehaviorSourceAccumulator {
     receipt: GrpoRecordedBehaviorSourceReceipt,
 }
@@ -355,9 +356,10 @@ impl GrpoRecordedBehaviorSourceObservation {
 /// values. The trainer feeds it selected policy log-probabilities already
 /// computed by the loss path, so this contract requires no second model
 /// forward.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct GrpoPolicyAuditAccumulator {
-    ratio_scope: Option<&'static str>,
+    ratio_scope: Option<String>,
     action_tokens: u64,
     ratio_observations: u64,
     ratio_sum: f64,
@@ -428,10 +430,10 @@ impl GrpoPolicyAuditAccumulator {
             crate::IsLevel::Token | crate::IsLevel::Cispo => "token",
         };
         anyhow::ensure!(
-            self.ratio_scope.is_none() || self.ratio_scope == Some(scope),
+            self.ratio_scope.as_deref().is_none_or(|current| current == scope),
             "GRPO policy audit ratio scope changed within one run"
         );
-        self.ratio_scope = Some(scope);
+        self.ratio_scope = Some(scope.to_string());
         self.action_tokens = self
             .action_tokens
             .saturating_add(policy_log_probs.len() as u64);
@@ -596,7 +598,7 @@ impl GrpoPolicyAuditAccumulator {
         Ok(GrpoPolicyAuditReceipt {
             schema: GRPO_POLICY_AUDIT_SCHEMA_V1.to_string(),
             importance_sampling: GrpoImportanceSamplingMetricsReceipt {
-                ratio_scope: self.ratio_scope.map(str::to_string),
+                ratio_scope: self.ratio_scope,
                 action_tokens: self.action_tokens,
                 ratio_observations: self.ratio_observations,
                 mean_ratio: ratio_mean,
@@ -833,7 +835,8 @@ pub struct TrainingPhaseTimingsReceipt {
     pub optimizer_ms: f64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct EchoActivityMetrics {
     pub initial_env_ce: Option<f64>,
     pub final_env_ce: Option<f64>,
@@ -2313,6 +2316,36 @@ mod tests {
         let second = (-0.3_f64).exp() - 1.0 + 0.3;
         assert_near(kl.mean_estimator.unwrap(), (first + second) / 2.0);
         assert_near(kl.mean_masked_estimator.unwrap(), second / 2.0);
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_policy_audit_accumulator_round_trips_strictly_for_resume() -> Result<()> {
+        let mut audit = GrpoPolicyAuditAccumulator::default();
+        audit.observe_policy_values(
+            &[-1.0, -2.0],
+            Some(&[-1.2, -1.8]),
+            Some(&[-0.7, -2.3]),
+            crate::IsLevel::Token,
+            0.2,
+            0.2,
+            crate::KlEstimator::K3,
+            Some(0.5),
+        )?;
+
+        let encoded = serde_json::to_value(&audit)?;
+        let restored: GrpoPolicyAuditAccumulator = serde_json::from_value(encoded.clone())?;
+        assert_eq!(restored, audit);
+
+        let mut with_unknown = encoded;
+        with_unknown
+            .as_object_mut()
+            .expect("audit checkpoint state must be an object")
+            .insert("unknown".to_string(), serde_json::Value::Bool(true));
+        assert!(
+            serde_json::from_value::<GrpoPolicyAuditAccumulator>(with_unknown).is_err(),
+            "resume state must reject unknown accumulator fields"
+        );
         Ok(())
     }
 

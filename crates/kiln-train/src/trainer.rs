@@ -2296,7 +2296,8 @@ pub struct TrainingProgress {
     pub progress: f32,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct GrpoBenchmarkTimings {
     pub tokenize_ms: f64,
     pub mask_build_ms: f64,
