@@ -134,6 +134,11 @@ async fn assert_unsafe_scale(app: &axum::Router, path: &str, body: Value) {
         response["error"]["code"], "training_invalid_request",
         "{path}: {response}"
     );
+    assert_eq!(
+        response["error"]["hint"],
+        "Correct the field named in the error message, then retry the same request.",
+        "{path}: invalid-request remediation must not describe a different training route: {response}"
+    );
     let message = response["error"]["message"].as_str().unwrap_or_default();
     assert!(
         message.contains("unsafe LoRA scaling"),

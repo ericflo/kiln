@@ -53,12 +53,15 @@ Required top-level fields:
 
 Hashes are lowercase hex SHA-256 strings prefixed with `sha256:`.
 
-For OPD, `teacher_content_revision` is the SHA-256 of the complete canonical
-teacher identity. It therefore changes with base or adapter content, numeric
-tokenizer vocabulary/config, implementation/runtime contract, or scoring
-bounds. The nested identity is retained so a receipt is independently
-auditable instead of relying on a mutable registry alias. Pre-scored JSONL also
-records the SHA-256 of the exact loaded source bytes under `training_data`.
+For OPD, `teacher_content_revision` identifies the exact numeric logit source.
+A live model-backed source uses the complete canonical teacher identity;
+materialized or composite fixtures instead hash their exact scored rows or
+algorithm contract. The nested `teacher_identity`, when present, independently
+binds base or adapter content, numeric tokenizer vocabulary/config,
+implementation/runtime contract, protocol, and scoring bounds. Its canonical
+digest is the `identity_revision` returned by `GET /v1/teachers`. Pre-scored
+JSONL also records the SHA-256 of the exact loaded source bytes under
+`training_data`.
 
 ## Failed Receipts
 

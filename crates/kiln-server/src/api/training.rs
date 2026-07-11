@@ -2527,12 +2527,29 @@ struct TrainingCheckpointSummary {
     effective_config: serde_json::Value,
     data_content_sha256: String,
     data_item_count: u64,
-    /// OPD-only teacher identity, extracted from the validated auxiliary
-    /// state. Absent for SFT/GRPO and legacy OPD checkpoints.
+    /// OPD-only teacher provenance, extracted from the validated auxiliary
+    /// state. Absent for SFT/GRPO and legacy OPD checkpoints. The identity
+    /// revision is comparable with `GET /v1/teachers`; the content revision
+    /// binds the exact numeric source and may instead hash materialized rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     teacher_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    teacher_identity_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     teacher_content_revision: Option<String>,
+}
+
+fn checkpoint_teacher_identity_revision(
+    auxiliary_state: &serde_json::Value,
+) -> serde_json::Result<Option<String>> {
+    let Some(value) = auxiliary_state.get("teacher_identity") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let identity: kiln_train::TeacherIdentityV1 = serde_json::from_value(value.clone())?;
+    Ok(Some(format!("sha256:{}", identity.content_revision())))
 }
 
 fn discover_latest_training_checkpoint(
@@ -2604,6 +2621,20 @@ fn discover_latest_training_checkpoint(
             .get("teacher_content_revision")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
+        let teacher_identity_revision =
+            match checkpoint_teacher_identity_revision(&manifest.auxiliary_state) {
+                Ok(revision) => revision,
+                Err(error) => {
+                    if errors.len() < MAX_REPORTED_ERRORS {
+                        errors.push(format!(
+                            "{name}: invalid checkpoint teacher_identity: {error}"
+                        ));
+                    } else {
+                        omitted_errors += 1;
+                    }
+                    continue;
+                }
+            };
         let summary = TrainingCheckpointSummary {
             resume_checkpoint: name,
             checkpoint_id: manifest.checkpoint_id,
@@ -2619,6 +2650,7 @@ fn discover_latest_training_checkpoint(
             data_content_sha256: manifest.data.content_sha256,
             data_item_count: manifest.data.item_count,
             teacher_id,
+            teacher_identity_revision,
             teacher_content_revision,
         };
         let replace = latest.as_ref().is_none_or(|current| {
@@ -2875,6 +2907,23 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    fn discovery_teacher_identity() -> kiln_train::TeacherIdentityV1 {
+        kiln_train::TeacherIdentityV1::new(
+            "teacher-v1-model",
+            "aa".repeat(32),
+            "bb".repeat(32),
+            "cc".repeat(32),
+            None,
+            32,
+            16,
+            128,
+            256,
+            "kiln-checkpoint-discovery-test",
+            "dd".repeat(32),
+        )
+        .unwrap()
+    }
+
     fn write_discovery_checkpoint(
         root: &Path,
         directory_name: &str,
@@ -2889,6 +2938,7 @@ mod tests {
         let auxiliary_state = if training_kind == TrainingKind::Opd {
             serde_json::json!({
                 "teacher_capabilities": {"teacher_id": "teacher-v1"},
+                "teacher_identity": discovery_teacher_identity(),
                 "teacher_content_revision": format!("sha256:{}", "22".repeat(32)),
             })
         } else {
@@ -3040,10 +3090,20 @@ mod tests {
         assert_eq!(latest.data_content_sha256, "11".repeat(32));
         assert_eq!(latest.data_item_count, 1);
         assert_eq!(latest.teacher_id.as_deref(), Some("teacher-v1"));
-        let expected_teacher_revision = format!("sha256:{}", "22".repeat(32));
+        let expected_teacher_identity_revision =
+            format!("sha256:{}", discovery_teacher_identity().content_revision());
+        assert_eq!(
+            latest.teacher_identity_revision.as_deref(),
+            Some(expected_teacher_identity_revision.as_str())
+        );
+        let expected_teacher_content_revision = format!("sha256:{}", "22".repeat(32));
         assert_eq!(
             latest.teacher_content_revision.as_deref(),
-            Some(expected_teacher_revision.as_str())
+            Some(expected_teacher_content_revision.as_str())
+        );
+        assert_ne!(
+            latest.teacher_identity_revision, latest.teacher_content_revision,
+            "model identity and exact numeric-source content are distinct contracts"
         );
         assert_eq!(
             latest.resume_checkpoint,
@@ -3053,6 +3113,36 @@ mod tests {
             error
                 .as_deref()
                 .is_some_and(|error| error.contains("step-00000009"))
+        );
+    }
+
+    #[test]
+    fn checkpoint_discovery_rejects_malformed_teacher_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory_name = "demo-checkpoint-step-00000002.kiln-checkpoint";
+        write_discovery_checkpoint(temp.path(), directory_name, "demo", TrainingKind::Opd, 2, 8);
+        let manifest_path = temp
+            .path()
+            .join(directory_name)
+            .join(kiln_train::checkpoint::TRAINING_CHECKPOINT_MANIFEST_FILENAME);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["auxiliary_state"]["teacher_identity"] =
+            serde_json::json!({"schema": "not-a-teacher-identity"});
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let (latest, error) =
+            discover_latest_training_checkpoint(temp.path(), "demo", TrainingKind::Opd);
+        assert!(latest.is_none(), "invalid identity must not be resumable");
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("invalid checkpoint teacher_identity")),
+            "identity rejection must remain visible to the operator: {error:?}"
         );
     }
 

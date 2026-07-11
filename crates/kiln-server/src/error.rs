@@ -460,7 +460,7 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "training_invalid_request",
             message: format!("Invalid training request: {detail}"),
-            hint: "For GRPO, submit either a groups array or a dataset_path JSONL file path. Do not send both.",
+            hint: "Correct the field named in the error message, then retry the same request.",
             retry_after_seconds: None,
         }
     }

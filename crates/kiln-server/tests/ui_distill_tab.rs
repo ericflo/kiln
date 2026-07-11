@@ -184,7 +184,7 @@ async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
     assert!(app_js.contains("body.config.checkpoint_interval = checkpointInterval"));
     assert!(app_js.contains("body.config.resume_checkpoint = resumeCheckpoint"));
     assert!(app_js.contains("kind === 'sft' || kind === 'grpo' || kind === 'opd'"));
-    assert!(app_js.contains("checkpoint.teacher_content_revision"));
+    assert!(app_js.contains("checkpoint.teacher_identity_revision"));
     assert!(app_js.contains("OPD checkpoint loaded"));
     assert!(app_js.contains("body.credential_id"));
     assert!(!app_js.contains("form.api_key_env"));

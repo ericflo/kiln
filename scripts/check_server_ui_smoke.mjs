@@ -561,6 +561,7 @@ async function startServer({
   let activeAdapter = availableAdapters.find((adapter) => adapter.active)?.name || null;
   const completedTrainingJobs = [];
   const smokeTeacherRevision = `sha256:${'7'.repeat(64)}`;
+  const smokeTeacherContentRevision = `sha256:${'6'.repeat(64)}`;
   const smokeTeachers = [{
     spec: { alias: 'teacher-v1', kind: 'fixture', model_id: 'smoke-teacher-v1' },
     usable: true,
@@ -1185,7 +1186,8 @@ async function startServer({
           data_content_sha256: '9'.repeat(64),
           data_item_count: body.prompts.length,
           teacher_id: body.teacher,
-          teacher_content_revision: smokeTeacherRevision,
+          teacher_identity_revision: smokeTeacherRevision,
+          teacher_content_revision: smokeTeacherContentRevision,
         },
       });
       setTimeout(() => json(res, { message: 'OPD job submitted', job_id: 'smoke-opd' }), 75);

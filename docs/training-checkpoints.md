@@ -240,14 +240,19 @@ in-flight step, group, or OPD candidate, but not the last committed checkpoint.
 `resume_checkpoint` basename, `training_kind`, `data_source_kind`, committed
 step, total steps, next epoch/group/candidate cursor, and completion state. Job
 detail also exposes the validated effective configuration, data hash/count,
-and OPD teacher alias/content revision used by the browser handoff. `kiln train
-status --job-id JOB_ID` prints the same basename. The training detail panel
+and OPD teacher alias, `teacher_identity_revision`, and
+`teacher_content_revision`. The identity revision is comparable with
+`GET /v1/teachers`; the content revision separately binds exact materialized
+logit rows or another numeric source. `kiln train status --job-id JOB_ID`
+prints the same basename. The training detail panel
 labels SFT epoch/example, inline/JSONL GRPO group, and OPD candidate cursors
 separately and provides copy and prepare-resume actions. Preparation clears
 inline SFT/GRPO data and OPD prompts that cannot be recovered from replay
 metadata. OPD preparation selects a teacher only when the currently registered
-alias has the checkpoint's exact revision; missing legacy bindings or teacher
-drift fail closed. Reinsert the identical source before submit.
+alias has the checkpoint's exact identity revision; missing legacy bindings or
+teacher drift fail closed. The server then reconstructs and verifies the exact
+content revision during resume admission. Reinsert the identical source before
+submit.
 
 Status discovery validates the bounded strict manifest without rehashing large
 state files on every poll. Resume admission performs the full file-set, size,

@@ -9498,8 +9498,8 @@ async function prepareTrainingResume(j, checkpoint) {
     const currentTeacher = teachers.find(t => t.spec?.alias === expectedTeacher && t.usable === true);
     const teacherBound = Boolean(
       expectedTeacher
-      && checkpoint.teacher_content_revision
-      && currentTeacher?.identity_revision === checkpoint.teacher_content_revision,
+      && checkpoint.teacher_identity_revision
+      && currentTeacher?.identity_revision === checkpoint.teacher_identity_revision,
     );
     if (teacherBound) {
       setTrainingFormValue('opd-teacher', expectedTeacher);
@@ -9510,7 +9510,7 @@ async function prepareTrainingResume(j, checkpoint) {
     if (form) {
       form.dataset.resumeCheckpoint = checkpoint.resume_checkpoint || '';
       form.dataset.resumeTeacher = expectedTeacher;
-      form.dataset.resumeTeacherRevision = checkpoint.teacher_content_revision || '';
+      form.dataset.resumeTeacherRevision = checkpoint.teacher_identity_revision || '';
     }
     const note = document.getElementById('opd-resume-note');
     if (note) {
