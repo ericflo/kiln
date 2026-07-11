@@ -260,6 +260,11 @@ the final answer. Request fields inherit server defaults when omitted; use
 explicit `null` for an unlimited dimension or `0` to close thinking immediately.
 If token and time budgets are both present, the first one reached wins. The
 clock excludes queue and prefill time and is checked between decode tokens.
+Before decode, the effective `max_tokens` after context-window clamping must fit
+the tokenizer's complete `</think>` sequence. Kiln rejects a smaller value and
+also rejects any `stop` string that can match, contain, or overlap that forced
+close. Leave additional completion tokens for the visible answer; a larger
+thinking budget is allowed and closes with trigger `max_tokens` when necessary.
 The final non-streaming choice exposes the outcome as
 `choices[].thinking_budget`; batch responses use
 `completions[].thinking_budget`. With SSE, inspect

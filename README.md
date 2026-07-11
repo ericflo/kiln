@@ -829,6 +829,16 @@ wins. The time budget starts when the first decode candidate is ready, so queue
 and prefill time do not consume it, and it is checked between generated tokens.
 If the model emits `</think>` naturally first, Kiln leaves it alone.
 
+When a budget applies to an open thinking block, Kiln validates closure before
+decode. The effective `max_tokens` value, after any context-window clamp, must
+fit the active tokenizer's complete `</think>` token sequence. A smaller value
+returns an invalid-request error; a value equal to the close length leaves no
+room for an answer, so reserve additional tokens for visible output. Any `stop`
+string that can match, contain, or overlap all or part of `</think>` is also
+rejected because it could terminate generation before the forced close enters
+KV history atomically. A budget larger than the completion limit is valid:
+Kiln reserves the final slots for the close and reports trigger `max_tokens`.
+
 On exhaustion, Kiln feeds the forced close-tag tokens into the model context and
 continues decoding the final answer. Those tokens count toward `max_tokens` and
 completion usage just like model-generated close-tag tokens. Budgets are inert

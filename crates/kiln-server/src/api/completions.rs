@@ -239,14 +239,14 @@ fn configure_thinking_budget_for_prompt(
         return Ok(());
     }
 
-    if sampling
+    if let Some(stop) = sampling
         .stop
         .iter()
-        .any(|stop| stop_sequence_conflicts_with_thinking_close(stop))
+        .find(|stop| stop_sequence_conflicts_with_thinking_close(stop))
     {
-        return Err(ApiError::chat_invalid_request(
-            "thinking budgets cannot be combined with a stop sequence that matches part of '</think>'",
-        ));
+        return Err(ApiError::chat_invalid_request(format!(
+            "stop sequence {stop:?} conflicts with the forced {REASONING_CLOSE_TAG:?} thinking close sequence"
+        )));
     }
 
     let close_token_ids = state
@@ -262,13 +262,7 @@ fn configure_thinking_budget_for_prompt(
             "the active tokenizer cannot reproduce {REASONING_CLOSE_TAG:?} as a forced token sequence"
         )));
     }
-    if close_token_ids.len() > sampling.max_tokens {
-        return Err(ApiError::chat_invalid_request(format!(
-            "max_tokens {} is too small for the tokenizer's {}-token </think> close sequence",
-            sampling.max_tokens,
-            close_token_ids.len()
-        )));
-    }
+    validate_thinking_budget_completion_capacity(sampling.max_tokens, close_token_ids.len())?;
     let max_completion_tokens = match state.backend.as_ref() {
         ModelBackend::Mock { .. } => sampling.max_tokens.min(MOCK_COMPLETION_TOKEN_LIMIT),
         ModelBackend::Real { .. } => sampling.max_tokens,
@@ -294,6 +288,18 @@ pub(crate) fn stop_sequence_conflicts_with_thinking_close(stop: &str) -> bool {
     let close = REASONING_CLOSE_TAG.as_bytes();
     (1..=stop.len().min(close.len()))
         .any(|len| stop.ends_with(&close[..len]) || close.ends_with(&stop[..len]))
+}
+
+fn validate_thinking_budget_completion_capacity(
+    effective_max_tokens: usize,
+    close_token_count: usize,
+) -> Result<(), ApiError> {
+    if close_token_count > effective_max_tokens {
+        return Err(ApiError::chat_invalid_request(format!(
+            "effective max_tokens {effective_max_tokens} cannot fit the active tokenizer's {close_token_count}-token {REASONING_CLOSE_TAG:?} thinking close sequence"
+        )));
+    }
+    Ok(())
 }
 
 fn fold_reasoning_into_content_for_request(state: &AppState, req: &ChatCompletionRequest) -> bool {
@@ -11646,6 +11652,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("stop sequence"));
+        assert!(error.message.contains("</think>\\n"));
+    }
+
+    #[test]
+    fn thinking_budget_prevalidates_effective_completion_capacity() {
+        validate_thinking_budget_completion_capacity(2, 2).unwrap();
+        validate_thinking_budget_completion_capacity(64, 2).unwrap();
+
+        let error = validate_thinking_budget_completion_capacity(1, 2).unwrap_err();
+        assert!(error.message.contains("effective max_tokens 1"));
+        assert!(error.message.contains("2-token"));
+        assert!(error.message.contains(REASONING_CLOSE_TAG));
     }
 
     #[test]
