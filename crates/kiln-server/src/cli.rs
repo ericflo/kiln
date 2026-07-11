@@ -143,7 +143,7 @@ const TRAIN_EXAMPLES: &str = r#"Examples:
       Train from one GRPO JSON request/batch with groups.
 
   kiln train grpo --file grpo-groups.jsonl --adapter support-bot
-      Train from GRPO JSONL without retaining the full dataset in memory.
+      Train from GRPO JSONL with one group per line without retaining the full dataset in memory.
 
   kiln train grpo --file grpo-groups.jsonl --adapter support-bot --checkpoint-interval 25
       Publish an exact immutable resume point every 25 optimizer groups.

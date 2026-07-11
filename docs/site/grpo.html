@@ -288,6 +288,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#what-grpo-does">What GRPO does</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#rollouts">Rollouts</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#submit-training">Submit training</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#checkpoint-resume">Checkpoint &amp; resume</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#watch-status">Watch status</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#audit-policy">Audit update</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
@@ -388,6 +389,8 @@
               <li><code>base_adapter</code> continues from an existing adapter.</li>
               <li><code>output_name</code> names the saved adapter.</li>
               <li><code>auto_load</code> defaults to <code>true</code>.</li>
+              <li><code>checkpoint_interval</code> publishes exact state every N committed optimizer groups.</li>
+              <li><code>resume_checkpoint</code> continues from the immutable basename reported by job detail.</li>
             </ul>
           </div>
           <div class="endpoint">
@@ -400,13 +403,29 @@
             </ul>
           </div>
         </div>
+        <section class="endpoint mt-5">
+          <h3 id="checkpoint-resume" class="font-semibold mb-2">Checkpoint and resume exact GRPO state</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln train grpo \
+  --file scored-groups.jsonl \
+  --adapter math-correctness \
+  --checkpoint-interval 25
+
+kiln train grpo \
+  --file scored-groups.jsonl \
+  --adapter math-correctness \
+  --checkpoint-interval 25 \
+  --resume-checkpoint math-correctness-checkpoint-step-00000025.kiln-checkpoint</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-dim);">
+            A <code>.jsonl</code> file uses the memory-bounded streamed route; JSON containing <code>groups</code> uses the inline route. Resume requires the identical source bytes, route, adapter, and effective configuration. Kiln validates and restores adapter, optimizer, reference/EMA, cursor/RNG, loss, and diagnostic state before GPU setup. Cancellation publishes at the next settled group boundary; a crash can lose the in-flight group but not the newest committed checkpoint. The browser job drill can copy the basename or prepare the matching form, and the full fail-closed contract is in <a href="https://github.com/ericflo/kiln/blob/main/docs/training-checkpoints.md">Native Training Checkpoints</a>.
+          </p>
+        </section>
       </article>
 
       <article class="card p-6">
         <div class="label mb-3">Monitoring</div>
         <h2 id="watch-status" class="text-2xl font-semibold mb-4">Watch the background training job</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          <code>/v1/train/grpo</code> returns a queued job immediately. Poll <code>/v1/train/status</code> to see pending, running, completed, or failed jobs, then confirm the trained adapter through the adapter APIs or the web UI.
+          <code>/v1/train/grpo</code> returns a queued job immediately. Poll <code>/v1/train/status</code> to see pending, running, completed, or failed jobs. <code>GET /v1/train/jobs/{job_id}</code> reports the latest exact checkpoint basename, inline/JSONL route, and next group cursor; then confirm the trained adapter through the adapter APIs or the web UI.
         </p>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           If the <code>kiln</code> CLI is on your <code>PATH</code>, run <code>kiln train status</code> for the same info as a readable summary (use <code>--url http://host:8420</code> for remote servers). The curl command below is the equivalent HTTP probe &mdash; handy for CI, scripts, or any environment without the CLI.
