@@ -66,6 +66,16 @@ fn grpo_uses_settled_group_boundaries_instead_of_a_job_long_gpu_writer() {
         "pub fn grpo_train_jsonl_to_with_coordination(",
         "/// Tokenized data for a single completion",
     );
+    let exact_checkpoint = source_between(
+        &trainer,
+        "impl GrpoCheckpointDescriptor {",
+        "fn load_grpo_checkpoint_loop_state(",
+    );
+    assert!(
+        exact_checkpoint.contains("let mut snapshot = run_coordinated_grpo_gpu_phase(")
+            && exact_checkpoint.contains("let path = snapshot.publish()?;"),
+        "exact GRPO checkpoints must capture under coordination and publish afterward"
+    );
     for (route, source) in [("inline", inline), ("streamed", streamed)] {
         assert!(
             source.contains("optimizer group"),
@@ -75,8 +85,13 @@ fn grpo_uses_settled_group_boundaries_instead_of_a_job_long_gpu_writer() {
         assert!(source.contains("final adapter snapshot"));
         assert!(source.contains("adapter smoke test and cleanup"));
         assert!(
-            source.contains("save_peft(&ckpt_dir") && source.contains("save_peft(&output_dir"),
-            "{route} GRPO must publish captured CPU state outside its GPU phases"
+            source.contains("checkpoint_descriptor.save(")
+                && source.contains("save_peft(&output_dir"),
+            "{route} GRPO must use exact coordinated checkpoints and publish its final adapter"
+        );
+        assert!(
+            !source.contains("save_peft(&ckpt_dir"),
+            "{route} GRPO must not regress to non-resumable PEFT checkpoint directories"
         );
     }
 }

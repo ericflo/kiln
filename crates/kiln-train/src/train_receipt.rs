@@ -2097,6 +2097,10 @@ pub struct LoraGradNormAccumulator {
 
 impl LoraGradNormAccumulator {
     pub fn observe(&mut self, module: impl Into<String>, norm: f64) {
+        // Device norm reductions are f32. Canonicalize back to that source
+        // precision so host sqrt/transfer tails cannot make forensic receipts
+        // differ by an information-free f64 ULP across equivalent runs.
+        let norm = f64::from(norm as f32);
         if !norm.is_finite() {
             return;
         }
@@ -2115,9 +2119,58 @@ impl LoraGradNormAccumulator {
 #[serde(deny_unknown_fields)]
 struct GradNormAccumulator {
     sample_count: usize,
+    #[serde(with = "f64_ieee_bits")]
     sum: f64,
+    #[serde(with = "f64_ieee_bits")]
     min: f64,
+    #[serde(with = "f64_ieee_bits")]
     max: f64,
+}
+
+mod f64_ieee_bits {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("0x{:016x}", value.to_bits()))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<f64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum WireValue {
+            Bits(String),
+            LegacyNumber(f64),
+        }
+
+        let value = match WireValue::deserialize(deserializer)? {
+            WireValue::Bits(encoded) => {
+                let digits = encoded.strip_prefix("0x").ok_or_else(|| {
+                    serde::de::Error::custom("IEEE-754 f64 bits must start with 0x")
+                })?;
+                if digits.len() != 16 {
+                    return Err(serde::de::Error::custom(
+                        "IEEE-754 f64 bits must contain exactly 16 hex digits",
+                    ));
+                }
+                let bits = u64::from_str_radix(digits, 16)
+                    .map_err(|_| serde::de::Error::custom("invalid IEEE-754 f64 bits"))?;
+                f64::from_bits(bits)
+            }
+            WireValue::LegacyNumber(value) => value,
+        };
+        if !value.is_finite() {
+            return Err(serde::de::Error::custom(
+                "gradient-norm accumulator values must be finite",
+            ));
+        }
+        Ok(value)
+    }
 }
 
 impl GradNormAccumulator {
@@ -2755,6 +2808,52 @@ mod tests {
         assert_eq!(q.min, 3.0);
         assert_eq!(q.mean, 4.0);
         assert_eq!(q.max, 5.0);
+    }
+
+    #[test]
+    fn lora_grad_norm_accumulator_continues_bit_exactly_after_json_restore() {
+        let first = 0.1076551472980432_f64;
+        let second = 0.07733242672018717_f64;
+        let mut uninterrupted = LoraGradNormAccumulator::default();
+        uninterrupted.observe("k_proj", first);
+        uninterrupted.observe("k_proj", second);
+
+        let mut resumed = LoraGradNormAccumulator::default();
+        resumed.observe("k_proj", first);
+        let encoded = serde_json::to_string(&resumed).unwrap();
+        assert!(
+            encoded.contains("0x"),
+            "checkpoint floats must use raw bits"
+        );
+        let mut resumed: LoraGradNormAccumulator = serde_json::from_str(&encoded).unwrap();
+        resumed.observe("k_proj", second);
+        assert_eq!(resumed, uninterrupted);
+    }
+
+    #[test]
+    fn lora_grad_norm_accumulator_accepts_legacy_numeric_state() {
+        let legacy = r#"{
+            "by_module": {
+                "q_proj": {
+                    "sample_count": 1,
+                    "sum": 0.25,
+                    "min": 0.25,
+                    "max": 0.25
+                }
+            }
+        }"#;
+        let restored: LoraGradNormAccumulator = serde_json::from_str(legacy).unwrap();
+        let summary = restored.finish().pop().unwrap();
+        assert_eq!(summary.mean, 0.25);
+    }
+
+    #[test]
+    fn lora_grad_norm_accumulator_canonicalizes_f64_tail_noise() {
+        let mut left = LoraGradNormAccumulator::default();
+        let mut right = LoraGradNormAccumulator::default();
+        left.observe("gate_proj", 0.00728748675095551);
+        right.observe("gate_proj", 0.007287486750955509);
+        assert_eq!(left, right);
     }
 
     #[test]
