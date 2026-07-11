@@ -140,19 +140,19 @@ fn effective_thinking_budget_for_request(
     state: &AppState,
     req: &ChatCompletionRequest,
 ) -> EffectiveThinkingBudget {
+    resolve_effective_thinking_budget(state, req.thinking_budget_tokens, req.thinking_budget_ms)
+}
+
+fn resolve_effective_thinking_budget(
+    state: &AppState,
+    tokens: BudgetOverride<usize>,
+    ms: BudgetOverride<u64>,
+) -> EffectiveThinkingBudget {
     EffectiveThinkingBudget {
-        tokens: req
-            .thinking_budget_tokens
-            .resolve(state.default_thinking_budget_tokens),
-        ms: req
-            .thinking_budget_ms
-            .resolve(state.default_thinking_budget_ms),
-        tokens_source: req
-            .thinking_budget_tokens
-            .source(state.default_thinking_budget_tokens),
-        ms_source: req
-            .thinking_budget_ms
-            .source(state.default_thinking_budget_ms),
+        tokens: tokens.resolve(state.default_thinking_budget_tokens),
+        ms: ms.resolve(state.default_thinking_budget_ms),
+        tokens_source: tokens.source(state.default_thinking_budget_tokens),
+        ms_source: ms.source(state.default_thinking_budget_ms),
     }
 }
 
@@ -162,14 +162,16 @@ fn thinking_budget_metadata_for_request(
     starts_in_reasoning: bool,
 ) -> ThinkingBudgetMetadata {
     let effective = effective_thinking_budget_for_request(state, req);
-    let configured = effective.tokens.is_some() || effective.ms.is_some();
+    let configuration = ThinkingBudgetConfigurationMetadata::from(effective);
     ThinkingBudgetMetadata {
-        configured,
-        applied: configured && starts_in_reasoning && chat_request_max_tokens(req) > 0,
-        max_tokens: effective.tokens,
-        max_time_ms: effective.ms,
-        tokens_source: effective.tokens_source,
-        time_source: effective.ms_source,
+        configured: configuration.configured,
+        applied: configuration.configured
+            && starts_in_reasoning
+            && chat_request_max_tokens(req) > 0,
+        max_tokens: configuration.max_tokens,
+        max_time_ms: configuration.max_time_ms,
+        tokens_source: configuration.tokens_source,
+        time_source: configuration.time_source,
         triggered: false,
         trigger: None,
         closed: None,
@@ -2930,19 +2932,15 @@ fn effective_batch_thinking_budget_for_request(
     state: &AppState,
     req: &BatchCompletionRequest,
 ) -> EffectiveThinkingBudget {
-    EffectiveThinkingBudget {
-        tokens: req
-            .thinking_budget_tokens
-            .resolve(state.default_thinking_budget_tokens),
-        ms: req
-            .thinking_budget_ms
-            .resolve(state.default_thinking_budget_ms),
-        tokens_source: req
-            .thinking_budget_tokens
-            .source(state.default_thinking_budget_tokens),
-        ms_source: req
-            .thinking_budget_ms
-            .source(state.default_thinking_budget_ms),
+    resolve_effective_thinking_budget(state, req.thinking_budget_tokens, req.thinking_budget_ms)
+}
+
+fn batch_completion_metadata_for_request(
+    state: &AppState,
+    req: &BatchCompletionRequest,
+) -> BatchCompletionMetadata {
+    BatchCompletionMetadata {
+        thinking_budget: effective_batch_thinking_budget_for_request(state, req).into(),
     }
 }
 
@@ -4278,6 +4276,43 @@ pub struct ThinkingBudgetMetadata {
     pub thinking_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_time_ms: Option<u64>,
+}
+
+/// Request-wide thinking-budget configuration and provenance. Batch outcomes
+/// remain completion-specific and are reported on each completion item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ThinkingBudgetConfigurationMetadata {
+    pub configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_time_ms: Option<u64>,
+    pub tokens_source: &'static str,
+    pub time_source: &'static str,
+}
+
+impl From<EffectiveThinkingBudget> for ThinkingBudgetConfigurationMetadata {
+    fn from(effective: EffectiveThinkingBudget) -> Self {
+        Self {
+            configured: effective.tokens.is_some() || effective.ms.is_some(),
+            max_tokens: effective.tokens,
+            max_time_ms: effective.ms,
+            tokens_source: effective.tokens_source,
+            time_source: effective.ms_source,
+        }
+    }
+}
+
+impl Default for ThinkingBudgetConfigurationMetadata {
+    fn default() -> Self {
+        Self {
+            configured: false,
+            max_tokens: None,
+            max_time_ms: None,
+            tokens_source: "unlimited",
+            time_source: "unlimited",
+        }
+    }
 }
 
 impl Default for ThinkingBudgetMetadata {
@@ -9434,6 +9469,12 @@ pub struct BatchCompletionResponse {
     /// per completion (so a prompt with `n=4` contributes its prompt token
     /// count 4×), matching how a client would sum N independent calls.
     pub usage: Usage,
+    pub metadata: BatchCompletionMetadata,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BatchCompletionMetadata {
+    pub thinking_budget: ThinkingBudgetConfigurationMetadata,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -9698,6 +9739,7 @@ fn batch_response_from_cached_value(
                 .prompt_tokens
                 .saturating_add(cached.completion_tokens),
         },
+        metadata: batch_completion_metadata_for_request(state, req),
     }
 }
 
@@ -9755,6 +9797,7 @@ fn batch_response_from_cached_chat_choices(
             completion_tokens: total_completion_tokens,
             total_tokens: total_prompt_tokens.saturating_add(total_completion_tokens),
         },
+        metadata: batch_completion_metadata_for_request(state, req),
     }
 }
 
@@ -9820,6 +9863,7 @@ fn batch_response_from_cached_chat_choice_groups(
             completion_tokens: total_completion_tokens,
             total_tokens: total_prompt_tokens.saturating_add(total_completion_tokens),
         },
+        metadata: batch_completion_metadata_for_request(state, req),
     }
 }
 
@@ -9878,6 +9922,7 @@ fn batch_response_from_cached_chat_requests(
             completion_tokens: total_completion_tokens,
             total_tokens: total_prompt_tokens.saturating_add(total_completion_tokens),
         },
+        metadata: batch_completion_metadata_for_request(state, req),
     }
 }
 
@@ -10533,6 +10578,7 @@ async fn batch_completions_inner(
                 completion_tokens: 0,
                 total_tokens: total_prompt_tokens,
             },
+            metadata: batch_completion_metadata_for_request(state, &req),
         };
         let cache_value = cache_value_from_batch_response(&resp);
         if let Some(owner) = batch_cache_owner.take() {
@@ -10801,6 +10847,7 @@ async fn batch_completions_inner(
             completion_tokens: total_completion_tokens,
             total_tokens: total_prompt_tokens.saturating_add(total_completion_tokens),
         },
+        metadata: batch_completion_metadata_for_request(state, &req),
     };
     let cache_value = cache_value_from_batch_response(&resp);
     if let Some(owner) = batch_cache_owner.take() {
@@ -14124,21 +14171,30 @@ mod tests {
                 completion_tokens: 8,
                 total_tokens: 12,
             },
+            metadata: BatchCompletionMetadata::default(),
         };
         let cached = cache_value_from_batch_response(&resp);
         let req = parse_batch_request(
             r#"{
                 "prompts":[[{"role":"user","content":"list files"}]],
+                "thinking_budget_tokens":null,
                 "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]
             }"#,
         );
-        let rehydrated = batch_response_from_cached_value(&make_batch_test_state(), &req, cached);
+        let mut state = make_batch_test_state();
+        state.default_thinking_budget_tokens = Some(99);
+        let rehydrated = batch_response_from_cached_value(&state, &req, cached);
 
         assert_eq!(
             rehydrated.completions[0].tool_calls.as_ref(),
             Some(&tool_calls)
         );
         assert_eq!(rehydrated.completions[0].finish_reason, "tool_calls");
+        assert_eq!(
+            rehydrated.metadata.thinking_budget.tokens_source,
+            "request_unlimited"
+        );
+        assert_eq!(rehydrated.metadata.thinking_budget.max_tokens, None);
     }
 
     #[test]
@@ -14446,6 +14502,58 @@ mod tests {
             300,
             "kiln-test".to_string(),
         )
+    }
+
+    #[test]
+    fn batch_metadata_reports_effective_budgets_and_provenance() {
+        let mut state = make_batch_test_state();
+        state.default_thinking_budget_tokens = Some(64);
+        state.default_thinking_budget_ms = Some(1_000);
+
+        let inherited = parse_batch_request(r#"{"prompts":[[]]}"#);
+        assert_eq!(
+            serde_json::to_value(batch_completion_metadata_for_request(&state, &inherited))
+                .unwrap(),
+            serde_json::json!({
+                "thinking_budget": {
+                    "configured": true,
+                    "max_tokens": 64,
+                    "max_time_ms": 1_000,
+                    "tokens_source": "server_default",
+                    "time_source": "server_default"
+                }
+            })
+        );
+
+        let overridden = parse_batch_request(
+            r#"{"prompts":[[]],"thinking_budget_tokens":0,"thinking_budget_ms":null}"#,
+        );
+        assert_eq!(
+            serde_json::to_value(batch_completion_metadata_for_request(&state, &overridden))
+                .unwrap(),
+            serde_json::json!({
+                "thinking_budget": {
+                    "configured": true,
+                    "max_tokens": 0,
+                    "tokens_source": "request",
+                    "time_source": "request_unlimited"
+                }
+            })
+        );
+
+        state.default_thinking_budget_tokens = None;
+        state.default_thinking_budget_ms = None;
+        assert_eq!(
+            serde_json::to_value(batch_completion_metadata_for_request(&state, &inherited))
+                .unwrap(),
+            serde_json::json!({
+                "thinking_budget": {
+                    "configured": false,
+                    "tokens_source": "unlimited",
+                    "time_source": "unlimited"
+                }
+            })
+        );
     }
 
     fn make_prompt_logprobs_test_state() -> AppState {
@@ -21690,7 +21798,9 @@ mod tests {
 
     #[tokio::test]
     async fn batch_zero_max_tokens_returns_without_generation() {
-        let state = make_batch_test_state();
+        let mut state = make_batch_test_state();
+        state.default_thinking_budget_tokens = Some(64);
+        state.default_thinking_budget_ms = Some(1_000);
         let body = serde_json::json!({
             "prompts": [
                 [{"role":"user","content":"zero one"}],
@@ -21698,7 +21808,9 @@ mod tests {
             ],
             "n": 2,
             "temperature": 0.7,
-            "max_tokens": 0
+            "max_tokens": 0,
+            "thinking_budget_tokens": 0,
+            "thinking_budget_ms": null
         })
         .to_string();
 
@@ -21713,6 +21825,15 @@ mod tests {
                 .all(|item| item["finish_reason"] == "length")
         );
         assert_eq!(body["usage"]["completion_tokens"], 0);
+        assert_eq!(
+            body["metadata"]["thinking_budget"],
+            serde_json::json!({
+                "configured": true,
+                "max_tokens": 0,
+                "tokens_source": "request",
+                "time_source": "request_unlimited"
+            })
+        );
         assert_eq!(
             state
                 .metrics
@@ -21895,6 +22016,7 @@ mod tests {
                 completion_tokens: 0,
                 total_tokens: 0,
             },
+            metadata: BatchCompletionMetadata::default(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["object"], "batch.completion");

@@ -267,9 +267,11 @@ close. Leave additional completion tokens for the visible answer; a larger
 thinking budget is allowed and closes with trigger `max_tokens` when necessary.
 The final non-streaming choice exposes the outcome as
 `choices[].thinking_budget`; batch responses use
-`completions[].thinking_budget`. With SSE, inspect
-`metadata.thinking_budget` on the chunk that carries `finish_reason`. The
-outcome includes `triggered`, optional `trigger` (`tokens`, `time`, or
+`completions[].thinking_budget`. Batch `metadata.thinking_budget` separately
+reports the request-wide effective token/time pair and each dimension's source:
+`request`, `server_default`, `request_unlimited`, or `unlimited`. With SSE,
+inspect `metadata.thinking_budget` on the chunk that carries `finish_reason`.
+The outcome includes `triggered`, optional `trigger` (`tokens`, `time`, or
 `max_tokens`), `closed`, `thinking_tokens`, and `thinking_time_ms`.
 
 ### Optional: point pi at Kiln
@@ -602,6 +604,11 @@ curl -s http://localhost:8420/v1/completions/batch \
     "seed": 42
   }' | python3 -m json.tool
 ```
+
+The response root includes the resolved shared configuration under
+`metadata.thinking_budget`; each `completions[]` row carries its own final
+`thinking_budget` outcome because different rows can close or trigger at
+different points.
 
 ### 9.5 Export an adapter (download tar.gz)
 

@@ -862,12 +862,17 @@ when a budget was applied:
 
 `trigger` is `tokens`, `time`, or `max_tokens`; the last value means Kiln
 reserved the remaining completion slots for an atomic close. A natural close
-has `triggered=false` and `closed=true`. Chat `metadata.thinking_budget` also
-reports the effective limits and whether each came from the request, a server
-default, or an explicit unlimited override. For SSE, that metadata and the
-final outcome are attached to the chunk containing `finish_reason`, immediately
-before the optional usage chunk and `[DONE]`. Cached token-budget responses
-preserve the original outcome. Durable request-log reassembly retains the same
+has `triggered=false` and `closed=true`. Chat and batch
+`metadata.thinking_budget` report the effective request-wide limits and whether
+each dimension came from the request (`request`), a server default
+(`server_default`), explicit request unlimited (`request_unlimited`), or no
+configured limit (`unlimited`). Batch outcomes remain completion-specific at
+`completions[].thinking_budget`; Kiln does not report a misleading aggregate
+trigger or close state at the batch root. For SSE, chat metadata and the final
+outcome are attached to the chunk containing `finish_reason`, immediately before
+the optional usage chunk and `[DONE]`. Cached responses recompute configuration
+provenance from the current request while preserving the original per-completion
+outcome. Durable request-log reassembly retains the same chat
 `metadata.thinking_budget` fields and restores the outcome at
 `response.choices[0].thinking_budget`, so streamed and non-streamed rows use the
 same mining paths.

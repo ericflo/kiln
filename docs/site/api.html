@@ -476,7 +476,7 @@ kiln serve --config kiln.toml</code></pre>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/chat/completions</code> &mdash; chat completions with OpenAI-shaped request and response bodies, including SSE streaming and normalized tool-call deltas.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/completions</code> &mdash; bounded, vLLM-shaped prompt-logprobs scoring for remote OPD teachers (no generation-only mode, no streaming; prompts capped at the smaller of 4096 tokens and the served model context).</div>
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/completions/batch</code> &mdash; multi-prompt batch generation for efficient GRPO rollouts, with the same thinking-budget fields as chat.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/completions/batch</code> &mdash; multi-prompt batch generation for efficient GRPO rollouts, with request-wide effective budget provenance in <code>metadata.thinking_budget</code> and completion-specific outcomes.</div>
         </div>
         <h3 id="prompt-logprobs" class="text-xl font-semibold mt-6 mb-3">Score prompt tokens</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
@@ -539,10 +539,13 @@ kiln serve --config kiln.toml</code></pre>
           <code>completions[].thinking_budget</code>. <code>trigger</code> is <code>tokens</code>,
           <code>time</code>, or <code>max_tokens</code>; a natural close reports
           <code>triggered=false</code> with <code>closed=true</code>. Chat
-          <code>metadata.thinking_budget</code> also reports effective limits and their sources. In
-          SSE streams, the chunk containing <code>finish_reason</code> carries that metadata and the
-          final outcome before the optional usage chunk and <code>[DONE]</code>. Cached token-budget
-          responses preserve the original outcome.
+          and batch <code>metadata.thinking_budget</code> also report effective limits and each
+          dimension's source: <code>request</code>, <code>server_default</code>,
+          <code>request_unlimited</code>, or <code>unlimited</code>. Batch outcomes remain per
+          completion rather than being aggregated at the root. In SSE streams, the chunk containing
+          <code>finish_reason</code> carries chat metadata and the final outcome before the optional
+          usage chunk and <code>[DONE]</code>. Cached responses preserve their original outcome while
+          reporting provenance for the current request.
         </p>
         <div class="endpoint mt-5">
           <h3 class="font-semibold mb-2">Server defaults</h3>
