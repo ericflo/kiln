@@ -1,10 +1,12 @@
 use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
+use crate::config::ServingProfileDiagnostics;
 use crate::state::{AppState, ModelBackend};
 
 #[derive(Serialize)]
 struct ConfigResponse {
+    serving_profile: ServingProfileDiagnostics,
     vram: VramConfig,
     kv_cache: KvCacheConfig,
     training: TrainingConfig,
@@ -93,6 +95,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
     let b = &state.memory_budget;
 
     Json(ConfigResponse {
+        serving_profile: state.serving_profile.diagnostics(),
         vram: VramConfig {
             detected_gb: vram.total_bytes as f64 / 1e9,
             source: vram.source.to_string(),
@@ -128,4 +131,71 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/v1/config", get(get_config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use kiln_core::config::ModelConfig;
+    use kiln_model::engine::MockEngine;
+    use kiln_scheduler::{Scheduler, SchedulerConfig};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn make_test_state() -> AppState {
+        let model_config = ModelConfig::qwen3_5_4b();
+        let scheduler = Scheduler::new(SchedulerConfig::default(), 256);
+        AppState::new_mock(
+            model_config.clone(),
+            scheduler,
+            Arc::new(MockEngine::new(model_config)),
+            crate::api::test_tokenizer(),
+            300,
+            "Qwen3.5-4B".to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn config_reports_profile_provenance_and_every_effective_policy() {
+        let mut state = make_test_state();
+        state.serving_profile = crate::config::ServingProfileSetting::new(
+            crate::config::ServingProfile::Experimental,
+            crate::config::ConfigValueSource::Environment,
+        );
+        let app = routes().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["serving_profile"]["profile"], "experimental");
+        assert_eq!(json["serving_profile"]["source"], "environment");
+        assert_eq!(json["serving_profile"]["immutable_after_startup"], true);
+        assert_eq!(json["serving_profile"]["request_overrides_allowed"], false);
+        let policy = &json["serving_profile"]["effective_policy"];
+        for field in [
+            "inference_admission",
+            "training_gpu_ownership",
+            "adapter_weight_transitions",
+            "dynamic_kv_resize",
+            "allocator_reclaim",
+            "live_graph_capture",
+        ] {
+            assert_eq!(policy[field], true, "unexpected {field}");
+        }
+        assert_eq!(policy["exclusive_gpu_behavior"], "writer_priority");
+    }
 }

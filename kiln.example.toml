@@ -17,6 +17,12 @@
 # weights). See QUICKSTART.md or https://ericflo.github.io/kiln/quickstart.html.
 
 [server]
+serving_profile = "stable"              # Immutable process-lifetime GPU ownership policy.
+                                        # stable: inference only, no live physical mutation;
+                                        # experimental: dynamic development behavior;
+                                        # maintenance: inference disabled, drained exclusive work.
+                                        # KILN_SERVING_PROFILE overrides this strictly. See
+                                        # docs/SERVING_PROFILES.md for the restart workflow.
 host = "127.0.0.1"                    # Kiln has no built-in auth. Set "0.0.0.0" to accept
                                       # remote connections ONLY behind an authenticated
                                       # reverse proxy or on a private network (WireGuard,

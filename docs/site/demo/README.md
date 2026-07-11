@@ -4,6 +4,10 @@ This directory holds the checked-in asciicast demos for the Kiln docs site. The 
 
 [`kiln-60s.cast`](kiln-60s.cast) remains the end-to-end online-learning cast: cold start → base answer → `/v1/train/sft` correction → LoRA hot-swap → improved answer. It is no longer the only demo. The multi-cast player in [`index.html`](index.html) lets readers choose any of the six checked-in casts or play them as a sequence.
 
+Online-learning and live-adapter casts use the explicit `experimental` serving
+profile. Inference-only casts use the default `stable` profile. Production
+maintenance behavior is documented in [Serving Profiles](../../SERVING_PROFILES.md).
+
 ## Casts
 
 | Cast | Driver | Story |

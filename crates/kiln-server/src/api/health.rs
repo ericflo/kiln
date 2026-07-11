@@ -9,7 +9,9 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 
 use crate::batching_engine::BatchingEngineSnapshot;
-use crate::config::{ConfigValueSource, ModelDefaultsProfile};
+use crate::config::{
+    ConfigValueSource, ModelDefaultsProfile, ServingProfileDiagnostics, ServingRuntimePolicy,
+};
 use crate::recent_requests::RequestRecord;
 use crate::state::{AppState, ModelBackend};
 
@@ -21,6 +23,7 @@ struct HealthResponse {
     model: String,
     backend: &'static str,
     backend_runtime: BackendRuntimeInfo,
+    serving_profile: ServingProfileDiagnostics,
     http: HttpRuntimeInfo,
     model_defaults_profile: ModelDefaultsProfile,
     eval_mode: bool,
@@ -208,22 +211,33 @@ struct DecodeRuntimeInfo {
 
 #[derive(Serialize)]
 struct MemoryGovernorRuntimeInfo {
+    /// Effective mode after applying the immutable serving profile.
     reclaim_mode: &'static str,
+    /// Mode selected by the governor's own environment/default configuration.
+    requested_reclaim_mode: &'static str,
     automatic_monitor_enabled: bool,
     source: &'static str,
+    disabled_by_serving_profile: bool,
 }
 
-fn memory_governor_runtime_info() -> MemoryGovernorRuntimeInfo {
+fn memory_governor_runtime_info(policy: ServingRuntimePolicy) -> MemoryGovernorRuntimeInfo {
     let governor = kiln_memory::MemoryGovernor::global();
     let enabled = governor.monitor_started();
+    let requested_reclaim_mode = governor.config().reclaim_mode.as_str();
     MemoryGovernorRuntimeInfo {
-        reclaim_mode: governor.config().reclaim_mode.as_str(),
+        reclaim_mode: if policy.allocator_reclaim {
+            requested_reclaim_mode
+        } else {
+            "off"
+        },
+        requested_reclaim_mode,
         automatic_monitor_enabled: enabled,
         source: if std::env::var_os(kiln_memory::MEMORY_RECLAIM_MODE_ENV).is_some() {
             "environment"
         } else {
             "default"
         },
+        disabled_by_serving_profile: !policy.allocator_reclaim,
     }
 }
 
@@ -366,6 +380,8 @@ struct HealthCheck {
 
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let uptime_seconds = state.started_at.elapsed().as_secs();
+    let serving_profile = state.serving_profile.diagnostics();
+    let serving_policy = serving_profile.effective_policy;
 
     // Adapter info
     let active_adapter = state.active_adapter_name.read().unwrap().clone();
@@ -494,7 +510,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         rocm_graphs,
         metal_graphs,
         kv_autoscaler: state.kv_autoscaler,
-        memory_governor: memory_governor_runtime_info(),
+        memory_governor: memory_governor_runtime_info(serving_policy),
         decode_batcher,
         batching_engine,
     };
@@ -581,13 +597,26 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             pass: backend_runtime.healthy,
         },
         HealthCheck {
+            name: "inference_admission",
+            pass: serving_policy.inference_admission,
+        },
+        HealthCheck {
             name: "inference_prewarm_complete",
             pass: inference_prewarm_complete,
         },
     ];
 
-    let serving_ready = model_loaded && scheduler_responsive && backend_runtime.healthy;
-    let status = if serving_ready { "ok" } else { "degraded" };
+    let serving_ready = model_loaded
+        && scheduler_responsive
+        && backend_runtime.healthy
+        && serving_policy.inference_admission;
+    let status = if !serving_policy.inference_admission {
+        "maintenance"
+    } else if serving_ready {
+        "ok"
+    } else {
+        "degraded"
+    };
 
     let response = HealthResponse {
         status,
@@ -602,6 +631,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         ),
         backend: backend_name,
         backend_runtime,
+        serving_profile,
         http: HttpRuntimeInfo {
             send_buffer_requested_bytes: state.http_send_buffer_bytes,
             send_buffer_kernel_readback_bytes: state.http_send_buffer_preflight_actual_bytes,
@@ -1006,6 +1036,21 @@ mod tests {
         assert!(json["uptime_seconds"].is_number());
         assert!(json["model"].as_str().unwrap().contains("Qwen3.5-4B"));
         assert_eq!(json["backend"], "mock");
+        assert_eq!(json["serving_profile"]["profile"], "stable");
+        assert_eq!(json["serving_profile"]["source"], "default");
+        assert_eq!(
+            json["serving_profile"]["effective_policy_source"],
+            "serving_profile"
+        );
+        assert_eq!(
+            json["serving_profile"]["effective_policy"]["inference_admission"],
+            true
+        );
+        assert_eq!(
+            json["serving_profile"]["effective_policy"]["allocator_reclaim"],
+            false
+        );
+        assert_eq!(json["serving_profile"]["request_overrides_allowed"], false);
         assert!(json["http"]["send_buffer_requested_bytes"].is_null());
         assert!(json["http"]["send_buffer_kernel_readback_bytes"].is_null());
         assert!(json["http"]["send_buffer_effective_bytes"].is_null());
@@ -1103,12 +1148,67 @@ mod tests {
             json["decode_runtime"]["memory_governor"]["reclaim_mode"],
             "off"
         );
+        assert_eq!(
+            json["decode_runtime"]["memory_governor"]["requested_reclaim_mode"],
+            "off"
+        );
+        assert_eq!(
+            json["decode_runtime"]["memory_governor"]["disabled_by_serving_profile"],
+            true
+        );
         assert!(json["training"].is_object());
         assert_eq!(json["training"]["queued"], 0);
         assert!(json["training"]["active_job"].is_null());
         assert!(json["checks"].is_array());
         let checks = json["checks"].as_array().unwrap();
         assert!(checks.iter().all(|c| c["pass"] == true));
+    }
+
+    #[tokio::test]
+    async fn test_health_marks_maintenance_as_intentionally_non_ready() {
+        let mut state = make_test_state();
+        state.serving_profile = crate::config::ServingProfileSetting::new(
+            crate::config::ServingProfile::Maintenance,
+            ConfigValueSource::ConfigFile,
+        );
+        let app = routes().with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["status"], "maintenance");
+        assert_eq!(json["backend_runtime"]["healthy"], true);
+        assert_eq!(json["serving_profile"]["profile"], "maintenance");
+        assert_eq!(json["serving_profile"]["source"], "config_file");
+        assert_eq!(
+            json["serving_profile"]["effective_policy"]["inference_admission"],
+            false
+        );
+        let checks = json["checks"].as_array().unwrap();
+        let inference_admission = checks
+            .iter()
+            .find(|check| check["name"] == "inference_admission")
+            .unwrap();
+        assert_eq!(inference_admission["pass"], false);
+        assert!(
+            checks
+                .iter()
+                .filter(|check| check["name"] != "inference_admission")
+                .all(|check| check["pass"] == true)
+        );
     }
 
     #[tokio::test]

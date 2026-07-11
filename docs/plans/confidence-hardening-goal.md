@@ -183,17 +183,17 @@ local receipt validator runs in cheap CI.
 
 ### 1.1 Stable serving profile
 
-- [ ] Add a typed, documented stable serving profile and make it the default
+- [x] Add a typed, documented stable serving profile and make it the default
   for supported ROCm operation.
-- [ ] In the stable profile, prohibit physical KV resize, pool trim, live graph
+- [x] In the stable profile, prohibit physical KV resize, pool trim, live graph
   capture, and training GPU ownership changes while requests are active.
 - [x] Add a real off switch for memory-governor automatic reclaim. Changing the
   probe interval is not an off switch.
-- [ ] Keep logical admission/eviction available without moving live allocation
+- [x] Keep logical admission/eviction available without moving live allocation
   pointers.
-- [ ] Require an explicit experimental or maintenance profile for dynamic
+- [x] Require an explicit experimental or maintenance profile for dynamic
   physical memory operations and concurrent training.
-- [ ] Expose the effective profile, every resolved setting, and its source
+- [x] Expose the effective profile, every resolved setting, and its source
   (default, file, environment, request) in startup diagnostics and health.
 - [ ] Make malformed configuration fatal with the variable/field name and
   invalid value. Do not fail open.
@@ -321,7 +321,7 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
 - [x] Add fair admission tests mixing short decode, 1K prefill, and 16K prefill.
 - [x] Ensure adapter loading and training cannot acquire an actor-wide GPU lock
   in the stable profile.
-- [ ] Define explicit maintenance/drain behavior for operations that require
+- [x] Define explicit maintenance/drain behavior for operations that require
   exclusive GPU ownership.
 
 ### 1.5 ROCm graph behavior
@@ -834,6 +834,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-10 | Stable runtime mutation guards | `sha256:229d9098f3c0` | this commit | portable | server/model checks, two profile graph-policy tests, and real CPU paged-cache resize rejection | passed | Production startup now resolves graph eligibility once from the immutable serving profile and passes explicit CUDA, ROCm, and Metal options into the runner. Stable and maintenance profiles cannot live-capture graphs; stable construction does not register allocator reclaim hooks, retry allocation through reclaim, start KV autoscaling, or permit the actor's physical resize operation. The compatibility constructor also resolves to stable. The real paged-cache test proves a rejected resize leaves capacity unchanged, and the profile tests prove experimental remains the only live-graph route. This is a portable enforcement checkpoint; adapter/training admission, health provenance, documentation, and the real ROCm stable-profile trace remain open. |
 | 2026-07-10 | Stable adapter and training admission | `sha256:c7eb316af477` | this commit | portable + real CPU integration | 786 server library tests and 23/24 real-model integrations | passed | Every real-backend training API and central batch publication now returns `409 serving_profile_conflict` in stable mode, while the queued-to-running transition independently finalizes injected or restored jobs before memory reservation, reclamation, or GPU coordination. Every live adapter flip is guarded inside the swap primitive before disk-to-device loading and the actor barrier; load/unload endpoints reject earlier, while true no-op selections remain available. Three retained-inference-owner tests prove adapter admission, training admission, and queued-worker rejection complete without waiting for or retaining the actor-wide writer. Intentional adapter/training tests now opt into the experimental profile explicitly. |
 | 2026-07-10 | Maintenance inference drain enforcement | `sha256:9bd7972295c1` | this commit | portable + real CPU integration | 788 server library tests and 24/25 real-model integrations | passed | Maintenance is a restart-only drain boundary: chat, text, batch, prompt-logprob, and agent-run admission return `503 inference_disabled_by_profile`; inference prewarm is suppressed; all eval publications are rejected before queue/tracking insertion; injected eval work becomes a fully archived failed job before its generator is invoked; and the live generator independently checks before adapter selection and generation. A real-backend test holds the exclusive GPU owner while chat and agent requests return promptly, proving they never wait for an inference read owner. Maintenance still performs a real adapter load and publishes its exact content revision, demonstrating that drained exclusive operations remain available. Health provenance and permanent operator documentation follow in the next checkpoint. |
+| 2026-07-10 | Serving-profile diagnostics and operator contract | `sha256:ec21510b0e58` | this commit | portable + real CPU integration | 791 server library tests, 24/25 real-model integrations, all-target server check, formatting, shell syntax, and diff hygiene | passed | One typed resolution report now drives startup diagnostics, `/health`, `/v1/health`, and `/v1/config`, publishing the selected profile, default/file/environment provenance, request-override prohibition, and every effective ownership policy. Maintenance reports a healthy backend separately while readiness returns 503 with `status=maintenance`; stable governor health distinguishes requested reclaim from the profile-forced effective `off`. The permanent policy matrix and restart-only drain runbook are linked from the README, quickstart, training/eval guides, example config, and demo scripts; interactive training demos opt into experimental while inference-only demos retain stable. The stable process still admits logical inference scheduling, cancellation, eviction, and prefix reuse while all physical mutation gates remain closed. |
 | 2026-07-09 | First reduced-CI measurement | `sha256:cda13f3f84e5` | `3c71cc4002f8` | GitHub Actions | run `29049575526` | passed | Three active jobs completed in 3m52s wall and about 4m36s aggregate time; all GPU backend jobs were skipped |
 
 ## Known Starting Defects

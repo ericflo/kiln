@@ -361,6 +361,30 @@ async fn main() -> Result<()> {
     let level = args.effective_log_level(&config.logging.level);
     kiln_server::logging::init(level, &config.logging.format)?;
 
+    let serving_profile = config.server.serving_profile.diagnostics();
+    let effective_policy = serving_profile.effective_policy;
+    tracing::info!(
+        profile = %serving_profile.profile,
+        source = %serving_profile.source,
+        immutable_after_startup = serving_profile.immutable_after_startup,
+        request_overrides_allowed = serving_profile.request_overrides_allowed,
+        effective_policy_source = serving_profile.effective_policy_source,
+        inference_admission = effective_policy.inference_admission,
+        training_gpu_ownership = effective_policy.training_gpu_ownership,
+        adapter_weight_transitions = effective_policy.adapter_weight_transitions,
+        dynamic_kv_resize = effective_policy.dynamic_kv_resize,
+        allocator_reclaim = effective_policy.allocator_reclaim,
+        live_graph_capture = effective_policy.live_graph_capture,
+        exclusive_gpu_behavior = effective_policy.exclusive_gpu_behavior,
+        "serving profile resolved"
+    );
+    if !effective_policy.inference_admission {
+        tracing::warn!(
+            profile = %serving_profile.profile,
+            "inference admission is disabled; health remains non-ready until restart with a serving profile"
+        );
+    }
+
     let host = &config.server.host;
     kiln_server::api::terminal::set_bind_host(host);
     let port = config.server.port;

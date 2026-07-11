@@ -28,15 +28,18 @@
 
 ---
 
-Kiln serves a language model, trains it, and evaluates it — same process, same GPU. You submit corrections or scored completions over HTTP and the model improves in seconds; you upload an SFT dataset and Kiln synthesizes an eval suite from it; you A/B-judge two adapters in the dashboard and your picks become a local judge LoRA. No restarts, no separate training pipeline, no second copy of the weights.
+Kiln serves a language model, trains it, and evaluates it on one GPU from one Rust binary. The default `stable` profile isolates predictable inference from GPU-writer transitions. Interactive train/eval loops opt into `experimental`; production systems enter a drained `maintenance` process for training or adapter changes, then restart into `stable`. See [Serving Profiles](docs/SERVING_PROFILES.md).
 
 It targets one model ([Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)) and optimizes everything for that model — the scheduler, the memory manager, the kernels. This isn't a general-purpose framework. It's a scalpel.
 
 ## Why
 
-Today, improving a deployed model looks like: collect failure examples, format them, upload to a training service, wait hours, download new weights, build a separate eval harness in Python, redeploy, hope. Kiln collapses that into one process — train, evaluate, A/B compare adapters, all over HTTP from the same binary that's serving traffic:
+Today, improving a deployed model looks like: collect failure examples, format them, upload to a training service, wait hours, download new weights, build a separate eval harness in Python, redeploy, hope. Kiln collapses that into one local binary and artifact set. For the interactive loop below, start the server with the explicit development profile:
 
 ```bash
+# Development only: admit inference plus GPU-writer transitions in one process
+KILN_SERVING_PROFILE=experimental KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
+
 # Submit a correction — the model learns it in seconds
 curl http://localhost:8420/v1/train/sft \
   -H "Content-Type: application/json" \
@@ -71,15 +74,15 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **OpenAI-compatible API** — drop in as a local replacement. SSE streaming, chat completions, tool use formatting, and first-class thinking budgets by token count or decode time.
 - **pi integration** — `kiln pi-setup` backs up and merges `~/.pi/agent/models.json` + `settings.json`, then points pi at Kiln as an OpenAI-compatible tool-calling backend.
 - **Embedded agent runs** — the server drives pi itself (`POST /v1/agent/runs`): spawns `pi --mode rpc` against its own model, streams the trajectory live with steer/abort, and auto-indexes finished sessions into the trace layer the self-improvement flywheel trains on.
-- **SFT training** over HTTP — submit examples, model updates in seconds via LoRA hot-swap.
-- **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function.
+- **SFT training** over HTTP — submit examples in `experimental` or drained `maintenance`; publication is atomic.
+- **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function; GPU ownership follows the selected serving profile.
 - **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes. Auto-detect picks the right scorer per example (`numeric_tolerance`, `multiple_choice`, `json_validity`, `regex`, `contains`, `tool_call`, `code`, `llm_judge`, `all`/`any` composites).
 - **Dataset → eval synthesis** — upload an SFT JSONL and Kiln decomposes it into an eval suite (final-assistant / first-turn / every-turn / tool-call-prediction strategies). No separate eval harness to write.
 - **Judgment flywheel** — A/B-judge two adapters in `/ui/`, save your picks into a judgment dataset, compile to SFT, train a *local* judge LoRA, validate it on a held-out slice. The dashboard ships a streaming side-by-side viewer with `A`/`B`/`Tie`/`Skip` keyboard shortcuts.
-- **Post-training auto-eval** — attach `post_eval` to any SFT/GRPO request and the produced adapter is graded immediately, with results back-linked to the training job.
+- **Post-training auto-eval** — in `experimental`, attach `post_eval` to any SFT/GRPO request and the produced adapter is graded immediately, with results back-linked to the training job.
 - **Adapter smoke tests** — pass `--adapter-smoke-test` on SFT/GRPO CLI submissions to record base-vs-adapter canary metrics in `train_receipt.json` before a full eval.
 - **Muon optimizer (default)** — momentum-orthogonalized SGD with fused on-device Newton-Schulz kernels for every backend (CUDA, ROCm, Vulkan, Metal). Converges LoRA fine-tunes in fewer steps than AdamW at roughly half the optimizer state (one momentum buffer vs Adam's two moments). AdamW and SGD remain selectable per-request via `{"optimizer": {"kind": "adam_w"}}` / `{"kind": "sgd"}`. Omit `learning_rate` and the server picks the per-optimizer default (Muon ~2e-2 vs AdamW ~1e-4 for SFT LoRA).
-- **LoRA hot-swap** — new adapter weights activate atomically at iteration boundaries. Zero downtime.
+- **Atomic LoRA transitions** — `experimental` supports live hot-swap; `maintenance` supports drained activation; `stable` rejects real weight transitions before GPU ownership changes.
 - **Continuous batching** with token-budgeted prefill — long prompts yield after every bounded quantum so ready decode rows keep advancing.
 - **128K+ context** on 24GB — Qwen3.5-4B's hybrid architecture (24 linear attention + 8 full attention layers) means KV cache is 4x smaller than a pure transformer.
 - **Paged KV cache** — virtual memory-style block allocation eliminates fragmentation.
@@ -117,7 +120,7 @@ responses = [
 # 2. Score them however you want — regex, unit tests, another model, human eval
 scored = [{"text": r.choices[0].message.content, "reward": my_score(r)} for r in responses]
 
-# 3. Submit — the server trains and hot-swaps immediately
+# 3. Submit — an experimental-profile server trains and hot-swaps atomically
 requests.post("http://localhost:8420/v1/train/grpo", json={
     "groups": [{
         "messages": [{"role": "user", "content": prompt}],
@@ -218,7 +221,7 @@ See [docs/VLLM_TEACHER_IDENTITY.md](docs/VLLM_TEACHER_IDENTITY.md).
 
 ## The Eval Loop
 
-Training is half the story; the other half is knowing whether your last training run actually helped. Kiln's eval system runs in the same process, against the same model weights, and treats your evals as first-class artifacts — registered suites, drillable per-example outcomes, A/B comparisons across adapters, and a judgment flywheel that turns your A/B picks into a *local* judge LoRA you can re-use.
+Training is half the story; the other half is knowing whether your last training run actually helped. In the `experimental` development profile, Kiln's eval system runs in the same process against the same model weights. In production, train under `maintenance`, restart into `stable`, and evaluate before restoring traffic. Both workflows use the same first-class artifacts: registered suites, drillable per-example outcomes, A/B comparisons across adapters, and a judgment flywheel that turns your A/B picks into a *local* judge LoRA you can re-use.
 
 ```bash
 # 1. Upload an SFT JSONL — Kiln will use it as the source of truth for examples
@@ -345,7 +348,13 @@ The `GPU` and `VRAM` lines come from `nvidia-smi` and are skipped silently if it
 curl http://localhost:8420/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages": [{"role": "user", "content": "Hello!"}], "stream": true}'
+```
 
+The default server is `stable`. To run the development training example, stop
+it and restart the same binary/model command with
+`KILN_SERVING_PROFILE=experimental`, then submit:
+
+```bash
 # Train
 curl http://localhost:8420/v1/train/sft \
   -H "Content-Type: application/json" \
@@ -431,8 +440,8 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets |
 | POST | `/v1/completions` | vLLM-shaped prompt-logprob subset with a canonical base-teacher identity fingerprint |
 | POST | `/v1/completions/batch` | Batch generation API for GRPO (up to 64 prompts per request), with the same thinking-budget controls |
-| POST | `/v1/train/sft` | Submit SFT training examples (optionally with a `post_eval` hook) |
-| POST | `/v1/train/grpo` | Submit GRPO scored completions (optionally with a `post_eval` hook). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
+| POST | `/v1/train/sft` | Submit SFT training examples under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`) |
+| POST | `/v1/train/grpo` | Submit GRPO scored completions under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — same handler, semantically-honest name for multi-turn rollouts |
 | GET | `/v1/train/status` | Training queue and job status |
 | GET | `/v1/train/status/{job_id}` | Inspect one training job |
@@ -490,13 +499,13 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
 | POST | `/v1/judgments/render_prompt` | Render the canonical pairwise judging prompt (debug aid) |
 | GET | `/v1/models` | List available models |
-| GET | `/v1/config` | Current server configuration |
+| GET | `/v1/config` | Current server configuration, serving-profile source, and every effective profile policy |
 | GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of active model, adapters, config hashes, env flags, batching, thinking defaults, and cache counts; enabled only with `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
 | GET | `/ui/` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
 | GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history for the dashboard's request panel |
-| GET | `/health` | Server health and diagnostics |
-| GET | `/v1/health` | /v1 compatibility alias for health and diagnostics |
+| GET | `/health` | Server readiness and diagnostics; maintenance intentionally returns 503 |
+| GET | `/v1/health` | `/v1` compatibility alias for readiness and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 
 ### Prompt logprobs
@@ -679,12 +688,13 @@ crates/
 
 ## Configuration
 
-Kiln uses a TOML config file. Environment variables override config values. See [`kiln.example.toml`](kiln.example.toml) for all options.
+Kiln uses a TOML config file. Environment variables override config values. See [`kiln.example.toml`](kiln.example.toml) for all options. The default `stable` GPU ownership contract and the restart-only maintenance workflow are documented in [Serving Profiles](docs/SERVING_PROFILES.md).
 
 | Setting | Env Var | Default | Description |
 |---|---|---|---|
 | `model.path` | `KILN_MODEL_PATH` | — | Path to model weights (required) |
 | `server.port` | `KILN_PORT` | 8420 | Server listen port |
+| `server.serving_profile` | `KILN_SERVING_PROFILE` | `stable` | Immutable process-lifetime GPU ownership policy: `stable`, `experimental`, or `maintenance`; malformed values stop startup, and health/config report the source and every effective policy field |
 | `server.http_send_buffer_bytes` | `KILN_HTTP_SEND_BUFFER_BYTES` | OS default | Optional accepted-socket `SO_SNDBUF` request (1024–16777216 bytes); Kiln preflights it before readiness and reports requested, kernel-readback, and platform-normalized effective bytes in health/debug |
 | `server.stream_stall_grace_ms` | `KILN_STREAM_STALL_GRACE_MS` | 2000 | Maximum continuous time a full 64-event response channel may make no delivery progress before that request is cancelled (10–2000 ms). Strict startup validation rejects malformed or out-of-range values; health/debug report the effective value and whether it came from the default, config file, or environment |
 | `server.max_batch_tokens` | `KILN_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per batching-actor cycle (2–65536). Ready decode rows consume one token each first; resumable prefills use the remainder round-robin. Lower values favor inter-token latency under long-prompt load; higher values favor prefill throughput. Invalid values stop startup; health/debug report value and source |

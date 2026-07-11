@@ -157,6 +157,21 @@ pub struct ServingRuntimePolicy {
     pub exclusive_gpu_behavior: &'static str,
 }
 
+/// Operator-facing resolution report for the process-lifetime serving policy.
+///
+/// `source` identifies who selected `profile`. Every field in
+/// `effective_policy` is derived solely from that profile, never from a
+/// request, so all observability surfaces can publish one consistent contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ServingProfileDiagnostics {
+    pub profile: ServingProfile,
+    pub source: ConfigValueSource,
+    pub immutable_after_startup: bool,
+    pub request_overrides_allowed: bool,
+    pub effective_policy_source: &'static str,
+    pub effective_policy: ServingRuntimePolicy,
+}
+
 /// Validated serving profile plus the startup source that selected it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServingProfileSetting {
@@ -189,6 +204,17 @@ impl ServingProfileSetting {
 
     pub const fn runtime_policy(self) -> ServingRuntimePolicy {
         self.profile.runtime_policy()
+    }
+
+    pub const fn diagnostics(self) -> ServingProfileDiagnostics {
+        ServingProfileDiagnostics {
+            profile: self.profile,
+            source: self.source,
+            immutable_after_startup: true,
+            request_overrides_allowed: false,
+            effective_policy_source: "serving_profile",
+            effective_policy: self.runtime_policy(),
+        }
     }
 }
 
@@ -2193,6 +2219,32 @@ port = 3000
                 live_graph_capture: false,
                 exclusive_gpu_behavior: "inference_disabled_drain_then_exclusive",
             }
+        );
+    }
+
+    #[test]
+    fn serving_profile_diagnostics_bind_source_and_effective_policy() {
+        let diagnostics =
+            ServingProfileSetting::new(ServingProfile::Maintenance, ConfigValueSource::Environment)
+                .diagnostics();
+
+        assert_eq!(diagnostics.profile, ServingProfile::Maintenance);
+        assert_eq!(diagnostics.source, ConfigValueSource::Environment);
+        assert!(diagnostics.immutable_after_startup);
+        assert!(!diagnostics.request_overrides_allowed);
+        assert_eq!(diagnostics.effective_policy_source, "serving_profile");
+        assert_eq!(
+            diagnostics.effective_policy,
+            ServingProfile::Maintenance.runtime_policy()
+        );
+
+        let json = serde_json::to_value(diagnostics).unwrap();
+        assert_eq!(json["profile"], "maintenance");
+        assert_eq!(json["source"], "environment");
+        assert_eq!(json["effective_policy"]["inference_admission"], false);
+        assert_eq!(
+            json["effective_policy"]["exclusive_gpu_behavior"],
+            "inference_disabled_drain_then_exclusive"
         );
     }
 

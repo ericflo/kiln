@@ -10,6 +10,7 @@
 set -e
 
 export KILN_MODEL_PATH="${KILN_MODEL_PATH:-./Qwen3.5-4B}"
+export KILN_SERVING_PROFILE=experimental
 KILN_BIN="${KILN_BIN:-./target/release/kiln}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

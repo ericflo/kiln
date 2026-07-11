@@ -11,6 +11,11 @@ The headline result on the paper's TerminalBench-2.0 benchmark: **pass@1 nearly 
 This guide is the operational companion to the integration plan
 ([`docs/plans/echo-integration-plan.md`](plans/echo-integration-plan.md)) and the paper archives ([`docs/papers/echo/echo_paper.md`](papers/echo/echo_paper.md)).
 
+Server-side ECHO/GRPO training requires `KILN_SERVING_PROFILE=experimental`
+for an interactive generate/train loop or `maintenance` for drained training.
+The default `stable` profile rejects training GPU ownership. See
+[Serving Profiles](SERVING_PROFILES.md).
+
 ## Quick decisions
 
 **Is ECHO on by default?** Yes. `LossConfig::default()` ships `loss.echo = Some(EchoConfig::default())` — `λ = 0.05`, `env_mask_mode: env_only`, `warning_filter: true` (`default_echo_some()` in `crates/kiln-train/src/lib.rs`). (One sentence of history: the term was disabled between the #1082 candle removal, which deleted its only gradient producer, and resurrection PR2, which rebuilt env-CE as constant-coefficient `(softmax − one-hot)` rows on the fused GRPO tape root — `λ/|O|` per row, |O| = pre-warning-filter observation length per paper §3.1, validated by a closed-form CPU gradient test.) Submissions with ECHO plus observation segments validate and train; the receipt records `echo.enabled: true` with `initial_env_ce` / `final_env_ce`. Rollouts with no env tokens pay nothing — the term contributes exactly zero and the receipt's env-CE fields stay unset.

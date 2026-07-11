@@ -6,6 +6,13 @@ inference, share the same model weights, and slot into the same job-queue
 machinery as training — so you can `train → eval → compare` in one HTTP
 loop without touching Python.
 
+That one-process loop requires `KILN_SERVING_PROFILE=experimental`. The
+default `stable` profile admits eval inference but rejects training and real
+adapter weight transitions. A `maintenance` process admits training and
+adapter transitions but rejects every eval because inference is disabled; run
+the eval after restarting into `stable`. See
+[Serving Profiles](SERVING_PROFILES.md).
+
 Three things are unusual about kiln's eval stack:
 
 1. **You don't write a scorer.** Auto-detect picks one per example based on

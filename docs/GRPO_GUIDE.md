@@ -6,6 +6,14 @@ code-runs). Everything below assumes a Kiln server running on
 `http://localhost:8420` with at least one adapter slot free and Python 3.10+
 on the client.
 
+The end-to-end generate/train/hot-swap loop requires the explicit development
+profile: start Kiln with `KILN_SERVING_PROFILE=experimental`. The default
+`stable` profile returns `409 serving_profile_conflict` for training, while
+`maintenance` disables the generation half of the loop. Production systems
+should generate under `stable`, restart into drained `maintenance` for the
+training mutation, then restart into `stable` to evaluate. See
+[Serving Profiles](SERVING_PROFILES.md).
+
 ## What GRPO is, in 5 sentences
 
 GRPO is **Group Relative Policy Optimization**, the reinforcement-learning
@@ -23,8 +31,9 @@ high-reward output. **You write the reward function. That's the whole point.**
 
 ## The loop
 
-Every GRPO iteration is the same four-step cycle. On Kiln this is one process,
-two HTTP endpoints, and an atomic adapter hot-swap:
+Every GRPO iteration is the same four-step cycle. In the `experimental`
+profile this is one process, two HTTP endpoints, and an atomic adapter
+hot-swap:
 
 ```
    [ generate ]    POST /v1/completions/batch

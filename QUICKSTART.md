@@ -163,6 +163,7 @@ Optionally, create a `kiln.toml` config file instead:
 path = "./Qwen3.5-4B"
 
 [server]
+serving_profile = "stable"
 port = 8420
 ```
 
@@ -171,6 +172,12 @@ Then start with:
 ```bash
 ./target/release/kiln serve --config kiln.toml
 ```
+
+`stable` is the default and is the recommended profile for ordinary serving.
+It rejects training GPU ownership and real adapter weight transitions. The
+tutorial's later train-then-eval loop uses `experimental` explicitly; a
+production deployment should use the drained `maintenance` restart workflow
+instead. See [Serving Profiles](docs/SERVING_PROFILES.md) before step 6.
 
 By default, Kiln logs in colored "pretty" format when stderr is an interactive
 terminal and switches to structured JSON when stderr is piped or redirected
@@ -296,6 +303,21 @@ Next steps are optional:
 
 ## 6. Submit SFT Training
 
+Training requires GPU-writer ownership. For this interactive tutorial, stop the
+stable server and restart the same command with the development profile:
+
+```bash
+KILN_SERVING_PROFILE=experimental \
+  KILN_MODEL_PATH=./Qwen3.5-4B \
+  ./target/release/kiln serve
+```
+
+This keeps inference, live adapter activation, and post-training eval available
+in one process. For production, remove the instance from traffic, restart with
+`KILN_SERVING_PROFILE=maintenance`, train without `post_eval`, then restart in
+`stable` and run the eval before restoring traffic. The full drain procedure is
+in [Serving Profiles](docs/SERVING_PROFILES.md#entering-maintenance).
+
 Create a training file `examples.jsonl` with chat-format examples:
 
 ```jsonl
@@ -328,9 +350,11 @@ curl -s http://localhost:8420/v1/train/sft \
 ```
 
 Training runs in the background and keeps its weights, receipt, replay data,
-and checkpoints hidden until the job finishes. The model continues serving
-requests during training. At completion Kiln publishes the adapter atomically;
-with the default `auto_load=true`, subsequent requests use the new revision. A
+and checkpoints hidden until the job finishes. Under `experimental`, the model
+continues serving while the writer-priority training operation runs. Under
+`maintenance`, inference is disabled. At completion Kiln publishes the adapter
+atomically; with the default `auto_load=true`, subsequent requests in
+`experimental` use the new revision. A
 same-name adapter that was already serving is reloaded inside that publication
 barrier even when `auto_load=false`, because its on-disk bytes cannot change
 behind the loaded weights.
@@ -682,7 +706,7 @@ Payload (`Content-Type: application/json`):
 
 ## 10. Evaluate your adapter
 
-Once you've trained an adapter, you'll want to know whether it's actually any better than the base model on the prompts you care about. Kiln's eval system runs in the same process as inference and training, so the loop is `train → eval → drill into failures → fix → repeat` without leaving the server.
+Once you've trained an adapter, you'll want to know whether it's actually any better than the base model on the prompts you care about. In the tutorial's `experimental` profile, the eval system runs in the same process as inference and training, so the loop is `train → eval → drill into failures → fix → repeat`. A production `maintenance` process cannot run evals; restart into `stable` first.
 
 The fastest path is to **synthesize an eval suite from an existing SFT dataset** — Kiln walks the conversations, extracts (prompt, target) pairs, picks an appropriate scorer per example (`numeric_tolerance`, `json_validity`, `multiple_choice`, `contains`, `tool_call`, `code`, `exact_match`, …), and registers a named suite you can re-run forever:
 
@@ -819,7 +843,7 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | GET | `/ui/` | Embedded web dashboard (status, adapters, training, chat) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
 | GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history for the dashboard's request panel |
-| GET | `/health` | Server health and diagnostics |
+| GET | `/health` | Server readiness and diagnostics; maintenance intentionally returns 503 |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/v1/models` | List available models |
 | POST | `/v1/chat/completions` | Chat completion (OpenAI-compatible). Kiln extensions include `thinking_budget_tokens` / `thinking_budget_ms` and per-request `adapter` or `adapters: [{name, scale}, …]` composition (see [9.8](#98-compose-adapters-per-request)). |
@@ -831,8 +855,8 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | GET | `/v1/adapters/{name}/download` | Stream adapter as `application/gzip` tar.gz (see [9.5](#95-export-an-adapter-download-targz)). |
 | POST | `/v1/adapters/upload` | Import adapter from a multipart `archive` tar.gz (see [9.6](#96-import-an-adapter-upload-targz)). |
 | POST | `/v1/adapters/merge` | Combine adapters via `weighted_average`, `ties`, or `concat` mode (see [9.7](#97-merge-adapters-ties)). |
-| POST | `/v1/train/sft` | Submit SFT training examples |
-| POST | `/v1/train/grpo` | Submit GRPO training batch (supports new `agentic_groups` shape with multi-turn trajectories; ECHO on by default) |
+| POST | `/v1/train/sft` | Submit SFT training examples (`experimental` or `maintenance`) |
+| POST | `/v1/train/grpo` | Submit GRPO training batch in `experimental` or `maintenance` (supports new `agentic_groups` shape with multi-turn trajectories; ECHO on by default) |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — semantically-honest name for multi-turn rollouts |
 | GET | `/v1/train/status` | Training queue status |
 | GET | `/v1/train/status/{job_id}` | Individual job status |
@@ -850,7 +874,7 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | POST | `/v1/judgments/{name}/rows` | Append one A/B/Tie/Skip preference |
 | POST | `/v1/judgments/{name}/compile` | Compile judgments into an SFT dataset for a judge LoRA |
 | POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
-| GET | `/v1/config` | Current server configuration |
+| GET | `/v1/config` | Current server configuration, serving-profile source, and every effective policy field |
 
 ## Configuration
 
@@ -862,6 +886,7 @@ Key settings:
 |---------|---------|---------|-------------|
 | `model.path` | `KILN_MODEL_PATH` | none | Path to model weights (required for real inference) |
 | `server.port` | `KILN_PORT` | 8420 | Server listen port |
+| `server.serving_profile` | `KILN_SERVING_PROFILE` | `stable` | Immutable GPU ownership policy: `stable`, `experimental`, or `maintenance` |
 | `server.max_batch_tokens` | `KILN_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per actor cycle; lower values favor decode latency during long prefills, higher values favor prefill throughput |
 | `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default token budget for an open thinking block |
 | `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block |
