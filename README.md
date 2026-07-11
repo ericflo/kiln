@@ -131,7 +131,14 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
 # 4. Next inference already uses the improved weights
 ```
 
-See [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) for worked verifiable-rewards examples (math, JSON, code).
+The compact example above intentionally uses the default
+`behavior_policy="no_importance_correction"`. For drift-corrected training,
+use `kiln rollout-generate`: it requests exact token/action provenance from the
+real batching path, validates the seed, adapter, prompt, scored content, and
+usage before scoring, and atomically writes JSONL for
+`behavior_policy="recorded"`. See [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) for
+the recorded-policy workflow and worked verifiable-reward examples (math,
+JSON, code).
 
 ### Agentic GRPO with ECHO (multi-turn rollouts)
 
@@ -437,9 +444,9 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets |
+| POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets and opt-in exact single-choice `rollout_provenance` |
 | POST | `/v1/completions` | vLLM-shaped prompt-logprob subset with a canonical base-teacher identity fingerprint |
-| POST | `/v1/completions/batch` | Batch generation API for GRPO (up to 64 prompts per request), with the same thinking-budget controls |
+| POST | `/v1/completions/batch` | Text-only batch generation (up to 64 prompts per request), with the same thinking-budget controls but no recorded behavior-policy probabilities |
 | POST | `/v1/train/sft` | Submit SFT training examples under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`) |
 | POST | `/v1/train/grpo` | Submit GRPO scored completions under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — same handler, semantically-honest name for multi-turn rollouts |

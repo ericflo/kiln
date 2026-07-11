@@ -586,9 +586,50 @@ recommends:
 - **`KILN_INFERENCE_MEMORY_FRACTION=X`** — fraction-based equivalent.
 
 
-### 9.4 Batch generation (efficient for GRPO rollouts)
+### 9.4 GRPO rollout generation
+
+Use `kiln rollout-generate` when training with
+`config.behavior_policy: "recorded"`. The command forces non-streaming,
+single-choice `POST /v1/chat/completions` requests with
+`rollout_provenance: true`, validates each returned behavior-policy record
+before scoring, and atomically publishes trainer-compatible JSONL only after
+the entire run succeeds:
+
+```bash
+kiln rollout-generate \
+  --adapter base \
+  --thinking false \
+  --tasks tasks.jsonl \
+  --seeds 8 \
+  --request-template request.json \
+  --scorer ./score_one.py \
+  --output rollouts.scored.jsonl
+```
+
+The JSONL stores `text`, `reward`, and exact
+`kiln.rollout-provenance.v1` data for every completion. Missing or malformed
+provenance, a mismatched seed/adapter/prompt/content identity, incomplete action
+coverage, or inconsistent usage fails before the scorer runs. See
+[the GRPO guide](docs/GRPO_GUIDE.md#recommended-recorded-policy-workflow) for
+runnable task, template, scorer, and training-submission examples.
+
+For direct API clients, add `"rollout_provenance": true` to one
+non-streaming chat request. The response places the record at
+`choices[0].rollout_provenance`. This path requires real model weights, the
+batching engine, `n: 1`, a content-addressed base-policy identity, and enough
+completion capacity for at least one sampled action. It bypasses text-only
+caches and returns `rollout_provenance_unavailable` instead of fabricating a
+record on unsupported paths. Tool definitions, `tool_choice`, and prior
+tool-call metadata are rejected until the scored training schema can bind them
+exactly.
+
+#### Text-only batch generation
 
 `/v1/completions/batch` returns one HTTP response covering many prompts × `n` completions per prompt. The iteration-level scheduler batches the underlying prefill/decode steps, so this is far cheaper than N parallel calls. Hard cap: `prompts.len() * n <= 64`. `stream` is not supported on this endpoint. `seed` is per-batch — each completion uses `seed.wrapping_add(prompt_idx * n + completion_idx)` so identical prompts produce distinct outputs.
+
+This endpoint does not emit per-token behavior provenance. Use it only with
+`behavior_policy: "no_importance_correction"`, or use `rollout-generate` for
+recorded importance correction.
 
 For the full generate→score→train loop with three worked verifiable-reward examples (math correctness, JSON-validity, code-runs), see [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md).
 
@@ -868,8 +909,8 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | GET | `/health` | Server readiness and diagnostics; maintenance intentionally returns 503 |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/v1/models` | List available models |
-| POST | `/v1/chat/completions` | Chat completion (OpenAI-compatible). Kiln extensions include `thinking_budget_tokens` / `thinking_budget_ms` and per-request `adapter` or `adapters: [{name, scale}, …]` composition (see [9.8](#98-compose-adapters-per-request)). |
-| POST | `/v1/completions/batch` | Multi-prompt batch generation with the same thinking-budget controls — efficient for GRPO rollouts (see [9.4](#94-batch-generation-efficient-for-grpo-rollouts)). |
+| POST | `/v1/chat/completions` | Chat completion (OpenAI-compatible). Kiln extensions include `thinking_budget_tokens` / `thinking_budget_ms`, exact single-choice `rollout_provenance`, and per-request `adapter` or `adapters: [{name, scale}, …]` composition (see [9.8](#98-compose-adapters-per-request)). |
+| POST | `/v1/completions/batch` | Multi-prompt text generation with the same thinking-budget controls, but without recorded behavior-policy provenance (see [9.4](#94-grpo-rollout-generation)). |
 | GET | `/v1/adapters` | List saved/available LoRA adapters, identify the active adapter, and report the exact loaded name/content revision |
 | POST | `/v1/adapters/load` | Load adapter from disk and return its exact content revision |
 | POST | `/v1/adapters/unload` | Unload active adapter |

@@ -75,6 +75,10 @@ pub struct RolloutGenerateStats {
     pub mean_client_latency_ms: f64,
     pub max_client_latency_ms: f64,
     pub mean_server_latency_ms: Option<f64>,
+    #[serde(default)]
+    pub total_sampled_action_tokens: usize,
+    #[serde(default)]
+    pub total_forced_action_tokens: usize,
 }
 
 fn deserialize_requested_thinking_budget<'de, D, T>(
@@ -105,6 +109,12 @@ pub struct RolloutCompletionSummary {
     pub finish_reason: String,
     pub content_chars: usize,
     pub response_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_provenance_schema: Option<String>,
+    #[serde(default)]
+    pub sampled_action_tokens: usize,
+    #[serde(default)]
+    pub forced_action_tokens: usize,
 }
 
 #[derive(Debug)]
@@ -132,11 +142,59 @@ struct RewardScore {
     raw: Value,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 struct TokenUsage {
     prompt_tokens: usize,
     completion_tokens: usize,
     total_tokens: usize,
+}
+
+#[derive(Debug)]
+struct ValidatedRolloutResponse {
+    content: String,
+    finish_reason: String,
+    usage: TokenUsage,
+    provenance: kiln_train::RolloutProvenanceV1,
+    sampled_action_tokens: usize,
+    forced_action_tokens: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RolloutGroupIdentity {
+    prompt_token_ids: Vec<u32>,
+    behavior_policy: kiln_train::RolloutBehaviorPolicyIdentityV1,
+    tokenizer: kiln_train::RolloutTokenizerIdentityV1,
+    template_invocation: kiln_train::RolloutChatTemplateInvocationV1,
+    sampling: kiln_train::RolloutSamplingConfigV1,
+    generation_backend: String,
+}
+
+impl RolloutGroupIdentity {
+    fn from_provenance(provenance: &kiln_train::RolloutProvenanceV1) -> Self {
+        Self {
+            prompt_token_ids: provenance.input_token_ids[..provenance.prompt_token_count].to_vec(),
+            behavior_policy: provenance.behavior_policy.clone(),
+            tokenizer: provenance.tokenizer.clone(),
+            template_invocation: provenance.template_invocation.clone(),
+            sampling: provenance.sampling.clone(),
+            generation_backend: provenance.generation_backend.clone(),
+        }
+    }
+}
+
+fn bind_rollout_group_identity(
+    group_identity: &mut Option<RolloutGroupIdentity>,
+    current: RolloutGroupIdentity,
+    task_id: &str,
+) -> Result<()> {
+    match group_identity {
+        Some(existing) => anyhow::ensure!(
+            existing == &current,
+            "rollout identity changed across seeds for task {task_id}; exact prompt tokens, behavior policy, tokenizer, template invocation, sampling controls, and generation backend must remain stable within one GRPO group"
+        ),
+        None => *group_identity = Some(current),
+    }
+    Ok(())
 }
 
 pub async fn run_rollout_generate(
@@ -144,6 +202,9 @@ pub async fn run_rollout_generate(
 ) -> Result<RolloutGenerateSummary> {
     if options.seeds == 0 {
         anyhow::bail!("--seeds must be greater than zero");
+    }
+    if options.output == options.summary_output {
+        anyhow::bail!("--output and --summary-output must name different files");
     }
     validate_thinking_budget_applicability(
         options.thinking,
@@ -183,15 +244,14 @@ pub async fn run_rollout_generate(
     }
 
     let client = reqwest::Client::new();
-    let mut writer = std::io::BufWriter::new(
-        std::fs::File::create(&options.output)
-            .with_context(|| format!("creating {}", options.output.display()))?,
-    );
+    let mut staged_output = new_staged_file(&options.output)?;
+    let mut writer = std::io::BufWriter::new(staged_output.as_file_mut());
     let mut summaries = Vec::with_capacity(tasks.len() * options.seeds);
     let mut warnings = Vec::new();
 
     for task in &tasks {
         let mut group_messages: Option<Vec<RolloutChatMessage>> = None;
+        let mut group_rollout_identity: Option<RolloutGroupIdentity> = None;
         let mut completions = Vec::with_capacity(options.seeds);
 
         for seed_index in 0..options.seeds {
@@ -213,7 +273,7 @@ pub async fn run_rollout_generate(
                         task.id
                     );
                 }
-                None => group_messages = Some(request_messages),
+                None => group_messages = Some(request_messages.clone()),
                 _ => {}
             }
 
@@ -227,9 +287,28 @@ pub async fn run_rollout_generate(
                     )
                 })?;
             let client_latency_ms = request_started.elapsed().as_secs_f64() * 1000.0;
-            let content = extract_chat_content(&response);
-            let finish_reason = extract_finish_reason(&response);
-            let usage = extract_usage(&response);
+            let validated = validate_rollout_response(
+                &response,
+                seed,
+                adapter.request_value.as_deref(),
+                &request_messages,
+            )
+            .with_context(|| {
+                format!(
+                    "invalid rollout provenance for task {} seed {} adapter {}",
+                    task.id, seed, adapter.label
+                )
+            })?;
+            let ValidatedRolloutResponse {
+                content,
+                finish_reason,
+                usage,
+                provenance,
+                sampled_action_tokens,
+                forced_action_tokens,
+            } = validated;
+            let rollout_identity = RolloutGroupIdentity::from_provenance(&provenance);
+            bind_rollout_group_identity(&mut group_rollout_identity, rollout_identity, &task.id)?;
             let server_total_latency_ms = response
                 .pointer("/metadata/performance/total_latency_ms")
                 .and_then(Value::as_f64);
@@ -284,17 +363,16 @@ pub async fn run_rollout_generate(
                     .get("id")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                rollout_provenance_schema: Some(provenance.schema().to_string()),
+                sampled_action_tokens,
+                forced_action_tokens,
             };
             summaries.push(completion_summary.clone());
 
             completions.push(json!({
                 "text": content,
                 "reward": score.reward,
-                "trajectory": [{
-                    "role": "assistant",
-                    "content": content,
-                    "kind": "action"
-                }],
+                "provenance": provenance,
                 "metadata": {
                     "task_index": task.index,
                     "task_id": task.id,
@@ -335,6 +413,11 @@ pub async fn run_rollout_generate(
     writer
         .flush()
         .with_context(|| format!("flushing {}", options.output.display()))?;
+    drop(writer);
+    staged_output
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("syncing staged {}", options.output.display()))?;
 
     let stats = summarize_completions(&summaries);
     let summary = RolloutGenerateSummary {
@@ -369,11 +452,12 @@ pub async fn run_rollout_generate(
             json!(started.elapsed().as_secs_f64() * 1000.0),
         );
     }
-    std::fs::write(
+    let staged_summary = stage_bytes(
         &options.summary_output,
-        serde_json::to_vec_pretty(&summary_value)?,
-    )
-    .with_context(|| format!("writing {}", options.summary_output.display()))?;
+        &serde_json::to_vec_pretty(&summary_value)?,
+    )?;
+    persist_staged_file(staged_output, &options.output)?;
+    persist_staged_file(staged_summary, &options.summary_output)?;
 
     Ok(summary)
 }
@@ -446,6 +530,8 @@ fn render_rollout_request(
         adapter.map_or(Value::Null, |name| Value::String(name.to_string())),
     );
     obj.insert("stream".to_string(), Value::Bool(false));
+    obj.insert("n".to_string(), json!(1));
+    obj.insert("rollout_provenance".to_string(), Value::Bool(true));
     obj.insert("include_performance".to_string(), Value::Bool(true));
     if let Some(budget) = thinking_budget_tokens {
         obj.insert(
@@ -677,45 +763,159 @@ async fn post_chat_completion(client: &reqwest::Client, url: &str, body: &Value)
     Ok(body)
 }
 
-fn extract_chat_content(response: &Value) -> String {
-    response
+fn validate_rollout_response(
+    response: &Value,
+    expected_seed: u64,
+    expected_adapter: Option<&str>,
+    expected_messages: &[RolloutChatMessage],
+) -> Result<ValidatedRolloutResponse> {
+    let choices = response
         .get("choices")
         .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
+        .context("response.choices must be an array")?;
+    anyhow::ensure!(
+        choices.len() == 1,
+        "response must contain exactly one choice, found {}",
+        choices.len()
+    );
+    let choice = &choices[0];
+    let content = choice
+        .pointer("/message/content")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
-fn extract_finish_reason(response: &Value) -> String {
-    response
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("finish_reason"))
+        .context("response choices[0].message.content must be a string")?
+        .to_string();
+    let finish_reason = choice
+        .get("finish_reason")
         .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string()
-}
+        .context("response choices[0].finish_reason must be a string")?
+        .to_string();
+    let provenance_value = choice
+        .get("rollout_provenance")
+        .context("response choices[0].rollout_provenance is missing")?;
+    let provenance: kiln_train::RolloutProvenanceV1 =
+        serde_json::from_value(provenance_value.clone())
+            .context("response choices[0].rollout_provenance is malformed")?;
+    provenance
+        .validate()
+        .map_err(anyhow::Error::msg)
+        .context("response rollout provenance is invalid")?;
 
-fn extract_usage(response: &Value) -> TokenUsage {
-    let usage = response.get("usage").unwrap_or(&Value::Null);
-    TokenUsage {
-        prompt_tokens: usage
-            .get("prompt_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize,
-        completion_tokens: usage
-            .get("completion_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize,
-        total_tokens: usage
-            .get("total_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize,
+    anyhow::ensure!(
+        provenance.seed == expected_seed,
+        "response rollout seed {} differs from requested seed {expected_seed}",
+        provenance.seed
+    );
+    match (
+        expected_adapter,
+        provenance.behavior_policy.adapter.as_ref(),
+    ) {
+        (None, None) => {}
+        (Some(expected), Some(actual)) if actual.name == expected => {}
+        (None, Some(actual)) => anyhow::bail!(
+            "response recorded adapter {:?} for an explicitly base-model rollout",
+            actual.name
+        ),
+        (Some(expected), Some(actual)) => anyhow::bail!(
+            "response recorded adapter {:?} instead of requested adapter {expected:?}",
+            actual.name
+        ),
+        (Some(expected), None) => {
+            anyhow::bail!("response omitted adapter identity for requested adapter {expected:?}")
+        }
     }
+
+    let training_messages = expected_messages
+        .iter()
+        .map(|message| kiln_train::ChatMessage {
+            role: message.role.clone(),
+            content: message.content.clone(),
+        })
+        .collect::<Vec<_>>();
+    let prompt_messages_sha256 = kiln_train::rollout_prompt_messages_sha256(&training_messages)
+        .map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        provenance.prompt_messages_sha256 == prompt_messages_sha256,
+        "response rollout provenance belongs to different prompt messages"
+    );
+    let scored = kiln_train::ScoredRollout::legacy(content.clone(), 0.0);
+    let scored_payload_sha256 =
+        kiln_train::scored_rollout_payload_sha256(&scored).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        provenance.scored_payload_sha256 == scored_payload_sha256,
+        "response rollout provenance belongs to different completion content"
+    );
+
+    let generated_tokens = provenance
+        .input_token_ids
+        .len()
+        .checked_sub(provenance.prompt_token_count)
+        .context("response rollout prompt boundary exceeds its token sequence")?;
+    anyhow::ensure!(
+        provenance.action_tokens.len() == generated_tokens,
+        "response rollout provenance enumerates {} actions for {generated_tokens} generated tokens",
+        provenance.action_tokens.len()
+    );
+    for (offset, action) in provenance.action_tokens.iter().enumerate() {
+        anyhow::ensure!(
+            action.sequence_index == provenance.prompt_token_count + offset,
+            "response rollout action {} is at sequence index {}, expected {}",
+            offset,
+            action.sequence_index,
+            provenance.prompt_token_count + offset
+        );
+    }
+
+    let usage = required_token_usage(response)?;
+    anyhow::ensure!(
+        usage.prompt_tokens == provenance.prompt_token_count,
+        "response usage reports {} prompt tokens but provenance records {}",
+        usage.prompt_tokens,
+        provenance.prompt_token_count
+    );
+    anyhow::ensure!(
+        usage.completion_tokens == provenance.action_tokens.len(),
+        "response usage reports {} completion tokens but provenance records {} actions",
+        usage.completion_tokens,
+        provenance.action_tokens.len()
+    );
+    anyhow::ensure!(
+        usage.total_tokens == usage.prompt_tokens + usage.completion_tokens,
+        "response usage total {} differs from prompt {} + completion {}",
+        usage.total_tokens,
+        usage.prompt_tokens,
+        usage.completion_tokens
+    );
+
+    let sampled_action_tokens = provenance.sampled_action_tokens().count();
+    let forced_action_tokens = provenance.action_tokens.len() - sampled_action_tokens;
+    Ok(ValidatedRolloutResponse {
+        content,
+        finish_reason,
+        usage,
+        provenance,
+        sampled_action_tokens,
+        forced_action_tokens,
+    })
+}
+
+fn required_token_usage(response: &Value) -> Result<TokenUsage> {
+    let usage = response
+        .get("usage")
+        .and_then(Value::as_object)
+        .context("response.usage must be an object")?;
+    let required = |name: &str| -> Result<usize> {
+        let value = usage
+            .get(name)
+            .and_then(Value::as_u64)
+            .with_context(|| format!("response.usage.{name} must be a non-negative integer"))?;
+        usize::try_from(value)
+            .with_context(|| format!("response.usage.{name} does not fit this platform"))
+    };
+    Ok(TokenUsage {
+        prompt_tokens: required("prompt_tokens")?,
+        completion_tokens: required("completion_tokens")?,
+        total_tokens: required("total_tokens")?,
+    })
 }
 
 fn run_scorer(path: &Path, input: &Value) -> Result<RewardScore> {
@@ -815,6 +1015,14 @@ fn summarize_completions(completions: &[RolloutCompletionSummary]) -> RolloutGen
         mean_client_latency_ms: mean(&latencies),
         max_client_latency_ms: latencies.into_iter().fold(0.0, f64::max),
         mean_server_latency_ms: (!server_latencies.is_empty()).then(|| mean(&server_latencies)),
+        total_sampled_action_tokens: completions
+            .iter()
+            .map(|item| item.sampled_action_tokens)
+            .sum(),
+        total_forced_action_tokens: completions
+            .iter()
+            .map(|item| item.forced_action_tokens)
+            .sum(),
     }
 }
 
@@ -832,6 +1040,45 @@ fn render_http_error(status: StatusCode, body: &Value) -> String {
         return format!("{status}: {message}");
     }
     format!("{status}: {body}")
+}
+
+fn destination_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn new_staged_file(destination: &Path) -> Result<tempfile::NamedTempFile> {
+    tempfile::Builder::new()
+        .prefix(".kiln-rollout-")
+        .tempfile_in(destination_parent(destination))
+        .with_context(|| format!("creating staged {}", destination.display()))
+}
+
+fn stage_bytes(destination: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile> {
+    let mut staged = new_staged_file(destination)?;
+    staged
+        .write_all(bytes)
+        .with_context(|| format!("writing staged {}", destination.display()))?;
+    staged
+        .flush()
+        .with_context(|| format!("flushing staged {}", destination.display()))?;
+    staged
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("syncing staged {}", destination.display()))?;
+    Ok(staged)
+}
+
+fn persist_staged_file(staged: tempfile::NamedTempFile, destination: &Path) -> Result<()> {
+    staged.persist(destination).map_err(|error| {
+        anyhow!(
+            "publishing {} atomically: {}",
+            destination.display(),
+            error.error
+        )
+    })?;
+    Ok(())
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -856,6 +1103,135 @@ mod tests {
     use axum::extract::State;
     use axum::routing::post;
     use std::sync::{Arc, Mutex};
+
+    const PROVENANCE_TEST_TEMPLATE: &str = "{% for message in messages %}{{ message.role }}:{{ message.content }}\n{% endfor %}assistant:";
+
+    fn provenance_test_tokenizer() -> kiln_core::tokenizer::KilnTokenizer {
+        let mut vocab = serde_json::Map::new();
+        for (id, token) in
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 :\n.-_|<>/"
+                .chars()
+                .enumerate()
+        {
+            vocab.insert(token.to_string(), json!(id));
+        }
+        let bytes = serde_json::to_vec(&json!({
+            "version": "1.0",
+            "model": {
+                "type": "BPE",
+                "vocab": vocab,
+                "merges": []
+            }
+        }))
+        .unwrap();
+        kiln_core::tokenizer::KilnTokenizer::from_bytes(&bytes)
+            .unwrap()
+            .with_chat_template(PROVENANCE_TEST_TEMPLATE.to_string())
+    }
+
+    fn identity_hash(fill: char) -> String {
+        format!("sha256:{}", fill.to_string().repeat(64))
+    }
+
+    fn provenance_for_test_response(
+        request: &Value,
+        content: &str,
+    ) -> (kiln_train::RolloutProvenanceV1, usize) {
+        let tokenizer = provenance_test_tokenizer();
+        let messages = extract_messages_for_group(request).unwrap();
+        let training_messages = messages
+            .iter()
+            .map(|message| kiln_train::ChatMessage {
+                role: message.role.clone(),
+                content: message.content.clone(),
+            })
+            .collect::<Vec<_>>();
+        let core_messages = training_messages
+            .iter()
+            .map(|message| kiln_core::tokenizer::ChatMessage {
+                role: message.role.clone(),
+                content: message.content.clone(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let template_kwargs = request
+            .get("chat_template_kwargs")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let prompt = tokenizer
+            .apply_chat_template_full_with_options(
+                &core_messages,
+                request
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice),
+                request.get("tool_choice"),
+                kiln_core::tokenizer::ChatTemplateOptions {
+                    template_kwargs: template_kwargs.clone(),
+                },
+            )
+            .unwrap();
+        let mut input_token_ids = tokenizer.encode(&prompt).unwrap();
+        let prompt_token_count = input_token_ids.len();
+        input_token_ids.push(0);
+        let adapter = request.get("adapter").and_then(Value::as_str).map(|name| {
+            kiln_train::RolloutAdapterIdentityV1 {
+                name: name.to_string(),
+                content_sha256: identity_hash('b'),
+            }
+        });
+        let scored = kiln_train::ScoredRollout::legacy(content.to_string(), 0.0);
+        let provenance = kiln_train::RolloutProvenanceV1::new(
+            input_token_ids,
+            prompt_token_count,
+            kiln_train::rollout_prompt_messages_sha256(&training_messages).unwrap(),
+            kiln_train::scored_rollout_payload_sha256(&scored).unwrap(),
+            vec![kiln_train::RolloutActionTokenV1::sampled(
+                prompt_token_count,
+                0,
+                -0.25,
+            )],
+            kiln_train::RolloutBehaviorPolicyIdentityV1 {
+                served_model_id: "Qwen3.5-4B".to_string(),
+                base_model_sha256: identity_hash('a'),
+                adapter,
+                inference_config_sha256: identity_hash('c'),
+                implementation: "kiln-test".to_string(),
+            },
+            kiln_train::RolloutTokenizerIdentityV1 {
+                vocab_sha256: tokenizer.vocab_identity_sha256(),
+                config_sha256: tokenizer.tokenizer_config_sha256().unwrap(),
+                chat_template_sha256: tokenizer.chat_template_sha256().unwrap(),
+            },
+            kiln_train::RolloutSamplingConfigV1 {
+                temperature: 1.0,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                max_tokens: 1,
+                repetition_penalty: 1.0,
+                presence_penalty: 1.5,
+                frequency_penalty: 0.0,
+                stop: Vec::new(),
+                thinking_budget: None,
+            },
+            request.get("seed").and_then(Value::as_u64).unwrap(),
+            "cpu",
+        )
+        .unwrap()
+        .with_template_invocation(kiln_train::RolloutChatTemplateInvocationV1 {
+            tools: request
+                .get("tools")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            tool_choice: request.get("tool_choice").cloned(),
+            template_kwargs,
+        })
+        .unwrap();
+        (provenance, prompt_token_count)
+    }
 
     #[test]
     fn render_rollout_request_forces_adapter_seed_thinking_and_performance() {
@@ -883,6 +1259,8 @@ mod tests {
         assert_eq!(request["adapter"], "cap");
         assert_eq!(request["seed"], 7);
         assert_eq!(request["stream"], false);
+        assert_eq!(request["n"], 1);
+        assert_eq!(request["rollout_provenance"], true);
         assert_eq!(request["include_performance"], true);
         assert_eq!(
             request["chat_template_kwargs"]["enable_thinking"],
@@ -1020,8 +1398,8 @@ mod tests {
             summary_output: summary_output.clone(),
         })
         .await
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
+        let error = format!("{error:#}");
 
         assert!(error.contains("`--thinking-budget-tokens`"));
         assert!(!error.contains("reading tasks JSONL"));
@@ -1078,6 +1456,167 @@ mod tests {
         assert!(parse_reward_stdout(r#"{"lift":1.0}"#).is_err());
     }
 
+    #[test]
+    fn rollout_response_validation_binds_seed_prompt_content_adapter_and_usage() {
+        let request = render_rollout_request(
+            &json!({
+                "messages": [{"role": "user", "content": "say hi"}],
+                "max_tokens": 1
+            }),
+            &json!({}),
+            10,
+            Some("cap"),
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        let messages = extract_messages_for_group(&request).unwrap();
+        let content = "cap answer 10";
+        let (provenance, prompt_tokens) = provenance_for_test_response(&request, content);
+        let mut response = json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+                "rollout_provenance": provenance
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": 1,
+                "total_tokens": prompt_tokens + 1
+            }
+        });
+        validate_rollout_response(&response, 10, Some("cap"), &messages).unwrap();
+
+        response["choices"][0]["rollout_provenance"]["seed"] = json!(11);
+        let error = validate_rollout_response(&response, 10, Some("cap"), &messages)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("differs from requested seed"), "{error}");
+
+        response["choices"][0]["rollout_provenance"]["seed"] = json!(10);
+        response["choices"][0]["message"]["content"] = json!("different output");
+        let error = validate_rollout_response(&response, 10, Some("cap"), &messages)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("different completion content"), "{error}");
+
+        response["choices"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("rollout_provenance");
+        let error = validate_rollout_response(&response, 10, Some("cap"), &messages)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("rollout_provenance is missing"), "{error}");
+    }
+
+    #[test]
+    fn rollout_group_identity_rejects_same_name_adapter_revision_drift() {
+        let request = render_rollout_request(
+            &json!({
+                "messages": [{"role": "user", "content": "say hi"}],
+                "max_tokens": 1
+            }),
+            &json!({}),
+            10,
+            Some("cap"),
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        let (provenance, _) = provenance_for_test_response(&request, "cap answer 10");
+        let identity = RolloutGroupIdentity::from_provenance(&provenance);
+        let mut group = None;
+        bind_rollout_group_identity(&mut group, identity.clone(), "t1").unwrap();
+        bind_rollout_group_identity(&mut group, identity.clone(), "t1").unwrap();
+
+        let mut drifted = identity;
+        drifted
+            .behavior_policy
+            .adapter
+            .as_mut()
+            .unwrap()
+            .content_sha256 = identity_hash('d');
+        let error = bind_rollout_group_identity(&mut group, drifted, "t1")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("identity changed across seeds"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn missing_rollout_provenance_never_scores_or_publishes_partial_output() {
+        async fn chat(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+            assert_eq!(body["rollout_provenance"], true);
+            axum::Json(json!({
+                "id": "chatcmpl-missing-provenance",
+                "choices": [{
+                    "message": {"role": "assistant", "content": "unbound"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }))
+        }
+
+        let app = Router::new().route("/v1/chat/completions", post(chat));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks = tmp.path().join("tasks.jsonl");
+        let template = tmp.path().join("request.json");
+        let output = tmp.path().join("rollouts.jsonl");
+        let summary_output = tmp.path().join("summary.json");
+        std::fs::write(&tasks, r#"{"prompt":"say hi"}"#).unwrap();
+        std::fs::write(
+            &template,
+            r#"{"messages":[{"role":"user","content":"{{prompt}}"}],"max_tokens":1}"#,
+        )
+        .unwrap();
+        std::fs::write(&output, "previous complete dataset\n").unwrap();
+        std::fs::write(&summary_output, "previous summary\n").unwrap();
+
+        let error = run_rollout_generate(RolloutGenerateOptions {
+            url: format!("http://{addr}"),
+            adapter: "base".to_string(),
+            thinking: false,
+            thinking_budget_tokens: None,
+            thinking_budget_ms: None,
+            tasks,
+            seeds: 1,
+            seed_start: 0,
+            request_template: template,
+            scorer: tmp.path().join("must-not-run.scorer"),
+            output: output.clone(),
+            summary_output: summary_output.clone(),
+        })
+        .await
+        .unwrap_err();
+        let error = format!("{error:#}");
+
+        assert!(error.contains("rollout_provenance is missing"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap(),
+            "previous complete dataset\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&summary_output).unwrap(),
+            "previous summary\n"
+        );
+        assert!(std::fs::read_dir(tmp.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".kiln-rollout-")
+        }));
+        server.abort();
+    }
+
     #[tokio::test]
     async fn run_rollout_generate_writes_trainer_compatible_jsonl() {
         #[derive(Clone, Default)]
@@ -1093,14 +1632,21 @@ mod tests {
                 .and_then(Value::as_str)
                 .unwrap_or("base");
             let seed = body.get("seed").and_then(Value::as_u64).unwrap_or(0);
+            let content = format!("{adapter} answer {seed}");
+            let (provenance, prompt_tokens) = provenance_for_test_response(&body, &content);
             axum::Json(json!({
                 "id": format!("chatcmpl-{seed}"),
                 "model": "Qwen3.5-4B",
                 "choices": [{
-                    "message": {"role": "assistant", "content": format!("{adapter} answer {seed}")},
-                    "finish_reason": "stop"
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                    "rollout_provenance": provenance
                 }],
-                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": 1,
+                    "total_tokens": prompt_tokens + 1
+                },
                 "metadata": {
                     "thinking_enabled": true,
                     "thinking_mode": "reasoning",
@@ -1108,8 +1654,8 @@ mod tests {
                     "final_content_empty": false,
                     "reasoning_folded_into_content": false,
                     "performance": {
-                        "prompt_tokens": 5,
-                        "completion_tokens": 2,
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": 1,
                         "ttft_ms": 1.0,
                         "total_latency_ms": 4.0,
                         "decode_tokens_per_sec": 500.0,
@@ -1180,8 +1726,9 @@ mod tests {
 
         assert_eq!(summary.group_count, 1);
         assert_eq!(summary.completion_count, 2);
-        assert_eq!(summary.stats.total_tokens, 14);
-        assert_eq!(summary.stats.total_completion_tokens, 4);
+        assert_eq!(summary.stats.total_completion_tokens, 2);
+        assert_eq!(summary.stats.total_sampled_action_tokens, 2);
+        assert_eq!(summary.stats.total_forced_action_tokens, 0);
         assert_eq!(summary.stats.mean_reward, 1.0);
         assert_eq!(
             summary.thinking_budget_tokens,
@@ -1226,10 +1773,26 @@ mod tests {
         assert_eq!(group.messages[0].content, "say hi");
         assert_eq!(group.completions.len(), 2);
         assert_eq!(group.completions[0].reward, 1.0);
-        assert_eq!(group.completions[0].trajectory[0].content, "cap answer 10");
+        assert_eq!(group.completions[0].text, "cap answer 10");
+        assert!(group.completions[0].trajectory.is_empty());
+        assert!(group.completions[0].provenance.is_some());
+        let mut recorded = kiln_train::GrpoConfig::default();
+        recorded.behavior_policy = kiln_train::BehaviorPolicy::Recorded;
+        kiln_train::trainer::validate_grpo_group_policy_data(
+            &group,
+            &recorded,
+            &provenance_test_tokenizer(),
+        )
+        .unwrap();
+        let expected_total_tokens = group.completions[0]
+            .provenance
+            .as_ref()
+            .unwrap()
+            .prompt_token_count
+            + 1;
         assert_eq!(
             group_value["completions"][0]["metadata"]["usage"]["total_tokens"],
-            7
+            expected_total_tokens
         );
         assert_eq!(
             group_value["completions"][0]["metadata"]["latency"]["server_total_ms"],
@@ -1249,6 +1812,8 @@ mod tests {
         );
         assert_eq!(observed[0]["include_performance"], true);
         assert_eq!(observed[0]["stream"], false);
+        assert_eq!(observed[0]["n"], 1);
+        assert_eq!(observed[0]["rollout_provenance"], true);
 
         server.abort();
     }

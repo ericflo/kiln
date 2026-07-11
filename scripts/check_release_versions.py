@@ -133,11 +133,22 @@ def parse_arg_fields(block: str) -> tuple[set[str], int]:
     flags: set[str] = set()
     positionals = 0
     pending_attrs: list[str] = []
+    open_attr_index: int | None = None
+    open_attr_parens = 0
 
     for raw_line in block.splitlines():
         line = raw_line.strip()
-        if line.startswith("#[arg("):
+        if open_attr_index is not None:
+            pending_attrs[open_attr_index] += " " + line
+            open_attr_parens += line.count("(") - line.count(")")
+            if open_attr_parens <= 0:
+                open_attr_index = None
+            continue
+        if line.startswith(("#[arg(", "#[command(")):
             pending_attrs.append(line)
+            open_attr_parens = line.count("(") - line.count(")")
+            if open_attr_parens > 0:
+                open_attr_index = len(pending_attrs) - 1
             continue
         field_match = re.match(r"(?:pub\s+)?([a-z][a-z0-9_]*)\s*:", line)
         if not field_match:

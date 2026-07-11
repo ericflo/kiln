@@ -214,7 +214,12 @@ The tasks file is JSONL, one task object per line. The request template is a
 chat-completions JSON body with placeholders like {{prompt}}, {{task.prompt}},
 {{seed}}, {{adapter_label}}, and {{thinking_enabled}}. For every task/seed, the
 CLI forces an explicit `adapter`, deterministic `seed`, non-streaming response,
-performance metadata, and `chat_template_kwargs.enable_thinking`.
+one choice, exact rollout provenance, performance metadata, and
+`chat_template_kwargs.enable_thinking`. The server must use real model weights
+with the batching engine enabled; mock, streaming, and trace-free generation
+paths cannot produce the behavior-policy record this command requires. Tool
+definitions and tool-call messages are rejected until the scored training
+schema can represent them exactly.
 
 `--thinking-budget-tokens` and `--thinking-budget-ms` override matching fields
 from the request template. Omit a flag to preserve the template or server
@@ -229,8 +234,13 @@ The scorer executable receives one JSON object on stdin with the task, request,
 response, content, seed, adapter, token usage, and latency. It may print a
 single numeric reward or a JSON object with `reward`, `score`, or `value`.
 Output JSONL contains one GRPO group per task with ScoredRollout-compatible
-completions and metadata recording latency, token counts, seed, adapter, and
-scorer output.
+completions, exact `kiln.rollout-provenance.v1` records, and metadata recording
+latency, token counts, seed, adapter, and scorer output. Before scoring, the CLI
+validates the record's schema, seed, adapter, prompt hash, content hash, action
+coverage, and usage counts. It publishes each output by atomic replacement only
+after every completion succeeds, so an invalid late response cannot leave a
+plausible partial dataset. Train this output with
+`config.behavior_policy="recorded"`.
 "#;
 
 const ROLLOUT_GENERATE_EXAMPLES: &str = r#"Examples:
@@ -502,7 +512,7 @@ pub enum Commands {
         url: String,
     },
 
-    /// Generate scored single-turn rollouts for GRPO training
+    /// Generate scored, provenance-bound single-turn rollouts for GRPO training
     #[command(
         name = "rollout-generate",
         long_about = ROLLOUT_GENERATE_OVERVIEW,

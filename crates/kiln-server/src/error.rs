@@ -170,7 +170,7 @@ impl ApiError {
             status: StatusCode::NOT_IMPLEMENTED,
             code: "rollout_provenance_unavailable",
             message: format!("Rollout provenance is unavailable for this request: {detail}"),
-            hint: "Use one non-streaming choice on a real-model server with the batching engine enabled. Prior message tool-call metadata is not supported until the training message schema can represent it exactly.",
+            hint: "Use one non-streaming text-only choice on a real-model server with the batching engine enabled. Tool definitions, tool choice, and prior tool-call metadata remain unsupported until the training schema can represent them exactly.",
             retry_after_seconds: None,
         }
     }

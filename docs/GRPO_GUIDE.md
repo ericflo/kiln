@@ -38,8 +38,8 @@ profile this is one process, two HTTP endpoints, and an atomic adapter
 hot-swap:
 
 ```
-   [ generate ]    POST /v1/completions/batch
-        │            (1 request → prompts × n completions)
+   [ generate ]    kiln rollout-generate
+        │            (scored JSONL + exact behavior provenance)
         ▼
    [  score   ]    your reward fn (Python, regex, json.loads, subprocess, …)
         │
@@ -60,14 +60,22 @@ The full schema for both endpoints lives in
 [Quickstart §9](../QUICKSTART.md#9-advanced-api-examples). The fields used in
 this guide are:
 
-**`POST /v1/completions/batch`** — issues `prompts.len() × n` completions in
-one HTTP round-trip. The iteration-level scheduler batches the underlying
-prefill/decode steps, so this is meaningfully cheaper than firing N parallel
-calls. Hard cap: `prompts.len() * n <= 64`. Use a fixed `seed` to make
-rollouts reproducible — Kiln derives a per-completion seed of
-`seed.wrapping_add(prompt_idx * n + completion_idx)` so identical prompts in
-the same batch still produce distinct outputs at `temperature > 0`. Streaming
-is not supported on this endpoint.
+**`kiln rollout-generate`** — renders a chat request for every task and seed,
+forces non-streaming single-choice generation with exact rollout provenance,
+runs your scorer, and writes trainer-compatible JSONL. It validates the
+returned schema, seed, adapter identity, prompt/content hashes, complete action
+coverage, and usage counts before invoking the scorer. Output publication is
+atomic: one missing or malformed record fails the command without replacing an
+existing dataset. This is the supported source for
+`behavior_policy: "recorded"`. Recorded tool-call rollouts remain unsupported:
+tool definitions, tool choice, and prior tool-call metadata fail admission until
+the scored training payload can represent them exactly.
+
+**`POST /v1/completions/batch`** — issues `prompts.len() × n` text completions
+in one HTTP round-trip. It remains useful for fast online or explicitly
+uncorrected experiments, including the compact worked examples below, but it
+does not emit exact per-token behavior provenance. Train those rollouts only
+with `behavior_policy: "no_importance_correction"`.
 
 **`POST /v1/train/grpo`** — accepts `groups`, where each group is
 `{"messages": [...], "completions": [{"text": "...", "reward": 0.0}, ...]}`.
@@ -79,6 +87,69 @@ The default `behavior_policy` is `"no_importance_correction"`, which is the
 honest mode for the text-only examples below. Set it to `"recorded"` only when
 every scored completion includes a validated `provenance` object from the
 generation that produced it.
+
+## Recommended recorded-policy workflow
+
+Create one task per line and a normal chat request template. The CLI owns
+`seed`, `adapter`, `n`, `stream`, and `rollout_provenance`, so template values
+for those fields are overwritten deliberately.
+
+```json
+{"id":"sum-1","prompt":"What is 47 + 138? Reply with just the number.","answer":185}
+```
+
+```json
+{
+  "model": "Qwen3.5-4B",
+  "messages": [{"role": "user", "content": "{{prompt}}"}],
+  "temperature": 0.9,
+  "max_tokens": 64
+}
+```
+
+The scorer receives the task, exact request, full response, parsed content,
+usage, and latency on stdin. A minimal executable scorer can print one number:
+
+```python
+#!/usr/bin/env python3
+import json, re, sys
+
+row = json.load(sys.stdin)
+numbers = re.findall(r"-?\d+", row["content"])
+print(float(bool(numbers) and int(numbers[-1]) == row["task"]["answer"]))
+```
+
+```bash
+chmod +x score_math.py
+kiln rollout-generate \
+  --adapter base \
+  --thinking false \
+  --tasks tasks.jsonl \
+  --seeds 8 \
+  --seed-start 42 \
+  --request-template request.json \
+  --scorer ./score_math.py \
+  --output math.rollouts.jsonl \
+  --summary-output math.rollouts.summary.json
+```
+
+Each completion contains `text`, `reward`, and the server-issued
+`kiln.rollout-provenance.v1` object. It intentionally has no synthetic
+single-turn `trajectory`: adding one after generation would change the scored
+payload identity. When the JSONL path is visible to the server, submit it with
+recorded importance correction:
+
+```bash
+curl -s http://localhost:8420/v1/train/grpo \
+  -H 'Content-Type: application/json' \
+  -d "{\"dataset_path\":\"$(realpath math.rollouts.jsonl)\",\"config\":{\"behavior_policy\":\"recorded\",\"output_name\":\"math-grpo\"}}" \
+  | python3 -m json.tool
+```
+
+The server replays the recorded template invocation with its pinned tokenizer,
+verifies the exact prompt prefix and scored payload again, and uses only sampled
+actions as policy targets. Runtime-forced thinking-close tokens remain context
+and never receive invented behavior probabilities.
 
 ## Worked example 1: Math correctness reward
 
@@ -332,7 +403,7 @@ server-side default, so omit anything you don't want to override:
   even when this is `false`; use a new versioned name for a truly idle output.
 
 For full schema details, see
-[QUICKSTART.md §9.4](../QUICKSTART.md#94-batch-generation-efficient-for-grpo-rollouts).
+[QUICKSTART.md §9.4](../QUICKSTART.md#94-grpo-rollout-generation).
 
 ## What to expect at the wall clock
 
@@ -378,18 +449,19 @@ Watch live training progress with `GET /v1/train/status`.
   loaded; unload it or choose a versioned `output_name`.
 - **`behavior_policy=recorded` is rejected.** Do not switch to
   `no_importance_correction` merely to suppress the error for off-policy data.
-  Regenerate the rollout with exact token IDs, sampled-token behavior
-  log-probabilities, behavior model/adapter identity, tokenizer/template
-  hashes, effective sampling controls, seed, and backend provenance. Kiln also
-  rejects provenance whose canonical prompt messages, scored payload, exact
-  token sequence, action positions, or tokenizer identity drifted before
-  training.
+  Regenerate the dataset with `kiln rollout-generate`; it requires exact token
+  IDs, sampled-token behavior log-probabilities, behavior model/adapter
+  identity, tokenizer/template hashes, effective sampling controls, seed, and
+  backend provenance before it publishes output. Kiln also rejects provenance
+  whose canonical prompt messages, scored payload, exact token sequence,
+  action positions, or tokenizer identity drifted before training.
 
 ## See also
 
-- [Quickstart §9](../QUICKSTART.md#9-advanced-api-examples) — full schema for
-  `/v1/completions/batch` and `/v1/train/grpo`, plus the fastest path to run
-  Kiln before trying GRPO.
+- [Quickstart §9.4](../QUICKSTART.md#94-grpo-rollout-generation) — rollout
+  generation paths and API constraints; [Quickstart §9](../QUICKSTART.md#9-advanced-api-examples)
+  has the full schema for `/v1/completions/batch` and `/v1/train/grpo`, plus
+  the fastest path to run Kiln before trying GRPO.
 - [README.md `## The GRPO Loop`](../README.md#the-grpo-loop) — the 30-second
   overview of why the generate → score → train loop exists.
 - [Website Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) — setup,

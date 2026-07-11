@@ -5709,6 +5709,16 @@ fn validate_rollout_provenance_admission(
             "prior message tool_calls, name, and tool_call_id fields cannot yet be represented by the training prompt schema",
         ));
     }
+    if req.tools.as_ref().is_some_and(|tools| !tools.is_empty())
+        || req
+            .tool_choice
+            .as_ref()
+            .is_some_and(|choice| !choice.is_null())
+    {
+        return Err(ApiError::rollout_provenance_unavailable(
+            "request tools and tool_choice can produce tool-call outputs that the scored training payload cannot yet represent exactly",
+        ));
+    }
     match state.backend.as_ref() {
         ModelBackend::Real {
             batching_engine: Some(_),
@@ -11973,6 +11983,19 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("tool_calls")
+        );
+
+        let (status, body) = chat_post(
+            make_batch_test_state(),
+            r#"{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function"}],"rollout_provenance":true}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::NOT_IMPLEMENTED);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("tool_choice")
         );
     }
 

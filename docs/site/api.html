@@ -398,16 +398,35 @@
         <div class="label mb-3">Advanced flows</div>
         <h2 id="power-user-requests" class="text-2xl font-semibold mb-4">Copy-paste power-user requests</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          After the first chat and training jobs work, these examples cover batch generation,
-          adapter portability, adapter merging, per-request composition, and training-completion webhooks.
+          After the first chat and training jobs work, these examples cover provenance-bound rollouts,
+          text-only batch generation, adapter portability, adapter merging, per-request composition, and training-completion webhooks.
         </p>
         <div class="grid gap-4">
           <section class="endpoint">
-            <h3 class="font-semibold mb-2">Batch completions for rollouts</h3>
+            <h3 class="font-semibold mb-2">Recorded-policy rollout dataset</h3>
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln rollout-generate \
+  --adapter base \
+  --thinking false \
+  --tasks tasks.jsonl \
+  --seeds 8 \
+  --request-template request.json \
+  --scorer ./score_one.py \
+  --output rollouts.scored.jsonl</code></pre>
+            <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+              The command requires exact server-issued behavior provenance, validates it before scoring,
+              and atomically publishes JSONL ready for <code>behavior_policy: "recorded"</code>.
+            </p>
+          </section>
+          <section class="endpoint">
+            <h3 class="font-semibold mb-2">Text-only batch completions</h3>
             <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/completions/batch \
   -H "Content-Type: application/json" \
   -d '{"prompts": ["Name a warm color.", "Name a cool color."], "max_tokens": 32, "seed": 7}' \
   | python3 -m json.tool</code></pre>
+            <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+              This high-throughput endpoint does not emit per-token behavior probabilities; use
+              <code>behavior_policy: "no_importance_correction"</code> for its outputs.
+            </p>
           </section>
           <section class="endpoint">
             <h3 class="font-semibold mb-2">Download and upload an adapter archive</h3>
@@ -476,9 +495,9 @@ kiln serve --config kiln.toml</code></pre>
         <div class="label mb-3">Inference</div>
         <h2 id="generation" class="text-2xl font-semibold mb-4">OpenAI-compatible generation</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/chat/completions</code> &mdash; chat completions with OpenAI-shaped request and response bodies, including SSE streaming and normalized tool-call deltas.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/chat/completions</code> &mdash; chat completions with OpenAI-shaped request and response bodies, including SSE streaming, normalized tool-call deltas, and opt-in exact rollout provenance.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/completions</code> &mdash; bounded, vLLM-shaped prompt-logprobs scoring for remote OPD teachers (no generation-only mode, no streaming; prompts capped at the smaller of 4096 tokens and the served model context).</div>
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/completions/batch</code> &mdash; multi-prompt batch generation for efficient GRPO rollouts, with request-wide effective budget provenance in <code>metadata.thinking_budget</code> and completion-specific outcomes.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/completions/batch</code> &mdash; multi-prompt text generation, with request-wide effective budget provenance in <code>metadata.thinking_budget</code> and completion-specific outcomes, but without per-token behavior-policy provenance.</div>
         </div>
         <h3 id="prompt-logprobs" class="text-xl font-semibold mt-6 mb-3">Score prompt tokens</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
@@ -503,6 +522,33 @@ kiln serve --config kiln.toml</code></pre>
   "prompt_logprobs": 5,
   "add_special_tokens": true
 }</code></pre>
+        <h3 id="rollout-provenance" class="text-xl font-semibold mt-6 mb-3">Capture an exact training rollout</h3>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          Set <code>rollout_provenance: true</code> on one non-streaming chat choice to receive a
+          validated <code>kiln.rollout-provenance.v1</code> record at
+          <code>choices[0].rollout_provenance</code>. The record binds the resolved seed, exact prompt
+          and generated token IDs, sampled post-filter log-probabilities, runtime-forced tokens,
+          behavior/base/adapter content identity, tokenizer and template hashes, effective sampling
+          and thinking-budget controls, template invocation, scored content, and generation backend.
+        </p>
+        <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>{
+  "messages": [{"role": "user", "content": "Solve 47 + 138."}],
+  "temperature": 0.9,
+  "max_tokens": 64,
+  "seed": 42,
+  "stream": false,
+  "n": 1,
+  "rollout_provenance": true
+}</code></pre>
+        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
+          This correctness-first path requires real model weights, the batching engine, a
+          content-addressed base-policy identity, and room for at least one sampled action. It bypasses
+          text-only request/completion caches. Unsupported streaming, multiple-choice, mock, unverified,
+          tool-definition/tool-choice, or prior tool-call message paths return
+          <code>rollout_provenance_unavailable</code>; malformed trace state fails generation instead of
+          returning a partial record. Use <code>kiln rollout-generate</code> to validate, score, and
+          atomically persist these records for <code>behavior_policy: "recorded"</code>.
+        </p>
         <h3 id="thinking-budgets" class="text-xl font-semibold mt-6 mb-3">Bound thinking without disabling it</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
           Set <code>thinking_budget_tokens</code>, <code>thinking_budget_ms</code>, or both on a chat or
