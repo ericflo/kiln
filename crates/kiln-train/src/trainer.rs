@@ -106,8 +106,9 @@ use crate::replay::{
     RequestRecord,
 };
 use crate::{
-    AdvantageMode, ChatMessage, GrpoConfig, GrpoGroup, IsLevel, KlEstimator, LossAggregation,
-    Optimizer, ReferencePolicy, RewardFilterOnEmpty, SftConfig, SftExample, TurnKind,
+    AdvantageMode, BehaviorPolicy, ChatMessage, GrpoConfig, GrpoGroup, IsLevel, KlEstimator,
+    KlReferencePolicy, LossAggregation, Optimizer, RewardFilterOnEmpty, SftConfig, SftExample,
+    TurnKind,
 };
 
 /// Per-job context the HTTP layer hands the trainer so the training run can
@@ -2060,7 +2061,9 @@ fn grpo_settings_receipt(
             .unwrap_or(serde_json::Value::Null),
         kl_estimator: serde_json::to_value(config.kl_estimator).unwrap_or(serde_json::Value::Null),
         is_level: serde_json::to_value(config.is_level).unwrap_or(serde_json::Value::Null),
-        reference_policy: serde_json::to_value(&config.reference_policy)
+        behavior_policy: serde_json::to_value(config.behavior_policy)
+            .unwrap_or(serde_json::Value::Null),
+        kl_reference_policy: serde_json::to_value(&config.kl_reference_policy)
             .unwrap_or(serde_json::Value::Null),
         entropy_aware_kl_quantile: config.entropy_aware_kl_quantile,
     }
@@ -3840,6 +3843,9 @@ pub fn grpo_train_to(
         .loss
         .validate_for_kt_tape(has_env_tokens)
         .map_err(|e| anyhow::anyhow!("GRPO loss config: {e}"))?;
+    config
+        .validate_policy_config()
+        .map_err(|e| anyhow::anyhow!("GRPO policy config: {e}"))?;
 
     let output_dir = output_adapter_dir.join(adapter_name);
     let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&groups);
@@ -4134,8 +4140,21 @@ pub fn grpo_train_to(
             }
             let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
             match tokenize_grpo_group_timed(group, tokenizer, &mask_cfg, Some(&mut phase_timings)) {
-                Ok(tgroup) => tokenized_groups.push(tgroup),
+                Ok(tgroup) => {
+                    validate_tokenized_behavior_policy(&tgroup, config.behavior_policy)
+                        .with_context(|| {
+                            format!("validate GRPO group {source_index} behavior provenance")
+                        })?;
+                    tokenized_groups.push(tgroup);
+                }
                 Err(e) => {
+                    if config.behavior_policy == BehaviorPolicy::Recorded {
+                        return Err(e).with_context(|| {
+                            format!(
+                                "tokenize GRPO group {source_index} with required recorded behavior provenance"
+                            )
+                        });
+                    }
                     tokenization_failed += 1;
                     tracing::warn!("skipping GRPO group: {e}");
                 }
@@ -4210,25 +4229,29 @@ pub fn grpo_train_to(
         let pb = make_step_progress(total_steps, "grpo training");
 
         // Phase 3b: maintain an EMA-snapshot LoRA when
-        // `ReferencePolicy::Ema` is configured. Initialized eagerly to a
+        // `KlReferencePolicy::Ema` is configured. Initialized eagerly to a
         // deepcopy of the (post-init, pre-train) LoRA so the very first
         // group's reference forward already runs against a frozen snapshot
         // rather than the live policy.
-        let mut ema_ref_state = match &config.reference_policy {
-            ReferencePolicy::Ema {
-                decay,
-                refresh_every,
-            } => {
-                let snapshot = lora_snapshot_capture_or_blend(&params, None, *decay)
-                    .context("initial EMA reference snapshot")?;
-                Some(EmaReferenceState {
-                    snapshot,
-                    groups_since_refresh: 0,
-                    refresh_every: (*refresh_every).max(1),
-                    decay: *decay,
-                })
+        let mut ema_ref_state = if config.kl_penalty_enabled() {
+            match &config.kl_reference_policy {
+                KlReferencePolicy::Ema {
+                    decay,
+                    refresh_every,
+                } => {
+                    let snapshot = lora_snapshot_capture_or_blend(&params, None, *decay)
+                        .context("initial EMA reference snapshot")?;
+                    Some(EmaReferenceState {
+                        snapshot,
+                        groups_since_refresh: 0,
+                        refresh_every: *refresh_every,
+                        decay: *decay,
+                    })
+                }
+                _ => None,
             }
-            _ => None,
+        } else {
+            None
         };
 
         for (group_idx, tgroup) in tokenized_groups.iter().enumerate() {
@@ -4486,6 +4509,9 @@ pub fn grpo_dry_run_jsonl(
     let mut base_adapter_dir = None;
 
     let result = (|| -> Result<GrpoDryRunReport> {
+        config
+            .validate_policy_config()
+            .map_err(|e| anyhow::anyhow!("GRPO policy config: {e}"))?;
         let ratio = crate::lora_scaling::validate_lora_scaling(
             config.lora_rank,
             config.lora_alpha,
@@ -4609,6 +4635,9 @@ pub fn grpo_dry_run_jsonl(
                     .with_context(|| {
                     format!("tokenize GRPO dry-run group {group_idx} at line {line_no}")
                 })?;
+            validate_tokenized_behavior_policy(&tgroup, config.behavior_policy).with_context(
+                || format!("validate GRPO dry-run group {group_idx} behavior provenance"),
+            )?;
             validate_grpo_dry_run_masks(&tgroup, group_idx, *line_no)?;
             let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
             token_counts.add_from(&group_counts);
@@ -4755,6 +4784,9 @@ pub fn grpo_train_jsonl_to(
         .loss
         .validate_for_kt_tape(false)
         .map_err(|e| anyhow::anyhow!("GRPO loss config: {e}"))?;
+    config
+        .validate_policy_config()
+        .map_err(|e| anyhow::anyhow!("GRPO policy config: {e}"))?;
     let output_dir = output_adapter_dir.join(adapter_name);
     let training_data = crate::train_receipt::TrainingDataReceipt {
         source: "jsonl_grpo_groups".to_string(),
@@ -5078,24 +5110,28 @@ pub fn grpo_train_jsonl_to(
         let mut last_ckpt_log_key: Option<(bool, usize)> = None;
 
         // Phase 3b: maintain an EMA-snapshot LoRA when
-        // `ReferencePolicy::Ema` is configured (see `grpo_train` for the
+        // `KlReferencePolicy::Ema` is configured (see `grpo_train` for the
         // identical pattern; streaming JSONL just iterates one group at a
         // time).
-        let mut ema_ref_state = match &config.reference_policy {
-            ReferencePolicy::Ema {
-                decay,
-                refresh_every,
-            } => {
-                let snapshot = lora_snapshot_capture_or_blend(&params, None, *decay)
-                    .context("initial EMA reference snapshot")?;
-                Some(EmaReferenceState {
-                    snapshot,
-                    groups_since_refresh: 0,
-                    refresh_every: (*refresh_every).max(1),
-                    decay: *decay,
-                })
+        let mut ema_ref_state = if config.kl_penalty_enabled() {
+            match &config.kl_reference_policy {
+                KlReferencePolicy::Ema {
+                    decay,
+                    refresh_every,
+                } => {
+                    let snapshot = lora_snapshot_capture_or_blend(&params, None, *decay)
+                        .context("initial EMA reference snapshot")?;
+                    Some(EmaReferenceState {
+                        snapshot,
+                        groups_since_refresh: 0,
+                        refresh_every: *refresh_every,
+                        decay: *decay,
+                    })
+                }
+                _ => None,
             }
-            _ => None,
+        } else {
+            None
         };
 
         loop {
@@ -5161,6 +5197,14 @@ pub fn grpo_train_jsonl_to(
                         processed_groups, line_no
                     )
                 })?;
+            validate_tokenized_behavior_policy(&tgroup, config.behavior_policy).with_context(
+                || {
+                    format!(
+                        "validate GRPO JSONL group {} at line {} behavior provenance",
+                        processed_groups, line_no
+                    )
+                },
+            )?;
             let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
             token_counts.add_from(&group_counts);
             processed_completions = processed_completions.saturating_add(tgroup.completions.len());
@@ -5419,6 +5463,9 @@ pub fn grpo_train_jsonl_to(
 struct TokenizedGrpoCompletion {
     /// Full input_ids: prompt + completion tokens.
     input_ids: Vec<u32>,
+    /// Exact end of the prompt prefix, independent of the first sampled
+    /// action position. Forced controller tokens may appear after this point.
+    prompt_token_count: usize,
     /// Mask of positions the model generated (assistant turns).
     /// Targets of the GRPO policy-gradient objective.
     action_mask: Vec<bool>,
@@ -5430,12 +5477,54 @@ struct TokenizedGrpoCompletion {
     /// in the ECHO term. Counts every Observation token regardless of the
     /// warning_filter trim — `env_mask` may be a strict subset of |O|.
     total_obs_len: usize,
+    /// Behavior-policy log-probabilities in sampled-action order. `None`
+    /// means the rollout was admitted only under an explicit
+    /// no-importance-correction policy.
+    recorded_behavior_log_probs: Option<Vec<f32>>,
 }
 
 /// A tokenized GRPO group ready for training.
 struct TokenizedGrpoGroup {
     completions: Vec<TokenizedGrpoCompletion>,
     rewards: Vec<f64>,
+}
+
+fn validate_tokenized_behavior_policy(
+    group: &TokenizedGrpoGroup,
+    behavior_policy: BehaviorPolicy,
+) -> Result<()> {
+    for (completion_idx, completion) in group.completions.iter().enumerate() {
+        anyhow::ensure!(
+            completion.prompt_token_count > 0
+                && completion.prompt_token_count <= completion.input_ids.len(),
+            "GRPO completion {completion_idx} has invalid prompt_token_count {} for {} input tokens",
+            completion.prompt_token_count,
+            completion.input_ids.len()
+        );
+        let sampled_tokens = completion
+            .action_mask
+            .get(1..)
+            .map_or(0, |mask| mask.iter().filter(|&&active| active).count());
+        if behavior_policy == BehaviorPolicy::Recorded {
+            let log_probs = completion.recorded_behavior_log_probs.as_ref().with_context(|| {
+                format!(
+                    "GRPO completion {completion_idx} is missing exact rollout provenance required by behavior_policy=recorded"
+                )
+            })?;
+            anyhow::ensure!(
+                log_probs.len() == sampled_tokens,
+                "GRPO completion {completion_idx} has {} recorded behavior log-probabilities for {sampled_tokens} sampled action tokens",
+                log_probs.len()
+            );
+            anyhow::ensure!(
+                log_probs
+                    .iter()
+                    .all(|value| value.is_finite() && *value <= 1e-6),
+                "GRPO completion {completion_idx} contains an invalid recorded behavior log-probability"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -5723,18 +5812,8 @@ fn compute_ref_log_probs_shared_prefix(
         return Ok(Vec::new());
     }
 
-    // Derive prompt_len from the first completion's action_mask.
-    // tokenize_grpo_group sets action_mask[i] = (i >= prompt_len) on the
-    // legacy single-string path; on the trajectory-aware path the first
-    // true index is the start of the first Action segment, which is
-    // exactly where the prompt ends and assistant generation begins —
-    // same semantics for shared-prefix routing.
     let first = &tgroup.completions[0];
-    let prompt_len = first
-        .action_mask
-        .iter()
-        .position(|&m| m)
-        .with_context(|| "GRPO completion has no action tokens (action_mask is all false)")?;
+    let prompt_len = first.prompt_token_count;
     if prompt_len < 1 {
         anyhow::bail!("GRPO shared-prefix ref forward requires prompt_len >= 1, got {prompt_len}");
     }
@@ -5742,11 +5821,7 @@ fn compute_ref_log_probs_shared_prefix(
     // Validate the prefix invariant — every completion must share the same
     // prompt prefix or the shared-prefix path is unsound.
     for (idx, comp) in tgroup.completions.iter().enumerate() {
-        let comp_prompt_len = comp
-            .action_mask
-            .iter()
-            .position(|&m| m)
-            .with_context(|| format!("completion {idx} has no action tokens"))?;
+        let comp_prompt_len = comp.prompt_token_count;
         anyhow::ensure!(
             comp_prompt_len == prompt_len,
             "GRPO completions have different prompt lengths ({prompt_len} vs {comp_prompt_len} for completion {idx})"
@@ -6031,14 +6106,16 @@ fn train_tokenized_grpo_group_with_grad_norms(
     opt_state: Option<&mut OptimizerState>,
     grad_norms: &mut crate::train_receipt::LoraGradNormAccumulator,
     lora_grad_index: &LoraGradNormIndex,
-    // Phase 3b: optional EMA-snapshot LoRA used as the reference policy when
-    // `config.reference_policy == ReferencePolicy::Ema`. None means the
-    // reference forward runs without any LoRA (base model — historical
-    // `BasePerStep`) or is skipped entirely (`ReferencePolicy::None`).
+    // Optional EMA-snapshot LoRA used as the KL reference when
+    // `config.kl_reference_policy == KlReferencePolicy::Ema`. None means the
+    // KL-reference forward runs without LoRA (`BasePerStep`) or is skipped.
     ema_ref_lora: Option<&LoraWeights>,
     mut timings: Option<&mut GrpoBenchmarkTimings>,
 ) -> Result<GrpoGroupStepReport> {
-    let skip_reference = matches!(config.reference_policy, ReferencePolicy::None);
+    validate_tokenized_behavior_policy(tgroup, config.behavior_policy)
+        .context("validate GRPO behavior-policy provenance")?;
+    let skip_kl_reference = !config.kl_penalty_enabled()
+        || matches!(config.kl_reference_policy, KlReferencePolicy::None);
 
     // Same resolution as the `grpo_train` entry points — deterministic from
     // the config, so the per-group helper doesn't need the value threaded in.
@@ -6088,7 +6165,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
     // fallback below when (a) reference is skipped, or (b) the group has a
     // single completion (no sharing to be had), or (c) the shared-prefix path
     // is explicitly disabled.
-    let use_shared_prefix = !skip_reference
+    let use_shared_prefix = !skip_kl_reference
         && tgroup.completions.len() > 1
         && !kiln_core::env_flag::env_flag("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", false);
     let shared_prefix_log_probs: Option<Vec<Tensor>> = if use_shared_prefix {
@@ -6185,11 +6262,9 @@ fn train_tokenized_grpo_group_with_grad_norms(
         )))]
         let tape_auth_eligible = false;
 
-        let ref_log_probs = if skip_reference {
-            // ReferencePolicy::None: no reference forward; ratio is forced
-            // to 1.0 inside grpo_loss / analytic tail via
-            // GrpoLossParams::reinforce. The placeholder zero tensor is
-            // never inspected by the math when reinforce = true.
+        let kl_reference_log_probs = if skip_kl_reference {
+            // KL is disabled, so the placeholder is never inspected by the
+            // loss. Behavior-policy probabilities are prepared separately.
             zeros_f32_on(num_active, device)?.detach()
         } else if let Some(shared) = shared_prefix_log_probs.as_ref() {
             // The shared-prefix output is one log-prob per completion-span
@@ -6200,9 +6275,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
             // single-turn rollouts the action_mask is true at every
             // completion-span position and this filter is a no-op.
             let span = &shared[comp_idx];
-            let comp_prompt_len = comp.action_mask.iter().position(|&m| m).with_context(|| {
-                format!("completion {comp_idx} has no action tokens (action_mask all false)")
-            })?;
+            let comp_prompt_len = comp.prompt_token_count;
             let active_indices: Vec<u32> = (0..span.dim(0)?)
                 .filter(|&i| {
                     comp.action_mask
@@ -6281,6 +6354,16 @@ fn train_tokenized_grpo_group_with_grad_norms(
             ref_log_probs
         };
 
+        let behavior_log_probs = match config.behavior_policy {
+            BehaviorPolicy::NoImportanceCorrection => zeros_f32_on(num_active, device)?.detach(),
+            BehaviorPolicy::Recorded => {
+                let values = comp.recorded_behavior_log_probs.as_ref().with_context(|| {
+                    format!("completion {comp_idx} is missing behavior-policy log-probabilities")
+                })?;
+                Tensor::from_vec_on(*device, values.clone(), vec![num_active])?.detach()
+            }
+        };
+
         // (#1082 candle-drop) GRPO per-completion step is now UNCONDITIONALLY
         // kt tape-authoritative. The candle gradient-checkpointed GRPO reverse
         // (`checkpointed_grpo_forward_backward` + analytic ECHO tail), the
@@ -6330,8 +6413,8 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         model_config,
                         params,
                         &comp.action_mask,
-                        &ref_log_probs,
-                        &ref_log_probs,
+                        &behavior_log_probs,
+                        &kl_reference_log_probs,
                         loss_params,
                         segs,
                         device,
@@ -6363,8 +6446,8 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         model_config,
                         params,
                         &comp.action_mask,
-                        &ref_log_probs,
-                        &ref_log_probs,
+                        &behavior_log_probs,
+                        &kl_reference_log_probs,
                         loss_params,
                         device,
                         comp_idx,
@@ -6391,7 +6474,13 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 // `tape_auth_eligible` is a const `false` without a GPU backend
                 // feature, so the ensure! above already bailed; this arm is
                 // unreachable but keeps `loss_val` definitely-assigned.
-                let _ = (&ref_log_probs, num_active, comp_env_count, comp_idx);
+                let _ = (
+                    &behavior_log_probs,
+                    &kl_reference_log_probs,
+                    num_active,
+                    comp_env_count,
+                    comp_idx,
+                );
                 unreachable!("GRPO kt path requires a GPU backend feature");
             }
         };
@@ -6738,6 +6827,22 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
     tokenize_grpo_group_timed(group, tokenizer, &mask_cfg, None)
 }
 
+/// Validate one GRPO group's policy/provenance contract without loading model
+/// weights or touching an accelerator. API admission uses this for recorded
+/// behavior data so a doomed job cannot sit in the training queue.
+pub fn validate_grpo_group_policy_data(
+    group: &GrpoGroup,
+    config: &GrpoConfig,
+    tokenizer: &KilnTokenizer,
+) -> Result<()> {
+    config
+        .validate_policy_config()
+        .map_err(|error| anyhow::anyhow!("GRPO policy config: {error}"))?;
+    let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
+    let tokenized = tokenize_grpo_group_timed(group, tokenizer, &mask_cfg, None)?;
+    validate_tokenized_behavior_policy(&tokenized, config.behavior_policy)
+}
+
 fn tokenize_grpo_group_timed(
     group: &GrpoGroup,
     tokenizer: &KilnTokenizer,
@@ -6794,6 +6899,13 @@ fn tokenize_grpo_group_timed(
             prebuilt.push(Some(masked));
             // Placeholder; not used when prebuilt is Some.
             full_message_batches.push(prompt_messages.clone());
+        } else if scored.provenance.is_some() {
+            // Exact provenance owns the model sequence. Keep a cheap prompt
+            // placeholder in the parallel batch; re-rendering completed text
+            // is not equivalent to the sequence inference consumed because
+            // chat templates append generation prefixes.
+            full_message_batches.push(prompt_messages.clone());
+            prebuilt.push(None);
         } else {
             // Legacy single-string path: assemble [prompt + assistant
             // completion] and tokenize as one chat batch (cheap because
@@ -6823,11 +6935,147 @@ fn tokenize_grpo_group_timed(
     }
     let mut completions = Vec::with_capacity(full_id_batches.len());
     let mut rewards = Vec::with_capacity(full_id_batches.len());
-    for ((full_ids, reward), pre) in full_id_batches
+    for (completion_idx, ((full_ids, reward), pre)) in full_id_batches
         .into_iter()
         .zip(raw_rewards.into_iter())
         .zip(prebuilt.into_iter())
+        .enumerate()
     {
+        if let Some(provenance) = group.completions[completion_idx].provenance.as_ref() {
+            provenance.validate().map_err(|error| {
+                anyhow::anyhow!(
+                    "completion {completion_idx} has invalid rollout provenance: {error}"
+                )
+            })?;
+
+            let vocab_sha256 = tokenizer.vocab_identity_sha256();
+            let config_sha256 = tokenizer
+                .tokenizer_config_sha256()
+                .map_err(|error| anyhow::anyhow!("hash tokenizer config: {error}"))?;
+            let chat_template_sha256 = tokenizer.chat_template_sha256().with_context(|| {
+                format!(
+                    "completion {completion_idx} has recorded provenance but the training tokenizer has no chat template"
+                )
+            })?;
+            anyhow::ensure!(
+                provenance.tokenizer.vocab_sha256 == vocab_sha256,
+                "completion {completion_idx} rollout tokenizer vocabulary identity mismatch: provenance={}, training={vocab_sha256}",
+                provenance.tokenizer.vocab_sha256
+            );
+            anyhow::ensure!(
+                provenance.tokenizer.config_sha256 == config_sha256,
+                "completion {completion_idx} rollout tokenizer config identity mismatch: provenance={}, training={config_sha256}",
+                provenance.tokenizer.config_sha256
+            );
+            anyhow::ensure!(
+                provenance.tokenizer.chat_template_sha256 == chat_template_sha256,
+                "completion {completion_idx} rollout chat-template identity mismatch: provenance={}, training={chat_template_sha256}",
+                provenance.tokenizer.chat_template_sha256
+            );
+
+            let prompt_messages_sha256 = crate::rollout_prompt_messages_sha256(&group.messages)
+                .map_err(anyhow::Error::msg)?;
+            let scored_payload_sha256 =
+                crate::scored_rollout_payload_sha256(&group.completions[completion_idx])
+                    .map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(
+                provenance.prompt_messages_sha256 == prompt_messages_sha256,
+                "completion {completion_idx} prompt messages differ from rollout provenance"
+            );
+            anyhow::ensure!(
+                provenance.scored_payload_sha256 == scored_payload_sha256,
+                "completion {completion_idx} scored text/trajectory differs from rollout provenance"
+            );
+            anyhow::ensure!(
+                provenance.prompt_token_count == prompt_ids.len(),
+                "completion {completion_idx} rollout prompt boundary {} differs from the rendered prompt length {}",
+                provenance.prompt_token_count,
+                prompt_ids.len()
+            );
+            anyhow::ensure!(
+                provenance.input_token_ids[..provenance.prompt_token_count] == prompt_ids,
+                "completion {completion_idx} rollout input prefix differs from the rendered prompt tokens"
+            );
+
+            let (rendered_trajectory_ids, trajectory_action_mask, env_mask, total_obs_len) =
+                if let Some(masked) = pre {
+                    let total_obs_len = masked.total_obs_len();
+                    let crate::trajectory_mask::MaskedRollout {
+                        input_ids,
+                        action_mask,
+                        env_mask,
+                        segment_spans: _,
+                    } = masked;
+                    (Some(input_ids), Some(action_mask), env_mask, total_obs_len)
+                } else {
+                    (None, None, vec![false; provenance.input_token_ids.len()], 0)
+                };
+
+            if let Some(rendered_input_ids) = rendered_trajectory_ids.as_ref() {
+                anyhow::ensure!(
+                    rendered_input_ids == &provenance.input_token_ids,
+                    "completion {completion_idx} trajectory rendering differs from its exact rollout token sequence; exact observation masks cannot be recovered safely"
+                );
+            }
+            let rendered_action_indices =
+                if let Some(expected_action_mask) = trajectory_action_mask.as_ref() {
+                    expected_action_mask
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, &active)| active.then_some(index))
+                        .collect::<Vec<_>>()
+                } else {
+                    (provenance.prompt_token_count..provenance.input_token_ids.len())
+                        .collect::<Vec<_>>()
+                };
+            let provenance_action_indices = provenance
+                .action_tokens
+                .iter()
+                .map(|token| token.sequence_index)
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                rendered_action_indices == provenance_action_indices,
+                "completion {completion_idx} scored payload action positions differ from rollout provenance"
+            );
+
+            let mut action_mask = vec![false; provenance.input_token_ids.len()];
+            let mut behavior_log_probs = Vec::new();
+            for action in &provenance.action_tokens {
+                if action.source == crate::RolloutActionTokenSourceV1::Sampled {
+                    action_mask[action.sequence_index] = true;
+                    let logprob = action.behavior_logprob.with_context(|| {
+                        format!(
+                            "completion {completion_idx} sampled token {} is missing behavior_logprob",
+                            action.sequence_index
+                        )
+                    })? as f32;
+                    anyhow::ensure!(
+                        logprob.is_finite(),
+                        "completion {completion_idx} behavior_logprob at token {} cannot be represented as f32",
+                        action.sequence_index
+                    );
+                    behavior_log_probs.push(logprob);
+                }
+            }
+            anyhow::ensure!(
+                action_mask
+                    .iter()
+                    .zip(env_mask.iter())
+                    .all(|(&action, &env)| !(action && env)),
+                "completion {completion_idx} has overlapping sampled-action and environment masks"
+            );
+            completions.push(TokenizedGrpoCompletion {
+                input_ids: provenance.input_token_ids.clone(),
+                prompt_token_count: provenance.prompt_token_count,
+                action_mask,
+                env_mask,
+                total_obs_len,
+                recorded_behavior_log_probs: Some(behavior_log_probs),
+            });
+            rewards.push(reward);
+            continue;
+        }
+
         // Trajectory-aware path: prebuilt MaskedRollout overrides the
         // batch-tokenized full_ids. The mask builder rendered the
         // conversation itself, so its input_ids are authoritative for
@@ -6847,11 +7095,17 @@ fn tokenize_grpo_group_timed(
                 env_mask,
                 segment_spans: _,
             } = masked;
+            anyhow::ensure!(
+                input_ids.len() >= prompt_ids.len() && input_ids[..prompt_ids.len()] == prompt_ids,
+                "trajectory completion {completion_idx} does not preserve the rendered group prompt token prefix"
+            );
             completions.push(TokenizedGrpoCompletion {
                 input_ids,
+                prompt_token_count: prompt_ids.len(),
                 action_mask,
                 env_mask,
                 total_obs_len,
+                recorded_behavior_log_probs: None,
             });
             rewards.push(reward);
             continue;
@@ -6890,9 +7144,11 @@ fn tokenize_grpo_group_timed(
 
         completions.push(TokenizedGrpoCompletion {
             input_ids: full_ids,
+            prompt_token_count: prompt_ids.len(),
             action_mask,
             env_mask,
             total_obs_len: 0,
+            recorded_behavior_log_probs: None,
         });
         rewards.push(reward);
     }
@@ -6995,7 +7251,7 @@ fn snapshot_projection(
 /// storage) and safe to pass as the reference into `model_forward_no_head`
 /// across subsequent optimizer steps on `current`.
 ///
-/// Used by [`ReferencePolicy::Ema`] in `grpo_train` and `grpo_train_jsonl`.
+/// Used by [`KlReferencePolicy::Ema`] in `grpo_train` and `grpo_train_jsonl`.
 fn lora_snapshot_capture_or_blend(
     current: &TrainableLoraParams,
     prior: Option<&LoraWeights>,
@@ -7037,7 +7293,7 @@ fn lora_snapshot_capture_or_blend(
     })
 }
 
-/// State threaded through a GRPO run to support `ReferencePolicy::Ema`.
+/// State threaded through a GRPO run to support `KlReferencePolicy::Ema`.
 ///
 /// Captures the most recent snapshot of the LoRA params and the number of
 /// completed groups since the last refresh. When `groups_since_refresh
@@ -11128,11 +11384,8 @@ pub(crate) struct GrpoLossParams {
     /// sequence level (GSPO, arXiv:2507.18071); `Cispo` clips the IS
     /// weight rather than the surrogate (arXiv:2506.13585).
     pub is_level: IsLevel,
-    /// When true, the IS ratio is forced to 1.0 (no reference distribution)
-    /// and the surrogate reduces to `advantage` per token — REINFORCE with
-    /// group-relative advantages. Set by `from_config()` whenever
-    /// `reference_policy == ReferencePolicy::None`. The KL contribution is
-    /// also forced off in that case (`kl_estimator = None`).
+    /// When true, the IS ratio is forced to 1.0 and the surrogate reduces to
+    /// `advantage` per token. KL selection remains independent.
     pub reinforce: bool,
     /// Phase 3c — entropy-aware KL quantile. `None` = full-token KL; when
     /// `Some(q)`, tokens whose `-policy_log_prob` is below the q-quantile
@@ -11145,15 +11398,11 @@ pub(crate) struct GrpoLossParams {
 impl GrpoLossParams {
     fn from_config(config: &GrpoConfig, advantage: f64, loss_normalizer: f64) -> Self {
         let (clip_low, clip_high) = config.clip_bounds();
-        let reinforce = matches!(config.reference_policy, ReferencePolicy::None);
-        // When the reference is skipped (ReferencePolicy::None) the IS
-        // ratio is fixed at 1.0; force the KL contribution off too — there
-        // is no reference distribution to anchor against.
-        let kl_estimator = if reinforce {
-            KlEstimator::None
-        } else {
-            config.kl_estimator
-        };
+        let reinforce = matches!(
+            config.behavior_policy,
+            BehaviorPolicy::NoImportanceCorrection
+        );
+        let kl_estimator = config.kl_estimator;
         // Entropy-aware KL only makes sense when KL is actually being
         // applied; gate it off otherwise so the quantile compute doesn't
         // run for nothing.
@@ -11773,6 +12022,96 @@ pub(crate) mod tests {
         }
     }
 
+    fn attach_test_rollout_provenance(
+        group: &mut GrpoGroup,
+        tokenizer: &KilnTokenizer,
+        force_one_action: bool,
+    ) -> Result<Option<usize>> {
+        anyhow::ensure!(
+            group.completions.len() == 1,
+            "test helper expects one rollout"
+        );
+        let tokenized = tokenize_grpo_group(group, tokenizer)?;
+        let completion = &tokenized.completions[0];
+        let action_positions = completion
+            .action_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &active)| active.then_some(index))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(!action_positions.is_empty(), "test rollout has no actions");
+        let forced_position =
+            force_one_action.then(|| *action_positions.last().expect("non-empty action positions"));
+        anyhow::ensure!(
+            !force_one_action || action_positions.len() > 1,
+            "forced-token fixture also needs a sampled token"
+        );
+        let action_tokens = action_positions
+            .iter()
+            .enumerate()
+            .map(|(ordinal, &sequence_index)| {
+                let token_id = completion.input_ids[sequence_index];
+                if Some(sequence_index) == forced_position {
+                    crate::RolloutActionTokenV1::forced(sequence_index, token_id)
+                } else {
+                    crate::RolloutActionTokenV1::sampled(
+                        sequence_index,
+                        token_id,
+                        -0.25 - ordinal as f64 * 0.01,
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        let thinking_budget =
+            forced_position.map(|sequence_index| crate::RolloutThinkingBudgetV1 {
+                max_tokens: Some(1),
+                max_time_ms: None,
+                close_token_ids: vec![completion.input_ids[sequence_index]],
+            });
+        let hash = |ch: char| format!("sha256:{}", ch.to_string().repeat(64));
+        let provenance = crate::RolloutProvenanceV1::new(
+            completion.input_ids.clone(),
+            completion.prompt_token_count,
+            crate::rollout_prompt_messages_sha256(&group.messages).map_err(anyhow::Error::msg)?,
+            crate::scored_rollout_payload_sha256(&group.completions[0])
+                .map_err(anyhow::Error::msg)?,
+            action_tokens,
+            crate::RolloutBehaviorPolicyIdentityV1 {
+                served_model_id: "test-model".to_string(),
+                base_model_sha256: hash('a'),
+                adapter: None,
+                inference_config_sha256: hash('b'),
+                implementation: "kiln-test".to_string(),
+            },
+            crate::RolloutTokenizerIdentityV1 {
+                vocab_sha256: tokenizer.vocab_identity_sha256(),
+                config_sha256: tokenizer
+                    .tokenizer_config_sha256()
+                    .map_err(|error| anyhow::anyhow!("{error}"))?,
+                chat_template_sha256: tokenizer
+                    .chat_template_sha256()
+                    .context("test tokenizer must have a chat template")?,
+            },
+            crate::RolloutSamplingConfigV1 {
+                temperature: 0.7,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                max_tokens: 64,
+                repetition_penalty: 1.0,
+                presence_penalty: 0.0,
+                frequency_penalty: 0.0,
+                stop: Vec::new(),
+                thinking_budget,
+            },
+            123,
+            "test",
+        )
+        .map_err(anyhow::Error::msg)?;
+        group.completions[0].provenance = Some(provenance);
+        Ok(forced_position)
+    }
+
     fn dry_run_action(content: &str) -> crate::TurnSegment {
         crate::TurnSegment {
             role: "assistant".to_string(),
@@ -11801,6 +12140,169 @@ pub(crate) mod tests {
             tool_call_id: None,
             warning_prefix_len: Some(warning_prefix_len),
         }
+    }
+
+    #[test]
+    fn recorded_rollout_provenance_binds_sampled_tokens_and_excludes_forced_tokens() -> Result<()> {
+        let tokenizer = make_echo_smoke_tokenizer()?;
+        let mut group = dry_run_group(vec![crate::ScoredRollout::from_trajectory(
+            vec![
+                dry_run_action("b"),
+                dry_run_observation("a"),
+                dry_run_action("b"),
+            ],
+            1.0,
+        )]);
+        let forced_position = attach_test_rollout_provenance(&mut group, &tokenizer, true)?
+            .context("fixture must contain a forced token")?;
+        let expected_log_probs = group.completions[0]
+            .provenance
+            .as_ref()
+            .unwrap()
+            .sampled_action_tokens()
+            .map(|token| token.behavior_logprob.unwrap() as f32)
+            .collect::<Vec<_>>();
+
+        let tokenized = tokenize_grpo_group(&group, &tokenizer)?;
+        validate_tokenized_behavior_policy(&tokenized, BehaviorPolicy::Recorded)?;
+        let completion = &tokenized.completions[0];
+        assert_eq!(
+            completion.recorded_behavior_log_probs.as_ref().unwrap(),
+            &expected_log_probs
+        );
+        assert!(!completion.action_mask[forced_position]);
+        assert!(completion.env_mask.iter().any(|&active| active));
+        assert!(
+            completion
+                .action_mask
+                .iter()
+                .zip(completion.env_mask.iter())
+                .all(|(&action, &env)| !(action && env))
+        );
+        assert_eq!(
+            completion
+                .action_mask
+                .get(1..)
+                .unwrap()
+                .iter()
+                .filter(|&&active| active)
+                .count(),
+            expected_log_probs.len()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_rollout_provenance_fails_closed_on_identity_or_payload_drift() -> Result<()> {
+        let tokenizer = make_echo_smoke_tokenizer()?;
+        let mut group = dry_run_group(vec![crate::ScoredRollout::legacy("b".to_string(), 1.0)]);
+        attach_test_rollout_provenance(&mut group, &tokenizer, false)?;
+
+        let mut wrong_identity = group.clone();
+        wrong_identity.completions[0]
+            .provenance
+            .as_mut()
+            .unwrap()
+            .tokenizer
+            .vocab_sha256 = format!("sha256:{}", "f".repeat(64));
+        let identity_error = match tokenize_grpo_group(&wrong_identity, &tokenizer) {
+            Ok(_) => panic!("tokenizer identity drift must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            identity_error
+                .to_string()
+                .contains("tokenizer vocabulary identity mismatch"),
+            "{identity_error:#}"
+        );
+
+        let mut wrong_prompt_tokens = group.clone();
+        let provenance = wrong_prompt_tokens.completions[0]
+            .provenance
+            .as_mut()
+            .unwrap();
+        provenance.input_token_ids[0] = provenance.input_token_ids[0].wrapping_add(1);
+        let prompt_token_error = match tokenize_grpo_group(&wrong_prompt_tokens, &tokenizer) {
+            Ok(_) => panic!("prompt-token drift must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            prompt_token_error
+                .to_string()
+                .contains("input prefix differs"),
+            "{prompt_token_error:#}"
+        );
+
+        let mut wrong_payload = group;
+        let mut wrong_prompt = wrong_payload.clone();
+        wrong_prompt.messages[0].content.push('b');
+        let prompt_error = match tokenize_grpo_group(&wrong_prompt, &tokenizer) {
+            Ok(_) => panic!("prompt drift must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            prompt_error.to_string().contains("prompt messages differ"),
+            "{prompt_error:#}"
+        );
+
+        wrong_payload.completions[0].text.push('a');
+        let payload_error = match tokenize_grpo_group(&wrong_payload, &tokenizer) {
+            Ok(_) => panic!("scored-payload drift must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            payload_error
+                .to_string()
+                .contains("scored text/trajectory differs"),
+            "{payload_error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_legacy_rollout_uses_exact_generated_suffix_without_chat_rerender() -> Result<()> {
+        let tokenizer = make_echo_smoke_tokenizer()?;
+        let mut group = dry_run_group(vec![crate::ScoredRollout::legacy("b".to_string(), 1.0)]);
+        attach_test_rollout_provenance(&mut group, &tokenizer, false)?;
+
+        let provenance = group.completions[0].provenance.as_mut().unwrap();
+        let generated_index = provenance.prompt_token_count;
+        let replacement = provenance.input_token_ids[generated_index].wrapping_add(1);
+        provenance.input_token_ids[generated_index] = replacement;
+        provenance.action_tokens[0].token_id = replacement;
+        let expected_input_ids = provenance.input_token_ids.clone();
+
+        let tokenized = tokenize_grpo_group(&group, &tokenizer)?;
+        assert_eq!(tokenized.completions[0].input_ids, expected_input_ids);
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_behavior_policy_dry_run_rejects_legacy_rollouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tokenizer = make_echo_smoke_tokenizer().unwrap();
+        let group = dry_run_group(vec![crate::ScoredRollout::legacy("b".to_string(), 1.0)]);
+        let data = dry_run_dataset(tmp.path(), "missing-provenance.jsonl", &[group]);
+        let config = GrpoConfig {
+            behavior_policy: BehaviorPolicy::Recorded,
+            dynamic_sampling: false,
+            ..dry_run_config(false, false)
+        };
+
+        let error = grpo_dry_run_jsonl(
+            &data,
+            &config,
+            &ModelConfig::qwen3_5_4b(),
+            &tokenizer,
+            &tmp.path().join("out"),
+            "missing-provenance",
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("missing exact rollout provenance"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -12261,7 +12763,14 @@ pub(crate) mod tests {
         assert!(cfg.dynamic_sampling);
         assert!(matches!(cfg.kl_estimator, KlEstimator::K1));
         assert!(matches!(cfg.is_level, IsLevel::Token));
-        assert!(matches!(cfg.reference_policy, ReferencePolicy::BasePerStep));
+        assert!(matches!(
+            cfg.behavior_policy,
+            BehaviorPolicy::NoImportanceCorrection
+        ));
+        assert!(matches!(
+            cfg.kl_reference_policy,
+            KlReferencePolicy::BasePerStep
+        ));
         // Clip stays symmetric by default; users opt into Clip-Higher by
         // setting clip_eps_high.
         assert!(cfg.clip_eps_high.is_none());
@@ -12756,8 +13265,8 @@ pub(crate) mod tests {
 
     #[test]
     fn grpo_loss_reinforce_short_circuits_to_neg_advantage_per_token() -> Result<()> {
-        // ReferencePolicy::None forces reinforce=true. The loss reduces to
-        // `-advantage` per token, summed and scaled by loss_normalizer.
+        // NoImportanceCorrection forces reinforce=true. With KL explicitly
+        // disabled, the loss is `-advantage` per token.
         let device = cpu_device();
         let policy = t1d(&[-0.5_f32, -1.1, -0.8])?;
         let reference = t1d(&[0.0_f32, 0.0, 0.0])?;
@@ -12836,15 +13345,26 @@ pub(crate) mod tests {
     fn grpo_loss_params_from_config_propagates_phase2_modes() {
         let cfg = GrpoConfig {
             is_level: IsLevel::Sequence,
-            reference_policy: ReferencePolicy::None,
-            kl_estimator: KlEstimator::K1, // should be overridden to None
+            behavior_policy: BehaviorPolicy::NoImportanceCorrection,
+            kl_reference_policy: KlReferencePolicy::BasePerStep,
+            kl_estimator: KlEstimator::K1,
             ..Default::default()
         };
         let p = GrpoLossParams::from_config(&cfg, 0.5, 1.0 / 4.0);
         assert!(matches!(p.is_level, IsLevel::Sequence));
         assert!(p.reinforce);
-        // ReferencePolicy::None forces KL off regardless of kl_estimator.
-        assert!(matches!(p.kl_estimator, KlEstimator::None));
+        assert!(matches!(p.kl_estimator, KlEstimator::K1));
+
+        let recorded = GrpoLossParams::from_config(
+            &GrpoConfig {
+                behavior_policy: BehaviorPolicy::Recorded,
+                ..cfg
+            },
+            0.5,
+            1.0 / 4.0,
+        );
+        assert!(!recorded.reinforce);
+        assert!(matches!(recorded.kl_estimator, KlEstimator::K1));
     }
 
     #[test]
@@ -14952,7 +15472,8 @@ pub(crate) mod tests {
                 config.lora_rank = 4;
                 config.lora_alpha = 8.0;
                 config.optimizer = Optimizer::Sgd;
-                config.reference_policy = ReferencePolicy::None;
+                config.kl_estimator = KlEstimator::None;
+                config.kl_reference_policy = KlReferencePolicy::None;
                 config.seed = Some(0xA6E17C_u64);
                 config.loss.echo = echo;
                 config.loss.no_policy_loss = no_policy_loss;

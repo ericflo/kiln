@@ -37,7 +37,7 @@ use kiln_model::forward::GpuWeights;
 use kiln_train::trainer::{grpo_dry_run_jsonl, grpo_train_jsonl};
 #[cfg(feature = "cuda")]
 use kiln_train::{
-    AdvantageMode, GrpoConfig, IsLevel, KlEstimator, LossAggregation, Optimizer, ReferencePolicy,
+    AdvantageMode, GrpoConfig, IsLevel, KlEstimator, KlReferencePolicy, LossAggregation, Optimizer,
     RewardFilterOnEmpty,
 };
 
@@ -54,12 +54,11 @@ enum Mode {
     Phase1Gspo,
     /// Phase 1 + CISPO weight-clip IS.
     Phase1Cispo,
-    /// Phase 1 + ReferencePolicy::None (skip reference forward, REINFORCE
-    /// with group-relative advantages).
+    /// Phase 1 with no importance correction and no KL-reference forward.
     Phase1Reinforce,
-    /// Phase 1 + ReferencePolicy::Ema (refresh every 8 groups, decay 0.0).
+    /// Phase 1 + EMA KL reference (refresh every 8 groups, decay 0.0).
     Phase3Ema,
-    /// Phase 1 + ReferencePolicy::Ema(decay=0.9, refresh=8) (slow-moving).
+    /// Phase 1 + EMA KL reference (decay=0.9, refresh=8) (slow-moving).
     Phase3EmaSlow,
     /// Phase 1 + selective KL (entropy_aware_kl_quantile = 0.8).
     Phase3KlCov,
@@ -114,7 +113,7 @@ impl Mode {
                 kl_estimator: KlEstimator::K1,
                 dynamic_sampling: false,
                 is_level: IsLevel::Token,
-                reference_policy: ReferencePolicy::BasePerStep,
+                kl_reference_policy: KlReferencePolicy::BasePerStep,
                 entropy_aware_kl_quantile: None,
                 ..base
             },
@@ -152,8 +151,9 @@ impl Mode {
                 loss_aggregation: LossAggregation::TokenLevel,
                 clip_epsilon: 0.20,
                 clip_eps_high: Some(0.28),
+                kl_estimator: KlEstimator::None,
                 dynamic_sampling: true,
-                reference_policy: ReferencePolicy::None,
+                kl_reference_policy: KlReferencePolicy::None,
                 ..base
             },
             Self::Phase3Ema => GrpoConfig {
@@ -163,7 +163,7 @@ impl Mode {
                 clip_eps_high: Some(0.28),
                 kl_estimator: KlEstimator::K1,
                 dynamic_sampling: true,
-                reference_policy: ReferencePolicy::Ema {
+                kl_reference_policy: KlReferencePolicy::Ema {
                     decay: 0.0,
                     refresh_every: 8,
                 },
@@ -176,7 +176,7 @@ impl Mode {
                 clip_eps_high: Some(0.28),
                 kl_estimator: KlEstimator::K1,
                 dynamic_sampling: true,
-                reference_policy: ReferencePolicy::Ema {
+                kl_reference_policy: KlReferencePolicy::Ema {
                     decay: 0.9,
                     refresh_every: 8,
                 },
@@ -199,7 +199,7 @@ impl Mode {
                 clip_eps_high: Some(0.28),
                 kl_estimator: KlEstimator::K1,
                 dynamic_sampling: true,
-                reference_policy: ReferencePolicy::Ema {
+                kl_reference_policy: KlReferencePolicy::Ema {
                     decay: 0.0,
                     refresh_every: 8,
                 },
@@ -755,7 +755,8 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| "off".to_string());
     println!(
         "config mode={} advantage_mode={:?} loss_aggregation={:?} clip=({},{:?}) \
-         kl_estimator={:?} dynamic_sampling={} is_level={:?} reference_policy={:?} \
+         kl_estimator={:?} dynamic_sampling={} is_level={:?} behavior_policy={:?} \
+         kl_reference_policy={:?} \
          lr={} rank={} alpha={} seed={} echo_lambda={} filter_var_min={:?} \
          filter_var_max={:?} min_groups={} on_empty_filter={:?}",
         args.mode.as_str(),
@@ -766,7 +767,8 @@ fn main() -> Result<()> {
         config.kl_estimator,
         config.dynamic_sampling,
         config.is_level,
-        config.reference_policy,
+        config.behavior_policy,
+        config.kl_reference_policy,
         config.effective_learning_rate(),
         config.lora_rank,
         config.lora_alpha,

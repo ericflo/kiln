@@ -267,6 +267,7 @@ fn dynamic_training_availability(
 fn validate_grpo_jsonl_submission_head(
     dataset_path: &str,
     tokenizer: Option<&kiln_core::tokenizer::KilnTokenizer>,
+    config: &kiln_train::GrpoConfig,
 ) -> Result<GrpoSubmissionStats, ApiError> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
@@ -300,6 +301,20 @@ fn validate_grpo_jsonl_submission_head(
                 "GRPO JSONL first non-empty group at line {} in '{dataset_path}' has no completions",
                 idx + 1
             )));
+        }
+        if config.behavior_policy == kiln_train::BehaviorPolicy::Recorded {
+            let tokenizer = tokenizer.ok_or_else(|| {
+                ApiError::training_invalid_request(
+                    "behavior_policy=recorded requires a tokenizer-aware submission preflight",
+                )
+            })?;
+            kiln_train::trainer::validate_grpo_group_policy_data(&group, config, tokenizer)
+                .map_err(|error| {
+                    ApiError::training_invalid_request(format!(
+                        "invalid recorded behavior provenance in GRPO JSONL line {}: {error:#}",
+                        idx + 1
+                    ))
+                })?;
         }
         return Ok(GrpoSubmissionStats {
             num_groups: None,
@@ -473,7 +488,10 @@ fn enforce_training_preflight(
     })
 }
 
-fn validate_grpo_submission_source(req: &GrpoRequest) -> Result<(), ApiError> {
+fn validate_grpo_submission_source(
+    req: &GrpoRequest,
+    tokenizer: Option<&kiln_core::tokenizer::KilnTokenizer>,
+) -> Result<(), ApiError> {
     if req.dataset_path.is_some() && !req.groups.is_empty() {
         return Err(ApiError::training_invalid_request(
             "GRPO request must use either groups or dataset_path, not both",
@@ -499,6 +517,32 @@ fn validate_grpo_submission_source(req: &GrpoRequest) -> Result<(), ApiError> {
         .loss
         .validate_for_kt_tape(has_env_tokens)
         .map_err(ApiError::training_invalid_request)?;
+    req.config
+        .validate_policy_config()
+        .map_err(ApiError::training_invalid_request)?;
+    if req.config.behavior_policy == kiln_train::BehaviorPolicy::Recorded {
+        for (group_idx, group) in req.groups.iter().enumerate() {
+            for (completion_idx, completion) in group.completions.iter().enumerate() {
+                if completion.provenance.is_none() {
+                    return Err(ApiError::training_invalid_request(format!(
+                        "GRPO group {group_idx} completion {completion_idx} is missing exact rollout provenance required by behavior_policy=recorded"
+                    )));
+                }
+            }
+            if let Some(tokenizer) = tokenizer {
+                kiln_train::trainer::validate_grpo_group_policy_data(
+                    group,
+                    &req.config,
+                    tokenizer,
+                )
+                .map_err(|error| {
+                    ApiError::training_invalid_request(format!(
+                        "GRPO group {group_idx} has invalid recorded behavior provenance: {error:#}"
+                    ))
+                })?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1236,10 +1280,10 @@ async fn submit_grpo(
             req.dataset_path = Some(path);
         }
     }
-    validate_grpo_submission_source(&req)?;
+    validate_grpo_submission_source(&req, Some(state.tokenizer.as_ref()))?;
 
     let stats = if let Some(path) = req.dataset_path.as_deref() {
-        validate_grpo_jsonl_submission_head(path, Some(state.tokenizer.as_ref()))?
+        validate_grpo_jsonl_submission_head(path, Some(state.tokenizer.as_ref()), &req.config)?
     } else {
         GrpoSubmissionStats {
             num_groups: Some(req.groups.len()),
@@ -3430,21 +3474,34 @@ mod tests {
     #[test]
     fn grpo_dataset_path_submission_allows_generic_streaming_route() {
         let req = grpo_req(Some("/tmp/grpo.jsonl"), Vec::new());
-        validate_grpo_submission_source(&req).unwrap();
+        validate_grpo_submission_source(&req, None).unwrap();
     }
 
     #[test]
     fn grpo_submission_rejects_ambiguous_or_empty_sources() {
         let both = grpo_req(Some("/tmp/grpo.jsonl"), vec![grpo_group()]);
-        let err = validate_grpo_submission_source(&both).unwrap_err();
+        let err = validate_grpo_submission_source(&both, None).unwrap_err();
         assert!(err.message.contains("either groups or dataset_path"));
 
         let empty = grpo_req(None, Vec::new());
-        let err = validate_grpo_submission_source(&empty).unwrap_err();
+        let err = validate_grpo_submission_source(&empty, None).unwrap_err();
         assert!(err.message.contains("non-empty groups or dataset_path"));
 
         let inline = grpo_req(None, vec![grpo_group()]);
-        validate_grpo_submission_source(&inline).unwrap();
+        validate_grpo_submission_source(&inline, None).unwrap();
+    }
+
+    #[test]
+    fn grpo_submission_rejects_missing_recorded_behavior_provenance_and_kl_reference() {
+        let mut recorded = grpo_req(None, vec![grpo_group()]);
+        recorded.config.behavior_policy = kiln_train::BehaviorPolicy::Recorded;
+        let error = validate_grpo_submission_source(&recorded, None).unwrap_err();
+        assert!(error.message.contains("missing exact rollout provenance"));
+
+        let mut missing_kl_reference = grpo_req(None, vec![grpo_group()]);
+        missing_kl_reference.config.kl_reference_policy = kiln_train::KlReferencePolicy::None;
+        let error = validate_grpo_submission_source(&missing_kl_reference, None).unwrap_err();
+        assert!(error.message.contains("requires kl_estimator=none"));
     }
 
     /// ECHO env-CE trains again (resurrection PR2), so echo-enabled
@@ -3474,26 +3531,26 @@ mod tests {
         ];
         let mut req = grpo_req(None, vec![group.clone()]);
         req.config.loss.echo = Some(kiln_train::EchoConfig::default());
-        validate_grpo_submission_source(&req)
+        validate_grpo_submission_source(&req, None)
             .expect("echo + observation segments is the flagship agentic shape");
 
         // Same data WITHOUT echo: also fine — the policy loss trains the
         // trajectory's action tokens.
         let req = grpo_req(None, vec![group]);
-        validate_grpo_submission_source(&req).unwrap();
+        validate_grpo_submission_source(&req, None).unwrap();
 
         // ECHO on legacy single-turn rollouts: zero env term, harmless.
         let mut req = grpo_req(None, vec![grpo_group()]);
         req.config.loss.echo = Some(kiln_train::EchoConfig::default());
-        validate_grpo_submission_source(&req).unwrap();
+        validate_grpo_submission_source(&req, None).unwrap();
 
         // no_policy_loss + default ECHO = §5.5 verifier-free mode: valid.
         let mut req = grpo_req(None, vec![grpo_group()]);
         req.config.loss.no_policy_loss = true;
-        validate_grpo_submission_source(&req).expect("verifier-free mode validates");
+        validate_grpo_submission_source(&req, None).expect("verifier-free mode validates");
         // Without ECHO there is nothing to train on — still rejected.
         req.config.loss.echo = None;
-        let err = validate_grpo_submission_source(&req).unwrap_err();
+        let err = validate_grpo_submission_source(&req, None).unwrap_err();
         assert!(err.message.contains("no_policy_loss"), "{}", err.message);
     }
 
@@ -3504,7 +3561,12 @@ mod tests {
         let first = serde_json::to_string(&grpo_group()).unwrap();
         std::fs::write(&path, format!("{first}\nthis is not json\n")).unwrap();
 
-        let stats = validate_grpo_jsonl_submission_head(path.to_str().unwrap(), None).unwrap();
+        let stats = validate_grpo_jsonl_submission_head(
+            path.to_str().unwrap(),
+            None,
+            &GrpoConfig::default(),
+        )
+        .unwrap();
         assert!(stats.streaming_dataset);
         assert_eq!(stats.num_groups, None);
         assert_eq!(stats.total_completions, None);

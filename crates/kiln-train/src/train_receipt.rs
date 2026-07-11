@@ -203,7 +203,10 @@ pub struct GrpoReceipt {
     pub loss_aggregation: serde_json::Value,
     pub kl_estimator: serde_json::Value,
     pub is_level: serde_json::Value,
-    pub reference_policy: serde_json::Value,
+    #[serde(default)]
+    pub behavior_policy: serde_json::Value,
+    #[serde(default, alias = "reference_policy")]
+    pub kl_reference_policy: serde_json::Value,
     pub entropy_aware_kl_quantile: Option<f32>,
 }
 
@@ -1773,6 +1776,33 @@ impl ModuleNormAccumulator {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn legacy_grpo_receipt_maps_reference_to_kl_and_leaves_behavior_unknown() {
+        let receipt: GrpoReceipt = serde_json::from_value(serde_json::json!({
+            "kl_coeff": 0.1,
+            "clip_epsilon": 0.2,
+            "clip_eps_high": null,
+            "dynamic_sampling": true,
+            "dynamic_groups_filtered": 0,
+            "advantage_mode": "dr_grpo",
+            "loss_aggregation": "token_level",
+            "kl_estimator": "k1",
+            "is_level": "token",
+            "reference_policy": {"kind": "base_per_step"},
+            "entropy_aware_kl_quantile": null
+        }))
+        .unwrap();
+        assert_eq!(receipt.behavior_policy, serde_json::Value::Null);
+        assert_eq!(
+            receipt.kl_reference_policy,
+            serde_json::json!({"kind": "base_per_step"})
+        );
+
+        let wire = serde_json::to_value(receipt).unwrap();
+        assert!(wire.get("reference_policy").is_none());
+        assert_eq!(wire["behavior_policy"], serde_json::Value::Null);
+    }
 
     #[test]
     fn train_receipt_success_round_trip() -> Result<()> {

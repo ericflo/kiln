@@ -447,7 +447,7 @@ pub use crate::trajectory::{
     AgenticGroup, ROLLOUT_PROVENANCE_SCHEMA_V1, RolloutActionTokenSourceV1, RolloutActionTokenV1,
     RolloutAdapterIdentityV1, RolloutBehaviorPolicyIdentityV1, RolloutProvenanceV1,
     RolloutSamplingConfigV1, RolloutThinkingBudgetV1, RolloutTokenizerIdentityV1, ScoredRollout,
-    TurnKind, TurnSegment,
+    TurnKind, TurnSegment, rollout_prompt_messages_sha256, scored_rollout_payload_sha256,
 };
 
 /// Legacy alias for [`ScoredRollout`]. Use the canonical name in new code.
@@ -570,19 +570,32 @@ pub enum IsLevel {
     Cispo,
 }
 
-/// What policy the reference forward uses, and how often it refreshes.
+/// Which distribution supplies the denominator for policy importance ratios.
 ///
-/// `BasePerStep` reproduces the historical kiln behavior: the reference is
-/// the base model (no LoRA), recomputed for every completion. The IS ratio
-/// is therefore `π_θ / π_base` and the KL term anchors the policy to the
-/// base model.
+/// `Recorded` consumes the exact, post-filter log-probabilities stored in
+/// rollout provenance. Training fails closed when any sampled action token is
+/// missing that provenance. `NoImportanceCorrection` explicitly fixes the
+/// ratio at 1; it never substitutes the KL reference for the behavior policy.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BehaviorPolicy {
+    /// Explicit on-policy/REINFORCE-style mode. No behavior probabilities are
+    /// read and the importance ratio is fixed at 1.
+    #[default]
+    NoImportanceCorrection,
+    /// Use sampled-token log-probabilities from exact rollout provenance.
+    Recorded,
+}
+
+/// What frozen policy anchors the KL penalty, and how often it refreshes.
 ///
-/// `None` skips the reference forward entirely and uses a fixed log-ratio
-/// of 0 for every token. Combined with `KlEstimator::None` this reduces
-/// GRPO to pure REINFORCE with group-relative advantages — useful as an
-/// ablation baseline. The reference forward is the most expensive single
-/// component of a kiln GRPO step, so this mode is also a meaningful
-/// speedup when the KL anchor is not load-bearing for stability.
+/// This selection is independent of [`BehaviorPolicy`]. In particular, the
+/// base model or an EMA snapshot must never be reused as a stand-in for the
+/// behavior distribution that sampled an off-policy rollout.
+///
+/// `BasePerStep` uses the base model (no LoRA), recomputed for every
+/// completion. `None` skips the frozen-policy forward and is valid only when
+/// the KL penalty is disabled.
 ///
 /// `Ema` snapshots the LoRA-applied policy every `refresh_every` optimizer
 /// steps into a frozen reference. `decay` controls EMA blending across
@@ -594,10 +607,10 @@ pub enum IsLevel {
 /// pre-reasoning) base model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ReferencePolicy {
+pub enum KlReferencePolicy {
     /// Base model (no LoRA), recomputed per completion. Historical default.
     BasePerStep,
-    /// No reference forward; ratio fixed at 1.0, KL forced off.
+    /// No KL-reference forward. Requires the KL penalty to be disabled.
     None,
     /// EMA snapshot of the LoRA-applied policy.
     Ema {
@@ -608,11 +621,16 @@ pub enum ReferencePolicy {
     },
 }
 
-impl Default for ReferencePolicy {
+impl Default for KlReferencePolicy {
     fn default() -> Self {
-        ReferencePolicy::BasePerStep
+        KlReferencePolicy::BasePerStep
     }
 }
+
+/// Backwards-compatible Rust type name. New code should use
+/// [`KlReferencePolicy`] so it cannot be confused with [`BehaviorPolicy`].
+#[deprecated(note = "use KlReferencePolicy")]
+pub type ReferencePolicy = KlReferencePolicy;
 
 fn default_ema_decay() -> f32 {
     0.0
@@ -623,9 +641,8 @@ fn default_ema_refresh() -> usize {
 
 /// Which KL estimator to use for the per-token penalty.
 ///
-/// All three options leave the reference forward pass intact (the reference
-/// log-probs are needed for the importance-sampling ratio). They only change
-/// the per-token KL term added to the surrogate.
+/// This changes only the per-token KL term. Importance correction is selected
+/// independently by [`BehaviorPolicy`].
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum KlEstimator {
@@ -638,10 +655,8 @@ pub enum KlEstimator {
     /// uses this form. Implemented on the shared kt tape path and the
     /// Vulkan kernel (`VK_GRPO_KL_MODE_K3`).
     K3,
-    /// No KL penalty. The reference forward still runs (still needed for the
-    /// importance ratio); only the KL contribution to the loss is zeroed.
-    /// Equivalent in effect to `kl_coeff = 0` but expresses the intent
-    /// explicitly.
+    /// No KL penalty. The KL-reference forward is skipped. Equivalent in
+    /// effect to `kl_coeff = 0` but expresses the intent explicitly.
     None,
 }
 
@@ -708,12 +723,14 @@ pub struct GrpoConfig {
     /// behavior). Set to `Sequence` for GSPO or `Cispo` for CISPO.
     #[serde(default)]
     pub is_level: IsLevel,
-    /// Reference-policy selection. Defaults to `BasePerStep` (historical
-    /// kiln behavior, KL anchored to the base model). Set to `None` for
-    /// REINFORCE-like training without an IS ratio, or `Ema` for a moving
-    /// snapshot of the LoRA-applied policy.
+    /// Importance-correction source. `Recorded` requires exact per-token
+    /// rollout provenance; `NoImportanceCorrection` fixes the ratio at 1.
     #[serde(default)]
-    pub reference_policy: ReferencePolicy,
+    pub behavior_policy: BehaviorPolicy,
+    /// Frozen policy used only for the KL penalty. The legacy JSON key
+    /// `reference_policy` remains accepted as an input alias.
+    #[serde(default, alias = "reference_policy")]
+    pub kl_reference_policy: KlReferencePolicy,
     /// Phase 3c — selective-KL entropy regulation. When `Some(q)`, only
     /// tokens whose proxy entropy (defined as `-policy_log_prob` for the
     /// selected token) is at or above the `q`-quantile across the active
@@ -913,7 +930,7 @@ pub struct OpdAuxConfig {
 pub struct LossConfig {
     /// Action-token policy-gradient term — knobs already on GrpoConfig
     /// (clip_eps, kl_coeff, kl_estimator, advantage_mode, is_level,
-    /// reference_policy, etc.). LossConfig doesn't duplicate them; the
+    /// behavior_policy, kl_reference_policy, etc.). LossConfig doesn't duplicate them; the
     /// trainer reads them from the surrounding GrpoConfig.
     ///
     /// Observation-token cross-entropy (paper: Shrivastava et al. 2026).
@@ -1077,6 +1094,59 @@ impl GrpoConfig {
         self.learning_rate
             .unwrap_or_else(|| resolve_learning_rate(&self.optimizer, TrainMode::Grpo))
     }
+
+    /// Whether this configuration needs frozen-policy log-probabilities for
+    /// its KL term. A zero coefficient and an explicit `KlEstimator::None`
+    /// both disable that work.
+    pub fn kl_penalty_enabled(&self) -> bool {
+        self.kl_coeff != 0.0 && !matches!(self.kl_estimator, KlEstimator::None)
+    }
+
+    /// Validate the independent behavior-policy and KL-reference selections.
+    /// This is device-free so API submission, dry-run, and trainer entry can
+    /// all reject an incoherent job before allocating accelerator memory.
+    pub fn validate_policy_config(&self) -> Result<(), String> {
+        if !self.kl_coeff.is_finite() || self.kl_coeff < 0.0 {
+            return Err(format!(
+                "kl_coeff must be finite and non-negative, got {}",
+                self.kl_coeff
+            ));
+        }
+        if self.kl_penalty_enabled() && matches!(self.kl_reference_policy, KlReferencePolicy::None)
+        {
+            return Err(
+                "kl_reference_policy=none requires kl_estimator=none or kl_coeff=0; the behavior policy is never substituted as a KL reference"
+                    .to_string(),
+            );
+        }
+        if let KlReferencePolicy::Ema {
+            decay,
+            refresh_every,
+        } = &self.kl_reference_policy
+        {
+            if !decay.is_finite() || !(0.0..=1.0).contains(decay) {
+                return Err(format!(
+                    "kl_reference_policy EMA decay must be finite and within [0, 1], got {decay}"
+                ));
+            }
+            if *refresh_every == 0 {
+                return Err(
+                    "kl_reference_policy EMA refresh_every must be greater than zero".to_string(),
+                );
+            }
+        }
+        if let Some(q) = self.entropy_aware_kl_quantile {
+            if !q.is_finite() || !(0.0..=1.0).contains(&q) {
+                return Err(format!(
+                    "entropy_aware_kl_quantile must be finite and within [0, 1], got {q}"
+                ));
+            }
+            if !self.kl_penalty_enabled() {
+                return Err("entropy_aware_kl_quantile requires an enabled KL penalty".to_string());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for GrpoConfig {
@@ -1091,7 +1161,8 @@ impl Default for GrpoConfig {
             kl_estimator: KlEstimator::default(),
             dynamic_sampling: default_dynamic_sampling(),
             is_level: IsLevel::default(),
-            reference_policy: ReferencePolicy::default(),
+            behavior_policy: BehaviorPolicy::default(),
+            kl_reference_policy: KlReferencePolicy::default(),
             entropy_aware_kl_quantile: None,
             reward_saturation_threshold: default_reward_saturation_threshold(),
             reward_low_variance_threshold: default_reward_low_variance_threshold(),
@@ -1238,6 +1309,73 @@ mod tests {
             serde_json::to_value(KlEstimator::default()).unwrap(),
             serde_json::json!("k1")
         );
+        assert_eq!(
+            serde_json::to_value(BehaviorPolicy::default()).unwrap(),
+            serde_json::json!("no_importance_correction")
+        );
+        assert_eq!(
+            serde_json::to_value(KlReferencePolicy::default()).unwrap(),
+            serde_json::json!({"kind": "base_per_step"})
+        );
+    }
+
+    #[test]
+    fn grpo_policy_config_uses_unambiguous_wire_fields_with_legacy_input_alias() {
+        let config: GrpoConfig = serde_json::from_value(serde_json::json!({
+            "reference_policy": {"kind": "none"},
+            "kl_estimator": "none"
+        }))
+        .unwrap();
+        assert_eq!(
+            config.behavior_policy,
+            BehaviorPolicy::NoImportanceCorrection
+        );
+        assert_eq!(config.kl_reference_policy, KlReferencePolicy::None);
+        config.validate_policy_config().unwrap();
+
+        let wire = serde_json::to_value(config).unwrap();
+        assert!(wire.get("reference_policy").is_none());
+        assert_eq!(wire["behavior_policy"], "no_importance_correction");
+        assert_eq!(
+            wire["kl_reference_policy"],
+            serde_json::json!({"kind": "none"})
+        );
+    }
+
+    #[test]
+    fn grpo_policy_config_rejects_incoherent_kl_selection() {
+        let missing_reference = GrpoConfig {
+            kl_reference_policy: KlReferencePolicy::None,
+            ..Default::default()
+        };
+        assert!(
+            missing_reference
+                .validate_policy_config()
+                .unwrap_err()
+                .contains("requires kl_estimator=none or kl_coeff=0")
+        );
+
+        let bad_ema = GrpoConfig {
+            kl_reference_policy: KlReferencePolicy::Ema {
+                decay: 0.5,
+                refresh_every: 0,
+            },
+            ..Default::default()
+        };
+        assert!(
+            bad_ema
+                .validate_policy_config()
+                .unwrap_err()
+                .contains("refresh_every")
+        );
+
+        let disabled_kl = GrpoConfig {
+            kl_estimator: KlEstimator::None,
+            kl_reference_policy: KlReferencePolicy::None,
+            ..Default::default()
+        };
+        disabled_kl.validate_policy_config().unwrap();
+        assert!(!disabled_kl.kl_penalty_enabled());
     }
 
     /// Pin the full per-optimizer learning-rate table. AdamW/SGD are the

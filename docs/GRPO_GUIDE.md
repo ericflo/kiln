@@ -24,10 +24,12 @@ update — no separate critic network and no replay buffer, which is what makes
 it suit Kiln's single-process design. Within each group the rewards are
 mean-zeroed and (optionally) normalized to produce per-completion *advantages*,
 so the update only depends on which completions in the group beat the others.
-A clipped importance-sampling ratio keeps the step honest when the in-flight
-adapter has drifted from the policy that generated the rollouts, and a KL
-penalty toward the base model keeps the adapter from collapsing onto a single
-high-reward output. **You write the reward function. That's the whole point.**
+When exact rollout provenance is available, a clipped importance-sampling
+ratio corrects for drift from the policy that generated the rollouts. Without
+that provenance, Kiln explicitly fixes the ratio at one rather than pretending
+that the KL reference was the behavior policy. A separately configured KL
+penalty can keep the adapter from collapsing onto one high-reward output.
+**You write the reward function. That's the whole point.**
 
 ## The loop
 
@@ -73,6 +75,10 @@ The request is enqueued and returns a `job_id` immediately; training runs on a
 background thread. Its output remains hidden until Kiln atomically publishes
 and auto-loads the completed adapter at an iteration boundary. Every `config`
 field has a server default, so `{"groups": [...]}` is a valid minimal payload.
+The default `behavior_policy` is `"no_importance_correction"`, which is the
+honest mode for the text-only examples below. Set it to `"recorded"` only when
+every scored completion includes a validated `provenance` object from the
+generation that produced it.
 
 ## Worked example 1: Math correctness reward
 
@@ -296,8 +302,22 @@ server-side default, so omit anything you don't want to override:
 - **`kl_coeff`** — defaults to `0.1`. Higher keeps the adapter closer to the
   base model (more conservative, slower). Lower lets the adapter drift faster
   but risks mode collapse onto whatever scored highest in early rounds.
+- **`behavior_policy`** — defaults to `"no_importance_correction"`, which fixes
+  the policy ratio at one. `"recorded"` enables correction from each sampled
+  action token's exact behavior log-probability and rejects any completion with
+  missing or mismatched provenance. The behavior distribution is never inferred
+  from the base model or KL reference.
+- **`kl_reference_policy`** — independently selects the frozen KL anchor.
+  `{"kind": "base_per_step"}` is the default. Use `{"kind": "ema",
+  "decay": 0.9, "refresh_every": 32}` for a moving frozen snapshot, or
+  `{"kind": "none"}` only with `"kl_estimator": "none"` or `kl_coeff: 0`.
+  The old `reference_policy` key is accepted only as an input alias; new
+  requests and receipts should use `kl_reference_policy`.
+- **`kl_estimator`** — `"k1"` by default; `"k3"` selects the non-negative
+  estimator and `"none"` disables both the penalty and KL-reference forward.
 - **`clip_epsilon`** — defaults to `0.2`. The PPO/GRPO clip range on the
-  importance-sampling ratio. Leave alone unless you have a specific reason.
+  importance ratio when `behavior_policy` is `"recorded"`; it has no effect on
+  the fixed-one ratio in no-correction mode.
 - **`lora_rank`** / **`lora_alpha`** — defaults `16` / `32`. The capacity of
   the adapter. Rank 8 is faster and still works for narrow tasks; rank 32+
   for broader behavioral shifts.
@@ -356,6 +376,14 @@ Watch live training progress with `GET /v1/train/status`.
   current adapter and resubmit. A gated (`post_eval.min_accuracy`) same-name
   rewrite also returns this before GPU work when that adapter is physically
   loaded; unload it or choose a versioned `output_name`.
+- **`behavior_policy=recorded` is rejected.** Do not switch to
+  `no_importance_correction` merely to suppress the error for off-policy data.
+  Regenerate the rollout with exact token IDs, sampled-token behavior
+  log-probabilities, behavior model/adapter identity, tokenizer/template
+  hashes, effective sampling controls, seed, and backend provenance. Kiln also
+  rejects provenance whose canonical prompt messages, scored payload, exact
+  token sequence, action positions, or tokenizer identity drifted before
+  training.
 
 ## See also
 

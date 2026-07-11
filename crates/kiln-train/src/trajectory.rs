@@ -150,6 +150,13 @@ pub struct RolloutProvenanceV1 {
     schema: String,
     pub input_token_ids: Vec<u32>,
     pub prompt_token_count: usize,
+    /// Canonical hash of the [`AgenticGroup::messages`] value this rollout
+    /// answers. This binds rewards to the intended prompt without attempting
+    /// to reconstruct the inference sequence from rendered text.
+    pub prompt_messages_sha256: String,
+    /// Canonical hash of the rollout's `text` and `trajectory` fields,
+    /// excluding the mutable reward.
+    pub scored_payload_sha256: String,
     pub action_tokens: Vec<RolloutActionTokenV1>,
     pub behavior_policy: RolloutBehaviorPolicyIdentityV1,
     pub tokenizer: RolloutTokenizerIdentityV1,
@@ -164,6 +171,8 @@ struct RolloutProvenanceV1Wire {
     schema: String,
     input_token_ids: Vec<u32>,
     prompt_token_count: usize,
+    prompt_messages_sha256: String,
+    scored_payload_sha256: String,
     action_tokens: Vec<RolloutActionTokenV1>,
     behavior_policy: RolloutBehaviorPolicyIdentityV1,
     tokenizer: RolloutTokenizerIdentityV1,
@@ -172,11 +181,41 @@ struct RolloutProvenanceV1Wire {
     generation_backend: String,
 }
 
+#[derive(Serialize)]
+struct ScoredRolloutPayloadIdentityV1<'a> {
+    schema: &'static str,
+    text: &'a str,
+    trajectory: &'a [TurnSegment],
+}
+
+/// Canonical prompt identity used by rollout provenance v1.
+pub fn rollout_prompt_messages_sha256(messages: &[ChatMessage]) -> Result<String, String> {
+    let bytes = serde_json::to_vec(messages)
+        .map_err(|error| format!("serialize rollout prompt messages: {error}"))?;
+    Ok(kiln_core::config_hashes::sha256_bytes(&bytes))
+}
+
+/// Canonical scored-payload identity used by rollout provenance v1. Reward is
+/// deliberately excluded so scoring can happen after immutable generation
+/// provenance is emitted.
+pub fn scored_rollout_payload_sha256(rollout: &ScoredRollout) -> Result<String, String> {
+    let identity = ScoredRolloutPayloadIdentityV1 {
+        schema: "kiln.scored-rollout-payload.v1",
+        text: &rollout.text,
+        trajectory: &rollout.trajectory,
+    };
+    let bytes = serde_json::to_vec(&identity)
+        .map_err(|error| format!("serialize scored rollout payload: {error}"))?;
+    Ok(kiln_core::config_hashes::sha256_bytes(&bytes))
+}
+
 impl RolloutProvenanceV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         input_token_ids: Vec<u32>,
         prompt_token_count: usize,
+        prompt_messages_sha256: String,
+        scored_payload_sha256: String,
         action_tokens: Vec<RolloutActionTokenV1>,
         behavior_policy: RolloutBehaviorPolicyIdentityV1,
         tokenizer: RolloutTokenizerIdentityV1,
@@ -188,6 +227,8 @@ impl RolloutProvenanceV1 {
             schema: ROLLOUT_PROVENANCE_SCHEMA_V1.to_string(),
             input_token_ids,
             prompt_token_count,
+            prompt_messages_sha256,
+            scored_payload_sha256,
             action_tokens,
             behavior_policy,
             tokenizer,
@@ -232,6 +273,8 @@ impl RolloutProvenanceV1 {
                 self.input_token_ids.len()
             ));
         }
+        validate_sha256("prompt_messages_sha256", &self.prompt_messages_sha256)?;
+        validate_sha256("scored_payload_sha256", &self.scored_payload_sha256)?;
         if self.action_tokens.is_empty() {
             return Err("rollout provenance action_tokens must not be empty".to_string());
         }
@@ -375,6 +418,8 @@ impl<'de> Deserialize<'de> for RolloutProvenanceV1 {
             schema: wire.schema,
             input_token_ids: wire.input_token_ids,
             prompt_token_count: wire.prompt_token_count,
+            prompt_messages_sha256: wire.prompt_messages_sha256,
+            scored_payload_sha256: wire.scored_payload_sha256,
             action_tokens: wire.action_tokens,
             behavior_policy: wire.behavior_policy,
             tokenizer: wire.tokenizer,
@@ -694,6 +739,8 @@ mod tests {
         RolloutProvenanceV1::new(
             vec![10, 11, 20, 21],
             2,
+            hash('0'),
+            hash('1'),
             vec![
                 RolloutActionTokenV1::sampled(2, 20, -0.25),
                 RolloutActionTokenV1::sampled(3, 21, -1.5),
@@ -743,6 +790,34 @@ mod tests {
     }
 
     #[test]
+    fn rollout_provenance_payload_hashes_bind_prompt_and_content_but_not_reward() {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "question".to_string(),
+        }];
+        let prompt_hash = rollout_prompt_messages_sha256(&messages).unwrap();
+        let changed_prompt_hash = rollout_prompt_messages_sha256(&[ChatMessage {
+            role: "user".to_string(),
+            content: "other".to_string(),
+        }])
+        .unwrap();
+        assert_ne!(prompt_hash, changed_prompt_hash);
+
+        let rollout = ScoredRollout::legacy("answer".to_string(), 0.0);
+        let mut rescored = rollout.clone();
+        rescored.reward = 1.0;
+        assert_eq!(
+            scored_rollout_payload_sha256(&rollout).unwrap(),
+            scored_rollout_payload_sha256(&rescored).unwrap()
+        );
+        rescored.text.push('!');
+        assert_ne!(
+            scored_rollout_payload_sha256(&rollout).unwrap(),
+            scored_rollout_payload_sha256(&rescored).unwrap()
+        );
+    }
+
+    #[test]
     fn scored_rollout_round_trips_exact_provenance() {
         let rollout =
             ScoredRollout::legacy("answer".to_string(), 1.0).with_provenance(valid_provenance());
@@ -773,6 +848,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("strictly increasing"), "{error}");
+
+        let mut value = serde_json::to_value(valid_provenance()).unwrap();
+        value["scored_payload_sha256"] = serde_json::json!("latest");
+        let error = serde_json::from_value::<RolloutProvenanceV1>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sha256:<64 lowercase hex>"), "{error}");
     }
 
     #[test]
