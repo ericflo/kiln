@@ -23,7 +23,9 @@ use kiln_model::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::config::{BatchTokenBudget, ConfigValueSource, PrefillTokenBudget, StreamStallGrace};
+use crate::config::{
+    BatchTokenBudget, ConfigValueSource, PrefillLayerBudget, PrefillTokenBudget, StreamStallGrace,
+};
 use crate::response_delivery::{
     DeliveryBarrierError, DeliveryBatch, DeliveryCommand, DeliveryKey, DeliveryResult,
     DeliveryResultNotifyError, DeliveryResultSink, DeliveryResultSinkError, DeliveryTerminal,
@@ -219,6 +221,8 @@ pub struct BatchingEngineSnapshot {
     pub max_batch_tokens_source: ConfigValueSource,
     pub max_prefill_tokens_per_cycle: usize,
     pub max_prefill_tokens_per_cycle_source: ConfigValueSource,
+    pub max_prefill_layers_per_cycle: usize,
+    pub max_prefill_layers_per_cycle_source: ConfigValueSource,
     pub max_prefill_admission_quantum: usize,
     pub current_batch_size: usize,
     pub last_batch_size: usize,
@@ -232,6 +236,7 @@ pub struct BatchingEngineSnapshot {
     pub total_prefill_forward_ms: f64,
     pub slow_prefill_forward_count: u64,
     pub last_prefill_tokens: usize,
+    pub last_prefill_layers: usize,
     pub last_admission_ms: f64,
     pub max_admission_ms: f64,
     pub total_admission_ms: f64,
@@ -242,6 +247,8 @@ pub struct BatchingEngineSnapshot {
     pub total_decode_rows: u64,
     pub total_prefill_admission_cycles: u64,
     pub total_prefill_forwards: u64,
+    pub total_prefill_layers: u64,
+    pub total_prefill_layer_yields: u64,
     pub total_decode_tokens: u64,
     pub total_prefill_tokens: u64,
     pub total_errors: u64,
@@ -294,10 +301,12 @@ pub enum RequestPreparation {
     Prefilling {
         slot: DecodeSlot,
         tokens_processed: usize,
+        layers_processed: usize,
     },
     Ready {
         slot: DecodeSlot,
         tokens_processed: usize,
+        layers_processed: usize,
     },
 }
 
@@ -358,12 +367,14 @@ pub trait DecodeForward: Send + Sync + 'static {
         Ok(RequestPreparation::Ready {
             slot: self.prepare_request(req)?,
             tokens_processed: req.prompt_tokens.len(),
+            layers_processed: 0,
         })
     }
     fn advance_prefill(
         &self,
         _slot: DecodeSlot,
         _max_tokens: usize,
+        _max_layers: usize,
         _sampling: &SamplingParams,
         _cancel: &CancelHandle,
     ) -> Result<RequestPreparation> {
@@ -374,6 +385,11 @@ pub trait DecodeForward: Send + Sync + 'static {
     /// this method; the production forward uses `RealPrefill` ownership.
     fn is_prefilling(&self, slot: &DecodeSlot) -> bool {
         matches!(slot, DecodeSlot::RealPrefill { .. })
+    }
+    /// Distinguish a valid transformer-layer yield from a broken prefill that
+    /// reported zero token and zero internal progress.
+    fn has_inflight_prefill_layer_progress(&self, _slot: &DecodeSlot) -> bool {
+        false
     }
     fn can_reuse_as_strict_prefix(&self, _prompt_token_len: usize) -> bool {
         false
@@ -658,13 +674,23 @@ impl DecodeForward for RealDecodeForward {
             .unwrap_or(false)
     }
 
+    fn has_inflight_prefill_layer_progress(&self, slot: &DecodeSlot) -> bool {
+        matches!(
+            slot,
+            DecodeSlot::RealPrefill {
+                state: Some(state),
+                ..
+            } if state.has_pending_layer_progress()
+        )
+    }
+
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
         let mut preparation = self.prepare_request_chunked(req, usize::MAX)?;
         loop {
             preparation = match preparation {
                 RequestPreparation::Ready { slot, .. } => return Ok(slot),
                 RequestPreparation::Prefilling { slot, .. } => {
-                    self.advance_prefill(slot, usize::MAX, &req.sampling, &req.cancel)?
+                    self.advance_prefill(slot, usize::MAX, usize::MAX, &req.sampling, &req.cancel)?
                 }
             };
         }
@@ -754,6 +780,7 @@ impl DecodeForward for RealDecodeForward {
                     first_token_pending: true,
                 },
                 tokens_processed: 0,
+                layers_processed: 0,
             }),
             Ok(PagedBatchedPrefillStart::Prefilling(state)) => Ok(RequestPreparation::Prefilling {
                 slot: DecodeSlot::RealPrefill {
@@ -761,6 +788,7 @@ impl DecodeForward for RealDecodeForward {
                     prefix_request,
                 },
                 tokens_processed: 0,
+                layers_processed: 0,
             }),
             Err(err) => Err(err),
         }
@@ -770,6 +798,7 @@ impl DecodeForward for RealDecodeForward {
         &self,
         slot: DecodeSlot,
         max_tokens: usize,
+        max_layers: usize,
         sampling: &SamplingParams,
         cancel: &CancelHandle,
     ) -> Result<RequestPreparation> {
@@ -790,11 +819,12 @@ impl DecodeForward for RealDecodeForward {
                 return Err(error);
             }
         };
-        let progress = runner_guard.advance_paged_batched_prefill(
+        let progress = runner_guard.advance_paged_batched_prefill_with_layer_budget(
             &mut state,
             sampling,
             self.paged_cache.as_ref(),
             max_tokens,
+            max_layers,
             Some(cancel),
         );
         let synchronized = runner_guard.synchronize_external_yield("batched prefill quantum");
@@ -816,6 +846,7 @@ impl DecodeForward for RealDecodeForward {
                         first_token_pending: true,
                     },
                     tokens_processed: progress.tokens_processed,
+                    layers_processed: progress.layers_processed,
                 }),
                 None => Ok(RequestPreparation::Prefilling {
                     slot: DecodeSlot::RealPrefill {
@@ -823,6 +854,7 @@ impl DecodeForward for RealDecodeForward {
                         prefix_request,
                     },
                     tokens_processed: progress.tokens_processed,
+                    layers_processed: progress.layers_processed,
                 }),
             },
             Err(error) => {
@@ -1214,6 +1246,7 @@ impl BatchingEngineHandle {
             policy,
             BatchTokenBudget::default(),
             PrefillTokenBudget::default(),
+            PrefillLayerBudget::default(),
             response_delivery_policy,
         )
     }
@@ -1224,6 +1257,7 @@ impl BatchingEngineHandle {
         policy: Option<DecodeBatcherPolicy>,
         max_batch_tokens: BatchTokenBudget,
         max_prefill_tokens_per_cycle: PrefillTokenBudget,
+        max_prefill_layers_per_cycle: PrefillLayerBudget,
         response_delivery_policy: ResponseDeliveryPolicy,
     ) -> Self {
         let max_decode_batch = max_decode_batch.max(1);
@@ -1232,6 +1266,7 @@ impl BatchingEngineHandle {
             max_decode_batch,
             max_batch_tokens,
             max_prefill_tokens_per_cycle,
+            max_prefill_layers_per_cycle,
             env_prefix_aware_admission(),
             env_prefill_admission_quantum_for_policy(max_decode_batch, policy),
             policy.is_some_and(|policy| policy.burst_prefill_admission),
@@ -1244,6 +1279,7 @@ impl BatchingEngineHandle {
         max_decode_batch: usize,
         max_batch_tokens: BatchTokenBudget,
         max_prefill_tokens_per_cycle: PrefillTokenBudget,
+        max_prefill_layers_per_cycle: PrefillLayerBudget,
         prefix_aware_admission: bool,
         prefill_admission_quantum: usize,
         burst_refill: bool,
@@ -1267,6 +1303,7 @@ impl BatchingEngineHandle {
             max_decode_batch.max(1),
             max_batch_tokens,
             max_prefill_tokens_per_cycle,
+            max_prefill_layers_per_cycle,
             prefix_aware_admission,
             prefill_admission_quantum,
             burst_refill,
@@ -1583,6 +1620,7 @@ struct BatchingEngineActor {
     max_decode_batch: usize,
     max_batch_tokens: usize,
     max_prefill_tokens_per_cycle: usize,
+    max_prefill_layers_per_cycle: usize,
     next_prefill_index: usize,
     prefix_aware_admission: bool,
     max_prefill_admissions_per_cycle: usize,
@@ -1620,6 +1658,7 @@ impl BatchingEngineActor {
         max_decode_batch: usize,
         max_batch_tokens: BatchTokenBudget,
         max_prefill_tokens_per_cycle: PrefillTokenBudget,
+        max_prefill_layers_per_cycle: PrefillLayerBudget,
         prefix_aware_admission: bool,
         prefill_admission_quantum: usize,
         burst_refill: bool,
@@ -1653,12 +1692,16 @@ impl BatchingEngineActor {
                 "prefill token ceiling reduced to the combined actor-cycle budget"
             );
         }
+        let max_prefill_layers_per_cycle_source = max_prefill_layers_per_cycle.source();
+        let max_prefill_layers_per_cycle = max_prefill_layers_per_cycle.layers();
         let snapshot = BatchingEngineSnapshot {
             accepting: true,
             max_batch_tokens: max_batch_tokens.tokens(),
             max_batch_tokens_source: max_batch_tokens.source(),
             max_prefill_tokens_per_cycle,
             max_prefill_tokens_per_cycle_source,
+            max_prefill_layers_per_cycle,
+            max_prefill_layers_per_cycle_source,
             max_prefill_admission_quantum: max_prefill_admissions_per_cycle,
             stream_stall_grace_ms: duration_millis_saturating(
                 response_delivery_policy.stream_stall_grace,
@@ -1680,6 +1723,7 @@ impl BatchingEngineActor {
             max_decode_batch,
             max_batch_tokens: max_batch_tokens.tokens(),
             max_prefill_tokens_per_cycle,
+            max_prefill_layers_per_cycle,
             next_prefill_index: 0,
             prefix_aware_admission,
             max_prefill_admissions_per_cycle,
@@ -1856,6 +1900,7 @@ impl BatchingEngineActor {
         elapsed: Duration,
         request_id: Uuid,
         token_budget: usize,
+        layer_budget: usize,
     ) {
         let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
         self.snapshot.last_prefill_ms = elapsed_ms;
@@ -1869,6 +1914,7 @@ impl BatchingEngineActor {
                 phase = "prefill",
                 %request_id,
                 token_budget,
+                layer_budget,
                 elapsed_ms,
                 threshold_ms = duration_millis_saturating(SLOW_ACTOR_PHASE_THRESHOLD),
                 active_requests = self.active.len(),
@@ -2314,10 +2360,12 @@ impl BatchingEngineActor {
                         RequestPreparation::Prefilling {
                             slot,
                             tokens_processed,
+                            ..
                         } => (slot, tokens_processed, false),
                         RequestPreparation::Ready {
                             slot,
                             tokens_processed,
+                            ..
                         } => (slot, tokens_processed, true),
                     };
                     if tokens_processed > token_budget {
@@ -2420,11 +2468,20 @@ impl BatchingEngineActor {
                 slot,
             } = self.active.remove(idx);
             let started = Instant::now();
-            let result = self
-                .forward
-                .advance_prefill(slot, budget, &req.sampling, &req.cancel);
+            let result = self.forward.advance_prefill(
+                slot,
+                budget,
+                self.max_prefill_layers_per_cycle,
+                &req.sampling,
+                &req.cancel,
+            );
             let elapsed = started.elapsed();
-            self.record_prefill_forward_duration(elapsed, req.request_id, budget);
+            self.record_prefill_forward_duration(
+                elapsed,
+                req.request_id,
+                budget,
+                self.max_prefill_layers_per_cycle,
+            );
             self.snapshot.total_prefill_forwards =
                 self.snapshot.total_prefill_forwards.saturating_add(1);
 
@@ -2443,17 +2500,76 @@ impl BatchingEngineActor {
                     continue;
                 }
             };
-            let (slot, tokens_processed, ready) = match preparation {
+            let (slot, tokens_processed, layers_processed, ready) = match preparation {
                 RequestPreparation::Prefilling {
                     slot,
                     tokens_processed,
-                } => (slot, tokens_processed, false),
+                    layers_processed,
+                } => (slot, tokens_processed, layers_processed, false),
                 RequestPreparation::Ready {
                     slot,
                     tokens_processed,
-                } => (slot, tokens_processed, true),
+                    layers_processed,
+                } => (slot, tokens_processed, layers_processed, true),
             };
-            if tokens_processed == 0 || tokens_processed > budget {
+            if layers_processed == 0 || layers_processed > self.max_prefill_layers_per_cycle {
+                self.forward.discard_request(slot);
+                self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                self.terminate_delivery(
+                    delivery_key,
+                    format!(
+                        "prefill forward reported {layers_processed} layers for a {}-layer budget",
+                        self.max_prefill_layers_per_cycle
+                    ),
+                );
+                self.next_prefill_index = if self.active.is_empty() {
+                    0
+                } else {
+                    idx % self.active.len()
+                };
+                self.refresh_snapshot();
+                advanced = true;
+                continue;
+            }
+            self.snapshot.last_prefill_layers = layers_processed;
+            self.snapshot.total_prefill_layers = self
+                .snapshot
+                .total_prefill_layers
+                .saturating_add(layers_processed as u64);
+            if tokens_processed == 0 {
+                if ready || !self.forward.has_inflight_prefill_layer_progress(&slot) {
+                    self.forward.discard_request(slot);
+                    self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                    self.terminate_delivery(
+                        delivery_key,
+                        "prefill forward reported zero tokens without retained layer progress"
+                            .to_string(),
+                    );
+                    self.next_prefill_index = if self.active.is_empty() {
+                        0
+                    } else {
+                        idx % self.active.len()
+                    };
+                    self.refresh_snapshot();
+                    return true;
+                }
+                self.active.insert(
+                    idx,
+                    ActiveRequest {
+                        req,
+                        delivery_key,
+                        delivery_state,
+                        next_delivery_sequence,
+                        slot,
+                    },
+                );
+                self.next_prefill_index = (idx + 1) % self.active.len();
+                self.snapshot.total_prefill_layer_yields =
+                    self.snapshot.total_prefill_layer_yields.saturating_add(1);
+                self.refresh_snapshot();
+                return true;
+            }
+            if tokens_processed > budget {
                 self.forward.discard_request(slot);
                 self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
                 self.terminate_delivery(
@@ -2468,8 +2584,7 @@ impl BatchingEngineActor {
                     idx % self.active.len()
                 };
                 self.refresh_snapshot();
-                advanced = true;
-                continue;
+                return true;
             }
 
             budget -= tokens_processed;
@@ -2978,13 +3093,21 @@ mod tests {
             tokens: usize,
             remaining: usize,
         },
+        PrefillLayers {
+            key: TokenId,
+            layers: usize,
+            remaining: usize,
+        },
         Discard(TokenId),
     }
 
     #[derive(Default)]
     struct SyntheticPrefillForward {
         remaining: StdMutex<HashMap<TokenId, usize>>,
+        pending_layers: StdMutex<HashMap<TokenId, usize>>,
         events: StdMutex<Vec<SchedulingEvent>>,
+        layers_per_chunk: usize,
+        layer_delay: Duration,
     }
 
     impl SyntheticPrefillForward {
@@ -3025,6 +3148,7 @@ mod tests {
                 return Ok(RequestPreparation::Ready {
                     slot,
                     tokens_processed: 0,
+                    layers_processed: 0,
                 });
             }
             self.remaining
@@ -3034,6 +3158,7 @@ mod tests {
             Ok(RequestPreparation::Prefilling {
                 slot,
                 tokens_processed: 0,
+                layers_processed: 0,
             })
         }
 
@@ -3048,11 +3173,51 @@ mod tests {
             &self,
             slot: DecodeSlot,
             max_tokens: usize,
+            max_layers: usize,
             _sampling: &SamplingParams,
             cancel: &CancelHandle,
         ) -> Result<RequestPreparation> {
             anyhow::ensure!(!cancel.is_cancelled(), "synthetic prefill cancelled");
             let key = Self::slot_key(&slot);
+            let layers_processed = if self.layers_per_chunk == 0 {
+                1
+            } else {
+                anyhow::ensure!(
+                    max_layers > 0,
+                    "synthetic prefill received an empty layer budget"
+                );
+                let (layers, remaining_after) = {
+                    let mut pending_layers = self.pending_layers.lock().unwrap();
+                    let remaining_layers =
+                        pending_layers.entry(key).or_insert(self.layers_per_chunk);
+                    let layers = (*remaining_layers).min(max_layers);
+                    *remaining_layers -= layers;
+                    let remaining_after = *remaining_layers;
+                    if remaining_after == 0 {
+                        pending_layers.remove(&key);
+                    }
+                    (layers, remaining_after)
+                };
+                if !self.layer_delay.is_zero() {
+                    thread::sleep(self.layer_delay);
+                }
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(SchedulingEvent::PrefillLayers {
+                        key,
+                        layers,
+                        remaining: remaining_after,
+                    });
+                if remaining_after > 0 {
+                    return Ok(RequestPreparation::Prefilling {
+                        slot,
+                        tokens_processed: 0,
+                        layers_processed: layers,
+                    });
+                }
+                layers
+            };
             let (tokens, remaining_after) = {
                 let mut remaining = self.remaining.lock().unwrap();
                 let remaining_tokens = remaining
@@ -3077,13 +3242,22 @@ mod tests {
                 Ok(RequestPreparation::Ready {
                     slot,
                     tokens_processed: tokens,
+                    layers_processed,
                 })
             } else {
                 Ok(RequestPreparation::Prefilling {
                     slot,
                     tokens_processed: tokens,
+                    layers_processed,
                 })
             }
+        }
+
+        fn has_inflight_prefill_layer_progress(&self, slot: &DecodeSlot) -> bool {
+            self.pending_layers
+                .lock()
+                .unwrap()
+                .contains_key(&Self::slot_key(slot))
         }
 
         fn forward_decode(
@@ -3136,7 +3310,9 @@ mod tests {
 
         fn discard_request(&self, slot: DecodeSlot) {
             let key = Self::slot_key(&slot);
-            if self.remaining.lock().unwrap().remove(&key).is_some() {
+            let removed_tokens = self.remaining.lock().unwrap().remove(&key).is_some();
+            let removed_layers = self.pending_layers.lock().unwrap().remove(&key).is_some();
+            if removed_tokens || removed_layers {
                 self.events
                     .lock()
                     .unwrap()
@@ -3359,6 +3535,7 @@ mod tests {
             max_decode_batch,
             BatchTokenBudget::default(),
             PrefillTokenBudget::default(),
+            PrefillLayerBudget::default(),
             prefix_aware_admission,
             prefill_admission_quantum,
             burst_refill,
@@ -3434,8 +3611,8 @@ mod tests {
 
         actor.record_admission_duration(Duration::from_millis(25), request_id, 128, 512);
         actor.record_admission_duration(Duration::from_millis(125), request_id, 128, 512);
-        actor.record_prefill_forward_duration(Duration::from_millis(90), request_id, 512);
-        actor.record_prefill_forward_duration(Duration::from_millis(510), request_id, 512);
+        actor.record_prefill_forward_duration(Duration::from_millis(90), request_id, 512, 4);
+        actor.record_prefill_forward_duration(Duration::from_millis(510), request_id, 512, 4);
         actor.record_decode_forward_duration(Duration::from_millis(75), 4);
         actor.record_decode_forward_duration(Duration::from_millis(175), 8);
 
@@ -3769,6 +3946,7 @@ mod tests {
             8,
             BatchTokenBudget::default(),
             PrefillTokenBudget::default(),
+            PrefillLayerBudget::default(),
             env_prefix_aware_admission(),
             env_prefill_admission_quantum_for_policy(8, None),
             false,
@@ -3869,6 +4047,7 @@ mod tests {
             1,
             BatchTokenBudget::default(),
             PrefillTokenBudget::default(),
+            PrefillLayerBudget::default(),
             false,
             1,
             false,
@@ -4807,6 +4986,7 @@ mod tests {
             8,
             BatchTokenBudget::default(),
             PrefillTokenBudget::default(),
+            PrefillLayerBudget::default(),
             false,
             8,
             false,
@@ -4937,6 +5117,7 @@ mod tests {
             8,
             BatchTokenBudget::default(),
             PrefillTokenBudget::default(),
+            PrefillLayerBudget::default(),
             true,
             8,
             false,
@@ -4992,6 +5173,7 @@ mod tests {
             3,
             budget,
             PrefillTokenBudget::new(PREFILL_TOKEN_BUDGET, ConfigValueSource::ConfigFile).unwrap(),
+            PrefillLayerBudget::default(),
             false,
             3,
             true,
@@ -5161,6 +5343,106 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn layer_budget_yields_retained_prefill_to_ready_decode() {
+        const SHORT_KEY: TokenId = 10;
+        const LONG_KEY: TokenId = 10_000;
+        const LAYER_BUDGET: usize = 2;
+
+        let forward = Arc::new(SyntheticPrefillForward {
+            layers_per_chunk: 8,
+            layer_delay: Duration::from_millis(2),
+            ..SyntheticPrefillForward::default()
+        });
+        let handle = BatchingEngineHandle::start_with_policy(
+            forward.clone(),
+            2,
+            BatchTokenBudget::new(8, ConfigValueSource::ConfigFile).unwrap(),
+            PrefillTokenBudget::new(4, ConfigValueSource::ConfigFile).unwrap(),
+            PrefillLayerBudget::new(LAYER_BUDGET, ConfigValueSource::ConfigFile).unwrap(),
+            false,
+            2,
+            true,
+            ResponseDeliveryPolicy::default(),
+        );
+
+        let mut long_rx = handle
+            .enqueue(request_with_tokens(vec![LONG_KEY; 8], 1))
+            .await
+            .unwrap();
+        let mut short_rx = handle
+            .enqueue(request_with_tokens(vec![SHORT_KEY], 6))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let drain_long = async {
+                loop {
+                    match long_rx.recv().await {
+                        Some(EngineEvent::Done { .. }) => break,
+                        Some(EngineEvent::Error(error)) => {
+                            panic!("long request failed: {error}")
+                        }
+                        Some(EngineEvent::Token { .. }) => {}
+                        None => panic!("long response closed without a terminal event"),
+                    }
+                }
+            };
+            let drain_short = async {
+                loop {
+                    match short_rx.recv().await {
+                        Some(EngineEvent::Done { .. }) => break,
+                        Some(EngineEvent::Error(error)) => {
+                            panic!("short request failed: {error}")
+                        }
+                        Some(EngineEvent::Token { .. }) => {}
+                        None => panic!("short response closed without a terminal event"),
+                    }
+                }
+            };
+            tokio::join!(drain_long, drain_short);
+        })
+        .await
+        .expect("layer-bounded prefill or peer decode stalled");
+
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.total_errors, 0);
+        assert_eq!(snapshot.max_prefill_layers_per_cycle, LAYER_BUDGET);
+        assert_eq!(
+            snapshot.max_prefill_layers_per_cycle_source,
+            ConfigValueSource::ConfigFile
+        );
+        assert!(snapshot.last_prefill_layers <= LAYER_BUDGET);
+        assert!(snapshot.total_prefill_layers >= 8);
+        assert!(snapshot.total_prefill_layer_yields >= 3);
+        handle.stop().await.unwrap();
+
+        let events = forward.events.lock().unwrap().clone();
+        let yielded_then_decoded = events.iter().enumerate().any(|(idx, event)| {
+            let SchedulingEvent::PrefillLayers { remaining, .. } = event else {
+                return false;
+            };
+            if *remaining == 0 {
+                return false;
+            }
+            let next_layer = events[idx + 1..]
+                .iter()
+                .position(|later| matches!(later, SchedulingEvent::PrefillLayers { .. }))
+                .map_or(events.len(), |offset| idx + 1 + offset);
+            events[idx + 1..next_layer].iter().any(|later| {
+                matches!(
+                    later,
+                    SchedulingEvent::Decode(keys)
+                        if keys.iter().any(|key| *key < LONG_KEY)
+                )
+            })
+        });
+        assert!(
+            yielded_then_decoded,
+            "ready decode did not run between retained prefill layer groups: {events:?}"
+        );
     }
 
     #[tokio::test]

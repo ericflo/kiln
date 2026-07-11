@@ -3086,13 +3086,27 @@ fn assert_resumable_paged_prefill_matches_monolithic(
 
     let mut prefill = Some(prefill);
     let mut chunks = Vec::new();
+    let mut layer_yields = 0usize;
     let mut chunked = loop {
         let progress = runner
-            .advance_paged_batched_prefill(&mut prefill, &sampling, &chunked_cache, 17, None)
+            .advance_paged_batched_prefill_with_layer_budget(
+                &mut prefill,
+                &sampling,
+                &chunked_cache,
+                17,
+                1,
+                None,
+            )
             .expect("advance resumable prefill");
         runner
             .synchronize_external_yield("resumable prefill parity quantum")
             .unwrap();
+        if progress.tokens_processed == 0 {
+            layer_yields += 1;
+            assert!(progress.decode_state.is_none());
+            assert!(prefill.as_ref().unwrap().remaining_tokens() > 0);
+            continue;
+        }
         assert!((1..=17).contains(&progress.tokens_processed));
         chunks.push(progress.tokens_processed);
         if let Some(state) = progress.decode_state {
@@ -3102,6 +3116,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(
     };
 
     assert!(chunks.len() > 1, "prompt should span multiple quanta");
+    assert_eq!(layer_yields, chunks.len());
     assert_eq!(chunks.iter().sum::<usize>(), prompt.len());
     assert_eq!(chunked.next_token, control.next_token);
     assert_eq!(chunked.seq_len, control.seq_len);
@@ -3173,7 +3188,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(
     );
 
     eprintln!(
-        "[{backend} PREFILL PASS] quanta={chunks:?} first_token={} next_decode_token={} split_position=80",
+        "[{backend} PREFILL PASS] quanta={chunks:?} layer_yields={layer_yields} first_token={} next_decode_token={} split_position=80",
         chunked.next_token, chunked_decode[0]
     );
 
@@ -3290,6 +3305,7 @@ fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
     let RequestPreparation::Prefilling {
         slot,
         tokens_processed,
+        ..
     } = forward
         .prepare_request_chunked(&request, 17)
         .expect("begin actor-owned prefill")
@@ -3301,13 +3317,16 @@ fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
     let RequestPreparation::Prefilling {
         slot,
         tokens_processed,
+        layers_processed,
     } = forward
-        .advance_prefill(slot, 17, &sampling, &request.cancel)
-        .expect("advance actor-owned prefill")
+        .advance_prefill(slot, 17, 1, &sampling, &request.cancel)
+        .expect("advance one retained actor-owned prefill layer")
     else {
-        panic!("17 tokens unexpectedly completed an 81-token prefill")
+        panic!("one layer unexpectedly completed an 81-token prefill")
     };
-    assert_eq!(tokens_processed, 17);
+    assert_eq!(tokens_processed, 0);
+    assert_eq!(layers_processed, 1);
+    assert!(forward.has_inflight_prefill_layer_progress(&slot));
     forward.discard_request(slot);
     assert_eq!(block_manager.lock().unwrap().num_used(), 0);
     let stats = prefix_cache.lock().unwrap().stats();
@@ -3328,8 +3347,15 @@ fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
         panic!("uncached prompt unexpectedly became decode-ready")
     };
     assert!(block_manager.lock().unwrap().num_used() > 0);
+    let RequestPreparation::Prefilling { slot, .. } = forward
+        .advance_prefill(slot, 17, 1, &sampling, &cancelled.cancel)
+        .expect("retain a layer-bounded prefill before cancellation")
+    else {
+        panic!("one layer unexpectedly completed a cancellable prefill")
+    };
+    assert!(forward.has_inflight_prefill_layer_progress(&slot));
     cancelled.cancel.cancel();
-    let error = match forward.advance_prefill(slot, 17, &sampling, &cancelled.cancel) {
+    let error = match forward.advance_prefill(slot, 17, 1, &sampling, &cancelled.cancel) {
         Ok(_) => panic!("cancelled prefill unexpectedly advanced"),
         Err(error) => error,
     };

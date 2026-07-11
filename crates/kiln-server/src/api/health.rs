@@ -335,6 +335,8 @@ struct BatchingEngineInfo {
     max_batch_tokens_source: ConfigValueSource,
     max_prefill_tokens_per_cycle: usize,
     max_prefill_tokens_per_cycle_source: ConfigValueSource,
+    max_prefill_layers_per_cycle: usize,
+    max_prefill_layers_per_cycle_source: ConfigValueSource,
     max_prefill_admission_quantum: usize,
     current_batch_size: usize,
     last_batch_size: usize,
@@ -348,6 +350,7 @@ struct BatchingEngineInfo {
     total_prefill_forward_ms: f64,
     slow_prefill_forward_count: u64,
     last_prefill_tokens: usize,
+    last_prefill_layers: usize,
     last_admission_ms: f64,
     max_admission_ms: f64,
     total_admission_ms: f64,
@@ -360,6 +363,8 @@ struct BatchingEngineInfo {
     total_prefill_forwards: u64,
     total_decode_tokens: u64,
     total_prefill_tokens: u64,
+    total_prefill_layers: u64,
+    total_prefill_layer_yields: u64,
     total_errors: u64,
     response_delivery_in_flight: usize,
     response_delivery_backpressured: usize,
@@ -876,6 +881,8 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             max_batch_tokens_source: snapshot.max_batch_tokens_source,
             max_prefill_tokens_per_cycle: snapshot.max_prefill_tokens_per_cycle,
             max_prefill_tokens_per_cycle_source: snapshot.max_prefill_tokens_per_cycle_source,
+            max_prefill_layers_per_cycle: snapshot.max_prefill_layers_per_cycle,
+            max_prefill_layers_per_cycle_source: snapshot.max_prefill_layers_per_cycle_source,
             max_prefill_admission_quantum: snapshot.max_prefill_admission_quantum,
             current_batch_size: snapshot.current_batch_size,
             last_batch_size: snapshot.last_batch_size,
@@ -889,6 +896,7 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             total_prefill_forward_ms: snapshot.total_prefill_forward_ms,
             slow_prefill_forward_count: snapshot.slow_prefill_forward_count,
             last_prefill_tokens: snapshot.last_prefill_tokens,
+            last_prefill_layers: snapshot.last_prefill_layers,
             last_admission_ms: snapshot.last_admission_ms,
             max_admission_ms: snapshot.max_admission_ms,
             total_admission_ms: snapshot.total_admission_ms,
@@ -901,6 +909,8 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             total_prefill_forwards: snapshot.total_prefill_forwards,
             total_decode_tokens: snapshot.total_decode_tokens,
             total_prefill_tokens: snapshot.total_prefill_tokens,
+            total_prefill_layers: snapshot.total_prefill_layers,
+            total_prefill_layer_yields: snapshot.total_prefill_layer_yields,
             total_errors: snapshot.total_errors,
             response_delivery_in_flight: snapshot.response_delivery_in_flight,
             response_delivery_backpressured: snapshot.response_delivery_backpressured,
@@ -1008,7 +1018,10 @@ mod tests {
             max_batch_tokens_source: ConfigValueSource::ConfigFile,
             max_prefill_tokens_per_cycle: 64,
             max_prefill_tokens_per_cycle_source: ConfigValueSource::Environment,
+            max_prefill_layers_per_cycle: 4,
+            max_prefill_layers_per_cycle_source: ConfigValueSource::ConfigFile,
             last_prefill_tokens: 251,
+            last_prefill_layers: 4,
             max_decode_forward_ms: 125.0,
             total_decode_forward_ms: 500.0,
             slow_decode_forward_count: 2,
@@ -1020,6 +1033,8 @@ mod tests {
             total_admission_calls: 4,
             slow_admission_count: 1,
             total_prefill_forwards: 9,
+            total_prefill_layers: 36,
+            total_prefill_layer_yields: 27,
             response_backpressure_events: 3,
             response_backpressure_wait_ms: 750,
             response_stall_evictions: 2,
@@ -1039,7 +1054,10 @@ mod tests {
         assert_eq!(json["max_batch_tokens_source"], "config_file");
         assert_eq!(json["max_prefill_tokens_per_cycle"], 64);
         assert_eq!(json["max_prefill_tokens_per_cycle_source"], "environment");
+        assert_eq!(json["max_prefill_layers_per_cycle"], 4);
+        assert_eq!(json["max_prefill_layers_per_cycle_source"], "config_file");
         assert_eq!(json["last_prefill_tokens"], 251);
+        assert_eq!(json["last_prefill_layers"], 4);
         assert_eq!(json["max_decode_forward_ms"], 125.0);
         assert_eq!(json["total_decode_forward_ms"], 500.0);
         assert_eq!(json["slow_decode_forward_count"], 2);
@@ -1051,6 +1069,8 @@ mod tests {
         assert_eq!(json["total_admission_calls"], 4);
         assert_eq!(json["slow_admission_count"], 1);
         assert_eq!(json["total_prefill_forwards"], 9);
+        assert_eq!(json["total_prefill_layers"], 36);
+        assert_eq!(json["total_prefill_layer_yields"], 27);
         assert_eq!(json["response_delivery_in_flight"], 7);
         assert_eq!(json["response_delivery_backpressured"], 2);
         assert_eq!(json["response_delivery_pending_terminal"], 1);

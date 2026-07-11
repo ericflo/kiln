@@ -702,7 +702,8 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `server.http_send_buffer_bytes` | `KILN_HTTP_SEND_BUFFER_BYTES` | OS default | Optional accepted-socket `SO_SNDBUF` request (1024–16777216 bytes); Kiln preflights it before readiness and reports requested, kernel-readback, and platform-normalized effective bytes in health/debug |
 | `server.stream_stall_grace_ms` | `KILN_STREAM_STALL_GRACE_MS` | 2000 | Maximum continuous time a full 64-event response channel may make no delivery progress before that request is cancelled (10–2000 ms). Strict startup validation rejects malformed or out-of-range values; health/debug report the effective value and whether it came from the default, config file, or environment |
 | `server.max_batch_tokens` | `KILN_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per batching-actor cycle (2–65536). Ready decode rows consume one token each first; admission and resumable prefill share the remainder. Invalid values stop startup; health/debug report value and source |
-| `server.max_prefill_tokens_per_cycle` | `KILN_MAX_PREFILL_TOKENS_PER_CYCLE` | 64 | Prompt-only ceiling inside the combined actor-cycle budget (1–65536). Decode reserves its rows first, then partial prefills advance round-robin by at most this many tokens before the next decode cohort. Lower values favor ITL; higher values favor prefill throughput. Invalid values stop startup; health/debug report the effective minimum and source |
+| `server.max_prefill_tokens_per_cycle` | `KILN_MAX_PREFILL_TOKENS_PER_CYCLE` | 64 | Prompt-only ceiling inside the combined actor-cycle budget (1–65536). Decode reserves its rows first, then partial prefills advance round-robin by at most this many tokens before the next decode cohort. Lower values favor ITL; higher values favor prefill throughput. Invalid values stop startup; health/debug report the effective value and source |
+| `server.max_prefill_layers_per_cycle` | `KILN_MAX_PREFILL_LAYERS_PER_CYCLE` | 4 | Transformer-layer ceiling for each retained prompt chunk (1–1024). A partial chunk yields to ready decode after this many layers and later resumes from its hidden state without replay. Lower values favor ITL; higher values reduce scheduling and synchronization overhead. Invalid values stop startup; health/debug report value and source |
 | `server.default_thinking_enabled` | `KILN_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
 | `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block |
 | `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget before Kiln closes an open thinking block |
@@ -731,18 +732,25 @@ Real-model serving initializes paged prefill ownership without running an
 unbounded prompt forward. Each actor cycle reserves one token for every ready
 decode row, then advances partial prefills round-robin within both the remaining
 `server.max_batch_tokens` budget and the independent
-`server.max_prefill_tokens_per_cycle` ceiling. Cancellation and shutdown release partial KV
-ownership only after the backend synchronization boundary; an unsettled device
-failure is quarantined instead of recycling pages. `/health` and
-`/v1/debug/model-state` expose `active_prefill`, the effective budget and its
-source, the last quantum size, and cumulative prefill-forward count. Prometheus
-exports the corresponding `kiln_batching_engine_active_prefill`,
+`server.max_prefill_tokens_per_cycle` ceiling. Within that token chunk, prefill
+yields after at most `server.max_prefill_layers_per_cycle` transformer layers;
+the actor retains the intermediate hidden and position state, runs the next
+ready decode cohort, and resumes without repeating completed layers. This layer
+quantum controls latency without multiplying full-model prompt passes as a
+smaller token chunk can. Cancellation and shutdown release partial KV ownership
+only after the backend synchronization boundary; an unsettled device failure is
+quarantined instead of recycling pages. `/health` and `/v1/debug/model-state`
+expose `active_prefill`, both effective budgets and their sources, the last token
+and layer quantum, cumulative processed layers, and actual inter-layer yields.
+Prometheus exports the corresponding `kiln_batching_engine_active_prefill`,
 `kiln_batching_engine_max_batch_tokens`,
 `kiln_batching_engine_max_prefill_tokens_per_cycle`,
+`kiln_batching_engine_max_prefill_layers_per_cycle`,
 `kiln_batching_engine_last_prefill_tokens`, and
-`kiln_batching_engine_prefill_forwards_total` series. Admission, bounded-prefill,
-and decode-forward wall time is also available as cumulative, process-maximum,
-and 100 ms slow-phase counters under `kiln_batching_engine_{admission,prefill_forward,decode_forward}_*`.
+`kiln_batching_engine_{last_prefill_layers,prefill_layers_total,prefill_layer_yields_total}`
+series. Admission, bounded-prefill, and decode-forward wall time is also
+available as cumulative, process-maximum, and 100 ms slow-phase counters under
+`kiln_batching_engine_{admission,prefill_forward,decode_forward}_*`.
 The same values appear in health and debug snapshots. A phase crossing 100 ms
 emits one structured `slow_batching_actor_phase` event with the bounded phase
 name and work size, which lets qualification correlate a token gap without

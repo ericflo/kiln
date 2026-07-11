@@ -670,6 +670,16 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_max_prefill_layers_per_cycle Effective transformer-layer ceiling between decode cohorts.\n");
+        out.push_str("# TYPE kiln_batching_engine_max_prefill_layers_per_cycle gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_max_prefill_layers_per_cycle {}",
+                gauges.batching_engine.max_prefill_layers_per_cycle
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_prefill_admission_quantum Maximum queued requests prefilled before yielding to decode.\n");
         out.push_str("# TYPE kiln_batching_engine_prefill_admission_quantum gauge\n");
         push_line(
@@ -757,6 +767,16 @@ impl Metrics {
             &format!(
                 "kiln_batching_engine_last_prefill_tokens {}",
                 gauges.batching_engine.last_prefill_tokens
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_last_prefill_layers Transformer layers processed by the most recent bounded prefill forward.\n");
+        out.push_str("# TYPE kiln_batching_engine_last_prefill_layers gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_last_prefill_layers {}",
+                gauges.batching_engine.last_prefill_layers
             ),
         );
 
@@ -901,6 +921,26 @@ impl Metrics {
             &format!(
                 "kiln_batching_engine_prefill_tokens_total {}",
                 gauges.batching_engine.total_prefill_tokens
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_prefill_layers_total Transformer layers processed by bounded prompt forwards.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefill_layers_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefill_layers_total {}",
+                gauges.batching_engine.total_prefill_layers
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_prefill_layer_yields_total Bounded prefill forwards that retained a token chunk and yielded between layers.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefill_layer_yields_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefill_layer_yields_total {}",
+                gauges.batching_engine.total_prefill_layer_yields
             ),
         );
 
@@ -1563,6 +1603,7 @@ mod tests {
                 active_prefill: 2,
                 max_batch_tokens: 256,
                 max_prefill_tokens_per_cycle: 64,
+                max_prefill_layers_per_cycle: 4,
                 max_prefill_admission_quantum: 2,
                 last_batch_size: 3,
                 max_observed_batch_size: 4,
@@ -1575,6 +1616,7 @@ mod tests {
                 total_prefill_forward_ms: 2_500.0,
                 slow_prefill_forward_count: 4,
                 last_prefill_tokens: 253,
+                last_prefill_layers: 4,
                 last_admission_ms: 25.0,
                 max_admission_ms: 150.0,
                 total_admission_ms: 500.0,
@@ -1587,6 +1629,8 @@ mod tests {
                 total_prefill_forwards: 12,
                 total_decode_tokens: 128,
                 total_prefill_tokens: 8192,
+                total_prefill_layers: 48,
+                total_prefill_layer_yields: 36,
                 total_errors: 1,
                 response_delivery_in_flight: 3,
                 response_delivery_backpressured: 2,
@@ -1659,6 +1703,7 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_active_prefill 2"));
         assert!(output.contains("kiln_batching_engine_max_batch_tokens 256"));
         assert!(output.contains("kiln_batching_engine_max_prefill_tokens_per_cycle 64"));
+        assert!(output.contains("kiln_batching_engine_max_prefill_layers_per_cycle 4"));
         assert!(output.contains("kiln_batching_engine_prefill_admission_quantum 2"));
         assert!(output.contains("kiln_batching_engine_last_batch_size 3"));
         assert!(output.contains("kiln_batching_engine_max_observed_batch 4"));
@@ -1668,6 +1713,7 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_slow_decode_forwards_total 2"));
         assert!(output.contains("kiln_batching_engine_last_prefill_ms 250.000000"));
         assert!(output.contains("kiln_batching_engine_last_prefill_tokens 253"));
+        assert!(output.contains("kiln_batching_engine_last_prefill_layers 4"));
         assert!(output.contains("kiln_batching_engine_prefill_forward_seconds_total 2.500000"));
         assert!(output.contains("kiln_batching_engine_prefill_forward_max_seconds 0.625000"));
         assert!(output.contains("kiln_batching_engine_slow_prefill_forwards_total 4"));
@@ -1688,6 +1734,8 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_prefill_forwards_total 12"));
         assert!(output.contains("kiln_batching_engine_decode_tokens_total 128"));
         assert!(output.contains("kiln_batching_engine_prefill_tokens_total 8192"));
+        assert!(output.contains("kiln_batching_engine_prefill_layers_total 48"));
+        assert!(output.contains("kiln_batching_engine_prefill_layer_yields_total 36"));
         assert!(output.contains("kiln_batching_engine_errors_total 1"));
         assert!(output.contains("# TYPE kiln_batching_engine_response_delivery_in_flight gauge"));
         assert!(output.contains("kiln_batching_engine_response_delivery_in_flight 3"));

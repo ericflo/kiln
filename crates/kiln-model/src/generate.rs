@@ -32,14 +32,14 @@ use crate::cuda_graph::CudaGraphRunner;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
 use crate::forward::lm_head_sample_backend_decode_if;
 use crate::forward::{
-    GpuWeights, LinearAttentionState, model_forward_kt, model_forward_paged,
-    model_forward_paged_batched_decode_hidden,
+    GpuWeights, LinearAttentionState, PagedLayerForwardState, model_forward_kt,
+    model_forward_paged, model_forward_paged_batched_decode_hidden,
     model_forward_paged_decode_contiguous_batch_greedy_with_ids,
     model_forward_paged_decode_contiguous_batch_hidden_with_ids,
     model_forward_paged_decode_contiguous_batch_sample_with_ids, model_forward_paged_last_token,
-    model_forward_paged_last_token_greedy, model_forward_paged_last_token_with_last_hidden,
-    model_forward_paged_next_token_greedy, model_forward_paged_streaming,
-    model_forward_paged_streaming_last_token_with_last_hidden,
+    model_forward_paged_last_token_greedy, model_forward_paged_last_token_layer_group,
+    model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
+    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
     model_forward_paged_streaming_with_progress,
     model_forward_paged_streaming_with_progress_offset, streaming_prefill_enabled_for,
 };
@@ -608,6 +608,11 @@ pub struct PagedBatchedPrefillState {
     /// Keeps an intermediate chunk's output alive until the caller performs
     /// its mandatory external-yield synchronization.
     pending_logits: Option<kiln_tensor::Tensor>,
+    /// Forward-local GPU tensors retained when the current token chunk yields
+    /// before all transformer layers have run.
+    pending_layer_forward: Option<PagedLayerForwardState>,
+    /// Exclusive end position of the in-flight layer-resumable token chunk.
+    pending_chunk_end: Option<usize>,
 }
 
 impl PagedBatchedPrefillState {
@@ -617,6 +622,10 @@ impl PagedBatchedPrefillState {
 
     pub fn remaining_tokens(&self) -> usize {
         self.prompt_tokens.len().saturating_sub(self.next_position)
+    }
+
+    pub fn has_pending_layer_progress(&self) -> bool {
+        self.pending_layer_forward.is_some()
     }
 
     pub fn into_allocated_blocks(self) -> Vec<u32> {
@@ -633,6 +642,7 @@ pub enum PagedBatchedPrefillStart {
 /// Result of one bounded prefill quantum.
 pub struct PagedBatchedPrefillProgress {
     pub tokens_processed: usize,
+    pub layers_processed: usize,
     pub decode_state: Option<PagedBatchedDecodeState>,
 }
 
@@ -3854,6 +3864,8 @@ impl ModelRunner {
                 streaming,
                 prefill_duration: std::time::Duration::ZERO,
                 pending_logits: None,
+                pending_layer_forward: None,
+                pending_chunk_end: None,
             },
         ))
     }
@@ -3869,7 +3881,30 @@ impl ModelRunner {
         max_tokens: usize,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedPrefillProgress> {
+        self.advance_paged_batched_prefill_with_layer_budget(
+            prefill,
+            params,
+            paged_cache,
+            max_tokens,
+            usize::MAX,
+            cancel,
+        )
+    }
+
+    /// Execute at most `max_layers` of one `max_tokens` prompt chunk. A zero
+    /// `tokens_processed` result with no decode state means transformer-layer
+    /// progress was made and retained for the next call.
+    pub fn advance_paged_batched_prefill_with_layer_budget(
+        &self,
+        prefill: &mut Option<PagedBatchedPrefillState>,
+        params: &SamplingParams,
+        paged_cache: &PagedKvCache,
+        max_tokens: usize,
+        max_layers: usize,
+        cancel: Option<&CancelHandle>,
+    ) -> Result<PagedBatchedPrefillProgress> {
         anyhow::ensure!(max_tokens > 0, "prefill token quantum must be positive");
+        anyhow::ensure!(max_layers > 0, "prefill layer quantum must be positive");
         check_cancelled(cancel)?;
 
         let state = prefill
@@ -3879,44 +3914,59 @@ impl ModelRunner {
             state.next_position < state.prompt_tokens.len(),
             "paged batched prefill has no remaining prompt tokens"
         );
-        // The previous output was retained only until the caller's external
-        // synchronization between quanta.
-        state.pending_logits.take();
-
-        let chunk_start = state.next_position;
-        let mut chunk_end = chunk_start
-            .saturating_add(max_tokens)
-            .min(state.prompt_tokens.len());
-        if let Some(split_pos) = state.split_pos
-            && split_pos > chunk_start
-            && split_pos < chunk_end
-        {
-            chunk_end = split_pos;
+        // A completed chunk's output was retained only until the caller's
+        // external synchronization. An in-flight layer group instead retains
+        // its own hidden/position tensors until that chunk finishes.
+        if state.pending_layer_forward.is_none() {
+            state.pending_logits.take();
         }
+        let chunk_start = state.next_position;
+        let chunk_end = match state.pending_chunk_end {
+            Some(chunk_end) => chunk_end,
+            None => {
+                let mut chunk_end = chunk_start
+                    .saturating_add(max_tokens)
+                    .min(state.prompt_tokens.len());
+                if let Some(split_pos) = state.split_pos
+                    && split_pos > chunk_start
+                    && split_pos < chunk_end
+                {
+                    chunk_end = split_pos;
+                }
+                state.pending_chunk_end = Some(chunk_end);
+                chunk_end
+            }
+        };
         let chunk_len = chunk_end.saturating_sub(chunk_start);
         anyhow::ensure!(chunk_len > 0, "prefill quantum made no progress");
 
         let started = std::time::Instant::now();
-        let logits = {
+        let layer_bounded = max_layers != usize::MAX || state.pending_layer_forward.is_some();
+        let forward: Result<(Option<kiln_tensor::Tensor>, usize)> = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             let tokens = &state.prompt_tokens[chunk_start..chunk_end];
-            if state.streaming {
-                model_forward_paged_streaming_with_progress_offset(
-                    &*self.backend,
-                    tokens,
-                    &self.weights,
-                    &self.config,
-                    pc_guard,
-                    &state.block_table,
-                    chunk_start,
-                    Some(&mut state.linear_state),
-                    self.active_lora.as_ref(),
-                    cancel,
-                    chunk_start.saturating_sub(state.cached_tokens) as u64,
-                )
-                .context("batched-engine chunked streaming prefill failed")?
+            if state.streaming && !layer_bounded {
+                Ok((
+                    Some(
+                        model_forward_paged_streaming_with_progress_offset(
+                            &*self.backend,
+                            tokens,
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            &state.block_table,
+                            chunk_start,
+                            Some(&mut state.linear_state),
+                            self.active_lora.as_ref(),
+                            cancel,
+                            chunk_start.saturating_sub(state.cached_tokens) as u64,
+                        )
+                        .context("batched-engine chunked streaming prefill failed")?,
+                    ),
+                    self.weights.layers.len(),
+                ))
             } else {
-                model_forward_paged_last_token(
+                let progress = model_forward_paged_last_token_layer_group(
                     &*self.backend,
                     tokens,
                     &self.weights,
@@ -3924,14 +3974,36 @@ impl ModelRunner {
                     pc_guard,
                     &state.block_table,
                     chunk_start,
-                    Some(&mut state.linear_state),
+                    &mut state.linear_state,
                     self.active_lora.as_ref(),
-                    None,
+                    state.pending_layer_forward.take(),
+                    max_layers,
                 )
-                .context("batched-engine chunked prefill failed")?
+                .context("batched-engine layer-bounded chunked prefill failed")?;
+                anyhow::ensure!(
+                    progress.layers_processed > 0,
+                    "layer-bounded prefill reported no transformer progress"
+                );
+                state.pending_layer_forward = progress.state;
+                Ok((progress.logits, progress.layers_processed))
             }
         };
         state.prefill_duration += started.elapsed();
+        let (logits, layers_processed) = forward?;
+        if state.pending_layer_forward.is_some() {
+            anyhow::ensure!(
+                logits.is_none(),
+                "partial layer-bounded prefill returned final logits"
+            );
+            check_cancelled(cancel)?;
+            return Ok(PagedBatchedPrefillProgress {
+                tokens_processed: 0,
+                layers_processed,
+                decode_state: None,
+            });
+        }
+        let logits = logits.context("completed layer-bounded prefill returned no logits")?;
+        state.pending_chunk_end = None;
         state.next_position = chunk_end;
         state.pending_logits = Some(logits);
 
@@ -3953,6 +4025,7 @@ impl ModelRunner {
         if state.next_position < state.prompt_tokens.len() {
             return Ok(PagedBatchedPrefillProgress {
                 tokens_processed: chunk_len,
+                layers_processed,
                 decode_state: None,
             });
         }
@@ -3982,6 +4055,7 @@ impl ModelRunner {
         };
         Ok(PagedBatchedPrefillProgress {
             tokens_processed: chunk_len,
+            layers_processed,
             decode_state: Some(PagedBatchedDecodeState {
                 block_table: state.block_table,
                 linear_state: state.linear_state,

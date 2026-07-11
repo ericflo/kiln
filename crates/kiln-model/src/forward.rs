@@ -30443,6 +30443,34 @@ enum LmHeadMode {
     HiddenOnly,
 }
 
+/// GPU ownership retained while one token chunk yields between transformer
+/// layer groups. The linear-attention and paged-KV state remain owned by the
+/// caller; this state carries only the forward-local tensors and layer cursors.
+pub(crate) struct PagedLayerForwardState {
+    hidden: Tensor,
+    positions: Tensor,
+    rotary_cos: Tensor,
+    rotary_sin: Tensor,
+    next_layer: usize,
+    full_attn_idx: usize,
+    linear_attn_idx: usize,
+}
+
+/// Result of one bounded layer group for last-row paged prefill.
+pub(crate) struct PagedLayerForwardProgress {
+    pub(crate) logits: Option<Tensor>,
+    pub(crate) state: Option<PagedLayerForwardState>,
+    pub(crate) layers_processed: usize,
+}
+
+struct PagedForwardProgress {
+    logits: Option<Tensor>,
+    hidden: Option<Tensor>,
+    token: Option<u32>,
+    state: Option<PagedLayerForwardState>,
+    layers_processed: usize,
+}
+
 /// Internal per-tile forward pass shared by `model_forward_paged` and
 /// `model_forward_paged_streaming`. `lm_head_mode` controls whether the
 /// final RMSNorm + LM head projection runs and over how many positions.
@@ -30460,7 +30488,7 @@ fn model_forward_paged_inner(
     paged_cache: &PagedKvCache,
     block_table: &BlockTable,
     start_pos: usize,
-    mut linear_state: Option<&mut LinearAttentionState>,
+    linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
     token_ids_gpu: Option<&Tensor>,
     positions_gpu: Option<&Tensor>,
@@ -30476,8 +30504,55 @@ fn model_forward_paged_inner(
     #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
     lm_head_mode: LmHeadMode,
 ) -> Result<(Option<Tensor>, Option<Tensor>, Option<u32>)> {
+    let progress = model_forward_paged_inner_bounded(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        token_ids_gpu,
+        positions_gpu,
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        graph_inputs,
+        #[cfg(feature = "cuda")]
+        kt_paged_cache,
+        lm_head_mode,
+        None,
+        usize::MAX,
+    )?;
+    debug_assert!(progress.state.is_none());
+    Ok((progress.logits, progress.hidden, progress.token))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn model_forward_paged_inner_bounded(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    token_ids_gpu: Option<&Tensor>,
+    positions_gpu: Option<&Tensor>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<
+        &PagedDecodeGraphInputs<'_>,
+    >,
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+    lm_head_mode: LmHeadMode,
+    resume: Option<PagedLayerForwardState>,
+    max_layers: usize,
+) -> Result<PagedForwardProgress> {
+    anyhow::ensure!(max_layers > 0, "paged layer quantum must be positive");
     let seq_len = token_ids.len();
     let device = weights.embed_tokens.device();
+    let resumed = resume.is_some();
     let _profile_sections = std::env::var("KILN_PROFILE_PAGED_SECTIONS")
         .is_ok()
         .then(|| {
@@ -30485,33 +30560,85 @@ fn model_forward_paged_inner(
             (std::time::Instant::now(), seq_len, start_pos)
         });
 
-    // 1. Embedding lookup: [seq_len, hidden_size]
-    let mut hidden = match token_ids_gpu {
-        Some(index) => embedding_lookup_from_weights_with_index(index, weights)?,
-        None => embedding_lookup_from_weights(token_ids, weights)?,
-    };
-
-    // Add batch dimension: [1, seq_len, hidden_size]
-    hidden = hidden.unsqueeze(0)?;
-
-    // Phase B11b tap: `tok_embed`. Output of `embed_tokens(input_ids)` with a
-    // leading batch dim. Taken once at layer 0 entry so both kiln and the HF
-    // reference dump compare the exact same pre-layer hidden state. Shape
-    // [1, T, hidden].
-    crate::mtp_debug::capture_b11_layer0_tap("tok_embed", &hidden)?;
-
-    // Position tensor for RoPE — use pre-allocated GPU tensor if provided,
-    // otherwise create one from scratch. The pre-allocated path is essential
-    // for CUDA graph replay where the tensor pointer must be stable.
-    let positions_owned;
-    let positions: &Tensor = match positions_gpu {
-        Some(t) => t,
-        None => {
-            let pos_f32: Vec<f32> = (start_pos..start_pos + seq_len).map(|p| p as f32).collect();
-            positions_owned = Tensor::new(pos_f32.as_slice(), device)?;
-            &positions_owned
+    let (
+        mut hidden,
+        positions_owned,
+        rope_tables_owned,
+        layer_start,
+        mut full_attn_idx,
+        mut linear_attn_idx,
+    ) = if let Some(resume) = resume {
+        anyhow::ensure!(
+            token_ids_gpu.is_none() && positions_gpu.is_none(),
+            "resumed paged forward cannot replace retained token or position tensors"
+        );
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        anyhow::ensure!(
+            graph_inputs.is_none(),
+            "graph-backed paged forward cannot yield between layers"
+        );
+        #[cfg(feature = "cuda")]
+        anyhow::ensure!(
+            kt_paged_cache.is_none(),
+            "CUDA twin-cache paged forward cannot yield between layers"
+        );
+        (
+            resume.hidden,
+            Some(resume.positions),
+            Some((resume.rotary_cos, resume.rotary_sin)),
+            resume.next_layer,
+            resume.full_attn_idx,
+            resume.linear_attn_idx,
+        )
+    } else {
+        // 1. Embedding lookup: [seq_len, hidden_size]
+        let hidden = match token_ids_gpu {
+            Some(index) => embedding_lookup_from_weights_with_index(index, weights)?,
+            None => embedding_lookup_from_weights(token_ids, weights)?,
         }
+        .unsqueeze(0)?;
+
+        // Phase B11b tap: `tok_embed`. Output of `embed_tokens(input_ids)`
+        // with a leading batch dim. A resumed layer group must not repeat it.
+        crate::mtp_debug::capture_b11_layer0_tap("tok_embed", &hidden)?;
+
+        let positions_owned = if positions_gpu.is_none() {
+            let pos_f32: Vec<f32> = (start_pos..start_pos + seq_len)
+                .map(|position| position as f32)
+                .collect();
+            Some(Tensor::new(pos_f32.as_slice(), device)?)
+        } else {
+            None
+        };
+        let positions = positions_gpu
+            .or(positions_owned.as_ref())
+            .context("paged forward positions are missing")?;
+        let graph_rope_tables = {
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
+            {
+                graph_inputs.map(|inputs| (inputs.rotary_cos, inputs.rotary_sin))
+            }
+            #[cfg(not(any(feature = "cuda", feature = "rocm")))]
+            {
+                Option::<(&Tensor, &Tensor)>::None
+            }
+        };
+        let rope_tables_owned = if positions_gpu.is_none() && graph_rope_tables.is_none() {
+            Some(rotary_tables_from_tensor(
+                positions,
+                &weights.rotary_inv_freq,
+            )?)
+        } else {
+            None
+        };
+        (hidden, positions_owned, rope_tables_owned, 0, 0, 0)
     };
+
+    // Position tensor for RoPE — graph callers retain their preallocated
+    // tensor, while resumable prefill owns the generated tensor in its state.
+    let positions = positions_gpu
+        .or(positions_owned.as_ref())
+        .context("paged forward positions are missing")?;
     let graph_rope_tables = {
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
@@ -30522,21 +30649,13 @@ fn model_forward_paged_inner(
             Option::<(&Tensor, &Tensor)>::None
         }
     };
-    let rope_tables_owned = if positions_gpu.is_none() && graph_rope_tables.is_none() {
-        Some(rotary_tables_from_tensor(
-            positions,
-            &weights.rotary_inv_freq,
-        )?)
-    } else {
-        None
-    };
     let rope_tables = graph_rope_tables.or_else(|| {
         rope_tables_owned
             .as_ref()
             .map(|(cos, sin)| (cos as &Tensor, sin as &Tensor))
     });
 
-    if _profile_sections.is_some() {
+    if _profile_sections.is_some() && !resumed {
         let _ = synchronize_for_profile(&device);
         if let Some((t0, sl, sp)) = _profile_sections.as_ref() {
             eprintln!(
@@ -30551,12 +30670,19 @@ fn model_forward_paged_inner(
     });
 
     // 2. Loop through all transformer layers
-    let mut full_attn_idx: usize = 0;
-    let mut linear_attn_idx: usize = 0;
+    let layer_end = layer_start
+        .saturating_add(max_layers)
+        .min(weights.layers.len());
     let profile_paged_layers = profile_paged_layers_enabled();
     let profile_gdn_stages = profile_gdn_stages_enabled();
     let profile_mlp_stages = profile_mlp_stages_enabled();
-    for (i, layer) in weights.layers.iter().enumerate() {
+    for (i, layer) in weights
+        .layers
+        .iter()
+        .enumerate()
+        .take(layer_end)
+        .skip(layer_start)
+    {
         // Get LoRA weights for this layer, if available
         let layer_lora: Option<(&LoraLayerWeights, f32)> =
             lora.and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
@@ -30824,6 +30950,45 @@ fn model_forward_paged_inner(
             );
         }
     }
+    let layers_processed = layer_end.saturating_sub(layer_start);
+    if layer_end < weights.layers.len() {
+        anyhow::ensure!(
+            matches!(lm_head_mode, LmHeadMode::LastRowOnly),
+            "only last-row paged prefill may yield between transformer layers"
+        );
+        anyhow::ensure!(
+            token_ids_gpu.is_none() && positions_gpu.is_none(),
+            "layer-yielding paged prefill must own token and position inputs"
+        );
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        anyhow::ensure!(
+            graph_inputs.is_none(),
+            "graph-backed paged forward cannot yield between layers"
+        );
+        #[cfg(feature = "cuda")]
+        anyhow::ensure!(
+            kt_paged_cache.is_none(),
+            "CUDA twin-cache paged forward cannot yield between layers"
+        );
+        let positions = positions_owned.context("yielding paged prefill lost its positions")?;
+        let (rotary_cos, rotary_sin) =
+            rope_tables_owned.context("yielding paged prefill lost its rotary tables")?;
+        return Ok(PagedForwardProgress {
+            logits: None,
+            hidden: None,
+            token: None,
+            state: Some(PagedLayerForwardState {
+                hidden,
+                positions,
+                rotary_cos,
+                rotary_sin,
+                next_layer: layer_end,
+                full_attn_idx,
+                linear_attn_idx,
+            }),
+            layers_processed,
+        });
+    }
     let _profile_lm_head_t0 = _profile_sections.is_some().then(|| {
         let _ = synchronize_for_profile(&device);
         std::time::Instant::now()
@@ -30838,7 +31003,7 @@ fn model_forward_paged_inner(
     // per-position and the matmul reduces along `hidden_size` only. `Skip`
     // returns `None` and is used by the streaming dispatcher for every tile
     // whose logits the caller will throw away.
-    match lm_head_mode {
+    let (logits, output_hidden, token) = match lm_head_mode {
         LmHeadMode::Full => {
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
@@ -30853,7 +31018,11 @@ fn model_forward_paged_inner(
                 record_layer_norm_debug(&hidden, 40);
                 lm_head_forward_backend_decode_if(Some(backend), &hidden, &weights.embed_tokens_t)?
             };
-            Ok((Some(logits), None, None))
+            Ok::<(Option<Tensor>, Option<Tensor>, Option<u32>), anyhow::Error>((
+                Some(logits),
+                None,
+                None,
+            ))
         }
         LmHeadMode::LastRowOnly => {
             let logits = {
@@ -30873,7 +31042,13 @@ fn model_forward_paged_inner(
                     &weights.final_norm,
                     &weights.embed_tokens_t,
                 )? {
-                    return Ok((None, None, Some(token)));
+                    return Ok(PagedForwardProgress {
+                        logits: None,
+                        hidden: None,
+                        token: Some(token),
+                        state: None,
+                        layers_processed,
+                    });
                 }
                 let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
                 #[cfg(feature = "rocm")]
@@ -30887,7 +31062,13 @@ fn model_forward_paged_inner(
                             .context("rocm w8 lm_head argmax normed contiguous")?;
                         let token = crate::rocm_w8_proj::argmax_bf16(&normed, lm_head_w8)
                             .context("rocm w8 lm_head argmax")?;
-                        return Ok((None, None, Some(token)));
+                        return Ok(PagedForwardProgress {
+                            logits: None,
+                            hidden: None,
+                            token: Some(token),
+                            state: None,
+                            layers_processed,
+                        });
                     }
                 }
                 lm_head_argmax_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
@@ -30957,6 +31138,61 @@ fn model_forward_paged_inner(
                 t_outer.elapsed().as_secs_f64() * 1000.0
             );
         }
+    })?;
+    Ok(PagedForwardProgress {
+        logits,
+        hidden: output_hidden,
+        token,
+        state: None,
+        layers_processed,
+    })
+}
+
+/// Advance one paged prefill token chunk through at most `max_layers`
+/// transformer layers. A partial result owns the intermediate hidden and RoPE
+/// tensors so the serving actor can run a decode cohort before resuming it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn model_forward_paged_last_token_layer_group(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: &mut LinearAttentionState,
+    lora: Option<&LoraWeights>,
+    state: Option<PagedLayerForwardState>,
+    max_layers: usize,
+) -> Result<PagedLayerForwardProgress> {
+    let progress = model_forward_paged_inner_bounded(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        Some(linear_state),
+        lora,
+        None,
+        None,
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        None,
+        #[cfg(feature = "cuda")]
+        None,
+        LmHeadMode::LastRowOnly,
+        state,
+        max_layers,
+    )?;
+    anyhow::ensure!(
+        progress.hidden.is_none() && progress.token.is_none(),
+        "last-row layer-group prefill returned an incompatible output"
+    );
+    Ok(PagedLayerForwardProgress {
+        logits: progress.logits,
+        state: progress.state,
+        layers_processed: progress.layers_processed,
     })
 }
 

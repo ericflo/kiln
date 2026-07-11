@@ -104,6 +104,8 @@ def health_fixture(
                 "stream_stall_grace_source": "environment",
                 "max_prefill_tokens_per_cycle": serve.MAX_PREFILL_TOKENS_PER_CYCLE,
                 "max_prefill_tokens_per_cycle_source": "default",
+                "max_prefill_layers_per_cycle": serve.MAX_PREFILL_LAYERS_PER_CYCLE,
+                "max_prefill_layers_per_cycle_source": "default",
                 "active_decode": 0,
                 "queue_depth": 0,
                 "max_observed_batch_size": 8,
@@ -115,6 +117,8 @@ def health_fixture(
                 "max_decode_forward_ms": 0.0,
                 "slow_decode_forward_count": 0,
                 "total_prefill_forwards": 0,
+                "total_prefill_layers": 0,
+                "total_prefill_layer_yields": 0,
                 "total_prefill_forward_ms": 0.0,
                 "max_prefill_forward_ms": 0.0,
                 "slow_prefill_forward_count": 0,
@@ -151,6 +155,8 @@ def debug_fixture(
                 "stream_stall_grace_source": "environment",
                 "max_prefill_tokens_per_cycle": serve.MAX_PREFILL_TOKENS_PER_CYCLE,
                 "max_prefill_tokens_per_cycle_source": "default",
+                "max_prefill_layers_per_cycle": serve.MAX_PREFILL_LAYERS_PER_CYCLE,
+                "max_prefill_layers_per_cycle_source": "default",
             },
         },
         "env_flags": {
@@ -169,6 +175,10 @@ def debug_fixture(
                 "value": str(serve.STREAM_STALL_GRACE_MS),
             },
             "KILN_MAX_PREFILL_TOKENS_PER_CYCLE": {
+                "present": False,
+                "value": None,
+            },
+            "KILN_MAX_PREFILL_LAYERS_PER_CYCLE": {
                 "present": False,
                 "value": None,
             },
@@ -1320,10 +1330,16 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             values["batching_max_prefill_tokens_per_cycle"],
             serve.MAX_PREFILL_TOKENS_PER_CYCLE,
         )
+        self.assertEqual(
+            values["batching_max_prefill_layers_per_cycle"],
+            serve.MAX_PREFILL_LAYERS_PER_CYCLE,
+        )
         self.assertEqual(values["batching_decode_forward_ms_total"], 600.0)
         self.assertEqual(values["batching_decode_forward_ms_max"], 150.0)
         self.assertEqual(values["batching_slow_decode_forward_count"], 2)
         self.assertEqual(values["batching_prefill_forward_count"], 5)
+        self.assertEqual(values["batching_prefill_layer_count"], 0)
+        self.assertEqual(values["batching_prefill_layer_yield_count"], 0)
         self.assertEqual(values["batching_prefill_forward_ms_total"], 1_400.0)
         self.assertEqual(values["batching_prefill_forward_ms_max"], 600.0)
         self.assertEqual(values["batching_slow_prefill_forward_count"], 3)

@@ -2866,6 +2866,7 @@ impl AppState {
             response_delivery_policy,
             max_batch_tokens,
             crate::config::PrefillTokenBudget::default(),
+            crate::config::PrefillLayerBudget::default(),
             request_timeout_secs,
             served_model_id,
             prefix_cache_cfg,
@@ -2887,6 +2888,7 @@ impl AppState {
         response_delivery_policy: crate::batching_engine::ResponseDeliveryPolicy,
         max_batch_tokens: crate::config::BatchTokenBudget,
         max_prefill_tokens_per_cycle: crate::config::PrefillTokenBudget,
+        max_prefill_layers_per_cycle: crate::config::PrefillLayerBudget,
         request_timeout_secs: u64,
         served_model_id: String,
         prefix_cache_cfg: &crate::config::PrefixCacheConfig,
@@ -3407,6 +3409,8 @@ impl AppState {
                 max_batch_tokens_source = %max_batch_tokens.source(),
                 max_prefill_tokens_per_cycle = max_prefill_tokens_per_cycle.tokens(),
                 max_prefill_tokens_per_cycle_source = %max_prefill_tokens_per_cycle.source(),
+                max_prefill_layers_per_cycle = max_prefill_layers_per_cycle.layers(),
+                max_prefill_layers_per_cycle_source = %max_prefill_layers_per_cycle.source(),
                 stream_stall_grace_ms = response_delivery_policy
                     .stream_stall_grace_ms(),
                 stream_stall_grace_source = %response_delivery_policy
@@ -3427,6 +3431,7 @@ impl AppState {
                 Some(decode_batcher_policy),
                 max_batch_tokens,
                 max_prefill_tokens_per_cycle,
+                max_prefill_layers_per_cycle,
                 response_delivery_policy,
             )
         });

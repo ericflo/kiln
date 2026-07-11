@@ -570,6 +570,7 @@ async fn main() -> Result<()> {
             response_delivery_policy,
             config.server.max_batch_tokens,
             config.server.max_prefill_tokens_per_cycle,
+            config.server.max_prefill_layers_per_cycle,
             config.server.request_timeout_secs,
             served_model_id,
             &config.prefix_cache,

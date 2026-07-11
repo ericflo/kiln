@@ -116,10 +116,14 @@ lasting at least 100 ms, any physical resize/reclaim/graph event, or any
 unexplained ITL outlier fails the stable arm.
 
 The stable serving run also attests the default 64-token prompt-work ceiling
-(`server.max_prefill_tokens_per_cycle`) and its startup provenance. Admission
-and resumable prefill share that ceiling after ready decode rows reserve their
-tokens; the receipt records its effective value plus cumulative/max actor-phase
-times. Any ITL outlier remains a failure even when its phase is explained.
+(`server.max_prefill_tokens_per_cycle`), the default four-layer yield ceiling
+(`server.max_prefill_layers_per_cycle`), and both startup provenances. Admission
+and resumable prefill share the token ceiling after ready decode rows reserve
+their tokens. A retained token chunk then yields between transformer-layer
+groups without replaying completed layers. The receipt records both effective
+values, processed-layer and layer-yield counts, plus cumulative/max actor-phase
+times; a run that exercises no inter-layer yield fails. Any ITL outlier remains
+a failure even when its phase is explained.
 
 For the historical dynamic-runtime A/B, run each of `default`,
 `autoscale-off`, `graphs-off`, and `both-off` separately. These four arms now

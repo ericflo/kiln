@@ -48,6 +48,13 @@ pub const MAX_BATCH_TOKENS_MAX: usize = 65_536;
 pub const DEFAULT_MAX_PREFILL_TOKENS_PER_CYCLE: usize = 64;
 pub const MAX_PREFILL_TOKENS_PER_CYCLE_MIN: usize = 1;
 pub const MAX_PREFILL_TOKENS_PER_CYCLE_MAX: usize = MAX_BATCH_TOKENS_MAX;
+/// Default transformer-layer work allowed before a partial prefill yields to
+/// the next decode cohort. Four layers keeps a Qwen3.5-4B group well below the
+/// measured token-only fixed-cost problem without repeating the 64-token chunk;
+/// the hardware qualification gate determines whether it is sufficient.
+pub const DEFAULT_MAX_PREFILL_LAYERS_PER_CYCLE: usize = 4;
+pub const MAX_PREFILL_LAYERS_PER_CYCLE_MIN: usize = 1;
+pub const MAX_PREFILL_LAYERS_PER_CYCLE_MAX: usize = 1_024;
 /// Strict startup selector for the serving-safety contract.
 pub const SERVING_PROFILE_ENV: &str = "KILN_SERVING_PROFILE";
 
@@ -447,6 +454,67 @@ impl<'de> Deserialize<'de> for PrefillTokenBudget {
     }
 }
 
+/// Validated transformer-layer ceiling per prefill actor cycle plus source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillLayerBudget {
+    layers: usize,
+    source: ConfigValueSource,
+}
+
+impl PrefillLayerBudget {
+    pub(crate) fn new(layers: usize, source: ConfigValueSource) -> Result<Self> {
+        validate_max_prefill_layers_per_cycle(layers)?;
+        Ok(Self { layers, source })
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        let layers = raw.trim().parse::<usize>().with_context(|| {
+            format!(
+                "KILN_MAX_PREFILL_LAYERS_PER_CYCLE must be a decimal integer in {}..={}, got {raw:?}",
+                MAX_PREFILL_LAYERS_PER_CYCLE_MIN, MAX_PREFILL_LAYERS_PER_CYCLE_MAX
+            )
+        })?;
+        Self::new(layers, ConfigValueSource::Environment)
+            .context("invalid KILN_MAX_PREFILL_LAYERS_PER_CYCLE")
+    }
+
+    pub fn layers(self) -> usize {
+        self.layers
+    }
+
+    pub fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for PrefillLayerBudget {
+    fn default() -> Self {
+        Self {
+            layers: DEFAULT_MAX_PREFILL_LAYERS_PER_CYCLE,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for PrefillLayerBudget {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(self.layers as u64)
+    }
+}
+
+impl<'de> Deserialize<'de> for PrefillLayerBudget {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let layers = usize::deserialize(deserializer)?;
+        Self::new(layers, ConfigValueSource::ConfigFile).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Top-level configuration for kiln.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
@@ -745,6 +813,9 @@ pub struct ServerConfig {
     /// Decode rows reserve their token first; admission and resumable prefill
     /// share this remainder so a long prompt cannot monopolize the actor.
     pub max_prefill_tokens_per_cycle: PrefillTokenBudget,
+    /// Transformer layers executed for an in-flight prefill chunk before the
+    /// hidden state yields back to decode without completing/repeating tokens.
+    pub max_prefill_layers_per_cycle: PrefillLayerBudget,
     /// Enable deterministic eval-serving behavior for `kiln serve`.
     pub eval_mode: bool,
     /// Server-level default for chat-template `enable_thinking`. `None`
@@ -1147,6 +1218,7 @@ impl Default for ServerConfig {
             stream_stall_grace_ms: StreamStallGrace::default(),
             max_batch_tokens: BatchTokenBudget::default(),
             max_prefill_tokens_per_cycle: PrefillTokenBudget::default(),
+            max_prefill_layers_per_cycle: PrefillLayerBudget::default(),
             eval_mode: false,
             default_thinking_enabled: None,
             default_thinking_budget_tokens: None,
@@ -1360,6 +1432,7 @@ impl KilnConfig {
         config.apply_stream_stall_grace_env_override()?;
         config.apply_max_batch_tokens_env_override()?;
         config.apply_max_prefill_tokens_per_cycle_env_override()?;
+        config.apply_max_prefill_layers_per_cycle_env_override()?;
         config.request_log.apply_env_overrides();
         config.validate()?;
         Ok(config)
@@ -1710,6 +1783,25 @@ impl KilnConfig {
         Ok(())
     }
 
+    fn apply_max_prefill_layers_per_cycle_env_override(&mut self) -> Result<()> {
+        let raw = match std::env::var("KILN_MAX_PREFILL_LAYERS_PER_CYCLE") {
+            Ok(raw) => raw,
+            Err(std::env::VarError::NotPresent) => return Ok(()),
+            Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+                "KILN_MAX_PREFILL_LAYERS_PER_CYCLE must be valid UTF-8 decimal layers"
+            ),
+        };
+        self.apply_max_prefill_layers_per_cycle_env_value(Some(&raw))
+    }
+
+    fn apply_max_prefill_layers_per_cycle_env_value(&mut self, raw: Option<&str>) -> Result<()> {
+        if let Some(raw) = raw {
+            self.server.max_prefill_layers_per_cycle =
+                PrefillLayerBudget::from_environment_value(raw)?;
+        }
+        Ok(())
+    }
+
     /// Validate configuration values. Returns an error describing the first invalid value.
     fn validate(&self) -> Result<()> {
         if self.server.port == 0 {
@@ -1724,6 +1816,7 @@ impl KilnConfig {
         validate_stream_stall_grace_ms(self.server.stream_stall_grace_ms.millis())?;
         validate_max_batch_tokens(self.server.max_batch_tokens.tokens())?;
         validate_max_prefill_tokens_per_cycle(self.server.max_prefill_tokens_per_cycle.tokens())?;
+        validate_max_prefill_layers_per_cycle(self.server.max_prefill_layers_per_cycle.layers())?;
         if self.server.shutdown_timeout_secs == 0 {
             anyhow::bail!("server.shutdown_timeout_secs must be > 0");
         }
@@ -1804,6 +1897,17 @@ fn validate_max_prefill_tokens_per_cycle(tokens: usize) -> Result<()> {
             "server.max_prefill_tokens_per_cycle must be between {} and {} tokens, got {tokens}",
             MAX_PREFILL_TOKENS_PER_CYCLE_MIN,
             MAX_PREFILL_TOKENS_PER_CYCLE_MAX
+        );
+    }
+    Ok(())
+}
+
+fn validate_max_prefill_layers_per_cycle(layers: usize) -> Result<()> {
+    if !(MAX_PREFILL_LAYERS_PER_CYCLE_MIN..=MAX_PREFILL_LAYERS_PER_CYCLE_MAX).contains(&layers) {
+        anyhow::bail!(
+            "server.max_prefill_layers_per_cycle must be between {} and {} layers, got {layers}",
+            MAX_PREFILL_LAYERS_PER_CYCLE_MIN,
+            MAX_PREFILL_LAYERS_PER_CYCLE_MAX
         );
     }
     Ok(())
@@ -2086,6 +2190,7 @@ http_send_buffer_bytes = 8192
 stream_stall_grace_ms = 1500
 max_batch_tokens = 1024
 max_prefill_tokens_per_cycle = 192
+max_prefill_layers_per_cycle = 6
 eval_mode = true
 default_thinking_enabled = false
 default_thinking_budget_tokens = 256
@@ -2163,6 +2268,11 @@ composed_cache_max_entries = 8
             config.server.max_prefill_tokens_per_cycle.source(),
             ConfigValueSource::ConfigFile
         );
+        assert_eq!(config.server.max_prefill_layers_per_cycle.layers(), 6);
+        assert_eq!(
+            config.server.max_prefill_layers_per_cycle.source(),
+            ConfigValueSource::ConfigFile
+        );
         assert!(config.server.eval_mode);
         assert_eq!(config.server.default_thinking_enabled, Some(false));
         assert_eq!(config.server.default_thinking_budget_tokens, Some(256));
@@ -2226,6 +2336,10 @@ port = 3000
         assert_eq!(
             config.server.max_prefill_tokens_per_cycle,
             PrefillTokenBudget::default()
+        );
+        assert_eq!(
+            config.server.max_prefill_layers_per_cycle,
+            PrefillLayerBudget::default()
         );
         assert!(!config.server.eval_mode); // default
         assert_eq!(config.server.default_thinking_enabled, None); // default
@@ -2660,6 +2774,72 @@ max_prefill_tokens_per_cycle = 256
                 error
                     .to_string()
                     .contains("server.max_prefill_tokens_per_cycle"),
+                "unexpected error for {invalid}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_max_prefill_layers_env_override_is_strict_and_source_tracked() {
+        let mut config: KilnConfig = toml::from_str(
+            r#"
+[server]
+max_prefill_layers_per_cycle = 8
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.server.max_prefill_layers_per_cycle.source(),
+            ConfigValueSource::ConfigFile
+        );
+
+        config
+            .apply_max_prefill_layers_per_cycle_env_value(Some(" 4 "))
+            .unwrap();
+        assert_eq!(config.server.max_prefill_layers_per_cycle.layers(), 4);
+        assert_eq!(
+            config.server.max_prefill_layers_per_cycle.source(),
+            ConfigValueSource::Environment
+        );
+
+        for invalid in ["", "0", "1025", "-1", "not-a-number"] {
+            let error = PrefillLayerBudget::from_environment_value(invalid).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("KILN_MAX_PREFILL_LAYERS_PER_CYCLE"),
+                "unexpected error for {invalid:?}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_max_prefill_layers_toml_validation_bounds() {
+        for valid in [
+            MAX_PREFILL_LAYERS_PER_CYCLE_MIN,
+            MAX_PREFILL_LAYERS_PER_CYCLE_MAX,
+        ] {
+            let config: KilnConfig = toml::from_str(&format!(
+                "[server]\nmax_prefill_layers_per_cycle = {valid}\n"
+            ))
+            .unwrap();
+            assert_eq!(config.server.max_prefill_layers_per_cycle.layers(), valid);
+            assert_eq!(
+                config.server.max_prefill_layers_per_cycle.source(),
+                ConfigValueSource::ConfigFile
+            );
+        }
+
+        for invalid in [
+            MAX_PREFILL_LAYERS_PER_CYCLE_MIN - 1,
+            MAX_PREFILL_LAYERS_PER_CYCLE_MAX + 1,
+        ] {
+            let error = toml::from_str::<KilnConfig>(&format!(
+                "[server]\nmax_prefill_layers_per_cycle = {invalid}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("server.max_prefill_layers_per_cycle"),
                 "unexpected error for {invalid}: {error:#}"
             );
         }

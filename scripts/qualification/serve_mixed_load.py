@@ -59,6 +59,7 @@ SLOW_SOCKET_BUFFER_BYTES = 4096
 HTTP_SEND_BUFFER_BYTES = 4096
 STREAM_STALL_GRACE_MS = 2000
 MAX_PREFILL_TOKENS_PER_CYCLE = 64
+MAX_PREFILL_LAYERS_PER_CYCLE = 4
 SLO_TTFT_MS = 30_000.0
 SLO_E2E_MS = 120_000.0
 STREAM_READ_POLL_SECONDS = 0.25
@@ -106,6 +107,7 @@ def _variant_config(
             "request_timeout_seconds": 180,
             "stream_stall_grace_ms": STREAM_STALL_GRACE_MS,
             "max_prefill_tokens_per_cycle": MAX_PREFILL_TOKENS_PER_CYCLE,
+            "max_prefill_layers_per_cycle": MAX_PREFILL_LAYERS_PER_CYCLE,
         },
         "workload": {
             "cancellation_after_semantic_deltas": CANCELLATION_AFTER_DELTAS,
@@ -215,10 +217,13 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "batching_decode_row_count": ("rows", "sum", False),
     "batching_max_observed_batch_size": ("rows", "max", False),
     "batching_max_prefill_tokens_per_cycle": ("tokens", "exact", True),
+    "batching_max_prefill_layers_per_cycle": ("layers", "exact", True),
     "batching_mean_rows_per_forward": ("rows", "mean", False),
     "batching_prefill_forward_count": ("count", "sum", False),
     "batching_prefill_forward_ms_max": ("ms", "max", True),
     "batching_prefill_forward_ms_total": ("ms", "sum", True),
+    "batching_prefill_layer_count": ("layers", "sum", True),
+    "batching_prefill_layer_yield_count": ("count", "sum", True),
     "batching_slow_admission_count": ("count", "sum", True),
     "batching_slow_decode_forward_count": ("count", "sum", True),
     "batching_slow_prefill_forward_count": ("count", "sum", True),
@@ -1577,6 +1582,16 @@ def attest_runtime(
             failures.append("health batching prefill-token ceiling does not match config")
         if batching.get("max_prefill_tokens_per_cycle_source") != "default":
             failures.append("health batching prefill-token ceiling source is not default")
+        expected_prefill_layer_ceiling = VARIANT_CONFIGS[variant]["server"][
+            "max_prefill_layers_per_cycle"
+        ]
+        if (
+            batching.get("max_prefill_layers_per_cycle")
+            != expected_prefill_layer_ceiling
+        ):
+            failures.append("health batching prefill-layer ceiling does not match config")
+        if batching.get("max_prefill_layers_per_cycle_source") != "default":
+            failures.append("health batching prefill-layer ceiling source is not default")
 
         debug_batching = debug.get("batching_engine")
         debug_snapshot = (
@@ -1598,6 +1613,12 @@ def attest_runtime(
                 or debug_snapshot.get("max_prefill_tokens_per_cycle_source") != "default"
             ):
                 failures.append("debug batching prefill-token ceiling does not match default")
+            if (
+                debug_snapshot.get("max_prefill_layers_per_cycle")
+                != expected_prefill_layer_ceiling
+                or debug_snapshot.get("max_prefill_layers_per_cycle_source") != "default"
+            ):
+                failures.append("debug batching prefill-layer ceiling does not match default")
 
     flags = debug.get("env_flags")
     if not isinstance(flags, dict):
@@ -1641,6 +1662,13 @@ def attest_runtime(
         or prefill_ceiling_flag.get("value") is not None
     ):
         failures.append("prefill-token ceiling debug flag does not prove the default source")
+    prefill_layer_ceiling_flag = flags.get("KILN_MAX_PREFILL_LAYERS_PER_CYCLE")
+    if (
+        not isinstance(prefill_layer_ceiling_flag, dict)
+        or prefill_layer_ceiling_flag.get("present") is not False
+        or prefill_layer_ceiling_flag.get("value") is not None
+    ):
+        failures.append("prefill-layer ceiling debug flag does not prove the default source")
     return failures
 
 
@@ -1656,11 +1684,14 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int]:
     for field in (
         "max_observed_batch_size",
         "max_prefill_tokens_per_cycle",
+        "max_prefill_layers_per_cycle",
         "total_errors",
         "total_decode_forwards",
         "total_batched_decode_forwards",
         "total_decode_rows",
         "total_prefill_forwards",
+        "total_prefill_layers",
+        "total_prefill_layer_yields",
         "total_admission_calls",
         "slow_admission_count",
         "slow_prefill_forward_count",
@@ -2113,11 +2144,20 @@ def metric_values(
         "batching_max_prefill_tokens_per_cycle": batching_end[
             "max_prefill_tokens_per_cycle"
         ],
+        "batching_max_prefill_layers_per_cycle": batching_end[
+            "max_prefill_layers_per_cycle"
+        ],
         "batching_mean_rows_per_forward": decode_rows / max(decode_forwards, 1),
         "batching_prefill_forward_count": prefill_forwards,
         "batching_prefill_forward_ms_max": batching_end["max_prefill_forward_ms"],
         "batching_prefill_forward_ms_total": counter_delta(
             batching_start, batching_end, "total_prefill_forward_ms"
+        ),
+        "batching_prefill_layer_count": counter_delta(
+            batching_start, batching_end, "total_prefill_layers"
+        ),
+        "batching_prefill_layer_yield_count": counter_delta(
+            batching_start, batching_end, "total_prefill_layer_yields"
         ),
         "batching_slow_admission_count": counter_delta(
             batching_start, batching_end, "slow_admission_count"
@@ -2527,6 +2567,10 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             status_failures.append("measured load executed no batched decode forward")
         if values["batching_decode_row_count"] <= values["batching_decode_forward_count"]:
             status_failures.append("measured decode rows do not prove multi-row batching")
+        if values["batching_prefill_layer_count"] < 1:
+            status_failures.append("measured load processed no bounded prefill layers")
+        if values["batching_prefill_layer_yield_count"] < 1:
+            status_failures.append("measured load exercised no inter-layer prefill yield")
         if values["external_yield_sync_call_count"] < 1:
             status_failures.append(
                 "measured load exercised no attributed backend synchronization boundary"
