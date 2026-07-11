@@ -737,7 +737,10 @@ yields after at most `server.max_prefill_layers_per_cycle` transformer layers;
 the actor retains the intermediate hidden and position state, runs the next
 ready decode cohort, and resumes without repeating completed layers. This layer
 quantum controls latency without multiplying full-model prompt passes as a
-smaller token chunk can. Cancellation and shutdown release partial KV ownership
+smaller token chunk can. If a later cycle has less token budget than the
+retained chunk's original width, the actor defers that chunk until the same
+width fits; it never shrinks or replays an in-flight chunk. Cancellation and
+shutdown release partial KV ownership
 only after the backend synchronization boundary; an unsettled device failure is
 quarantined instead of recycling pages. `/health` and `/v1/debug/model-state`
 expose `active_prefill`, both effective budgets and their sources, the last token
@@ -748,7 +751,9 @@ Prometheus exports the corresponding `kiln_batching_engine_active_prefill`,
 `kiln_batching_engine_max_prefill_layers_per_cycle`,
 `kiln_batching_engine_last_prefill_tokens`, and
 `kiln_batching_engine_{last_prefill_layers,prefill_layers_total,prefill_layer_yields_total}`
-series. Admission, bounded-prefill, and decode-forward wall time is also
+series. Reservation deferrals are counted by
+`kiln_batching_engine_prefill_token_budget_deferrals_total`. Admission,
+bounded-prefill, and decode-forward wall time is also
 available as cumulative, process-maximum, and 100 ms slow-phase counters under
 `kiln_batching_engine_{admission,prefill_forward,decode_forward}_*`.
 The same values appear in health and debug snapshots. A phase crossing 100 ms

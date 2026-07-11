@@ -628,6 +628,15 @@ impl PagedBatchedPrefillState {
         self.pending_layer_forward.is_some()
     }
 
+    /// Width selected when the current token chunk first entered its layer
+    /// groups. Later actor cycles must preserve this reservation; shrinking it
+    /// would require replaying already-completed layers with different inputs.
+    pub fn pending_layer_chunk_tokens(&self) -> Option<usize> {
+        self.pending_layer_forward.as_ref()?;
+        self.pending_chunk_end
+            .map(|chunk_end| chunk_end.saturating_sub(self.next_position))
+    }
+
     pub fn into_allocated_blocks(self) -> Vec<u32> {
         self.allocated_blocks
     }

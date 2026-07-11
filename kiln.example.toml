@@ -62,7 +62,8 @@ max_prefill_tokens_per_cycle = 64        # Independent prompt-token ceiling insi
                                         # strictly with KILN_MAX_PREFILL_TOKENS_PER_CYCLE.
 max_prefill_layers_per_cycle = 4         # Transformer layers processed before a retained prompt
                                         # chunk yields to the next decode cohort. The same hidden
-                                        # state resumes without replaying completed layers. Lower
+                                        # state and token width resume without replaying completed
+                                        # layers; a narrower later cycle defers the chunk. Lower
                                         # values favor ITL; higher values reduce scheduling and
                                         # synchronization overhead. Valid range: 1..=1024. Override
                                         # strictly with KILN_MAX_PREFILL_LAYERS_PER_CYCLE.

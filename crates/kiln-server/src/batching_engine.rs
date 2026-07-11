@@ -249,6 +249,7 @@ pub struct BatchingEngineSnapshot {
     pub total_prefill_forwards: u64,
     pub total_prefill_layers: u64,
     pub total_prefill_layer_yields: u64,
+    pub total_prefill_token_budget_deferrals: u64,
     pub total_decode_tokens: u64,
     pub total_prefill_tokens: u64,
     pub total_errors: u64,
@@ -390,6 +391,11 @@ pub trait DecodeForward: Send + Sync + 'static {
     /// reported zero token and zero internal progress.
     fn has_inflight_prefill_layer_progress(&self, _slot: &DecodeSlot) -> bool {
         false
+    }
+    /// Token width fixed when a layer-resumable chunk began. The actor must
+    /// not resume it in a later cycle with less remaining token budget.
+    fn inflight_prefill_token_width(&self, _slot: &DecodeSlot) -> Option<usize> {
+        None
     }
     fn can_reuse_as_strict_prefix(&self, _prompt_token_len: usize) -> bool {
         false
@@ -682,6 +688,16 @@ impl DecodeForward for RealDecodeForward {
                 ..
             } if state.has_pending_layer_progress()
         )
+    }
+
+    fn inflight_prefill_token_width(&self, slot: &DecodeSlot) -> Option<usize> {
+        let DecodeSlot::RealPrefill {
+            state: Some(state), ..
+        } = slot
+        else {
+            return None;
+        };
+        state.pending_layer_chunk_tokens()
     }
 
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
@@ -2455,6 +2471,10 @@ impl BatchingEngineActor {
                 .find(|&idx| {
                     self.active[idx].delivery_state == ActiveDeliveryState::Ready
                         && self.forward.is_prefilling(&self.active[idx].slot)
+                        && self
+                            .forward
+                            .inflight_prefill_token_width(&self.active[idx].slot)
+                            .is_none_or(|tokens| tokens <= budget)
                 })
             else {
                 break;
@@ -2610,7 +2630,22 @@ impl BatchingEngineActor {
             self.refresh_snapshot();
             advanced = true;
         }
-        advanced
+        let token_budget_deferred = self.active.iter().any(|active| {
+            active.delivery_state == ActiveDeliveryState::Ready
+                && self.forward.is_prefilling(&active.slot)
+                && self
+                    .forward
+                    .inflight_prefill_token_width(&active.slot)
+                    .is_some_and(|tokens| tokens > budget)
+        });
+        if token_budget_deferred {
+            self.snapshot.total_prefill_token_budget_deferrals = self
+                .snapshot
+                .total_prefill_token_budget_deferrals
+                .saturating_add(1);
+            self.refresh_snapshot();
+        }
+        advanced || token_budget_deferred
     }
 
     fn pending_first_token_at(&mut self, idx: usize) -> Option<TokenId> {
@@ -3105,6 +3140,7 @@ mod tests {
     struct SyntheticPrefillForward {
         remaining: StdMutex<HashMap<TokenId, usize>>,
         pending_layers: StdMutex<HashMap<TokenId, usize>>,
+        pending_token_widths: StdMutex<HashMap<TokenId, usize>>,
         events: StdMutex<Vec<SchedulingEvent>>,
         layers_per_chunk: usize,
         layer_delay: Duration,
@@ -3179,6 +3215,20 @@ mod tests {
         ) -> Result<RequestPreparation> {
             anyhow::ensure!(!cancel.is_cancelled(), "synthetic prefill cancelled");
             let key = Self::slot_key(&slot);
+            let reserved_tokens = if self.layers_per_chunk == 0 {
+                None
+            } else {
+                let remaining_tokens =
+                    *self.remaining.lock().unwrap().get(&key).ok_or_else(|| {
+                        anyhow::anyhow!("missing synthetic prefill state for {key}")
+                    })?;
+                let mut pending_token_widths = self.pending_token_widths.lock().unwrap();
+                Some(
+                    *pending_token_widths
+                        .entry(key)
+                        .or_insert(remaining_tokens.min(max_tokens)),
+                )
+            };
             let layers_processed = if self.layers_per_chunk == 0 {
                 1
             } else {
@@ -3223,8 +3273,12 @@ mod tests {
                 let remaining_tokens = remaining
                     .get_mut(&key)
                     .ok_or_else(|| anyhow::anyhow!("missing synthetic prefill state for {key}"))?;
-                let tokens = (*remaining_tokens).min(max_tokens);
+                let tokens = reserved_tokens.unwrap_or_else(|| (*remaining_tokens).min(max_tokens));
                 anyhow::ensure!(tokens > 0, "synthetic prefill received an empty budget");
+                anyhow::ensure!(
+                    tokens <= *remaining_tokens,
+                    "synthetic reserved width {tokens} exceeds {remaining_tokens} remaining tokens"
+                );
                 *remaining_tokens -= tokens;
                 let remaining_after = *remaining_tokens;
                 if remaining_after == 0 {
@@ -3232,6 +3286,9 @@ mod tests {
                 }
                 (tokens, remaining_after)
             };
+            if reserved_tokens.is_some() {
+                self.pending_token_widths.lock().unwrap().remove(&key);
+            }
             thread::sleep(Duration::from_micros(100));
             self.events.lock().unwrap().push(SchedulingEvent::Prefill {
                 key,
@@ -3258,6 +3315,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .contains_key(&Self::slot_key(slot))
+        }
+
+        fn inflight_prefill_token_width(&self, slot: &DecodeSlot) -> Option<usize> {
+            self.pending_token_widths
+                .lock()
+                .unwrap()
+                .get(&Self::slot_key(slot))
+                .copied()
         }
 
         fn forward_decode(
@@ -3312,7 +3377,13 @@ mod tests {
             let key = Self::slot_key(&slot);
             let removed_tokens = self.remaining.lock().unwrap().remove(&key).is_some();
             let removed_layers = self.pending_layers.lock().unwrap().remove(&key).is_some();
-            if removed_tokens || removed_layers {
+            let removed_width = self
+                .pending_token_widths
+                .lock()
+                .unwrap()
+                .remove(&key)
+                .is_some();
+            if removed_tokens || removed_layers || removed_width {
                 self.events
                     .lock()
                     .unwrap()
@@ -5443,6 +5514,70 @@ mod tests {
             yielded_then_decoded,
             "ready decode did not run between retained prefill layer groups: {events:?}"
         );
+    }
+
+    #[test]
+    fn retained_prefill_waits_for_its_original_token_width() {
+        const KEY: TokenId = 10_000;
+
+        let forward = Arc::new(SyntheticPrefillForward {
+            layers_per_chunk: 8,
+            ..SyntheticPrefillForward::default()
+        });
+        let (_command_tx, command_rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let mut actor = test_actor(
+            command_rx,
+            forward.clone(),
+            1,
+            false,
+            1,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let req = request_with_tokens(vec![KEY; 128], 1);
+        let RequestPreparation::Prefilling { slot, .. } = forward
+            .prepare_request_chunked(&req, 64)
+            .expect("initialize synthetic retained prefill")
+        else {
+            panic!("long synthetic prompt unexpectedly became ready")
+        };
+        let (response_tx, _response_rx) = mpsc::channel(8);
+        push_test_active(&mut actor, req, response_tx, slot);
+
+        assert!(actor.run_prefill_budget(64));
+        assert_eq!(
+            forward.inflight_prefill_token_width(&actor.active[0].slot),
+            Some(64)
+        );
+        let events_before_deferral = forward.events.lock().unwrap().len();
+
+        assert!(
+            actor.run_prefill_budget(32),
+            "a token-width deferral must keep the actor schedulable for its next cycle"
+        );
+        assert_eq!(forward.events.lock().unwrap().len(), events_before_deferral);
+        assert_eq!(actor.snapshot.total_prefill_token_budget_deferrals, 1);
+        assert_eq!(actor.snapshot.total_errors, 0);
+        assert_eq!(
+            forward.inflight_prefill_token_width(&actor.active[0].slot),
+            Some(64)
+        );
+
+        assert!(actor.run_prefill_budget(64));
+        assert_eq!(actor.snapshot.total_prefill_tokens, 64);
+        assert_eq!(actor.snapshot.total_prefill_layers, 8);
+        assert_eq!(actor.snapshot.total_prefill_forwards, 2);
+        assert_eq!(actor.snapshot.total_errors, 0);
+        assert!(matches!(
+            forward.events.lock().unwrap().last(),
+            Some(SchedulingEvent::Prefill {
+                key: KEY,
+                tokens: 64,
+                remaining: 64,
+            })
+        ));
+
+        actor.fail_all("test complete");
     }
 
     #[tokio::test]
