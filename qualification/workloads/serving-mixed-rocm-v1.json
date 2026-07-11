@@ -32,8 +32,12 @@
           "rocm_path": "/opt/rocm"
         },
         "runtime": {
+          "serving_profile": "experimental",
+          "kv_autoscale_requested": false,
           "kv_autoscale_enabled": false,
+          "memory_reclaim_requested_mode": "off",
           "memory_reclaim_mode": "off",
+          "rocm_graphs_requested": true,
           "rocm_graphs_enabled": true
         },
         "server": {
@@ -118,6 +122,11 @@
               "e2e_latency_ms_p50",
               "e2e_latency_ms_p99",
               "e2e_latency_ms_p999",
+              "external_yield_sync_call_count",
+              "external_yield_sync_failure_count",
+              "external_yield_sync_max_ms",
+              "external_yield_sync_slow_count",
+              "external_yield_sync_total_ms",
               "graph_measured_capture_attempt_count",
               "graph_measured_capture_deferral_count",
               "graph_measured_capture_failure_count",
@@ -177,8 +186,12 @@
           "rocm_path": "/opt/rocm"
         },
         "runtime": {
+          "serving_profile": "experimental",
+          "kv_autoscale_requested": false,
           "kv_autoscale_enabled": false,
+          "memory_reclaim_requested_mode": "off",
           "memory_reclaim_mode": "off",
+          "rocm_graphs_requested": false,
           "rocm_graphs_enabled": false
         },
         "server": {
@@ -263,6 +276,11 @@
               "e2e_latency_ms_p50",
               "e2e_latency_ms_p99",
               "e2e_latency_ms_p999",
+              "external_yield_sync_call_count",
+              "external_yield_sync_failure_count",
+              "external_yield_sync_max_ms",
+              "external_yield_sync_slow_count",
+              "external_yield_sync_total_ms",
               "graph_measured_capture_attempt_count",
               "graph_measured_capture_deferral_count",
               "graph_measured_capture_failure_count",
@@ -322,8 +340,12 @@
           "rocm_path": "/opt/rocm"
         },
         "runtime": {
+          "serving_profile": "experimental",
+          "kv_autoscale_requested": true,
           "kv_autoscale_enabled": true,
+          "memory_reclaim_requested_mode": "off",
           "memory_reclaim_mode": "off",
+          "rocm_graphs_requested": true,
           "rocm_graphs_enabled": true
         },
         "server": {
@@ -408,6 +430,11 @@
               "e2e_latency_ms_p50",
               "e2e_latency_ms_p99",
               "e2e_latency_ms_p999",
+              "external_yield_sync_call_count",
+              "external_yield_sync_failure_count",
+              "external_yield_sync_max_ms",
+              "external_yield_sync_slow_count",
+              "external_yield_sync_total_ms",
               "graph_measured_capture_attempt_count",
               "graph_measured_capture_deferral_count",
               "graph_measured_capture_failure_count",
@@ -467,8 +494,12 @@
           "rocm_path": "/opt/rocm"
         },
         "runtime": {
+          "serving_profile": "experimental",
+          "kv_autoscale_requested": true,
           "kv_autoscale_enabled": true,
+          "memory_reclaim_requested_mode": "off",
           "memory_reclaim_mode": "off",
+          "rocm_graphs_requested": false,
           "rocm_graphs_enabled": false
         },
         "server": {
@@ -553,6 +584,165 @@
               "e2e_latency_ms_p50",
               "e2e_latency_ms_p99",
               "e2e_latency_ms_p999",
+              "external_yield_sync_call_count",
+              "external_yield_sync_failure_count",
+              "external_yield_sync_max_ms",
+              "external_yield_sync_slow_count",
+              "external_yield_sync_total_ms",
+              "graph_measured_capture_attempt_count",
+              "graph_measured_capture_deferral_count",
+              "graph_measured_capture_failure_count",
+              "graph_measured_capture_success_count",
+              "graph_measured_live_count_end",
+              "graph_measured_replay_attempt_count",
+              "graph_measured_replay_failure_count",
+              "graph_measured_replay_success_count",
+              "graph_pre_measurement_capture_success_count",
+              "graph_pre_measurement_failure_count",
+              "graph_pre_measurement_replay_success_count",
+              "itl_ms_p50",
+              "itl_ms_p99",
+              "itl_ms_p999",
+              "kv_blocks_end",
+              "kv_blocks_start",
+              "kv_resize_event_count",
+              "long_prefill_prompt_tokens",
+              "memory_reclaim_event_count",
+              "output_token_throughput_per_second",
+              "peak_gpu_memory_used_bytes",
+              "prompt_token_count",
+              "request_count",
+              "request_failure_count",
+              "request_throughput_per_second",
+              "response_queue_delay_ms_p50",
+              "response_queue_delay_ms_p99",
+              "response_queue_delay_ms_p999",
+              "slo_goodput_requests_per_second",
+              "slow_consumer_peer_success_count",
+              "ttft_ms_p50",
+              "ttft_ms_p99",
+              "ttft_ms_p999",
+              "unexplained_itl_outlier_count",
+              "zero_token_response_count"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "stable",
+      "description": "Stable-profile arm: dynamic controls are requested but physical KV resize, allocator reclaim, and live ROCm graph capture must remain suppressed.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "features": "rocm",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "rocm_archs": "gfx1151",
+          "rocm_path": "/opt/rocm"
+        },
+        "runtime": {
+          "serving_profile": "stable",
+          "kv_autoscale_requested": true,
+          "kv_autoscale_enabled": false,
+          "memory_reclaim_requested_mode": "automatic",
+          "memory_reclaim_mode": "off",
+          "rocm_graphs_requested": true,
+          "rocm_graphs_enabled": false
+        },
+        "server": {
+          "chat_performance_metadata_enabled": true,
+          "debug_endpoints_enabled": true,
+          "default_thinking_enabled": false,
+          "http_send_buffer_bytes": 4096,
+          "log_format": "json",
+          "request_timeout_seconds": 180,
+          "stream_stall_grace_ms": 2000
+        },
+        "workload": {
+          "cancellation_after_semantic_deltas": 4,
+          "long_prefill_max_tokens": 32,
+          "long_prefill_words": 1536,
+          "max_warmup_requests": 4,
+          "memory_poll_interval_ms": 500,
+          "normal_max_tokens": 128,
+          "normal_requests": 8,
+          "outlier_absolute_ms": 250,
+          "outlier_history_size": 64,
+          "outlier_multiplier": 5,
+          "overall_timeout_seconds": 420,
+          "pressure_peer_dispatch": "after_slow_headers_before_pressure_wait",
+          "pressure_peer_max_tokens": 512,
+          "pressure_peer_prompt_words": 64,
+          "pressure_peer_seed_offset": 103,
+          "request_timeout_seconds": 120,
+          "slow_socket_buffer_bytes": 4096,
+          "slow_max_tokens": 4096,
+          "startup_timeout_seconds": 240,
+          "warmup_max_tokens": 32
+        }
+      },
+      "cases": [
+        {
+          "id": "mixed-load",
+          "description": "Build current source and run qualification-grade mixed SSE traffic with cancellation and socket backpressure.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_mixed_load.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 900,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*rocm)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "attributed_itl_outlier_count",
+              "batching_batched_decode_forward_count",
+              "batching_decode_forward_count",
+              "batching_decode_row_count",
+              "batching_max_observed_batch_size",
+              "batching_mean_rows_per_forward",
+              "batching_total_errors",
+              "cancellation_confirmed_count",
+              "client_backpressure_event_count",
+              "client_backpressure_wait_ms",
+              "client_stall_eviction_count",
+              "completion_token_count",
+              "e2e_latency_ms_p50",
+              "e2e_latency_ms_p99",
+              "e2e_latency_ms_p999",
+              "external_yield_sync_call_count",
+              "external_yield_sync_failure_count",
+              "external_yield_sync_max_ms",
+              "external_yield_sync_slow_count",
+              "external_yield_sync_total_ms",
               "graph_measured_capture_attempt_count",
               "graph_measured_capture_deferral_count",
               "graph_measured_capture_failure_count",
@@ -601,14 +791,16 @@
         "baseline_variant_id": "default",
         "candidate_variant_id": "autoscale-off",
         "allowed_effective_config_differences": [
-          "runtime.kv_autoscale_enabled"
+          "runtime.kv_autoscale_enabled",
+          "runtime.kv_autoscale_requested"
         ]
       },
       {
         "baseline_variant_id": "default",
         "candidate_variant_id": "graphs-off",
         "allowed_effective_config_differences": [
-          "runtime.rocm_graphs_enabled"
+          "runtime.rocm_graphs_enabled",
+          "runtime.rocm_graphs_requested"
         ]
       },
       {
@@ -616,7 +808,9 @@
         "candidate_variant_id": "both-off",
         "allowed_effective_config_differences": [
           "runtime.kv_autoscale_enabled",
-          "runtime.rocm_graphs_enabled"
+          "runtime.kv_autoscale_requested",
+          "runtime.rocm_graphs_enabled",
+          "runtime.rocm_graphs_requested"
         ]
       }
     ],

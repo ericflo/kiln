@@ -30,7 +30,19 @@ def http_fixture() -> dict:
     }
 
 
-def health_fixture(*, kv_autoscale: bool, rocm_graphs: bool) -> dict:
+def health_fixture(
+    *,
+    kv_autoscale: bool,
+    rocm_graphs: bool,
+    serving_profile: str = "experimental",
+    kv_autoscale_requested: bool | None = None,
+    memory_reclaim_requested_mode: str = "off",
+) -> dict:
+    kv_autoscale_requested = (
+        kv_autoscale
+        if kv_autoscale_requested is None
+        else kv_autoscale_requested
+    )
     graph = {
         "requested": rocm_graphs,
         "capture_requested": rocm_graphs,
@@ -49,6 +61,15 @@ def health_fixture(*, kv_autoscale: bool, rocm_graphs: bool) -> dict:
     }
     return {
         "backend": "model",
+        "backend_runtime": {"external_yield_sync": []},
+        "serving_profile": {
+            "profile": serving_profile,
+            "source": "environment",
+            "immutable_after_startup": True,
+            "request_overrides_allowed": False,
+            "effective_policy_source": "serving_profile",
+            "effective_policy": serve.PROFILE_POLICIES[serving_profile],
+        },
         "gpu_memory": {
             "total_vram_bytes": 64 * 1024 * 1024 * 1024,
             "live": {"used_gb": 1.0, "source": "linux-drm-sysfs"},
@@ -57,15 +78,25 @@ def health_fixture(*, kv_autoscale: bool, rocm_graphs: bool) -> dict:
         "decode_runtime": {
             "rocm_graphs": graph,
             "kv_autoscaler": {
-                "requested": kv_autoscale,
+                "requested": kv_autoscale_requested,
                 "enabled": kv_autoscale,
-                "state": "enabled" if kv_autoscale else "disabled",
-                "reason": "active" if kv_autoscale else "environment",
+                "state": (
+                    "unavailable"
+                    if serving_profile == "stable"
+                    else "enabled" if kv_autoscale else "disabled"
+                ),
+                "reason": (
+                    "serving_profile_stable"
+                    if serving_profile == "stable"
+                    else "active" if kv_autoscale else "environment"
+                ),
             },
             "memory_governor": {
                 "reclaim_mode": "off",
+                "requested_reclaim_mode": memory_reclaim_requested_mode,
                 "automatic_monitor_enabled": False,
                 "source": "environment",
+                "disabled_by_serving_profile": serving_profile == "stable",
             },
             "batching_engine": {
                 "stream_stall_grace_ms": serve.STREAM_STALL_GRACE_MS,
@@ -87,7 +118,12 @@ def health_fixture(*, kv_autoscale: bool, rocm_graphs: bool) -> dict:
     }
 
 
-def debug_fixture(*, kv_autoscale: bool, rocm_graphs: bool) -> dict:
+def debug_fixture(
+    *,
+    kv_autoscale: bool,
+    rocm_graphs: bool,
+    memory_reclaim_requested_mode: str = "off",
+) -> dict:
     def flag(enabled: bool) -> dict:
         return {"present": not enabled, "value": None if enabled else "0"}
 
@@ -104,7 +140,10 @@ def debug_fixture(*, kv_autoscale: bool, rocm_graphs: bool) -> dict:
         "env_flags": {
             "KILN_KV_AUTOSCALE": flag(kv_autoscale),
             "KILN_ROCM_GRAPHS": flag(rocm_graphs),
-            "KILN_MEMORY_RECLAIM_MODE": {"present": True, "value": "off"},
+            "KILN_MEMORY_RECLAIM_MODE": {
+                "present": True,
+                "value": memory_reclaim_requested_mode,
+            },
             "KILN_HTTP_SEND_BUFFER_BYTES": {
                 "present": True,
                 "value": str(serve.HTTP_SEND_BUFFER_BYTES),
@@ -417,7 +456,7 @@ class ServeMixedLoadTests(unittest.TestCase):
             {
                 ("default", variant_id)
                 for variant_id in serve.VARIANT_CONFIGS
-                if variant_id != "default"
+                if variant_id not in {"default", "stable"}
             },
         )
 
@@ -520,6 +559,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "ROCm pool reclaim completed": "memory_reclaim",
             "ROCm HIP graph captured for decode (24 layers)": "graph_capture",
             "ROCm graph capture failed: bad launch": "graph_fallback",
+            "slow_backend_external_yield_sync": "external_yield_sync",
             "response_channel_backpressure": "client_backpressure_start",
             "response_channel_backpressure_timeout": "client_backpressure_timeout",
             "stream_request_bound": "stream_request_bound",
@@ -729,7 +769,13 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 with self.subTest(variant=variant):
                     env = serve.server_environment(variant, model, 1234, adapters)
                     expected = config["runtime"]
-                    self.assertEqual(env["KILN_MEMORY_RECLAIM_MODE"], "off")
+                    self.assertEqual(
+                        env["KILN_MEMORY_RECLAIM_MODE"],
+                        expected["memory_reclaim_requested_mode"],
+                    )
+                    self.assertEqual(
+                        env["KILN_SERVING_PROFILE"], expected["serving_profile"]
+                    )
                     self.assertEqual(
                         env["KILN_STREAM_STALL_GRACE_MS"], str(serve.STREAM_STALL_GRACE_MS)
                     )
@@ -742,11 +788,11 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                     self.assertEqual(env["KILN_LOG_FORMAT"], "json")
                     self.assertEqual(
                         env.get("KILN_KV_AUTOSCALE"),
-                        None if expected["kv_autoscale_enabled"] else "0",
+                        None if expected["kv_autoscale_requested"] else "0",
                     )
                     self.assertEqual(
                         env.get("KILN_ROCM_GRAPHS"),
-                        None if expected["rocm_graphs_enabled"] else "0",
+                        None if expected["rocm_graphs_requested"] else "0",
                     )
 
     def test_http_send_buffer_attestation_is_platform_strict(self) -> None:
@@ -828,10 +874,18 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                     health_fixture(
                         kv_autoscale=runtime["kv_autoscale_enabled"],
                         rocm_graphs=runtime["rocm_graphs_enabled"],
+                        serving_profile=runtime["serving_profile"],
+                        kv_autoscale_requested=runtime["kv_autoscale_requested"],
+                        memory_reclaim_requested_mode=runtime[
+                            "memory_reclaim_requested_mode"
+                        ],
                     ),
                     debug_fixture(
-                        kv_autoscale=runtime["kv_autoscale_enabled"],
-                        rocm_graphs=runtime["rocm_graphs_enabled"],
+                        kv_autoscale=runtime["kv_autoscale_requested"],
+                        rocm_graphs=runtime["rocm_graphs_requested"],
+                        memory_reclaim_requested_mode=runtime[
+                            "memory_reclaim_requested_mode"
+                        ],
                     ),
                 )
                 self.assertEqual(failures, [])
@@ -936,6 +990,49 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         with self.assertRaises(serve.QualificationError):
             serve.graph_snapshot(health)
 
+    def test_external_yield_sync_snapshot_is_strict_and_reports_deltas(self) -> None:
+        before = health_fixture(kv_autoscale=True, rocm_graphs=True)
+        before["backend_runtime"]["external_yield_sync"] = [
+            {
+                "boundary": "batched decode step",
+                "calls": 2,
+                "failures": 0,
+                "total_micros": 20_000,
+                "max_micros": 12_000,
+                "slow_calls": 0,
+            }
+        ]
+        after = json.loads(json.dumps(before))
+        after["backend_runtime"]["external_yield_sync"][0].update(
+            {
+                "calls": 7,
+                "total_micros": 95_000,
+                "max_micros": 25_000,
+            }
+        )
+        self.assertEqual(
+            serve.external_yield_sync_metric_values(before, after),
+            {
+                "external_yield_sync_call_count": 5,
+                "external_yield_sync_failure_count": 0,
+                "external_yield_sync_max_ms": 25.0,
+                "external_yield_sync_slow_count": 0,
+                "external_yield_sync_total_ms": 75.0,
+            },
+        )
+
+        duplicate = json.loads(json.dumps(after))
+        duplicate["backend_runtime"]["external_yield_sync"].append(
+            duplicate["backend_runtime"]["external_yield_sync"][0]
+        )
+        with self.assertRaisesRegex(serve.QualificationError, "duplicate"):
+            serve.external_yield_sync_snapshot(duplicate)
+
+        regressed = json.loads(json.dumps(after))
+        regressed["backend_runtime"]["external_yield_sync"][0]["calls"] = 1
+        with self.assertRaisesRegex(serve.QualificationError, "regressed"):
+            serve.external_yield_sync_metric_values(before, regressed)
+
     def test_cancellation_match_requires_marker_and_disconnect_reason(self) -> None:
         records = [
             {"prompt_preview": "marker-a", "finish_reason": "stop"},
@@ -991,6 +1088,13 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             [100.0, 100.0], [result], [outside]
         )
         self.assertEqual((attributed, unexplained), (0, 1))
+        synchronization = serve.ObservedEvent(
+            0.5, "external_yield_sync", "slow attributed synchronization"
+        )
+        attributed, unexplained = serve.classify_itl_outliers(
+            [100.0, 100.0], [result], [synchronization]
+        )
+        self.assertEqual((attributed, unexplained), (1, 0))
 
     def test_metric_values_use_runtime_counter_deltas(self) -> None:
         result = serve.StreamResult(
@@ -1039,7 +1143,24 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "response_stall_evictions": 2,
             }
         )
+        measurement_start["backend_runtime"]["external_yield_sync"] = [
+            {
+                "boundary": "batched decode step",
+                "calls": 2,
+                "failures": 0,
+                "total_micros": 20_000,
+                "max_micros": 12_000,
+                "slow_calls": 0,
+            }
+        ]
         end = json.loads(json.dumps(measurement_start))
+        end["backend_runtime"]["external_yield_sync"][0].update(
+            {
+                "calls": 7,
+                "total_micros": 95_000,
+                "max_micros": 25_000,
+            }
+        )
         end_graph = end["decode_runtime"]["rocm_graphs"]
         end_graph.update(
             {
@@ -1088,6 +1209,10 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(values["graph_measured_capture_deferral_count"], 1)
         self.assertEqual(values["graph_measured_replay_success_count"], 8)
         self.assertEqual(values["graph_measured_live_count_end"], 1)
+        self.assertEqual(values["external_yield_sync_call_count"], 5)
+        self.assertEqual(values["external_yield_sync_failure_count"], 0)
+        self.assertEqual(values["external_yield_sync_total_ms"], 75.0)
+        self.assertEqual(values["external_yield_sync_max_ms"], 25.0)
 
         with self.assertRaises(serve.QualificationError):
             serve.counter_delta({"counter": 2}, {"counter": 1}, "counter")

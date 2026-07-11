@@ -63,7 +63,16 @@ SLO_E2E_MS = 120_000.0
 STREAM_READ_POLL_SECONDS = 0.25
 
 
-def _variant_config(*, kv_autoscale: bool, rocm_graphs: bool) -> dict[str, Any]:
+def _variant_config(
+    *,
+    serving_profile: str,
+    kv_autoscale_requested: bool,
+    kv_autoscale_enabled: bool,
+    memory_reclaim_requested_mode: str,
+    memory_reclaim_mode: str,
+    rocm_graphs_requested: bool,
+    rocm_graphs_enabled: bool,
+) -> dict[str, Any]:
     return {
         "build": {
             "binary": BUILD_BINARY,
@@ -77,9 +86,13 @@ def _variant_config(*, kv_autoscale: bool, rocm_graphs: bool) -> dict[str, Any]:
             "rocm_path": BUILD_ROCM_PATH,
         },
         "runtime": {
-            "kv_autoscale_enabled": kv_autoscale,
-            "memory_reclaim_mode": "off",
-            "rocm_graphs_enabled": rocm_graphs,
+            "serving_profile": serving_profile,
+            "kv_autoscale_requested": kv_autoscale_requested,
+            "kv_autoscale_enabled": kv_autoscale_enabled,
+            "memory_reclaim_requested_mode": memory_reclaim_requested_mode,
+            "memory_reclaim_mode": memory_reclaim_mode,
+            "rocm_graphs_requested": rocm_graphs_requested,
+            "rocm_graphs_enabled": rocm_graphs_enabled,
         },
         "server": {
             "chat_performance_metadata_enabled": True,
@@ -116,10 +129,73 @@ def _variant_config(*, kv_autoscale: bool, rocm_graphs: bool) -> dict[str, Any]:
 
 
 VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
-    "default": _variant_config(kv_autoscale=True, rocm_graphs=True),
-    "autoscale-off": _variant_config(kv_autoscale=False, rocm_graphs=True),
-    "graphs-off": _variant_config(kv_autoscale=True, rocm_graphs=False),
-    "both-off": _variant_config(kv_autoscale=False, rocm_graphs=False),
+    "default": _variant_config(
+        serving_profile="experimental",
+        kv_autoscale_requested=True,
+        kv_autoscale_enabled=True,
+        memory_reclaim_requested_mode="off",
+        memory_reclaim_mode="off",
+        rocm_graphs_requested=True,
+        rocm_graphs_enabled=True,
+    ),
+    "autoscale-off": _variant_config(
+        serving_profile="experimental",
+        kv_autoscale_requested=False,
+        kv_autoscale_enabled=False,
+        memory_reclaim_requested_mode="off",
+        memory_reclaim_mode="off",
+        rocm_graphs_requested=True,
+        rocm_graphs_enabled=True,
+    ),
+    "graphs-off": _variant_config(
+        serving_profile="experimental",
+        kv_autoscale_requested=True,
+        kv_autoscale_enabled=True,
+        memory_reclaim_requested_mode="off",
+        memory_reclaim_mode="off",
+        rocm_graphs_requested=False,
+        rocm_graphs_enabled=False,
+    ),
+    "both-off": _variant_config(
+        serving_profile="experimental",
+        kv_autoscale_requested=False,
+        kv_autoscale_enabled=False,
+        memory_reclaim_requested_mode="off",
+        memory_reclaim_mode="off",
+        rocm_graphs_requested=False,
+        rocm_graphs_enabled=False,
+    ),
+    "stable": _variant_config(
+        serving_profile="stable",
+        kv_autoscale_requested=True,
+        kv_autoscale_enabled=False,
+        memory_reclaim_requested_mode="automatic",
+        memory_reclaim_mode="off",
+        rocm_graphs_requested=True,
+        rocm_graphs_enabled=False,
+    ),
+}
+
+
+PROFILE_POLICIES: dict[str, dict[str, bool | str]] = {
+    "experimental": {
+        "inference_admission": True,
+        "training_gpu_ownership": True,
+        "adapter_weight_transitions": True,
+        "dynamic_kv_resize": True,
+        "allocator_reclaim": True,
+        "live_graph_capture": True,
+        "exclusive_gpu_behavior": "writer_priority",
+    },
+    "stable": {
+        "inference_admission": True,
+        "training_gpu_ownership": False,
+        "adapter_weight_transitions": False,
+        "dynamic_kv_resize": False,
+        "allocator_reclaim": False,
+        "live_graph_capture": False,
+        "exclusive_gpu_behavior": "reject",
+    },
 }
 
 
@@ -139,6 +215,11 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "e2e_latency_ms_p50": ("ms", "p50", True),
     "e2e_latency_ms_p99": ("ms", "p99", True),
     "e2e_latency_ms_p999": ("ms", "p99.9", True),
+    "external_yield_sync_call_count": ("count", "sum", False),
+    "external_yield_sync_failure_count": ("count", "sum", True),
+    "external_yield_sync_max_ms": ("ms", "max", True),
+    "external_yield_sync_slow_count": ("count", "sum", True),
+    "external_yield_sync_total_ms": ("ms", "sum", True),
     "graph_measured_capture_attempt_count": ("count", "sum", False),
     "graph_measured_capture_deferral_count": ("count", "sum", True),
     "graph_measured_capture_failure_count": ("count", "sum", True),
@@ -187,6 +268,13 @@ GRAPH_MONOTONIC_FIELDS = (
     "failures",
 )
 GRAPH_GAUGE_FIELDS = ("captured_graph_count",)
+EXTERNAL_YIELD_SYNC_MONOTONIC_FIELDS = (
+    "calls",
+    "failures",
+    "total_micros",
+    "max_micros",
+    "slow_calls",
+)
 
 
 class QualificationError(RuntimeError):
@@ -910,6 +998,8 @@ def classify_server_event(
         return "graph_fallback"
     if lowered.startswith("rocm hip graph captured for decode"):
         return "graph_capture"
+    if lowered == "slow_backend_external_yield_sync":
+        return "external_yield_sync"
     if lowered == "stream_request_bound":
         return "stream_request_bound"
     if lowered == "response_channel_backpressure":
@@ -1135,22 +1225,25 @@ def server_environment(
                 config["server"]["http_send_buffer_bytes"]
             ),
             "KILN_LOG_FORMAT": config["server"]["log_format"],
-            "KILN_MEMORY_RECLAIM_MODE": config["runtime"]["memory_reclaim_mode"],
+            "KILN_MEMORY_RECLAIM_MODE": config["runtime"][
+                "memory_reclaim_requested_mode"
+            ],
             "KILN_MODEL_PATH": str(model_path),
             "KILN_PORT": str(port),
             "KILN_REQUEST_TIMEOUT_SECS": str(
                 config["server"]["request_timeout_seconds"]
             ),
             "KILN_SERVED_MODEL_ID": MODEL_ID,
+            "KILN_SERVING_PROFILE": config["runtime"]["serving_profile"],
             "KILN_STREAM_STALL_GRACE_MS": str(
                 config["server"]["stream_stall_grace_ms"]
             ),
             "RUST_LOG": "kiln=info,kiln_server=info,kiln_model=info,kiln_memory=info,tower_http=warn",
         }
     )
-    if not config["runtime"]["kv_autoscale_enabled"]:
+    if not config["runtime"]["kv_autoscale_requested"]:
         environment["KILN_KV_AUTOSCALE"] = "0"
-    if not config["runtime"]["rocm_graphs_enabled"]:
+    if not config["runtime"]["rocm_graphs_requested"]:
         environment["KILN_ROCM_GRAPHS"] = "0"
     return environment
 
@@ -1311,6 +1404,25 @@ def attest_runtime(
     if health.get("backend") != "model":
         failures.append(f"health.backend={health.get('backend')!r}, expected 'model'")
     failures.extend(gpu_memory_attestation_failures(health.get("gpu_memory")))
+    serving_profile = health.get("serving_profile")
+    expected_profile = expected["serving_profile"]
+    expected_policy = PROFILE_POLICIES[expected_profile]
+    if not isinstance(serving_profile, dict):
+        failures.append("health.serving_profile is missing")
+    else:
+        expected_profile_fields = {
+            "profile": expected_profile,
+            "source": "environment",
+            "immutable_after_startup": True,
+            "request_overrides_allowed": False,
+            "effective_policy_source": "serving_profile",
+            "effective_policy": expected_policy,
+        }
+        for field, value in expected_profile_fields.items():
+            if serving_profile.get(field) != value:
+                failures.append(
+                    f"serving profile {field}={serving_profile.get(field)!r}, expected {value!r}"
+                )
     expected_send_buffer = VARIANT_CONFIGS[variant]["server"]["http_send_buffer_bytes"]
     health_http = health.get("http")
     debug_http = debug.get("http")
@@ -1357,26 +1469,44 @@ def attest_runtime(
     if not isinstance(autoscaler, dict):
         failures.append("KV autoscaler runtime state is missing")
     else:
-        expected_autoscaler_fields = {
-            "requested": expected_autoscaler,
-            "enabled": expected_autoscaler,
-            "state": "enabled" if expected_autoscaler else "disabled",
-            "reason": "active" if expected_autoscaler else "environment",
-        }
+        if expected_profile == "stable":
+            expected_autoscaler_fields = {
+                "requested": expected["kv_autoscale_requested"],
+                "enabled": False,
+                "state": "unavailable",
+                "reason": "serving_profile_stable",
+            }
+        else:
+            expected_autoscaler_fields = {
+                "requested": expected["kv_autoscale_requested"],
+                "enabled": expected_autoscaler,
+                "state": "enabled" if expected_autoscaler else "disabled",
+                "reason": "active" if expected_autoscaler else "environment",
+            }
         for field, value in expected_autoscaler_fields.items():
             if autoscaler.get(field) != value:
                 failures.append(
                     f"KV autoscaler {field}={autoscaler.get(field)!r}, expected {value!r}"
                 )
     governor = runtime.get("memory_governor")
-    if not isinstance(governor, dict) or governor.get("reclaim_mode") != expected[
-        "memory_reclaim_mode"
-    ]:
+    if not isinstance(governor, dict):
+        failures.append("memory governor runtime state is missing")
+    elif governor.get("reclaim_mode") != expected["memory_reclaim_mode"]:
         failures.append(f"memory reclaim mode does not match {expected['memory_reclaim_mode']!r}")
-    elif governor.get("automatic_monitor_enabled") is not False:
-        failures.append("memory governor automatic monitor unexpectedly enabled")
-    elif governor.get("source") != "environment":
-        failures.append("memory reclaim mode was not sourced from the isolated environment")
+    else:
+        if (
+            governor.get("requested_reclaim_mode")
+            != expected["memory_reclaim_requested_mode"]
+        ):
+            failures.append("memory reclaim requested mode does not match isolated input")
+        if governor.get("automatic_monitor_enabled") is not False:
+            failures.append("memory governor automatic monitor unexpectedly enabled")
+        if governor.get("source") != "environment":
+            failures.append("memory reclaim mode was not sourced from the isolated environment")
+        if governor.get("disabled_by_serving_profile") != (
+            expected_profile == "stable"
+        ):
+            failures.append("memory reclaim profile suppression state is incorrect")
     batching = runtime.get("batching_engine")
     if not isinstance(batching, dict):
         failures.append("batching engine is not enabled")
@@ -1408,8 +1538,8 @@ def attest_runtime(
         failures.append("debug env_flags are missing")
         return failures
     for name, enabled in (
-        ("KILN_KV_AUTOSCALE", expected["kv_autoscale_enabled"]),
-        ("KILN_ROCM_GRAPHS", expected["rocm_graphs_enabled"]),
+        ("KILN_KV_AUTOSCALE", expected["kv_autoscale_requested"]),
+        ("KILN_ROCM_GRAPHS", expected["rocm_graphs_requested"]),
     ):
         state = flags.get(name)
         if not isinstance(state, dict):
@@ -1420,9 +1550,9 @@ def attest_runtime(
             failures.append(f"disabled flag {name} must be present with value 0")
     memory_flag = flags.get("KILN_MEMORY_RECLAIM_MODE")
     if not isinstance(memory_flag, dict) or memory_flag.get("value") != expected[
-        "memory_reclaim_mode"
+        "memory_reclaim_requested_mode"
     ]:
-        failures.append("memory reclaim debug flag does not match effective mode")
+        failures.append("memory reclaim debug flag does not match requested mode")
     send_buffer_flag = flags.get("KILN_HTTP_SEND_BUFFER_BYTES")
     if (
         not isinstance(send_buffer_flag, dict)
@@ -1517,6 +1647,81 @@ def counter_delta(before: dict[str, int], after: dict[str, int], field: str) -> 
     return after[field] - before[field]
 
 
+def external_yield_sync_snapshot(health: dict[str, Any]) -> dict[str, dict[str, int]]:
+    backend_runtime = health.get("backend_runtime")
+    rows = (
+        backend_runtime.get("external_yield_sync")
+        if isinstance(backend_runtime, dict)
+        else None
+    )
+    if not isinstance(rows, list):
+        raise QualificationError("health.backend_runtime.external_yield_sync is missing")
+    snapshot: dict[str, dict[str, int]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise QualificationError("external-yield synchronization row is not an object")
+        boundary = row.get("boundary")
+        if not isinstance(boundary, str) or not boundary.strip():
+            raise QualificationError("external-yield synchronization boundary is empty")
+        if boundary in snapshot:
+            raise QualificationError(
+                f"duplicate external-yield synchronization boundary {boundary!r}"
+            )
+        counters: dict[str, int] = {}
+        for field in EXTERNAL_YIELD_SYNC_MONOTONIC_FIELDS:
+            value = row.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise QualificationError(
+                    f"external-yield field {boundary}.{field} must be a nonnegative integer, got {value!r}"
+                )
+            counters[field] = value
+        if counters["failures"] > counters["calls"]:
+            raise QualificationError(
+                f"external-yield failures exceed calls at {boundary!r}"
+            )
+        if counters["slow_calls"] > counters["calls"]:
+            raise QualificationError(
+                f"external-yield slow calls exceed calls at {boundary!r}"
+            )
+        snapshot[boundary] = counters
+    return snapshot
+
+
+def external_yield_sync_metric_values(
+    before_health: dict[str, Any], after_health: dict[str, Any]
+) -> dict[str, float | int]:
+    before = external_yield_sync_snapshot(before_health)
+    after = external_yield_sync_snapshot(after_health)
+    missing = sorted(set(before) - set(after))
+    if missing:
+        raise QualificationError(
+            f"external-yield synchronization boundaries disappeared: {missing}"
+        )
+    totals = {field: 0 for field in EXTERNAL_YIELD_SYNC_MONOTONIC_FIELDS}
+    max_micros = 0
+    for boundary, after_counters in after.items():
+        before_counters = before.get(
+            boundary,
+            {field: 0 for field in EXTERNAL_YIELD_SYNC_MONOTONIC_FIELDS},
+        )
+        for field in EXTERNAL_YIELD_SYNC_MONOTONIC_FIELDS:
+            if after_counters[field] < before_counters[field]:
+                raise QualificationError(
+                    f"external-yield counter {boundary}.{field} regressed from "
+                    f"{before_counters[field]} to {after_counters[field]}"
+                )
+        for field in ("calls", "failures", "total_micros", "slow_calls"):
+            totals[field] += after_counters[field] - before_counters[field]
+        max_micros = max(max_micros, after_counters["max_micros"])
+    return {
+        "external_yield_sync_call_count": totals["calls"],
+        "external_yield_sync_failure_count": totals["failures"],
+        "external_yield_sync_max_ms": max_micros / 1000.0,
+        "external_yield_sync_slow_count": totals["slow_calls"],
+        "external_yield_sync_total_ms": totals["total_micros"] / 1000.0,
+    }
+
+
 def read_stable_health(
     port: int, absolute_deadline: float, label: str
 ) -> dict[str, Any]:
@@ -1529,6 +1734,7 @@ def read_stable_health(
         if last_state != "busy":
             graph_snapshot(health)
             batching_snapshot(health)
+            external_yield_sync_snapshot(health)
             return health
         time.sleep(0.05)
     raise TimeoutError(f"{label} could not obtain stable graph health; last state={last_state!r}")
@@ -1700,6 +1906,7 @@ def classify_itl_outliers(
         "memory_reclaim",
         "graph_capture",
         "graph_fallback",
+        "external_yield_sync",
         "client_backpressure_start",
         "client_backpressure_timeout",
     }
@@ -1763,6 +1970,9 @@ def metric_values(
     batching_end = batching_snapshot(health_end)
     graph_start = graph_snapshot(health_after_warmup)
     graph_end = graph_snapshot(health_end)
+    external_yield_sync = external_yield_sync_metric_values(
+        health_measurement_start, health_end
+    )
     decode_forwards = counter_delta(
         batching_start, batching_end, "total_decode_forwards"
     )
@@ -1771,7 +1981,7 @@ def metric_values(
     )
     decode_rows = counter_delta(batching_start, batching_end, "total_decode_rows")
     categories = [event.category for event in events]
-    return {
+    values: dict[str, float | int] = {
         "attributed_itl_outlier_count": attributed,
         "batching_batched_decode_forward_count": batched_decode_forwards,
         "batching_decode_forward_count": decode_forwards,
@@ -1848,6 +2058,8 @@ def metric_values(
         "unexplained_itl_outlier_count": unexplained,
         "zero_token_response_count": zero_tokens,
     }
+    values.update(external_yield_sync)
+    return values
 
 
 def metrics_from_values(values: dict[str, float | int]) -> list[dict[str, Any]]:
@@ -2159,6 +2371,19 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             status_failures.append("measured load executed no batched decode forward")
         if values["batching_decode_row_count"] <= values["batching_decode_forward_count"]:
             status_failures.append("measured decode rows do not prove multi-row batching")
+        if values["external_yield_sync_call_count"] < 1:
+            status_failures.append(
+                "measured load exercised no attributed backend synchronization boundary"
+            )
+        if values["external_yield_sync_failure_count"] != 0:
+            status_failures.append("backend external-yield synchronization failed")
+        if (
+            VARIANT_CONFIGS[variant]["runtime"]["serving_profile"] == "stable"
+            and values["external_yield_sync_slow_count"] != 0
+        ):
+            status_failures.append(
+                "stable profile observed a backend synchronization taking at least 100 ms"
+            )
         if not cancellation_confirmed:
             status_failures.append("server did not confirm cancellation cleanup")
         if slow_peer_success < 1:

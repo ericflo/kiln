@@ -95,8 +95,30 @@ model directory and `--model-id` with its public identity. Select each declared
 A/B arm explicitly; the manifest, not an ambient environment variable, owns
 the effective configuration recorded in the receipt.
 
-For the Strix Halo ROCm mixed-serving workload, run each of `default`,
-`autoscale-off`, `graphs-off`, and `both-off` separately:
+For the supported Strix Halo ROCm serving contract, run the `stable` arm. It
+deliberately requests autoscaling, automatic allocator reclaim, and ROCm graphs,
+then requires the stable profile to suppress all three while mixed SSE load,
+long prefill, cancellation, and socket backpressure are active:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" ROCM_PATH=/opt/rocm \
+python3 scripts/qualification/run.py \
+  --variant stable \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen3.5-4B \
+  qualification/workloads/serving-mixed-rocm-v1.json
+```
+
+The receipt also records every backend external-yield synchronization boundary,
+call/failure/slow count, total time, and maximum duration. A failed sync, a sync
+lasting at least 100 ms, any physical resize/reclaim/graph event, or any
+unexplained ITL outlier fails the stable arm.
+
+For the historical dynamic-runtime A/B, run each of `default`,
+`autoscale-off`, `graphs-off`, and `both-off` separately. These four arms now
+pin `KILN_SERVING_PROFILE=experimental` so their requested graph/autoscale
+differences retain the semantics they had before stable became the default:
 
 ```bash
 PATH="$HOME/.cargo/bin:$PATH" ROCM_PATH=/opt/rocm \
@@ -108,10 +130,9 @@ python3 scripts/qualification/run.py \
   qualification/workloads/serving-mixed-rocm-v1.json
 ```
 
-The variant named `default` preserves the default KV-autoscale and ROCm-graph
-A/B settings, but the manifest intentionally applies one shared qualification
-transport envelope to every arm. It is not an uncontrolled production-default
-benchmark.
+The variant named `default` preserves the graph-on/autoscale-on A/B baseline,
+not the production serving default. The manifest intentionally applies one
+shared qualification transport envelope to every arm.
 
 Never edit a receipt to make it pass. A failed receipt is useful evidence: keep
 it when it identifies a reproducible product defect, fix the defect in a new
