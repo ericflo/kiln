@@ -58,8 +58,8 @@ requireText(serverConfig, 'port: DEFAULT_SERVER_PORT', 'server config default');
 
 const serverCli = read(files.serverCli);
 const cliDefaultCount = (serverCli.match(/default_value_t = default_server_url\(\)/g) || []).length;
-if (cliDefaultCount !== 15) {
-  throw new Error(`server CLI has ${cliDefaultCount} centralized URL defaults; expected 15`);
+if (cliDefaultCount !== 16) {
+  throw new Error(`server CLI has ${cliDefaultCount} centralized URL defaults; expected 16`);
 }
 rejectText(serverCli, 'default_value = "http://localhost:', 'server CLI');
 
