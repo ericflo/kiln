@@ -23,7 +23,7 @@ use kiln_model::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::config::{BatchTokenBudget, ConfigValueSource, StreamStallGrace};
+use crate::config::{BatchTokenBudget, ConfigValueSource, PrefillTokenBudget, StreamStallGrace};
 use crate::response_delivery::{
     DeliveryBarrierError, DeliveryBatch, DeliveryCommand, DeliveryKey, DeliveryResult,
     DeliveryResultNotifyError, DeliveryResultSink, DeliveryResultSinkError, DeliveryTerminal,
@@ -217,6 +217,8 @@ pub struct BatchingEngineSnapshot {
     pub active_prefill: usize,
     pub max_batch_tokens: usize,
     pub max_batch_tokens_source: ConfigValueSource,
+    pub max_prefill_tokens_per_cycle: usize,
+    pub max_prefill_tokens_per_cycle_source: ConfigValueSource,
     pub max_prefill_admission_quantum: usize,
     pub current_batch_size: usize,
     pub last_batch_size: usize,
@@ -1211,6 +1213,7 @@ impl BatchingEngineHandle {
             max_decode_batch,
             policy,
             BatchTokenBudget::default(),
+            PrefillTokenBudget::default(),
             response_delivery_policy,
         )
     }
@@ -1220,6 +1223,7 @@ impl BatchingEngineHandle {
         max_decode_batch: usize,
         policy: Option<DecodeBatcherPolicy>,
         max_batch_tokens: BatchTokenBudget,
+        max_prefill_tokens_per_cycle: PrefillTokenBudget,
         response_delivery_policy: ResponseDeliveryPolicy,
     ) -> Self {
         let max_decode_batch = max_decode_batch.max(1);
@@ -1227,6 +1231,7 @@ impl BatchingEngineHandle {
             forward,
             max_decode_batch,
             max_batch_tokens,
+            max_prefill_tokens_per_cycle,
             env_prefix_aware_admission(),
             env_prefill_admission_quantum_for_policy(max_decode_batch, policy),
             policy.is_some_and(|policy| policy.burst_prefill_admission),
@@ -1238,6 +1243,7 @@ impl BatchingEngineHandle {
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
         max_batch_tokens: BatchTokenBudget,
+        max_prefill_tokens_per_cycle: PrefillTokenBudget,
         prefix_aware_admission: bool,
         prefill_admission_quantum: usize,
         burst_refill: bool,
@@ -1260,6 +1266,7 @@ impl BatchingEngineHandle {
             forward,
             max_decode_batch.max(1),
             max_batch_tokens,
+            max_prefill_tokens_per_cycle,
             prefix_aware_admission,
             prefill_admission_quantum,
             burst_refill,
@@ -1575,6 +1582,7 @@ struct BatchingEngineActor {
     stopped: bool,
     max_decode_batch: usize,
     max_batch_tokens: usize,
+    max_prefill_tokens_per_cycle: usize,
     next_prefill_index: usize,
     prefix_aware_admission: bool,
     max_prefill_admissions_per_cycle: usize,
@@ -1611,6 +1619,7 @@ impl BatchingEngineActor {
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
         max_batch_tokens: BatchTokenBudget,
+        max_prefill_tokens_per_cycle: PrefillTokenBudget,
         prefix_aware_admission: bool,
         prefill_admission_quantum: usize,
         burst_refill: bool,
@@ -1631,10 +1640,25 @@ impl BatchingEngineActor {
             );
         }
         let max_prefill_admissions_per_cycle = prefill_admission_quantum.clamp(1, max_decode_batch);
+        let max_prefill_tokens_per_cycle_source = max_prefill_tokens_per_cycle.source();
+        let configured_max_prefill_tokens_per_cycle = max_prefill_tokens_per_cycle.tokens();
+        let max_prefill_tokens_per_cycle = configured_max_prefill_tokens_per_cycle
+            .min(max_batch_tokens.tokens())
+            .max(1);
+        if max_prefill_tokens_per_cycle != configured_max_prefill_tokens_per_cycle {
+            tracing::info!(
+                configured_max_prefill_tokens_per_cycle,
+                effective_max_prefill_tokens_per_cycle = max_prefill_tokens_per_cycle,
+                max_batch_tokens = max_batch_tokens.tokens(),
+                "prefill token ceiling reduced to the combined actor-cycle budget"
+            );
+        }
         let snapshot = BatchingEngineSnapshot {
             accepting: true,
             max_batch_tokens: max_batch_tokens.tokens(),
             max_batch_tokens_source: max_batch_tokens.source(),
+            max_prefill_tokens_per_cycle,
+            max_prefill_tokens_per_cycle_source,
             max_prefill_admission_quantum: max_prefill_admissions_per_cycle,
             stream_stall_grace_ms: duration_millis_saturating(
                 response_delivery_policy.stream_stall_grace,
@@ -1655,6 +1679,7 @@ impl BatchingEngineActor {
             stopped: false,
             max_decode_batch,
             max_batch_tokens: max_batch_tokens.tokens(),
+            max_prefill_tokens_per_cycle,
             next_prefill_index: 0,
             prefix_aware_admission,
             max_prefill_admissions_per_cycle,
@@ -1718,6 +1743,7 @@ impl BatchingEngineActor {
                 .ready_decode_indices_with_limit(self.max_batch_tokens)
                 .len();
             let admission_budget = self.max_batch_tokens.saturating_sub(decode_reservation);
+            let admission_budget = admission_budget.min(self.max_prefill_tokens_per_cycle);
             let admission = self.admit_waiting_with_budget(admission_budget);
             if self.stopped {
                 break;
@@ -1756,7 +1782,11 @@ impl BatchingEngineActor {
             let prefill_budget = self
                 .max_batch_tokens
                 .saturating_sub(admission.tokens_processed)
-                .saturating_sub(decoded_tokens);
+                .saturating_sub(decoded_tokens)
+                .min(
+                    self.max_prefill_tokens_per_cycle
+                        .saturating_sub(admission.tokens_processed),
+                );
             let advanced_prefill = self.run_prefill_budget(prefill_budget);
             if decoded_tokens > 0 || advanced_prefill {
                 continue;
@@ -2360,7 +2390,7 @@ impl BatchingEngineActor {
 
     #[cfg(test)]
     fn admit_waiting(&mut self) -> bool {
-        self.admit_waiting_with_budget(self.max_batch_tokens)
+        self.admit_waiting_with_budget(self.max_batch_tokens.min(self.max_prefill_tokens_per_cycle))
             .submitted_first_tokens
     }
 
@@ -3328,6 +3358,7 @@ mod tests {
             forward,
             max_decode_batch,
             BatchTokenBudget::default(),
+            PrefillTokenBudget::default(),
             prefix_aware_admission,
             prefill_admission_quantum,
             burst_refill,
@@ -3737,6 +3768,7 @@ mod tests {
             forward,
             8,
             BatchTokenBudget::default(),
+            PrefillTokenBudget::default(),
             env_prefix_aware_admission(),
             env_prefill_admission_quantum_for_policy(8, None),
             false,
@@ -3836,6 +3868,7 @@ mod tests {
             Arc::new(MockForward::default()),
             1,
             BatchTokenBudget::default(),
+            PrefillTokenBudget::default(),
             false,
             1,
             false,
@@ -4773,6 +4806,7 @@ mod tests {
             forward.clone(),
             8,
             BatchTokenBudget::default(),
+            PrefillTokenBudget::default(),
             false,
             8,
             false,
@@ -4902,6 +4936,7 @@ mod tests {
             forward.clone(),
             8,
             BatchTokenBudget::default(),
+            PrefillTokenBudget::default(),
             true,
             8,
             false,
@@ -4948,6 +4983,7 @@ mod tests {
         const MEDIUM_KEY: TokenId = 1_000;
         const LONG_KEY: TokenId = 16_000;
         const TOKEN_BUDGET: usize = 32;
+        const PREFILL_TOKEN_BUDGET: usize = 7;
 
         let forward = Arc::new(SyntheticPrefillForward::default());
         let budget = BatchTokenBudget::new(TOKEN_BUDGET, ConfigValueSource::ConfigFile).unwrap();
@@ -4955,6 +4991,7 @@ mod tests {
             forward.clone(),
             3,
             budget,
+            PrefillTokenBudget::new(PREFILL_TOKEN_BUDGET, ConfigValueSource::ConfigFile).unwrap(),
             false,
             3,
             true,
@@ -5015,7 +5052,12 @@ mod tests {
             in_flight.max_batch_tokens_source,
             ConfigValueSource::ConfigFile
         );
-        assert!(in_flight.last_prefill_tokens <= TOKEN_BUDGET);
+        assert_eq!(in_flight.max_prefill_tokens_per_cycle, PREFILL_TOKEN_BUDGET);
+        assert_eq!(
+            in_flight.max_prefill_tokens_per_cycle_source,
+            ConfigValueSource::ConfigFile
+        );
+        assert!(in_flight.last_prefill_tokens <= PREFILL_TOKEN_BUDGET);
         assert!(in_flight.total_prefill_forwards > 0);
 
         handle.cancel(long_id).await.unwrap();
@@ -5060,7 +5102,7 @@ mod tests {
         assert!(
             prefills
                 .iter()
-                .all(|(_, tokens, _)| *tokens <= TOKEN_BUDGET)
+                .all(|(_, tokens, _)| *tokens <= PREFILL_TOKEN_BUDGET)
         );
         assert_eq!(
             prefills

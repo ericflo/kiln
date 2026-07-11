@@ -42,6 +42,12 @@ pub const STREAM_STALL_GRACE_MAX_MS: u64 = DEFAULT_STREAM_STALL_GRACE_MS;
 /// the remainder.
 pub const MAX_BATCH_TOKENS_MIN: usize = 2;
 pub const MAX_BATCH_TOKENS_MAX: usize = 65_536;
+/// Default prompt-token work allowed between decode cohorts. The stable
+/// serving default is intentionally lower than the combined batch budget so a
+/// long prompt cannot turn one actor cycle into a visible decode pause.
+pub const DEFAULT_MAX_PREFILL_TOKENS_PER_CYCLE: usize = 64;
+pub const MAX_PREFILL_TOKENS_PER_CYCLE_MIN: usize = 1;
+pub const MAX_PREFILL_TOKENS_PER_CYCLE_MAX: usize = MAX_BATCH_TOKENS_MAX;
 /// Strict startup selector for the serving-safety contract.
 pub const SERVING_PROFILE_ENV: &str = "KILN_SERVING_PROFILE";
 
@@ -380,6 +386,67 @@ impl<'de> Deserialize<'de> for BatchTokenBudget {
     }
 }
 
+/// Validated prompt-token ceiling per actor cycle plus startup provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillTokenBudget {
+    tokens: usize,
+    source: ConfigValueSource,
+}
+
+impl PrefillTokenBudget {
+    pub(crate) fn new(tokens: usize, source: ConfigValueSource) -> Result<Self> {
+        validate_max_prefill_tokens_per_cycle(tokens)?;
+        Ok(Self { tokens, source })
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        let tokens = raw.trim().parse::<usize>().with_context(|| {
+            format!(
+                "KILN_MAX_PREFILL_TOKENS_PER_CYCLE must be a decimal integer in {}..={}, got {raw:?}",
+                MAX_PREFILL_TOKENS_PER_CYCLE_MIN, MAX_PREFILL_TOKENS_PER_CYCLE_MAX
+            )
+        })?;
+        Self::new(tokens, ConfigValueSource::Environment)
+            .context("invalid KILN_MAX_PREFILL_TOKENS_PER_CYCLE")
+    }
+
+    pub fn tokens(self) -> usize {
+        self.tokens
+    }
+
+    pub fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for PrefillTokenBudget {
+    fn default() -> Self {
+        Self {
+            tokens: DEFAULT_MAX_PREFILL_TOKENS_PER_CYCLE,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for PrefillTokenBudget {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(self.tokens as u64)
+    }
+}
+
+impl<'de> Deserialize<'de> for PrefillTokenBudget {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let tokens = usize::deserialize(deserializer)?;
+        Self::new(tokens, ConfigValueSource::ConfigFile).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Top-level configuration for kiln.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
@@ -674,6 +741,10 @@ pub struct ServerConfig {
     /// decode rows consume one token each; a resumable prefill may use only the
     /// remainder before the actor yields back to decode and control commands.
     pub max_batch_tokens: BatchTokenBudget,
+    /// Independent prompt-token ceiling inside the combined actor-cycle budget.
+    /// Decode rows reserve their token first; admission and resumable prefill
+    /// share this remainder so a long prompt cannot monopolize the actor.
+    pub max_prefill_tokens_per_cycle: PrefillTokenBudget,
     /// Enable deterministic eval-serving behavior for `kiln serve`.
     pub eval_mode: bool,
     /// Server-level default for chat-template `enable_thinking`. `None`
@@ -1075,6 +1146,7 @@ impl Default for ServerConfig {
             http_send_buffer_bytes: None,
             stream_stall_grace_ms: StreamStallGrace::default(),
             max_batch_tokens: BatchTokenBudget::default(),
+            max_prefill_tokens_per_cycle: PrefillTokenBudget::default(),
             eval_mode: false,
             default_thinking_enabled: None,
             default_thinking_budget_tokens: None,
@@ -1287,6 +1359,7 @@ impl KilnConfig {
         config.apply_serving_profile_env_override()?;
         config.apply_stream_stall_grace_env_override()?;
         config.apply_max_batch_tokens_env_override()?;
+        config.apply_max_prefill_tokens_per_cycle_env_override()?;
         config.request_log.apply_env_overrides();
         config.validate()?;
         Ok(config)
@@ -1617,6 +1690,26 @@ impl KilnConfig {
         Ok(())
     }
 
+    /// Resolve the prompt-only actor-cycle ceiling once at startup.
+    fn apply_max_prefill_tokens_per_cycle_env_override(&mut self) -> Result<()> {
+        let raw = match std::env::var("KILN_MAX_PREFILL_TOKENS_PER_CYCLE") {
+            Ok(raw) => raw,
+            Err(std::env::VarError::NotPresent) => return Ok(()),
+            Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+                "KILN_MAX_PREFILL_TOKENS_PER_CYCLE must be valid UTF-8 decimal tokens"
+            ),
+        };
+        self.apply_max_prefill_tokens_per_cycle_env_value(Some(&raw))
+    }
+
+    fn apply_max_prefill_tokens_per_cycle_env_value(&mut self, raw: Option<&str>) -> Result<()> {
+        if let Some(raw) = raw {
+            self.server.max_prefill_tokens_per_cycle =
+                PrefillTokenBudget::from_environment_value(raw)?;
+        }
+        Ok(())
+    }
+
     /// Validate configuration values. Returns an error describing the first invalid value.
     fn validate(&self) -> Result<()> {
         if self.server.port == 0 {
@@ -1630,6 +1723,7 @@ impl KilnConfig {
         }
         validate_stream_stall_grace_ms(self.server.stream_stall_grace_ms.millis())?;
         validate_max_batch_tokens(self.server.max_batch_tokens.tokens())?;
+        validate_max_prefill_tokens_per_cycle(self.server.max_prefill_tokens_per_cycle.tokens())?;
         if self.server.shutdown_timeout_secs == 0 {
             anyhow::bail!("server.shutdown_timeout_secs must be > 0");
         }
@@ -1699,6 +1793,17 @@ fn validate_max_batch_tokens(tokens: usize) -> Result<()> {
             "server.max_batch_tokens must be between {} and {} tokens, got {tokens}",
             MAX_BATCH_TOKENS_MIN,
             MAX_BATCH_TOKENS_MAX
+        );
+    }
+    Ok(())
+}
+
+fn validate_max_prefill_tokens_per_cycle(tokens: usize) -> Result<()> {
+    if !(MAX_PREFILL_TOKENS_PER_CYCLE_MIN..=MAX_PREFILL_TOKENS_PER_CYCLE_MAX).contains(&tokens) {
+        anyhow::bail!(
+            "server.max_prefill_tokens_per_cycle must be between {} and {} tokens, got {tokens}",
+            MAX_PREFILL_TOKENS_PER_CYCLE_MIN,
+            MAX_PREFILL_TOKENS_PER_CYCLE_MAX
         );
     }
     Ok(())
@@ -1980,6 +2085,7 @@ request_timeout_secs = 60
 http_send_buffer_bytes = 8192
 stream_stall_grace_ms = 1500
 max_batch_tokens = 1024
+max_prefill_tokens_per_cycle = 192
 eval_mode = true
 default_thinking_enabled = false
 default_thinking_budget_tokens = 256
@@ -2052,6 +2158,11 @@ composed_cache_max_entries = 8
             config.server.max_batch_tokens.source(),
             ConfigValueSource::ConfigFile
         );
+        assert_eq!(config.server.max_prefill_tokens_per_cycle.tokens(), 192);
+        assert_eq!(
+            config.server.max_prefill_tokens_per_cycle.source(),
+            ConfigValueSource::ConfigFile
+        );
         assert!(config.server.eval_mode);
         assert_eq!(config.server.default_thinking_enabled, Some(false));
         assert_eq!(config.server.default_thinking_budget_tokens, Some(256));
@@ -2112,6 +2223,10 @@ port = 3000
             StreamStallGrace::default()
         );
         assert_eq!(config.server.max_batch_tokens, BatchTokenBudget::default());
+        assert_eq!(
+            config.server.max_prefill_tokens_per_cycle,
+            PrefillTokenBudget::default()
+        );
         assert!(!config.server.eval_mode); // default
         assert_eq!(config.server.default_thinking_enabled, None); // default
         assert!(!config.server.fold_reasoning_into_content); // default
@@ -2479,6 +2594,72 @@ max_batch_tokens = 1024
                     .unwrap_err();
             assert!(
                 error.to_string().contains("server.max_batch_tokens"),
+                "unexpected error for {invalid}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_max_prefill_tokens_env_override_is_strict_and_source_tracked() {
+        let mut config: KilnConfig = toml::from_str(
+            r#"
+[server]
+max_prefill_tokens_per_cycle = 256
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.server.max_prefill_tokens_per_cycle.source(),
+            ConfigValueSource::ConfigFile
+        );
+
+        config
+            .apply_max_prefill_tokens_per_cycle_env_value(Some(" 64 "))
+            .unwrap();
+        assert_eq!(config.server.max_prefill_tokens_per_cycle.tokens(), 64);
+        assert_eq!(
+            config.server.max_prefill_tokens_per_cycle.source(),
+            ConfigValueSource::Environment
+        );
+
+        for invalid in ["", "0", "65537", "-1", "not-a-number"] {
+            let error = PrefillTokenBudget::from_environment_value(invalid).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("KILN_MAX_PREFILL_TOKENS_PER_CYCLE"),
+                "unexpected error for {invalid:?}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_max_prefill_tokens_toml_validation_bounds() {
+        for valid in [
+            MAX_PREFILL_TOKENS_PER_CYCLE_MIN,
+            MAX_PREFILL_TOKENS_PER_CYCLE_MAX,
+        ] {
+            let config: KilnConfig = toml::from_str(&format!(
+                "[server]\nmax_prefill_tokens_per_cycle = {valid}\n"
+            ))
+            .unwrap();
+            assert_eq!(config.server.max_prefill_tokens_per_cycle.tokens(), valid);
+            assert_eq!(
+                config.server.max_prefill_tokens_per_cycle.source(),
+                ConfigValueSource::ConfigFile
+            );
+        }
+
+        for invalid in [
+            MAX_PREFILL_TOKENS_PER_CYCLE_MIN - 1,
+            MAX_PREFILL_TOKENS_PER_CYCLE_MAX + 1,
+        ] {
+            let error = toml::from_str::<KilnConfig>(&format!(
+                "[server]\nmax_prefill_tokens_per_cycle = {invalid}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("server.max_prefill_tokens_per_cycle"),
                 "unexpected error for {invalid}: {error:#}"
             );
         }

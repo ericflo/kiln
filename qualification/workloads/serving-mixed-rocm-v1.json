@@ -47,7 +47,8 @@
           "http_send_buffer_bytes": 4096,
           "log_format": "json",
           "request_timeout_seconds": 180,
-          "stream_stall_grace_ms": 2000
+          "stream_stall_grace_ms": 2000,
+          "max_prefill_tokens_per_cycle": 64
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -117,6 +118,7 @@
               "batching_decode_forward_ms_total",
               "batching_decode_row_count",
               "batching_max_observed_batch_size",
+              "batching_max_prefill_tokens_per_cycle",
               "batching_mean_rows_per_forward",
               "batching_prefill_forward_count",
               "batching_prefill_forward_ms_max",
@@ -212,7 +214,8 @@
           "http_send_buffer_bytes": 4096,
           "log_format": "json",
           "request_timeout_seconds": 180,
-          "stream_stall_grace_ms": 2000
+          "stream_stall_grace_ms": 2000,
+          "max_prefill_tokens_per_cycle": 64
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -282,6 +285,7 @@
               "batching_decode_forward_ms_total",
               "batching_decode_row_count",
               "batching_max_observed_batch_size",
+              "batching_max_prefill_tokens_per_cycle",
               "batching_mean_rows_per_forward",
               "batching_prefill_forward_count",
               "batching_prefill_forward_ms_max",
@@ -377,7 +381,8 @@
           "http_send_buffer_bytes": 4096,
           "log_format": "json",
           "request_timeout_seconds": 180,
-          "stream_stall_grace_ms": 2000
+          "stream_stall_grace_ms": 2000,
+          "max_prefill_tokens_per_cycle": 64
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -447,6 +452,7 @@
               "batching_decode_forward_ms_total",
               "batching_decode_row_count",
               "batching_max_observed_batch_size",
+              "batching_max_prefill_tokens_per_cycle",
               "batching_mean_rows_per_forward",
               "batching_prefill_forward_count",
               "batching_prefill_forward_ms_max",
@@ -542,7 +548,8 @@
           "http_send_buffer_bytes": 4096,
           "log_format": "json",
           "request_timeout_seconds": 180,
-          "stream_stall_grace_ms": 2000
+          "stream_stall_grace_ms": 2000,
+          "max_prefill_tokens_per_cycle": 64
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -612,6 +619,7 @@
               "batching_decode_forward_ms_total",
               "batching_decode_row_count",
               "batching_max_observed_batch_size",
+              "batching_max_prefill_tokens_per_cycle",
               "batching_mean_rows_per_forward",
               "batching_prefill_forward_count",
               "batching_prefill_forward_ms_max",
@@ -707,7 +715,8 @@
           "http_send_buffer_bytes": 4096,
           "log_format": "json",
           "request_timeout_seconds": 180,
-          "stream_stall_grace_ms": 2000
+          "stream_stall_grace_ms": 2000,
+          "max_prefill_tokens_per_cycle": 64
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -777,6 +786,7 @@
               "batching_decode_forward_ms_total",
               "batching_decode_row_count",
               "batching_max_observed_batch_size",
+              "batching_max_prefill_tokens_per_cycle",
               "batching_mean_rows_per_forward",
               "batching_prefill_forward_count",
               "batching_prefill_forward_ms_max",

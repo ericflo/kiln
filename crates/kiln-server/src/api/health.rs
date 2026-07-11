@@ -333,6 +333,8 @@ struct BatchingEngineInfo {
     active_prefill: usize,
     max_batch_tokens: usize,
     max_batch_tokens_source: ConfigValueSource,
+    max_prefill_tokens_per_cycle: usize,
+    max_prefill_tokens_per_cycle_source: ConfigValueSource,
     max_prefill_admission_quantum: usize,
     current_batch_size: usize,
     last_batch_size: usize,
@@ -872,6 +874,8 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             active_prefill: snapshot.active_prefill,
             max_batch_tokens: snapshot.max_batch_tokens,
             max_batch_tokens_source: snapshot.max_batch_tokens_source,
+            max_prefill_tokens_per_cycle: snapshot.max_prefill_tokens_per_cycle,
+            max_prefill_tokens_per_cycle_source: snapshot.max_prefill_tokens_per_cycle_source,
             max_prefill_admission_quantum: snapshot.max_prefill_admission_quantum,
             current_batch_size: snapshot.current_batch_size,
             last_batch_size: snapshot.last_batch_size,
@@ -1002,6 +1006,8 @@ mod tests {
             active_prefill: 2,
             max_batch_tokens: 256,
             max_batch_tokens_source: ConfigValueSource::ConfigFile,
+            max_prefill_tokens_per_cycle: 64,
+            max_prefill_tokens_per_cycle_source: ConfigValueSource::Environment,
             last_prefill_tokens: 251,
             max_decode_forward_ms: 125.0,
             total_decode_forward_ms: 500.0,
@@ -1031,6 +1037,8 @@ mod tests {
         assert_eq!(json["active_prefill"], 2);
         assert_eq!(json["max_batch_tokens"], 256);
         assert_eq!(json["max_batch_tokens_source"], "config_file");
+        assert_eq!(json["max_prefill_tokens_per_cycle"], 64);
+        assert_eq!(json["max_prefill_tokens_per_cycle_source"], "environment");
         assert_eq!(json["last_prefill_tokens"], 251);
         assert_eq!(json["max_decode_forward_ms"], 125.0);
         assert_eq!(json["total_decode_forward_ms"], 500.0);

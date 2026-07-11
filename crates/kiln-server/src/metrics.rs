@@ -660,6 +660,16 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_max_prefill_tokens_per_cycle Effective prompt-token ceiling between decode cohorts.\n");
+        out.push_str("# TYPE kiln_batching_engine_max_prefill_tokens_per_cycle gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_max_prefill_tokens_per_cycle {}",
+                gauges.batching_engine.max_prefill_tokens_per_cycle
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_prefill_admission_quantum Maximum queued requests prefilled before yielding to decode.\n");
         out.push_str("# TYPE kiln_batching_engine_prefill_admission_quantum gauge\n");
         push_line(
@@ -1552,6 +1562,7 @@ mod tests {
                 active_decode: 3,
                 active_prefill: 2,
                 max_batch_tokens: 256,
+                max_prefill_tokens_per_cycle: 64,
                 max_prefill_admission_quantum: 2,
                 last_batch_size: 3,
                 max_observed_batch_size: 4,
@@ -1647,6 +1658,7 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_active_decode 3"));
         assert!(output.contains("kiln_batching_engine_active_prefill 2"));
         assert!(output.contains("kiln_batching_engine_max_batch_tokens 256"));
+        assert!(output.contains("kiln_batching_engine_max_prefill_tokens_per_cycle 64"));
         assert!(output.contains("kiln_batching_engine_prefill_admission_quantum 2"));
         assert!(output.contains("kiln_batching_engine_last_batch_size 3"));
         assert!(output.contains("kiln_batching_engine_max_observed_batch 4"));

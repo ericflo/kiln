@@ -58,6 +58,7 @@ OUTLIER_HISTORY_SIZE = 64
 SLOW_SOCKET_BUFFER_BYTES = 4096
 HTTP_SEND_BUFFER_BYTES = 4096
 STREAM_STALL_GRACE_MS = 2000
+MAX_PREFILL_TOKENS_PER_CYCLE = 64
 SLO_TTFT_MS = 30_000.0
 SLO_E2E_MS = 120_000.0
 STREAM_READ_POLL_SECONDS = 0.25
@@ -104,6 +105,7 @@ def _variant_config(
             "log_format": "json",
             "request_timeout_seconds": 180,
             "stream_stall_grace_ms": STREAM_STALL_GRACE_MS,
+            "max_prefill_tokens_per_cycle": MAX_PREFILL_TOKENS_PER_CYCLE,
         },
         "workload": {
             "cancellation_after_semantic_deltas": CANCELLATION_AFTER_DELTAS,
@@ -212,6 +214,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "batching_decode_forward_ms_total": ("ms", "sum", True),
     "batching_decode_row_count": ("rows", "sum", False),
     "batching_max_observed_batch_size": ("rows", "max", False),
+    "batching_max_prefill_tokens_per_cycle": ("tokens", "exact", True),
     "batching_mean_rows_per_forward": ("rows", "mean", False),
     "batching_prefill_forward_count": ("count", "sum", False),
     "batching_prefill_forward_ms_max": ("ms", "max", True),
@@ -1567,6 +1570,13 @@ def attest_runtime(
             failures.append("health batching stream-stall grace does not match config")
         if batching.get("stream_stall_grace_source") != "environment":
             failures.append("health batching stream-stall grace source is not environment")
+        expected_prefill_ceiling = VARIANT_CONFIGS[variant]["server"][
+            "max_prefill_tokens_per_cycle"
+        ]
+        if batching.get("max_prefill_tokens_per_cycle") != expected_prefill_ceiling:
+            failures.append("health batching prefill-token ceiling does not match config")
+        if batching.get("max_prefill_tokens_per_cycle_source") != "default":
+            failures.append("health batching prefill-token ceiling source is not default")
 
         debug_batching = debug.get("batching_engine")
         debug_snapshot = (
@@ -1576,11 +1586,18 @@ def attest_runtime(
         )
         if not isinstance(debug_snapshot, dict):
             failures.append("debug batching-engine snapshot is missing")
-        elif (
-            debug_snapshot.get("stream_stall_grace_ms") != expected_stall_grace
-            or debug_snapshot.get("stream_stall_grace_source") != "environment"
-        ):
-            failures.append("debug batching stream-stall policy does not match environment")
+        else:
+            if (
+                debug_snapshot.get("stream_stall_grace_ms") != expected_stall_grace
+                or debug_snapshot.get("stream_stall_grace_source") != "environment"
+            ):
+                failures.append("debug batching stream-stall policy does not match environment")
+            if (
+                debug_snapshot.get("max_prefill_tokens_per_cycle")
+                != expected_prefill_ceiling
+                or debug_snapshot.get("max_prefill_tokens_per_cycle_source") != "default"
+            ):
+                failures.append("debug batching prefill-token ceiling does not match default")
 
     flags = debug.get("env_flags")
     if not isinstance(flags, dict):
@@ -1617,6 +1634,13 @@ def attest_runtime(
         != str(VARIANT_CONFIGS[variant]["server"]["stream_stall_grace_ms"])
     ):
         failures.append("stream-stall grace debug flag does not match effective policy")
+    prefill_ceiling_flag = flags.get("KILN_MAX_PREFILL_TOKENS_PER_CYCLE")
+    if (
+        not isinstance(prefill_ceiling_flag, dict)
+        or prefill_ceiling_flag.get("present") is not False
+        or prefill_ceiling_flag.get("value") is not None
+    ):
+        failures.append("prefill-token ceiling debug flag does not prove the default source")
     return failures
 
 
@@ -1631,6 +1655,7 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int]:
     snapshot: dict[str, float | int] = {}
     for field in (
         "max_observed_batch_size",
+        "max_prefill_tokens_per_cycle",
         "total_errors",
         "total_decode_forwards",
         "total_batched_decode_forwards",
@@ -2085,6 +2110,9 @@ def metric_values(
             batching_start["max_observed_batch_size"],
             batching_end["max_observed_batch_size"],
         ),
+        "batching_max_prefill_tokens_per_cycle": batching_end[
+            "max_prefill_tokens_per_cycle"
+        ],
         "batching_mean_rows_per_forward": decode_rows / max(decode_forwards, 1),
         "batching_prefill_forward_count": prefill_forwards,
         "batching_prefill_forward_ms_max": batching_end["max_prefill_forward_ms"],

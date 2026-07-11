@@ -110,6 +110,8 @@ struct BatchingEngineSnapshotDebug {
     active_prefill: usize,
     max_batch_tokens: usize,
     max_batch_tokens_source: ConfigValueSource,
+    max_prefill_tokens_per_cycle: usize,
+    max_prefill_tokens_per_cycle_source: ConfigValueSource,
     max_prefill_admission_quantum: usize,
     current_batch_size: usize,
     last_batch_size: usize,
@@ -395,6 +397,7 @@ fn selected_env_flags() -> BTreeMap<&'static str, EnvFlagState> {
         "KILN_HTTP_SEND_BUFFER_BYTES",
         "KILN_STREAM_STALL_GRACE_MS",
         "KILN_MAX_BATCH_TOKENS",
+        "KILN_MAX_PREFILL_TOKENS_PER_CYCLE",
     ]
     .into_iter()
     .map(|name| {
@@ -538,6 +541,8 @@ impl From<BatchingEngineSnapshot> for BatchingEngineSnapshotDebug {
             active_prefill: snapshot.active_prefill,
             max_batch_tokens: snapshot.max_batch_tokens,
             max_batch_tokens_source: snapshot.max_batch_tokens_source,
+            max_prefill_tokens_per_cycle: snapshot.max_prefill_tokens_per_cycle,
+            max_prefill_tokens_per_cycle_source: snapshot.max_prefill_tokens_per_cycle_source,
             max_prefill_admission_quantum: snapshot.max_prefill_admission_quantum,
             current_batch_size: snapshot.current_batch_size,
             last_batch_size: snapshot.last_batch_size,
@@ -732,6 +737,7 @@ mod tests {
         assert!(json["env_flags"]["KILN_HTTP_SEND_BUFFER_BYTES"].is_object());
         assert!(json["env_flags"]["KILN_STREAM_STALL_GRACE_MS"].is_object());
         assert!(json["env_flags"]["KILN_MAX_BATCH_TOKENS"].is_object());
+        assert!(json["env_flags"]["KILN_MAX_PREFILL_TOKENS_PER_CYCLE"].is_object());
         assert_eq!(json["http"]["send_buffer_requested_bytes"], 4096);
         assert_eq!(json["http"]["send_buffer_kernel_readback_bytes"], 8192);
         assert_eq!(json["http"]["send_buffer_effective_bytes"], 4096);
@@ -754,6 +760,8 @@ mod tests {
             active_prefill: 3,
             max_batch_tokens: 128,
             max_batch_tokens_source: ConfigValueSource::Environment,
+            max_prefill_tokens_per_cycle: 32,
+            max_prefill_tokens_per_cycle_source: ConfigValueSource::ConfigFile,
             last_prefill_tokens: 124,
             max_decode_forward_ms: 115.0,
             total_decode_forward_ms: 460.0,
@@ -778,6 +786,8 @@ mod tests {
         assert_eq!(json["active_prefill"], 3);
         assert_eq!(json["max_batch_tokens"], 128);
         assert_eq!(json["max_batch_tokens_source"], "environment");
+        assert_eq!(json["max_prefill_tokens_per_cycle"], 32);
+        assert_eq!(json["max_prefill_tokens_per_cycle_source"], "config_file");
         assert_eq!(json["last_prefill_tokens"], 124);
         assert_eq!(json["max_decode_forward_ms"], 115.0);
         assert_eq!(json["total_decode_forward_ms"], 460.0);

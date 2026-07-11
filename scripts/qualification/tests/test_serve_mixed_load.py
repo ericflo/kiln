@@ -102,6 +102,8 @@ def health_fixture(
             "batching_engine": {
                 "stream_stall_grace_ms": serve.STREAM_STALL_GRACE_MS,
                 "stream_stall_grace_source": "environment",
+                "max_prefill_tokens_per_cycle": serve.MAX_PREFILL_TOKENS_PER_CYCLE,
+                "max_prefill_tokens_per_cycle_source": "default",
                 "active_decode": 0,
                 "queue_depth": 0,
                 "max_observed_batch_size": 8,
@@ -147,6 +149,8 @@ def debug_fixture(
             "snapshot": {
                 "stream_stall_grace_ms": serve.STREAM_STALL_GRACE_MS,
                 "stream_stall_grace_source": "environment",
+                "max_prefill_tokens_per_cycle": serve.MAX_PREFILL_TOKENS_PER_CYCLE,
+                "max_prefill_tokens_per_cycle_source": "default",
             },
         },
         "env_flags": {
@@ -163,6 +167,10 @@ def debug_fixture(
             "KILN_STREAM_STALL_GRACE_MS": {
                 "present": True,
                 "value": str(serve.STREAM_STALL_GRACE_MS),
+            },
+            "KILN_MAX_PREFILL_TOKENS_PER_CYCLE": {
+                "present": False,
+                "value": None,
             },
         }
     }
@@ -1308,6 +1316,10 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(values["batching_batched_decode_forward_count"], 4)
         self.assertEqual(values["batching_decode_row_count"], 15)
         self.assertEqual(values["batching_mean_rows_per_forward"], 3.0)
+        self.assertEqual(
+            values["batching_max_prefill_tokens_per_cycle"],
+            serve.MAX_PREFILL_TOKENS_PER_CYCLE,
+        )
         self.assertEqual(values["batching_decode_forward_ms_total"], 600.0)
         self.assertEqual(values["batching_decode_forward_ms_max"], 150.0)
         self.assertEqual(values["batching_slow_decode_forward_count"], 2)
