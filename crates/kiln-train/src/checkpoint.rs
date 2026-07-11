@@ -437,6 +437,51 @@ impl ValidatedTrainingCheckpoint {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointPublicationStage {
+    StagingCreated,
+    SentinelSynced,
+    ArtifactsWritten,
+    ManifestAndArtifactsSynced,
+    ReadyToPublish,
+    Published,
+    ParentDirectorySynced,
+}
+
+impl CheckpointPublicationStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::StagingCreated => "staging_created",
+            Self::SentinelSynced => "sentinel_synced",
+            Self::ArtifactsWritten => "artifacts_written",
+            Self::ManifestAndArtifactsSynced => "manifest_and_artifacts_synced",
+            Self::ReadyToPublish => "ready_to_publish",
+            Self::Published => "published",
+            Self::ParentDirectorySynced => "parent_directory_synced",
+        }
+    }
+
+    #[cfg(test)]
+    fn is_published(self) -> bool {
+        matches!(self, Self::Published | Self::ParentDirectorySynced)
+    }
+}
+
+fn observe_checkpoint_publication_stage<O>(
+    observe: &mut O,
+    stage: CheckpointPublicationStage,
+) -> Result<()>
+where
+    O: FnMut(CheckpointPublicationStage) -> Result<()>,
+{
+    observe(stage).with_context(|| {
+        format!(
+            "checkpoint publication interrupted at durable stage {}",
+            stage.as_str()
+        )
+    })
+}
+
 /// Stage and publish one immutable resumable checkpoint directory.
 ///
 /// `write_artifacts` writes every declared artifact beneath the supplied
@@ -445,12 +490,28 @@ impl ValidatedTrainingCheckpoint {
 /// removed. Existing checkpoints are never overwritten.
 pub fn write_training_checkpoint_atomic<F>(
     target: &Path,
-    mut manifest: TrainingCheckpointManifest,
+    manifest: TrainingCheckpointManifest,
     artifacts: &[CheckpointArtifact],
     write_artifacts: F,
 ) -> Result<PathBuf>
 where
     F: FnOnce(&Path) -> Result<()>,
+{
+    write_training_checkpoint_atomic_observed(target, manifest, artifacts, write_artifacts, |_| {
+        Ok(())
+    })
+}
+
+fn write_training_checkpoint_atomic_observed<F, O>(
+    target: &Path,
+    mut manifest: TrainingCheckpointManifest,
+    artifacts: &[CheckpointArtifact],
+    write_artifacts: F,
+    mut observe: O,
+) -> Result<PathBuf>
+where
+    F: FnOnce(&Path) -> Result<()>,
+    O: FnMut(CheckpointPublicationStage) -> Result<()>,
 {
     ensure!(
         manifest.files.is_empty(),
@@ -495,6 +556,7 @@ where
     fs::create_dir(&staging)
         .with_context(|| format!("create checkpoint staging directory {}", staging.display()))?;
     let mut guard = StagingGuard::new(staging.clone());
+    observe_checkpoint_publication_stage(&mut observe, CheckpointPublicationStage::StagingCreated)?;
 
     let sentinel_path = staging.join(TRAINING_CHECKPOINT_INCOMPLETE_SENTINEL);
     write_new_synced_file(
@@ -502,8 +564,13 @@ where
         format!("{}\n", manifest.checkpoint_id).as_bytes(),
     )?;
     sync_directory(&staging)?;
+    observe_checkpoint_publication_stage(&mut observe, CheckpointPublicationStage::SentinelSynced)?;
 
     write_artifacts(&staging).context("write training checkpoint artifacts")?;
+    observe_checkpoint_publication_stage(
+        &mut observe,
+        CheckpointPublicationStage::ArtifactsWritten,
+    )?;
 
     let actual = collect_files(&staging)?;
     let expected: BTreeSet<_> = planned.keys().cloned().collect();
@@ -557,9 +624,14 @@ where
             .sync_all()
             .with_context(|| format!("sync checkpoint artifact {relative:?}"))?;
     }
+    observe_checkpoint_publication_stage(
+        &mut observe,
+        CheckpointPublicationStage::ManifestAndArtifactsSynced,
+    )?;
     fs::remove_file(&sentinel_path)
         .with_context(|| format!("remove checkpoint sentinel {}", sentinel_path.display()))?;
     sync_directory_tree(&staging)?;
+    observe_checkpoint_publication_stage(&mut observe, CheckpointPublicationStage::ReadyToPublish)?;
 
     fs::rename(&staging, target).with_context(|| {
         format!(
@@ -568,7 +640,12 @@ where
             target.display()
         )
     })?;
+    observe_checkpoint_publication_stage(&mut observe, CheckpointPublicationStage::Published)?;
     sync_directory(parent)?;
+    observe_checkpoint_publication_stage(
+        &mut observe,
+        CheckpointPublicationStage::ParentDirectorySynced,
+    )?;
     guard.disarm();
     Ok(target.to_path_buf())
 }
@@ -581,6 +658,7 @@ where
 /// semantics. Call [`load_training_checkpoint`] before restoring any state;
 /// that path additionally validates the complete file set and every checksum.
 pub fn read_training_checkpoint_manifest(path: &Path) -> Result<TrainingCheckpointManifest> {
+    validate_checkpoint_target(path)?;
     let root_meta = fs::symlink_metadata(path)
         .with_context(|| format!("stat training checkpoint {}", path.display()))?;
     ensure!(
@@ -681,7 +759,7 @@ fn validate_checkpoint_target(path: &Path) -> Result<()> {
         .context("training checkpoint target must have a UTF-8 basename")?;
     ensure!(
         basename.ends_with(TRAINING_CHECKPOINT_DIRECTORY_SUFFIX),
-        "resumable training checkpoint directory must end with {:?}",
+        "path is not a resumable training checkpoint: directory must end with {:?}",
         TRAINING_CHECKPOINT_DIRECTORY_SUFFIX
     );
     Ok(())
@@ -993,6 +1071,213 @@ mod tests {
         Ok(())
     }
 
+    fn publication_stages() -> [CheckpointPublicationStage; 7] {
+        [
+            CheckpointPublicationStage::StagingCreated,
+            CheckpointPublicationStage::SentinelSynced,
+            CheckpointPublicationStage::ArtifactsWritten,
+            CheckpointPublicationStage::ManifestAndArtifactsSynced,
+            CheckpointPublicationStage::ReadyToPublish,
+            CheckpointPublicationStage::Published,
+            CheckpointPublicationStage::ParentDirectorySynced,
+        ]
+    }
+
+    fn publication_stage_named(name: &str) -> Option<CheckpointPublicationStage> {
+        publication_stages()
+            .into_iter()
+            .find(|stage| stage.as_str() == name)
+    }
+
+    #[test]
+    fn injected_fault_at_every_publication_stage_is_absent_or_valid() -> Result<()> {
+        for fault_stage in publication_stages() {
+            let temp = tempfile::tempdir()?;
+            let target = temp.path().join("fault.kiln-checkpoint");
+            let error = format!(
+                "{:#}",
+                write_training_checkpoint_atomic_observed(
+                    &target,
+                    manifest(),
+                    &artifacts(),
+                    write_artifacts,
+                    |stage| {
+                        if stage == fault_stage {
+                            bail!("injected fault at {}", stage.as_str());
+                        }
+                        Ok(())
+                    },
+                )
+                .unwrap_err()
+            );
+            assert!(
+                error.contains(&format!("injected fault at {}", fault_stage.as_str())),
+                "wrong error at {fault_stage:?}: {error}"
+            );
+
+            if fault_stage.is_published() {
+                load_training_checkpoint(&target).with_context(|| {
+                    format!("published target must remain valid after {fault_stage:?}")
+                })?;
+            } else {
+                assert!(
+                    !target.exists(),
+                    "pre-publish fault {fault_stage:?} exposed the final basename"
+                );
+                assert_eq!(
+                    fs::read_dir(temp.path())?.count(),
+                    0,
+                    "in-process cleanup leaked staging after {fault_stage:?}"
+                );
+                write_training_checkpoint_atomic(
+                    &target,
+                    manifest(),
+                    &artifacts(),
+                    write_artifacts,
+                )?;
+                load_training_checkpoint(&target).with_context(|| {
+                    format!("retry after {fault_stage:?} did not produce a valid checkpoint")
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_kill_at_every_publication_stage_is_absent_or_valid() -> Result<()> {
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        const CHILD_ROOT_ENV: &str = "KILN_CHECKPOINT_KILL_CHILD_ROOT";
+        const CHILD_STAGE_ENV: &str = "KILN_CHECKPOINT_KILL_CHILD_STAGE";
+        const TARGET_BASENAME: &str = "crash.kiln-checkpoint";
+        const READY_MARKER: &str = "publication-stage-ready";
+
+        if let Some(root) = std::env::var_os(CHILD_ROOT_ENV) {
+            let root = PathBuf::from(root);
+            let stage_name = std::env::var(CHILD_STAGE_ENV)
+                .context("checkpoint kill child omitted publication stage")?;
+            let stop_stage = publication_stage_named(&stage_name)
+                .with_context(|| format!("unknown checkpoint publication stage {stage_name:?}"))?;
+            let marker = root.join(READY_MARKER);
+            let result = write_training_checkpoint_atomic_observed(
+                &root.join(TARGET_BASENAME),
+                manifest(),
+                &artifacts(),
+                write_artifacts,
+                |stage| {
+                    if stage == stop_stage {
+                        write_new_synced_file(&marker, format!("{}\n", stage.as_str()).as_bytes())?;
+                        sync_directory(&root)?;
+                        loop {
+                            std::thread::sleep(Duration::from_secs(60));
+                        }
+                    }
+                    Ok(())
+                },
+            );
+            bail!(
+                "checkpoint kill child passed stop stage {stop_stage:?} without blocking: {result:?}"
+            );
+        }
+
+        for stop_stage in publication_stages() {
+            let temp = tempfile::tempdir()?;
+            let case_root = temp.path().join(stop_stage.as_str());
+            fs::create_dir(&case_root)?;
+            let target = case_root.join(TARGET_BASENAME);
+            let marker = case_root.join(READY_MARKER);
+            let mut child = Command::new(std::env::current_exe()?)
+                .arg("process_kill_at_every_publication_stage_is_absent_or_valid")
+                .arg("--test-threads=1")
+                .env(CHILD_ROOT_ENV, &case_root)
+                .env(CHILD_STAGE_ENV, stop_stage.as_str())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .with_context(|| format!("spawn checkpoint kill child for {stop_stage:?}"))?;
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !marker.is_file() {
+                if let Some(status) = child.try_wait()? {
+                    bail!("checkpoint kill child exited before {stop_stage:?} marker: {status}");
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!("checkpoint kill child timed out before {stop_stage:?} marker");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            child.kill()?;
+            let status = child.wait()?;
+            assert_eq!(
+                status.signal(),
+                Some(9),
+                "child at {stop_stage:?} did not terminate by SIGKILL: {status}"
+            );
+
+            if stop_stage.is_published() {
+                load_training_checkpoint(&target).with_context(|| {
+                    format!("post-rename kill at {stop_stage:?} left an invalid target")
+                })?;
+                assert!(
+                    fs::read_dir(&case_root)?
+                        .filter_map(std::result::Result::ok)
+                        .all(|entry| !entry.file_name().to_string_lossy().starts_with('.')),
+                    "post-rename kill at {stop_stage:?} retained staging"
+                );
+                continue;
+            }
+
+            assert!(
+                !target.exists(),
+                "pre-rename kill at {stop_stage:?} exposed the final basename"
+            );
+            let staging_prefix = format!(".{TARGET_BASENAME}.incomplete-");
+            let staging = fs::read_dir(&case_root)?
+                .filter_map(std::result::Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with(&staging_prefix))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                staging.len(),
+                1,
+                "pre-rename kill at {stop_stage:?} did not retain exactly one orphan staging directory"
+            );
+            assert!(
+                load_training_checkpoint(&staging[0]).is_err(),
+                "orphan staging at {stop_stage:?} must never be accepted as resumable"
+            );
+            let sentinel_exists = staging[0]
+                .join(TRAINING_CHECKPOINT_INCOMPLETE_SENTINEL)
+                .exists();
+            assert_eq!(
+                sentinel_exists,
+                matches!(
+                    stop_stage,
+                    CheckpointPublicationStage::SentinelSynced
+                        | CheckpointPublicationStage::ArtifactsWritten
+                        | CheckpointPublicationStage::ManifestAndArtifactsSynced
+                ),
+                "unexpected sentinel state after {stop_stage:?}"
+            );
+
+            write_training_checkpoint_atomic(&target, manifest(), &artifacts(), write_artifacts)?;
+            load_training_checkpoint(&target).with_context(|| {
+                format!("retry around orphan staging after {stop_stage:?} was invalid")
+            })?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn atomic_round_trip_is_explicitly_resumable() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -1063,11 +1348,11 @@ mod tests {
         fs::create_dir(&peft)?;
         fs::write(peft.join("adapter_config.json"), b"{}")?;
         fs::write(peft.join("adapter_model.safetensors"), b"weights")?;
+        let error = load_training_checkpoint(&peft).unwrap_err().to_string();
         assert!(
-            load_training_checkpoint(&peft)
-                .unwrap_err()
-                .to_string()
-                .contains("not resumable")
+            error.contains("not a resumable training checkpoint")
+                && error.contains(TRAINING_CHECKPOINT_DIRECTORY_SUFFIX),
+            "PEFT rejection must name the canonical checkpoint suffix: {error}"
         );
         Ok(())
     }

@@ -22,9 +22,20 @@ the declared state files, computes their sizes and SHA-256 hashes, writes and
 synchronizes the manifest, removes the sentinel, and atomically renames the
 directory into place. Checkpoint names are immutable and cannot be overwritten.
 
-The loader rejects an incomplete sentinel, unsupported schema/type, unknown
-manifest fields, invalid or escaping paths, symlinks, missing or untracked
-files, size drift, and checksum drift before returning any state to a trainer.
+The loader accepts only a canonical `.kiln-checkpoint` basename and rejects an
+incomplete sentinel, unsupported schema/type, unknown manifest fields, invalid
+or escaping paths, symlinks, missing or untracked files, size drift, and
+checksum drift before returning any state to a trainer.
+
+The publication state machine is process-kill qualified at all seven durable
+boundaries: staging creation, sentinel sync, artifact write, manifest/artifact
+sync, ready-to-rename, atomic rename, and parent-directory sync. Deterministic
+fault injection and real child-process `SIGKILL` prove that the canonical final
+basename is absent before rename and fully checksum-valid after rename. A crash
+may retain a hidden UUID-suffixed staging directory, including the narrow state
+after its sentinel was removed, but its noncanonical basename is never
+loadable or discoverable as a resume checkpoint. A new writer can safely retry
+the intended immutable basename beside that orphan.
 
 On a shared serving GPU, checkpoint publication has two phases. Kiln takes the
 same interruptible serving write lock used by an optimizer step only while it
@@ -234,7 +245,9 @@ support-bot-checkpoint-step-00000025.kiln-checkpoint/
 
 They are published there while training is running, independently of the
 temporary final-adapter staging tree. A process crash can therefore lose the
-in-flight step, group, or OPD candidate, but not the last committed checkpoint.
+in-flight step, group, or OPD candidate, but not the last committed checkpoint;
+an interrupted checkpoint publication is either absent or complete at its
+canonical basename.
 
 `GET /v1/train/jobs/{job_id}` reports `latest_checkpoint`, including the
 `resume_checkpoint` basename, `training_kind`, `data_source_kind`, committed
