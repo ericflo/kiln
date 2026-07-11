@@ -280,6 +280,26 @@ async fn main() -> Result<()> {
                 )
                 .await;
             }
+            TrainCommands::Opd {
+                file,
+                adapter,
+                teacher,
+                lora_rank,
+                checkpoint_interval,
+                resume_checkpoint,
+                url,
+            } => {
+                return cli::run_train_opd(
+                    url,
+                    file,
+                    adapter,
+                    teacher.as_deref(),
+                    *lora_rank,
+                    checkpoint_interval.map(std::num::NonZeroUsize::get),
+                    resume_checkpoint.as_deref(),
+                )
+                .await;
+            }
             TrainCommands::Status { job_id, url } => {
                 return cli::run_train_status(url, job_id.as_deref()).await;
             }

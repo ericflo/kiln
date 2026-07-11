@@ -19,7 +19,7 @@ use crate::config::default_server_url;
 
 const TOP_LEVEL_OVERVIEW: &str = r#"Kiln serves Qwen3.5-4B from one Rust process and lets you adapt it with live LoRA training.
 
-Running `kiln` with no subcommand starts the OpenAI-compatible server, just like `kiln serve`. Commands such as `kiln health`, `kiln train sft`, `kiln train grpo`, and `kiln adapters list` talk to a running server.
+Running `kiln` with no subcommand starts the OpenAI-compatible server, just like `kiln serve`. Commands such as `kiln health`, `kiln train sft`, `kiln train grpo`, `kiln train opd`, and `kiln adapters list` talk to a running server.
 
 After `kiln serve`, open http://127.0.0.1:8420/ui/ for the embedded dashboard: status, adapters, training monitoring, and quick inference.
 
@@ -28,6 +28,7 @@ Common next steps:
   kiln health         inspect a running server
   kiln train sft      train a LoRA adapter from corrections
   kiln train grpo     train a LoRA adapter from scored completions
+  kiln train opd      distill a LoRA adapter from a registered teacher
   kiln adapters list  list saved adapters and show which one is active
 "#;
 
@@ -105,9 +106,9 @@ const HEALTH_EXAMPLES: &str = r#"Examples:
   See Troubleshooting if /health is not ready, the model path is wrong, CUDA is unavailable, or the server is not reachable.
 "#;
 
-const TRAIN_OVERVIEW: &str = r#"Submit SFT or GRPO training jobs to the running Kiln server at http://localhost:8420 by default.
+const TRAIN_OVERVIEW: &str = r#"Submit SFT, GRPO, or OPD training jobs to the running Kiln server at http://localhost:8420 by default.
 
-SFT reads JSONL: one chat correction example per line with a messages array. GRPO reads either one JSON request/batch with groups or JSONL with one group per line; each group has prompt messages plus candidate completions containing text and reward scores.
+SFT reads JSONL: one chat correction example per line with a messages array. GRPO reads either one JSON request/batch with groups or JSONL with one group per line; each group has prompt messages plus candidate completions containing text and reward scores. OPD reads one JSON API request or a JSON array of prompts and requires a registered teacher alias.
 
 Add --adapter-smoke-test to record a small base-vs-adapter canary check in train_receipt.json after successful training.
 
@@ -132,6 +133,15 @@ Use --checkpoint-interval N to emit exact resumable checkpoints every N optimize
 Open http://127.0.0.1:8420/ui/ for guided submission and training status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
 
+const TRAIN_OPD_OVERVIEW: &str = r#"Train with on-policy or off-policy distillation from a registered teacher.
+
+The input is either one /v1/train/opd JSON request object or a JSON array of prompts. Use --teacher to supply or override the request's teacher alias; --adapter always sets config.output_name.
+
+OPD publishes exact resumable checkpoints every 25 committed optimizer steps by default. Use --checkpoint-interval N to change the cadence, and resume with the same input/effective configuration plus --resume-checkpoint BASENAME from `kiln train status --job-id ID`.
+
+Open http://127.0.0.1:8420/ui/ for guided submission and training status.
+"#;
+
 const TRAIN_EXAMPLES: &str = r#"Examples:
   kiln train sft --file corrections.jsonl --adapter support-bot
       Train from SFT JSONL: one chat correction example per line with a messages array.
@@ -147,6 +157,12 @@ const TRAIN_EXAMPLES: &str = r#"Examples:
 
   kiln train grpo --file grpo-groups.jsonl --adapter support-bot --checkpoint-interval 25
       Publish an exact immutable resume point every 25 optimizer groups.
+
+  kiln train opd --file opd-request.json --adapter distilled-bot --teacher teacher-v1
+      Submit an OPD request while setting its output adapter and teacher alias.
+
+  kiln train opd --file opd-request.json --adapter distilled-bot --teacher teacher-v1 --resume-checkpoint distilled-bot-checkpoint-step-00000025.kiln-checkpoint
+      Resume from the exact immutable OPD checkpoint reported by job status.
 
   kiln train status
       Show the training queue and recent jobs on the running server.
@@ -747,6 +763,37 @@ pub enum TrainCommands {
         adapter_smoke_test: bool,
 
         /// Emit an exact resumable checkpoint every N optimizer groups
+        #[arg(long)]
+        checkpoint_interval: Option<std::num::NonZeroUsize>,
+
+        /// Immutable .kiln-checkpoint basename reported by job status
+        #[arg(long)]
+        resume_checkpoint: Option<String>,
+
+        /// Server URL; defaults to the local kiln serve instance
+        #[arg(long, default_value_t = default_server_url())]
+        url: String,
+    },
+    /// Train a LoRA adapter by on-policy or off-policy distillation
+    #[command(long_about = TRAIN_OPD_OVERVIEW)]
+    Opd {
+        /// Path to one OPD request object or a JSON array of prompts
+        #[arg(long, short)]
+        file: String,
+
+        /// Adapter name to train
+        #[arg(long, default_value = "default")]
+        adapter: String,
+
+        /// Registered teacher alias; overrides the request when present
+        #[arg(long)]
+        teacher: Option<String>,
+
+        /// LoRA rank for the trained adapter
+        #[arg(long)]
+        lora_rank: Option<usize>,
+
+        /// Emit an exact resumable checkpoint every N committed optimizer steps
         #[arg(long)]
         checkpoint_interval: Option<std::num::NonZeroUsize>,
 
@@ -2162,42 +2209,7 @@ pub async fn run_train_sft(
         )
     };
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{url}/v1/train/sft"))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| handle_request_error(url, e))?;
-
-    let status = resp.status();
-    let resp_body: serde_json::Value = resp.json().await?;
-
-    if status.is_success() {
-        println!("{} Training job submitted", style("✓").green().bold());
-        let job_id = resp_body.get("job_id").and_then(|j| j.as_str());
-        if let Some(id) = job_id {
-            println!("  {} {}", style("Job ID:").dim(), id);
-        }
-        match job_id {
-            Some(id) => println!(
-                "  {} kiln train status --job-id {id} --url {url}",
-                style("Check status:").dim()
-            ),
-            None => println!(
-                "  {} kiln train status --url {url}",
-                style("Check status:").dim()
-            ),
-        }
-    } else {
-        eprintln!(
-            "{} Training submission failed: {}",
-            style("✗").red().bold(),
-            render_api_error(&resp_body, status)
-        );
-        std::process::exit(1);
-    }
-    Ok(())
+    submit_training_payload(url, "sft", "SFT", &body).await
 }
 
 /// Run the `train grpo` CLI subcommand.
@@ -2242,40 +2254,86 @@ pub async fn run_train_grpo(
         style(adapter).white().bold()
     );
 
+    submit_training_payload(url, "grpo", "GRPO", &body).await
+}
+
+/// Run the `train opd` CLI subcommand.
+pub async fn run_train_opd(
+    url: &str,
+    file: &str,
+    adapter: &str,
+    teacher: Option<&str>,
+    lora_rank: Option<usize>,
+    checkpoint_interval: Option<usize>,
+    resume_checkpoint: Option<&str>,
+) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(file)
+        .map_err(|error| anyhow::anyhow!("Failed to read {file}: {error}"))?;
+    let request: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|error| anyhow::anyhow!("Invalid JSON in {file}: {error}"))?;
+    let body = build_opd_training_payload(
+        request,
+        adapter,
+        teacher,
+        lora_rank,
+        checkpoint_interval,
+        resume_checkpoint,
+    )?;
+    let resolved_teacher = body["teacher"]
+        .as_str()
+        .expect("validated OPD request has a teacher");
+
+    println!(
+        "{} Submitting OPD training on adapter '{}' with teacher '{}'",
+        style("→").cyan().bold(),
+        style(adapter).white().bold(),
+        style(resolved_teacher).white().bold()
+    );
+    submit_training_payload(url, "opd", "OPD", &body).await
+}
+
+async fn submit_training_payload(
+    url: &str,
+    route: &str,
+    label: &str,
+    body: &serde_json::Value,
+) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{url}/v1/train/grpo"))
-        .json(&body)
+    let response = client
+        .post(format!("{url}/v1/train/{route}"))
+        .json(body)
         .send()
         .await
-        .map_err(|e| handle_request_error(url, e))?;
+        .map_err(|error| handle_request_error(url, error))?;
+    let status = response.status();
+    let response_body: serde_json::Value = response.json().await?;
 
-    let status = resp.status();
-    let resp_body: serde_json::Value = resp.json().await?;
-
-    if status.is_success() {
-        println!("{} GRPO training job submitted", style("✓").green().bold());
-        let job_id = resp_body.get("job_id").and_then(|j| j.as_str());
-        if let Some(id) = job_id {
-            println!("  {} {}", style("Job ID:").dim(), id);
-        }
-        match job_id {
-            Some(id) => println!(
-                "  {} kiln train status --job-id {id} --url {url}",
-                style("Check status:").dim()
-            ),
-            None => println!(
-                "  {} kiln train status --url {url}",
-                style("Check status:").dim()
-            ),
-        }
-    } else {
+    if !status.is_success() {
         eprintln!(
-            "{} GRPO submission failed: {}",
+            "{} {label} submission failed: {}",
             style("✗").red().bold(),
-            render_api_error(&resp_body, status)
+            render_api_error(&response_body, status)
         );
         std::process::exit(1);
+    }
+
+    println!(
+        "{} {label} training job submitted",
+        style("✓").green().bold()
+    );
+    let job_id = response_body.get("job_id").and_then(|value| value.as_str());
+    if let Some(id) = job_id {
+        println!("  {} {}", style("Job ID:").dim(), id);
+    }
+    match job_id {
+        Some(id) => println!(
+            "  {} kiln train status --job-id {id} --url {url}",
+            style("Check status:").dim()
+        ),
+        None => println!(
+            "  {} kiln train status --url {url}",
+            style("Check status:").dim()
+        ),
     }
     Ok(())
 }
@@ -2440,6 +2498,91 @@ fn build_grpo_training_payload(
     }
     if let Some(checkpoint) = resume_checkpoint {
         config_obj.insert("resume_checkpoint".into(), serde_json::json!(checkpoint));
+    }
+
+    Ok(body)
+}
+
+fn build_opd_training_payload(
+    body: serde_json::Value,
+    adapter: &str,
+    teacher_override: Option<&str>,
+    lora_rank: Option<usize>,
+    checkpoint_interval: Option<usize>,
+    resume_checkpoint: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    if adapter.trim().is_empty() {
+        anyhow::bail!("OPD --adapter must not be empty");
+    }
+    let mut body = match body {
+        serde_json::Value::Object(object) => serde_json::Value::Object(object),
+        serde_json::Value::Array(prompts) => serde_json::json!({ "prompts": prompts }),
+        _ => {
+            anyhow::bail!(
+                "OPD input must be a JSON request object or a JSON array of prompt objects"
+            )
+        }
+    };
+    let object = body
+        .as_object_mut()
+        .expect("OPD body was normalized to an object");
+    object.remove("adapter_name");
+
+    if let Some(teacher) = teacher_override {
+        if teacher.trim().is_empty() {
+            anyhow::bail!("OPD --teacher must not be empty");
+        }
+        object.insert("teacher".into(), serde_json::json!(teacher));
+    }
+    let teacher = object
+        .get("teacher")
+        .and_then(serde_json::Value::as_str)
+        .filter(|teacher| !teacher.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "OPD input must contain a non-empty teacher alias or be submitted with --teacher"
+            )
+        })?;
+    if teacher.trim() != teacher {
+        anyhow::bail!("OPD teacher alias must not have leading or trailing whitespace");
+    }
+
+    let config = object
+        .entry("config")
+        .or_insert_with(|| serde_json::json!({}));
+    let config = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("OPD request config must be a JSON object"))?;
+    config.insert("output_name".into(), serde_json::json!(adapter));
+    if let Some(rank) = lora_rank {
+        config.insert("lora_rank".into(), serde_json::json!(rank));
+    }
+    if let Some(interval) = checkpoint_interval {
+        config.insert("checkpoint_interval".into(), serde_json::json!(interval));
+    }
+    if let Some(checkpoint) = resume_checkpoint {
+        config.insert("resume_checkpoint".into(), serde_json::json!(checkpoint));
+    }
+
+    let request: kiln_train::OpdRequest = serde_json::from_value(body.clone())
+        .map_err(|error| anyhow::anyhow!("Invalid OPD request: {error}"))?;
+    request
+        .config
+        .validate_runtime_contract()
+        .map_err(|error| anyhow::anyhow!("Invalid OPD config: {error:#}"))?;
+    if request
+        .dataset_path
+        .as_deref()
+        .is_some_and(|path| path.trim().is_empty())
+    {
+        anyhow::bail!("OPD dataset_path must not be empty");
+    }
+    let has_prompts = !request.prompts.is_empty();
+    let has_dataset = request.dataset_path.is_some();
+    if has_prompts == has_dataset {
+        anyhow::bail!(
+            "OPD request must contain exactly one non-empty source: prompts or dataset_path"
+        );
     }
 
     Ok(body)
@@ -3904,6 +4047,125 @@ mod tests {
     }
 
     #[test]
+    fn build_opd_training_payload_applies_exact_resume_overrides() {
+        let body = build_opd_training_payload(
+            json!({
+                "prompts": [{
+                    "messages": [{"role": "user", "content": "Explain the result"}]
+                }],
+                "teacher": "stale-teacher",
+                "config": {"top_k": 16, "seed": 73, "output_name": "stale-output"}
+            }),
+            "opd-adapter",
+            Some("teacher-v2"),
+            Some(24),
+            Some(25),
+            Some("opd-adapter-checkpoint-step-00000025.kiln-checkpoint"),
+        )
+        .unwrap();
+
+        assert_eq!(body["teacher"], "teacher-v2");
+        assert_eq!(body["config"]["output_name"], "opd-adapter");
+        assert_eq!(body["config"]["lora_rank"], 24);
+        assert_eq!(body["config"]["top_k"], 16);
+        assert_eq!(body["config"]["seed"], 73);
+        assert_eq!(body["config"]["checkpoint_interval"], 25);
+        assert_eq!(
+            body["config"]["resume_checkpoint"],
+            "opd-adapter-checkpoint-step-00000025.kiln-checkpoint"
+        );
+        serde_json::from_value::<kiln_train::OpdRequest>(body).unwrap();
+    }
+
+    #[test]
+    fn build_opd_training_payload_wraps_prompt_arrays_and_requires_one_source() {
+        let prompt = json!({
+            "messages": [{"role": "user", "content": "Summarize this"}]
+        });
+        let body = build_opd_training_payload(
+            json!([prompt.clone()]),
+            "opd-adapter",
+            Some("teacher-v1"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(body["prompts"], json!([prompt]));
+        assert_eq!(body["teacher"], "teacher-v1");
+        assert_eq!(body["config"]["output_name"], "opd-adapter");
+
+        let dataset = build_opd_training_payload(
+            json!({
+                "teacher": "teacher-v1",
+                "dataset_path": "/data/opd.jsonl",
+                "config": {"training_mode": "off_policy"}
+            }),
+            "opd-adapter",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(dataset["teacher"], "teacher-v1");
+        assert_eq!(dataset["dataset_path"], "/data/opd.jsonl");
+        assert_eq!(dataset["config"]["training_mode"], "off_policy");
+
+        let neither = build_opd_training_payload(
+            json!({"teacher": "teacher-v1"}),
+            "opd-adapter",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(neither.to_string().contains("exactly one non-empty source"));
+
+        let both = build_opd_training_payload(
+            json!({
+                "teacher": "teacher-v1",
+                "prompts": [{"messages": [{"role": "user", "content": "hello"}]}],
+                "dataset_path": "/data/opd.jsonl"
+            }),
+            "opd-adapter",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(both.to_string().contains("exactly one non-empty source"));
+    }
+
+    #[test]
+    fn build_opd_training_payload_rejects_missing_teacher_and_invalid_config() {
+        let prompts = json!([{
+            "messages": [{"role": "user", "content": "hello"}]
+        }]);
+        let missing =
+            build_opd_training_payload(prompts.clone(), "opd-adapter", None, None, None, None)
+                .unwrap_err();
+        assert!(missing.to_string().contains("--teacher"));
+
+        let invalid = build_opd_training_payload(
+            json!({
+                "teacher": "teacher-v1",
+                "prompts": prompts,
+                "config": {"checkpoint_interval": 0}
+            }),
+            "opd-adapter",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(invalid.to_string().contains("checkpoint_interval"));
+    }
+
+    #[test]
     fn render_api_error_structured_with_hint() {
         let body = json!({
             "error": {
@@ -4179,6 +4441,68 @@ mod tests {
             "groups.jsonl",
             "--adapter",
             "demo",
+            "--checkpoint-interval",
+            "0",
+        ])
+        .err()
+        .expect("zero checkpoint interval must be rejected");
+        assert!(err.to_string().contains("invalid value '0'"));
+    }
+
+    #[test]
+    fn parses_opd_exact_resume_options() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "kiln",
+            "train",
+            "opd",
+            "--file",
+            "opd-request.json",
+            "--adapter",
+            "demo",
+            "--teacher",
+            "teacher-v1",
+            "--lora-rank",
+            "24",
+            "--checkpoint-interval",
+            "25",
+            "--resume-checkpoint",
+            "demo-checkpoint-step-00000025.kiln-checkpoint",
+        ])
+        .expect("parse failed");
+        match cli.command {
+            Some(Commands::Train(TrainCommands::Opd {
+                file,
+                adapter,
+                teacher,
+                lora_rank,
+                checkpoint_interval,
+                resume_checkpoint,
+                url,
+            })) => {
+                assert_eq!(file, "opd-request.json");
+                assert_eq!(adapter, "demo");
+                assert_eq!(teacher.as_deref(), Some("teacher-v1"));
+                assert_eq!(lora_rank, Some(24));
+                assert_eq!(
+                    checkpoint_interval.map(std::num::NonZeroUsize::get),
+                    Some(25)
+                );
+                assert_eq!(
+                    resume_checkpoint.as_deref(),
+                    Some("demo-checkpoint-step-00000025.kiln-checkpoint")
+                );
+                assert_eq!(url, "http://localhost:8420");
+            }
+            other => panic!("expected Train(Opd), got {:?}", other.is_some()),
+        }
+
+        let err = Cli::try_parse_from([
+            "kiln",
+            "train",
+            "opd",
+            "--file",
+            "opd-request.json",
             "--checkpoint-interval",
             "0",
         ])
