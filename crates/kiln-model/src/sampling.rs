@@ -28,6 +28,27 @@ use rand::{RngExt, SeedableRng};
 // candle has been removed from the sampler. Mirrors `forward.rs`.
 use kiln_tensor::{D, DType, Device, Tensor};
 
+/// One token sampled from the fully resolved behavior distribution.
+///
+/// `logprob` is the natural logarithm of the token's probability after
+/// penalties, temperature, top-k, min-p, and top-p have all been applied and
+/// the surviving distribution has been renormalized. Deterministic sampling
+/// has log-probability zero.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SampledToken {
+    pub token_id: u32,
+    pub logprob: f32,
+}
+
+impl SampledToken {
+    fn deterministic(token_id: u32) -> Self {
+        Self {
+            token_id,
+            logprob: 0.0,
+        }
+    }
+}
+
 /// Extract the last-position logits from a `[..., vocab_size]` tensor and flatten
 /// them to a 1-D `[vocab_size]` tensor that still lives on the original device.
 fn last_position_logits(logits: &Tensor) -> Result<Tensor> {
@@ -149,6 +170,28 @@ pub fn sample_step(
     sample_with_full_params(logits, &effective, history)
 }
 
+/// Sample one decode step and return the exact selected-token behavior
+/// log-probability. Stochastic traced sampling requires a resolved seed so the
+/// token and its provenance can be reproduced independently of process-local
+/// entropy sources.
+pub fn sample_step_with_logprob(
+    logits: &Tensor,
+    params: &kiln_core::sampling::SamplingParams,
+    step_seed: Option<u64>,
+    history: &[u32],
+) -> Result<SampledToken> {
+    if params.is_effectively_greedy() {
+        return Ok(SampledToken::deterministic(greedy_sample(logits)?));
+    }
+    anyhow::ensure!(
+        step_seed.is_some(),
+        "sampling with behavior log-probability capture requires a resolved per-step seed"
+    );
+    let mut effective = params.clone();
+    effective.seed = step_seed;
+    sample_with_full_params_and_logprob(logits, &effective, history)
+}
+
 /// Comprehensive sampler. Applies, in order:
 ///
 /// 1. Repetition penalty (HF-style, sign-conditional).
@@ -218,6 +261,75 @@ pub fn sample_with_full_params(
         params.min_p,
         params.seed,
     )
+}
+
+/// Comprehensive sampling plus the selected token's normalized
+/// post-filter log-probability.
+///
+/// The seeded draw and probability lookup share one materialized effective
+/// distribution, so trace capture does not repeat filtering or transfer the
+/// candidate set twice.
+pub fn sample_with_full_params_and_logprob(
+    logits: &Tensor,
+    params: &kiln_core::sampling::SamplingParams,
+    token_history: &[u32],
+) -> Result<SampledToken> {
+    if params.is_effectively_greedy() {
+        return Ok(SampledToken::deterministic(greedy_sample(logits)?));
+    }
+    anyhow::ensure!(
+        params.seed.is_some(),
+        "sampling with behavior log-probability capture requires a resolved seed"
+    );
+    let seed = params.seed.expect("resolved seed checked above");
+    let penalties_no_op = params.token_penalties_are_no_op() || token_history.is_empty();
+    let min_p_no_op = kiln_core::sampling::SamplingParams::min_p_is_disabled(params.min_p);
+    if penalties_no_op && min_p_no_op {
+        return sample_with_params_and_logprob(
+            logits,
+            params.temperature,
+            params.top_p,
+            params.top_k,
+            seed,
+        );
+    }
+    let adjusted_logits = if penalties_no_op {
+        last_position_logits(logits)?
+    } else {
+        apply_penalties_on_device(
+            logits,
+            token_history,
+            params.repetition_penalty,
+            params.presence_penalty,
+            params.frequency_penalty,
+        )?
+    };
+    sample_from_adjusted_logits_with_logprob(
+        &adjusted_logits,
+        params.temperature,
+        params.top_p,
+        params.top_k,
+        params.min_p,
+        seed,
+    )
+}
+
+/// Temperature/top-k/top-p sampling with a resolved seed and exact selected
+/// behavior log-probability.
+pub fn sample_with_params_and_logprob(
+    logits: &Tensor,
+    temperature: f32,
+    top_p: f32,
+    top_k: u32,
+    seed: u64,
+) -> Result<SampledToken> {
+    use kiln_core::sampling::SamplingParams as SP;
+
+    if SP::values_are_effectively_greedy(temperature, top_k) {
+        return Ok(SampledToken::deterministic(greedy_sample(logits)?));
+    }
+    let flat = last_position_logits(logits)?.to_dtype(DType::F32)?;
+    sample_from_adjusted_logits_with_logprob(&flat, temperature, top_p, top_k, 0.0, seed)
 }
 
 /// Apply repetition / presence / frequency penalties to the logits on
@@ -397,15 +509,116 @@ fn sample_from_adjusted_logits(
         return sample_full_distribution_unsorted(&scaled, seed);
     }
 
-    // Fetch top-k (idx, logit) pairs — same machinery the legacy
-    // sampler uses. Min_p is a host-side filter applied after softmax.
+    filtered_distribution(&scaled, top_p, top_k, min_p)?.sample(seed)
+}
+
+fn sample_from_adjusted_logits_with_logprob(
+    flat_logits: &Tensor,
+    temperature: f32,
+    top_p: f32,
+    top_k: u32,
+    min_p: f32,
+    seed: u64,
+) -> Result<SampledToken> {
+    use kiln_core::sampling::SamplingParams as SP;
+
+    if SP::values_are_effectively_greedy(temperature, top_k) {
+        return Ok(SampledToken::deterministic(greedy_sample(flat_logits)?));
+    }
+    let scaled = flat_logits.affine(1.0 / temperature as f64, 0.0)?;
+    let vocab_size = flat_logits.dims()[0];
+    let min_p_no_op = SP::min_p_is_disabled(min_p);
+    if SP::top_p_disables_nucleus_filter(top_p)
+        && (top_k == 0 || top_k as usize >= vocab_size)
+        && min_p_no_op
+    {
+        sample_full_distribution_unsorted_with_logprob(&scaled, seed)
+    } else {
+        filtered_distribution(&scaled, top_p, top_k, min_p)?.sample_with_logprob(Some(seed))
+    }
+}
+
+enum EffectiveDistribution {
+    Deterministic(u32),
+    Categorical(Vec<(u32, f32)>),
+}
+
+impl EffectiveDistribution {
+    fn sample(&self, seed: Option<u64>) -> Result<u32> {
+        match self {
+            Self::Deterministic(token_id) => Ok(*token_id),
+            Self::Categorical(probs) => {
+                let mut rng: StdRng = match seed {
+                    Some(seed) => StdRng::seed_from_u64(seed),
+                    None => rand::make_rng::<StdRng>(),
+                };
+                let random: f32 = rng.random();
+                let mut cumulative = 0.0_f32;
+                for &(token_id, probability) in probs {
+                    cumulative += probability;
+                    if random < cumulative {
+                        return Ok(token_id);
+                    }
+                }
+                Ok(probs.last().context("no candidates after filtering")?.0)
+            }
+        }
+    }
+
+    fn sample_with_logprob(&self, seed: Option<u64>) -> Result<SampledToken> {
+        match self {
+            Self::Deterministic(token_id) => Ok(SampledToken::deterministic(*token_id)),
+            Self::Categorical(probs) => {
+                let mut rng: StdRng = match seed {
+                    Some(seed) => StdRng::seed_from_u64(seed),
+                    None => rand::make_rng::<StdRng>(),
+                };
+                let random: f32 = rng.random();
+                let mut cumulative = 0.0_f32;
+                for &(token_id, probability) in probs {
+                    cumulative += probability;
+                    if random < cumulative {
+                        return sampled_token_from_probability(token_id, probability);
+                    }
+                }
+                let &(token_id, probability) =
+                    probs.last().context("no candidates after filtering")?;
+                sampled_token_from_probability(token_id, probability)
+            }
+        }
+    }
+}
+
+fn sampled_token_from_probability(token_id: u32, probability: f32) -> Result<SampledToken> {
+    anyhow::ensure!(
+        probability.is_finite() && probability > 0.0 && probability <= 1.0 + 1e-6,
+        "sampled token {token_id} has invalid effective probability {probability}"
+    );
+    Ok(SampledToken {
+        token_id,
+        logprob: probability.min(1.0).ln(),
+    })
+}
+
+fn filtered_distribution(
+    scaled: &Tensor,
+    top_p: f32,
+    top_k: u32,
+    min_p: f32,
+) -> Result<EffectiveDistribution> {
+    use kiln_core::sampling::SamplingParams as SP;
+
+    let vocab_size = scaled.dims()[0];
+    let min_p_no_op = SP::min_p_is_disabled(min_p);
+    // Fetch top-k (idx, logit) pairs — same machinery the token-only sampler
+    // uses. Min-p is a host-side filter applied after softmax.
     let indexed: Vec<(u32, f32)> = if top_k > 0 && (top_k as usize) < vocab_size {
-        match try_topk_on_device(&scaled, top_k as usize) {
+        match try_topk_on_device(scaled, top_k as usize) {
             Ok(pairs) => pairs,
-            Err(_) => topk_via_host_sort(&scaled, Some(top_k as usize))?,
+            Err(_) => topk_via_host_sort(scaled, Some(top_k as usize))?,
         }
     } else {
-        topk_via_host_sort(&scaled, None)?
+        topk_via_host_sort(scaled, None)?
     };
     if indexed.is_empty() {
         anyhow::bail!("no candidates after filtering");
@@ -419,7 +632,9 @@ fn sample_from_adjusted_logits(
         .collect();
     let sum: f32 = probs.iter().map(|(_, p)| p).sum();
     if !sum.is_finite() || sum <= 0.0 {
-        return Ok(probs.first().map(|&(idx, _)| idx).unwrap_or(0));
+        return Ok(EffectiveDistribution::Deterministic(
+            probs.first().map(|&(idx, _)| idx).unwrap_or(0),
+        ));
     }
     for (_, p) in probs.iter_mut() {
         *p /= sum;
@@ -431,7 +646,7 @@ fn sample_from_adjusted_logits(
         let threshold = min_p * pmax;
         probs.retain(|&(_, p)| p >= threshold);
         if probs.is_empty() {
-            return Ok(indexed[0].0);
+            return Ok(EffectiveDistribution::Deterministic(indexed[0].0));
         }
         let s: f32 = probs.iter().map(|(_, p)| p).sum();
         if s > 0.0 {
@@ -461,20 +676,7 @@ fn sample_from_adjusted_logits(
         }
     }
 
-    // Categorical sample.
-    let mut rng: StdRng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => rand::make_rng::<StdRng>(),
-    };
-    let r: f32 = rng.random();
-    let mut cumsum = 0.0_f32;
-    for &(idx, p) in &probs {
-        cumsum += p;
-        if r < cumsum {
-            return Ok(idx);
-        }
-    }
-    Ok(probs.last().context("no candidates after filtering")?.0)
+    Ok(EffectiveDistribution::Categorical(probs))
 }
 
 /// Parameterized sampling with temperature, top-k, and top-p (nucleus) filtering.
@@ -497,102 +699,8 @@ pub fn sample_with_params(
     if kiln_core::sampling::SamplingParams::values_are_effectively_greedy(temperature, top_k) {
         return greedy_sample(logits);
     }
-
-    let flat = last_position_logits(logits)?;
-    let vocab_size = flat.dims()[0];
-
-    // Apply temperature on-device; result stays on the original device.
-    let scaled = flat
-        .to_dtype(DType::F32)?
-        .affine(1.0 / temperature as f64, 0.0)?;
-
-    // Default sampling stays on-device for GPU backends. This keeps the
-    // default desktop path off the full-vocab DtoH transfer.
-    if seed.is_none()
-        && kiln_core::sampling::SamplingParams::top_p_disables_nucleus_filter(top_p)
-        && (top_k == 0 || top_k as usize >= vocab_size)
-        && matches!(scaled.device(), Device::Cuda(_) | Device::Metal(_))
-    {
-        let sampled = kiln_tensor::ops::gumbel_softmax_sample(&scaled, 1.0, 0)?;
-        return Ok(sampled.to_scalar::<u32>()?);
-    }
-
-    // Full-vocab temperature sampling with nucleus filtering disabled still
-    // needs one host transfer for seeded categorical RNG, but it does not need
-    // an O(V log V) sort because no rank-based filtering is requested.
-    if kiln_core::sampling::SamplingParams::top_p_disables_nucleus_filter(top_p)
-        && (top_k == 0 || top_k as usize >= vocab_size)
-    {
-        return sample_full_distribution_unsorted(&scaled, seed);
-    }
-
-    // Fetch a descending (index, logit) list, truncated to top_k when active.
-    // When top_k selects a real subset of the vocab, we try to sort on-device and
-    // transfer only the top_k pairs (e.g. 50 floats + 50 u32 indices = 400 B vs
-    // 608 KB for the full vocab at vocab=151,936). If the device sort fails (e.g.
-    // shared-memory limits on large vocabs), we fall back to a full-vocab transfer
-    // and host sort — correctness is preserved, only the speedup is forfeited.
-    let indexed: Vec<(u32, f32)> = if top_k > 0 && (top_k as usize) < vocab_size {
-        match try_topk_on_device(&scaled, top_k as usize) {
-            Ok(pairs) => pairs,
-            Err(_) => topk_via_host_sort(&scaled, Some(top_k as usize))?,
-        }
-    } else {
-        // top_k == 0 (or >= vocab): we need the full distribution on host for the
-        // subsequent softmax / top-p / categorical stages.
-        topk_via_host_sort(&scaled, None)?
-    };
-
-    if indexed.is_empty() {
-        anyhow::bail!("no candidates after filtering");
-    }
-
-    // Softmax over remaining candidates (numerically stable via max subtraction).
-    let max_logit = indexed[0].1;
-    let mut probs: Vec<(u32, f32)> = indexed
-        .iter()
-        .map(|&(idx, logit)| (idx, (logit - max_logit).exp()))
-        .collect();
-    let sum: f32 = probs.iter().map(|(_, p)| p).sum();
-    for (_, p) in probs.iter_mut() {
-        *p /= sum;
-    }
-
-    // Top-p (nucleus) filtering.
-    if top_p > 0.0 && top_p < 1.0 {
-        let mut cumsum = 0.0_f32;
-        let mut cutoff = probs.len();
-        for (i, (_, p)) in probs.iter().enumerate() {
-            cumsum += p;
-            if cumsum >= top_p {
-                cutoff = i + 1;
-                break;
-            }
-        }
-        probs.truncate(cutoff);
-        let sum: f32 = probs.iter().map(|(_, p)| p).sum();
-        for (_, p) in probs.iter_mut() {
-            *p /= sum;
-        }
-    }
-
-    // Categorical sampling (host-side; candle has no GPU categorical RNG).
-    let mut rng: StdRng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => rand::make_rng::<StdRng>(),
-    };
-
-    let r: f32 = rng.random();
-    let mut cumsum = 0.0_f32;
-    for &(idx, p) in &probs {
-        cumsum += p;
-        if r < cumsum {
-            return Ok(idx);
-        }
-    }
-
-    // Numerical edge case: cumsum < r due to rounding. Return the last candidate.
-    Ok(probs.last().context("no candidates after filtering")?.0)
+    let flat = last_position_logits(logits)?.to_dtype(DType::F32)?;
+    sample_from_adjusted_logits(&flat, temperature, top_p, top_k, 0.0, seed)
 }
 
 /// Sample from the full temperature-scaled distribution without sorting.
@@ -600,12 +708,32 @@ pub fn sample_with_params(
 /// This is the fast path for the API/UI defaults: `temperature > 0`,
 /// `top_p = 1`, and `top_k = 0`.
 fn sample_full_distribution_unsorted(scaled: &Tensor, seed: Option<u64>) -> Result<u32> {
+    let (weights, fallback_idx) = full_distribution_weights(scaled)?;
+    let Some(weights) = weights else {
+        return Ok(fallback_idx);
+    };
+    sample_from_distribution_weights(&weights, seed, fallback_idx)
+}
+
+fn sample_full_distribution_unsorted_with_logprob(
+    scaled: &Tensor,
+    seed: u64,
+) -> Result<SampledToken> {
+    let (weights, fallback_idx) = full_distribution_weights(scaled)?;
+    let Some(weights) = weights else {
+        return Ok(SampledToken::deterministic(fallback_idx));
+    };
+    sample_from_distribution_weights_with_logprob(&weights, Some(seed), fallback_idx)
+}
+
+fn full_distribution_weights(scaled: &Tensor) -> Result<(Option<Vec<f32>>, u32)> {
     #[cfg(feature = "cuda")]
     if let Some(weights) = try_kt_full_distribution_probs(scaled)? {
         if weights.is_empty() {
             anyhow::bail!("empty logits distribution");
         }
-        return sample_from_distribution_weights(&weights, seed, (weights.len() - 1) as u32);
+        let fallback_idx = (weights.len() - 1) as u32;
+        return Ok((Some(weights), fallback_idx));
     }
 
     let values: Vec<f32> = scaled.to_vec1()?;
@@ -614,11 +742,7 @@ fn sample_full_distribution_unsorted(scaled: &Tensor, seed: Option<u64>) -> Resu
     }
 
     let fallback_idx = (values.len() - 1) as u32;
-    let Some(weights) = softmax_probs_from_logits(&values) else {
-        return Ok(fallback_idx);
-    };
-
-    sample_from_distribution_weights(&weights, seed, fallback_idx)
+    Ok((softmax_probs_from_logits(&values), fallback_idx))
 }
 
 fn softmax_probs_from_logits(values: &[f32]) -> Option<Vec<f32>> {
@@ -660,10 +784,45 @@ fn sample_from_distribution_weights(
     let sum: f32 = weights
         .iter()
         .copied()
-        .filter(|w| w.is_finite() && *w > 0.0)
+        .filter(|weight| weight.is_finite() && *weight > 0.0)
         .sum();
     if !sum.is_finite() || sum <= 0.0 {
         return Ok(fallback_idx);
+    }
+
+    let mut rng: StdRng = match seed {
+        Some(seed) => StdRng::seed_from_u64(seed),
+        None => rand::make_rng::<StdRng>(),
+    };
+    let threshold = rng.random::<f32>() * sum;
+    let mut cumulative = 0.0_f32;
+    for (index, &weight) in weights.iter().enumerate() {
+        if !weight.is_finite() || weight <= 0.0 {
+            continue;
+        }
+        cumulative += weight;
+        if threshold < cumulative {
+            return Ok(index as u32);
+        }
+    }
+    Ok(fallback_idx)
+}
+
+fn sample_from_distribution_weights_with_logprob(
+    weights: &[f32],
+    seed: Option<u64>,
+    fallback_idx: u32,
+) -> Result<SampledToken> {
+    if weights.is_empty() {
+        anyhow::bail!("empty logits distribution");
+    }
+    let sum: f32 = weights
+        .iter()
+        .copied()
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return Ok(SampledToken::deterministic(fallback_idx));
     }
 
     let mut rng: StdRng = match seed {
@@ -678,11 +837,15 @@ fn sample_from_distribution_weights(
         }
         cumsum += weight;
         if threshold < cumsum {
-            return Ok(idx as u32);
+            return sampled_token_from_probability(idx as u32, weight / sum);
         }
     }
 
-    Ok(fallback_idx)
+    let fallback_probability = weights
+        .get(fallback_idx as usize)
+        .copied()
+        .unwrap_or_default();
+    sampled_token_from_probability(fallback_idx, fallback_probability / sum)
 }
 
 #[cfg(feature = "cuda")]
@@ -1279,6 +1442,121 @@ mod tests {
         params.temperature = 0.0;
         let token = sample_with_full_params(&logits, &params, &[])?;
         assert_eq!(token, 1, "temperature=0 must be greedy");
+        Ok(())
+    }
+
+    #[test]
+    fn traced_greedy_sampling_has_unit_probability() -> Result<()> {
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &Device::Cpu)?;
+        let mut params = full_params_with_seed(42);
+        params.temperature = 0.0;
+        let sampled = sample_with_full_params_and_logprob(&logits, &params, &[])?;
+        assert_eq!(sampled, SampledToken::deterministic(1));
+        Ok(())
+    }
+
+    #[test]
+    fn traced_sampling_matches_token_path_and_full_distribution_probability() -> Result<()> {
+        let values = [0.0_f32, 1.0, 2.0, -1.0];
+        let logits = Tensor::new(&values, &Device::Cpu)?;
+        let mut params = full_params_with_seed(0);
+        params.temperature = 1.0;
+        params.top_p = 1.0;
+        params.top_k = 0;
+        params.min_p = 0.0;
+
+        let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let weights = values.map(|value| (value - max).exp());
+        let normalizer: f32 = weights.iter().sum();
+        for seed in 0..32 {
+            params.seed = Some(seed);
+            let expected_token = sample_with_full_params(&logits, &params, &[])?;
+            let sampled = sample_with_full_params_and_logprob(&logits, &params, &[])?;
+            assert_eq!(sampled.token_id, expected_token, "seed {seed}");
+            let expected_logprob = (weights[expected_token as usize] / normalizer).ln();
+            assert!(
+                (sampled.logprob - expected_logprob).abs() <= 1e-6,
+                "seed {seed}: got {}, expected {expected_logprob}",
+                sampled.logprob
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn traced_sampling_reports_probability_after_penalties_and_filters() -> Result<()> {
+        let logits = Tensor::new(&[3.0_f32, 2.0, 1.0, 0.0], &Device::Cpu)?;
+        let mut params = full_params_with_seed(0);
+        params.temperature = 1.0;
+        params.top_k = 3;
+        params.min_p = 0.3;
+        params.top_p = 0.75;
+        params.frequency_penalty = 0.75;
+        let history = [0_u32, 0];
+
+        // The frequency penalty changes token 0's logit from 3.0 to 1.5.
+        // Top-k/min-p retain logits [2.0, 1.5, 1.0], then top-p retains the
+        // first two and renormalizes them to softmax([2.0, 1.5]).
+        let p_token_1 = 1.0 / (1.0 + (-0.5_f32).exp());
+        let p_token_0 = 1.0 - p_token_1;
+        for seed in 0..32 {
+            params.seed = Some(seed);
+            let expected_token = sample_with_full_params(&logits, &params, &history)?;
+            let sampled = sample_with_full_params_and_logprob(&logits, &params, &history)?;
+            assert_eq!(sampled.token_id, expected_token, "seed {seed}");
+            let expected_probability = match sampled.token_id {
+                1 => p_token_1,
+                0 => p_token_0,
+                token => panic!("filtered distribution emitted token {token}"),
+            };
+            assert!(
+                (sampled.logprob - expected_probability.ln()).abs() <= 1e-6,
+                "seed {seed}: got {}, expected {}",
+                sampled.logprob,
+                expected_probability.ln()
+            );
+        }
+
+        params.seed = None;
+        let error = sample_with_full_params_and_logprob(&logits, &params, &history).unwrap_err();
+        assert!(error.to_string().contains("requires a resolved seed"));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "rocm")]
+    fn traced_sampling_rocm_topk_matches_cpu_token_and_logprob() -> Result<()> {
+        if !kiln_tensor::rocm_is_available() {
+            eprintln!("ROCm unavailable, skipping traced sampling parity");
+            return Ok(());
+        }
+        let values: Vec<f32> = (0..257)
+            .map(|index| ((index as f32 + 0.25) * 0.173).sin() * 3.0 + index as f32 * 0.0001)
+            .collect();
+        let cpu_logits = Tensor::new(values.as_slice(), &Device::Cpu)?;
+        let rocm_logits = Tensor::new(values.as_slice(), &Device::Rocm(0))?;
+        let history = [3_u32, 3, 17, 41, 41, 41];
+        let mut params = full_params_with_seed(0);
+        params.temperature = 0.8;
+        params.top_k = 20;
+        params.top_p = 0.85;
+        params.min_p = 0.05;
+        params.repetition_penalty = 1.1;
+        params.presence_penalty = 0.2;
+        params.frequency_penalty = 0.05;
+
+        for seed in 0..16 {
+            params.seed = Some(seed);
+            let expected = sample_with_full_params_and_logprob(&cpu_logits, &params, &history)?;
+            let actual = sample_with_full_params_and_logprob(&rocm_logits, &params, &history)?;
+            assert_eq!(actual.token_id, expected.token_id, "seed {seed}");
+            assert!(
+                (actual.logprob - expected.logprob).abs() <= 1e-5,
+                "seed {seed}: ROCm logprob {} != CPU {}",
+                actual.logprob,
+                expected.logprob
+            );
+        }
         Ok(())
     }
 
