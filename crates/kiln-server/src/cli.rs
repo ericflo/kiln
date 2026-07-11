@@ -219,7 +219,10 @@ performance metadata, and `chat_template_kwargs.enable_thinking`.
 from the request template. Omit a flag to preserve the template or server
 default, pass a non-negative integer for a limit (`0` closes thinking
 immediately), or pass `unlimited` to send an explicit JSON null and bypass a
-server default. The requested states are recorded in the rollout summary.
+server default. Budget flags and top-level template budget fields require
+`--thinking true`; the command rejects them while thinking is disabled instead
+of silently accepting controls that cannot apply. The requested states are
+recorded in the rollout summary.
 
 The scorer executable receives one JSON object on stdin with the task, request,
 response, content, seed, adapter, token usage, and latency. It may print a
@@ -518,11 +521,11 @@ pub enum Commands {
         )]
         thinking: bool,
 
-        /// Thinking token budget: omit to preserve the template/server value, use 0 to close immediately, or `unlimited` for no limit
+        /// Thinking token budget (requires `--thinking true`): omit to preserve the template/server value, use 0 to close immediately, or `unlimited` for no limit
         #[arg(long, value_name = "TOKENS|unlimited")]
         thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
 
-        /// Thinking decode-time budget: omit to preserve the template/server value, use 0 to close immediately, or `unlimited` for no limit
+        /// Thinking decode-time budget (requires `--thinking true`): omit to preserve the template/server value, use 0 to close immediately, or `unlimited` for no limit
         #[arg(long, value_name = "MILLISECONDS|unlimited")]
         thinking_budget_ms: Option<ThinkingBudgetArg<u64>>,
 
@@ -3237,7 +3240,7 @@ mod tests {
             "--adapter",
             "support-bot",
             "--thinking",
-            "false",
+            "true",
             "--thinking-budget-tokens",
             "96",
             "--thinking-budget-ms",
@@ -3277,7 +3280,7 @@ mod tests {
         };
 
         assert_eq!(adapter, "support-bot");
-        assert!(!thinking);
+        assert!(thinking);
         assert_eq!(thinking_budget_tokens, Some(ThinkingBudgetArg::Limited(96)));
         assert_eq!(thinking_budget_ms, Some(ThinkingBudgetArg::Limited(1500)));
         assert_eq!(tasks, PathBuf::from("tasks.jsonl"));
@@ -3320,6 +3323,8 @@ mod tests {
             "rollout-generate",
             "--adapter",
             "base",
+            "--thinking",
+            "true",
             "--thinking-budget-tokens",
             "unlimited",
             "--thinking-budget-ms",

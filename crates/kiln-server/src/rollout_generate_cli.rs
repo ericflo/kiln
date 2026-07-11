@@ -145,6 +145,12 @@ pub async fn run_rollout_generate(
     if options.seeds == 0 {
         anyhow::bail!("--seeds must be greater than zero");
     }
+    validate_thinking_budget_applicability(
+        options.thinking,
+        options.thinking_budget_tokens,
+        options.thinking_budget_ms,
+        None,
+    )?;
 
     let adapter = parse_adapter_selection(&options.adapter);
     let started = Instant::now();
@@ -165,6 +171,12 @@ pub async fn run_rollout_generate(
             options.request_template.display()
         )
     })?;
+    validate_thinking_budget_applicability(
+        options.thinking,
+        options.thinking_budget_tokens,
+        options.thinking_budget_ms,
+        Some(&template),
+    )?;
 
     if tasks.is_empty() {
         anyhow::bail!("tasks JSONL contained no tasks");
@@ -418,6 +430,12 @@ fn render_rollout_request(
     thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
     thinking_budget_ms: Option<ThinkingBudgetArg<u64>>,
 ) -> Result<Value> {
+    validate_thinking_budget_applicability(
+        thinking,
+        thinking_budget_tokens,
+        thinking_budget_ms,
+        Some(template),
+    )?;
     let mut value = render_template_value(template, task, seed, adapter, thinking)?;
     let obj = value
         .as_object_mut()
@@ -449,6 +467,42 @@ fn render_rollout_request(
         .ok_or_else(|| anyhow!("chat_template_kwargs must be a JSON object"))?;
     kwargs.insert("enable_thinking".to_string(), Value::Bool(thinking));
     Ok(value)
+}
+
+fn validate_thinking_budget_applicability(
+    thinking: bool,
+    thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
+    thinking_budget_ms: Option<ThinkingBudgetArg<u64>>,
+    template: Option<&Value>,
+) -> Result<()> {
+    if thinking {
+        return Ok(());
+    }
+
+    let mut inert_settings = Vec::new();
+    if thinking_budget_tokens.is_some() {
+        inert_settings.push("`--thinking-budget-tokens`");
+    }
+    if thinking_budget_ms.is_some() {
+        inert_settings.push("`--thinking-budget-ms`");
+    }
+    if let Some(template) = template.and_then(Value::as_object) {
+        if template.contains_key("thinking_budget_tokens") {
+            inert_settings.push("request template field `thinking_budget_tokens`");
+        }
+        if template.contains_key("thinking_budget_ms") {
+            inert_settings.push("request template field `thinking_budget_ms`");
+        }
+    }
+
+    if inert_settings.is_empty() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "thinking budgets require `--thinking true`; thinking is disabled and would make {} inert. Enable thinking or remove the listed budget settings",
+        inert_settings.join(", ")
+    )
 }
 
 fn render_template_value(
@@ -821,7 +875,7 @@ mod tests {
             &task,
             7,
             Some("cap"),
-            false,
+            true,
             Some(ThinkingBudgetArg::Limited(96)),
             Some(ThinkingBudgetArg::Limited(1500)),
         )
@@ -832,7 +886,7 @@ mod tests {
         assert_eq!(request["include_performance"], true);
         assert_eq!(
             request["chat_template_kwargs"]["enable_thinking"],
-            Value::Bool(false)
+            Value::Bool(true)
         );
         assert_eq!(request["chat_template_kwargs"]["custom"], "kept");
         assert_eq!(request["max_tokens"], 3);
@@ -840,7 +894,7 @@ mod tests {
         assert_eq!(request["thinking_budget_ms"], 1500);
         assert_eq!(
             request["messages"][0]["content"],
-            "Question 2+2? seed 7 cap false"
+            "Question 2+2? seed 7 cap true"
         );
 
         let base = render_rollout_request(&template, &task, 8, None, true, None, None).unwrap();
@@ -864,6 +918,152 @@ mod tests {
         .unwrap();
         assert!(unlimited["thinking_budget_tokens"].is_null());
         assert!(unlimited["thinking_budget_ms"].is_null());
+    }
+
+    fn contract_budget_arg<T>(case: &Value, dimension: &str) -> Option<ThinkingBudgetArg<T>>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let setting = &case[dimension];
+        match setting["state"].as_str().unwrap() {
+            "inherit" => None,
+            "unlimited" => Some(ThinkingBudgetArg::Unlimited),
+            "limit" => Some(ThinkingBudgetArg::Limited(
+                serde_json::from_value(setting["value"].clone()).unwrap(),
+            )),
+            state => panic!("unknown thinking-budget contract state {state:?}"),
+        }
+    }
+
+    #[test]
+    fn rollout_request_runs_request_scope_budget_contract_matrix() {
+        let contract: Value = serde_json::from_str(include_str!(
+            "../../../contracts/thinking-budget-v1.conformance.json"
+        ))
+        .unwrap();
+        assert_eq!(contract["contract_version"], 1);
+        let template = json!({
+            "model": "Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "{{prompt}}"}]
+        });
+        let task = json!({"prompt": "contract check"});
+
+        for case in contract["resolution_cases"].as_array().unwrap() {
+            if case["scope"] != "request" {
+                continue;
+            }
+            let name = case["name"].as_str().unwrap();
+            let tokens = contract_budget_arg::<usize>(case, "tokens");
+            let time_ms = contract_budget_arg::<u64>(case, "time");
+            let rendered =
+                render_rollout_request(&template, &task, 1, None, true, tokens, time_ms).unwrap();
+
+            for field in ["thinking_budget_tokens", "thinking_budget_ms"] {
+                assert_eq!(
+                    rendered.get(field),
+                    case["request"].get(field),
+                    "{name} {field} wire shape"
+                );
+            }
+
+            let disabled =
+                render_rollout_request(&template, &task, 1, None, false, tokens, time_ms);
+            if tokens.is_some() || time_ms.is_some() {
+                let error = disabled.unwrap_err().to_string();
+                assert!(
+                    error.contains("thinking budgets require `--thinking true`"),
+                    "{name}: {error}"
+                );
+            } else {
+                let disabled = disabled.unwrap();
+                assert_eq!(
+                    disabled["chat_template_kwargs"]["enable_thinking"], false,
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_thinking_rejects_template_budget_fields() {
+        let template = json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "thinking_budget_tokens": 64,
+            "thinking_budget_ms": null
+        });
+        let error = render_rollout_request(&template, &json!({}), 0, None, false, None, None)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("request template field `thinking_budget_tokens`"));
+        assert!(error.contains("request template field `thinking_budget_ms`"));
+        assert!(error.contains("Enable thinking or remove the listed budget settings"));
+    }
+
+    #[tokio::test]
+    async fn rollout_rejects_disabled_budget_flags_before_file_io() {
+        let tmp = tempfile::tempdir().unwrap();
+        let output = tmp.path().join("must-not-exist.jsonl");
+        let summary_output = tmp.path().join("must-not-exist.summary.json");
+        let error = run_rollout_generate(RolloutGenerateOptions {
+            url: "http://127.0.0.1:1".to_string(),
+            adapter: "base".to_string(),
+            thinking: false,
+            thinking_budget_tokens: Some(ThinkingBudgetArg::Limited(0)),
+            thinking_budget_ms: None,
+            tasks: tmp.path().join("missing.tasks.jsonl"),
+            seeds: 1,
+            seed_start: 0,
+            request_template: tmp.path().join("missing.request.json"),
+            scorer: tmp.path().join("missing.scorer"),
+            output: output.clone(),
+            summary_output: summary_output.clone(),
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("`--thinking-budget-tokens`"));
+        assert!(!error.contains("reading tasks JSONL"));
+        assert!(!output.exists());
+        assert!(!summary_output.exists());
+    }
+
+    #[tokio::test]
+    async fn rollout_rejects_disabled_template_budget_before_output_or_network() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks = tmp.path().join("tasks.jsonl");
+        let template = tmp.path().join("request.json");
+        let output = tmp.path().join("must-not-exist.jsonl");
+        let summary_output = tmp.path().join("must-not-exist.summary.json");
+        std::fs::write(&tasks, r#"{"prompt":"hello"}"#).unwrap();
+        std::fs::write(
+            &template,
+            r#"{"messages":[{"role":"user","content":"{{prompt}}"}],"thinking_budget_ms":null}"#,
+        )
+        .unwrap();
+
+        let error = run_rollout_generate(RolloutGenerateOptions {
+            url: "http://127.0.0.1:1".to_string(),
+            adapter: "base".to_string(),
+            thinking: false,
+            thinking_budget_tokens: None,
+            thinking_budget_ms: None,
+            tasks,
+            seeds: 1,
+            seed_start: 0,
+            request_template: template,
+            scorer: tmp.path().join("missing.scorer"),
+            output: output.clone(),
+            summary_output: summary_output.clone(),
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("request template field `thinking_budget_ms`"));
+        assert!(!output.exists());
+        assert!(!summary_output.exists());
     }
 
     #[test]
@@ -902,8 +1102,8 @@ mod tests {
                 }],
                 "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
                 "metadata": {
-                    "thinking_enabled": false,
-                    "thinking_mode": "non_reasoning",
+                    "thinking_enabled": true,
+                    "thinking_mode": "reasoning",
                     "thinking_source": "request",
                     "final_content_empty": false,
                     "reasoning_folded_into_content": false,
@@ -914,7 +1114,7 @@ mod tests {
                         "total_latency_ms": 4.0,
                         "decode_tokens_per_sec": 500.0,
                         "adapter_used": adapter,
-                        "thinking_mode": "non_reasoning",
+                        "thinking_mode": "reasoning",
                         "finish_reason": "stop"
                     }
                 }
@@ -964,7 +1164,7 @@ mod tests {
         let summary = run_rollout_generate(RolloutGenerateOptions {
             url: format!("http://{addr}"),
             adapter: "cap".to_string(),
-            thinking: false,
+            thinking: true,
             thinking_budget_tokens: Some(ThinkingBudgetArg::Limited(96)),
             thinking_budget_ms: Some(ThinkingBudgetArg::Limited(1500)),
             tasks,
@@ -1045,7 +1245,7 @@ mod tests {
         assert_eq!(observed[0]["thinking_budget_ms"], 1500);
         assert_eq!(
             observed[0]["chat_template_kwargs"]["enable_thinking"],
-            Value::Bool(false)
+            Value::Bool(true)
         );
         assert_eq!(observed[0]["include_performance"], true);
         assert_eq!(observed[0]["stream"], false);

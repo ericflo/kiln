@@ -34,6 +34,12 @@ the inherited time default.
 The browser Playground obtains those defaults from `GET /v1/config` and shows
 the resolved pair plus server/request ownership before sending.
 
+`kiln rollout-generate` fails closed on budget applicability. Its budget flags
+and top-level request-template budget fields require `--thinking true`; when
+thinking is disabled, the command rejects those settings before creating an
+output file or sending a request. This prevents a valid-looking budget from
+silently becoming inert.
+
 Finite limits and explicit unlimited values report the surface that supplied
 them. Request metadata uses `request`/`request_unlimited`; eval resolution also
 uses `suite`, `run_override`, and `example` plus their `_unlimited` forms.
