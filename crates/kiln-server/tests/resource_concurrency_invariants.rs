@@ -38,6 +38,30 @@ fn grpo_uses_settled_group_boundaries_instead_of_a_job_long_gpu_writer() {
     );
     assert!(branch.contains("Some(trainer::GpuStepCoordination::new("));
 
+    let run_grpo = source_between(&queue, "fn run_grpo(", "/// Run one OPD training request.");
+    for required in [
+        "return kiln_train::cuda_train::cuda_native_grpo_train_jsonl_to_with_checkpoint_root(",
+        "return trainer::grpo_train_jsonl_to_with_checkpoint_root(",
+        "return kiln_train::cuda_train::cuda_native_grpo_train_to_with_checkpoint_root(",
+        "\n    trainer::grpo_train_to_with_checkpoint_root(",
+    ] {
+        assert!(
+            run_grpo.contains(required),
+            "server GRPO must publish durable exact checkpoints through {required}"
+        );
+    }
+    for forbidden in [
+        "cuda_native_grpo_train_jsonl_to_with_coordination(",
+        "grpo_train_jsonl_to_with_coordination(",
+        "cuda_native_grpo_train_to_with_coordination(",
+        "grpo_train_to_with_coordination(",
+    ] {
+        assert!(
+            !run_grpo.contains(forbidden),
+            "server GRPO must not couple checkpoints to final-adapter staging via {forbidden}"
+        );
+    }
+
     let trainer = read("crates/kiln-train/src/trainer.rs");
     let helper = source_between(
         &trainer,

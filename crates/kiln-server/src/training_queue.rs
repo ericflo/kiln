@@ -430,11 +430,43 @@ fn normalize_sft_resume_checkpoint(
     adapter_dir: &std::path::Path,
     adapter_name: &str,
 ) -> Result<(), String> {
-    let Some(raw) = config.resume_checkpoint.as_deref() else {
+    normalize_training_resume_checkpoint(
+        &mut config.resume_checkpoint,
+        kiln_train::checkpoint::TrainingKind::Sft,
+        "SFT",
+        adapter_dir,
+        adapter_name,
+    )
+}
+
+fn normalize_grpo_resume_checkpoint(
+    config: &mut kiln_train::GrpoConfig,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+) -> Result<(), String> {
+    normalize_training_resume_checkpoint(
+        &mut config.resume_checkpoint,
+        kiln_train::checkpoint::TrainingKind::Grpo,
+        "GRPO",
+        adapter_dir,
+        adapter_name,
+    )
+}
+
+fn normalize_training_resume_checkpoint(
+    resume_checkpoint: &mut Option<String>,
+    expected_kind: kiln_train::checkpoint::TrainingKind,
+    training_label: &str,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+) -> Result<(), String> {
+    let Some(raw) = resume_checkpoint.as_deref() else {
         return Ok(());
     };
     if raw.trim().is_empty() {
-        return Err("SFT resume_checkpoint must not be empty".to_string());
+        return Err(format!(
+            "{training_label} resume_checkpoint must not be empty"
+        ));
     }
     let supplied = std::path::Path::new(raw);
     let candidate = if supplied.is_absolute() {
@@ -444,17 +476,16 @@ fn normalize_sft_resume_checkpoint(
         let basename = match (components.next(), components.next()) {
             (Some(std::path::Component::Normal(name)), None) => name,
             _ => {
-                return Err(
-                    "SFT resume_checkpoint must be one checkpoint basename, without traversal or nested directories"
-                        .to_string(),
-                );
+                return Err(format!(
+                    "{training_label} resume_checkpoint must be one checkpoint basename, without traversal or nested directories"
+                ));
             }
         };
         adapter_dir.join(basename)
     };
     if candidate.parent() != Some(adapter_dir) {
         return Err(format!(
-            "SFT resume_checkpoint must be an immutable checkpoint directly beneath {}",
+            "{training_label} resume_checkpoint must be an immutable checkpoint directly beneath {}",
             adapter_dir.display()
         ));
     }
@@ -466,25 +497,25 @@ fn normalize_sft_resume_checkpoint(
         })
     {
         return Err(format!(
-            "SFT resume_checkpoint must end with {}",
+            "{training_label} resume_checkpoint must end with {}",
             kiln_train::checkpoint::TRAINING_CHECKPOINT_DIRECTORY_SUFFIX
         ));
     }
     let checkpoint = kiln_train::checkpoint::load_training_checkpoint(&candidate)
-        .map_err(|error| format!("validate SFT resume_checkpoint: {error:#}"))?;
-    if checkpoint.manifest.training_kind != kiln_train::checkpoint::TrainingKind::Sft {
+        .map_err(|error| format!("validate {training_label} resume_checkpoint: {error:#}"))?;
+    if checkpoint.manifest.training_kind != expected_kind {
         return Err(format!(
-            "SFT resume_checkpoint contains {:?} state",
+            "{training_label} resume_checkpoint contains {:?} state",
             checkpoint.manifest.training_kind
         ));
     }
     if checkpoint.manifest.adapter_name != adapter_name {
         return Err(format!(
-            "SFT resume_checkpoint adapter {:?} does not match output adapter {:?}",
+            "{training_label} resume_checkpoint adapter {:?} does not match output adapter {:?}",
             checkpoint.manifest.adapter_name, adapter_name
         ));
     }
-    config.resume_checkpoint = Some(candidate.display().to_string());
+    *resume_checkpoint = Some(candidate.display().to_string());
     Ok(())
 }
 
@@ -616,7 +647,7 @@ fn run_grpo(
                     "backend native training route enabled - routing streamed GRPO dataset to \
                      cuda_native_grpo_train_jsonl"
                 );
-                return kiln_train::cuda_train::cuda_native_grpo_train_jsonl_to_with_coordination(
+                return kiln_train::cuda_train::cuda_native_grpo_train_jsonl_to_with_checkpoint_root(
                     std::path::Path::new(dataset_path),
                     &req.config,
                     model_config,
@@ -624,6 +655,7 @@ fn run_grpo(
                     tokenizer,
                     adapter_dir,
                     output_adapter_dir,
+                    adapter_dir,
                     adapter_name,
                     Some(progress_cb),
                     gpu_step_coordination.clone(),
@@ -647,7 +679,7 @@ fn run_grpo(
                 dataset_path,
                 "routing streamed GRPO dataset to generic trainer"
             );
-            return trainer::grpo_train_jsonl_to_with_coordination(
+            return trainer::grpo_train_jsonl_to_with_checkpoint_root(
                 std::path::Path::new(dataset_path),
                 &req.config,
                 model_config,
@@ -655,6 +687,7 @@ fn run_grpo(
                 tokenizer,
                 adapter_dir,
                 output_adapter_dir,
+                adapter_dir,
                 adapter_name,
                 Some(progress_cb),
                 Some(replay_ctx),
@@ -672,7 +705,7 @@ fn run_grpo(
                 native_route_env,
                 "backend native training route enabled - routing GRPO to cuda_native_grpo_train"
             );
-            return kiln_train::cuda_train::cuda_native_grpo_train_to_with_coordination(
+            return kiln_train::cuda_train::cuda_native_grpo_train_to_with_checkpoint_root(
                 &req.groups,
                 &req.config,
                 model_config,
@@ -680,6 +713,7 @@ fn run_grpo(
                 tokenizer,
                 adapter_dir,
                 output_adapter_dir,
+                adapter_dir,
                 adapter_name,
                 Some(progress_cb),
                 gpu_step_coordination.clone(),
@@ -697,7 +731,7 @@ fn run_grpo(
             );
         }
     }
-    trainer::grpo_train_to_with_coordination(
+    trainer::grpo_train_to_with_checkpoint_root(
         &req.groups,
         &req.config,
         model_config,
@@ -705,6 +739,7 @@ fn run_grpo(
         tokenizer,
         adapter_dir,
         output_adapter_dir,
+        adapter_dir,
         adapter_name,
         Some(progress_cb),
         Some(replay_ctx),
@@ -2999,10 +3034,16 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
         let job = jobs.get(&job_id).unwrap();
         (job.auto_load, job.adapter_name.clone(), job.job_type)
     };
-    if let QueuedJob::Sft(request) = &mut entry.job
-        && let Err(error) =
+    let resume_admission = match &mut entry.job {
+        QueuedJob::Sft(request) => {
             normalize_sft_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
-    {
+        }
+        QueuedJob::Grpo(request) => {
+            normalize_grpo_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
+        }
+        _ => Ok(()),
+    };
+    if let Err(error) = resume_admission {
         reject_queued_training_job(&state, &job_id, error, "invalid_resume_checkpoint");
         return;
     }
@@ -3821,6 +3862,33 @@ mod tests {
             config.resume_checkpoint.as_deref(),
             temp.path().join(name).to_str()
         );
+    }
+
+    #[test]
+    fn grpo_resume_admission_normalizes_only_matching_exact_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let name = "target-checkpoint-step-00000001.kiln-checkpoint";
+        write_resume_checkpoint_fixture(temp.path(), name, "target", TrainingKind::Grpo);
+        let mut config = kiln_train::GrpoConfig {
+            resume_checkpoint: Some(name.into()),
+            ..Default::default()
+        };
+
+        normalize_grpo_resume_checkpoint(&mut config, temp.path(), "target").unwrap();
+        assert_eq!(
+            config.resume_checkpoint.as_deref(),
+            temp.path().join(name).to_str()
+        );
+
+        let sft_name = "target-checkpoint-sft.kiln-checkpoint";
+        write_resume_checkpoint_fixture(temp.path(), sft_name, "target", TrainingKind::Sft);
+        let mut wrong_kind = kiln_train::GrpoConfig {
+            resume_checkpoint: Some(sft_name.into()),
+            ..Default::default()
+        };
+        let error =
+            normalize_grpo_resume_checkpoint(&mut wrong_kind, temp.path(), "target").unwrap_err();
+        assert!(error.contains("GRPO resume_checkpoint contains Sft state"));
     }
 
     #[test]

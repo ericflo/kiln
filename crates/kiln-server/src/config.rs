@@ -1213,9 +1213,10 @@ pub struct MemoryConfig {
 pub struct TrainingConfig {
     pub grad_checkpoint_segments: Option<usize>,
     pub no_grad_checkpoint: bool,
-    /// Save a checkpoint every N committed optimizer steps. SFT checkpoints
-    /// are exact and resumable; modes not yet migrated emit PEFT snapshots.
-    /// Per-job config overrides this. `None` disables periodic checkpoints.
+    /// Save a checkpoint every N committed optimizer steps. SFT and GRPO
+    /// checkpoints are exact and resumable; modes not yet migrated emit PEFT
+    /// snapshots. Per-job config overrides this. `None` disables periodic
+    /// checkpoints.
     pub checkpoint_interval: Option<usize>,
     /// HTTP(S) URL to POST a JSON notification to when a training job
     /// (SFT or GRPO) completes or fails.

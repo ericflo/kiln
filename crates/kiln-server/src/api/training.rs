@@ -1309,6 +1309,11 @@ async fn submit_grpo(
         req.config.lora_alpha,
         req.config.allow_high_lora_scale,
     )?;
+    if req.config.checkpoint_interval == Some(0) {
+        return Err(ApiError::training_invalid_request(
+            "GRPO checkpoint_interval must be greater than zero",
+        ));
+    }
     let adapter_name = req
         .config
         .output_name
@@ -2491,9 +2496,9 @@ struct TrainingJobDetail {
     /// Replay request summary from `replay.jsonl`. Large inline datasets are
     /// reduced to counts so the drill-in remains usable.
     replay_request: Option<serde_json::Value>,
-    /// Newest manifest-valid immutable checkpoint for this SFT adapter. The
-    /// basename can be sent back as `config.resume_checkpoint`; submission
-    /// performs the full artifact/checksum validation before GPU work.
+    /// Newest manifest-valid immutable checkpoint for this job's training
+    /// type. The basename can be sent back as `config.resume_checkpoint`;
+    /// submission performs full artifact/checksum validation before GPU work.
     latest_checkpoint: Option<TrainingCheckpointSummary>,
     /// Non-fatal discovery errors for checkpoint-shaped directories. A valid
     /// older checkpoint may still be returned in `latest_checkpoint`.
@@ -2505,9 +2510,11 @@ struct TrainingJobDetail {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct TrainingCheckpointSummary {
-    /// Stable basename accepted by `SftConfig.resume_checkpoint`.
+    /// Stable basename accepted by the matching training config.
     resume_checkpoint: String,
     checkpoint_id: String,
+    training_kind: kiln_train::checkpoint::TrainingKind,
+    data_source_kind: String,
     global_step: u64,
     total_steps: u64,
     next_epoch_index: u64,
@@ -2516,9 +2523,10 @@ struct TrainingCheckpointSummary {
     created_at: String,
 }
 
-fn discover_latest_sft_checkpoint(
+fn discover_latest_training_checkpoint(
     adapter_root: &Path,
     adapter_name: &str,
+    expected_kind: kiln_train::checkpoint::TrainingKind,
 ) -> (Option<TrainingCheckpointSummary>, Option<String>) {
     const MAX_REPORTED_ERRORS: usize = 4;
 
@@ -2571,12 +2579,14 @@ fn discover_latest_sft_checkpoint(
             }
             continue;
         }
-        if manifest.training_kind != kiln_train::checkpoint::TrainingKind::Sft {
+        if manifest.training_kind != expected_kind {
             continue;
         }
         let summary = TrainingCheckpointSummary {
             resume_checkpoint: name,
             checkpoint_id: manifest.checkpoint_id,
+            training_kind: manifest.training_kind,
+            data_source_kind: manifest.data.source_kind,
             global_step: manifest.progress.global_step,
             total_steps: manifest.progress.total_steps,
             next_epoch_index: manifest.progress.epoch_index,
@@ -2757,11 +2767,16 @@ async fn job_detail(
     detail.train_receipt = train_receipt;
     detail.replay_request = replay_request;
     detail.metadata_error = metadata_error;
-    if let (TrainingJobType::Sft, Some(adapter_name)) =
-        (detail.job_type, detail.status.adapter_name.as_deref())
+    let checkpoint_kind = match detail.job_type {
+        TrainingJobType::Sft => Some(kiln_train::checkpoint::TrainingKind::Sft),
+        TrainingJobType::Grpo => Some(kiln_train::checkpoint::TrainingKind::Grpo),
+        TrainingJobType::Opd => None,
+    };
+    if let (Some(expected_kind), Some(adapter_name)) =
+        (checkpoint_kind, detail.status.adapter_name.as_deref())
     {
         (detail.latest_checkpoint, detail.checkpoint_error) =
-            discover_latest_sft_checkpoint(&state.adapter_dir, adapter_name);
+            discover_latest_training_checkpoint(&state.adapter_dir, adapter_name, expected_kind);
     }
     Ok(Json(detail))
 }
@@ -2939,8 +2954,11 @@ mod tests {
         std::fs::create_dir(&corrupt).unwrap();
         std::fs::write(corrupt.join("checkpoint_manifest.json"), b"{}").unwrap();
 
-        let (latest, error) = discover_latest_sft_checkpoint(temp.path(), "demo");
+        let (latest, error) =
+            discover_latest_training_checkpoint(temp.path(), "demo", TrainingKind::Sft);
         let latest = latest.expect("latest valid SFT checkpoint");
+        assert_eq!(latest.training_kind, TrainingKind::Sft);
+        assert_eq!(latest.data_source_kind, "test");
         assert_eq!(latest.global_step, 4);
         assert_eq!(latest.total_steps, 8);
         assert_eq!(
@@ -2953,6 +2971,21 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("step-00000009")),
             "corrupt checkpoint candidates must remain visible to operators"
+        );
+
+        let (latest, error) =
+            discover_latest_training_checkpoint(temp.path(), "demo", TrainingKind::Grpo);
+        let latest = latest.expect("latest valid GRPO checkpoint");
+        assert_eq!(latest.training_kind, TrainingKind::Grpo);
+        assert_eq!(latest.global_step, 6);
+        assert_eq!(
+            latest.resume_checkpoint,
+            "demo-checkpoint-step-00000006.kiln-checkpoint"
+        );
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("step-00000009"))
         );
     }
 

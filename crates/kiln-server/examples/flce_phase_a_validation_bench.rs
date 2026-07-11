@@ -313,6 +313,7 @@ fn run_one(
         if let Ok(mut slot) = last_loss_c.lock() {
             *slot = Some(p.loss);
         }
+        kiln_train::trainer::TrainControl::Continue
     });
 
     let start = Instant::now();
