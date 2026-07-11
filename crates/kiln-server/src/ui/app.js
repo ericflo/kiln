@@ -3894,6 +3894,11 @@ function wireAdvanced(kind, summarize) {
 // A blank learning-rate field means "auto" — the server resolves the
 // per-optimizer default (Muon vs AdamW want very different bands).
 const lrSummary = id => (document.getElementById(id)?.value || '').trim() || 'auto';
+const checkpointSummary = kind => {
+  const interval = (document.getElementById(kind + '-checkpoint-interval')?.value || '').trim();
+  const resume = (document.getElementById(kind + '-resume-checkpoint')?.value || '').trim();
+  return `${interval ? `checkpoint every ${interval}` : 'checkpoints off'} · ${resume ? 'resume selected' : 'fresh run'}`;
+};
 const optimizerLabel = id => {
   const value = document.getElementById(id)?.value || 'muon';
   if (value === 'adam_w') return 'AdamW';
@@ -3908,19 +3913,23 @@ function readTrainingOptimizer(kind) {
 }
 wireAdvanced('sft', () => {
   const v = id => document.getElementById(id)?.value || '?';
+  const raw = id => document.getElementById(id)?.value || '';
   const lr = lrSummary('sft-learning-rate');
   const opt = optimizerLabel('sft-optimizer');
-  const isDefault = v('sft-epochs') === '3' && opt === 'Muon' && lr === 'auto' && v('sft-rank') === '8';
+  const isDefault = v('sft-epochs') === '3' && opt === 'Muon' && lr === 'auto' && v('sft-rank') === '8'
+    && !raw('sft-checkpoint-interval') && !raw('sft-resume-checkpoint');
   if (typeof updateSftOverfitHint === 'function') updateSftOverfitHint();
-  return `${v('sft-epochs')} epochs · ${opt} · learning rate ${lr} · LoRA rank ${v('sft-rank')}`
+  return `${v('sft-epochs')} epochs · ${opt} · learning rate ${lr} · LoRA rank ${v('sft-rank')} · ${checkpointSummary('sft')}`
     + (isDefault ? ' — sensible defaults, no tuning needed' : ' — customized');
 });
 wireAdvanced('grpo', () => {
   const v = id => document.getElementById(id)?.value || '?';
+  const raw = id => document.getElementById(id)?.value || '';
   const lr = lrSummary('grpo-learning-rate');
   const opt = optimizerLabel('grpo-optimizer');
-  const isDefault = v('grpo-kl-coeff') === '0.1' && opt === 'Muon' && lr === 'auto' && v('grpo-rank') === '8';
-  return `KL ${v('grpo-kl-coeff')} · ${opt} · learning rate ${lr} · LoRA rank ${v('grpo-rank')}`
+  const isDefault = v('grpo-kl-coeff') === '0.1' && opt === 'Muon' && lr === 'auto' && v('grpo-rank') === '8'
+    && !raw('grpo-checkpoint-interval') && !raw('grpo-resume-checkpoint');
+  return `KL ${v('grpo-kl-coeff')} · ${opt} · learning rate ${lr} · LoRA rank ${v('grpo-rank')} · ${checkpointSummary('grpo')}`
     + (isDefault ? ' — sensible defaults, no tuning needed' : ' — customized');
 });
 
@@ -4076,6 +4085,20 @@ function parsePositiveIntegerField(value, label) {
     throw new Error(`${label} must be a positive whole number.`);
   }
   return parsed;
+}
+
+function parseOptionalPositiveIntegerField(value, label) {
+  if (!value.trim()) return null;
+  return parsePositiveIntegerField(value, label);
+}
+
+function parseResumeCheckpointField(value, label) {
+  const checkpoint = value.trim();
+  if (!checkpoint) return null;
+  if (!isPathSafeAdapterDirectoryName(checkpoint) || !checkpoint.endsWith('.kiln-checkpoint')) {
+    throw new Error(`${label} must be one direct .kiln-checkpoint basename, without a path.`);
+  }
+  return checkpoint;
 }
 
 function parseQuickInferenceTemperature(input) {
@@ -4265,6 +4288,8 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
     const learningRate = parseOptionalFiniteNumberField(form.learning_rate.value, 'SFT learning rate');
     const epochs = parsePositiveIntegerField(form.epochs.value, 'SFT epochs');
     const rank = parsePositiveIntegerField(form.rank.value, 'SFT LoRA rank');
+    const checkpointInterval = parseOptionalPositiveIntegerField(form.checkpoint_interval.value, 'SFT checkpoint interval');
+    const resumeCheckpoint = parseResumeCheckpointField(form.resume_checkpoint.value, 'SFT resume checkpoint');
     const config = {
       output_name: outputName,
       auto_load: form.auto_load.checked,
@@ -4277,6 +4302,8 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
     };
     // Blank lr is omitted so the server resolves the per-optimizer default.
     if (learningRate !== null) config.learning_rate = learningRate;
+    if (checkpointInterval !== null) config.checkpoint_interval = checkpointInterval;
+    if (resumeCheckpoint !== null) config.resume_checkpoint = resumeCheckpoint;
     const held = trainingData.sft;
     let body;
     if (held && held.datasetName) {
@@ -4316,6 +4343,8 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
     const learningRate = parseOptionalFiniteNumberField(form.learning_rate.value, 'GRPO learning rate');
     const klCoeff = parseFiniteNumberField(form.kl_coeff.value, 'GRPO KL coefficient');
     const rank = parsePositiveIntegerField(form.rank.value, 'GRPO LoRA rank');
+    const checkpointInterval = parseOptionalPositiveIntegerField(form.checkpoint_interval.value, 'GRPO checkpoint interval');
+    const resumeCheckpoint = parseResumeCheckpointField(form.resume_checkpoint.value, 'GRPO resume checkpoint');
     const config = {
       output_name: outputName,
       auto_load: form.auto_load.checked,
@@ -4328,6 +4357,8 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
     };
     // Blank lr is omitted so the server resolves the per-optimizer default.
     if (learningRate !== null) config.learning_rate = learningRate;
+    if (checkpointInterval !== null) config.checkpoint_interval = checkpointInterval;
+    if (resumeCheckpoint !== null) config.resume_checkpoint = resumeCheckpoint;
     const held = trainingData.grpo;
     let body;
     if (held && held.datasetName) {
@@ -9399,6 +9430,88 @@ function renderTrainMetadata(j) {
   </div>`;
 }
 
+function checkpointTrainingKind(j, checkpoint) {
+  const kind = String(checkpoint?.training_kind || j?.job_type || '').toLowerCase();
+  return kind === 'sft' || kind === 'grpo' ? kind : null;
+}
+
+function setTrainingFormValue(id, value) {
+  const input = document.getElementById(id);
+  if (!input) return;
+  input.value = value === null || value === undefined ? '' : String(value);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function replayOptimizerKind(config) {
+  const optimizer = config?.optimizer;
+  const kind = typeof optimizer === 'string' ? optimizer : optimizer?.kind;
+  return ['muon', 'adam_w', 'sgd'].includes(kind) ? kind : 'muon';
+}
+
+async function prepareTrainingResume(j, checkpoint) {
+  const kind = checkpointTrainingKind(j, checkpoint);
+  if (!kind) {
+    toast('This checkpoint type cannot be resumed from the browser.', 'err');
+    return;
+  }
+
+  closeTrainDrillModal();
+  selectPage('training');
+  document.getElementById('training-tab-' + kind)?.click();
+
+  // A replay summary does not retain inline rows. Clear every current source
+  // before preparing the form so an unrelated paste or upload cannot be sent
+  // with a valid-looking checkpoint basename.
+  clearTrainingData(kind);
+  const textarea = document.getElementById(TRAIN_KIND[kind].textareaId);
+  if (textarea) textarea.value = '';
+  const picker = document.getElementById(TRAIN_KIND[kind].pickId);
+  if (picker) picker.value = '';
+
+  const requestBody = j?.replay_request?.request_body || {};
+  const config = requestBody.config || {};
+  let restoredDataset = null;
+  if (typeof requestBody.dataset === 'string' && requestBody.dataset.trim()) {
+    restoredDataset = requestBody.dataset.trim();
+    await loadNamedDatasetIntoTraining(kind, restoredDataset);
+  }
+
+  setTrainingFormValue(kind + '-output-name', j.adapter_name || config.output_name || '');
+  setTrainingFormValue(kind + '-learning-rate', Number.isFinite(config.learning_rate) ? config.learning_rate : '');
+  setTrainingFormValue(kind + '-rank', Number.isInteger(config.lora_rank) && config.lora_rank > 0 ? config.lora_rank : 8);
+  setTrainingFormValue(kind + '-optimizer', replayOptimizerKind(config));
+  setTrainingFormValue(
+    kind + '-checkpoint-interval',
+    Number.isInteger(config.checkpoint_interval) && config.checkpoint_interval > 0
+      ? config.checkpoint_interval
+      : '',
+  );
+  setTrainingFormValue(kind + '-resume-checkpoint', checkpoint.resume_checkpoint);
+  if (kind === 'sft') {
+    setTrainingFormValue('sft-epochs', Number.isInteger(config.epochs) && config.epochs > 0 ? config.epochs : 3);
+  } else {
+    setTrainingFormValue('grpo-kl-coeff', Number.isFinite(config.kl_coeff) ? config.kl_coeff : 0.1);
+  }
+  const autoLoad = document.getElementById(kind + '-auto-load');
+  if (autoLoad && typeof config.auto_load === 'boolean') autoLoad.checked = config.auto_load;
+
+  const advanced = document.getElementById(kind + '-advanced');
+  const advancedToggle = document.getElementById(kind + '-adv-toggle');
+  if (advanced && advanced.hidden) {
+    advanced.hidden = false;
+    advancedToggle?.setAttribute('aria-expanded', 'true');
+  }
+  TRAIN_KIND[kind].update();
+
+  if (restoredDataset) {
+    document.getElementById(kind + '-resume-checkpoint')?.focus();
+    toast(`Checkpoint and dataset ${restoredDataset} loaded — review the settings, then submit.`, 'ok');
+  } else {
+    document.getElementById(kind + '-dropzone')?.focus();
+    toast('Checkpoint loaded — re-select the exact original training data before submitting.');
+  }
+}
+
 function renderTrainCheckpoint(j) {
   const checkpoint = j.latest_checkpoint || null;
   const error = j.checkpoint_error
@@ -9414,12 +9527,22 @@ function renderTrainCheckpoint(j) {
   const status = checkpoint.complete
     ? 'complete'
     : `step ${drillValue(checkpoint.global_step)} / ${drillValue(checkpoint.total_steps)}`;
+  const kind = checkpointTrainingKind(j, checkpoint);
+  const sourceKind = String(checkpoint.data_source_kind || '');
+  const cursor = kind === 'grpo'
+    ? `${sourceKind.startsWith('jsonl-') ? 'GRPO JSONL' : 'GRPO inline'} · next group cursor ${drillValue(checkpoint.next_cursor_in_epoch)}`
+    : `SFT · next epoch index ${drillValue(checkpoint.next_epoch_index)} · example cursor ${drillValue(checkpoint.next_cursor_in_epoch)}`;
+  const state = String(j.state || '').toLowerCase();
+  const prepareButton = kind && state !== 'queued' && state !== 'running'
+    ? `<button class="btn btn-sm" type="button" data-prepare-training-resume title="Load this checkpoint and its recorded settings into the ${kind.toUpperCase()} form"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-arrow-right"></use></svg> Prepare resume</button>`
+    : '';
   return `<div class="detail-section">
     <h4>Resume checkpoint</h4>
     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
       <code style="background:var(--surface); padding:4px 8px; border-radius:4px; border:1px solid var(--border); overflow-wrap:anywhere;">${escapeHtml(checkpoint.resume_checkpoint)}</code>
       <button class="btn btn-sm btn-ghost" type="button" data-copy-resume-checkpoint="${escapeHtml(checkpoint.resume_checkpoint)}" title="Copy resume checkpoint basename" aria-label="Copy resume checkpoint basename"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg></button>
-      <span class="hint tabular-nums">${escapeHtml(status)} · epoch index ${drillValue(checkpoint.next_epoch_index)} · cursor ${drillValue(checkpoint.next_cursor_in_epoch)}</span>
+      ${prepareButton}
+      <span class="hint tabular-nums">${escapeHtml(status)} · ${escapeHtml(cursor)}</span>
     </div>
     ${error}
   </div>`;
@@ -9499,11 +9622,21 @@ function renderTrainDrillBody(j) {
           ? navigator.clipboard.writeText.bind(navigator.clipboard)
           : (text) => { fallbackCopyText(text); return Promise.resolve(); };
         writeText(value)
-          .then(() => toast('Resume checkpoint copied', 'ok'))
+          .then(() => {
+            if (Object.prototype.hasOwnProperty.call(window, '__copiedText')) window.__copiedText = value;
+            toast('Resume checkpoint copied', 'ok');
+          })
           .catch(() => {
             try { fallbackCopyText(value); toast('Resume checkpoint copied', 'ok'); }
             catch { toast('Copy failed', 'err'); }
           });
+      });
+    });
+    document.querySelectorAll('[data-prepare-training-resume]').forEach(b => {
+      b.addEventListener('click', () => {
+        prepareTrainingResume(j, j.latest_checkpoint).catch(error => {
+          toast('Could not prepare resume: ' + error.message, 'err');
+        });
       });
     });
   }, 0);

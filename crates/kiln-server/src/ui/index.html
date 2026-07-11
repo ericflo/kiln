@@ -611,6 +611,16 @@
                 <input type="number" id="sft-rank" name="rank" value="8" min="1" max="128">
                 <div class="form-help">Adapter capacity. 8 is plenty for corrections.</div>
               </div>
+              <div class="form-group">
+                <label for="sft-checkpoint-interval">Checkpoint interval</label>
+                <input type="number" id="sft-checkpoint-interval" name="checkpoint_interval" value="" min="1" step="1" placeholder="off">
+                <div class="form-help">Optimizer steps between exact resume points. Blank disables periodic checkpoints.</div>
+              </div>
+              <div class="form-group">
+                <label for="sft-resume-checkpoint">Resume checkpoint</label>
+                <input type="text" id="sft-resume-checkpoint" name="resume_checkpoint" value="" placeholder="adapter-checkpoint-step-….kiln-checkpoint" autocomplete="off" spellcheck="false">
+                <div class="form-help">Direct <code>.kiln-checkpoint</code> basename. Use the same adapter, data, and settings.</div>
+              </div>
             </div>
           </div>
           <div style="display: flex; gap: var(--space-3); align-items: center; padding-top: var(--space-3); border-top: 1px solid var(--border);">
@@ -694,6 +704,16 @@
                 <label for="grpo-rank">LoRA rank</label>
                 <input type="number" id="grpo-rank" name="rank" value="8" min="1" max="128">
                 <div class="form-help">Adapter capacity. 8 is plenty to start.</div>
+              </div>
+              <div class="form-group">
+                <label for="grpo-checkpoint-interval">Checkpoint interval</label>
+                <input type="number" id="grpo-checkpoint-interval" name="checkpoint_interval" value="" min="1" step="1" placeholder="off">
+                <div class="form-help">Optimizer groups between exact resume points. Blank disables periodic checkpoints.</div>
+              </div>
+              <div class="form-group">
+                <label for="grpo-resume-checkpoint">Resume checkpoint</label>
+                <input type="text" id="grpo-resume-checkpoint" name="resume_checkpoint" value="" placeholder="adapter-checkpoint-step-….kiln-checkpoint" autocomplete="off" spellcheck="false">
+                <div class="form-help">Direct <code>.kiln-checkpoint</code> basename. Use the same adapter, data, and settings.</div>
               </div>
             </div>
           </div>

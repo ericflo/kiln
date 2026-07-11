@@ -180,6 +180,8 @@ function validateSftPayload(body) {
   if (body?.config?.epochs !== 3) return 'SFT epochs should be numeric and nested under config';
   if (body?.config?.lora_rank !== 8) return 'SFT lora_rank should be numeric and nested under config';
   if (body?.config?.lora_alpha !== 16) return 'SFT lora_alpha should pair with rank (2×rank, capped at 32) so the trainer scale gate passes';
+  if (body?.config?.checkpoint_interval !== 2) return 'SFT checkpoint_interval should be a positive integer nested under config';
+  if ('resume_checkpoint' in (body?.config || {})) return 'Fresh SFT submission should omit resume_checkpoint when the field is blank';
   if ('output_name' in body || 'adapter_name' in body || 'num_epochs' in body) return 'SFT payload should not use stale top-level training config fields';
   return null;
 }
@@ -196,6 +198,8 @@ function validateGrpoPayload(body) {
   if (!isFiniteNumber(body?.config?.kl_coeff) || body.config.kl_coeff !== 0.1) return 'GRPO kl_coeff should be numeric';
   if (body?.config?.lora_rank !== 8) return 'GRPO lora_rank should be numeric and nested under config';
   if (body?.config?.lora_alpha !== 16) return 'GRPO lora_alpha should pair with rank (2×rank, capped at 32) so the trainer scale gate passes';
+  if (body?.config?.checkpoint_interval !== 3) return 'GRPO checkpoint_interval should be a positive integer nested under config';
+  if ('resume_checkpoint' in (body?.config || {})) return 'Fresh GRPO submission should omit resume_checkpoint when the field is blank';
   if ('epochs' in (body?.config || {}) || 'output_name' in body || 'adapter_name' in body || 'num_epochs' in body) return 'GRPO payload should not use stale SFT/top-level training config fields';
   return null;
 }
@@ -1099,6 +1103,25 @@ async function startServer({
         progress: 1,
         adapter_name: body.config.output_name,
         elapsed_secs: 1,
+        replay_request: {
+          kind: 'grpo',
+          request_body: {
+            groups_count: body.groups.length,
+            config: body.config,
+          },
+        },
+        latest_checkpoint: {
+          resume_checkpoint: 'grpo-adapter-checkpoint-step-00000003.kiln-checkpoint',
+          checkpoint_id: 'smoke-grpo-checkpoint-3',
+          training_kind: 'grpo',
+          data_source_kind: 'jsonl-grpo-trainable-order-v1',
+          global_step: 3,
+          total_steps: 5,
+          next_epoch_index: 0,
+          next_cursor_in_epoch: 3,
+          complete: false,
+          created_at: '2026-07-10T12:00:00Z',
+        },
       });
       setTimeout(() => json(res, { message: 'GRPO job submitted', job_id: 'smoke-grpo' }), 75);
       return;
@@ -1716,6 +1739,44 @@ async function expectNoMobileOverflow(page) {
   }
 }
 
+async function expectAdvancedTrainingLayout(page, kind, viewportLabel) {
+  const layout = await page.evaluate((trainingKind) => {
+    const body = document.getElementById(trainingKind + '-advanced');
+    if (!body || body.hidden) return { visible: false };
+    const bounds = body.getBoundingClientRect();
+    const groups = Array.from(body.querySelectorAll('.form-group')).map((group) => {
+      const rect = group.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+    });
+    const overlaps = [];
+    for (let left = 0; left < groups.length; left += 1) {
+      for (let right = left + 1; right < groups.length; right += 1) {
+        const a = groups[left];
+        const b = groups[right];
+        if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1
+          && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1) {
+          overlaps.push([left, right]);
+        }
+      }
+    }
+    return {
+      visible: true,
+      bodyWidth: bounds.width,
+      clientWidth: body.clientWidth,
+      scrollWidth: body.scrollWidth,
+      outside: groups.filter((rect) => rect.left < bounds.left - 1 || rect.right > bounds.right + 1),
+      overlaps,
+    };
+  }, kind);
+  if (!layout.visible) fail(`${viewportLabel} ${kind.toUpperCase()} advanced settings should be visible`);
+  if (layout.scrollWidth > layout.clientWidth + 1) {
+    fail(`${viewportLabel} ${kind.toUpperCase()} advanced settings overflow horizontally: ${JSON.stringify(layout)}`);
+  }
+  if (layout.outside.length || layout.overlaps.length) {
+    fail(`${viewportLabel} ${kind.toUpperCase()} advanced controls overlap or escape their panel: ${JSON.stringify(layout)}`);
+  }
+}
+
 async function expectMobilePanelFlow(page) {
   const tabPanels = [
     // Recent requests is promoted to the top of Overview — live agent traffic is
@@ -1972,8 +2033,13 @@ async function runMobileOnboardingSmoke(baseUrl) {
     await waitForVisiblePanel(page, '#tab-queue', 'Mobile Queue tab did not activate');
     await clickAndWait(page, '#training-tab-sft', 'Could not activate mobile SFT tab');
     await waitForVisiblePanel(page, '#tab-sft', 'Mobile SFT tab did not activate');
+    await clickAndWait(page, '#sft-adv-toggle', 'Could not open mobile SFT advanced settings');
+    await expectAdvancedTrainingLayout(page, 'sft', 'Mobile');
+    await expectNoMobileOverflow(page);
     await clickAndWait(page, '#training-tab-grpo', 'Could not activate mobile GRPO tab');
     await waitForVisiblePanel(page, '#tab-grpo', 'Mobile GRPO tab did not activate');
+    await clickAndWait(page, '#grpo-adv-toggle', 'Could not open mobile GRPO advanced settings');
+    await expectAdvancedTrainingLayout(page, 'grpo', 'Mobile');
     await expectNoMobileOverflow(page);
 
     await goToPrimaryTab(page, 'playground');
@@ -2930,6 +2996,13 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await expectDisabled(page, '#sft-form button[type="submit"]', true, 'SFT submit should start disabled until examples are provided');
     await clickAndWait(page, '#use-sft-sample', 'Could not click SFT sample payload button');
     await expectDisabled(page, '#sft-form button[type="submit"]', false, 'SFT submit should enable after sample payload is clicked');
+    await clickAndWait(page, '#sft-adv-toggle', 'Could not open SFT advanced settings');
+    await page.$eval('#sft-checkpoint-interval', (input) => {
+      input.value = '2';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await expectAdvancedTrainingLayout(page, 'sft', 'Desktop');
+    await waitForPanelText(page, '#sft-adv-summary', /checkpoint every 2 · fresh run/, 'SFT advanced summary should expose checkpoint cadence');
     await clickAndWait(page, '#sft-form button[type="submit"]', 'Could not submit sample SFT payload');
     await expectDisabled(page, '#sft-form button[type="submit"]', true, 'SFT submit should disable while the job is submitting');
     await expectTrainingToast(page, 'SFT job submitted');
@@ -3017,6 +3090,13 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await expectDisabled(page, '#grpo-form button[type="submit"]', true, 'GRPO submit should start disabled until groups are provided');
     await clickAndWait(page, '#use-grpo-sample', 'Could not click GRPO sample payload button');
     await expectDisabled(page, '#grpo-form button[type="submit"]', false, 'GRPO submit should enable after sample payload is clicked');
+    await clickAndWait(page, '#grpo-adv-toggle', 'Could not open GRPO advanced settings');
+    await page.$eval('#grpo-checkpoint-interval', (input) => {
+      input.value = '3';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await expectAdvancedTrainingLayout(page, 'grpo', 'Desktop');
+    await waitForPanelText(page, '#grpo-adv-summary', /checkpoint every 3 · fresh run/, 'GRPO advanced summary should expose checkpoint cadence');
     await clickAndWait(page, '#grpo-form button[type="submit"]', 'Could not submit sample GRPO payload');
     await expectDisabled(page, '#grpo-form button[type="submit"]', true, 'GRPO submit should disable while the job is submitting');
     await expectTrainingToast(page, 'GRPO job submitted');
@@ -3032,9 +3112,59 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await expectDisabled(page, '#train-drill-copy-loss', true, 'Copy loss CSV should disable when the job has no loss samples');
     const copyLossTitle = await page.$eval('#train-drill-copy-loss', (el) => el.title);
     if (!/No loss samples recorded yet/.test(copyLossTitle)) fail(`Disabled Copy loss CSV should explain what unlocks it, got: ${JSON.stringify(copyLossTitle)}`);
-    await clickAndWait(page, '#train-drill-close', 'Could not close the GRPO train drill modal');
+    await waitForPanelText(page, '#train-drill-content', /GRPO JSONL · next group cursor 3/, 'GRPO checkpoint status should use route-aware group cursor wording');
+    await page.evaluate(() => { window.__copiedText = ''; });
+    await clickAndWait(page, '[data-copy-resume-checkpoint]', 'Could not copy the GRPO resume checkpoint');
+    await page.waitForFunction(
+      () => window.__copiedText === 'grpo-adapter-checkpoint-step-00000003.kiln-checkpoint',
+      { timeout: 5000 },
+    ).catch(() => fail('GRPO resume checkpoint copy should use the direct immutable basename'));
+    await expectTrainingToast(page, 'Resume checkpoint copied');
+
+    await clickAndWait(page, '[data-prepare-training-resume]', 'Could not prepare the GRPO resume form');
+    await waitForVisiblePanel(page, '#tab-grpo', 'Preparing a GRPO resume should open the GRPO form');
     await page.waitForFunction(() => document.getElementById('train-drill-modal')?.hidden === true, { timeout: 5000 })
-      .catch(() => fail('GRPO train drill modal did not close'));
+      .catch(() => fail('Preparing a resume should close the train drill modal'));
+    await expectTrainingToast(page, 'Checkpoint loaded — re-select the exact original training data before submitting.');
+    const preparedResume = await page.evaluate(() => ({
+      adapter: document.getElementById('grpo-output-name')?.value,
+      cadence: document.getElementById('grpo-checkpoint-interval')?.value,
+      checkpoint: document.getElementById('grpo-resume-checkpoint')?.value,
+      advancedOpen: document.getElementById('grpo-advanced')?.hidden === false,
+    }));
+    if (preparedResume.adapter !== 'grpo-adapter'
+      || preparedResume.cadence !== '3'
+      || preparedResume.checkpoint !== 'grpo-adapter-checkpoint-step-00000003.kiln-checkpoint'
+      || !preparedResume.advancedOpen) {
+      fail(`Prepared GRPO resume fields were incomplete: ${JSON.stringify(preparedResume)}`);
+    }
+    await waitForPanelText(page, '#grpo-adv-summary', /checkpoint every 3 · resume selected/, 'Prepared GRPO resume should be visible in the collapsed summary');
+    await expectDisabled(page, '#grpo-form button[type="submit"]', true, 'Preparing an inline resume must clear unverifiable prior data');
+
+    await page.$eval('#grpo-checkpoint-interval', (input) => {
+      input.value = '0';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await clickAndWait(page, '#use-grpo-sample', 'Could not restore sample data for resume validation');
+    await expectDisabled(page, '#grpo-form button[type="submit"]', false, 'GRPO submit should re-enable after exact data is selected');
+    const zeroCadenceValidity = await page.$eval('#grpo-checkpoint-interval', (input) => ({
+      valid: input.checkValidity(),
+      rangeUnderflow: input.validity.rangeUnderflow,
+      formValid: input.form?.checkValidity(),
+    }));
+    if (zeroCadenceValidity.valid || !zeroCadenceValidity.rangeUnderflow || zeroCadenceValidity.formValid) {
+      fail(`Native GRPO checkpoint cadence validation should reject zero: ${JSON.stringify(zeroCadenceValidity)}`);
+    }
+    await page.$eval('#grpo-checkpoint-interval', (input) => {
+      input.value = '3';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await page.$eval('#grpo-resume-checkpoint', (input) => {
+      input.value = '../bad.kiln-checkpoint';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await clickAndWait(page, '#grpo-form button[type="submit"]', 'Could not exercise invalid GRPO resume validation');
+    await expectTrainingToast(page, 'GRPO resume checkpoint must be one direct .kiln-checkpoint basename, without a path.');
 
     await goToPrimaryTab(page, 'playground');
     await expectDisabled(page, '#chat-send', true, 'Quick Inference send should start disabled until text is entered');
