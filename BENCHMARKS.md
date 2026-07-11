@@ -1,10 +1,86 @@
 # Benchmarks
 
 Inference performance for **kiln** on Qwen3.5-4B against external references on
-the same single-GPU class. Headline numbers track current `main`; older runs
-are kept as historical context where the methodology was the same.
+the same single-GPU class. The acceptance protocol below is current. Numerical
+tables later in this file predate that protocol and are historical until they
+are replaced by checked-in `kiln.serving-benchmark.v1` receipts.
 
-## Setup
+## Current serving acceptance protocol
+
+[`scripts/bench-concurrent-batch.py`](scripts/bench-concurrent-batch.py) is the
+one serving driver for Kiln and vLLM. Measured traffic uses only the shared
+streaming `POST /v1/chat/completions` API. Kiln `/health` snapshots are taken
+before and after a run when available, outside the timed request path; they do
+not alter request bodies or scheduling.
+
+The driver:
+
+- builds unique prompts by permuting one fixed marker multiset, never from wall
+  clock time, and rejects a row if reported prompt-token counts differ;
+- pins model, template thinking mode, output length, neutral penalties,
+  temperature, top-p, seeds, all-at-once arrival, warmup, and concurrency;
+- starts every row behind one thread barrier and records dispatch spread;
+- requires one `[DONE]`, one positive usage record, one finish reason, and the
+  requested number of generated tokens from every request;
+- reports client-visible TTFT, SSE-event ITL p50/p99/p99.9, end-to-end latency,
+  request and output-token throughput, SLO-goodput, errors, and sampled peak
+  device memory;
+- records Kiln's effective decode ceiling, observed width, mean rows per
+  forward, phase time, and error deltas when its diagnostics are enabled;
+- writes an atomic, self-hashing receipt and can require exact prompt/output
+  hashes to match a reference engine receipt.
+
+`client_visible_itl_ms_*` is deliberately named: it measures non-empty
+semantic SSE-event arrival, which is the only engine-neutral client signal.
+An engine may coalesce multiple tokenizer tokens into one visible event. The
+driver does not request Kiln-only token-timing events because that would make
+the two measured request bodies different.
+
+Run Kiln first from a clean checkout. Use an explicit DRM path on machines with
+more than one GPU:
+
+```bash
+RUN_ID=qwen35-4b-greedy-short-20260710
+python3 scripts/bench-concurrent-batch.py \
+  --engine kiln \
+  --base-url http://127.0.0.1:8420 \
+  --model Qwen3.5-4B \
+  --run-id "$RUN_ID" \
+  --sizes 1,8,16,32,64,128 \
+  --repeats 3 \
+  --max-tokens 64 \
+  --require-memory \
+  --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
+  --out /tmp/kiln-serving.json
+```
+
+Run vLLM with the same `RUN_ID`, model alias, sizes, and generation settings.
+The runtime identity must be supplied for a non-Kiln engine. The reference
+receipt makes prompt and greedy output parity a release gate:
+
+```bash
+python3 scripts/bench-concurrent-batch.py \
+  --engine vllm \
+  --base-url http://127.0.0.1:8000 \
+  --model Qwen3.5-4B \
+  --runtime-identity vllm:VERSION+BUILD \
+  --run-id "$RUN_ID" \
+  --sizes 1,8,16,32,64,128 \
+  --repeats 3 \
+  --max-tokens 64 \
+  --diagnostics-url none \
+  --require-memory \
+  --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
+  --reference-receipt /tmp/kiln-serving.json \
+  --out /tmp/vllm-serving.json
+```
+
+An official receipt must not use `--allow-dirty`, disable fixed output or
+uniform prompt-token gates, omit runtime identity, or include failed/zero-token
+requests in throughput. Use a shared run ID for both engines and restart the
+engine between implementations so device-memory baselines are independent.
+
+## Historical CUDA setup
 
 | Component | Value |
 |---|---|
@@ -26,7 +102,7 @@ The current single-stream protocol is `--paged --prompt-tokens 512
 --chat-template --latency-only --temperature 0.0 --seed N` with three fresh
 processes. Median-of-3 governs.
 
-## Results
+## Historical results
 
 ### Single-stream throughput (kiln, post-PR #536, A6000)
 
@@ -131,15 +207,15 @@ quantized + GDN-fused base path is already running close to its bs=1 ceiling
 on A6000, and the most obvious next-step lever (native MTP self-spec) does
 not yet pay back the verifier cost at current α.
 
-### Batched concurrent-decode throughput (L40S sm_89, post May 2026 batched-decode rework)
+### Historical batched concurrent-decode throughput (L40S sm_89, May 2026)
 
 Aggregate `/v1/chat/completions` greedy decode tokens/s across N
 concurrent HTTP streams, Qwen3.5-4B, `KILN_W4A16=1`,
 `KILN_CUDA_GRAPHS=true`, `KILN_MAX_DECODE_BATCH=64`, 128 generated
-tokens per stream, per-call-nonce prompts (see
-`scripts/bench-concurrent-batch.py` — without the nonce, the
-deterministic completion cache collapses repeated greedy decodes onto a
-0-tok response and over-reports throughput by 2 ×+):
+tokens per stream, using the pre-v2 driver and wall-clock nonce prompts. Those
+nonces avoided Kiln's deterministic completion cache, but did not bind the two
+engines to one reproducible prompt set or measure streaming TTFT/ITL. These
+rows therefore remain historical rather than current acceptance evidence:
 
 | Concurrency | Aggregate tok/s | Scale vs bs=1 |
 |---:|---:|---:|
@@ -187,9 +263,9 @@ path; the fix is purely a bs > 1 win.
 
 ### Direct head-to-head: kiln vs vLLM 0.21.0 (L40S sm_89, May 2026)
 
-Same Qwen3.5-4B weights, same L40S, same bench harness
-(`scripts/bench-concurrent-batch.py`), greedy decode,
-`max_tokens=64`, per-call-nonce prompts. vLLM serves via
+Same Qwen3.5-4B weights and L40S, measured with the pre-v2 version of
+`scripts/bench-concurrent-batch.py`, greedy decode, `max_tokens=64`, and
+per-call nonce prompts. vLLM serves via
 `vllm serve … --gpu-memory-utilization 0.85 --max-model-len 2048
 --max-num-seqs 256`, default torch.compile + full CUDA-graph capture
 across batch sizes [1..512]. kiln runs `target/release/kiln serve`
@@ -222,9 +298,11 @@ benched here on L40S):
   bs=64 step every kernel pays full dispatch overhead. Closing this
   is the next major perf lever — see TODO note in `cuda_graph.rs`.
 
-The gap is reproducible across multiple sweeps and the `bench-concurrent-batch.py`
-nonce already neutralizes the deterministic completion cache that
-otherwise inflates kiln numbers. p50/p99 per-request latencies follow
+The historical gap reproduced across multiple sweeps, and the old driver's
+nonce neutralized the deterministic completion cache that otherwise inflated
+Kiln numbers. It did not provide the current workload fingerprint, usage
+gates, output parity, device-memory sampling, or streaming ITL contract, so it
+cannot serve as a current comparison receipt. Its p50/p99 request latencies follow
 the aggregate-throughput ordering (vLLM's bs=64 p99 = 2.13 s, kiln's
 bs=64 p99 = 3.46 s).
 
