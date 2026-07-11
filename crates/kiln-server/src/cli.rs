@@ -15,6 +15,7 @@ use crate::adapter_verify::{
     AdapterVerifyOptions, AdapterVerifyServerReceipt, DEFAULT_VERIFY_PROMPT,
     DETERMINISTIC_GREEDY_TEXT_NOTE, finalize_status, push_check, verify_adapter_offline,
 };
+use crate::config::default_server_url;
 
 const TOP_LEVEL_OVERVIEW: &str = r#"Kiln serves Qwen3.5-4B from one Rust process and lets you adapt it with live LoRA training.
 
@@ -461,7 +462,7 @@ pub enum Commands {
     #[command(long_about = HEALTH_OVERVIEW, after_help = HEALTH_EXAMPLES)]
     Health {
         /// Server URL
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
 
         /// Emit raw JSON instead of the pretty-printed tree
@@ -497,7 +498,7 @@ pub enum Commands {
         output: PathBuf,
 
         /// Server URL; defaults to the local kiln serve instance
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
     },
 
@@ -558,7 +559,7 @@ pub enum Commands {
         summary_output: PathBuf,
 
         /// Server URL; defaults to the local kiln serve instance
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
     },
 
@@ -586,7 +587,7 @@ pub enum Commands {
     #[command(name = "pi-setup", long_about = PI_SETUP_OVERVIEW)]
     PiSetup {
         /// Override the kiln server URL. `/v1` is appended when omitted.
-        #[arg(long, alias = "kiln-url", default_value = "http://localhost:8420")]
+        #[arg(long, alias = "kiln-url", default_value_t = default_server_url())]
         url: String,
         /// Output path for the models.json file. Default
         /// `$HOME/.pi/agent/models.json`.
@@ -605,7 +606,7 @@ pub enum Commands {
     #[command(name = "self-improve", long_about = SELF_IMPROVE_OVERVIEW)]
     SelfImprove {
         /// Server URL.
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
         /// Agent adapter to improve.
         #[arg(long, default_value = "pi-coder-current")]
@@ -627,7 +628,7 @@ pub enum JudgeCommands {
     /// (turn, context) pairs. Requires a configured teacher alias.
     Distill {
         /// Server URL.
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
         /// Output adapter name.
         #[arg(long, default_value = "judge-pi-v1")]
@@ -640,7 +641,7 @@ pub enum JudgeCommands {
     /// when agreement drops below 80%.
     DriftCheck {
         /// Server URL.
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
         /// Judge LoRA alias.
         #[arg(long, default_value = "judge-pi-v1")]
@@ -698,7 +699,7 @@ pub enum TrainCommands {
         adapter_smoke_test: bool,
 
         /// Server URL; defaults to the local kiln serve instance
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
     },
     /// Train a LoRA adapter from scored GRPO completions
@@ -721,7 +722,7 @@ pub enum TrainCommands {
         adapter_smoke_test: bool,
 
         /// Server URL; defaults to the local kiln serve instance
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
     },
     /// Show training queue / per-job status
@@ -731,7 +732,7 @@ pub enum TrainCommands {
         job_id: Option<String>,
 
         /// Server URL; defaults to the local kiln serve instance
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
     },
     /// Cancel a queued or running training job
@@ -742,7 +743,7 @@ pub enum TrainCommands {
         job_id: String,
 
         /// Server URL; defaults to the local kiln serve instance
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
     },
 }
@@ -752,7 +753,7 @@ pub enum AdapterCommands {
     /// List saved adapters and show which one is active
     List {
         /// Server URL; defaults to the local kiln serve instance
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
     },
     /// Load an adapter from disk
@@ -760,7 +761,7 @@ pub enum AdapterCommands {
         /// Adapter name
         name: String,
         /// Server URL; defaults to the local kiln serve instance
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
     },
     /// Unload the active adapter and revert to the base model
@@ -768,7 +769,7 @@ pub enum AdapterCommands {
         /// Optional legacy adapter name; ignored because the server unloads the active adapter
         name: Option<String>,
         /// Server URL; defaults to the local kiln serve instance
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
     },
     /// Delete an adapter
@@ -776,7 +777,7 @@ pub enum AdapterCommands {
         /// Adapter name
         name: String,
         /// Server URL; defaults to the local kiln serve instance
-        #[arg(long, default_value = "http://localhost:8420")]
+        #[arg(long, default_value_t = default_server_url())]
         url: String,
     },
     /// Verify an adapter directory and optionally prove it through a running server

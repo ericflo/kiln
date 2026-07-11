@@ -900,7 +900,7 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 
 ## Configuration
 
-Kiln uses a TOML config file. See [`kiln.example.toml`](kiln.example.toml) for all options.
+Kiln uses a TOML config file. See [`kiln.example.toml`](kiln.example.toml) for all options. The built-in server, CLI, and desktop defaults are checked against the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json).
 
 Key settings:
 

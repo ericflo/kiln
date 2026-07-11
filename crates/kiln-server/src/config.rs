@@ -20,6 +20,19 @@ use anyhow::{Context, Result};
 pub use kiln_scheduler::DEFAULT_MAX_BATCH_TOKENS;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Default loopback interface used by a fresh server or desktop install.
+pub const DEFAULT_SERVER_HOST: &str = "127.0.0.1";
+/// Hostname used by local CLI clients when no server URL is supplied.
+pub const DEFAULT_SERVER_CLIENT_HOST: &str = "localhost";
+/// Shared default listen/client port. Keep this aligned with
+/// `contracts/runtime-defaults-v1.json` and the desktop conformance checks.
+pub const DEFAULT_SERVER_PORT: u16 = 8420;
+
+/// Default base URL used by local HTTP clients.
+pub fn default_server_url() -> String {
+    format!("http://{DEFAULT_SERVER_CLIENT_HOST}:{DEFAULT_SERVER_PORT}")
+}
+
 /// Smallest accepted per-connection HTTP `SO_SNDBUF` request.
 pub const HTTP_SEND_BUFFER_MIN_BYTES: usize = 1024;
 /// Largest accepted per-connection HTTP `SO_SNDBUF` request. This opt-in is
@@ -1444,8 +1457,8 @@ impl Default for ServerConfig {
         Self {
             serving_profile: ServingProfileSetting::default(),
             deterministic: DeterministicInference::default(),
-            host: "127.0.0.1".into(),
-            port: 8420,
+            host: DEFAULT_SERVER_HOST.into(),
+            port: DEFAULT_SERVER_PORT,
             request_timeout_secs: 600,
             http_send_buffer_bytes: None,
             stream_stall_grace_ms: StreamStallGrace::default(),
@@ -2271,6 +2284,25 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn runtime_defaults_contract_matches_server_and_client_defaults() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../../contracts/runtime-defaults-v1.json"))
+                .unwrap();
+
+        assert_eq!(contract["contract_version"], 1);
+        assert_eq!(contract["server"]["bind_host"], DEFAULT_SERVER_HOST);
+        assert_eq!(
+            contract["server"]["client_host"],
+            DEFAULT_SERVER_CLIENT_HOST
+        );
+        assert_eq!(contract["server"]["port"], DEFAULT_SERVER_PORT);
+        assert_eq!(
+            default_server_url(),
+            format!("http://{DEFAULT_SERVER_CLIENT_HOST}:{DEFAULT_SERVER_PORT}")
+        );
+    }
+
+    #[test]
     fn test_defaults() {
         let config = KilnConfig::default();
         assert_eq!(
@@ -2291,8 +2323,8 @@ mod tests {
             config.server.max_decode_batch.source(),
             ConfigValueSource::Default
         );
-        assert_eq!(config.server.host, "127.0.0.1");
-        assert_eq!(config.server.port, 8420);
+        assert_eq!(config.server.host, DEFAULT_SERVER_HOST);
+        assert_eq!(config.server.port, DEFAULT_SERVER_PORT);
         assert_eq!(config.server.request_timeout_secs, 600);
         assert_eq!(config.server.http_send_buffer_bytes, None);
         assert_eq!(

@@ -548,6 +548,7 @@
       </div>
     </div>
 
+    <script src="_kiln-runtime-defaults.js"></script>
     <script>
       const invoke = window.__TAURI__.core.invoke;
       const dialog = window.__TAURI__.dialog;
@@ -658,8 +659,8 @@
         return {
           kiln_binary: strOrNull("kiln_binary"),
           model_path: strOrNull("model_path"),
-          host: n("host").value.trim() || "127.0.0.1",
-          port: parseInt(n("port").value, 10) || 8000,
+          host: n("host").value.trim() || KILN_RUNTIME_DEFAULTS.serverHost,
+          port: parseInt(n("port").value, 10) || KILN_RUNTIME_DEFAULTS.serverPort,
           inference_fraction: parseFloat(n("inference_fraction").value) || 0.9,
           fp8_kv_cache: n("fp8_kv_cache").checked,
           cuda_graphs: n("cuda_graphs").checked,
@@ -679,7 +680,7 @@
         n("kiln_binary").value = s.kiln_binary || "";
         n("model_path").value = s.model_path || "";
         n("host").value = s.host || "";
-        n("port").value = s.port ?? 8000;
+        n("port").value = s.port ?? KILN_RUNTIME_DEFAULTS.serverPort;
         n("inference_fraction").value = s.inference_fraction ?? 0.9;
         n("fp8_kv_cache").checked = !!s.fp8_kv_cache;
         n("cuda_graphs").checked = !!s.cuda_graphs;

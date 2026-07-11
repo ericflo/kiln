@@ -3,6 +3,7 @@
 mod hf_download;
 mod installer;
 mod poller;
+mod runtime_defaults;
 mod settings;
 mod supervisor;
 mod tray;
@@ -1158,12 +1159,13 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{autolaunch_failure_body, openai_base_url};
+    use crate::runtime_defaults::{DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT};
 
     #[test]
     fn default_loopback() {
         assert_eq!(
-            openai_base_url("127.0.0.1", 8000),
-            "http://127.0.0.1:8000/v1"
+            openai_base_url(DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT),
+            "http://127.0.0.1:8420/v1"
         );
     }
 

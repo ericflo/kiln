@@ -34,16 +34,15 @@ use kiln_eval::{
     ProductionTraceSuiteConfig, SuiteResult,
 };
 use kiln_server::cli::ThinkingBudgetArg;
+use kiln_server::config::default_server_url;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-
-const DEFAULT_SERVER_URL: &str = "http://localhost:8420";
 
 #[derive(Parser, Debug)]
 #[command(name = "kiln-eval", about = "Run kiln evals from the command line")]
 struct Cli {
     /// Kiln server base URL.
-    #[arg(long, env = "KILN_SERVER_URL", default_value = DEFAULT_SERVER_URL)]
+    #[arg(long, env = "KILN_SERVER_URL", default_value_t = default_server_url())]
     server: String,
     #[command(subcommand)]
     cmd: Command,
@@ -1544,6 +1543,12 @@ fn compute_flip_diff(result: &EvalResultPayload) -> Option<kiln_eval::FlipDiff> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_default_server_uses_shared_runtime_default() {
+        let cli = Cli::parse_from(["kiln-eval", "list"]);
+        assert_eq!(cli.server, default_server_url());
+    }
 
     #[test]
     fn jsonl_format_alias_is_rejected() {

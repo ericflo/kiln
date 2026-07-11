@@ -5,6 +5,8 @@ import vm from 'node:vm';
 const files = {
   dashboard: 'desktop/ui/dashboard.html',
   settings: 'desktop/ui/settings.html',
+  runtimeDefaults: 'desktop/ui/_kiln-runtime-defaults.js',
+  runtimeDefaultsContract: 'contracts/runtime-defaults-v1.json',
   thinkingBudgetContract: 'contracts/thinking-budget-v1.conformance.json',
 };
 
@@ -60,6 +62,8 @@ function assertNoForbiddenPublicityCopy(text, label) {
 
 function checkDashboard(html) {
   const text = stripHtml(html);
+  assertContains(html, '_kiln-runtime-defaults.js', 'dashboard runtime defaults');
+  assertContains(html, 'KILN_RUNTIME_DEFAULTS.serverPort', 'dashboard port fallback');
   assertContains(html, quickstartHref, 'dashboard first-run help');
   assertContains(html, troubleshootingHref, 'dashboard first-run help');
   assertContains(text, 'quickstart', 'dashboard first-run help text');
@@ -71,6 +75,8 @@ function checkDashboard(html) {
 
 function checkSettings(html) {
   const text = stripHtml(html);
+  assertContains(html, '_kiln-runtime-defaults.js', 'settings runtime defaults');
+  assertContains(html, 'KILN_RUNTIME_DEFAULTS.serverPort', 'settings port fallback');
   assertContains(html, quickstartHref, 'settings setup help');
   assertContains(html, troubleshootingHref, 'settings setup help');
   assertContains(text, 'quickstart', 'settings setup help text');
@@ -166,6 +172,30 @@ function checkSettings(html) {
   }
 }
 
+function checkRuntimeDefaults() {
+  const contract = JSON.parse(read(files.runtimeDefaultsContract));
+  if (contract.contract_version !== 1 || !contract.server) {
+    throw new Error('runtime-defaults contract is missing the v1 server record');
+  }
+
+  const context = vm.createContext({});
+  vm.runInContext(read(files.runtimeDefaults), context);
+  const defaults = context.KILN_RUNTIME_DEFAULTS;
+  if (!defaults) {
+    throw new Error('desktop runtime defaults did not define KILN_RUNTIME_DEFAULTS');
+  }
+  if (defaults.serverHost !== contract.server.bind_host) {
+    throw new Error(`desktop default host ${defaults.serverHost} does not match ${contract.server.bind_host}`);
+  }
+  if (defaults.serverPort !== contract.server.port) {
+    throw new Error(`desktop default port ${defaults.serverPort} does not match ${contract.server.port}`);
+  }
+  const expectedBase = `http://${contract.server.bind_host}:${contract.server.port}`;
+  if (defaults.serverBaseUrl !== expectedBase || defaults.openAiBaseUrl !== `${expectedBase}/v1`) {
+    throw new Error(`desktop default URLs do not match ${expectedBase}`);
+  }
+}
+
 function assertThrowsBudgetRead(context, pattern, label) {
   try {
     context.parsers.readThinkingBudget();
@@ -176,6 +206,7 @@ function assertThrowsBudgetRead(context, pattern, label) {
   throw new Error(`${label} was accepted`);
 }
 
+checkRuntimeDefaults();
 checkDashboard(read(files.dashboard));
 checkSettings(read(files.settings));
 console.log('Desktop UI smoke checks passed');

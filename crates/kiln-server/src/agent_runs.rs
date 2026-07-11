@@ -65,10 +65,12 @@ fn format_self_url(host: &str, port: u16) -> String {
 }
 
 pub fn self_url() -> String {
-    SELF_URL
-        .get()
-        .cloned()
-        .unwrap_or_else(|| "http://127.0.0.1:8420".to_string())
+    SELF_URL.get().cloned().unwrap_or_else(|| {
+        format_self_url(
+            crate::config::DEFAULT_SERVER_HOST,
+            crate::config::DEFAULT_SERVER_PORT,
+        )
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

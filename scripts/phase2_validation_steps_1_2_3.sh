@@ -63,6 +63,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+BASE_URL="${KILN_URL:-http://localhost:8420}"
 
 LOG_DIR="$(mktemp -d -t kiln-phase2-validation-XXXXXX)"
 echo ">>> Logs in $LOG_DIR" >&2
@@ -165,7 +166,7 @@ run_step() {
     # Wait for the server to come up (max 60s).
     local ready=0
     for _ in $(seq 1 60); do
-        if curl -fs http://localhost:8080/v1/models > /dev/null 2>&1; then
+        if curl -fs "$BASE_URL/v1/models" > /dev/null 2>&1; then
             ready=1
             break
         fi
@@ -182,7 +183,7 @@ run_step() {
     watchdog_pid=$(start_watchdog)
 
     # Submit the SFT job.
-    if ! curl -fsS -X POST http://localhost:8080/v1/training/sft \
+    if ! curl -fsS -X POST "$BASE_URL/v1/training/sft" \
         -H 'Content-Type: application/json' \
         -d "{\"file\":\"$SFT_FILE\",\"epochs\":1,\"adapter\":\"phase2-validation-$step_name\"}" \
         > "$curl_log" 2>&1; then
@@ -205,7 +206,7 @@ run_step() {
         fi
         sleep 3
         local status
-        status="$(curl -fs http://localhost:8080/v1/training/queue 2>/dev/null \
+        status="$(curl -fs "$BASE_URL/v1/training/queue" 2>/dev/null \
             | jq -r --arg id "$job_id" '
                 (.completed[]? | select(.id == $id) | .state) //
                 (.running.id == $id | if . then "running" else empty end)' 2>/dev/null \

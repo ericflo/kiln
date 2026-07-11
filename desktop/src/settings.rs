@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+use crate::runtime_defaults::{DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT};
 use crate::supervisor::SupervisorConfig;
 
 const DESKTOP_RUNTIME_CONFIG_NAME: &str = "kiln-desktop-runtime.toml";
@@ -37,8 +38,8 @@ impl Default for Settings {
         Self {
             kiln_binary: None,
             model_path: None,
-            host: "127.0.0.1".to_string(),
-            port: 8000,
+            host: DEFAULT_SERVER_HOST.to_string(),
+            port: DEFAULT_SERVER_PORT,
             inference_fraction: if cfg!(target_os = "macos") { 0.7 } else { 0.9 },
             fp8_kv_cache: false,
             cuda_graphs: !cfg!(target_os = "macos"),
@@ -238,10 +239,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_defaults_contract_matches_desktop_defaults() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../contracts/runtime-defaults-v1.json")).unwrap();
+
+        assert_eq!(contract["contract_version"], 1);
+        assert_eq!(contract["server"]["bind_host"], DEFAULT_SERVER_HOST);
+        assert_eq!(contract["server"]["port"], DEFAULT_SERVER_PORT);
+    }
+
+    #[test]
     fn default_values_are_sane() {
         let s = Settings::default();
-        assert_eq!(s.host, "127.0.0.1");
-        assert_eq!(s.port, 8000);
+        assert_eq!(s.host, DEFAULT_SERVER_HOST);
+        assert_eq!(s.port, DEFAULT_SERVER_PORT);
         let expected_fraction = if cfg!(target_os = "macos") { 0.7 } else { 0.9 };
         assert!((s.inference_fraction - expected_fraction).abs() < f32::EPSILON);
         assert!(!s.fp8_kv_cache);
@@ -253,6 +264,10 @@ mod tests {
         assert!(s.auto_start);
         assert!(s.auto_restart);
         assert!(!s.launch_at_login);
+
+        let supervisor = SupervisorConfig::default();
+        assert_eq!(supervisor.host, DEFAULT_SERVER_HOST);
+        assert_eq!(supervisor.port, DEFAULT_SERVER_PORT);
     }
 
     #[test]

@@ -103,10 +103,15 @@ async fn terminal_status() -> Json<serde_json::Value> {
 /// Best-effort server URL for pi's provider config, derived from the Host
 /// header the browser actually used — correct across port-forwards.
 fn kiln_url_from_headers(headers: &HeaderMap) -> String {
+    let default_host = format!(
+        "{}:{}",
+        crate::config::DEFAULT_SERVER_CLIENT_HOST,
+        crate::config::DEFAULT_SERVER_PORT
+    );
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost:8420");
+        .unwrap_or(&default_host);
     format!("http://{host}")
 }
 

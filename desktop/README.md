@@ -30,6 +30,8 @@ macOS `.dmg` releases are signed with a Developer ID certificate and notarized b
 
 ## What ships in v0.2.16
 
+Fresh installs use `127.0.0.1:8420`, matching the server and CLI defaults in the shared [runtime-defaults contract](../contracts/runtime-defaults-v1.json). A port saved explicitly in Settings remains a user override.
+
 - **Subprocess supervisor** — Tokio child process driving the `kiln` binary, with stdout/stderr captured into an in-process ring buffer.
 - **Crash restart** with exponential backoff, and a clear error state surfaced in the tray.
 - **System tray icon** with status states: stopped, starting, running, training-active, error.
@@ -160,7 +162,7 @@ Common first-run issues and how to recover.
 
 - **CUDA driver too old.** Settings shows the detected NVIDIA driver and the minimum required by the selected kiln release. If the gate trips ("CUDA driver too old: …  Update blocked"), update your NVIDIA driver to at least the version shown — see <https://www.nvidia.com/drivers> — then restart the desktop app. The same gate blocks in-app server-binary updates until the driver is current.
 
-- **Port already in use.** Default server port is `8080`. If another process is bound, open Settings, change "Port" to a free port (e.g. `8090`), and Save. Then restart the server from the tray menu and update any OpenAI-compatible client to the new `http://localhost:<port>/v1` base URL.
+- **Port already in use.** Default server port is `8420`. If another process is bound, open Settings, change "Port" to a free port (e.g. `8421`), and Save. Then restart the server from the tray menu and update any OpenAI-compatible client to the new `http://localhost:<port>/v1` base URL.
 
 - **Server keeps crashing or restarts in a loop.** Open the Logs window (Ctrl/Cmd+L) to inspect the captured stderr. The most common causes are: corrupt or partial model weights (re-download), insufficient VRAM for the model + KV cache (lower the inference memory fraction in Settings, or enable FP8 KV cache), and a CUDA runtime/driver mismatch (see above). The supervisor backs off exponentially between restart attempts; "Stop server" from the tray will halt the loop.
 

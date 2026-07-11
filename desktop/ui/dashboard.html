@@ -157,7 +157,7 @@
                 <span class="step-num"><span class="step-num-text">3</span></span>
                 <span class="step-body">
                   <span class="step-title">Point your agent</span>
-                  <span class="step-sub">Run one of these against <code id="connect-base">http://127.0.0.1:8000/v1</code>:</span>
+                  <span class="step-sub">Run one of these against <code id="connect-base">http://127.0.0.1:8420/v1</code>:</span>
                   <div class="tabs connect-tabs" role="tablist" aria-label="Client setup" style="margin-top:var(--space-2);">
                     <button class="tab active" type="button" role="tab" data-connect-tab="pi" aria-selected="true">pi</button>
                     <button class="tab" type="button" role="tab" data-connect-tab="opencode" aria-selected="false">opencode</button>
@@ -230,6 +230,7 @@
         <p class="hint">Use Cmd in place of Ctrl on macOS. (Windows/Linux builds only today.)</p>
       </div>
     </div>
+    <script src="_kiln-runtime-defaults.js"></script>
     <script>
       const invoke = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
         || (window.__TAURI__ && window.__TAURI__.invoke);
@@ -1015,7 +1016,7 @@
       const connectSnippetsEl = document.getElementById("connect-snippets");
       const connectStepModel = document.getElementById("connect-step-model");
       const connectModelOk = document.getElementById("connect-model-ok");
-      let connectBaseUrl = "http://127.0.0.1:8000/v1";
+      let connectBaseUrl = KILN_RUNTIME_DEFAULTS.openAiBaseUrl;
       const CONNECT_MODEL = "kiln";
 
       function connectSnippetData(base) {
@@ -1090,8 +1091,8 @@
         if (!invoke) { renderConnectSnippets("pi"); return; }
         try {
           const s = await invoke("get_settings");
-          const host = (s && s.host) || "127.0.0.1";
-          const port = (s && s.port) || 8000;
+          const host = (s && s.host) || KILN_RUNTIME_DEFAULTS.serverHost;
+          const port = (s && s.port) || KILN_RUNTIME_DEFAULTS.serverPort;
           connectBaseUrl = "http://" + host + ":" + port + "/v1";
           setConnectModelDone(!!(s && s.model_path && String(s.model_path).trim()));
         } catch (_) { /* keep defaults */ }

@@ -11,6 +11,8 @@ use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
+use crate::runtime_defaults::{DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT};
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", content = "message")]
 pub enum ServerState {
@@ -56,8 +58,8 @@ impl Default for SupervisorConfig {
             max_restarts: 5,
             restart_backoff_ms: 500,
             log_buffer_bytes: 4 * 1024 * 1024,
-            host: "127.0.0.1".to_string(),
-            port: 8000,
+            host: DEFAULT_SERVER_HOST.to_string(),
+            port: DEFAULT_SERVER_PORT,
         }
     }
 }
@@ -378,7 +380,7 @@ mod tests {
             restart_backoff_ms: 100,
             log_buffer_bytes: 1024,
             host: "127.0.0.1".to_string(),
-            port: 8000,
+            port: DEFAULT_SERVER_PORT,
         };
         let sup = Supervisor::new(config);
         sup.start().await.expect("start");
@@ -411,7 +413,7 @@ mod tests {
             restart_backoff_ms: 100,
             log_buffer_bytes: 1024,
             host: "127.0.0.1".to_string(),
-            port: 8000,
+            port: DEFAULT_SERVER_PORT,
         };
         let sup = Supervisor::new(config);
         sup.start().await.expect("start");
@@ -443,7 +445,7 @@ mod tests {
             restart_backoff_ms: 10,
             log_buffer_bytes: 1024,
             host: "127.0.0.1".to_string(),
-            port: 8000,
+            port: DEFAULT_SERVER_PORT,
         };
         let sup = Supervisor::new(config);
         sup.start().await.expect("start");
