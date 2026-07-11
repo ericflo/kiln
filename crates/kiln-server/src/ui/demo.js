@@ -146,6 +146,25 @@
   });
 
   const responses = {
+    '/v1/config': () => ({
+      serving_profile: { profile: 'stable', source: 'default' },
+      vram: { detected_gb: 51.0, source: 'nvidia-smi' },
+      kv_cache: { num_blocks: 528, num_blocks_source: 'auto', fp8_enabled: true },
+      training: { checkpoint_segments: 4, checkpoint_segments_source: 'auto', checkpointing_enabled: true },
+      memory_budget: {
+        total_vram_gb: 51.0,
+        model_gb: 8.2,
+        kv_cache_gb: 12.0,
+        training_budget_gb: 4.1,
+        inference_memory_fraction: 0.55,
+      },
+      generation: {
+        default_thinking_enabled: true,
+        default_thinking_budget_tokens: 64,
+        default_thinking_budget_ms: 1500,
+        fold_reasoning_into_content: false,
+      },
+    }),
     '/health': () => ({
       status: 'ok',
       model: 'Qwen/Qwen3.5-4B',

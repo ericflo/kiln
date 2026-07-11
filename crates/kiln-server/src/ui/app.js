@@ -1849,7 +1849,30 @@ function renderServerStatus(h) {
    failures render a quiet retry line and never throw.
    ===================================================================== */
 let runtimeConfigLoaded = false;
-let runtimeConfigFetchSeq = 0;
+let runtimeConfigRenderSeq = 0;
+let runtimeConfigSnapshot = null;
+let runtimeConfigRequest = null;
+let runtimeConfigRequestSeq = 0;
+
+function fetchRuntimeConfig(force = false) {
+  if (!force && runtimeConfigSnapshot) return Promise.resolve(runtimeConfigSnapshot);
+  if (!force && runtimeConfigRequest) return runtimeConfigRequest;
+
+  const seq = ++runtimeConfigRequestSeq;
+  const request = api('/v1/config')
+    .then(cfg => {
+      if (seq === runtimeConfigRequestSeq) {
+        runtimeConfigSnapshot = cfg;
+        updatePlaygroundThinkingBudgetDefaults(cfg);
+      }
+      return cfg;
+    })
+    .finally(() => {
+      if (runtimeConfigRequest === request) runtimeConfigRequest = null;
+    });
+  runtimeConfigRequest = request;
+  return request;
+}
 
 function runtimeConfigRow(label, valueHtml, title) {
   return `<div class="rc-row"${title ? ` title="${escapeHtml(title)}"` : ''}>
@@ -1913,23 +1936,24 @@ async function loadRuntimeConfig(force = false) {
   const body = document.getElementById('runtime-config-body');
   if (!body) return;
   if (runtimeConfigLoaded && !force) return;
-  const seq = ++runtimeConfigFetchSeq;
+  const seq = ++runtimeConfigRenderSeq;
   body.innerHTML = '<div class="hint">Loading GET /v1/config…</div>';
   try {
-    const cfg = await api('/v1/config');
-    if (seq !== runtimeConfigFetchSeq) return; // superseded by a newer refresh
+    const cfg = await fetchRuntimeConfig(force);
+    if (seq !== runtimeConfigRenderSeq) return; // superseded by a newer refresh
     runtimeConfigLoaded = true;
     body.innerHTML = renderRuntimeConfigBody(cfg);
   } catch (e) {
-    if (seq !== runtimeConfigFetchSeq) return;
+    if (seq !== runtimeConfigRenderSeq) return;
     runtimeConfigLoaded = false; // the next open retries automatically
     body.innerHTML = `<div class="hint">Couldn't load /v1/config — ${escapeHtml((e && e.message) || 'request failed')}</div>
       <div class="rc-actions"><button class="btn btn-sm" type="button" data-rc-refresh>Retry</button></div>`;
   }
 }
 
-// Static shell: wire once at startup. `toggle` fires on open and close;
-// fetch on open only (and only the first time, unless Refresh forces it).
+// Static shell: wire once at startup. `toggle` fires on open and close; the
+// first open consumes Playground's shared snapshot, while Refresh forces one
+// new request for both surfaces.
 (function initRuntimeConfig() {
   const details = document.getElementById('runtime-config');
   if (!details) return;
@@ -4565,6 +4589,147 @@ function strictThinkingBudgetMilliseconds(raw, max) {
   return milliseconds <= BigInt(max) ? Number(milliseconds) : null;
 }
 
+const THINKING_BUDGET_TOKEN_MAX = 131_072;
+const THINKING_BUDGET_TIME_MS_MAX = 86_400_000;
+let playgroundThinkingBudgetDefaults = {
+  loaded: false,
+  loading: false,
+  error: null,
+  tokens: null,
+  timeMs: null,
+};
+
+function validThinkingBudgetDefault(value) {
+  return value === null || (Number.isSafeInteger(value) && value >= 0);
+}
+
+function updatePlaygroundThinkingBudgetDefaults(cfg) {
+  const generation = cfg?.generation;
+  const hasTokens = generation
+    && Object.prototype.hasOwnProperty.call(generation, 'default_thinking_budget_tokens');
+  const hasTime = generation
+    && Object.prototype.hasOwnProperty.call(generation, 'default_thinking_budget_ms');
+  const tokens = generation?.default_thinking_budget_tokens;
+  const timeMs = generation?.default_thinking_budget_ms;
+  if (!hasTokens || !hasTime || !validThinkingBudgetDefault(tokens) || !validThinkingBudgetDefault(timeMs)) {
+    playgroundThinkingBudgetDefaults = {
+      ...playgroundThinkingBudgetDefaults,
+      loaded: false,
+      loading: false,
+      error: 'Server defaults unavailable',
+    };
+    renderThinkingBudgetPreview();
+    return;
+  }
+  playgroundThinkingBudgetDefaults = {
+    loaded: true,
+    loading: false,
+    error: null,
+    tokens,
+    timeMs,
+  };
+  renderThinkingBudgetPreview();
+}
+
+async function loadPlaygroundThinkingBudgetDefaults(force = false) {
+  playgroundThinkingBudgetDefaults.loading = true;
+  playgroundThinkingBudgetDefaults.error = null;
+  renderThinkingBudgetPreview();
+  try {
+    await fetchRuntimeConfig(force);
+  } catch (error) {
+    playgroundThinkingBudgetDefaults.loading = false;
+    playgroundThinkingBudgetDefaults.error = (error && error.message) || 'Server defaults unavailable';
+    renderThinkingBudgetPreview();
+  }
+}
+
+function thinkingBudgetPreviewDimension(mode, input, kind) {
+  if (mode === 'unlimited') return { value: null, source: 'request', invalid: false };
+  if (mode === 'limit') {
+    const raw = (input?.value || '').trim();
+    if (input?.validity?.badInput || !raw) {
+      return { label: raw ? 'invalid' : 'required', source: '', invalid: true };
+    }
+    const value = kind === 'tokens'
+      ? strictThinkingBudgetInteger(raw, THINKING_BUDGET_TOKEN_MAX)
+      : strictThinkingBudgetMilliseconds(raw, THINKING_BUDGET_TIME_MS_MAX);
+    if (value === null) return { label: 'invalid', source: '', invalid: true };
+    return { value, source: 'request', invalid: false };
+  }
+  if (!playgroundThinkingBudgetDefaults.loaded) {
+    return {
+      label: playgroundThinkingBudgetDefaults.loading ? 'loading...' : 'unavailable',
+      source: '',
+      invalid: false,
+    };
+  }
+  return {
+    value: kind === 'tokens'
+      ? playgroundThinkingBudgetDefaults.tokens
+      : playgroundThinkingBudgetDefaults.timeMs,
+    source: 'server',
+    invalid: false,
+  };
+}
+
+function formatThinkingBudgetPreviewValue(dimension, kind) {
+  if (dimension.label) return dimension.label;
+  if (dimension.value === null) return 'unlimited';
+  if (kind === 'tokens') return dimension.value.toLocaleString();
+  if (dimension.value < 1000) return `${dimension.value.toLocaleString()} ms`;
+  return `${(dimension.value / 1000).toLocaleString(undefined, { maximumFractionDigits: 3 })} s`;
+}
+
+function renderThinkingBudgetPreview() {
+  const preview = document.getElementById('chat-thinking-budget-preview');
+  if (!preview) return;
+  const enabled = document.getElementById('chat-enable-thinking')?.checked !== false;
+  const tokensMode = document.getElementById('chat-thinking-budget-tokens-mode')?.value || 'inherit';
+  const timeMode = document.getElementById('chat-thinking-budget-time-mode')?.value || 'inherit';
+  const tokens = thinkingBudgetPreviewDimension(
+    tokensMode,
+    document.getElementById('chat-thinking-budget-tokens'),
+    'tokens',
+  );
+  const time = thinkingBudgetPreviewDimension(
+    timeMode,
+    document.getElementById('chat-thinking-budget-seconds'),
+    'time',
+  );
+  const setDimension = (valueId, sourceId, dimension, kind) => {
+    const value = document.getElementById(valueId);
+    const source = document.getElementById(sourceId);
+    if (value) value.textContent = formatThinkingBudgetPreviewValue(dimension, kind);
+    if (source) {
+      source.textContent = dimension.source;
+      source.hidden = !dimension.source;
+    }
+  };
+  setDimension('chat-thinking-budget-preview-tokens', 'chat-thinking-budget-preview-tokens-source', tokens, 'tokens');
+  setDimension('chat-thinking-budget-preview-time', 'chat-thinking-budget-preview-time-source', time, 'time');
+
+  const invalid = tokens.invalid || time.invalid;
+  const state = document.getElementById('chat-thinking-budget-preview-state');
+  let stateText = '';
+  if (!enabled) stateText = 'inactive';
+  else if (invalid) stateText = 'incomplete';
+  else if (playgroundThinkingBudgetDefaults.error) {
+    stateText = playgroundThinkingBudgetDefaults.loaded ? 'refresh failed' : 'defaults unavailable';
+  }
+  if (state) state.textContent = stateText;
+  preview.classList.toggle('is-inactive', !enabled);
+  preview.classList.toggle('has-error', enabled && (invalid || !!playgroundThinkingBudgetDefaults.error));
+  preview.dataset.state = stateText || 'ready';
+  preview.title = playgroundThinkingBudgetDefaults.error || '';
+
+  const retry = document.getElementById('chat-thinking-budget-refresh');
+  if (retry) {
+    retry.hidden = !playgroundThinkingBudgetDefaults.error;
+    retry.disabled = playgroundThinkingBudgetDefaults.loading;
+  }
+}
+
 function thinkingBudgetInputRaw(input, message, fieldId) {
   if (input?.validity?.badInput) {
     throw thinkingBudgetError(message, fieldId);
@@ -4591,7 +4756,7 @@ function readThinkingBudgetRequest({ validateDisabled = false } = {}) {
       'chat-thinking-budget-tokens',
     );
     if (!tokensRaw) throw thinkingBudgetError(tokensMessage, 'chat-thinking-budget-tokens');
-    tokens = strictThinkingBudgetInteger(tokensRaw, 131072);
+    tokens = strictThinkingBudgetInteger(tokensRaw, THINKING_BUDGET_TOKEN_MAX);
     if (tokens === null) {
       throw thinkingBudgetError(
         tokensMessage,
@@ -4607,7 +4772,7 @@ function readThinkingBudgetRequest({ validateDisabled = false } = {}) {
       'chat-thinking-budget-seconds',
     );
     if (!secondsRaw) throw thinkingBudgetError(secondsMessage, 'chat-thinking-budget-seconds');
-    ms = strictThinkingBudgetMilliseconds(secondsRaw, 86_400_000);
+    ms = strictThinkingBudgetMilliseconds(secondsRaw, THINKING_BUDGET_TIME_MS_MAX);
     if (ms === null) {
       throw thinkingBudgetError(
         secondsMessage,
@@ -4664,6 +4829,7 @@ function syncThinkingBudgetControls({ revealCustom = false } = {}) {
   if (tokens) tokens.disabled = !enabled || !tokenLimit;
   if (seconds) seconds.disabled = !enabled || !timeLimit;
   if (enabled && hasLimit && revealCustom) openChatAdvancedControls();
+  renderThinkingBudgetPreview();
 }
 
 function applyThinkingBudgetRequest(body, thinkingBudget) {
@@ -5829,6 +5995,12 @@ PLAYGROUND_SETTING_IDS.forEach(id => {
     syncThinkingBudgetControls({ revealCustom: true });
   });
 });
+['chat-thinking-budget-tokens', 'chat-thinking-budget-seconds'].forEach(id => {
+  document.getElementById(id)?.addEventListener('input', renderThinkingBudgetPreview);
+});
+document.getElementById('chat-thinking-budget-refresh')?.addEventListener('click', () => {
+  loadPlaygroundThinkingBudgetDefaults(true);
+});
 const thinkingEnabled = document.getElementById('chat-enable-thinking');
 thinkingEnabled?.addEventListener('change', () => {
   syncThinkingBudgetControls();
@@ -5882,6 +6054,7 @@ if (presetSelect) {
 // apply; conversation restore prompts a banner so users don't get a
 // stale conversation invisibly attached to a fresh request.
 applyPlaygroundSettings(readPlaygroundSettings());
+loadPlaygroundThinkingBudgetDefaults();
 restorePlaygroundHistoryBanner();
 
 document.getElementById('upload-name').addEventListener('input', handleUploadNameInput);

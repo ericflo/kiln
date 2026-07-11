@@ -396,8 +396,8 @@
              so anything rendered inside it gets destroyed on the next poll —
              that is exactly how the VRAM donut used to vanish. This static
              shell is never touched by the poll, so its open state and content
-             survive repaints by construction. Content fetches GET /v1/config
-             on first open only — no poll loop. -->
+             survive repaints by construction. Content shares Playground's
+             one-shot GET /v1/config snapshot — no poll loop. -->
         <details class="runtime-config" id="runtime-config">
           <summary>
             <svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg>
@@ -1716,29 +1716,53 @@
           <input type="checkbox" id="chat-enable-thinking" checked>
           <span>Thinking</span>
         </label>
-        <label for="chat-thinking-budget-tokens-mode" title="Override the token dimension without changing the time dimension.">Think tokens</label>
-        <select id="chat-thinking-budget-tokens-mode" aria-controls="chat-thinking-budget-tokens-field">
-          <option value="inherit" selected>Inherit</option>
-          <option value="unlimited">Unlimited</option>
-          <option value="limit">Limit</option>
-        </select>
-        <label for="chat-thinking-budget-time-mode" title="Override the time dimension without changing the token dimension.">Think time</label>
-        <select id="chat-thinking-budget-time-mode" aria-controls="chat-thinking-budget-time-field">
-          <option value="inherit" selected>Inherit</option>
-          <option value="unlimited">Unlimited</option>
-          <option value="limit">Limit</option>
-        </select>
-        <label for="chat-preset" title="Apply one of Qwen3.5's officially recommended sampling profiles.">Preset</label>
-        <select id="chat-preset">
-          <option value="qwen3-thinking-general" selected>Thinking · general (Qwen3.5 default)</option>
-          <option value="qwen3-thinking-coding">Thinking · coding (temp=0.6)</option>
-          <option value="qwen3-non-thinking-general">Non-thinking · general (temp=0.7)</option>
-          <option value="qwen3-non-thinking-reasoning">Non-thinking · reasoning (temp=1.0)</option>
-          <option value="greedy">Greedy (temperature 0)</option>
-          <option value="custom">Custom (don't touch fields)</option>
-        </select>
+        <div class="chat-control-field chat-thinking-budget-mode-field">
+          <label for="chat-thinking-budget-tokens-mode" title="Override the token dimension without changing the time dimension.">Think tokens</label>
+          <select id="chat-thinking-budget-tokens-mode" aria-controls="chat-thinking-budget-tokens-field">
+            <option value="inherit" selected>Inherit</option>
+            <option value="unlimited">Unlimited</option>
+            <option value="limit">Limit</option>
+          </select>
+        </div>
+        <div class="chat-control-field chat-thinking-budget-mode-field">
+          <label for="chat-thinking-budget-time-mode" title="Override the time dimension without changing the token dimension.">Think time</label>
+          <select id="chat-thinking-budget-time-mode" aria-controls="chat-thinking-budget-time-field">
+            <option value="inherit" selected>Inherit</option>
+            <option value="unlimited">Unlimited</option>
+            <option value="limit">Limit</option>
+          </select>
+        </div>
+        <div class="chat-control-field chat-preset-field">
+          <label for="chat-preset" title="Apply one of Qwen3.5's officially recommended sampling profiles.">Preset</label>
+          <select id="chat-preset">
+            <option value="qwen3-thinking-general" selected>Thinking · general (Qwen3.5 default)</option>
+            <option value="qwen3-thinking-coding">Thinking · coding (temp=0.6)</option>
+            <option value="qwen3-non-thinking-general">Non-thinking · general (temp=0.7)</option>
+            <option value="qwen3-non-thinking-reasoning">Non-thinking · reasoning (temp=1.0)</option>
+            <option value="greedy">Greedy (temperature 0)</option>
+            <option value="custom">Custom (don't touch fields)</option>
+          </select>
+        </div>
         <span style="flex:1;"></span>
         <button class="btn btn-sm btn-ghost" id="chat-toggle-advanced" type="button" aria-expanded="false" aria-controls="chat-advanced"><svg class="icn icn-sm"><use href="#i-gear"></use></svg> Advanced</button>
+      </div>
+      <div class="chat-thinking-budget-preview" id="chat-thinking-budget-preview" aria-live="polite" aria-atomic="true">
+        <span class="chat-thinking-budget-preview-label">Effective think budget</span>
+        <span class="chat-thinking-budget-preview-dimension">
+          <span>Tokens</span>
+          <strong id="chat-thinking-budget-preview-tokens">Loading...</strong>
+          <span class="chat-thinking-budget-preview-source" id="chat-thinking-budget-preview-tokens-source" hidden></span>
+        </span>
+        <span class="chat-thinking-budget-preview-separator" aria-hidden="true">·</span>
+        <span class="chat-thinking-budget-preview-dimension">
+          <span>Time</span>
+          <strong id="chat-thinking-budget-preview-time">Loading...</strong>
+          <span class="chat-thinking-budget-preview-source" id="chat-thinking-budget-preview-time-source" hidden></span>
+        </span>
+        <span class="chat-thinking-budget-preview-state" id="chat-thinking-budget-preview-state"></span>
+        <button class="btn btn-sm btn-ghost chat-thinking-budget-refresh" id="chat-thinking-budget-refresh" type="button" title="Retry loading server thinking-budget defaults" aria-label="Retry loading server thinking-budget defaults" hidden>
+          <svg class="icn icn-sm" aria-hidden="true"><use href="#i-refresh"></use></svg>
+        </button>
       </div>
       <div class="chat-advanced" id="chat-advanced" hidden>
         <label class="chat-adv-field chat-adv-system" for="chat-system">

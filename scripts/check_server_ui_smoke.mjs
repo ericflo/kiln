@@ -813,9 +813,8 @@ async function startServer({
       });
       return;
     }
-    // Mirrors api/config.rs ConfigResponse (vram / kv_cache / training /
-    // memory_budget) — the runtime-config expander fetches this once per
-    // open, never on a poll loop.
+    // Mirrors api/config.rs ConfigResponse. Playground and the runtime-config
+    // expander share this immutable snapshot instead of polling it.
     if (url.pathname === '/v1/config') {
       json(res, {
         vram: { detected_gb: 25.8, source: 'nvidia-smi' },
@@ -827,6 +826,12 @@ async function startServer({
           kv_cache_gb: 2.1,
           training_budget_gb: 4.0,
           inference_memory_fraction: 0.55,
+        },
+        generation: {
+          default_thinking_enabled: true,
+          default_thinking_budget_tokens: 64,
+          default_thinking_budget_ms: 1500,
+          fold_reasoning_into_content: false,
         },
       });
       return;
@@ -1979,6 +1984,18 @@ async function runMobileOnboardingSmoke(baseUrl) {
       && document.getElementById('chat-thinking-budget-tokens')?.disabled === false
       && document.getElementById('chat-thinking-budget-seconds')?.disabled === false
     ), { timeout: 5000 }).catch(() => fail('Mobile finite thinking-budget controls should be visible and editable'));
+    await page.$eval('#chat-thinking-budget-tokens', (input) => {
+      input.value = '131072';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await page.$eval('#chat-thinking-budget-seconds', (input) => {
+      input.value = '86400';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await page.waitForFunction(() => (
+      document.getElementById('chat-thinking-budget-preview-tokens')?.textContent === '131,072'
+      && document.getElementById('chat-thinking-budget-preview-time')?.textContent === '86,400 s'
+    ), { timeout: 5000 }).catch(() => fail('Mobile thinking-budget preview should render the maximum finite pair'));
     await expectNoMobileOverflow(page);
   } finally {
     await browser.close();
@@ -2097,6 +2114,11 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       await waitForPanelText(page, '#runtime-config-body', /Couldn't load \/v1\/config/, 'Runtime config should render its graceful failure copy');
       await page.$('#runtime-config [data-rc-refresh]')
         .then((handle) => { if (!handle) fail('Runtime config failure copy should offer a Retry button'); });
+      await goToPrimaryTab(page, 'playground');
+      await page.waitForFunction(() => (
+        document.getElementById('chat-thinking-budget-preview')?.dataset.state === 'defaults unavailable'
+        && document.getElementById('chat-thinking-budget-refresh')?.hidden === false
+      ), { timeout: 5000 }).catch(() => fail('Playground should show unavailable inherited defaults with a Retry button'));
 
       await goToPrimaryTab(page, 'adapters');
       await expectApiFailurePanel(page, '#adapters-panel', 'Adapters', 'Adapters smoke failure from /v1/adapters');
@@ -2121,6 +2143,14 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 
         // Heal the APIs: every panel must recover (Retry click or next poll).
         setFailDashboardApis(false);
+        await goToPrimaryTab(page, 'playground');
+        await page.click('#chat-thinking-budget-refresh')
+          .catch(() => fail('Could not retry Playground thinking-budget defaults after the APIs healed'));
+        await page.waitForFunction(() => (
+          document.getElementById('chat-thinking-budget-preview')?.dataset.state === 'ready'
+          && document.getElementById('chat-thinking-budget-preview-tokens')?.textContent === '64'
+          && document.getElementById('chat-thinking-budget-preview-time')?.textContent === '1.5 s'
+        ), { timeout: 5000 }).catch(() => fail('Playground thinking-budget defaults did not recover after Retry'));
         await goToPrimaryTab(page, 'overview');
         await recoverPanel('#server-status', /GPU VRAM/, 'Server status did not recover after the APIs healed');
         await page.waitForSelector('#server-status .vram-donut svg', { timeout: 5000 })
@@ -3008,6 +3038,8 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 
     await goToPrimaryTab(page, 'playground');
     await expectDisabled(page, '#chat-send', true, 'Quick Inference send should start disabled until text is entered');
+    await page.waitForFunction(() => document.getElementById('chat-thinking-budget-preview')?.dataset.state === 'ready', { timeout: 5000 })
+      .catch(() => fail('Playground did not resolve the effective server thinking-budget defaults'));
     const initialThinkingBudget = await page.evaluate(() => ({
       tokensMode: document.getElementById('chat-thinking-budget-tokens-mode')?.value,
       timeMode: document.getElementById('chat-thinking-budget-time-mode')?.value,
@@ -3018,6 +3050,10 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       timeFieldHidden: document.getElementById('chat-thinking-budget-time-field')?.hidden,
       tokensDisabled: document.getElementById('chat-thinking-budget-tokens')?.disabled,
       secondsDisabled: document.getElementById('chat-thinking-budget-seconds')?.disabled,
+      previewTokens: document.getElementById('chat-thinking-budget-preview-tokens')?.textContent,
+      previewTime: document.getElementById('chat-thinking-budget-preview-time')?.textContent,
+      previewTokensSource: document.getElementById('chat-thinking-budget-preview-tokens-source')?.textContent,
+      previewTimeSource: document.getElementById('chat-thinking-budget-preview-time-source')?.textContent,
     }));
     if (initialThinkingBudget.tokensMode !== 'inherit'
         || initialThinkingBudget.timeMode !== 'inherit'
@@ -3031,6 +3067,12 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
         || !initialThinkingBudget.tokensDisabled
         || !initialThinkingBudget.secondsDisabled) {
       fail(`Inherited thinking budgets should hide and disable finite-limit fields, got ${JSON.stringify(initialThinkingBudget)}`);
+    }
+    if (initialThinkingBudget.previewTokens !== '64'
+        || initialThinkingBudget.previewTime !== '1.5 s'
+        || initialThinkingBudget.previewTokensSource !== 'server'
+        || initialThinkingBudget.previewTimeSource !== 'server') {
+      fail(`Inherited thinking-budget preview should show the effective server pair, got ${JSON.stringify(initialThinkingBudget)}`);
     }
 
     const browserBudgetCases = thinkingBudgetContract.resolution_cases
@@ -3101,20 +3143,27 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     }
 
     await page.select('#chat-thinking-budget-tokens-mode', 'limit');
-    await page.select('#chat-thinking-budget-time-mode', 'limit');
+    await page.select('#chat-thinking-budget-time-mode', 'inherit');
     await page.waitForFunction(() => (
       document.getElementById('chat-advanced')?.hidden === false
       && document.getElementById('chat-thinking-budget-custom')?.hidden === false
       && document.getElementById('chat-thinking-budget-tokens-field')?.hidden === false
-      && document.getElementById('chat-thinking-budget-time-field')?.hidden === false
       && document.getElementById('chat-thinking-budget-tokens')?.disabled === false
-      && document.getElementById('chat-thinking-budget-seconds')?.disabled === false
-    ), { timeout: 5000 }).catch(() => fail('Finite thinking budgets should reveal enabled token/time controls in Advanced'));
+      && document.getElementById('chat-thinking-budget-time-field')?.hidden === true
+      && document.getElementById('chat-thinking-budget-seconds')?.disabled === true
+    ), { timeout: 5000 }).catch(() => fail('A finite token budget should preserve the inherited time dimension'));
 
     await page.$eval('#chat-thinking-budget-tokens', (input) => {
       input.value = '5';
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    await page.waitForFunction(() => (
+      document.getElementById('chat-thinking-budget-preview-tokens')?.textContent === '5'
+      && document.getElementById('chat-thinking-budget-preview-tokens-source')?.textContent === 'request'
+      && document.getElementById('chat-thinking-budget-preview-time')?.textContent === '1.5 s'
+      && document.getElementById('chat-thinking-budget-preview-time-source')?.textContent === 'server'
+    ), { timeout: 5000 }).catch(() => fail('Independent token override should preserve the previewed server time default'));
+    await page.select('#chat-thinking-budget-time-mode', 'limit');
     await page.$eval('#chat-thinking-budget-seconds', (input) => {
       input.value = '1';
       input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -3131,8 +3180,13 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       }
     };
     page.on('request', trackMalformedBudgetRequest);
-    await page.$eval('#chat-thinking-budget-tokens', (input) => { input.value = '1.5'; });
+    await page.$eval('#chat-thinking-budget-tokens', (input) => {
+      input.value = '1.5';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
     await page.$eval('#chat-thinking-budget-seconds', (input) => { input.value = '1'; });
+    await page.waitForFunction(() => document.getElementById('chat-thinking-budget-preview')?.dataset.state === 'incomplete', { timeout: 5000 })
+      .catch(() => fail('Malformed finite thinking budget should mark the effective preview incomplete'));
     await page.type('#chat-input', 'This malformed budget must not be sent.');
     await page.click('#chat-send');
     await page.waitForFunction(() => (
@@ -3183,17 +3237,34 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
         && settings.thinkingBudgetSeconds === '1.25'
         && settings.advancedOpen === true;
     }, { timeout: 5000 }).catch(() => fail('Independent finite thinking budgets should persist with the Playground settings'));
+    await page.waitForFunction(() => (
+      document.getElementById('chat-thinking-budget-preview-tokens')?.textContent === '0'
+      && document.getElementById('chat-thinking-budget-preview-time')?.textContent === '1.25 s'
+      && document.getElementById('chat-thinking-budget-preview-tokens-source')?.textContent === 'request'
+      && document.getElementById('chat-thinking-budget-preview-time-source')?.textContent === 'request'
+    ), { timeout: 5000 }).catch(() => fail('Finite request pair should update the effective thinking-budget preview'));
 
+    const thinkingBeforeDisable = await page.$eval('#chat-enable-thinking', (input) => {
+      input.scrollIntoView({ block: 'center' });
+      return { checked: input.checked, disabled: input.disabled };
+    });
+    if (!thinkingBeforeDisable.checked) {
+      fail(`Thinking should still be enabled before the disable-state regression, got ${JSON.stringify(thinkingBeforeDisable)}`);
+    }
     await page.click('#chat-enable-thinking');
     await expectDisabled(page, '#chat-thinking-budget-tokens-mode', true, 'Thinking off should disable the token budget mode');
     await expectDisabled(page, '#chat-thinking-budget-time-mode', true, 'Thinking off should disable the time budget mode');
     await expectDisabled(page, '#chat-thinking-budget-tokens', true, 'Thinking off should disable the token budget');
     await expectDisabled(page, '#chat-thinking-budget-seconds', true, 'Thinking off should disable the time budget');
+    await page.waitForFunction(() => document.getElementById('chat-thinking-budget-preview')?.dataset.state === 'inactive', { timeout: 5000 })
+      .catch(() => fail('Thinking off should mark the configured budget preview inactive'));
     await page.click('#chat-enable-thinking');
     await expectDisabled(page, '#chat-thinking-budget-tokens-mode', false, 'Thinking on should re-enable the token budget mode');
     await expectDisabled(page, '#chat-thinking-budget-time-mode', false, 'Thinking on should re-enable the time budget mode');
     await expectDisabled(page, '#chat-thinking-budget-tokens', false, 'Thinking on should restore custom token budget editing');
     await expectDisabled(page, '#chat-thinking-budget-seconds', false, 'Thinking on should restore custom time budget editing');
+    await page.waitForFunction(() => document.getElementById('chat-thinking-budget-preview')?.dataset.state === 'ready', { timeout: 5000 })
+      .catch(() => fail('Thinking on should reactivate the effective budget preview'));
 
     await page.type('#chat-input', 'Explain Kiln in one sentence.');
     await expectDisabled(page, '#chat-send', false, 'Quick Inference send should enable after text is entered');
@@ -3229,12 +3300,20 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       timeFieldHidden: document.getElementById('chat-thinking-budget-time-field')?.hidden,
       tokensDisabled: document.getElementById('chat-thinking-budget-tokens')?.disabled,
       secondsDisabled: document.getElementById('chat-thinking-budget-seconds')?.disabled,
+      previewTokens: document.getElementById('chat-thinking-budget-preview-tokens')?.textContent,
+      previewTime: document.getElementById('chat-thinking-budget-preview-time')?.textContent,
+      previewTokensSource: document.getElementById('chat-thinking-budget-preview-tokens-source')?.textContent,
+      previewTimeSource: document.getElementById('chat-thinking-budget-preview-time-source')?.textContent,
     }));
     if (!unlimitedState.customHidden
         || !unlimitedState.tokensFieldHidden
         || !unlimitedState.timeFieldHidden
         || !unlimitedState.tokensDisabled
-        || !unlimitedState.secondsDisabled) {
+        || !unlimitedState.secondsDisabled
+        || unlimitedState.previewTokens !== 'unlimited'
+        || unlimitedState.previewTime !== 'unlimited'
+        || unlimitedState.previewTokensSource !== 'request'
+        || unlimitedState.previewTimeSource !== 'request') {
       fail(`Unlimited thinking budget should hide and disable custom fields, got ${JSON.stringify(unlimitedState)}`);
     }
     await page.type('#chat-input', 'Explain Kiln in one sentence.');
@@ -3253,6 +3332,12 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 
     await page.select('#chat-thinking-budget-tokens-mode', 'inherit');
     await page.select('#chat-thinking-budget-time-mode', 'inherit');
+    await page.waitForFunction(() => (
+      document.getElementById('chat-thinking-budget-preview-tokens')?.textContent === '64'
+      && document.getElementById('chat-thinking-budget-preview-time')?.textContent === '1.5 s'
+      && document.getElementById('chat-thinking-budget-preview-tokens-source')?.textContent === 'server'
+      && document.getElementById('chat-thinking-budget-preview-time-source')?.textContent === 'server'
+    ), { timeout: 5000 }).catch(() => fail('Inherited request should restore the effective server-default preview'));
     await page.type('#chat-input', 'Explain Kiln in one sentence.');
     const inheritedRequestPromise = page.waitForRequest(
       (request) => request.method() === 'POST' && request.url().endsWith('/v1/chat/completions'),

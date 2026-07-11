@@ -166,6 +166,8 @@ mod tests {
             crate::config::ServingProfile::Experimental,
             crate::config::ConfigValueSource::Environment,
         );
+        state.default_thinking_budget_tokens = Some(64);
+        state.default_thinking_budget_ms = Some(1_500);
         let app = routes().with_state(state);
 
         let response = app
@@ -187,6 +189,8 @@ mod tests {
         assert_eq!(json["serving_profile"]["source"], "environment");
         assert_eq!(json["serving_profile"]["immutable_after_startup"], true);
         assert_eq!(json["serving_profile"]["request_overrides_allowed"], false);
+        assert_eq!(json["generation"]["default_thinking_budget_tokens"], 64);
+        assert_eq!(json["generation"]["default_thinking_budget_ms"], 1_500);
         assert_eq!(json["decode_runtime"]["deterministic"]["enabled"], false);
         assert_eq!(json["decode_runtime"]["deterministic"]["source"], "default");
         assert!(json["decode_runtime"]["max_decode_batch"]["configured"].is_null());

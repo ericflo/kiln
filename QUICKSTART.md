@@ -273,6 +273,9 @@ reports the request-wide effective token/time pair and each dimension's source:
 inspect `metadata.thinking_budget` on the chunk that carries `finish_reason`.
 The outcome includes `triggered`, optional `trigger` (`tokens`, `time`, or
 `max_tokens`), `closed`, `thinking_tokens`, and `thinking_time_ms`.
+The Playground loads the effective defaults from `GET /v1/config` and previews
+the resolved pair before send, including whether each value comes from the
+server or this request.
 The versioned wire shapes and executable semantics are normative in the
 [Thinking Budget Contract](docs/THINKING_BUDGET_CONTRACT.md).
 

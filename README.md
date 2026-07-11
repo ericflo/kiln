@@ -831,6 +831,9 @@ closes thinking immediately. When both limits are set, the first one reached
 wins. The time budget starts when the first decode candidate is ready, so queue
 and prefill time do not consume it, and it is checked between generated tokens.
 If the model emits `</think>` naturally first, Kiln leaves it alone.
+The Playground reads the effective server defaults from `GET /v1/config` and
+previews the resolved token/time pair before send, with each dimension marked
+as coming from the server or the request.
 
 When a budget applies to an open thinking block, Kiln validates closure before
 decode. The effective `max_tokens` value, after any context-window clamp, must

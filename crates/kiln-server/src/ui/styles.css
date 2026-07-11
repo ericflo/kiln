@@ -1225,10 +1225,27 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   font-weight: 600;
   margin: 0;
 }
+.chat-control-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.chat-control-field > label {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
 .chat-controls #chat-adapter { width: auto; min-width: 180px; }
 .chat-controls #chat-temp    { width: 76px; }
 .chat-controls #chat-thinking-budget-tokens-mode,
-.chat-controls #chat-thinking-budget-time-mode { min-width: 112px; }
+.chat-controls #chat-thinking-budget-time-mode { width: 112px; min-width: 112px; }
+.chat-preset-field { flex: 1 1 310px; }
+.chat-preset-field #chat-preset { min-width: 250px; }
 .chat-controls .chat-toggle-label {
   display: inline-flex;
   align-items: center;
@@ -1245,6 +1262,58 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   margin: 0;
   cursor: pointer;
 }
+.chat-thinking-budget-preview {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--ink-900);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.chat-thinking-budget-preview-label {
+  color: var(--text);
+  font-weight: 600;
+  margin-right: 4px;
+}
+.chat-thinking-budget-preview-dimension {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+}
+.chat-thinking-budget-preview-dimension strong {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.chat-thinking-budget-preview-source,
+.chat-thinking-budget-preview-state {
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
+}
+.chat-thinking-budget-preview-source {
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+.chat-thinking-budget-preview-state { margin-left: auto; }
+.chat-thinking-budget-preview.is-inactive { opacity: 0.58; }
+.chat-thinking-budget-preview.has-error .chat-thinking-budget-preview-state { color: var(--warning-fg); }
+.chat-thinking-budget-refresh {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.chat-thinking-budget-refresh[hidden] { display: none; }
 .chat-advanced {
   display: flex;
   flex-direction: column;
@@ -1299,13 +1368,27 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
 .chat-advanced textarea { resize: vertical; min-height: 38px; max-height: 200px; line-height: 1.45; }
 
 @media (max-width: 720px) {
+  .chat-thinking-budget-mode-field,
+  .chat-preset-field {
+    flex: 1 1 100%;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 6px;
+  }
   .chat-controls #chat-thinking-budget-tokens-mode,
-  .chat-controls #chat-thinking-budget-time-mode { min-width: 0; max-width: 100%; }
+  .chat-controls #chat-thinking-budget-time-mode,
+  .chat-preset-field #chat-preset { width: 100%; min-width: 0; max-width: 100%; }
   .chat-thinking-budget-custom {
     flex: 1 1 100%;
     min-width: 0;
     max-width: 100%;
   }
+  .chat-thinking-budget-preview {
+    align-items: baseline;
+    padding-inline: var(--space-4);
+  }
+  .chat-thinking-budget-preview-label,
+  .chat-thinking-budget-preview-state { flex: 1 1 100%; margin-left: 0; }
 }
 
 .restore-banner {

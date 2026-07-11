@@ -31,6 +31,8 @@ Token and time dimensions resolve independently:
 Editing one dimension must not change the other. For example, a request can
 set `thinking_budget_tokens=0` while omitting `thinking_budget_ms`, preserving
 the inherited time default.
+The browser Playground obtains those defaults from `GET /v1/config` and shows
+the resolved pair plus server/request ownership before sending.
 
 Finite limits and explicit unlimited values report the surface that supplied
 them. Request metadata uses `request`/`request_unlimited`; eval resolution also
