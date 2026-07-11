@@ -4953,6 +4953,85 @@ impl GpuStepCoordination {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
+
+    fn blocking_gpu_phase<T>(
+        &self,
+        backend: &dyn BackendRuntime,
+        workload: &'static str,
+        phase: &'static str,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<CoordinatedGpuPhase<T>> {
+        let wait_started = Instant::now();
+        let guard = self
+            .blocking_write()
+            .with_context(|| format!("acquire healthy backend for {workload} {phase}"))?;
+        let wait_ms = wait_started.elapsed().as_secs_f64() * 1000.0;
+
+        let held_started = Instant::now();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+        let sync_result = ExternalYieldBackend::runtime_synchronize_external_yield(backend)
+            .with_context(|| format!("synchronize backend after {workload} {phase}"));
+        let held_ms = held_started.elapsed().as_secs_f64() * 1000.0;
+        match (&result, &sync_result) {
+            (Err(_), settlement) => {
+                let sync_suffix = settlement
+                    .as_ref()
+                    .err()
+                    .map(|error| format!("; settlement also failed: {error:#}"))
+                    .unwrap_or_default();
+                self.backend_health
+                    .quarantine(format!("{workload} {phase} panicked{sync_suffix}"));
+            }
+            (Ok(_), Err(sync_error)) => self.backend_health.quarantine(format!(
+                "{workload} {phase} external-yield synchronization failed: {sync_error:#}"
+            )),
+            (Ok(_), Ok(())) => {}
+        }
+        drop(guard);
+        tracing::debug!(
+            workload,
+            phase,
+            wait_ms,
+            held_ms,
+            "completed coordinated training GPU phase"
+        );
+
+        match result {
+            Ok(operation_result) => match sync_result {
+                Ok(()) => operation_result.map(|value| CoordinatedGpuPhase {
+                    value,
+                    wait_ms,
+                    held_ms,
+                }),
+                Err(sync_error) => match operation_result {
+                    Ok(_) => Err(sync_error),
+                    Err(operation_error) => Err(anyhow::anyhow!(
+                        "{workload} {phase} failed ({operation_error:#}) and backend settlement also failed ({sync_error:#})"
+                    )),
+                },
+            },
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    /// Run one bounded training GPU phase, settle the backend before releasing
+    /// serving ownership, and quarantine the process if settlement is unknown.
+    pub fn run_gpu_phase<T>(
+        &self,
+        backend: &dyn BackendRuntime,
+        workload: &'static str,
+        phase: &'static str,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.blocking_gpu_phase(backend, workload, phase, operation)
+            .map(|outcome| outcome.value)
+    }
+}
+
+struct CoordinatedGpuPhase<T> {
+    value: T,
+    wait_ms: f64,
+    held_ms: f64,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -4982,54 +5061,11 @@ fn run_coordinated_grpo_gpu_phase<T>(
         return operation();
     };
 
-    let wait_started = Instant::now();
-    let guard = coordination
-        .blocking_write()
-        .with_context(|| format!("acquire healthy backend for GRPO {phase}"))?;
-    let wait_ms = wait_started.elapsed().as_secs_f64() * 1000.0;
-    timings.wait_ms += wait_ms;
+    let outcome = coordination.blocking_gpu_phase(backend, "GRPO", phase, operation)?;
+    timings.wait_ms += outcome.wait_ms;
+    timings.held_ms += outcome.held_ms;
     timings.acquisitions = timings.acquisitions.saturating_add(1);
-
-    let held_started = Instant::now();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
-    let sync_result = ExternalYieldBackend::runtime_synchronize_external_yield(backend)
-        .with_context(|| format!("synchronize backend after GRPO {phase}"));
-    let held_ms = held_started.elapsed().as_secs_f64() * 1000.0;
-    timings.held_ms += held_ms;
-    drop(guard);
-    tracing::debug!(
-        phase,
-        wait_ms,
-        held_ms,
-        "completed coordinated GRPO GPU phase"
-    );
-
-    match result {
-        Ok(operation_result) => match sync_result {
-            Ok(()) => operation_result,
-            Err(sync_error) => {
-                coordination.backend_health.quarantine(format!(
-                    "GRPO {phase} external-yield synchronization failed: {sync_error:#}"
-                ));
-                match operation_result {
-                    Ok(_) => Err(sync_error),
-                    Err(operation_error) => Err(anyhow::anyhow!(
-                        "GRPO {phase} failed ({operation_error:#}) and backend settlement also failed ({sync_error:#})"
-                    )),
-                }
-            }
-        },
-        Err(payload) => {
-            let sync_suffix = sync_result
-                .err()
-                .map(|error| format!("; settlement also failed: {error:#}"))
-                .unwrap_or_default();
-            coordination
-                .backend_health
-                .quarantine(format!("GRPO {phase} panicked{sync_suffix}"));
-            std::panic::resume_unwind(payload)
-        }
-    }
+    Ok(outcome.value)
 }
 
 pub fn sft_train(
@@ -15747,13 +15783,34 @@ pub(crate) mod tests {
         let coordination = GpuStepCoordination::new(lock.clone(), backend_health.clone());
         let backend = NamedTestBackend::failing_external_yield_sync();
         let mut writer_timings = GrpoGpuWriterTimings::default();
+        let phase_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waiter_started = phase_started.clone();
+        let waiter_lock = lock.clone();
+        let waiter_health = backend_health.clone();
+        let inference_waiter = std::thread::spawn(move || {
+            while !waiter_started.load(std::sync::atomic::Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            loop {
+                if let Ok(owner) = waiter_lock.clone().try_read_owned() {
+                    let quarantined = waiter_health.snapshot().quarantined;
+                    drop(owner);
+                    return quarantined;
+                }
+                std::thread::yield_now();
+            }
+        });
 
         let error = run_coordinated_grpo_gpu_phase(
             Some(&coordination),
             &*backend,
             &mut writer_timings,
             "injected sync failure",
-            || Ok(()),
+            || {
+                phase_started.store(true, std::sync::atomic::Ordering::Release);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                Ok(())
+            },
         )
         .expect_err("failed GRPO settlement must reject the phase");
         assert!(
@@ -15771,6 +15828,10 @@ pub(crate) mod tests {
         assert!(
             lock.try_write().is_ok(),
             "the process lock must not leak even though quarantine blocks reuse"
+        );
+        assert!(
+            inference_waiter.join().unwrap(),
+            "a waiting inference owner must observe quarantine before the writer releases"
         );
     }
 
