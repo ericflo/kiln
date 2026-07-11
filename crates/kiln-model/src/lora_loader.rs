@@ -581,7 +581,10 @@ pub fn compute_lora_delta(
 
     let hidden = matmul_last_dim_rhs_transposed(x, &a)?; // [..., rank]
     let delta = matmul_last_dim_rhs_transposed(&hidden, &b)?; // [..., out_features]
-    let delta = (delta * scale as f64)?;
+    // Keep the scalar on the tensor's device. The overloaded `Tensor * f64`
+    // path materializes a CPU broadcast tensor on non-CPU substrates, which
+    // made frozen LoRA reference forwards fail mid-GRPO on Vulkan.
+    let delta = kiln_tensor::ops::mul_scalar(&delta, scale)?;
 
     // Final cast to input dtype (no-op when already matching).
     let delta = delta.to_dtype(x.dtype())?;

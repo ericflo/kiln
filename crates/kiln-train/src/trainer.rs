@@ -1146,6 +1146,13 @@ impl TrainableLoraParams {
             if let Some(resolved) = ResidencyBackend::runtime_resolve_resident_activation(
                 backend, &primary, &dims, dtype,
             )? {
+                let resolved = if resolved.device() == primary.device() {
+                    resolved
+                } else {
+                    resolved
+                        .to_device(primary.device())
+                        .context("realign resolved LoRA parameter to its owner device")?
+                };
                 param
                     .replace_plain_trainable_tensor(resolved)
                     .map_err(|error| anyhow::anyhow!("sync LoRA parameter identity: {error}"))?;
@@ -1433,6 +1440,13 @@ impl OptimizerState {
             if let Some(resolved) = ResidencyBackend::runtime_resolve_resident_activation(
                 backend, tensor, &dims, dtype,
             )? {
+                let resolved = if resolved.device() == tensor.device() {
+                    resolved
+                } else {
+                    resolved
+                        .to_device(tensor.device())
+                        .context("realign resolved optimizer state to its owner device")?
+                };
                 *tensor = checkpoint_tensor_with_id(resolved, id, "optimizer resident sync")?;
                 Ok(true)
             } else {
@@ -3146,6 +3160,46 @@ struct GrpoCheckpointLoopState {
 }
 
 impl GrpoCheckpointLoopState {
+    #[allow(clippy::too_many_arguments)]
+    fn capture(
+        route: GrpoCheckpointRoute,
+        global_step: usize,
+        source_byte_offset: Option<u64>,
+        source_lines_consumed: Option<u64>,
+        processed_completions: usize,
+        loss_history: &[f64],
+        data_stats: &crate::train_receipt::DataStatsReceipt,
+        token_counts: &crate::train_receipt::TokenCountReceipt,
+        dynamic_groups_filtered: usize,
+        echo_metrics: &crate::train_receipt::EchoActivityMetrics,
+        lora_grad_norms: &crate::train_receipt::LoraGradNormAccumulator,
+        policy_audit: &crate::train_receipt::GrpoPolicyAuditAccumulator,
+        phase_timings: &GrpoBenchmarkTimings,
+        gpu_writer_timings: &GrpoGpuWriterTimings,
+        ema_ref_state: Option<&EmaReferenceState>,
+    ) -> Self {
+        Self {
+            schema_version: GRPO_CHECKPOINT_LOOP_STATE_SCHEMA_VERSION,
+            state_type: GRPO_CHECKPOINT_LOOP_STATE_TYPE.to_string(),
+            route,
+            global_step: global_step as u64,
+            source_byte_offset,
+            source_lines_consumed,
+            processed_completions: processed_completions as u64,
+            loss_history: loss_history.to_vec(),
+            last_loss: loss_history.last().copied(),
+            data_stats: data_stats.clone(),
+            token_counts: token_counts.clone(),
+            dynamic_groups_filtered: dynamic_groups_filtered as u64,
+            echo_metrics: echo_metrics.clone(),
+            lora_grad_norms: lora_grad_norms.clone(),
+            policy_audit: policy_audit.clone(),
+            phase_timings: phase_timings.clone(),
+            gpu_writer_timings: gpu_writer_timings.clone(),
+            ema_groups_since_refresh: ema_ref_state.map(|state| state.groups_since_refresh as u64),
+        }
+    }
+
     fn validate(&self, progress: &crate::checkpoint::TrainingCheckpointProgress) -> Result<()> {
         anyhow::ensure!(
             self.schema_version == GRPO_CHECKPOINT_LOOP_STATE_SCHEMA_VERSION
@@ -3574,6 +3628,50 @@ impl GrpoCheckpointDescriptor {
             reference_state,
             loop_state_bytes,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save(
+        &self,
+        output_root: &Path,
+        backend: &dyn BackendRuntime,
+        params: &mut TrainableLoraParams,
+        opt_state: &mut Option<OptimizerState>,
+        ema_ref_state: Option<&EmaReferenceState>,
+        loop_state: &mut GrpoCheckpointLoopState,
+        gpu_step_coordination: Option<&GpuStepCoordination>,
+        gpu_writer_timings: &mut GrpoGpuWriterTimings,
+        phase: &'static str,
+    ) -> Result<PathBuf> {
+        let mut snapshot = run_coordinated_grpo_gpu_phase(
+            gpu_step_coordination,
+            backend,
+            gpu_writer_timings,
+            phase,
+            || {
+                self.capture(
+                    output_root,
+                    backend,
+                    params,
+                    opt_state,
+                    ema_ref_state,
+                    loop_state,
+                )
+            },
+        )?;
+        // Capture the acquisition/wait update produced by the snapshot phase
+        // itself. Tensor copying is already complete, so re-encoding this CPU
+        // metadata does not extend writer ownership.
+        loop_state.gpu_writer_timings = gpu_writer_timings.clone();
+        snapshot.replace_loop_state(loop_state)?;
+        let publish_started = Instant::now();
+        let path = snapshot.publish()?;
+        tracing::info!(
+            checkpoint = %path.display(),
+            publish_ms = publish_started.elapsed().as_millis() as u64,
+            "published exact GRPO checkpoint"
+        );
+        Ok(path)
     }
 }
 
@@ -6025,7 +6123,45 @@ pub fn grpo_train_to_with_coordination(
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    grpo_train_to_with_checkpoint_root(
+        groups,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        output_adapter_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+        gpu_step_coordination,
+    )
+}
+
+/// Staged-output GRPO with a separate durable checkpoint root. Server jobs can
+/// use this entry point so final-adapter staging cleanup cannot discard a
+/// resume point that was already atomically published.
+#[allow(clippy::too_many_arguments)]
+pub fn grpo_train_to_with_checkpoint_root(
+    groups: &[GrpoGroup],
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+    gpu_step_coordination: Option<GpuStepCoordination>,
+) -> Result<PathBuf> {
     let run_started = Instant::now();
+    anyhow::ensure!(
+        config.checkpoint_interval != Some(0),
+        "GRPO checkpoint_interval must be greater than zero"
+    );
     // Fail fast on loss compositions the kt-tape path cannot train —
     // BEFORE any forward pass. The old order discovered this per-step,
     // after the rollout + reference forwards had already burned GPU time.
@@ -6046,10 +6182,78 @@ pub fn grpo_train_to_with_coordination(
 
     let output_dir = output_adapter_dir.join(adapter_name);
     let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&groups);
+    let training_data_checkpoint_sha256 =
+        checkpoint_sha256_hex(training_data_sha256.as_deref(), "GRPO training data")?;
     let requested_base_adapter_dir = config.base_adapter.as_deref().map(|name| {
         resolve_base_adapter_dir_from_roots(name, adapter_dir, output_adapter_dir, adapter_name)
     });
-    let mut gpu_writer_timings = GrpoGpuWriterTimings::default();
+    let resume_checkpoint = config
+        .resume_checkpoint
+        .as_deref()
+        .map(Path::new)
+        .map(crate::checkpoint::load_training_checkpoint)
+        .transpose()
+        .context("load GRPO resume checkpoint")?;
+    let resume_loop_state = resume_checkpoint
+        .as_ref()
+        .map(load_grpo_checkpoint_loop_state)
+        .transpose()?;
+    if let Some(checkpoint) = resume_checkpoint.as_ref() {
+        anyhow::ensure!(
+            checkpoint.manifest.training_kind == crate::checkpoint::TrainingKind::Grpo,
+            "resume checkpoint is not a GRPO checkpoint"
+        );
+        anyhow::ensure!(
+            checkpoint.manifest.adapter_name == adapter_name,
+            "resume checkpoint adapter {:?} does not match {:?}",
+            checkpoint.manifest.adapter_name,
+            adapter_name
+        );
+        anyhow::ensure!(
+            checkpoint.manifest.data.source_kind == GrpoCheckpointRoute::Inline.source_kind()
+                && checkpoint.manifest.data.content_sha256 == training_data_checkpoint_sha256,
+            "resume checkpoint inline GRPO data identity differs from this request"
+        );
+        anyhow::ensure!(
+            resume_loop_state
+                .as_ref()
+                .is_some_and(|state| state.route == GrpoCheckpointRoute::Inline),
+            "resume checkpoint was not produced by inline GRPO"
+        );
+    }
+    if config.checkpoint_interval.is_some() || resume_checkpoint.is_some() {
+        checkpoint_sha256_hex(
+            weights.source_content_sha256.as_deref(),
+            "base-model weights content identity",
+        )?;
+    }
+    let resume_init_seed = resume_checkpoint
+        .as_ref()
+        .map(|checkpoint| {
+            let state = checkpoint
+                .manifest
+                .rng_states
+                .get("lora-init")
+                .context("GRPO resume checkpoint has no lora-init RNG state")?;
+            anyhow::ensure!(
+                state.algorithm == "kiln.seeded-lora-init.v1" && state.position == 0,
+                "unsupported GRPO lora-init RNG state"
+            );
+            Ok(state.seed)
+        })
+        .transpose()?;
+    if let (Some(requested), Some(restored)) = (config.seed, resume_init_seed) {
+        anyhow::ensure!(
+            requested == restored,
+            "GRPO resume seed {restored} differs from requested seed {requested}"
+        );
+    }
+    let requested_effective_seed = resume_init_seed.or(config.seed);
+    let mut gpu_writer_timings = resume_loop_state
+        .as_ref()
+        .map_or_else(GrpoGpuWriterTimings::default, |state| {
+            state.gpu_writer_timings.clone()
+        });
     // (#1082) `embed_tokens.device()` is a kt Device; the GRPO body is now
     // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward),
     // so keep `device` kt downstream. The only candle touch is safetensors
@@ -6075,13 +6279,32 @@ pub fn grpo_train_to_with_coordination(
         completions_read: total_completions,
         ..Default::default()
     };
-    let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
-    let mut echo_metrics = crate::train_receipt::EchoActivityMetrics::default();
+    let mut token_counts = resume_loop_state
+        .as_ref()
+        .map_or_else(crate::train_receipt::TokenCountReceipt::default, |state| {
+            state.token_counts.clone()
+        });
+    let mut echo_metrics = resume_loop_state.as_ref().map_or_else(
+        crate::train_receipt::EchoActivityMetrics::default,
+        |state| state.echo_metrics.clone(),
+    );
     let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
-    let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
-    let mut policy_audit = crate::train_receipt::GrpoPolicyAuditAccumulator::default();
-    let mut phase_timings = GrpoBenchmarkTimings::default();
-    let mut dynamic_groups_filtered = 0usize;
+    let mut lora_grad_norms = resume_loop_state.as_ref().map_or_else(
+        crate::train_receipt::LoraGradNormAccumulator::default,
+        |state| state.lora_grad_norms.clone(),
+    );
+    let mut policy_audit = resume_loop_state.as_ref().map_or_else(
+        crate::train_receipt::GrpoPolicyAuditAccumulator::default,
+        |state| state.policy_audit.clone(),
+    );
+    let mut phase_timings = resume_loop_state
+        .as_ref()
+        .map_or_else(GrpoBenchmarkTimings::default, |state| {
+            state.phase_timings.clone()
+        });
+    let mut dynamic_groups_filtered = resume_loop_state
+        .as_ref()
+        .map_or(0, |state| state.dynamic_groups_filtered as usize);
     let learning_rate = config.effective_learning_rate();
     if let Some(explicit) = config.learning_rate {
         if let Some(warning) = crate::learning_rate_band_warning(
@@ -6155,30 +6378,53 @@ pub fn grpo_train_to_with_coordination(
 
     // Open replay state (writes request record + lineage.json *before* the
     // optimizer step) and resolve the effective seed.
+    let replay_parent_adapter = resume_checkpoint
+        .is_none()
+        .then_some(config.base_adapter.as_deref())
+        .flatten();
     let (replay_state, effective_seed) = match replay_ctx.as_ref() {
         Some(ctx) => {
             let (state, seed) = open_replay_state_to(
                 ctx,
-                config.seed,
-                config.base_adapter.as_deref(),
+                requested_effective_seed,
+                replay_parent_adapter,
                 adapter_dir,
                 output_adapter_dir,
                 adapter_name,
             )?;
             (Some(state), Some(seed))
         }
-        None => (None, config.seed),
+        None => (
+            None,
+            Some(requested_effective_seed.unwrap_or_else(rand::random)),
+        ),
     };
+    let effective_seed_value = effective_seed.expect("GRPO always resolves an effective seed");
+    let effective_checkpoint_config =
+        grpo_checkpoint_effective_config(config, learning_rate, effective_seed_value)?;
+    if let Some(checkpoint) = resume_checkpoint.as_ref() {
+        anyhow::ensure!(
+            checkpoint.manifest.effective_config == effective_checkpoint_config,
+            "resume checkpoint effective GRPO configuration differs from this request: checkpoint={}, request={}",
+            checkpoint.manifest.effective_config,
+            effective_checkpoint_config
+        );
+    }
 
-    let base_adapter_dir = match resolve_and_validate_base_adapter_from_roots(
-        config.base_adapter.as_deref(),
-        adapter_dir,
-        output_adapter_dir,
-        adapter_name,
-        model_config,
-        config.lora_rank,
-        config.allow_adapter_shape_conversion,
-    ) {
+    let base_adapter_result = if resume_checkpoint.is_some() {
+        Ok(None)
+    } else {
+        resolve_and_validate_base_adapter_from_roots(
+            config.base_adapter.as_deref(),
+            adapter_dir,
+            output_adapter_dir,
+            adapter_name,
+            model_config,
+            config.lora_rank,
+            config.allow_adapter_shape_conversion,
+        )
+    };
+    let base_adapter_dir = match base_adapter_result {
         Ok(value) => value,
         Err(err) => {
             let message = format!("{err:#}");
@@ -6227,11 +6473,20 @@ pub fn grpo_train_to_with_coordination(
                 config.lora_rank,
                 config.lora_alpha,
                 &device,
-                effective_seed,
+                Some(effective_seed_value),
                 training_precision_policy,
             )?;
 
-            if let Some(base_dir) = base_adapter_dir.as_deref() {
+            if let Some(checkpoint) = resume_checkpoint.as_ref() {
+                let adapter_path = checkpoint
+                    .artifact_path(&checkpoint.manifest.state_files.adapter_parameters)?;
+                params.load_checkpoint_parameters(&adapter_path)?;
+                tracing::info!(
+                    checkpoint = %checkpoint.root.display(),
+                    step = checkpoint.manifest.progress.global_step,
+                    "restored exact GRPO adapter parameters"
+                );
+            } else if let Some(base_dir) = base_adapter_dir.as_deref() {
                 let n_loaded = params.load_from_safetensors(base_dir, &device)?;
                 tracing::info!(
                     base = %base_dir.display(),
@@ -6240,8 +6495,33 @@ pub fn grpo_train_to_with_coordination(
                 );
             }
 
+            let mut opt_state = make_opt_state(&params, config.optimizer, learning_rate, &device)?;
+            if let Some(checkpoint) = resume_checkpoint.as_ref() {
+                let state_path = checkpoint
+                    .manifest
+                    .state_files
+                    .optimizer_state
+                    .as_deref()
+                    .map(|relative| checkpoint.artifact_path(relative))
+                    .transpose()?;
+                match (opt_state.as_mut(), state_path) {
+                    (Some(state), Some(path)) => {
+                        let step = u32::try_from(checkpoint.manifest.progress.global_step)
+                            .context("GRPO resume optimizer step exceeds u32")?;
+                        state.load_checkpoint_state(&params, &path, step)?;
+                    }
+                    (None, None) => {}
+                    (Some(_), None) => anyhow::bail!(
+                        "stateful GRPO optimizer checkpoint has no optimizer artifact"
+                    ),
+                    (None, Some(_)) => {
+                        anyhow::bail!("SGD GRPO checkpoint unexpectedly contains optimizer state")
+                    }
+                }
+            }
+            // Registry identity is process-local. Restore host tensors before
+            // registration so resident copies cannot retain seeded state.
             params.register_with_backend(&*backend)?;
-            let opt_state = make_opt_state(&params, config.optimizer, learning_rate, &device)?;
             if let Some(state) = opt_state.as_ref() {
                 state.register_with_backend(&*backend)?;
             }
@@ -6337,6 +6617,7 @@ pub fn grpo_train_to_with_coordination(
         );
         let tokenize_all_started = Instant::now();
         let mut tokenized_groups: Vec<TokenizedGrpoGroup> = Vec::new();
+        let mut trainable_source_indices: Vec<u64> = Vec::new();
         for (idx, group) in groups.iter().enumerate() {
             let source_index = idx + 1;
             if let Some(plan) = reward_filter_plan.as_ref() {
@@ -6356,6 +6637,7 @@ pub fn grpo_train_to_with_coordination(
                             format!("validate GRPO group {source_index} behavior provenance")
                         })?;
                     tokenized_groups.push(tgroup);
+                    trainable_source_indices.push(idx as u64);
                 }
                 Err(e) => {
                     if config.behavior_policy == BehaviorPolicy::Recorded {
@@ -6370,27 +6652,46 @@ pub fn grpo_train_to_with_coordination(
                 }
             }
         }
+        if let Some(state) = resume_loop_state.as_ref() {
+            anyhow::ensure!(
+                state.dynamic_groups_filtered as usize == dynamic_dropped,
+                "resume checkpoint dynamic-sampling selection differs from this request"
+            );
+        }
         dynamic_groups_filtered = dynamic_dropped;
         data_stats.groups_filtered = data_stats
             .reward_groups_filtered
             .saturating_add(dynamic_dropped)
             .saturating_add(tokenization_failed);
-        data_stats.groups_trained = tokenized_groups.len();
-        data_stats.completions_trained = tokenized_groups.iter().map(|g| g.completions.len()).sum();
-        token_counts = token_counts_for_grpo_groups(&tokenized_groups);
+        let planned_token_counts = token_counts_for_grpo_groups(&tokenized_groups);
+        let planned_completions: usize = tokenized_groups
+            .iter()
+            .map(|group| group.completions.len())
+            .sum();
+        if let Some(state) = resume_loop_state.as_ref() {
+            anyhow::ensure!(
+                state.data_stats.groups_read == data_stats.groups_read
+                    && state.data_stats.completions_read == data_stats.completions_read
+                    && state.data_stats.groups_filtered == data_stats.groups_filtered
+                    && state.data_stats.reward_groups_filtered == data_stats.reward_groups_filtered
+                    && state.data_stats.reward_groups_kept == data_stats.reward_groups_kept,
+                "resume checkpoint GRPO filtering statistics differ from this request"
+            );
+            data_stats = state.data_stats.clone();
+        }
         tracing::info!(
             groups = tokenized_groups.len(),
-            completions = data_stats.completions_trained,
-            action_tokens = token_counts.action_tokens,
-            env_tokens = token_counts.env_tokens,
-            context_tokens = token_counts.context_tokens,
+            completions = planned_completions,
+            action_tokens = planned_token_counts.action_tokens,
+            env_tokens = planned_token_counts.env_tokens,
+            context_tokens = planned_token_counts.context_tokens,
             elapsed_ms = tokenize_all_started.elapsed().as_millis() as u64,
             "GRPO tokenize end"
         );
         crate::train_receipt::warn_echo_enabled_without_env_tokens(
             "grpo",
             config.loss.echo_enabled(),
-            &token_counts,
+            &planned_token_counts,
         );
 
         if dynamic_dropped > 0 {
@@ -6432,11 +6733,124 @@ pub fn grpo_train_to_with_coordination(
         );
 
         let total_steps = tokenized_groups.len();
-        let mut global_step = 0;
-        let mut last_loss = 0.0;
+        let gradient_checkpoint_plan: Vec<_> = tokenized_groups
+            .iter()
+            .zip(&trainable_source_indices)
+            .map(|(group, source_index)| {
+                let max_seq_len = group
+                    .completions
+                    .iter()
+                    .map(|completion| completion.input_ids.len())
+                    .max()
+                    .unwrap_or(0);
+                let resolved = checkpoint_config_for_training_step(
+                    weights,
+                    &device,
+                    config.grad_checkpoint_segments,
+                    model_config.num_layers,
+                    max_seq_len,
+                    model_config.hidden_size,
+                    model_config.intermediate_size,
+                    model_config.vocab_size,
+                    2,
+                    activation_bytes_per_elem,
+                );
+                let boundaries =
+                    checkpoint_segments_for_config(weights, &device, max_seq_len, resolved);
+                serde_json::json!({
+                    "source_index": source_index,
+                    "max_seq_len": max_seq_len,
+                    "enabled": resolved.enabled,
+                    "num_segments": resolved.num_segments,
+                    "auto_configured": resolved.auto_configured,
+                    "boundaries": boundaries,
+                })
+            })
+            .collect();
+        let trainable_order_sha256 =
+            crate::train_receipt::sha256_json_serializable(&trainable_source_indices)
+                .context("hash inline GRPO trainable order")?;
+        let gradient_checkpoint_plan_sha256 =
+            crate::train_receipt::sha256_json_serializable(&gradient_checkpoint_plan)
+                .context("hash inline GRPO gradient-checkpoint plan")?;
+        let ema_refresh_every = if config.kl_penalty_enabled() {
+            match &config.kl_reference_policy {
+                KlReferencePolicy::Ema { refresh_every, .. } => Some(*refresh_every),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let checkpoint_descriptor = GrpoCheckpointDescriptor {
+            route: GrpoCheckpointRoute::Inline,
+            adapter_name: adapter_name.to_string(),
+            effective_config: effective_checkpoint_config.clone(),
+            precision_policy: training_checkpoint_precision(&params, opt_state.as_ref())?,
+            data: crate::checkpoint::TrainingCheckpointData {
+                source_kind: GrpoCheckpointRoute::Inline.source_kind().to_string(),
+                content_sha256: training_data_checkpoint_sha256.clone(),
+                item_count: total_steps as u64,
+            },
+            init_seed: effective_seed_value,
+            optimizer: config.optimizer,
+            learning_rate,
+            total_steps,
+            base_model_weights_sha256: weights.source_content_sha256.clone(),
+            auxiliary_state: grpo_checkpoint_auxiliary_state(
+                GrpoCheckpointRoute::Inline,
+                model_config,
+                tokenizer,
+                training_precision_policy,
+                weights.source_content_sha256.as_deref(),
+                BackendIdentity::runtime_name(backend.as_ref()),
+                &trainable_order_sha256,
+                &gradient_checkpoint_plan_sha256,
+            ),
+            ema_refresh_every,
+        };
+        if let (Some(checkpoint), Some(loop_state)) =
+            (resume_checkpoint.as_ref(), resume_loop_state.as_ref())
+        {
+            checkpoint_descriptor.validate_resume(checkpoint, loop_state)?;
+        }
+
+        let mut global_step = resume_loop_state
+            .as_ref()
+            .map_or(0, |state| state.global_step as usize);
+        let mut processed_completions = resume_loop_state
+            .as_ref()
+            .map_or(0, |state| state.processed_completions as usize);
+        let mut loss_history = resume_loop_state
+            .as_ref()
+            .map_or_else(Vec::new, |state| state.loss_history.clone());
+        let mut last_loss = resume_loop_state
+            .as_ref()
+            .and_then(|state| state.last_loss)
+            .unwrap_or(0.0);
+        let mut last_saved_step = resume_loop_state
+            .as_ref()
+            .map(|state| state.global_step as usize);
+        anyhow::ensure!(
+            global_step <= total_steps,
+            "GRPO resume cursor {global_step} exceeds {total_steps} trainable groups"
+        );
+        let expected_processed_completions: usize = tokenized_groups
+            .iter()
+            .take(global_step)
+            .map(|group| group.completions.len())
+            .sum();
+        let expected_token_counts = token_counts_for_grpo_groups(&tokenized_groups[..global_step]);
+        anyhow::ensure!(
+            processed_completions == expected_processed_completions
+                && token_counts == expected_token_counts,
+            "GRPO resume diagnostics do not match the committed trainable prefix"
+        );
         let mut last_ckpt_log_key: Option<(bool, usize)> = None;
 
         let pb = make_step_progress(total_steps, "grpo training");
+        if let Some(pb) = &pb {
+            pb.set_position(global_step as u64);
+        }
 
         // Phase 3b: maintain an EMA-snapshot LoRA when
         // `KlReferencePolicy::Ema` is configured. Initialized eagerly to a
@@ -6449,19 +6863,44 @@ pub fn grpo_train_to_with_coordination(
                     decay,
                     refresh_every,
                 } => {
-                    let snapshot = run_coordinated_grpo_gpu_phase(
-                        gpu_step_coordination.as_ref(),
-                        &*backend,
-                        &mut gpu_writer_timings,
-                        "initial EMA reference snapshot",
-                        || {
-                            lora_snapshot_capture_or_blend(&params, None, *decay)
-                                .context("initial EMA reference snapshot")
-                        },
-                    )?;
+                    let (snapshot, groups_since_refresh) =
+                        if let (Some(checkpoint), Some(loop_state)) =
+                            (resume_checkpoint.as_ref(), resume_loop_state.as_ref())
+                        {
+                            let relative = checkpoint
+                                .manifest
+                                .state_files
+                                .reference_state
+                                .as_deref()
+                                .context("EMA GRPO resume checkpoint has no reference state")?;
+                            let path = checkpoint.artifact_path(relative)?;
+                            (
+                                load_lora_reference_checkpoint(&path, &params, &device)?,
+                                loop_state
+                                    .ema_groups_since_refresh
+                                    .context("EMA GRPO resume checkpoint has no cadence cursor")?
+                                    as usize,
+                            )
+                        } else {
+                            (
+                                run_coordinated_grpo_gpu_phase(
+                                    gpu_step_coordination.as_ref(),
+                                    &*backend,
+                                    &mut gpu_writer_timings,
+                                    "initial EMA reference snapshot",
+                                    || {
+                                        lora_snapshot_capture_or_blend(
+                                            &params, None, *decay, &device,
+                                        )
+                                        .context("initial EMA reference snapshot")
+                                    },
+                                )?,
+                                0,
+                            )
+                        };
                     Some(EmaReferenceState {
                         snapshot,
-                        groups_since_refresh: 0,
+                        groups_since_refresh,
                         refresh_every: *refresh_every,
                         decay: *decay,
                     })
@@ -6472,7 +6911,7 @@ pub fn grpo_train_to_with_coordination(
             None
         };
 
-        for (group_idx, tgroup) in tokenized_groups.iter().enumerate() {
+        for (group_idx, tgroup) in tokenized_groups.iter().enumerate().skip(global_step) {
             let num_completions = tgroup.completions.len();
             let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(tgroup));
             let group_max_seq_len = tgroup
@@ -6545,10 +6984,14 @@ pub fn grpo_train_to_with_coordination(
                     if let Some(state) = ema_ref_state.as_mut() {
                         state.groups_since_refresh += 1;
                         if state.groups_since_refresh >= state.refresh_every {
+                            params
+                                .sync_to_master(&*backend)
+                                .context("sync policy before EMA reference refresh")?;
                             state.snapshot = lora_snapshot_capture_or_blend(
                                 &params,
                                 Some(&state.snapshot),
                                 state.decay,
+                                &device,
                             )
                             .context("EMA reference snapshot refresh")?;
                             state.groups_since_refresh = 0;
@@ -6564,35 +7007,58 @@ pub fn grpo_train_to_with_coordination(
                 },
             )?;
             let avg_group_loss = step_report.loss;
+            anyhow::ensure!(
+                avg_group_loss.is_finite(),
+                "GRPO loss became non-finite at group {}: {avg_group_loss}",
+                group_idx + 1
+            );
             echo_metrics.observe_env_ce(step_report.echo_env_ce);
             last_loss = avg_group_loss;
+            loss_history.push(avg_group_loss);
             global_step += 1;
+            processed_completions = processed_completions.saturating_add(num_completions);
+            token_counts.add_from(&group_counts);
+            data_stats.groups_trained = global_step;
+            data_stats.completions_trained = processed_completions;
 
-            // Periodic adapter checkpoint
-            if let Some(interval) = config.checkpoint_interval {
-                if interval > 0 && global_step % interval == 0 && global_step < total_steps {
-                    let ckpt_dir =
-                        output_adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
-                    run_coordinated_grpo_gpu_phase(
-                        gpu_step_coordination.as_ref(),
-                        &*backend,
-                        &mut gpu_writer_timings,
-                        "checkpoint device snapshot",
-                        || {
-                            params
-                                .sync_to_master(&*backend)
-                                .context("capture GRPO checkpoint adapter state")
-                        },
-                    )?;
-                    // The master snapshot is CPU-owned, so encoding and disk
-                    // publication must not extend the GPU writer interval.
-                    params
-                        .save_peft(&ckpt_dir, model_config.num_layers)
-                        .with_context(|| {
-                            format!("save GRPO adapter checkpoint at {}", ckpt_dir.display())
-                        })?;
-                    tracing::info!(step = global_step, "saved GRPO training checkpoint");
-                }
+            let checkpoint_due = config
+                .checkpoint_interval
+                .is_some_and(|interval| global_step % interval == 0 && global_step < total_steps);
+            if checkpoint_due {
+                let mut loop_state = GrpoCheckpointLoopState::capture(
+                    GrpoCheckpointRoute::Inline,
+                    global_step,
+                    None,
+                    None,
+                    processed_completions,
+                    &loss_history,
+                    &data_stats,
+                    &token_counts,
+                    dynamic_groups_filtered,
+                    &echo_metrics,
+                    &lora_grad_norms,
+                    &policy_audit,
+                    &phase_timings,
+                    &gpu_writer_timings,
+                    ema_ref_state.as_ref(),
+                );
+                let path = checkpoint_descriptor.save(
+                    checkpoint_output_dir,
+                    &*backend,
+                    &mut params,
+                    &mut opt_state,
+                    ema_ref_state.as_ref(),
+                    &mut loop_state,
+                    gpu_step_coordination.as_ref(),
+                    &mut gpu_writer_timings,
+                    "checkpoint device snapshot",
+                )?;
+                last_saved_step = Some(global_step);
+                tracing::info!(
+                    step = global_step,
+                    checkpoint = %path.display(),
+                    "saved exact GRPO training checkpoint"
+                );
             }
 
             if let Some(ref cb) = progress_cb {
@@ -6604,7 +7070,42 @@ pub fn grpo_train_to_with_coordination(
                     loss: avg_group_loss,
                     progress: global_step as f32 / total_steps as f32,
                 });
-                if control == TrainControl::Stop {
+                if control == TrainControl::Stop && global_step < total_steps {
+                    if last_saved_step != Some(global_step) {
+                        let mut loop_state = GrpoCheckpointLoopState::capture(
+                            GrpoCheckpointRoute::Inline,
+                            global_step,
+                            None,
+                            None,
+                            processed_completions,
+                            &loss_history,
+                            &data_stats,
+                            &token_counts,
+                            dynamic_groups_filtered,
+                            &echo_metrics,
+                            &lora_grad_norms,
+                            &policy_audit,
+                            &phase_timings,
+                            &gpu_writer_timings,
+                            ema_ref_state.as_ref(),
+                        );
+                        let path = checkpoint_descriptor.save(
+                            checkpoint_output_dir,
+                            &*backend,
+                            &mut params,
+                            &mut opt_state,
+                            ema_ref_state.as_ref(),
+                            &mut loop_state,
+                            gpu_step_coordination.as_ref(),
+                            &mut gpu_writer_timings,
+                            "cancellation checkpoint device snapshot",
+                        )?;
+                        tracing::info!(
+                            step = global_step,
+                            checkpoint = %path.display(),
+                            "saved exact GRPO checkpoint before cancellation"
+                        );
+                    }
                     anyhow::bail!("training cancelled by user (stop requested at step boundary)");
                 }
             }
@@ -6634,6 +7135,14 @@ pub fn grpo_train_to_with_coordination(
                 pb.inc(1);
             }
         }
+
+        anyhow::ensure!(
+            global_step == total_steps
+                && loss_history.len() == total_steps
+                && processed_completions == planned_completions
+                && token_counts == planned_token_counts,
+            "GRPO loop completed with inconsistent progress or diagnostics"
+        );
 
         if let Some(pb) = pb {
             pb.finish_and_clear();
@@ -7438,7 +7947,7 @@ pub fn grpo_train_jsonl_to_with_coordination(
                         &mut gpu_writer_timings,
                         "streamed initial EMA reference snapshot",
                         || {
-                            lora_snapshot_capture_or_blend(&params, None, *decay)
+                            lora_snapshot_capture_or_blend(&params, None, *decay, &device)
                                 .context("initial EMA reference snapshot")
                         },
                     )?;
@@ -7606,10 +8115,14 @@ pub fn grpo_train_jsonl_to_with_coordination(
                     if let Some(state) = ema_ref_state.as_mut() {
                         state.groups_since_refresh += 1;
                         if state.groups_since_refresh >= state.refresh_every {
+                            params
+                                .sync_to_master(&*backend)
+                                .context("sync streamed policy before EMA reference refresh")?;
                             state.snapshot = lora_snapshot_capture_or_blend(
                                 &params,
                                 Some(&state.snapshot),
                                 state.decay,
+                                &device,
                             )
                             .context("EMA reference snapshot refresh")?;
                             state.groups_since_refresh = 0;
@@ -8590,6 +9103,11 @@ fn train_tokenized_grpo_group_with_grad_norms(
     // is explicitly disabled.
     let use_shared_prefix = !skip_kl_reference
         && tgroup.completions.len() > 1
+        // The paged shared-prefix reference path still mixes a host
+        // broadcast temporary into a fully resident Vulkan graph. Keep the
+        // exact per-completion path until paged Vulkan reference parity is
+        // independently qualified.
+        && !matches!(device, Device::Vulkan(_))
         && !kiln_core::env_flag::env_flag("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", false);
     let shared_prefix_log_probs: Option<Vec<Tensor>> = if use_shared_prefix {
         let started = Instant::now();
@@ -9650,8 +10168,7 @@ fn tokenize_grpo_group_timed(
 ///
 /// Used by [`lora_snapshot_capture_or_blend`] to materialize a reference
 /// LoRA that won't silently track future policy updates.
-fn deepcopy_tensor_for_snapshot(t: &Tensor) -> Result<Tensor> {
-    let device = t.device();
+fn deepcopy_tensor_for_snapshot(t: &Tensor, snapshot_device: &Device) -> Result<Tensor> {
     let dtype = t.dtype();
     let shape = t.dims().to_vec();
     let host: Vec<f32> = t
@@ -9661,7 +10178,7 @@ fn deepcopy_tensor_for_snapshot(t: &Tensor) -> Result<Tensor> {
         .to_vec1::<f32>()
         .context("snapshot: read tensor to host f32 vec")?;
     // (#1082) kt-native rebuild on the source device (no candle constructor).
-    let rebuilt = Tensor::from_vec_on(device, host, shape)?;
+    let rebuilt = Tensor::from_vec_on(snapshot_device.clone(), host, shape)?;
     if dtype == DType::F32 {
         Ok(rebuilt.detach())
     } else {
@@ -9672,10 +10189,21 @@ fn deepcopy_tensor_for_snapshot(t: &Tensor) -> Result<Tensor> {
 /// EMA blend two tensors: `new = decay * old + (1 - decay) * current`. The
 /// result has the same dtype as `old` and is independent of either input's
 /// storage (the affine + add chain materializes a fresh tensor).
-fn ema_blend_tensor(old: &Tensor, current: &Tensor, decay: f32) -> Result<Tensor> {
+fn ema_blend_tensor(
+    old: &Tensor,
+    current: &Tensor,
+    decay: f32,
+    snapshot_device: &Device,
+) -> Result<Tensor> {
     let dtype = old.dtype();
-    let a = old.to_f32_dtype()?.affine(decay as f64, 0.0)?;
-    let b = current.to_f32_dtype()?.affine((1.0 - decay) as f64, 0.0)?;
+    let a = old
+        .to_device(snapshot_device.clone())?
+        .to_f32_dtype()?
+        .affine(decay as f64, 0.0)?;
+    let b = current
+        .to_device(snapshot_device.clone())?
+        .to_f32_dtype()?
+        .affine((1.0 - decay) as f64, 0.0)?;
     let blended = (a + b)?;
     let out = if dtype == DType::F32 {
         blended
@@ -9694,6 +10222,7 @@ fn snapshot_projection(
     cur: &Option<(Parameter, Parameter)>,
     prior: Option<&LoraProjectionWeights>,
     decay: f32,
+    snapshot_device: &Device,
 ) -> Result<Option<LoraProjectionWeights>> {
     let Some((cur_a, cur_b)) = cur else {
         return Ok(None);
@@ -9706,14 +10235,21 @@ fn snapshot_projection(
     let cur_b_kt = cur_b.forward_storage().primary_tensor();
     let (a, b) = match prior {
         Some(prior) => (
-            ema_blend_tensor(&prior.a, cur_a_kt, decay)?,
-            ema_blend_tensor(&prior.b, cur_b_kt, decay)?,
+            ema_blend_tensor(&prior.a, cur_a_kt, decay, snapshot_device)?,
+            ema_blend_tensor(&prior.b, cur_b_kt, decay, snapshot_device)?,
         ),
         None => (
-            deepcopy_tensor_for_snapshot(cur_a_kt)?,
-            deepcopy_tensor_for_snapshot(cur_b_kt)?,
+            deepcopy_tensor_for_snapshot(cur_a_kt, snapshot_device)?,
+            deepcopy_tensor_for_snapshot(cur_b_kt, snapshot_device)?,
         ),
     };
+    anyhow::ensure!(
+        a.device() == *snapshot_device && b.device() == *snapshot_device,
+        "GRPO EMA snapshot landed on {}/{} instead of {}",
+        a.device(),
+        b.device(),
+        snapshot_device
+    );
     Ok(Some(LoraProjectionWeights { a, b }))
 }
 
@@ -9733,6 +10269,7 @@ fn lora_snapshot_capture_or_blend(
     current: &TrainableLoraParams,
     prior: Option<&LoraWeights>,
     decay: f32,
+    snapshot_device: &Device,
 ) -> Result<LoraWeights> {
     let layers = current
         .layers
@@ -9744,7 +10281,7 @@ fn lora_snapshot_capture_or_blend(
             let mk = |which: fn(&LoraLayerWeights) -> Option<&LoraProjectionWeights>,
                       cur: &Option<(Parameter, Parameter)>|
              -> Result<Option<LoraProjectionWeights>> {
-                snapshot_projection(cur, snap_layer.and_then(which), decay)
+                snapshot_projection(cur, snap_layer.and_then(which), decay, snapshot_device)
             };
             Ok::<LoraLayerWeights, anyhow::Error>(LoraLayerWeights {
                 q_proj: mk(|l| l.q_proj.as_ref(), &lp.q_proj)?,
@@ -9812,6 +10349,7 @@ fn restore_lora_reference_tensor(
     loaded: &mut HashMap<String, KtTensor>,
     key: &str,
     current: &KtTensor,
+    snapshot_device: &Device,
 ) -> Result<KtTensor> {
     let tensor = loaded
         .remove(key)
@@ -9830,7 +10368,7 @@ fn restore_lora_reference_tensor(
     );
     checkpoint_ensure_finite_tensor(&tensor, key)?;
     tensor
-        .to_device(current.device())
+        .to_device(snapshot_device.clone())
         .and_then(|tensor| tensor.contiguous())
         .map_err(|error| anyhow::anyhow!("restore GRPO EMA reference tensor {key}: {error}"))
 }
@@ -9840,6 +10378,7 @@ fn restore_lora_reference_projection(
     layer_idx: usize,
     module: &str,
     current: &Option<(Parameter, Parameter)>,
+    snapshot_device: &Device,
 ) -> Result<Option<LoraProjectionWeights>> {
     let Some((current_a, current_b)) = current else {
         return Ok(None);
@@ -9851,11 +10390,13 @@ fn restore_lora_reference_projection(
             loaded,
             &a_key,
             current_a.forward_storage().primary_tensor(),
+            snapshot_device,
         )?,
         b: restore_lora_reference_tensor(
             loaded,
             &b_key,
             current_b.forward_storage().primary_tensor(),
+            snapshot_device,
         )?,
     }))
 }
@@ -9863,6 +10404,7 @@ fn restore_lora_reference_projection(
 fn load_lora_reference_checkpoint(
     path: &Path,
     current: &TrainableLoraParams,
+    snapshot_device: &Device,
 ) -> Result<LoraWeights> {
     let mut loaded = kiln_tensor::safetensors::load_cpu(path)
         .map_err(|error| anyhow::anyhow!("load GRPO EMA reference checkpoint: {error}"))?;
@@ -9884,60 +10426,70 @@ fn load_lora_reference_checkpoint(
                     layer_idx,
                     "q_proj",
                     &layer.q_proj,
+                    snapshot_device,
                 )?,
                 k_proj: restore_lora_reference_projection(
                     &mut loaded,
                     layer_idx,
                     "k_proj",
                     &layer.k_proj,
+                    snapshot_device,
                 )?,
                 v_proj: restore_lora_reference_projection(
                     &mut loaded,
                     layer_idx,
                     "v_proj",
                     &layer.v_proj,
+                    snapshot_device,
                 )?,
                 o_proj: restore_lora_reference_projection(
                     &mut loaded,
                     layer_idx,
                     "o_proj",
                     &layer.o_proj,
+                    snapshot_device,
                 )?,
                 in_proj_qkv: restore_lora_reference_projection(
                     &mut loaded,
                     layer_idx,
                     "in_proj_qkv",
                     &layer.in_proj_qkv,
+                    snapshot_device,
                 )?,
                 in_proj_z: restore_lora_reference_projection(
                     &mut loaded,
                     layer_idx,
                     "in_proj_z",
                     &layer.in_proj_z,
+                    snapshot_device,
                 )?,
                 gdn_out_proj: restore_lora_reference_projection(
                     &mut loaded,
                     layer_idx,
                     "out_proj",
                     &layer.gdn_out_proj,
+                    snapshot_device,
                 )?,
                 gate_proj: restore_lora_reference_projection(
                     &mut loaded,
                     layer_idx,
                     "gate_proj",
                     &layer.gate_proj,
+                    snapshot_device,
                 )?,
                 up_proj: restore_lora_reference_projection(
                     &mut loaded,
                     layer_idx,
                     "up_proj",
                     &layer.up_proj,
+                    snapshot_device,
                 )?,
                 down_proj: restore_lora_reference_projection(
                     &mut loaded,
                     layer_idx,
                     "down_proj",
                     &layer.down_proj,
+                    snapshot_device,
                 )?,
             })
         })
@@ -16135,7 +16687,7 @@ pub(crate) mod tests {
         let old = t1d(&[1.0_f32, 2.0, 4.0])?;
         let current = t1d(&[2.0_f32, 4.0, 8.0])?;
         let decay = 0.25_f32;
-        let blended = ema_blend_tensor(&old, &current, decay)?;
+        let blended = ema_blend_tensor(&old, &current, decay, &cpu_device())?;
         let got = blended.to_vec1::<f32>()?;
         // decay * old + (1 - decay) * current = 0.25*[1,2,4] + 0.75*[2,4,8]
         // = [0.25,0.5,1.0] + [1.5,3.0,6.0] = [1.75, 3.5, 7.0]
@@ -16149,7 +16701,7 @@ pub(crate) mod tests {
     fn ema_blend_with_decay_one_returns_old() -> Result<()> {
         let old = t1d(&[3.0_f32, 5.0])?;
         let current = t1d(&[7.0_f32, 11.0])?;
-        let blended = ema_blend_tensor(&old, &current, 1.0)?;
+        let blended = ema_blend_tensor(&old, &current, 1.0, &cpu_device())?;
         let got = blended.to_vec1::<f32>()?;
         assert!((got[0] - 3.0).abs() < 1e-5);
         assert!((got[1] - 5.0).abs() < 1e-5);
@@ -16160,7 +16712,7 @@ pub(crate) mod tests {
     fn ema_blend_with_decay_zero_returns_current() -> Result<()> {
         let old = t1d(&[3.0_f32, 5.0])?;
         let current = t1d(&[7.0_f32, 11.0])?;
-        let blended = ema_blend_tensor(&old, &current, 0.0)?;
+        let blended = ema_blend_tensor(&old, &current, 0.0, &cpu_device())?;
         let got = blended.to_vec1::<f32>()?;
         assert!((got[0] - 7.0).abs() < 1e-5);
         assert!((got[1] - 11.0).abs() < 1e-5);
@@ -18352,7 +18904,7 @@ pub(crate) mod tests {
             .context("EMA checkpoint fixture requires optimizer state")?;
         params.register_with_backend(&*backend)?;
         opt_state.register_with_backend(&*backend)?;
-        let initial = lora_snapshot_capture_or_blend(&params, None, 0.8)?;
+        let initial = lora_snapshot_capture_or_blend(&params, None, 0.8, &device)?;
         let grads = checkpoint_test_grad_map(&params, 0.025)?;
         optimizer_step_from_map(
             &*backend,
@@ -18363,16 +18915,16 @@ pub(crate) mod tests {
             Some(&mut opt_state),
         )?;
         params.sync_to_master(&*backend)?;
-        let uninterrupted = lora_snapshot_capture_or_blend(&params, Some(&initial), 0.8)?;
+        let uninterrupted = lora_snapshot_capture_or_blend(&params, Some(&initial), 0.8, &device)?;
 
         let temp = tempfile::tempdir()?;
         let checkpoint = temp.path().join("ema-reference.safetensors");
         capture_lora_reference_checkpoint(&uninterrupted)?.save(&checkpoint)?;
-        let restored = load_lora_reference_checkpoint(&checkpoint, &params)?;
+        let restored = load_lora_reference_checkpoint(&checkpoint, &params, &device)?;
 
         let uninterrupted_next =
-            lora_snapshot_capture_or_blend(&params, Some(&uninterrupted), 0.8)?;
-        let restored_next = lora_snapshot_capture_or_blend(&params, Some(&restored), 0.8)?;
+            lora_snapshot_capture_or_blend(&params, Some(&uninterrupted), 0.8, &device)?;
+        let restored_next = lora_snapshot_capture_or_blend(&params, Some(&restored), 0.8, &device)?;
         let uninterrupted_path = temp.path().join("uninterrupted-next.safetensors");
         let restored_path = temp.path().join("restored-next.safetensors");
         capture_lora_reference_checkpoint(&uninterrupted_next)?.save(&uninterrupted_path)?;
@@ -18465,7 +19017,11 @@ pub(crate) mod tests {
         let device = cpu_device();
         let model_config = tiny_config();
         let weights = tiny_weights(&model_config, &device)?;
-        let backend = backend::for_device_kt(&device);
+        // A Vulkan-enabled process treats `Device::Cpu` as the hybrid
+        // substrate sentinel. This is a portable codec fixture, so bind the
+        // concrete CPU backend instead of inheriting runtime GPU discovery.
+        let backend: std::sync::Arc<dyn BackendRuntime> =
+            std::sync::Arc::new(backend::cpu::CpuBackend::new(device));
         let optimizer = Optimizer::AdamW {
             beta1: 0.9,
             beta2: 0.999,
@@ -18492,7 +19048,7 @@ pub(crate) mod tests {
             opt_state.as_mut(),
         )?;
         let ema_ref_state = EmaReferenceState {
-            snapshot: lora_snapshot_capture_or_blend(&params, None, 0.8)?,
+            snapshot: lora_snapshot_capture_or_blend(&params, None, 0.8, &device)?,
             groups_since_refresh: 1,
             refresh_every: 2,
             decay: 0.8,
@@ -18568,7 +19124,8 @@ pub(crate) mod tests {
                 .as_deref()
                 .context("fixture checkpoint reference path")?,
         )?;
-        let restored_reference = load_lora_reference_checkpoint(&reference_path, &restored_params)?;
+        let restored_reference =
+            load_lora_reference_checkpoint(&reference_path, &restored_params, &device)?;
         let expected_reference = temp.path().join("expected-reference.safetensors");
         let actual_reference = temp.path().join("actual-reference.safetensors");
         capture_lora_reference_checkpoint(&ema_ref_state.snapshot)?.save(&expected_reference)?;
@@ -18840,6 +19397,245 @@ pub(crate) mod tests {
             }
         }
         Ok(())
+    }
+
+    #[cfg(any(feature = "rocm", feature = "vulkan"))]
+    fn grpo_cancel_resume_matches_uninterrupted_training(
+        model_config: ModelConfig,
+        weights: GpuWeights,
+    ) -> Result<()> {
+        let tokenizer = make_echo_smoke_tokenizer()?;
+        let groups: Vec<GrpoGroup> = (0..3)
+            .map(|_| {
+                dry_run_group(vec![
+                    crate::ScoredRollout::legacy("b".to_string(), 1.0),
+                    crate::ScoredRollout::legacy("a".to_string(), 0.0),
+                ])
+            })
+            .collect();
+        let mut config = crate::GrpoConfig {
+            learning_rate: Some(1e-3),
+            lora_rank: 4,
+            lora_alpha: 8.0,
+            auto_load: false,
+            checkpoint_interval: Some(2),
+            grad_checkpoint_segments: Some(1),
+            seed: Some(0x6A70),
+            optimizer: Optimizer::AdamW {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: 0.01,
+            },
+            kl_reference_policy: KlReferencePolicy::Ema {
+                decay: 0.8,
+                refresh_every: 2,
+            },
+            ..crate::GrpoConfig::default()
+        };
+        config.loss.echo = None;
+
+        let uninterrupted_root = tempfile::tempdir()?;
+        let uninterrupted_stage = uninterrupted_root.path().join("final-stage");
+        let uninterrupted_checkpoints = uninterrupted_root.path().join("checkpoints");
+        std::fs::create_dir_all(&uninterrupted_stage)?;
+        std::fs::create_dir_all(&uninterrupted_checkpoints)?;
+        let uninterrupted_losses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uninterrupted_capture = uninterrupted_losses.clone();
+        let uninterrupted_output = grpo_train_to_with_checkpoint_root(
+            &groups,
+            &config,
+            &model_config,
+            &weights,
+            &tokenizer,
+            uninterrupted_root.path(),
+            &uninterrupted_stage,
+            &uninterrupted_checkpoints,
+            "exact-grpo",
+            Some(Box::new(move |progress| {
+                uninterrupted_capture.lock().unwrap().push(progress.loss);
+                TrainControl::Continue
+            })),
+            None,
+            None,
+        )?;
+
+        let resumed_root = tempfile::tempdir()?;
+        let first_stage = resumed_root.path().join("failed-stage");
+        let resumed_checkpoints = resumed_root.path().join("checkpoints");
+        std::fs::create_dir_all(&first_stage)?;
+        std::fs::create_dir_all(&resumed_checkpoints)?;
+        let interrupted_losses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let interrupted_capture = interrupted_losses.clone();
+        let interrupted = grpo_train_to_with_checkpoint_root(
+            &groups,
+            &config,
+            &model_config,
+            &weights,
+            &tokenizer,
+            resumed_root.path(),
+            &first_stage,
+            &resumed_checkpoints,
+            "exact-grpo",
+            Some(Box::new(move |progress| {
+                interrupted_capture.lock().unwrap().push(progress.loss);
+                if progress.step == 1 {
+                    TrainControl::Stop
+                } else {
+                    TrainControl::Continue
+                }
+            })),
+            None,
+            None,
+        )
+        .expect_err("injected GRPO cancellation must stop after group one");
+        anyhow::ensure!(interrupted.to_string().contains("cancelled by user"));
+
+        let resume_path =
+            resumed_checkpoints.join("exact-grpo-checkpoint-step-00000001.kiln-checkpoint");
+        crate::checkpoint::load_training_checkpoint(&resume_path)?;
+        std::fs::remove_dir_all(&first_stage)?;
+        anyhow::ensure!(
+            resume_path.exists(),
+            "durable GRPO checkpoint was coupled to failed final staging"
+        );
+
+        let resumed_stage = resumed_root.path().join("resumed-stage");
+        std::fs::create_dir_all(&resumed_stage)?;
+        let resumed_losses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let resumed_capture = resumed_losses.clone();
+        let resumed_config = crate::GrpoConfig {
+            resume_checkpoint: Some(resume_path.display().to_string()),
+            ..config.clone()
+        };
+        let resumed_output = grpo_train_to_with_checkpoint_root(
+            &groups,
+            &resumed_config,
+            &model_config,
+            &weights,
+            &tokenizer,
+            resumed_root.path(),
+            &resumed_stage,
+            &resumed_checkpoints,
+            "exact-grpo",
+            Some(Box::new(move |progress| {
+                resumed_capture.lock().unwrap().push(progress.loss);
+                TrainControl::Continue
+            })),
+            None,
+            None,
+        )?;
+
+        let uninterrupted_losses = uninterrupted_losses.lock().unwrap().clone();
+        let mut combined_losses = interrupted_losses.lock().unwrap().clone();
+        combined_losses.extend(resumed_losses.lock().unwrap().iter().copied());
+        anyhow::ensure!(
+            uninterrupted_losses == combined_losses,
+            "resumed GRPO loss trajectory differs: uninterrupted={uninterrupted_losses:?}, resumed={combined_losses:?}"
+        );
+        anyhow::ensure!(
+            std::fs::read(uninterrupted_output.join("adapter_model.safetensors"))?
+                == std::fs::read(resumed_output.join("adapter_model.safetensors"))?,
+            "resumed GRPO final adapter differs"
+        );
+
+        let uninterrupted_step_two = crate::checkpoint::load_training_checkpoint(
+            &uninterrupted_checkpoints.join("exact-grpo-checkpoint-step-00000002.kiln-checkpoint"),
+        )?;
+        let resumed_step_two = crate::checkpoint::load_training_checkpoint(
+            &resumed_checkpoints.join("exact-grpo-checkpoint-step-00000002.kiln-checkpoint"),
+        )?;
+        for relative in [
+            GRPO_CHECKPOINT_ADAPTER_FILE,
+            GRPO_CHECKPOINT_OPTIMIZER_FILE,
+            GRPO_CHECKPOINT_REFERENCE_FILE,
+        ] {
+            anyhow::ensure!(
+                std::fs::read(uninterrupted_step_two.artifact_path(relative)?)?
+                    == std::fs::read(resumed_step_two.artifact_path(relative)?)?,
+                "resumed GRPO checkpoint artifact {relative} differs"
+            );
+        }
+        let uninterrupted_loop = load_grpo_checkpoint_loop_state(&uninterrupted_step_two)?;
+        let resumed_loop = load_grpo_checkpoint_loop_state(&resumed_step_two)?;
+        anyhow::ensure!(
+            uninterrupted_loop.loss_history == resumed_loop.loss_history
+                && uninterrupted_loop.last_loss == resumed_loop.last_loss,
+            "resumed GRPO objective history differs"
+        );
+        anyhow::ensure!(
+            uninterrupted_loop.data_stats == resumed_loop.data_stats
+                && uninterrupted_loop.token_counts == resumed_loop.token_counts,
+            "resumed GRPO data diagnostics differ: uninterrupted={:?}/{:?}, resumed={:?}/{:?}",
+            uninterrupted_loop.data_stats,
+            uninterrupted_loop.token_counts,
+            resumed_loop.data_stats,
+            resumed_loop.token_counts
+        );
+        anyhow::ensure!(
+            uninterrupted_loop.echo_metrics == resumed_loop.echo_metrics,
+            "resumed GRPO ECHO diagnostics differ: uninterrupted={:?}, resumed={:?}",
+            uninterrupted_loop.echo_metrics,
+            resumed_loop.echo_metrics
+        );
+        anyhow::ensure!(
+            uninterrupted_loop.lora_grad_norms == resumed_loop.lora_grad_norms,
+            "resumed GRPO gradient diagnostics differ: uninterrupted={:?}, resumed={:?}",
+            uninterrupted_loop.lora_grad_norms,
+            resumed_loop.lora_grad_norms
+        );
+        anyhow::ensure!(
+            uninterrupted_loop.policy_audit == resumed_loop.policy_audit,
+            "resumed GRPO policy diagnostics differ: uninterrupted={:?}, resumed={:?}",
+            uninterrupted_loop.policy_audit,
+            resumed_loop.policy_audit
+        );
+        anyhow::ensure!(
+            uninterrupted_loop.ema_groups_since_refresh == resumed_loop.ema_groups_since_refresh,
+            "resumed GRPO EMA cadence differs"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn rocm_grpo_cancel_resume_matches_uninterrupted_training() -> Result<()> {
+        if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+            eprintln!(
+                "skip rocm_grpo_cancel_resume_matches_uninterrupted_training: qualification off"
+            );
+            return Ok(());
+        }
+        anyhow::ensure!(
+            kiln_tensor::rocm_is_available(),
+            "ROCm qualification requested but no ROCm device is available"
+        );
+        let device = Device::Rocm(0);
+        let model_config = tiny_config_full_attn_bf16();
+        let weights = tiny_weights_bf16(&model_config, &device)?;
+        grpo_cancel_resume_matches_uninterrupted_training(model_config, weights)
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vulkan_grpo_cancel_resume_matches_uninterrupted_training() -> Result<()> {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            eprintln!(
+                "skip vulkan_grpo_cancel_resume_matches_uninterrupted_training: Vulkan test opt-in disabled"
+            );
+            return Ok(());
+        }
+        let prior_resident = std::env::var("KILN_TRAIN_RESIDENT").ok();
+        unsafe {
+            std::env::set_var("KILN_TRAIN_RESIDENT", "1");
+        }
+        let device = Device::Vulkan(0);
+        let model_config = tiny_config_full_attn();
+        let weights = tiny_weights(&model_config, &device)?;
+        let result = grpo_cancel_resume_matches_uninterrupted_training(model_config, weights);
+        restore_env("KILN_TRAIN_RESIDENT", prior_resident);
+        result
     }
 
     #[test]
