@@ -57,6 +57,8 @@
 //! directly. Discounted advantages and importance-ratio clipping are rejected
 //! until a policy-gradient loss root is connected.
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -810,6 +812,11 @@ pub struct OpdConfig {
     #[serde(default = "default_opd_checkpoint_interval")]
     pub checkpoint_interval: Option<usize>,
 
+    /// Immutable exact-training checkpoint to resume. PEFT adapter snapshots
+    /// are serving artifacts and are rejected at this boundary.
+    #[serde(default)]
+    pub resume_checkpoint: Option<String>,
+
     /// Deterministic seed. If `None`, the trainer picks one and records
     /// it in the replay log.
     #[serde(default)]
@@ -898,6 +905,10 @@ impl OpdConfig {
             self.max_cost_usd.is_none(),
             "OPD max_cost_usd is unavailable: the only wired remote provider is self-hosted vLLM and no metered billing source exists"
         );
+        anyhow::ensure!(
+            self.checkpoint_interval != Some(0),
+            "OPD checkpoint_interval must be greater than zero"
+        );
         Ok(())
     }
 }
@@ -924,6 +935,7 @@ impl Default for OpdConfig {
             output_name: None,
             auto_load: default_auto_load(),
             checkpoint_interval: default_opd_checkpoint_interval(),
+            resume_checkpoint: None,
             seed: None,
             optimizer: Optimizer::default(),
             echo: None,
@@ -3147,6 +3159,470 @@ impl OpdCheckpointLoopState {
     }
 }
 
+const OPD_CHECKPOINT_ADAPTER_FILE: &str = "adapter.safetensors";
+const OPD_CHECKPOINT_OPTIMIZER_FILE: &str = "optimizer.safetensors";
+
+#[derive(Debug, Clone)]
+struct OpdCheckpointDescriptor {
+    adapter_name: String,
+    effective_config: serde_json::Value,
+    precision_policy: crate::checkpoint::TrainingCheckpointPrecision,
+    data: crate::checkpoint::TrainingCheckpointData,
+    init_seed: u64,
+    optimizer: Optimizer,
+    learning_rate: f64,
+    candidates_per_epoch: usize,
+    total_epochs: usize,
+    on_policy: bool,
+    base_model_weights_sha256: Option<String>,
+    teacher_content_revision: Option<String>,
+    auxiliary_state: serde_json::Value,
+}
+
+#[derive(Debug)]
+struct OpdCheckpointSnapshot {
+    target: PathBuf,
+    manifest: crate::checkpoint::TrainingCheckpointManifest,
+    artifacts: Vec<crate::checkpoint::CheckpointArtifact>,
+    adapter_parameters: crate::trainer::CheckpointTensorSnapshot,
+    optimizer_state: Option<crate::trainer::CheckpointTensorSnapshot>,
+    loop_state_bytes: Vec<u8>,
+}
+
+impl OpdCheckpointSnapshot {
+    fn publish(self) -> Result<PathBuf> {
+        let Self {
+            target,
+            manifest,
+            artifacts,
+            adapter_parameters,
+            optimizer_state,
+            loop_state_bytes,
+        } = self;
+        crate::checkpoint::write_training_checkpoint_atomic(
+            &target,
+            manifest,
+            &artifacts,
+            move |staging| {
+                adapter_parameters.save(&staging.join(OPD_CHECKPOINT_ADAPTER_FILE))?;
+                if let Some(state) = optimizer_state.as_ref() {
+                    state.save(&staging.join(OPD_CHECKPOINT_OPTIMIZER_FILE))?;
+                }
+                std::fs::write(
+                    staging.join(OPD_CHECKPOINT_LOOP_STATE_FILE),
+                    &loop_state_bytes,
+                )
+                .context("write OPD checkpoint loop state")?;
+                Ok(())
+            },
+        )
+    }
+}
+
+impl OpdCheckpointDescriptor {
+    fn total_candidates(&self) -> Result<usize> {
+        self.candidates_per_epoch
+            .checked_mul(self.total_epochs)
+            .context("OPD checkpoint schedule overflows usize")
+    }
+
+    fn optimizer_state_file(&self) -> Option<String> {
+        (!matches!(self.optimizer, Optimizer::Sgd))
+            .then(|| OPD_CHECKPOINT_OPTIMIZER_FILE.to_string())
+    }
+
+    fn optimizer_manifest(
+        &self,
+        step: u64,
+    ) -> Result<crate::checkpoint::TrainingCheckpointOptimizer> {
+        let kind = match self.optimizer {
+            Optimizer::Sgd => "sgd",
+            Optimizer::AdamW { .. } => "adam_w",
+            Optimizer::Muon { .. } => "muon",
+        };
+        let hyperparameters = crate::trainer::canonical_checkpoint_json_value(serde_json::json!({
+            "learning_rate": self.learning_rate,
+            "optimizer": serde_json::to_value(self.optimizer)
+                .context("serialize OPD checkpoint optimizer")?,
+        }))?;
+        Ok(crate::checkpoint::TrainingCheckpointOptimizer {
+            kind: kind.to_string(),
+            step,
+            hyperparameters,
+            state_file: self.optimizer_state_file(),
+        })
+    }
+
+    fn scheduler_manifest(&self, step: u64) -> crate::checkpoint::TrainingCheckpointScheduler {
+        crate::checkpoint::TrainingCheckpointScheduler {
+            kind: "constant".to_string(),
+            step,
+            state: serde_json::json!({"learning_rate": self.learning_rate}),
+        }
+    }
+
+    fn consumed_candidates(&self, loop_state: &OpdCheckpointLoopState) -> Result<u64> {
+        loop_state
+            .epoch_index
+            .checked_mul(self.candidates_per_epoch as u64)
+            .and_then(|value| value.checked_add(loop_state.cursor_in_epoch))
+            .context("OPD checkpoint candidate cursor overflows u64")
+    }
+
+    fn rng_states(
+        &self,
+        loop_state: &OpdCheckpointLoopState,
+    ) -> Result<BTreeMap<String, crate::checkpoint::TrainingCheckpointRngState>> {
+        let mut states = BTreeMap::from([(
+            "lora-init".to_string(),
+            crate::checkpoint::TrainingCheckpointRngState {
+                algorithm: "kiln.seeded-lora-init.v1".to_string(),
+                seed: self.init_seed,
+                position: 0,
+                state_file: None,
+            },
+        )]);
+        if self.on_policy {
+            states.insert(
+                "rollout-sampling".to_string(),
+                crate::checkpoint::TrainingCheckpointRngState {
+                    algorithm: "kiln.opd-rollout-candidate.v1".to_string(),
+                    seed: self.init_seed,
+                    position: self.consumed_candidates(loop_state)?,
+                    state_file: None,
+                },
+            );
+        }
+        let rounding = &self.precision_policy.stochastic_rounding;
+        if rounding.get("mode").and_then(serde_json::Value::as_str) == Some("stochastic") {
+            if let Some(seed) = rounding.get("seed").and_then(serde_json::Value::as_u64) {
+                states.insert(
+                    "optimizer-rounding".to_string(),
+                    crate::checkpoint::TrainingCheckpointRngState {
+                        algorithm: "kiln.optimizer-stochastic-rounding.v1".to_string(),
+                        seed,
+                        position: loop_state.global_step,
+                        state_file: None,
+                    },
+                );
+            }
+        }
+        Ok(states)
+    }
+
+    fn data_order(&self) -> Vec<u64> {
+        (0..self.candidates_per_epoch as u64).collect()
+    }
+
+    fn state_files(&self) -> crate::checkpoint::TrainingCheckpointStateFiles {
+        crate::checkpoint::TrainingCheckpointStateFiles {
+            adapter_parameters: OPD_CHECKPOINT_ADAPTER_FILE.to_string(),
+            optimizer_state: self.optimizer_state_file(),
+            reference_state: None,
+            ema_state: None,
+            reward_normalization_state: None,
+            loss_history: Some(OPD_CHECKPOINT_LOOP_STATE_FILE.to_string()),
+        }
+    }
+
+    fn progress(
+        &self,
+        loop_state: &OpdCheckpointLoopState,
+    ) -> Result<crate::checkpoint::TrainingCheckpointProgress> {
+        Ok(crate::checkpoint::TrainingCheckpointProgress {
+            global_step: loop_state.global_step,
+            total_steps: self.total_candidates()? as u64,
+            epoch_index: loop_state.epoch_index,
+            cursor_in_epoch: loop_state.cursor_in_epoch,
+            data_order: self.data_order(),
+        })
+    }
+
+    fn manifest(
+        &self,
+        loop_state: &OpdCheckpointLoopState,
+    ) -> Result<crate::checkpoint::TrainingCheckpointManifest> {
+        let progress = self.progress(loop_state)?;
+        loop_state.validate(&progress, self.candidates_per_epoch, self.total_epochs)?;
+        Ok(crate::checkpoint::TrainingCheckpointManifest::new(
+            format!("opd-step-{:08}", loop_state.global_step),
+            crate::checkpoint::TrainingKind::Opd,
+            &self.adapter_name,
+            self.effective_config.clone(),
+            self.precision_policy.clone(),
+            progress,
+            self.data.clone(),
+            self.rng_states(loop_state)?,
+            self.optimizer_manifest(loop_state.global_step)?,
+            self.scheduler_manifest(loop_state.global_step),
+            self.state_files(),
+            self.auxiliary_state.clone(),
+        ))
+    }
+
+    fn validate_resume(
+        &self,
+        checkpoint: &crate::checkpoint::ValidatedTrainingCheckpoint,
+        loop_state: &OpdCheckpointLoopState,
+    ) -> Result<()> {
+        let manifest = &checkpoint.manifest;
+        anyhow::ensure!(
+            manifest.training_kind == crate::checkpoint::TrainingKind::Opd,
+            "resume checkpoint is {:?}, not OPD",
+            manifest.training_kind
+        );
+        anyhow::ensure!(
+            manifest.adapter_name == self.adapter_name,
+            "resume checkpoint adapter {:?} does not match output adapter {:?}",
+            manifest.adapter_name,
+            self.adapter_name
+        );
+        anyhow::ensure!(
+            manifest.effective_config == self.effective_config,
+            "resume checkpoint effective OPD configuration differs from this request: checkpoint={}, request={}",
+            manifest.effective_config,
+            self.effective_config
+        );
+        anyhow::ensure!(
+            manifest.precision_policy == self.precision_policy,
+            "resume checkpoint precision policy differs from this runtime"
+        );
+        anyhow::ensure!(
+            manifest.data == self.data,
+            "resume checkpoint OPD data identity differs from this request"
+        );
+        anyhow::ensure!(
+            manifest.progress.total_steps == self.total_candidates()? as u64
+                && manifest.progress.data_order == self.data_order(),
+            "resume checkpoint OPD candidate order differs from this run"
+        );
+        anyhow::ensure!(
+            manifest.optimizer == self.optimizer_manifest(manifest.progress.global_step)?,
+            "resume checkpoint optimizer contract differs from this request"
+        );
+        anyhow::ensure!(
+            manifest.scheduler == self.scheduler_manifest(manifest.progress.global_step),
+            "resume checkpoint scheduler contract differs from this request"
+        );
+        anyhow::ensure!(
+            manifest.rng_states == self.rng_states(loop_state)?,
+            "resume checkpoint RNG streams differ from this request"
+        );
+        anyhow::ensure!(
+            manifest.state_files == self.state_files(),
+            "resume checkpoint OPD artifact contract differs from this runtime"
+        );
+        anyhow::ensure!(
+            manifest.auxiliary_state == self.auxiliary_state,
+            "resume checkpoint model/tokenizer/teacher/runtime identity differs from this run"
+        );
+        loop_state.validate(
+            &manifest.progress,
+            self.candidates_per_epoch,
+            self.total_epochs,
+        )
+    }
+
+    fn capture(
+        &self,
+        output_root: &Path,
+        backend: &dyn kiln_model::backend::BackendRuntime,
+        params: &mut crate::trainer::TrainableLoraParams,
+        opt_state: &mut Option<crate::trainer::OptimizerState>,
+        loop_state: &OpdCheckpointLoopState,
+    ) -> Result<OpdCheckpointSnapshot> {
+        anyhow::ensure!(
+            self.base_model_weights_sha256.is_some(),
+            "exact OPD checkpointing requires base-model weights loaded with a content identity"
+        );
+        anyhow::ensure!(
+            self.teacher_content_revision.is_some(),
+            "exact OPD checkpointing requires an authoritative teacher content identity"
+        );
+        match (&self.optimizer, opt_state.as_ref()) {
+            (Optimizer::Sgd, None) => {}
+            (Optimizer::Sgd, Some(_)) => {
+                anyhow::bail!("SGD OPD checkpoint unexpectedly has optimizer state")
+            }
+            (_, Some(state)) => anyhow::ensure!(
+                u64::from(state.step_count()) == loop_state.global_step,
+                "OPD optimizer step {} differs from loop step {}",
+                state.step_count(),
+                loop_state.global_step
+            ),
+            (_, None) => anyhow::bail!("stateful OPD optimizer has no checkpoint state"),
+        }
+        let manifest = self.manifest(loop_state)?;
+        let target = output_root.join(format!(
+            "{}-checkpoint-step-{:08}.kiln-checkpoint",
+            self.adapter_name, loop_state.global_step
+        ));
+        params.sync_to_master(backend)?;
+        let adapter_parameters = params.capture_checkpoint_parameters()?;
+        let optimizer_state = opt_state
+            .as_mut()
+            .map(|state| state.capture_checkpoint_state(params, backend))
+            .transpose()?;
+        let mut artifacts = vec![
+            crate::checkpoint::CheckpointArtifact {
+                relative_path: OPD_CHECKPOINT_ADAPTER_FILE.to_string(),
+                role: crate::checkpoint::CheckpointFileRole::AdapterParameters,
+            },
+            crate::checkpoint::CheckpointArtifact {
+                relative_path: OPD_CHECKPOINT_LOOP_STATE_FILE.to_string(),
+                role: crate::checkpoint::CheckpointFileRole::LossHistory,
+            },
+        ];
+        if optimizer_state.is_some() {
+            artifacts.push(crate::checkpoint::CheckpointArtifact {
+                relative_path: OPD_CHECKPOINT_OPTIMIZER_FILE.to_string(),
+                role: crate::checkpoint::CheckpointFileRole::OptimizerState,
+            });
+        }
+        let loop_state_bytes =
+            serde_json::to_vec_pretty(loop_state).context("serialize OPD checkpoint loop state")?;
+        Ok(OpdCheckpointSnapshot {
+            target,
+            manifest,
+            artifacts,
+            adapter_parameters,
+            optimizer_state,
+            loop_state_bytes,
+        })
+    }
+
+    fn save(
+        &self,
+        output_root: &Path,
+        backend: &dyn kiln_model::backend::BackendRuntime,
+        params: &mut crate::trainer::TrainableLoraParams,
+        opt_state: &mut Option<crate::trainer::OptimizerState>,
+        loop_state: &OpdCheckpointLoopState,
+    ) -> Result<PathBuf> {
+        let snapshot = self.capture(output_root, backend, params, opt_state, loop_state)?;
+        let publish_started = std::time::Instant::now();
+        let path = snapshot.publish()?;
+        tracing::info!(
+            checkpoint = %path.display(),
+            publish_ms = publish_started.elapsed().as_millis() as u64,
+            "published exact OPD checkpoint"
+        );
+        Ok(path)
+    }
+}
+
+fn load_opd_checkpoint_loop_state(
+    checkpoint: &crate::checkpoint::ValidatedTrainingCheckpoint,
+) -> Result<OpdCheckpointLoopState> {
+    let relative = checkpoint
+        .manifest
+        .state_files
+        .loss_history
+        .as_deref()
+        .context("OPD resume checkpoint has no loop-state file")?;
+    anyhow::ensure!(
+        relative == OPD_CHECKPOINT_LOOP_STATE_FILE,
+        "unsupported OPD loop-state artifact {relative:?}"
+    );
+    let path = checkpoint.artifact_path(relative)?;
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read OPD checkpoint loop state {}", path.display()))?;
+    serde_json::from_slice(&bytes).context("parse strict OPD checkpoint loop state")
+}
+
+fn restore_opd_adapter_parameters(
+    params: &mut crate::trainer::TrainableLoraParams,
+    device: &kiln_tensor::Device,
+    resume_checkpoint: Option<&crate::checkpoint::ValidatedTrainingCheckpoint>,
+    base_adapter_dir: Option<&Path>,
+) -> Result<()> {
+    anyhow::ensure!(
+        resume_checkpoint.is_none() || base_adapter_dir.is_none(),
+        "OPD exact resume and base-adapter initialization are mutually exclusive"
+    );
+    if let Some(checkpoint) = resume_checkpoint {
+        let adapter_path =
+            checkpoint.artifact_path(&checkpoint.manifest.state_files.adapter_parameters)?;
+        params.load_checkpoint_parameters(&adapter_path)?;
+        tracing::info!(
+            checkpoint = %checkpoint.root.display(),
+            step = checkpoint.manifest.progress.global_step,
+            "restored exact OPD adapter parameters"
+        );
+    } else if let Some(base_dir) = base_adapter_dir {
+        let loaded = params.load_from_safetensors(base_dir, device)?;
+        tracing::info!(
+            base = %base_dir.display(),
+            tensors = loaded,
+            "loaded base adapter before OPD optimizer setup"
+        );
+    }
+    Ok(())
+}
+
+fn opd_checkpoint_effective_config(
+    config: &OpdConfig,
+    learning_rate: f64,
+    effective_seed: u64,
+    effective_top_k: usize,
+    effective_samples_per_prompt: usize,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(config).context("serialize effective OPD config")?;
+    let object = value
+        .as_object_mut()
+        .context("serialized OPD config is not an object")?;
+    object.remove("resume_checkpoint");
+    object.insert(
+        "learning_rate".to_string(),
+        serde_json::json!(learning_rate),
+    );
+    object.insert("seed".to_string(), serde_json::json!(effective_seed));
+    object.insert(
+        "effective_top_k".to_string(),
+        serde_json::json!(effective_top_k),
+    );
+    object.insert(
+        "effective_samples_per_prompt".to_string(),
+        serde_json::json!(effective_samples_per_prompt),
+    );
+    crate::trainer::canonical_checkpoint_json_value(value)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn opd_checkpoint_auxiliary_state(
+    model_config: &kiln_core::config::ModelConfig,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    training_precision_policy: kiln_model::backend::TrainingPrecisionPolicy,
+    base_model_weights_sha256: Option<&str>,
+    backend_runtime: &str,
+    prepared_source_indices: &[usize],
+    teacher_caps: &LogitSourceCaps,
+    teacher_provenance: &OpdTeacherProvenance,
+    use_chat_template_rollout_prefixes: bool,
+) -> Result<serde_json::Value> {
+    let hashes =
+        kiln_core::config_hashes::ConfigHashes::from_model_tokenizer(model_config, tokenizer, None);
+    let prepared_source_order_sha256 =
+        crate::train_receipt::sha256_json_serializable(&prepared_source_indices)
+            .context("hash OPD prepared source order")?;
+    Ok(serde_json::json!({
+        "loop_state_type": OPD_CHECKPOINT_LOOP_STATE_TYPE,
+        "model_config_sha256": hashes.model_config_hash,
+        "tokenizer_config_sha256": hashes.tokenizer_config_hash,
+        "chat_template_sha256": hashes.chat_template_hash,
+        "base_model_weights_sha256": base_model_weights_sha256,
+        "backend_runtime": backend_runtime,
+        "kiln_train_version": env!("CARGO_PKG_VERSION"),
+        "prepared_source_indices": prepared_source_indices,
+        "prepared_source_order_sha256": prepared_source_order_sha256,
+        "teacher_capabilities": teacher_caps,
+        "teacher_identity": &teacher_provenance.identity,
+        "teacher_content_revision": teacher_provenance.content_revision(),
+        "training_precision_policy": training_precision_policy.name,
+        "use_chat_template_rollout_prefixes": use_chat_template_rollout_prefixes,
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn opd_train(
     prompts: &[OpdPrompt],
@@ -3220,6 +3696,10 @@ pub fn opd_train_to(
     let run_started = std::time::Instant::now();
     let output_dir = output_adapter_dir.join(adapter_name);
     let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&prompts);
+    let training_data_checkpoint_sha256 = crate::trainer::checkpoint_sha256_hex(
+        training_data_sha256.as_deref(),
+        "OPD training data",
+    )?;
     let requested_base_adapter_dir = config.base_adapter.as_deref().map(|name| {
         crate::trainer::resolve_base_adapter_dir_from_roots(
             name,
@@ -3257,6 +3737,8 @@ pub fn opd_train_to(
             tokenizer,
             config,
             effective_top_k,
+            config.seed,
+            config.samples_per_prompt,
             &teacher_provenance,
             &output_dir,
             requested_base_adapter_dir.as_deref(),
@@ -3358,6 +3840,64 @@ pub fn opd_train_to(
         "starting OPD training"
     );
 
+    let resume_checkpoint = config
+        .resume_checkpoint
+        .as_deref()
+        .map(Path::new)
+        .map(crate::checkpoint::load_training_checkpoint)
+        .transpose()
+        .context("load OPD resume checkpoint")?;
+    let resume_loop_state = resume_checkpoint
+        .as_ref()
+        .map(load_opd_checkpoint_loop_state)
+        .transpose()?;
+    if let Some(checkpoint) = resume_checkpoint.as_ref() {
+        anyhow::ensure!(
+            checkpoint.manifest.training_kind == crate::checkpoint::TrainingKind::Opd,
+            "resume checkpoint is not an OPD checkpoint"
+        );
+        anyhow::ensure!(
+            checkpoint.manifest.adapter_name == adapter_name,
+            "resume checkpoint adapter {:?} does not match {:?}",
+            checkpoint.manifest.adapter_name,
+            adapter_name
+        );
+        anyhow::ensure!(
+            checkpoint.manifest.data.content_sha256 == training_data_checkpoint_sha256,
+            "resume checkpoint OPD training data hash differs from this request"
+        );
+    }
+    if config.checkpoint_interval.is_some() || resume_checkpoint.is_some() {
+        crate::trainer::checkpoint_sha256_hex(
+            weights.source_content_sha256.as_deref(),
+            "base-model weights content identity",
+        )?;
+    }
+    let resume_init_seed = resume_checkpoint
+        .as_ref()
+        .map(|checkpoint| {
+            let state = checkpoint
+                .manifest
+                .rng_states
+                .get("lora-init")
+                .context("OPD resume checkpoint has no lora-init RNG state")?;
+            anyhow::ensure!(
+                state.algorithm == "kiln.seeded-lora-init.v1" && state.position == 0,
+                "unsupported OPD lora-init RNG state"
+            );
+            Ok(state.seed)
+        })
+        .transpose()?;
+    if let (Some(requested), Some(restored)) = (config.seed, resume_init_seed) {
+        anyhow::ensure!(
+            requested == restored,
+            "OPD resume seed {restored} differs from requested seed {requested}"
+        );
+    }
+    let effective_seed = resume_init_seed
+        .or(config.seed)
+        .unwrap_or_else(rand::random);
+
     let alpha_over_rank = match crate::lora_scaling::validate_lora_scaling(
         config.lora_rank,
         config.lora_alpha,
@@ -3371,6 +3911,8 @@ pub fn opd_train_to(
                 tokenizer,
                 config,
                 effective_top_k,
+                Some(effective_seed),
+                effective_samples_per_prompt,
                 &teacher_provenance,
                 &output_dir,
                 requested_base_adapter_dir.as_deref(),
@@ -3394,8 +3936,6 @@ pub fn opd_train_to(
         }
     };
 
-    let effective_seed = config.seed;
-
     // `mut`: `sync_to_master` (checkpoint + final save) takes `&mut self`
     // (it swaps each param's forward/backward storage to the resolved kt
     // master). Mirrors `sft_train`'s `let mut params`. (#1082)
@@ -3405,10 +3945,9 @@ pub fn opd_train_to(
         config.lora_rank,
         config.lora_alpha,
         &device_kt,
-        effective_seed,
+        Some(effective_seed),
         training_precision_policy,
     )?;
-    params.register_with_backend(&*backend_rt)?;
 
     // (#1082) `allocate_adamw_state` flipped to the kt-native AdamW state and
     // now takes the resolved hyperparameters + kt device (the candle moment
@@ -3429,7 +3968,6 @@ pub fn opd_train_to(
                 weight_decay,
                 &device_kt,
             )?;
-            state.register_with_backend(&*backend_rt)?;
             Some(state)
         }
         Optimizer::Muon {
@@ -3446,7 +3984,6 @@ pub fn opd_train_to(
                 weight_decay,
                 &device_kt,
             )?;
-            state.register_with_backend(&*backend_rt)?;
             Some(state)
         }
     };
@@ -3465,6 +4002,8 @@ pub fn opd_train_to(
             tokenizer,
             config,
             effective_top_k,
+            Some(effective_seed),
+            effective_samples_per_prompt,
             &teacher_provenance,
             &output_dir,
             requested_base_adapter_dir.as_deref(),
@@ -3492,18 +4031,14 @@ pub fn opd_train_to(
     data_stats.examples_filtered = prompts.len().saturating_sub(tokenized.len());
 
     let epochs = config.epochs.max(1);
-    let total_steps = epochs * tokenized.len() * effective_samples_per_prompt.max(1);
-    let mut global_step = 0usize;
-    let mut last_loss = 0.0_f64;
-    // Last fired ECHO env-CE value across the run (None = the term never
-    // combined — receipt honesty keys off this, not off the config).
-    let mut run_env_ce: Option<f64> = None;
-    // Per-module LoRA grad-norm accumulator — mirrors the SFT/GRPO
-    // tape-authoritative producers. Populated each step from the
-    // kt-native grad store and finalized into the train receipt so the
-    // receipt's `lora_grad_norms` reflects that gradients flowed (matches
-    // SFT/GRPO; previously OPD left it empty).
-    let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
+    let samples_per_prompt = effective_samples_per_prompt.max(1);
+    let candidates_per_epoch = tokenized
+        .len()
+        .checked_mul(samples_per_prompt)
+        .context("OPD candidate count overflows usize")?;
+    let total_steps = epochs
+        .checked_mul(candidates_per_epoch)
+        .context("OPD training schedule overflows usize")?;
 
     // (#1082 P-OPD) `embed_tokens_t` is the frozen, weight-tied lm_head. The OPD
     // scalar-loss tape root is now kt-native (`try_tape_opd_scalar_mean_cuda_kt`)
@@ -3518,7 +4053,6 @@ pub fn opd_train_to(
     // pick it up. Programmatic in-process rollback to the last
     // passing checkpoint is the remaining §3.9 wire-up; for now the
     // detector fires and the user sees it in the run log.
-    let mut guardrail = crate::diagnostics::LengthInflationGuardrail::default();
     let validation_cadence: u64 = 5;
 
     // Resolve EOS token ids once for rollout termination.
@@ -3627,125 +4161,278 @@ pub fn opd_train_to(
         );
     }
 
-    for epoch in 0..epochs {
-        for prepared_prompt in &tokenized {
-            let prompt_idx = prepared_prompt.source_index;
-            let tokenized_prompt = &prepared_prompt.tokenized;
-            // Build the rollout prompt from the pre-rendered chat-template
-            // prefix (see above — drops the dummy assistant turn and lets
-            // the template emit the proper assistant cue marker tokens).
-            // The explicitly enabled render path fails before training if a
-            // prompt cannot be rendered or encoded. The legacy framing is
-            // used only when that mode was selected above.
-            let prompt_only: Vec<u32> = if use_chat_template_render {
-                rollout_prompt_prefixes[prompt_idx].clone()
+    let checkpoint_precision =
+        crate::trainer::training_checkpoint_precision(&params, opt_state.as_ref())?;
+    let prepared_source_indices: Vec<usize> = tokenized
+        .iter()
+        .map(|prepared| prepared.source_index)
+        .collect();
+    let effective_checkpoint_config = opd_checkpoint_effective_config(
+        config,
+        learning_rate,
+        effective_seed,
+        effective_top_k,
+        samples_per_prompt,
+    )?;
+    let checkpoint_descriptor = OpdCheckpointDescriptor {
+        adapter_name: adapter_name.to_string(),
+        effective_config: effective_checkpoint_config,
+        precision_policy: checkpoint_precision,
+        data: crate::checkpoint::TrainingCheckpointData {
+            source_kind: if on_policy_enabled {
+                "inline-on-policy-opd-candidate-order-v1"
             } else {
-                // Legacy path selected explicitly by the current default.
-                let prompt_end = tokenized_prompt
-                    .action_mask
-                    .iter()
-                    .position(|&m| m)
-                    .unwrap_or(tokenized_prompt.input_ids.len());
-                if prompt_end == 0 || prompt_end >= tokenized_prompt.input_ids.len() {
-                    tracing::warn!(prompt_idx, "skipping prompt with no prompt/assistant split");
-                    continue;
-                }
-                tokenized_prompt.input_ids[..prompt_end].to_vec()
-            };
-            let rollout_prompt_len = prompt_only.len();
+                "inline-off-policy-opd-candidate-order-v1"
+            }
+            .to_string(),
+            content_sha256: training_data_checkpoint_sha256,
+            item_count: candidates_per_epoch as u64,
+        },
+        init_seed: effective_seed,
+        optimizer: config.optimizer,
+        learning_rate,
+        candidates_per_epoch,
+        total_epochs: epochs,
+        on_policy: on_policy_enabled,
+        base_model_weights_sha256: weights.source_content_sha256.clone(),
+        teacher_content_revision: teacher_provenance.content_revision(),
+        auxiliary_state: opd_checkpoint_auxiliary_state(
+            model_config,
+            tokenizer,
+            training_precision_policy,
+            weights.source_content_sha256.as_deref(),
+            backend_rt.runtime_name(),
+            &prepared_source_indices,
+            &teacher_caps,
+            &teacher_provenance,
+            use_chat_template_render,
+        )?,
+    };
+    if let (Some(checkpoint), Some(loop_state)) =
+        (resume_checkpoint.as_ref(), resume_loop_state.as_ref())
+    {
+        checkpoint_descriptor.validate_resume(checkpoint, loop_state)?;
+        anyhow::ensure!(
+            loop_state.data_stats.examples_read == prompts.len()
+                && loop_state.data_stats.examples_filtered == data_stats.examples_filtered,
+            "resume checkpoint OPD prepared-row counters differ from this request"
+        );
+    }
 
-            for sample_idx in 0..effective_samples_per_prompt.max(1) {
-                // §3.1 step 1: sample a fresh student trajectory under
-                // the current LoRA. Replaces the off-policy passthrough
-                // of the teacher-authored assistant turn with the
-                // student's own tokens — the defining property of
-                // on-policy distillation per Lu (2025) §1.
-                let (input_ids_owned, active_positions, env_mask_owned, total_obs_len): (
-                    Vec<u32>,
-                    Vec<usize>,
-                    Vec<bool>,
-                    usize,
-                ) = if on_policy_enabled {
-                    let lora_for_sample = params.as_lora_weights();
-                    let step_seed = effective_seed.map(|s| {
-                        s.wrapping_add(global_step as u64)
-                            .wrapping_add(prompt_idx as u64 * 1_000_003)
-                            .wrapping_add(sample_idx as u64 * 1_000_033)
-                    });
-                    let sampled = sample_student_rollout(
-                        &*backend_rt,
-                        weights,
-                        model_config,
-                        &lora_for_sample,
-                        &prompt_only,
-                        config.max_tokens,
-                        &eos_token_ids,
-                        config.temperature as f32,
-                        config.top_p as f32,
-                        step_seed,
-                    )
-                    .with_context(|| format!("on-policy rollout for prompt {prompt_idx}"))?;
-                    if sampled.is_empty() {
+    let base_adapter_dir = if resume_checkpoint.is_some() {
+        None
+    } else {
+        crate::trainer::resolve_and_validate_base_adapter_from_roots(
+            config.base_adapter.as_deref(),
+            adapter_dir,
+            output_adapter_dir,
+            adapter_name,
+            model_config,
+            config.lora_rank,
+            false,
+        )?
+    };
+    restore_opd_adapter_parameters(
+        &mut params,
+        &device_kt,
+        resume_checkpoint.as_ref(),
+        base_adapter_dir.as_deref(),
+    )?;
+    if let Some(checkpoint) = resume_checkpoint.as_ref() {
+        let state_path = checkpoint
+            .manifest
+            .state_files
+            .optimizer_state
+            .as_deref()
+            .map(|relative| checkpoint.artifact_path(relative))
+            .transpose()?;
+        match (opt_state.as_mut(), state_path) {
+            (Some(state), Some(path)) => {
+                let step = u32::try_from(checkpoint.manifest.progress.global_step)
+                    .context("OPD resume optimizer step exceeds u32")?;
+                state.load_checkpoint_state(&params, &path, step)?;
+            }
+            (None, None) => {}
+            (Some(_), None) => {
+                anyhow::bail!("stateful OPD checkpoint has no optimizer artifact")
+            }
+            (None, Some(_)) => {
+                anyhow::bail!("SGD OPD checkpoint unexpectedly contains optimizer state")
+            }
+        }
+    }
+    let mut global_step = resume_loop_state
+        .as_ref()
+        .map_or(Ok(0), |state| usize::try_from(state.global_step))
+        .context("OPD resume global step exceeds usize")?;
+    let start_epoch = resume_loop_state
+        .as_ref()
+        .map_or(Ok(0), |state| usize::try_from(state.epoch_index))
+        .context("OPD resume epoch exceeds usize")?;
+    let start_cursor = resume_loop_state
+        .as_ref()
+        .map_or(Ok(0), |state| usize::try_from(state.cursor_in_epoch))
+        .context("OPD resume candidate cursor exceeds usize")?;
+    let mut loss_history = resume_loop_state
+        .as_ref()
+        .map_or_else(Vec::new, |state| state.loss_history.clone());
+    let mut last_loss = loss_history.last().copied().unwrap_or(0.0);
+    if let Some(state) = resume_loop_state.as_ref() {
+        data_stats = state.data_stats.clone();
+        token_counts = state.token_counts.clone();
+    }
+    let mut run_env_ce = resume_loop_state
+        .as_ref()
+        .and_then(|state| state.run_env_ce);
+    let mut lora_grad_norms = resume_loop_state.as_ref().map_or_else(
+        crate::train_receipt::LoraGradNormAccumulator::default,
+        |state| state.lora_grad_norms.clone(),
+    );
+    let mut guardrail = resume_loop_state.as_ref().map_or_else(
+        crate::diagnostics::LengthInflationGuardrail::default,
+        |state| state.guardrail.clone(),
+    );
+    params.register_with_backend(&*backend_rt)?;
+    if let Some(state) = opt_state.as_ref() {
+        if let Err(error) = state.register_with_backend(&*backend_rt) {
+            params.evict_from_backend(&*backend_rt);
+            return Err(error).context("register OPD optimizer state with backend");
+        }
+    }
+    let train_result = (|| -> Result<PathBuf> {
+        for epoch in start_epoch..epochs {
+            for (prepared_index, prepared_prompt) in tokenized.iter().enumerate() {
+                let prompt_idx = prepared_prompt.source_index;
+                let tokenized_prompt = &prepared_prompt.tokenized;
+                // Build the rollout prompt from the pre-rendered chat-template
+                // prefix (see above — drops the dummy assistant turn and lets
+                // the template emit the proper assistant cue marker tokens).
+                // The explicitly enabled render path fails before training if a
+                // prompt cannot be rendered or encoded. The legacy framing is
+                // used only when that mode was selected above.
+                let prompt_only: Vec<u32> = if use_chat_template_render {
+                    rollout_prompt_prefixes[prompt_idx].clone()
+                } else {
+                    // Legacy path selected explicitly by the current default.
+                    let prompt_end = tokenized_prompt
+                        .action_mask
+                        .iter()
+                        .position(|&m| m)
+                        .unwrap_or(tokenized_prompt.input_ids.len());
+                    if prompt_end == 0 || prompt_end >= tokenized_prompt.input_ids.len() {
                         tracing::warn!(
                             prompt_idx,
-                            sample_idx,
-                            "student produced 0 new tokens; skipping step"
+                            "skipping prompt with no prompt/assistant split"
                         );
                         continue;
                     }
-                    let mut full = prompt_only.clone();
-                    full.extend_from_slice(&sampled);
-                    // Active positions: the student-sampled tokens, which
-                    // start at `rollout_prompt_len` (after the original
-                    // prompt + the generation-prompt suffix).
-                    let active: Vec<usize> =
-                        (rollout_prompt_len..rollout_prompt_len + sampled.len()).collect();
-                    let env_mask = vec![false; full.len()];
-                    (full, active, env_mask, 0)
-                } else {
-                    let active: Vec<usize> = tokenized_prompt
-                        .action_mask
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, &m)| if m { Some(i) } else { None })
-                        .collect();
-                    (
-                        tokenized_prompt.input_ids.clone(),
-                        active,
-                        tokenized_prompt.env_mask.clone(),
-                        tokenized_prompt.total_obs_len,
-                    )
+                    tokenized_prompt.input_ids[..prompt_end].to_vec()
                 };
-                let input_ids: &[u32] = &input_ids_owned;
-                let env_mask: &[bool] = &env_mask_owned;
-                if active_positions.is_empty() {
-                    continue;
-                }
-                let env_count = env_mask.iter().filter(|&&active| active).count();
-                token_counts.action_tokens = token_counts
-                    .action_tokens
-                    .saturating_add(active_positions.len() as u64);
-                token_counts.env_tokens = token_counts.env_tokens.saturating_add(env_count as u64);
-                token_counts.context_tokens = token_counts.context_tokens.saturating_add(
-                    input_ids
-                        .len()
-                        .saturating_sub(active_positions.len().saturating_add(env_count))
-                        as u64,
-                );
-                // §20 asymmetric teacher conditioning: if this prompt
-                // declared `teacher_extra_messages`, build the teacher's
-                // token sequence as `teacher_prompt_tokens ++ sampled`.
-                // The student's input_ids = prompt_only ++ sampled has
-                // the student's own prompt framing; the teacher's view
-                // swaps the prompt half for the merged-extras version
-                // while keeping the SAME sampled rollout. Active
-                // positions are remapped to the teacher's frame. This
-                // bookkeeping is path-independent (it only touches host
-                // token arrays) so we compute it once before the
-                // tape-authoritative-vs-candle dispatch below.
-                let teacher_prompt: &[u32] = &teacher_prompt_tokens[prompt_idx];
-                let (teacher_full_tokens_owned, teacher_shifted_positions): (Vec<u32>, Vec<usize>) =
-                    if teacher_prompt.is_empty() {
+                let rollout_prompt_len = prompt_only.len();
+
+                for sample_idx in 0..samples_per_prompt {
+                    let candidate_cursor = prepared_index
+                        .checked_mul(samples_per_prompt)
+                        .and_then(|value| value.checked_add(sample_idx))
+                        .context("OPD candidate cursor overflows usize")?;
+                    if epoch == start_epoch && candidate_cursor < start_cursor {
+                        continue;
+                    }
+                    // §3.1 step 1: sample a fresh student trajectory under
+                    // the current LoRA. Replaces the off-policy passthrough
+                    // of the teacher-authored assistant turn with the
+                    // student's own tokens — the defining property of
+                    // on-policy distillation per Lu (2025) §1.
+                    let (input_ids_owned, active_positions, env_mask_owned, total_obs_len): (
+                        Vec<u32>,
+                        Vec<usize>,
+                        Vec<bool>,
+                        usize,
+                    ) = if on_policy_enabled {
+                        let lora_for_sample = params.as_lora_weights();
+                        let step_seed = Some(
+                            effective_seed
+                                .wrapping_add(global_step as u64)
+                                .wrapping_add(prompt_idx as u64 * 1_000_003)
+                                .wrapping_add(sample_idx as u64 * 1_000_033),
+                        );
+                        let sampled = sample_student_rollout(
+                            &*backend_rt,
+                            weights,
+                            model_config,
+                            &lora_for_sample,
+                            &prompt_only,
+                            config.max_tokens,
+                            &eos_token_ids,
+                            config.temperature as f32,
+                            config.top_p as f32,
+                            step_seed,
+                        )
+                        .with_context(|| format!("on-policy rollout for prompt {prompt_idx}"))?;
+                        if sampled.is_empty() {
+                            tracing::warn!(
+                                prompt_idx,
+                                sample_idx,
+                                "student produced 0 new tokens; skipping step"
+                            );
+                            continue;
+                        }
+                        let mut full = prompt_only.clone();
+                        full.extend_from_slice(&sampled);
+                        // Active positions: the student-sampled tokens, which
+                        // start at `rollout_prompt_len` (after the original
+                        // prompt + the generation-prompt suffix).
+                        let active: Vec<usize> =
+                            (rollout_prompt_len..rollout_prompt_len + sampled.len()).collect();
+                        let env_mask = vec![false; full.len()];
+                        (full, active, env_mask, 0)
+                    } else {
+                        let active: Vec<usize> = tokenized_prompt
+                            .action_mask
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, &m)| if m { Some(i) } else { None })
+                            .collect();
+                        (
+                            tokenized_prompt.input_ids.clone(),
+                            active,
+                            tokenized_prompt.env_mask.clone(),
+                            tokenized_prompt.total_obs_len,
+                        )
+                    };
+                    let input_ids: &[u32] = &input_ids_owned;
+                    let env_mask: &[bool] = &env_mask_owned;
+                    if active_positions.is_empty() {
+                        continue;
+                    }
+                    let env_count = env_mask.iter().filter(|&&active| active).count();
+                    token_counts.action_tokens = token_counts
+                        .action_tokens
+                        .saturating_add(active_positions.len() as u64);
+                    token_counts.env_tokens =
+                        token_counts.env_tokens.saturating_add(env_count as u64);
+                    token_counts.context_tokens = token_counts.context_tokens.saturating_add(
+                        input_ids
+                            .len()
+                            .saturating_sub(active_positions.len().saturating_add(env_count))
+                            as u64,
+                    );
+                    // §20 asymmetric teacher conditioning: if this prompt
+                    // declared `teacher_extra_messages`, build the teacher's
+                    // token sequence as `teacher_prompt_tokens ++ sampled`.
+                    // The student's input_ids = prompt_only ++ sampled has
+                    // the student's own prompt framing; the teacher's view
+                    // swaps the prompt half for the merged-extras version
+                    // while keeping the SAME sampled rollout. Active
+                    // positions are remapped to the teacher's frame. This
+                    // bookkeeping is path-independent (it only touches host
+                    // token arrays) so we compute it once before the
+                    // tape-authoritative-vs-candle dispatch below.
+                    let teacher_prompt: &[u32] = &teacher_prompt_tokens[prompt_idx];
+                    let (teacher_full_tokens_owned, teacher_shifted_positions): (
+                        Vec<u32>,
+                        Vec<usize>,
+                    ) = if teacher_prompt.is_empty() {
                         (Vec::new(), Vec::new())
                     } else {
                         // sampled portion of student's input_ids = the
@@ -3764,8 +4451,10 @@ pub fn opd_train_to(
                             .collect();
                         (t, pos)
                     };
-                let (teacher_tokens_opt, teacher_active_opt): (Option<&[u32]>, Option<&[usize]>) =
-                    if teacher_prompt.is_empty() {
+                    let (teacher_tokens_opt, teacher_active_opt): (
+                        Option<&[u32]>,
+                        Option<&[usize]>,
+                    ) = if teacher_prompt.is_empty() {
                         (None, None)
                     } else {
                         (
@@ -3774,310 +4463,333 @@ pub fn opd_train_to(
                         )
                     };
 
-                // (#1082) The `echo_active_this_step` ECHO gate was deleted along
-                // with the candle gradient-checkpointing path it guarded. ECHO's
-                // FLCE + candle `.affine()` + candle `.add()` composite has no
-                // kt-tape coverage, so the tape-authoritative scalar-loss root
-                // cannot represent `mean_kl + λ·echo_ce`. With the candle fallback
-                // removed, ECHO env-CE drops out of OPD entirely (re-add it when a
-                // kt-tape ECHO adapter lands). `env_mask` / `env_count` /
-                // `total_obs_len` stay computed above for the receipt token-count
-                // bookkeeping but no longer steer dispatch.
-                let opd_segments = opd_checkpoint_segments_for_step(
-                    &opd_vram_cache,
-                    opd_base_model_bytes,
-                    opd_activation_bytes_per_elem,
-                    model_config,
-                    input_ids.len(),
-                );
-                let checkpoint_segments = opd_segments.as_ref().map_or(0, |segs| segs.len());
+                    // (#1082) The `echo_active_this_step` ECHO gate was deleted along
+                    // with the candle gradient-checkpointing path it guarded. ECHO's
+                    // FLCE + candle `.affine()` + candle `.add()` composite has no
+                    // kt-tape coverage, so the tape-authoritative scalar-loss root
+                    // cannot represent `mean_kl + λ·echo_ce`. With the candle fallback
+                    // removed, ECHO env-CE drops out of OPD entirely (re-add it when a
+                    // kt-tape ECHO adapter lands). `env_mask` / `env_count` /
+                    // `total_obs_len` stay computed above for the receipt token-count
+                    // bookkeeping but no longer steer dispatch.
+                    let opd_segments = opd_checkpoint_segments_for_step(
+                        &opd_vram_cache,
+                        opd_base_model_bytes,
+                        opd_activation_bytes_per_elem,
+                        model_config,
+                        input_ids.len(),
+                    );
+                    let checkpoint_segments = opd_segments.as_ref().map_or(0, |segs| segs.len());
 
-                // === Forward + backward dispatch (#1082 candle-drop) ===
-                //
-                // Tape-authoritative kt path (the ONLY path post-candle-drop):
-                // drive gradients through the kt `Tape`, never candle
-                // `loss.backward()`. Runs a SINGLE full forward
-                // (`model_forward_no_head`) inside `with_tape_authoritative_scope`
-                // so the LoRA adapters record their nodes, then roots the tape at
-                // the scalar OPD loss (`try_tape_opd_scalar_mean_cuda_kt`, taking
-                // kt `normed`/`head_t` directly) and walks the connected tape with
-                // one `Tape::backward`. Returns the LoRA
-                // grads as a kt-native `kiln_autograd::GradStore` (keyed by
-                // `KtTensorId`) consumed DIRECTLY by
-                // `optimizer_step_from_kt_grad_store` — NO per-step kt→candle grad
-                // copy (the explicit high-perf target). Mirrors the SFT
-                // `standard_forward_backward_tape_authoritative_kt` producer +
-                // `optimizer_step_from_kt_grad_store` consumer.
-                //
-                // (#1082) The candle gradient-checkpointing fallback
-                // (`opd_step_forward_backward_candle`) + the candle/CPU/ECHO
-                // dispatch arms were deleted: candle autograd can no longer trace
-                // LoRA grads through the kt-internal forward ops (the kt↔candle
-                // copy bridge severs the lineage — see note
-                // `kiln-candle-autograd-drops-attn-conv-grads`), so the tape path
-                // is the sole correct grad producer. `echo_active_this_step`,
-                // `env_mask`, `env_count`, `total_obs_len`, `opd_vram_cache`,
-                // `opd_base_model_bytes` (the candle-path-only inputs) are now
-                // unused on the kt-only path.
-                //
-                // CUDA-gated: the kt tape adapters record kt CUDA ops, so the OPD
-                // tape path is CUDA-only. A non-cuda build of `opd_train` has no
-                // grad producer; the non-cuda arm bails cleanly so the loop body
-                // (which reads `loss_val` / `active_count` below for logging,
-                // guardrails, and the progress callback) still type-checks on
-                // both builds.
-                let (loss_val, active_count): (f64, usize) = {
-                    #[cfg(any(
-                        feature = "cuda",
-                        feature = "metal",
-                        feature = "vulkan",
-                        feature = "rocm"
-                    ))]
-                    {
-                        let step_started = std::time::Instant::now();
-                        // ECHO env-CE spec for this rollout (OPD half of the
-                        // resurrection plan): built from the trajectory env
-                        // mask the prepare pass already computed; None when
-                        // ECHO is off or the rollout has no observations.
-                        let echo_spec = config.echo.as_ref().and_then(|echo| {
-                            (total_obs_len > 0 && echo.lambda != 0.0).then(|| {
-                                crate::grpo_tape_shim::EchoEnvSpec {
-                                    env_mask: env_mask_owned.clone(),
-                                    total_obs_len,
-                                    lambda: echo.lambda,
-                                }
-                            })
-                        });
-                        let (loss_val, active_count, kt_grads, step_env_ce) =
-                            if let Some(segs) = opd_segments.as_deref() {
-                                checkpointed_opd_step_forward_backward_tape_authoritative(
-                                    &*backend_rt,
-                                    input_ids,
-                                    weights,
-                                    model_config,
-                                    &params,
-                                    &device_kt,
-                                    &head_t,
-                                    teacher.clone(),
-                                    &active_positions,
-                                    config.loss,
-                                    effective_top_k,
-                                    teacher_tokens_opt,
-                                    teacher_active_opt,
-                                    echo_spec.as_ref(),
-                                    segs,
-                                )?
-                            } else {
-                                opd_step_forward_backward_tape_authoritative(
-                                    &*backend_rt,
-                                    input_ids,
-                                    weights,
-                                    model_config,
-                                    &params,
-                                    &device_kt,
-                                    &head_t,
-                                    teacher.clone(),
-                                    &active_positions,
-                                    config.loss,
-                                    effective_top_k,
-                                    teacher_tokens_opt,
-                                    teacher_active_opt,
-                                    echo_spec.as_ref(),
-                                )?
-                            };
-                        if let Some(env_ce) = step_env_ce {
-                            run_env_ce = Some(env_ce);
+                    // === Forward + backward dispatch (#1082 candle-drop) ===
+                    //
+                    // Tape-authoritative kt path (the ONLY path post-candle-drop):
+                    // drive gradients through the kt `Tape`, never candle
+                    // `loss.backward()`. Runs a SINGLE full forward
+                    // (`model_forward_no_head`) inside `with_tape_authoritative_scope`
+                    // so the LoRA adapters record their nodes, then roots the tape at
+                    // the scalar OPD loss (`try_tape_opd_scalar_mean_cuda_kt`, taking
+                    // kt `normed`/`head_t` directly) and walks the connected tape with
+                    // one `Tape::backward`. Returns the LoRA
+                    // grads as a kt-native `kiln_autograd::GradStore` (keyed by
+                    // `KtTensorId`) consumed DIRECTLY by
+                    // `optimizer_step_from_kt_grad_store` — NO per-step kt→candle grad
+                    // copy (the explicit high-perf target). Mirrors the SFT
+                    // `standard_forward_backward_tape_authoritative_kt` producer +
+                    // `optimizer_step_from_kt_grad_store` consumer.
+                    //
+                    // (#1082) The candle gradient-checkpointing fallback
+                    // (`opd_step_forward_backward_candle`) + the candle/CPU/ECHO
+                    // dispatch arms were deleted: candle autograd can no longer trace
+                    // LoRA grads through the kt-internal forward ops (the kt↔candle
+                    // copy bridge severs the lineage — see note
+                    // `kiln-candle-autograd-drops-attn-conv-grads`), so the tape path
+                    // is the sole correct grad producer. `echo_active_this_step`,
+                    // `env_mask`, `env_count`, `total_obs_len`, `opd_vram_cache`,
+                    // `opd_base_model_bytes` (the candle-path-only inputs) are now
+                    // unused on the kt-only path.
+                    //
+                    // CUDA-gated: the kt tape adapters record kt CUDA ops, so the OPD
+                    // tape path is CUDA-only. A non-cuda build of `opd_train` has no
+                    // grad producer; the non-cuda arm bails cleanly so the loop body
+                    // (which reads `loss_val` / `active_count` below for logging,
+                    // guardrails, and the progress callback) still type-checks on
+                    // both builds.
+                    let (loss_val, active_count): (f64, usize) = {
+                        #[cfg(any(
+                            feature = "cuda",
+                            feature = "metal",
+                            feature = "vulkan",
+                            feature = "rocm"
+                        ))]
+                        {
+                            let step_started = std::time::Instant::now();
+                            // ECHO env-CE spec for this rollout (OPD half of the
+                            // resurrection plan): built from the trajectory env
+                            // mask the prepare pass already computed; None when
+                            // ECHO is off or the rollout has no observations.
+                            let echo_spec = config.echo.as_ref().and_then(|echo| {
+                                (total_obs_len > 0 && echo.lambda != 0.0).then(|| {
+                                    crate::grpo_tape_shim::EchoEnvSpec {
+                                        env_mask: env_mask_owned.clone(),
+                                        total_obs_len,
+                                        lambda: echo.lambda,
+                                    }
+                                })
+                            });
+                            let (loss_val, active_count, kt_grads, step_env_ce) =
+                                if let Some(segs) = opd_segments.as_deref() {
+                                    checkpointed_opd_step_forward_backward_tape_authoritative(
+                                        &*backend_rt,
+                                        input_ids,
+                                        weights,
+                                        model_config,
+                                        &params,
+                                        &device_kt,
+                                        &head_t,
+                                        teacher.clone(),
+                                        &active_positions,
+                                        config.loss,
+                                        effective_top_k,
+                                        teacher_tokens_opt,
+                                        teacher_active_opt,
+                                        echo_spec.as_ref(),
+                                        segs,
+                                    )?
+                                } else {
+                                    opd_step_forward_backward_tape_authoritative(
+                                        &*backend_rt,
+                                        input_ids,
+                                        weights,
+                                        model_config,
+                                        &params,
+                                        &device_kt,
+                                        &head_t,
+                                        teacher.clone(),
+                                        &active_positions,
+                                        config.loss,
+                                        effective_top_k,
+                                        teacher_tokens_opt,
+                                        teacher_active_opt,
+                                        echo_spec.as_ref(),
+                                    )?
+                                };
+                            if let Some(env_ce) = step_env_ce {
+                                run_env_ce = Some(env_ce);
+                            }
+                            tracing::info!(
+                                prompt_idx,
+                                sample_idx,
+                                seq_len = input_ids.len(),
+                                action_tokens = active_positions.len(),
+                                env_tokens = env_count,
+                                checkpoint_segments,
+                                elapsed_ms = step_started.elapsed().as_millis() as u64,
+                                "OPD step end (tape-authoritative kt)"
+                            );
+
+                            // Observe per-module LoRA grad norms from the kt-native
+                            // grad store BEFORE the optimizer consumes it — same
+                            // pattern as SFT/GRPO. Records that gradients flowed
+                            // (the receipt's `lora_grad_norms` is the oracle the
+                            // Metal smoke checks).
+                            crate::trainer::observe_lora_grad_norms_from_kt_grad_store(
+                                &mut lora_grad_norms,
+                                &params,
+                                &kt_grads,
+                            )?;
+
+                            // Consume the kt-native grads DIRECTLY (no kt→candle
+                            // copy): `optimizer_step_from_kt_grad_store` bridges each
+                            // LoRA Var's grad at its own per-Var boundary inside the
+                            // optimizer update, the last remaining candle dependency
+                            // in the OPD grad path (dissolves when `kiln-optim` goes
+                            // kt-native).
+                            crate::trainer::optimizer_step_from_kt_grad_store(
+                                &*backend_rt,
+                                &mut params,
+                                &kt_grads,
+                                learning_rate,
+                                config.optimizer,
+                                opt_state.as_mut(),
+                            )?;
+
+                            (loss_val, active_count)
                         }
-                        tracing::info!(
-                            prompt_idx,
-                            sample_idx,
-                            seq_len = input_ids.len(),
-                            action_tokens = active_positions.len(),
-                            env_tokens = env_count,
-                            checkpoint_segments,
-                            elapsed_ms = step_started.elapsed().as_millis() as u64,
-                            "OPD step end (tape-authoritative kt)"
-                        );
-
-                        // Observe per-module LoRA grad norms from the kt-native
-                        // grad store BEFORE the optimizer consumes it — same
-                        // pattern as SFT/GRPO. Records that gradients flowed
-                        // (the receipt's `lora_grad_norms` is the oracle the
-                        // Metal smoke checks).
-                        crate::trainer::observe_lora_grad_norms_from_kt_grad_store(
-                            &mut lora_grad_norms,
-                            &params,
-                            &kt_grads,
-                        )?;
-
-                        // Consume the kt-native grads DIRECTLY (no kt→candle
-                        // copy): `optimizer_step_from_kt_grad_store` bridges each
-                        // LoRA Var's grad at its own per-Var boundary inside the
-                        // optimizer update, the last remaining candle dependency
-                        // in the OPD grad path (dissolves when `kiln-optim` goes
-                        // kt-native).
-                        crate::trainer::optimizer_step_from_kt_grad_store(
-                            &*backend_rt,
-                            &mut params,
-                            &kt_grads,
-                            learning_rate,
-                            config.optimizer,
-                            opt_state.as_mut(),
-                        )?;
-
-                        (loss_val, active_count)
-                    }
-                    #[cfg(not(any(
-                        feature = "cuda",
-                        feature = "metal",
-                        feature = "vulkan",
-                        feature = "rocm"
-                    )))]
-                    {
-                        anyhow::bail!(
-                            "opd_train: OPD training requires a CUDA / Metal / Vulkan / ROCm \
+                        #[cfg(not(any(
+                            feature = "cuda",
+                            feature = "metal",
+                            feature = "vulkan",
+                            feature = "rocm"
+                        )))]
+                        {
+                            anyhow::bail!(
+                                "opd_train: OPD training requires a CUDA / Metal / Vulkan / ROCm \
                              build — the kt tape-authoritative grad path (the sole grad \
                              producer after the #1082 candle-drop) records kt GPU ops and is \
                              gated behind `feature = \"cuda\"` / `\"metal\"` / `\"vulkan\"` / \
                              `\"rocm\"`"
-                        );
-                    }
-                };
-
-                last_loss = loss_val;
-                global_step += 1;
-
-                // Periodic adapter checkpoint — mirrors sft_train. Lets a
-                // long OPD run survive mid-flight kills (SIGTERM, OOM,
-                // wall-time exhaustion) without losing all training
-                // signal. The most recent checkpoint dir is a complete
-                // PEFT adapter that can be loaded as if training had
-                // finished there. Disabled when `config.checkpoint_interval`
-                // is None or 0.
-                if let Some(interval) = config.checkpoint_interval {
-                    if interval > 0 && global_step % interval == 0 && global_step < total_steps {
-                        let ckpt_dir = output_adapter_dir
-                            .join(format!("{adapter_name}-checkpoint-{global_step}"));
-                        if let Err(e) = params.sync_to_master(&*backend_rt) {
-                            tracing::warn!(
-                                step = global_step,
-                                error = %e,
-                                "checkpoint: failed to sync LoRA params to kt master"
                             );
                         }
-                        match params.save_peft(&ckpt_dir, model_config.num_layers) {
-                            Ok(_) => {
-                                eprintln!(
-                                    "opd_train: checkpoint step={}/{} dir={}",
-                                    global_step,
-                                    total_steps,
-                                    ckpt_dir.display()
-                                );
-                                tracing::info!(
-                                    step = global_step,
-                                    total_steps,
-                                    path = %ckpt_dir.display(),
-                                    "OPD checkpoint saved"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    step = global_step,
-                                    error = %e,
-                                    "checkpoint: save_peft failed"
-                                );
-                            }
+                    };
+
+                    anyhow::ensure!(
+                        loss_val.is_finite(),
+                        "OPD loss became non-finite at candidate {}: {loss_val}",
+                        candidate_cursor + 1
+                    );
+                    last_loss = loss_val;
+                    loss_history.push(loss_val);
+                    global_step += 1;
+                    data_stats.examples_trained = global_step;
+                    let next_candidate = candidate_cursor + 1;
+                    let (next_epoch, next_cursor) = if next_candidate == candidates_per_epoch {
+                        (epoch + 1, 0)
+                    } else {
+                        (epoch, next_candidate)
+                    };
+                    let has_remaining_candidates = next_epoch < epochs;
+
+                    // §3.9 guardrail observation on the validation
+                    // cadence. We build a snapshot from the active-token
+                    // tokens-as-bytes proxy (since opd_train uses the
+                    // ground-truth assistant turn as the rollout for the
+                    // milestone wire-up — true student-sampled rollouts
+                    // arrive with the rollout sampler). The repetition /
+                    // truncation signals are best-effort against the
+                    // ground-truth tail; the kl / loss signals are real.
+                    if global_step as u64 % validation_cadence == 0 {
+                        let rollout =
+                            crate::diagnostics::RolloutSummary::from_tokens(input_ids, true);
+                        let snapshot = crate::diagnostics::build_snapshot(
+                            global_step as u64,
+                            std::slice::from_ref(&rollout),
+                            loss_val,
+                        );
+                        let decision = guardrail.observe(&snapshot);
+                        if !matches!(decision, crate::diagnostics::GuardrailDecision::Ok) {
+                            tracing::warn!(
+                                step = global_step,
+                                decision = ?decision,
+                                "§3.9 guardrail fired"
+                            );
                         }
                     }
-                }
 
-                // §3.9 guardrail observation on the validation
-                // cadence. We build a snapshot from the active-token
-                // tokens-as-bytes proxy (since opd_train uses the
-                // ground-truth assistant turn as the rollout for the
-                // milestone wire-up — true student-sampled rollouts
-                // arrive with the rollout sampler). The repetition /
-                // truncation signals are best-effort against the
-                // ground-truth tail; the kl / loss signals are real.
-                if global_step as u64 % validation_cadence == 0 {
-                    let rollout = crate::diagnostics::RolloutSummary::from_tokens(input_ids, true);
-                    let snapshot = crate::diagnostics::build_snapshot(
-                        global_step as u64,
-                        std::slice::from_ref(&rollout),
-                        loss_val,
-                    );
-                    let decision = guardrail.observe(&snapshot);
-                    if !matches!(decision, crate::diagnostics::GuardrailDecision::Ok) {
-                        tracing::warn!(
+                    let control =
+                        progress_cb
+                            .as_ref()
+                            .map_or(crate::trainer::TrainControl::Continue, |cb| {
+                                let consumed_candidates = next_epoch
+                                    .saturating_mul(candidates_per_epoch)
+                                    .saturating_add(next_cursor);
+                                cb(crate::trainer::TrainingProgress {
+                                    epoch: epoch + 1,
+                                    total_epochs: epochs,
+                                    step: global_step,
+                                    total_steps,
+                                    loss: loss_val,
+                                    progress: consumed_candidates as f32
+                                        / total_steps.max(1) as f32,
+                                })
+                            });
+
+                    let checkpoint_due = config.checkpoint_interval.is_some_and(|interval| {
+                        global_step % interval == 0 && has_remaining_candidates
+                    });
+                    let stop_requested =
+                        control == crate::trainer::TrainControl::Stop && has_remaining_candidates;
+                    if checkpoint_due || stop_requested {
+                        let loop_state = OpdCheckpointLoopState::capture(
+                            global_step,
+                            next_epoch,
+                            next_cursor,
+                            &loss_history,
+                            &data_stats,
+                            &token_counts,
+                            run_env_ce,
+                            &lora_grad_norms,
+                            &guardrail,
+                        );
+                        let path = checkpoint_descriptor.save(
+                            output_adapter_dir,
+                            &*backend_rt,
+                            &mut params,
+                            &mut opt_state,
+                            &loop_state,
+                        )?;
+                        tracing::info!(
                             step = global_step,
-                            decision = ?decision,
-                            "§3.9 guardrail fired"
+                            checkpoint = %path.display(),
+                            reason = if stop_requested { "cancellation" } else { "periodic" },
+                            "saved exact OPD training checkpoint"
                         );
                     }
-                }
+                    if stop_requested {
+                        anyhow::bail!(
+                            "training cancelled by user (stop requested at OPD step boundary)"
+                        );
+                    }
 
-                if let Some(ref cb) = progress_cb {
-                    cb(crate::trainer::TrainingProgress {
-                        epoch: epoch + 1,
-                        total_epochs: epochs,
-                        step: global_step,
-                        total_steps,
-                        loss: loss_val,
-                        progress: global_step as f32 / total_steps.max(1) as f32,
-                    });
-                }
-
-                if global_step % 10 == 0 || global_step == total_steps {
-                    tracing::info!(
-                        prompt = prompt_idx,
-                        sample = sample_idx,
-                        step = global_step,
-                        total_steps,
-                        loss = format!("{loss_val:.6}"),
-                        active = active_count,
-                        "OPD step"
-                    );
+                    if global_step % 10 == 0 || global_step == total_steps {
+                        tracing::info!(
+                            prompt = prompt_idx,
+                            sample = sample_idx,
+                            step = global_step,
+                            total_steps,
+                            loss = format!("{loss_val:.6}"),
+                            active = active_count,
+                            "OPD step"
+                        );
+                    }
                 }
             }
         }
+
+        // Pull on-device values back into the kt master before `save_peft`
+        // serializes them — mirrors sft_train's final `sync_to_master`.
+        params.sync_to_master(&*backend_rt)?;
+
+        params.save_peft(&output_dir, model_config.num_layers)?;
+        data_stats.examples_trained = global_step;
+
+        tracing::info!(
+            adapter = adapter_name,
+            path = %output_dir.display(),
+            final_loss = format!("{last_loss:.6}"),
+            steps = global_step,
+            "OPD training complete"
+        );
+
+        write_opd_train_receipt(
+            adapter_name,
+            model_config,
+            tokenizer,
+            config,
+            effective_top_k,
+            Some(effective_seed),
+            effective_samples_per_prompt,
+            &teacher_provenance,
+            &output_dir,
+            requested_base_adapter_dir.as_deref(),
+            training_data_sha256,
+            data_stats,
+            token_counts,
+            run_started.elapsed().as_millis() as u64,
+            Some(alpha_over_rank),
+            Some(last_loss),
+            run_env_ce,
+            lora_grad_norms.finish(),
+            None,
+        )?;
+
+        Ok(output_dir)
+    })();
+    if let Some(state) = opt_state.as_ref() {
+        state.evict_from_backend(&*backend_rt);
     }
-
-    // Pull on-device values back into the kt master before `save_peft`
-    // serializes them — mirrors sft_train's final `sync_to_master`.
-    let _synced = params.sync_to_master(&*backend_rt).unwrap_or(0);
-
-    params.save_peft(&output_dir, model_config.num_layers)?;
-    data_stats.examples_trained = global_step;
-
-    tracing::info!(
-        adapter = adapter_name,
-        path = %output_dir.display(),
-        final_loss = format!("{last_loss:.6}"),
-        steps = global_step,
-        "OPD training complete"
-    );
-
-    write_opd_train_receipt(
-        adapter_name,
-        model_config,
-        tokenizer,
-        config,
-        effective_top_k,
-        &teacher_provenance,
-        &output_dir,
-        requested_base_adapter_dir.as_deref(),
-        training_data_sha256,
-        data_stats,
-        token_counts,
-        run_started.elapsed().as_millis() as u64,
-        Some(alpha_over_rank),
-        Some(last_loss),
-        run_env_ce,
-        lora_grad_norms.finish(),
-        None,
-    )?;
-
-    Ok(output_dir)
+    params.evict_from_backend(&*backend_rt);
+    train_result
 }
 
 /// Tape-authoritative OPD forward + backward for one step (#1082 CP-4 endgame).
@@ -4681,6 +5393,8 @@ fn write_opd_train_receipt(
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     config: &OpdConfig,
     effective_top_k: usize,
+    effective_seed: Option<u64>,
+    effective_samples_per_prompt: usize,
     teacher: &OpdTeacherProvenance,
     output_dir: &std::path::Path,
     base_adapter_dir: Option<&std::path::Path>,
@@ -4694,7 +5408,12 @@ fn write_opd_train_receipt(
     lora_grad_norms: Vec<crate::train_receipt::LoraGradNormSummary>,
     status_error: Option<String>,
 ) -> Result<()> {
-    let effective_config = opd_config_for_receipt(config, effective_top_k);
+    let effective_config = opd_config_for_receipt(
+        config,
+        effective_top_k,
+        effective_seed,
+        effective_samples_per_prompt,
+    );
     let effective_config_json = serde_json::to_value(&effective_config)
         .context("serialize effective OPD configuration for train receipt")?;
     let mut receipt = crate::train_receipt::TrainReceipt::new(
@@ -4712,7 +5431,7 @@ fn write_opd_train_receipt(
             learning_rate: config.effective_learning_rate(),
             epochs: config.epochs.max(1),
             shuffle: false,
-            seed: config.seed,
+            seed: effective_seed,
         },
         effective_config_json,
     );
@@ -4743,7 +5462,7 @@ fn write_opd_train_receipt(
             OpdLossGranularity::TeacherTopK | OpdLossGranularity::FullVocab
         )
         .then_some(effective_top_k),
-        samples_per_prompt: config.samples_per_prompt,
+        samples_per_prompt: effective_samples_per_prompt,
         action_tokens: token_counts.action_tokens,
         env_tokens: token_counts.env_tokens,
         // HONESTY preserved, term restored: `echo_combined` records
@@ -4804,9 +5523,16 @@ fn write_opd_train_receipt(
     Ok(())
 }
 
-fn opd_config_for_receipt(config: &OpdConfig, effective_top_k: usize) -> OpdConfig {
+fn opd_config_for_receipt(
+    config: &OpdConfig,
+    effective_top_k: usize,
+    effective_seed: Option<u64>,
+    effective_samples_per_prompt: usize,
+) -> OpdConfig {
     let mut effective_config = config.clone();
     effective_config.top_k = effective_top_k;
+    effective_config.seed = effective_seed;
+    effective_config.samples_per_prompt = effective_samples_per_prompt;
     effective_config
 }
 
@@ -5206,16 +5932,22 @@ mod tests {
     }
 
     #[test]
-    fn opd_receipt_config_records_effective_not_requested_top_k() {
+    fn opd_receipt_config_records_resolved_values_without_mutating_request() {
         let config = OpdConfig::default();
         assert_eq!(config.top_k, 32);
+        assert_eq!(config.samples_per_prompt, 4);
+        assert_eq!(config.seed, None);
 
-        let receipt_config = opd_config_for_receipt(&config, 16);
+        let receipt_config = opd_config_for_receipt(&config, 16, Some(73), 64);
         assert_eq!(receipt_config.top_k, 16);
+        assert_eq!(receipt_config.samples_per_prompt, 64);
+        assert_eq!(receipt_config.seed, Some(73));
         assert_eq!(
             config.top_k, 32,
             "receipt preparation must not mutate the request"
         );
+        assert_eq!(config.samples_per_prompt, 4);
+        assert_eq!(config.seed, None);
         assert_eq!(
             serde_json::to_value(receipt_config).unwrap()["top_k"],
             serde_json::json!(16)
@@ -5844,7 +6576,27 @@ mod tests {
         assert!(matches!(cfg.stable_opd, StableOpdMode::Off));
         assert!(matches!(cfg.loss, OpdLossGranularity::TeacherTopK));
         assert_eq!(cfg.checkpoint_interval, Some(25));
+        assert!(cfg.resume_checkpoint.is_none());
         cfg.validate_runtime_contract().unwrap();
+    }
+
+    #[test]
+    fn opd_config_round_trips_resume_checkpoint_and_rejects_zero_interval() {
+        let name = "run-checkpoint-step-00000007.kiln-checkpoint";
+        let config: OpdConfig = serde_json::from_value(serde_json::json!({
+            "resume_checkpoint": name,
+            "checkpoint_interval": 3,
+        }))
+        .unwrap();
+        assert_eq!(config.resume_checkpoint.as_deref(), Some(name));
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["resume_checkpoint"],
+            name
+        );
+
+        let mut invalid = config;
+        invalid.checkpoint_interval = Some(0);
+        assert!(invalid.validate_runtime_contract().is_err());
     }
 
     #[test]
@@ -5939,6 +6691,397 @@ mod tests {
         wrong_history.last_loss = Some(0.25);
         assert!(wrong_history.validate(&progress, 4, 2).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn opd_checkpoint_manifest_binds_candidate_rng_and_optimizer_progress() -> Result<()> {
+        let data_stats = crate::train_receipt::DataStatsReceipt {
+            examples_read: 3,
+            examples_filtered: 1,
+            examples_trained: 2,
+            ..Default::default()
+        };
+        let state = OpdCheckpointLoopState::capture(
+            2,
+            0,
+            3,
+            &[0.75, 0.5],
+            &data_stats,
+            &crate::train_receipt::TokenCountReceipt::default(),
+            None,
+            &crate::train_receipt::LoraGradNormAccumulator::default(),
+            &crate::diagnostics::LengthInflationGuardrail::default(),
+        );
+        let descriptor = OpdCheckpointDescriptor {
+            adapter_name: "exact-opd".into(),
+            effective_config: serde_json::json!({"seed": 17}),
+            precision_policy: crate::checkpoint::TrainingCheckpointPrecision {
+                parameter_dtype: "f32".into(),
+                optimizer_state_dtype: "f32".into(),
+                activation_dtype: "f32".into(),
+                gradient_dtype: "f32".into(),
+                stochastic_rounding: serde_json::json!({"mode": "round_to_nearest"}),
+            },
+            data: crate::checkpoint::TrainingCheckpointData {
+                source_kind: "inline-on-policy-opd-candidate-order-v1".into(),
+                content_sha256: "1".repeat(64),
+                item_count: 4,
+            },
+            init_seed: 17,
+            optimizer: Optimizer::AdamW {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: 0.01,
+            },
+            learning_rate: 1e-5,
+            candidates_per_epoch: 4,
+            total_epochs: 2,
+            on_policy: true,
+            base_model_weights_sha256: Some(format!("sha256:{}", "2".repeat(64))),
+            teacher_content_revision: Some(format!("sha256:{}", "3".repeat(64))),
+            auxiliary_state: serde_json::json!({"identity": "bound"}),
+        };
+        let manifest = descriptor.manifest(&state)?;
+        assert_eq!(manifest.training_kind, crate::checkpoint::TrainingKind::Opd);
+        assert_eq!(manifest.progress.global_step, 2);
+        assert_eq!(manifest.progress.cursor_in_epoch, 3);
+        assert_eq!(manifest.optimizer.step, 2);
+        assert_eq!(manifest.scheduler.step, 2);
+        assert_eq!(manifest.rng_states["rollout-sampling"].position, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn opd_base_adapter_initialization_loads_the_requested_weights() -> Result<()> {
+        use crate::trainer::tests::{tiny_config_full_attn, tiny_weights};
+
+        let device = kiln_tensor::Device::Cpu;
+        let config = tiny_config_full_attn();
+        let weights = tiny_weights(&config, &device)?;
+        let source = crate::trainer::TrainableLoraParams::initialize_seeded(
+            &config,
+            &weights,
+            2,
+            4.0,
+            &device,
+            Some(11),
+        )?;
+        let mut destination = crate::trainer::TrainableLoraParams::initialize_seeded(
+            &config,
+            &weights,
+            2,
+            4.0,
+            &device,
+            Some(99),
+        )?;
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().join("base");
+        source.save_peft(&base, config.num_layers)?;
+        restore_opd_adapter_parameters(&mut destination, &device, None, Some(&base))?;
+
+        let source_exact = temp.path().join("source.safetensors");
+        let destination_exact = temp.path().join("destination.safetensors");
+        source.save_checkpoint_parameters(&source_exact)?;
+        destination.save_checkpoint_parameters(&destination_exact)?;
+        assert_eq!(
+            std::fs::read(source_exact)?,
+            std::fs::read(destination_exact)?
+        );
+        Ok(())
+    }
+
+    #[cfg(any(feature = "rocm", feature = "vulkan"))]
+    fn exact_resume_opd_prompts() -> Vec<OpdPrompt> {
+        ["ok", "hi", "result"]
+            .into_iter()
+            .map(|answer| OpdPrompt {
+                messages: vec![
+                    ChatMessage {
+                        role: "user".into(),
+                        content: "hi".into(),
+                    },
+                    ChatMessage {
+                        role: "assistant".into(),
+                        content: answer.into(),
+                    },
+                ],
+                teacher_extra_messages: Vec::new(),
+                trajectory: Vec::new(),
+            })
+            .collect()
+    }
+
+    #[cfg(any(feature = "rocm", feature = "vulkan"))]
+    fn exact_resume_opd_teacher(
+        prompts: &[OpdPrompt],
+        tokenizer: &KilnTokenizer,
+        vocab_size: usize,
+        top_k: usize,
+    ) -> Result<Arc<dyn LogitSource>> {
+        let identity = crate::TeacherIdentityV1::new(
+            "exact-opd-teacher",
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            None,
+            vocab_size as u32,
+            top_k as u32,
+            4096,
+            1_000_000,
+            "kiln-test-fixture",
+            "d".repeat(64),
+        )?;
+        let mut fixture = FixtureLogitSource::uniform_topk("exact-opd-teacher", vocab_size, top_k)
+            .with_authoritative_identity(identity)?;
+        for prompt in prompts {
+            let tokenized = tokenize_opd_prompt_for_training(prompt, tokenizer, None)?;
+            let active_positions: Vec<usize> = tokenized
+                .action_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(index, active)| active.then_some(index))
+                .collect();
+            for logits_row in target_token_positions_to_logits_rows(
+                "exact-opd-teacher",
+                tokenized.input_ids.len(),
+                &active_positions,
+            )? {
+                fixture.insert(
+                    &tokenized.input_ids,
+                    logits_row,
+                    (0..top_k as u32).collect(),
+                    (0..top_k).map(|rank| -3.0 - rank as f32 * 0.1).collect(),
+                )?;
+            }
+        }
+        Ok(Arc::new(fixture))
+    }
+
+    #[cfg(any(feature = "rocm", feature = "vulkan"))]
+    fn exact_resume_loss_callback(
+        stop_after: Option<usize>,
+    ) -> (
+        Arc<std::sync::Mutex<Vec<f64>>>,
+        crate::trainer::ProgressCallback,
+    ) {
+        let losses = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = losses.clone();
+        let callback = Box::new(move |progress: crate::trainer::TrainingProgress| {
+            let mut values = captured.lock().unwrap();
+            values.push(progress.loss);
+            if stop_after.is_some_and(|limit| values.len() >= limit) {
+                crate::trainer::TrainControl::Stop
+            } else {
+                crate::trainer::TrainControl::Continue
+            }
+        });
+        (losses, callback)
+    }
+
+    #[cfg(any(feature = "rocm", feature = "vulkan"))]
+    fn opd_cancel_resume_matches_uninterrupted_training(
+        model_config: kiln_core::config::ModelConfig,
+        weights: kiln_model::forward::GpuWeights,
+    ) -> Result<()> {
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+            std::env::remove_var("KILN_OPD_USE_CHAT_TEMPLATE_RENDER");
+        }
+        let tokenizer = off_policy_smoke_tokenizer()?;
+        let prompts = exact_resume_opd_prompts();
+        let top_k = 16;
+        let teacher =
+            exact_resume_opd_teacher(&prompts, &tokenizer, model_config.vocab_size, top_k)?;
+        let config = OpdConfig {
+            training_mode: OpdTrainingMode::OffPolicy,
+            top_k,
+            samples_per_prompt: 1,
+            learning_rate: Some(1e-3),
+            lora_rank: 2,
+            lora_alpha: 4.0,
+            auto_load: false,
+            checkpoint_interval: Some(2),
+            seed: Some(17),
+            optimizer: Optimizer::AdamW {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: 0.01,
+            },
+            epochs: 1,
+            ..Default::default()
+        };
+        let temp = tempfile::tempdir()?;
+        let adapter_root = temp.path().join("adapters");
+        let control_root = temp.path().join("control");
+        let resumed_root = temp.path().join("resumed");
+        std::fs::create_dir_all(&adapter_root)?;
+        std::fs::create_dir_all(&control_root)?;
+        std::fs::create_dir_all(&resumed_root)?;
+        let adapter_name = "exact-opd";
+
+        let (control_losses, control_callback) = exact_resume_loss_callback(None);
+        let control_output = opd_train_to(
+            &prompts,
+            &config,
+            &model_config,
+            &weights,
+            &tokenizer,
+            teacher.clone(),
+            &adapter_root,
+            &control_root,
+            adapter_name,
+            Some(control_callback),
+        )?;
+
+        let (first_losses, first_callback) = exact_resume_loss_callback(Some(1));
+        let interrupted = opd_train_to(
+            &prompts,
+            &config,
+            &model_config,
+            &weights,
+            &tokenizer,
+            teacher.clone(),
+            &adapter_root,
+            &resumed_root,
+            adapter_name,
+            Some(first_callback),
+        )
+        .expect_err("OPD stop callback must interrupt after publishing a checkpoint");
+        assert!(
+            format!("{interrupted:#}").contains("cancelled by user"),
+            "{interrupted:#}"
+        );
+        let resume_path = resumed_root.join(format!(
+            "{adapter_name}-checkpoint-step-00000001.kiln-checkpoint"
+        ));
+        let mut resume_config = config.clone();
+        resume_config.resume_checkpoint = Some(resume_path.display().to_string());
+        let (remaining_losses, remaining_callback) = exact_resume_loss_callback(None);
+        let resumed_output = opd_train_to(
+            &prompts,
+            &resume_config,
+            &model_config,
+            &weights,
+            &tokenizer,
+            teacher,
+            &adapter_root,
+            &resumed_root,
+            adapter_name,
+            Some(remaining_callback),
+        )?;
+
+        let control_losses = control_losses.lock().unwrap().clone();
+        let mut combined_losses = first_losses.lock().unwrap().clone();
+        combined_losses.extend(remaining_losses.lock().unwrap().iter().copied());
+        assert_eq!(combined_losses, control_losses);
+        assert_eq!(
+            std::fs::read(control_output.join("adapter_model.safetensors"))?,
+            std::fs::read(resumed_output.join("adapter_model.safetensors"))?
+        );
+
+        let control_checkpoint = crate::checkpoint::load_training_checkpoint(&control_root.join(
+            format!("{adapter_name}-checkpoint-step-00000002.kiln-checkpoint"),
+        ))?;
+        let resumed_checkpoint = crate::checkpoint::load_training_checkpoint(&resumed_root.join(
+            format!("{adapter_name}-checkpoint-step-00000002.kiln-checkpoint"),
+        ))?;
+        assert_eq!(
+            control_checkpoint.manifest.effective_config,
+            resumed_checkpoint.manifest.effective_config
+        );
+        assert_eq!(
+            control_checkpoint.manifest.precision_policy,
+            resumed_checkpoint.manifest.precision_policy
+        );
+        assert_eq!(
+            control_checkpoint.manifest.progress,
+            resumed_checkpoint.manifest.progress
+        );
+        assert_eq!(
+            control_checkpoint.manifest.data,
+            resumed_checkpoint.manifest.data
+        );
+        assert_eq!(
+            control_checkpoint.manifest.rng_states,
+            resumed_checkpoint.manifest.rng_states
+        );
+        assert_eq!(
+            control_checkpoint.manifest.optimizer,
+            resumed_checkpoint.manifest.optimizer
+        );
+        assert_eq!(
+            control_checkpoint.manifest.scheduler,
+            resumed_checkpoint.manifest.scheduler
+        );
+        assert_eq!(
+            control_checkpoint.manifest.state_files,
+            resumed_checkpoint.manifest.state_files
+        );
+        assert_eq!(
+            control_checkpoint.manifest.auxiliary_state,
+            resumed_checkpoint.manifest.auxiliary_state
+        );
+        for relative in [OPD_CHECKPOINT_ADAPTER_FILE, OPD_CHECKPOINT_OPTIMIZER_FILE] {
+            assert_eq!(
+                std::fs::read(control_checkpoint.artifact_path(relative)?)?,
+                std::fs::read(resumed_checkpoint.artifact_path(relative)?)?
+            );
+        }
+        assert_eq!(
+            load_opd_checkpoint_loop_state(&control_checkpoint)?,
+            load_opd_checkpoint_loop_state(&resumed_checkpoint)?
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn rocm_opd_cancel_resume_matches_uninterrupted_training() -> Result<()> {
+        if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+            eprintln!(
+                "skip rocm_opd_cancel_resume_matches_uninterrupted_training: qualification off"
+            );
+            return Ok(());
+        }
+        anyhow::ensure!(
+            kiln_tensor::rocm_is_available(),
+            "ROCm qualification requested but no ROCm device is available"
+        );
+        use crate::trainer::tests::{tiny_config_full_attn_bf16, tiny_weights_bf16};
+        let device = Device::Rocm(0);
+        let model_config = tiny_config_full_attn_bf16();
+        let weights = tiny_weights_bf16(&model_config, &device)?;
+        opd_cancel_resume_matches_uninterrupted_training(model_config, weights)
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vulkan_opd_cancel_resume_matches_uninterrupted_training() -> Result<()> {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            eprintln!(
+                "skip vulkan_opd_cancel_resume_matches_uninterrupted_training: Vulkan test opt-in disabled"
+            );
+            return Ok(());
+        }
+        anyhow::ensure!(
+            kiln_model::backend::vulkan::vulkan_is_available(),
+            "Vulkan qualification requested but no Vulkan device is available"
+        );
+        use crate::trainer::tests::{tiny_config_full_attn, tiny_weights};
+        let device = Device::Vulkan(0);
+        let model_config = tiny_config_full_attn();
+        let weights = tiny_weights(&model_config, &device)?;
+        opd_cancel_resume_matches_uninterrupted_training(model_config, weights)
     }
 
     #[test]

@@ -1474,7 +1474,7 @@ impl OptimizerState {
     /// Capture optimizer tensors by stable parameter name into CPU storage.
     /// Device buffers and CPU fallback state share one F32 safetensors
     /// representation; per-param counters are U32 scalar tensors.
-    fn capture_checkpoint_state(
+    pub(crate) fn capture_checkpoint_state(
         &mut self,
         params: &TrainableLoraParams,
         backend: &dyn BackendRuntime,
@@ -1718,7 +1718,7 @@ fn checkpoint_tensor_to_cpu_f32(tensor: &KtTensor, label: &str) -> Result<KtTens
 }
 
 #[derive(Debug)]
-struct CheckpointTensorSnapshot {
+pub(crate) struct CheckpointTensorSnapshot {
     kind: &'static str,
     tensors: Vec<(String, KtTensor)>,
 }
@@ -1733,7 +1733,7 @@ impl CheckpointTensorSnapshot {
         Ok(Self { kind, tensors })
     }
 
-    fn save(&self, path: &Path) -> Result<()> {
+    pub(crate) fn save(&self, path: &Path) -> Result<()> {
         let tensors: HashMap<&str, &KtTensor> = self
             .tensors
             .iter()
@@ -2013,7 +2013,7 @@ impl TrainableLoraParams {
     /// Capture exact main-loop adapter parameters into CPU storage without
     /// PEFT receipts/config. The enclosing checkpoint writer owns atomicity
     /// and checksums.
-    fn capture_checkpoint_parameters(&self) -> Result<CheckpointTensorSnapshot> {
+    pub(crate) fn capture_checkpoint_parameters(&self) -> Result<CheckpointTensorSnapshot> {
         let mut owned = Vec::with_capacity(self.all_params().len());
         for (key, param) in self.checkpoint_params() {
             let tensor = param
@@ -2484,7 +2484,7 @@ pub(crate) fn resolve_base_adapter_dir_from_roots(
     }
 }
 
-fn resolve_and_validate_base_adapter_from_roots(
+pub(crate) fn resolve_and_validate_base_adapter_from_roots(
     base_adapter: Option<&str>,
     adapter_dir: &Path,
     output_adapter_dir: &Path,
@@ -2986,7 +2986,7 @@ fn checkpoint_dtype_name(dtype: KtDType) -> String {
     dtype.to_string().to_ascii_lowercase()
 }
 
-fn training_checkpoint_precision(
+pub(crate) fn training_checkpoint_precision(
     params: &TrainableLoraParams,
     opt_state: Option<&OptimizerState>,
 ) -> Result<crate::checkpoint::TrainingCheckpointPrecision> {
@@ -3045,7 +3045,9 @@ fn sft_checkpoint_effective_config(
     canonical_checkpoint_json_value(value)
 }
 
-fn canonical_checkpoint_json_value(value: serde_json::Value) -> Result<serde_json::Value> {
+pub(crate) fn canonical_checkpoint_json_value(
+    value: serde_json::Value,
+) -> Result<serde_json::Value> {
     let encoded = serde_json::to_vec(&value).context("encode canonical checkpoint JSON")?;
     serde_json::from_slice(&encoded).context("decode canonical checkpoint JSON")
 }
@@ -3077,7 +3079,7 @@ fn sft_checkpoint_auxiliary_state(
     }))
 }
 
-fn checkpoint_sha256_hex(prefixed: Option<&str>, label: &str) -> Result<String> {
+pub(crate) fn checkpoint_sha256_hex(prefixed: Option<&str>, label: &str) -> Result<String> {
     let value = prefixed.with_context(|| format!("compute {label} SHA-256"))?;
     value
         .strip_prefix("sha256:")

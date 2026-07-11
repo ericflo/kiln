@@ -452,7 +452,7 @@ desktop configuration with identical effective semantics and provenance.
 ### 3.2 Exact resumable checkpoints
 
 - [x] Define a versioned training-checkpoint manifest.
-- [ ] Save and restore adapter parameters, optimizer moments/momentum, scheduler,
+- [x] Save and restore adapter parameters, optimizer moments/momentum, scheduler,
   global step, epoch, data cursor/order, all RNG states, reference/EMA state,
   precision policy, and effective configuration.
 - [x] Write checkpoints atomically with an incomplete sentinel and checksum
@@ -460,7 +460,7 @@ desktop configuration with identical effective semantics and provenance.
 - [x] Distinguish resumable checkpoints from exportable PEFT adapter snapshots
   in names, API, UI, and docs.
 - [ ] Add crash/fault interruption tests.
-- [ ] Prove uninterrupted versus stop/resume training produces the same loss
+- [x] Prove uninterrupted versus stop/resume training produces the same loss
   sequence, optimizer state, and adapter hash inside the declared deterministic
   envelope.
 
@@ -948,6 +948,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-10 | Public GRPO exact-resume route qualification | `sha256:279d01899d17` | this commit | Strix Halo ROCm + Vulkan | qualification-mode real-device HTTP integration for inline and streamed JSONL GRPO; public submit/status/cancel/resume routes; Rust 1.94/1.96 formatting and default/ROCm/Vulkan server gates | passed | On both local backends, each public source route completed an uninterrupted 12-group control, submitted the same job again, cancelled it through `DELETE /v1/train/queue/{id}` after it entered `running`, loaded the exact immutable basename exposed by job status, and resumed through `POST /v1/train/grpo`. The combined interrupted/resumed loss sequence, final PEFT adapter bytes, final checkpoint adapter and optimizer bytes, EMA-reference bytes, committed cursor, JSONL physical-line/byte/hash state, RNG streams, effective configuration, precision, scheduler/optimizer manifest, and semantic diagnostics matched the uninterrupted control exactly; blank JSONL lines exercised the physical cursor and backend health remained unquarantined. ROCm used a production-shaped BF16 identity-bearing base with the production-default tape flags, while Vulkan exercised its supported resident F32 route. Replacement Pages run `29166231196` and cheap CI run `29166231193` are green after the preceding documentation regression repair. OPD exact resume and process-kill/fault qualification remain open. |
 | 2026-07-10 | Preserve OPD prompt identity after filtering | `sha256:8cb5f0cc63e1` | this commit | portable + ROCm/Vulkan compile gates | focused filtered-row source-index regression; 418 trainer tests with one pre-existing ignore; ROCm/Vulkan train all-target checks; Rust 1.94/1.96 formatting and diff hygiene | passed | OPD previously compacted valid tokenized prompts after filtering but later indexed rollout prefixes and asymmetric teacher contexts with the compacted position. If an earlier row was invalid, a retained row could train against another source row's prompt or privileged context. Prepared prompts now carry their original source index through every downstream lookup, and a regression filters row zero while proving row one remains bound to its own tokenization and teacher-only context. Exact checkpoint cursor work can now bind the real source order rather than preserving an already-corrupted index. |
 | 2026-07-10 | Strict OPD recovery-state contract | `sha256:5ef0e1508adf` | this commit | portable | 27 focused loop-state and diagnostics regressions; unknown-field, cursor, history, and non-finite corruption rejection; Rust 1.94/1.96 formatting and diff hygiene | passed | OPD recovery state distinguishes consumed source/sample candidates from committed optimizer steps and preserves loss, data/token, ECHO, gradient-diagnostic, and stateful collapse-guardrail accumulators. Tensor artifacts and runtime restore are intentionally the next checkpoint. |
+| 2026-07-10 | Exact OPD core stop/resume integration | `sha256:d889872feea5` | this commit | portable + Strix Halo ROCm/Vulkan | 423 portable trainer tests with one pre-existing ignore; real ROCm BF16 and Vulkan F32 uninterrupted-versus-cancelled/resumed equivalence; requested-base-adapter byte-equivalence regression; default/ROCm/Vulkan server all-target checks; Rust 1.94/1.96 formatting and diff hygiene | passed | OPD now atomically checkpoints and restores exact adapter, AdamW/Muon, scheduler, distinct optimizer-step and source/sample cursors, rollout/init RNG streams, effective seed/configuration, loss and diagnostic state, model/tokenizer/base-weight/backend/precision identity, and authoritative teacher revision. Both local backends matched every loss plus final and intermediate adapter/optimizer bytes. The loop now honors stop callbacks, rejects zero cadence and non-finite loss, records resolved seeds and auto-scaled sample counts, makes final synchronization fallible, and evicts resident state on every exit. This work also exposed that `base_adapter` was recorded but never loaded; the requested weights now initialize OPD before optimizer registration. Server ownership, durable public admission, CLI/UI/docs, and process-kill fault qualification remain separate checkpoints. |
 | 2026-07-09 | First reduced-CI measurement | `sha256:cda13f3f84e5` | `3c71cc4002f8` | GitHub Actions | run `29049575526` | passed | Three active jobs completed in 3m52s wall and about 4m36s aggregate time; all GPU backend jobs were skipped |
 
 ## Known Starting Defects
@@ -974,11 +975,12 @@ These are anchors, not an exhaustive substitute for the checklist:
   label training rows as held out: `crates/kiln-eval/src/suite.rs`,
   `crates/kiln-eval/src/result.rs`, `crates/kiln-eval/src/synthesis.rs`, and
   `docs/site/evals.html`.
-- OPD periodic snapshots remain PEFT-only and lack optimizer/cursor/RNG/
-  reference state. SFT and inline/streamed GRPO exact resume are public; GRPO's
-  API/CLI/browser/docs and public-route ROCm/Vulkan qualification are complete,
-  while process-kill/fault qualification remains open:
-  `crates/kiln-train/src/trainer.rs` and `crates/kiln-train/src/opd.rs`.
+- OPD core snapshots are exact and locally qualified on ROCm/Vulkan, but the
+  server still holds job-wide GPU ownership and has no durable public OPD
+  resume admission, CLI/browser workflow, or permanent documentation.
+  Process-kill/fault qualification also remains open:
+  `crates/kiln-server/src/training_queue.rs` and
+  `crates/kiln-train/src/opd.rs`.
 - Thinking-budget configuration, streaming logs, batch/compare surfaces, recent
   requests, and desktop semantics are not yet one conformance-tested contract:
   `crates/kiln-server/src/config.rs`,
