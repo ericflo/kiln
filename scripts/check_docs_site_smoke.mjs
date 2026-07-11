@@ -419,7 +419,8 @@ function validateReadmeColdReaderCoverage() {
   const normalizedReadme = normalizeReadmeForColdReader(readme);
 
   const requiredTermGroups = [
-    ['what-it-is paragraph', ['single-GPU inference server', 'live LoRA training', 'same process', 'same GPU']],
+    ['what-it-is paragraph', ['single-GPU inference server', 'live LoRA training', 'one GPU', 'one Rust binary']],
+    ['serving-profile contract', ['stable profile', 'experimental', 'maintenance', 'Serving Profiles', 'docs/SERVING_PROFILES.md']],
     ['install/run paths', ['Desktop App', 'server binary', 'Docker', 'source CLI', 'kiln serve']],
     ['GRPO loop', ['GRPO Loop', 'killer feature', 'generate completions', 'score them', 'reward function']],
     ['embedded dashboard', ['/ui', 'dashboard']],
