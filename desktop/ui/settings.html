@@ -587,29 +587,44 @@
         if (!custom) setThinkingBudgetWarning("");
       }
 
-      function optionalNonnegativeInteger(id, label) {
-        const raw = document.getElementById(id).value.trim();
-        if (!raw.length) return null;
+      function strictThinkingBudgetInteger(raw) {
+        if (!/^\d+$/.test(raw)) return null;
         const value = Number(raw);
-        if (!Number.isFinite(value) || value < 0 || !Number.isSafeInteger(value)) {
-          throw new Error(label + " must be a nonnegative whole number.");
-        }
+        return Number.isSafeInteger(value) ? value : null;
+      }
+
+      function strictThinkingBudgetMilliseconds(raw) {
+        const match = /^(?:(\d+)(?:\.(\d{1,3}))?|\.(\d{1,3}))$/.exec(raw);
+        if (!match) return null;
+
+        const wholeSeconds = BigInt(match[1] || "0");
+        const fractionalMilliseconds = BigInt((match[2] || match[3] || "").padEnd(3, "0"));
+        const milliseconds = wholeSeconds * 1000n + fractionalMilliseconds;
+        return milliseconds <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(milliseconds) : null;
+      }
+
+      function thinkingBudgetInputRaw(id, message) {
+        const input = document.getElementById(id);
+        if (input.validity && input.validity.badInput) throw new Error(message);
+        return input.value.trim();
+      }
+
+      function optionalNonnegativeInteger(id, label) {
+        const message = label + " must be a nonnegative whole number.";
+        const raw = thinkingBudgetInputRaw(id, message);
+        if (!raw.length) return null;
+        const value = strictThinkingBudgetInteger(raw);
+        if (value === null) throw new Error(message);
         return value;
       }
 
       function optionalMillisecondsFromSeconds() {
-        const raw = document.getElementById("default_thinking_budget_seconds").value.trim();
+        const finiteMessage = "Time budget must be a nonnegative number of seconds with at most three decimal places.";
+        const raw = thinkingBudgetInputRaw("default_thinking_budget_seconds", finiteMessage);
         if (!raw.length) return null;
-        const seconds = Number(raw);
-        if (!Number.isFinite(seconds) || seconds < 0) {
-          throw new Error("Time budget must be a finite, nonnegative number of seconds.");
-        }
-        const milliseconds = seconds * 1000;
-        const integerMilliseconds = Math.round(milliseconds);
-        if (!Number.isSafeInteger(integerMilliseconds) || Math.abs(milliseconds - integerMilliseconds) > 1e-7) {
-          throw new Error("Time budget supports at most three decimal places.");
-        }
-        return integerMilliseconds;
+        const milliseconds = strictThinkingBudgetMilliseconds(raw);
+        if (milliseconds === null) throw new Error(finiteMessage);
+        return milliseconds;
       }
 
       function readThinkingBudget() {

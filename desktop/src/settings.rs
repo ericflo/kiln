@@ -417,7 +417,10 @@ mod tests {
         assert!(html.contains("id=\"default_thinking_budget_tokens\""));
         assert!(html.contains("id=\"default_thinking_budget_seconds\""));
         assert!(html.contains("default_thinking_budget_ms: milliseconds"));
-        assert!(html.contains("Number.isSafeInteger(integerMilliseconds)"));
+        assert!(html.contains("function strictThinkingBudgetInteger(raw)"));
+        assert!(html.contains("function strictThinkingBudgetMilliseconds(raw)"));
+        assert!(html.contains("input.validity.badInput"));
+        assert!(!html.contains("Math.round(milliseconds)"));
     }
 
     #[test]

@@ -1,22 +1,22 @@
 name: UI smoke
 
-# The dashboard lives in crates/kiln-server/src/ui/ (index.html + styles.css
-# + demo.js + app.js) served by kiln-server; this job drives it
-# headless (empty-adapter, default, failure scenarios + payload-shape checks)
-# against the mock server in scripts/check_server_ui_smoke.mjs. Before this
-# job the smoke only ran when someone remembered to run it locally — UI
-# regressions reached main silently.
+# The server dashboard gets a headless browser smoke against a mock server;
+# the desktop shell gets fast static and embedded-script contract checks.
 on:
   push:
     branches: [main]
     paths:
       - 'crates/kiln-server/src/ui/**'
       - 'scripts/check_server_ui_smoke.mjs'
+      - 'desktop/ui/**'
+      - 'scripts/check_desktop_ui_smoke.mjs'
       - '.github/workflows/ui-smoke.yml'
   pull_request:
     paths:
       - 'crates/kiln-server/src/ui/**'
       - 'scripts/check_server_ui_smoke.mjs'
+      - 'desktop/ui/**'
+      - 'scripts/check_desktop_ui_smoke.mjs'
       - '.github/workflows/ui-smoke.yml'
   workflow_dispatch:
 
@@ -26,6 +26,9 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
+
+      - name: Check desktop UI contracts
+        run: node scripts/check_desktop_ui_smoke.mjs
 
       - name: Run dashboard smoke
         # ubuntu-22.04 runners ship Google Chrome and Node 20+ preinstalled.

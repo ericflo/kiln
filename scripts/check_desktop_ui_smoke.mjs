@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import vm from 'node:vm';
 
 const files = {
   dashboard: 'desktop/ui/dashboard.html',
@@ -76,6 +77,86 @@ function checkSettings(html) {
   assertContains(text, 'model path', 'settings setup help copy');
   assertAny(text, ['server binary', 'kiln binary'], 'settings binary setup copy');
   assertNoForbiddenPublicityCopy(text, 'settings setup help');
+
+  const parserStart = html.indexOf('function strictThinkingBudgetInteger(raw)');
+  const parserEnd = html.indexOf('function readForm()', parserStart);
+  if (parserStart < 0 || parserEnd < 0) {
+    throw new Error('settings thinking-budget parsers are missing');
+  }
+  const inputs = {
+    default_thinking_budget_tokens: { value: '', validity: { badInput: false } },
+    default_thinking_budget_seconds: { value: '', validity: { badInput: false } },
+  };
+  const context = vm.createContext({
+    document: { getElementById: (id) => inputs[id] },
+    thinkingBudgetMode: 'custom',
+  });
+  vm.runInContext(
+    `${html.slice(parserStart, parserEnd)}\nthis.parsers = { strictThinkingBudgetInteger, strictThinkingBudgetMilliseconds, readThinkingBudget };`,
+    context,
+  );
+
+  const integerCases = new Map([
+    ['0', 0], ['0002', 2], ['9007199254740991', Number.MAX_SAFE_INTEGER],
+    ['1.5', null], ['1e2', null], ['+1', null], ['-1', null],
+    ['9007199254740992', null],
+  ]);
+  for (const [raw, expected] of integerCases) {
+    const actual = context.parsers.strictThinkingBudgetInteger(raw);
+    if (actual !== expected) {
+      throw new Error(`settings token parser returned ${String(actual)} for ${JSON.stringify(raw)}; expected ${String(expected)}`);
+    }
+  }
+
+  const millisecondCases = new Map([
+    ['0', 0], ['.001', 1], ['0.010', 10], ['1.25', 1250],
+    ['1.0001', null], ['1e2', null], ['+1', null], ['-1', null], ['1.', null],
+    ['9007199254740.991', Number.MAX_SAFE_INTEGER],
+    ['9007199254740.992', null],
+  ]);
+  for (const [raw, expected] of millisecondCases) {
+    const actual = context.parsers.strictThinkingBudgetMilliseconds(raw);
+    if (actual !== expected) {
+      throw new Error(`settings time parser returned ${String(actual)} for ${JSON.stringify(raw)}; expected ${String(expected)}`);
+    }
+  }
+
+  assertContains(html, 'input.validity.badInput', 'settings malformed number-state guard');
+  if (html.includes('Math.round(milliseconds)')) {
+    throw new Error('settings time budget must not round a floating-point conversion');
+  }
+
+  inputs.default_thinking_budget_tokens.value = '1.5';
+  inputs.default_thinking_budget_seconds.value = '1';
+  assertThrowsBudgetRead(context, /whole number/, 'settings decimal token budget');
+
+  inputs.default_thinking_budget_tokens.value = '';
+  inputs.default_thinking_budget_tokens.validity.badInput = true;
+  assertThrowsBudgetRead(context, /whole number/, 'settings native malformed token state');
+
+  inputs.default_thinking_budget_tokens.validity.badInput = false;
+  inputs.default_thinking_budget_tokens.value = '0';
+  inputs.default_thinking_budget_seconds.value = '1.25';
+  const custom = context.parsers.readThinkingBudget();
+  if (custom.default_thinking_budget_tokens !== 0 || custom.default_thinking_budget_ms !== 1250) {
+    throw new Error(`settings custom budget produced ${JSON.stringify(custom)}`);
+  }
+
+  context.thinkingBudgetMode = 'unlimited';
+  const unlimited = context.parsers.readThinkingBudget();
+  if (unlimited.default_thinking_budget_tokens !== null || unlimited.default_thinking_budget_ms !== null) {
+    throw new Error(`settings Unlimited mode produced ${JSON.stringify(unlimited)}`);
+  }
+}
+
+function assertThrowsBudgetRead(context, pattern, label) {
+  try {
+    context.parsers.readThinkingBudget();
+  } catch (error) {
+    if (pattern.test(error.message)) return;
+    throw new Error(`${label} failed with unexpected error: ${error.message}`);
+  }
+  throw new Error(`${label} was accepted`);
 }
 
 checkDashboard(read(files.dashboard));

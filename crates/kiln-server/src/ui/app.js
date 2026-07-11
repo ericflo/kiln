@@ -4439,6 +4439,11 @@ function applyChatPreset(name) {
 function persistPlaygroundSettingsSoon() {
   if (persistPlaygroundSettingsSoon._h) clearTimeout(persistPlaygroundSettingsSoon._h);
   persistPlaygroundSettingsSoon._h = setTimeout(() => {
+    try {
+      readThinkingBudgetRequest({ validateDisabled: true });
+    } catch {
+      return;
+    }
     writePlaygroundSettings(capturePlaygroundSettings());
   }, 200);
 }
@@ -4471,16 +4476,49 @@ function thinkingBudgetError(message, fieldId) {
   return error;
 }
 
-function readThinkingBudgetRequest() {
+function strictThinkingBudgetInteger(raw, max) {
+  if (!/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value <= max ? value : null;
+}
+
+function strictThinkingBudgetMilliseconds(raw, max) {
+  const match = /^(?:(\d+)(?:\.(\d{1,3}))?|\.(\d{1,3}))$/.exec(raw);
+  if (!match) return null;
+
+  const wholeSeconds = BigInt(match[1] || '0');
+  const fractionalMilliseconds = BigInt((match[2] || match[3] || '').padEnd(3, '0'));
+  const milliseconds = wholeSeconds * 1000n + fractionalMilliseconds;
+  return milliseconds <= BigInt(max) ? Number(milliseconds) : null;
+}
+
+function thinkingBudgetInputRaw(input, message, fieldId) {
+  if (input?.validity?.badInput) {
+    throw thinkingBudgetError(message, fieldId);
+  }
+  return (input?.value || '').trim();
+}
+
+function readThinkingBudgetRequest({ validateDisabled = false } = {}) {
   const thinkingEnabled = document.getElementById('chat-enable-thinking')?.checked !== false;
   const mode = document.getElementById('chat-thinking-budget-mode')?.value || 'server';
-  if (!thinkingEnabled || mode === 'server') return { mode: 'server' };
+  if ((!thinkingEnabled && !validateDisabled) || mode === 'server') return { mode: 'server' };
   if (mode === 'unlimited') return { mode, tokens: null, ms: null };
 
   const tokensInput = document.getElementById('chat-thinking-budget-tokens');
   const secondsInput = document.getElementById('chat-thinking-budget-seconds');
-  const tokensRaw = (tokensInput?.value || '').trim();
-  const secondsRaw = (secondsInput?.value || '').trim();
+  const tokensMessage = 'Thinking tokens must be a whole number from 0 to 131072.';
+  const secondsMessage = 'Thinking seconds must be between 0 and 86400 with at most three decimal places.';
+  const tokensRaw = thinkingBudgetInputRaw(
+    tokensInput,
+    tokensMessage,
+    'chat-thinking-budget-tokens',
+  );
+  const secondsRaw = thinkingBudgetInputRaw(
+    secondsInput,
+    secondsMessage,
+    'chat-thinking-budget-seconds',
+  );
   if (!tokensRaw && !secondsRaw) {
     throw thinkingBudgetError(
       'Set a thinking token limit, a time limit, or choose Unlimited.',
@@ -4490,27 +4528,24 @@ function readThinkingBudgetRequest() {
 
   let tokens = null;
   if (tokensRaw) {
-    const parsed = Number(tokensRaw);
-    if (!/^\d+$/.test(tokensRaw) || !Number.isSafeInteger(parsed) || parsed > 131072) {
+    tokens = strictThinkingBudgetInteger(tokensRaw, 131072);
+    if (tokens === null) {
       throw thinkingBudgetError(
-        'Thinking tokens must be a whole number from 0 to 131072.',
+        tokensMessage,
         'chat-thinking-budget-tokens',
       );
     }
-    tokens = parsed;
   }
 
   let ms = null;
   if (secondsRaw) {
-    const decimalSeconds = /^(?:\d+|\d*\.\d{1,3})$/;
-    const seconds = Number(secondsRaw);
-    if (!decimalSeconds.test(secondsRaw) || !Number.isFinite(seconds) || seconds > 86400) {
+    ms = strictThinkingBudgetMilliseconds(secondsRaw, 86_400_000);
+    if (ms === null) {
       throw thinkingBudgetError(
-        'Thinking seconds must be between 0 and 86400 with at most three decimal places.',
+        secondsMessage,
         'chat-thinking-budget-seconds',
       );
     }
-    ms = Math.round(seconds * 1000);
   }
   return { mode, tokens, ms };
 }

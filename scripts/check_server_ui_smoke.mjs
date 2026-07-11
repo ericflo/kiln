@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { tmpdir } from 'node:os';
+import vm from 'node:vm';
 
 const repoRoot = resolve(import.meta.dirname, '..');
 const uiDir = resolve(repoRoot, 'crates/kiln-server/src/ui');
@@ -52,6 +53,37 @@ const forbiddenPublicityTerms = [
 
 function fail(message) {
   throw new Error(message);
+}
+
+function checkThinkingBudgetParserContract(source) {
+  const parserStart = source.indexOf('function strictThinkingBudgetInteger(raw, max)');
+  const parserEnd = source.indexOf('function thinkingBudgetInputRaw(', parserStart);
+  if (parserStart < 0 || parserEnd < 0) fail('Server thinking-budget parsers are missing');
+
+  const context = vm.createContext({});
+  vm.runInContext(`${source.slice(parserStart, parserEnd)}\nthis.parsers = { strictThinkingBudgetInteger, strictThinkingBudgetMilliseconds };`, context);
+  const integerCases = new Map([
+    ['0', 0], ['0002', 2], ['131072', 131072],
+    ['1.5', null], ['1e2', null], ['+1', null], ['-1', null], ['131073', null],
+  ]);
+  for (const [raw, expected] of integerCases) {
+    const actual = context.parsers.strictThinkingBudgetInteger(raw, 131072);
+    if (actual !== expected) {
+      fail(`Server token parser returned ${String(actual)} for ${JSON.stringify(raw)}; expected ${String(expected)}`);
+    }
+  }
+
+  const millisecondCases = new Map([
+    ['0', 0], ['.001', 1], ['0.010', 10], ['1.25', 1250], ['86400', 86_400_000],
+    ['1.0001', null], ['1e2', null], ['+1', null], ['-1', null], ['1.', null],
+    ['86400.001', null],
+  ]);
+  for (const [raw, expected] of millisecondCases) {
+    const actual = context.parsers.strictThinkingBudgetMilliseconds(raw, 86_400_000);
+    if (actual !== expected) {
+      fail(`Server time parser returned ${String(actual)} for ${JSON.stringify(raw)}; expected ${String(expected)}`);
+    }
+  }
 }
 
 async function loadPuppeteer() {
@@ -2843,6 +2875,63 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       && document.getElementById('chat-thinking-budget-tokens')?.disabled === false
       && document.getElementById('chat-thinking-budget-seconds')?.disabled === false
     ), { timeout: 5000 }).catch(() => fail('Custom thinking budget should reveal enabled token/time controls in Advanced'));
+
+    await page.$eval('#chat-thinking-budget-tokens', (input) => {
+      input.value = '5';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await page.$eval('#chat-thinking-budget-seconds', (input) => {
+      input.value = '1';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await page.waitForFunction(() => {
+      const settings = JSON.parse(localStorage.getItem('kiln.playground.settings.v1') || '{}');
+      return settings.thinkingBudgetTokens === '5' && settings.thinkingBudgetSeconds === '1';
+    }, { timeout: 5000 }).catch(() => fail('A valid custom thinking budget should persist before malformed-edit coverage'));
+
+    let malformedBudgetRequests = 0;
+    const trackMalformedBudgetRequest = (request) => {
+      if (request.method() === 'POST' && request.url().endsWith('/v1/chat/completions')) {
+        malformedBudgetRequests += 1;
+      }
+    };
+    page.on('request', trackMalformedBudgetRequest);
+    await page.$eval('#chat-thinking-budget-tokens', (input) => { input.value = '1.5'; });
+    await page.$eval('#chat-thinking-budget-seconds', (input) => { input.value = '1'; });
+    await page.type('#chat-input', 'This malformed budget must not be sent.');
+    await page.click('#chat-send');
+    await page.waitForFunction(() => (
+      /Thinking tokens must be a whole number/.test(document.getElementById('toasts')?.textContent || '')
+      && document.activeElement?.id === 'chat-thinking-budget-tokens'
+    ), { timeout: 5000 }).catch(() => fail('A decimal token budget should show an error and focus the token field'));
+
+    await page.$eval('#toasts', (toasts) => toasts.replaceChildren());
+    await page.$eval('#chat-thinking-budget-tokens', (input) => { input.value = ''; input.focus(); });
+    await page.keyboard.type('e');
+    const nativeBadInput = await page.$eval('#chat-thinking-budget-tokens', (input) => input.validity.badInput);
+    if (!nativeBadInput) fail('The browser did not enter the native malformed number state used by the budget regression');
+    await page.click('#chat-send');
+    await page.waitForFunction(() => (
+      /Thinking tokens must be a whole number/.test(document.getElementById('toasts')?.textContent || '')
+      && document.activeElement?.id === 'chat-thinking-budget-tokens'
+    ), { timeout: 5000 }).catch(() => fail('A native malformed token state should show an error instead of reading as blank'));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    page.off('request', trackMalformedBudgetRequest);
+    if (malformedBudgetRequests !== 0) {
+      fail(`Malformed thinking budgets must not produce a request; observed ${malformedBudgetRequests}`);
+    }
+    const persistedAfterBadInput = await page.evaluate(() => {
+      const settings = JSON.parse(localStorage.getItem('kiln.playground.settings.v1') || '{}');
+      return [settings.thinkingBudgetTokens, settings.thinkingBudgetSeconds];
+    });
+    if (JSON.stringify(persistedAfterBadInput) !== JSON.stringify(['5', '1'])) {
+      fail(`A malformed native number state must not overwrite the last valid persisted budget, got ${JSON.stringify(persistedAfterBadInput)}`);
+    }
+    await page.$eval('#chat-input', (input) => {
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
     await page.$eval('#chat-thinking-budget-tokens', (input) => {
       input.value = '0';
       input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -3279,6 +3368,8 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await browser.close();
   }
 }
+
+checkThinkingBudgetParserContract(await readFile(uiAppJsPath, 'utf8'));
 
 const emptyAdapterScenario = await startServer({ availableAdapters: [] });
 try {
