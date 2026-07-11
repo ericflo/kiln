@@ -443,7 +443,12 @@ impl Default for SftConfig {
 //
 // See `docs/plans/echo-integration-plan.md` §2 and §B.1 for the design.
 
-pub use crate::trajectory::{AgenticGroup, ScoredRollout, TurnKind, TurnSegment};
+pub use crate::trajectory::{
+    AgenticGroup, ROLLOUT_PROVENANCE_SCHEMA_V1, RolloutActionTokenSourceV1, RolloutActionTokenV1,
+    RolloutAdapterIdentityV1, RolloutBehaviorPolicyIdentityV1, RolloutProvenanceV1,
+    RolloutSamplingConfigV1, RolloutThinkingBudgetV1, RolloutTokenizerIdentityV1, ScoredRollout,
+    TurnKind, TurnSegment,
+};
 
 /// Legacy alias for [`ScoredRollout`]. Use the canonical name in new code.
 pub type ScoredCompletion = ScoredRollout;

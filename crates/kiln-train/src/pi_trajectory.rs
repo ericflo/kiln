@@ -142,6 +142,7 @@ pub fn scored_rollout_from_pi_session(
         text,
         reward,
         trajectory: parsed.trajectory,
+        provenance: None,
     }
 }
 

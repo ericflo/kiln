@@ -25,9 +25,462 @@
 //! don't need to change. The renames are deliberately *additive*: the same
 //! struct, the same field names, plus an optional `trajectory` field.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::ChatMessage;
+
+/// Version tag for exact, behavior-policy-bound rollout provenance.
+pub const ROLLOUT_PROVENANCE_SCHEMA_V1: &str = "kiln.rollout-provenance.v1";
+
+const MAX_ROLLOUT_IDENTITY_TEXT_BYTES: usize = 256;
+const MAX_ROLLOUT_BACKEND_BYTES: usize = 64;
+const MAX_ROLLOUT_TOKEN_COUNT: usize = 16_777_216;
+const MAX_ROLLOUT_STOP_SEQUENCES: usize = 256;
+const MAX_ROLLOUT_STOP_BYTES: usize = 16 * 1024;
+
+/// Whether an action token came from the model distribution or a deterministic
+/// runtime controller such as thinking-budget closure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RolloutActionTokenSourceV1 {
+    Sampled,
+    Forced,
+}
+
+/// One exact action-token decision in the full model input sequence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutActionTokenV1 {
+    /// Index into [`RolloutProvenanceV1::input_token_ids`].
+    pub sequence_index: usize,
+    /// Redundant token ID used to make index drift fail closed.
+    pub token_id: u32,
+    pub source: RolloutActionTokenSourceV1,
+    /// Log-probability under the effective post-filter behavior distribution.
+    /// Required for sampled tokens and forbidden for forced tokens.
+    pub behavior_logprob: Option<f64>,
+}
+
+impl RolloutActionTokenV1 {
+    pub fn sampled(sequence_index: usize, token_id: u32, behavior_logprob: f64) -> Self {
+        Self {
+            sequence_index,
+            token_id,
+            source: RolloutActionTokenSourceV1::Sampled,
+            behavior_logprob: Some(behavior_logprob),
+        }
+    }
+
+    pub fn forced(sequence_index: usize, token_id: u32) -> Self {
+        Self {
+            sequence_index,
+            token_id,
+            source: RolloutActionTokenSourceV1::Forced,
+            behavior_logprob: None,
+        }
+    }
+}
+
+/// Content identity of the adapter used by the behavior policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutAdapterIdentityV1 {
+    pub name: String,
+    pub content_sha256: String,
+}
+
+/// Immutable model/runtime identity of the policy that sampled the rollout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutBehaviorPolicyIdentityV1 {
+    pub served_model_id: String,
+    pub base_model_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<RolloutAdapterIdentityV1>,
+    pub inference_config_sha256: String,
+    pub implementation: String,
+}
+
+/// Exact tokenizer and chat-template identities used to build model inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutTokenizerIdentityV1 {
+    pub vocab_sha256: String,
+    pub config_sha256: String,
+    pub chat_template_sha256: String,
+}
+
+/// Effective thinking-budget controls that can replace sampled tokens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutThinkingBudgetV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_time_ms: Option<u64>,
+    pub close_token_ids: Vec<u32>,
+}
+
+/// Fully resolved sampling controls used by the behavior policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutSamplingConfigV1 {
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: u32,
+    pub min_p: f32,
+    pub max_tokens: usize,
+    pub repetition_penalty: f32,
+    pub presence_penalty: f32,
+    pub frequency_penalty: f32,
+    pub stop: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<RolloutThinkingBudgetV1>,
+}
+
+/// Exact, versioned provenance required for off-policy importance correction.
+///
+/// `input_token_ids` is the complete model sequence at rollout completion,
+/// including the original prompt. `action_tokens` identifies model decisions
+/// within that sequence; sampled decisions carry behavior log-probabilities,
+/// while deterministic runtime insertions are explicit and never masquerade
+/// as samples from the model.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RolloutProvenanceV1 {
+    schema: String,
+    pub input_token_ids: Vec<u32>,
+    pub prompt_token_count: usize,
+    pub action_tokens: Vec<RolloutActionTokenV1>,
+    pub behavior_policy: RolloutBehaviorPolicyIdentityV1,
+    pub tokenizer: RolloutTokenizerIdentityV1,
+    pub sampling: RolloutSamplingConfigV1,
+    pub seed: u64,
+    pub generation_backend: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RolloutProvenanceV1Wire {
+    schema: String,
+    input_token_ids: Vec<u32>,
+    prompt_token_count: usize,
+    action_tokens: Vec<RolloutActionTokenV1>,
+    behavior_policy: RolloutBehaviorPolicyIdentityV1,
+    tokenizer: RolloutTokenizerIdentityV1,
+    sampling: RolloutSamplingConfigV1,
+    seed: u64,
+    generation_backend: String,
+}
+
+impl RolloutProvenanceV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        input_token_ids: Vec<u32>,
+        prompt_token_count: usize,
+        action_tokens: Vec<RolloutActionTokenV1>,
+        behavior_policy: RolloutBehaviorPolicyIdentityV1,
+        tokenizer: RolloutTokenizerIdentityV1,
+        sampling: RolloutSamplingConfigV1,
+        seed: u64,
+        generation_backend: impl Into<String>,
+    ) -> Result<Self, String> {
+        let provenance = Self {
+            schema: ROLLOUT_PROVENANCE_SCHEMA_V1.to_string(),
+            input_token_ids,
+            prompt_token_count,
+            action_tokens,
+            behavior_policy,
+            tokenizer,
+            sampling,
+            seed,
+            generation_backend: generation_backend.into(),
+        };
+        provenance.validate()?;
+        Ok(provenance)
+    }
+
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    pub fn sampled_action_tokens(&self) -> impl Iterator<Item = &RolloutActionTokenV1> {
+        self.action_tokens
+            .iter()
+            .filter(|token| token.source == RolloutActionTokenSourceV1::Sampled)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != ROLLOUT_PROVENANCE_SCHEMA_V1 {
+            return Err(format!(
+                "unsupported rollout provenance schema {:?}; expected {:?}",
+                self.schema, ROLLOUT_PROVENANCE_SCHEMA_V1
+            ));
+        }
+        if self.input_token_ids.is_empty() {
+            return Err("rollout provenance input_token_ids must not be empty".to_string());
+        }
+        if self.input_token_ids.len() > MAX_ROLLOUT_TOKEN_COUNT {
+            return Err(format!(
+                "rollout provenance contains {} input tokens; maximum is {MAX_ROLLOUT_TOKEN_COUNT}",
+                self.input_token_ids.len()
+            ));
+        }
+        if self.prompt_token_count == 0 || self.prompt_token_count > self.input_token_ids.len() {
+            return Err(format!(
+                "rollout provenance prompt_token_count {} is outside 1..={}",
+                self.prompt_token_count,
+                self.input_token_ids.len()
+            ));
+        }
+        if self.action_tokens.is_empty() {
+            return Err("rollout provenance action_tokens must not be empty".to_string());
+        }
+        if self.action_tokens.len() > self.input_token_ids.len() {
+            return Err(format!(
+                "rollout provenance contains {} action tokens for only {} input tokens",
+                self.action_tokens.len(),
+                self.input_token_ids.len()
+            ));
+        }
+
+        let mut previous_index = None;
+        let mut sampled_count = 0usize;
+        let mut forced_count = 0usize;
+        for action in &self.action_tokens {
+            if action.sequence_index < self.prompt_token_count
+                || action.sequence_index >= self.input_token_ids.len()
+            {
+                return Err(format!(
+                    "rollout action token index {} is outside generated sequence range {}..{}",
+                    action.sequence_index,
+                    self.prompt_token_count,
+                    self.input_token_ids.len()
+                ));
+            }
+            if previous_index.is_some_and(|previous| action.sequence_index <= previous) {
+                return Err(format!(
+                    "rollout action token indices must be strictly increasing; found {} after {}",
+                    action.sequence_index,
+                    previous_index.unwrap_or_default()
+                ));
+            }
+            previous_index = Some(action.sequence_index);
+            let actual_token_id = self.input_token_ids[action.sequence_index];
+            if action.token_id != actual_token_id {
+                return Err(format!(
+                    "rollout action token at index {} claims id {} but input_token_ids contains {}",
+                    action.sequence_index, action.token_id, actual_token_id
+                ));
+            }
+            match (action.source, action.behavior_logprob) {
+                (RolloutActionTokenSourceV1::Sampled, Some(logprob))
+                    if logprob.is_finite() && logprob <= 1e-6 =>
+                {
+                    sampled_count += 1;
+                }
+                (RolloutActionTokenSourceV1::Sampled, Some(logprob)) => {
+                    return Err(format!(
+                        "sampled rollout action token at index {} has invalid behavior_logprob {logprob}",
+                        action.sequence_index
+                    ));
+                }
+                (RolloutActionTokenSourceV1::Sampled, None) => {
+                    return Err(format!(
+                        "sampled rollout action token at index {} is missing behavior_logprob",
+                        action.sequence_index
+                    ));
+                }
+                (RolloutActionTokenSourceV1::Forced, None) => forced_count += 1,
+                (RolloutActionTokenSourceV1::Forced, Some(_)) => {
+                    return Err(format!(
+                        "forced rollout action token at index {} must not carry behavior_logprob",
+                        action.sequence_index
+                    ));
+                }
+            }
+        }
+        if sampled_count == 0 {
+            return Err(
+                "rollout provenance must contain at least one sampled action token".to_string(),
+            );
+        }
+
+        validate_identity_text(
+            "behavior_policy.served_model_id",
+            &self.behavior_policy.served_model_id,
+            MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
+        )?;
+        validate_sha256(
+            "behavior_policy.base_model_sha256",
+            &self.behavior_policy.base_model_sha256,
+        )?;
+        validate_sha256(
+            "behavior_policy.inference_config_sha256",
+            &self.behavior_policy.inference_config_sha256,
+        )?;
+        validate_identity_text(
+            "behavior_policy.implementation",
+            &self.behavior_policy.implementation,
+            MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
+        )?;
+        if let Some(adapter) = &self.behavior_policy.adapter {
+            validate_identity_text(
+                "behavior_policy.adapter.name",
+                &adapter.name,
+                MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
+            )?;
+            validate_sha256(
+                "behavior_policy.adapter.content_sha256",
+                &adapter.content_sha256,
+            )?;
+        }
+        validate_sha256("tokenizer.vocab_sha256", &self.tokenizer.vocab_sha256)?;
+        validate_sha256("tokenizer.config_sha256", &self.tokenizer.config_sha256)?;
+        validate_sha256(
+            "tokenizer.chat_template_sha256",
+            &self.tokenizer.chat_template_sha256,
+        )?;
+        validate_identity_text(
+            "generation_backend",
+            &self.generation_backend,
+            MAX_ROLLOUT_BACKEND_BYTES,
+        )?;
+        validate_sampling_config(&self.sampling)?;
+        if forced_count > 0 {
+            let budget = self.sampling.thinking_budget.as_ref().ok_or_else(|| {
+                "forced rollout action tokens require sampling.thinking_budget provenance"
+                    .to_string()
+            })?;
+            if let Some(action) = self.action_tokens.iter().find(|action| {
+                action.source == RolloutActionTokenSourceV1::Forced
+                    && !budget.close_token_ids.contains(&action.token_id)
+            }) {
+                return Err(format!(
+                    "forced rollout action token id {} at index {} is absent from sampling.thinking_budget.close_token_ids",
+                    action.token_id, action.sequence_index
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for RolloutProvenanceV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RolloutProvenanceV1Wire::deserialize(deserializer)?;
+        let provenance = Self {
+            schema: wire.schema,
+            input_token_ids: wire.input_token_ids,
+            prompt_token_count: wire.prompt_token_count,
+            action_tokens: wire.action_tokens,
+            behavior_policy: wire.behavior_policy,
+            tokenizer: wire.tokenizer,
+            sampling: wire.sampling,
+            seed: wire.seed,
+            generation_backend: wire.generation_backend,
+        };
+        provenance.validate().map_err(serde::de::Error::custom)?;
+        Ok(provenance)
+    }
+}
+
+fn validate_sampling_config(config: &RolloutSamplingConfigV1) -> Result<(), String> {
+    if !config.temperature.is_finite() || config.temperature < 0.0 {
+        return Err(format!(
+            "sampling.temperature must be finite and non-negative, got {}",
+            config.temperature
+        ));
+    }
+    if !config.top_p.is_finite() || !(0.0..=1.0).contains(&config.top_p) {
+        return Err(format!(
+            "sampling.top_p must be finite and within [0, 1], got {}",
+            config.top_p
+        ));
+    }
+    if !config.min_p.is_finite() || !(0.0..=1.0).contains(&config.min_p) {
+        return Err(format!(
+            "sampling.min_p must be finite and within [0, 1], got {}",
+            config.min_p
+        ));
+    }
+    if config.max_tokens == 0 {
+        return Err("sampling.max_tokens must be greater than zero".to_string());
+    }
+    if !config.repetition_penalty.is_finite() || config.repetition_penalty <= 0.0 {
+        return Err(format!(
+            "sampling.repetition_penalty must be finite and positive, got {}",
+            config.repetition_penalty
+        ));
+    }
+    for (field, value) in [
+        ("sampling.presence_penalty", config.presence_penalty),
+        ("sampling.frequency_penalty", config.frequency_penalty),
+    ] {
+        if !value.is_finite() || !(-2.0..=2.0).contains(&value) {
+            return Err(format!(
+                "{field} must be finite and within [-2, 2], got {value}"
+            ));
+        }
+    }
+    if config.stop.len() > MAX_ROLLOUT_STOP_SEQUENCES {
+        return Err(format!(
+            "sampling.stop has {} entries; maximum is {MAX_ROLLOUT_STOP_SEQUENCES}",
+            config.stop.len()
+        ));
+    }
+    let stop_bytes = config.stop.iter().map(String::len).sum::<usize>();
+    if stop_bytes > MAX_ROLLOUT_STOP_BYTES {
+        return Err(format!(
+            "sampling.stop contains {stop_bytes} bytes; maximum is {MAX_ROLLOUT_STOP_BYTES}"
+        ));
+    }
+    if config.stop.iter().any(|stop| stop.is_empty()) {
+        return Err("sampling.stop entries must not be empty".to_string());
+    }
+    if let Some(budget) = &config.thinking_budget {
+        if budget.max_tokens.is_none() && budget.max_time_ms.is_none() {
+            return Err("sampling.thinking_budget must contain a token or time limit".to_string());
+        }
+        if budget.close_token_ids.is_empty() {
+            return Err("sampling.thinking_budget.close_token_ids must not be empty".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_identity_text(field: &str, value: &str, max_bytes: usize) -> Result<(), String> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > max_bytes
+        || value.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "{field} must be non-empty, trimmed, control-free, and at most {max_bytes} bytes"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sha256(field: &str, value: &str) -> Result<(), String> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(format!(
+            "{field} must use the sha256:<64 lowercase hex> form"
+        ));
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!(
+            "{field} must use the sha256:<64 lowercase hex> form"
+        ));
+    }
+    Ok(())
+}
 
 /// What kind of supervision applies to tokens inside a [`TurnSegment`].
 ///
@@ -123,6 +576,11 @@ pub struct ScoredRollout {
     /// informational/legacy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trajectory: Vec<TurnSegment>,
+    /// Exact generation provenance. Required when training enables recorded
+    /// behavior-policy importance correction; legacy data may omit it only
+    /// under an explicitly provenance-free training mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<RolloutProvenanceV1>,
 }
 
 impl ScoredRollout {
@@ -132,6 +590,7 @@ impl ScoredRollout {
             text,
             reward,
             trajectory: Vec::new(),
+            provenance: None,
         }
     }
 
@@ -144,7 +603,14 @@ impl ScoredRollout {
             text,
             reward,
             trajectory,
+            provenance: None,
         }
+    }
+
+    /// Attach validated exact generation provenance.
+    pub fn with_provenance(mut self, provenance: RolloutProvenanceV1) -> Self {
+        self.provenance = Some(provenance);
+        self
     }
 
     /// True when this rollout carries a multi-turn trajectory ECHO can use.
@@ -219,6 +685,166 @@ impl AgenticGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hash(fill: char) -> String {
+        format!("sha256:{}", fill.to_string().repeat(64))
+    }
+
+    fn valid_provenance() -> RolloutProvenanceV1 {
+        RolloutProvenanceV1::new(
+            vec![10, 11, 20, 21],
+            2,
+            vec![
+                RolloutActionTokenV1::sampled(2, 20, -0.25),
+                RolloutActionTokenV1::sampled(3, 21, -1.5),
+            ],
+            RolloutBehaviorPolicyIdentityV1 {
+                served_model_id: "Qwen/Qwen3.5-4B".to_string(),
+                base_model_sha256: hash('a'),
+                adapter: Some(RolloutAdapterIdentityV1 {
+                    name: "reasoning-v3".to_string(),
+                    content_sha256: hash('b'),
+                }),
+                inference_config_sha256: hash('c'),
+                implementation: "kiln/0.4.1/rocm".to_string(),
+            },
+            RolloutTokenizerIdentityV1 {
+                vocab_sha256: hash('d'),
+                config_sha256: hash('e'),
+                chat_template_sha256: hash('f'),
+            },
+            RolloutSamplingConfigV1 {
+                temperature: 0.7,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                max_tokens: 128,
+                repetition_penalty: 1.0,
+                presence_penalty: 0.0,
+                frequency_penalty: 0.0,
+                stop: vec!["<|im_end|>".to_string()],
+                thinking_budget: None,
+            },
+            42,
+            "rocm",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rollout_provenance_v1_round_trips_canonically() {
+        let provenance = valid_provenance();
+        let json = serde_json::to_string(&provenance).unwrap();
+        let parsed: RolloutProvenanceV1 = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, provenance);
+        assert_eq!(parsed.schema(), ROLLOUT_PROVENANCE_SCHEMA_V1);
+        assert_eq!(parsed.sampled_action_tokens().count(), 2);
+        assert!(json.contains(ROLLOUT_PROVENANCE_SCHEMA_V1));
+    }
+
+    #[test]
+    fn scored_rollout_round_trips_exact_provenance() {
+        let rollout =
+            ScoredRollout::legacy("answer".to_string(), 1.0).with_provenance(valid_provenance());
+        let json = serde_json::to_string(&rollout).unwrap();
+        let parsed: ScoredRollout = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.provenance, rollout.provenance);
+    }
+
+    #[test]
+    fn rollout_provenance_rejects_unknown_or_misaligned_fields() {
+        let mut value = serde_json::to_value(valid_provenance()).unwrap();
+        value["unexpected"] = serde_json::json!(true);
+        let error = serde_json::from_value::<RolloutProvenanceV1>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field"), "{error}");
+
+        let mut value = serde_json::to_value(valid_provenance()).unwrap();
+        value["action_tokens"][0]["token_id"] = serde_json::json!(999);
+        let error = serde_json::from_value::<RolloutProvenanceV1>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("claims id 999"), "{error}");
+
+        let mut value = serde_json::to_value(valid_provenance()).unwrap();
+        value["action_tokens"][1]["sequence_index"] = serde_json::json!(2);
+        let error = serde_json::from_value::<RolloutProvenanceV1>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("strictly increasing"), "{error}");
+    }
+
+    #[test]
+    fn rollout_provenance_rejects_invalid_behavior_logprobs() {
+        let mut value = serde_json::to_value(valid_provenance()).unwrap();
+        value["action_tokens"][0]["behavior_logprob"] = serde_json::Value::Null;
+        let error = serde_json::from_value::<RolloutProvenanceV1>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing behavior_logprob"), "{error}");
+
+        let mut value = serde_json::to_value(valid_provenance()).unwrap();
+        value["action_tokens"][0]["behavior_logprob"] = serde_json::json!(0.1);
+        let error = serde_json::from_value::<RolloutProvenanceV1>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid behavior_logprob"), "{error}");
+
+        let mut value = serde_json::to_value(valid_provenance()).unwrap();
+        value["action_tokens"][0]["source"] = serde_json::json!("forced");
+        let error = serde_json::from_value::<RolloutProvenanceV1>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must not carry behavior_logprob"), "{error}");
+    }
+
+    #[test]
+    fn rollout_provenance_requires_budget_for_forced_tokens() {
+        let mut value = serde_json::to_value(valid_provenance()).unwrap();
+        value["action_tokens"][0]["source"] = serde_json::json!("forced");
+        value["action_tokens"][0]["behavior_logprob"] = serde_json::Value::Null;
+        let error = serde_json::from_value::<RolloutProvenanceV1>(value.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("require sampling.thinking_budget"),
+            "{error}"
+        );
+
+        value["sampling"]["thinking_budget"] = serde_json::json!({
+            "max_tokens": 4,
+            "close_token_ids": [999]
+        });
+        let error = serde_json::from_value::<RolloutProvenanceV1>(value.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("absent from"), "{error}");
+
+        value["sampling"]["thinking_budget"]["close_token_ids"] = serde_json::json!([20]);
+        let parsed = serde_json::from_value::<RolloutProvenanceV1>(value).unwrap();
+        assert_eq!(
+            parsed.action_tokens[0].source,
+            RolloutActionTokenSourceV1::Forced
+        );
+    }
+
+    #[test]
+    fn rollout_provenance_rejects_invalid_identity_and_sampling() {
+        let mut value = serde_json::to_value(valid_provenance()).unwrap();
+        value["behavior_policy"]["base_model_sha256"] = serde_json::json!("model-latest");
+        let error = serde_json::from_value::<RolloutProvenanceV1>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sha256:<64 lowercase hex>"), "{error}");
+
+        let mut value = serde_json::to_value(valid_provenance()).unwrap();
+        value["sampling"]["top_p"] = serde_json::json!(1.5);
+        let error = serde_json::from_value::<RolloutProvenanceV1>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sampling.top_p"), "{error}");
+    }
 
     #[test]
     fn legacy_scored_completion_text_round_trips() {
