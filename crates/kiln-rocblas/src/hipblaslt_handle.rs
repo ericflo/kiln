@@ -264,6 +264,9 @@ struct HandleInner {
     algo_cache_misses: AtomicU64,
     /// Runtime heuristic results inserted into the shared cache.
     algo_cache_inserts: AtomicU64,
+    /// Valid matmuls served by hipBLASLt's implicit/default algorithm after
+    /// the explicit heuristic returned no candidates.
+    implicit_algo_fallbacks: AtomicU64,
     /// Workspace policy + counters.
     workspace_pool: Mutex<WorkspacePool>,
     /// Backing workspace buffers keyed by HIP stream handle. Each buffer is
@@ -293,6 +296,10 @@ impl std::fmt::Debug for HipblasLtMatmulHandle {
             .field("algo_cache_hits", &stats.hits)
             .field("algo_cache_misses", &stats.misses)
             .field("algo_cache_inserts", &stats.inserts)
+            .field(
+                "implicit_algo_fallbacks",
+                &self.implicit_algo_fallback_count(),
+            )
             .finish()
     }
 }
@@ -339,6 +346,7 @@ impl HipblasLtMatmulHandle {
                 algo_cache_hits: AtomicU64::new(0),
                 algo_cache_misses: AtomicU64::new(0),
                 algo_cache_inserts: AtomicU64::new(0),
+                implicit_algo_fallbacks: AtomicU64::new(0),
                 workspace_pool: Mutex::new(pool),
                 workspace_by_stream: Mutex::new(HashMap::new()),
             }),
@@ -398,6 +406,11 @@ impl HipblasLtMatmulHandle {
             misses: self.inner.algo_cache_misses.load(Ordering::Relaxed),
             inserts: self.inner.algo_cache_inserts.load(Ordering::Relaxed),
         }
+    }
+
+    /// Number of calls that required hipBLASLt's uncached implicit algorithm.
+    pub fn implicit_algo_fallback_count(&self) -> u64 {
+        self.inner.implicit_algo_fallbacks.load(Ordering::Relaxed)
     }
 
     /// ROCm device index this handle is bound to.
@@ -479,8 +492,17 @@ impl HipblasLtMatmulHandle {
             self.inner.algo_cache_misses.fetch_add(1, Ordering::Relaxed);
         }
 
+        // A cache miss is the only opportunity to discover an algorithm for a
+        // shape. Give the heuristic the full configured budget; starting at a
+        // 1 MiB allocation silently excluded otherwise-valid algorithms and
+        // could turn a new attention shape into a request failure.
+        let workspace_request = heuristic_workspace_request(
+            cache_hit,
+            cached_workspace_bytes,
+            self.workspace_pool().max_bytes,
+        );
         let (workspace_ptr_raw, workspace_bytes) =
-            self.ensure_workspace(stream, cached_workspace_bytes)?;
+            self.ensure_workspace(stream, workspace_request)?;
 
         let mut algo_blob_out = vec![0u8; ALGO_BLOB_MAX];
         let mut algo_blob_out_len: u64 = algo_blob_out.len() as u64;
@@ -517,6 +539,12 @@ impl HipblasLtMatmulHandle {
         }
 
         algo_blob_out.truncate(algo_blob_out_len as usize);
+
+        if cached_blob.is_empty() && chosen_algo_id < 0 && algo_blob_out.is_empty() {
+            self.inner
+                .implicit_algo_fallbacks
+                .fetch_add(1, Ordering::Relaxed);
+        }
 
         // Update workspace pool counters.
         {
@@ -717,6 +745,10 @@ fn bytes_for_dtype(dtype: &str) -> u64 {
     }
 }
 
+fn heuristic_workspace_request(cache_hit: bool, cached_bytes: u64, max_bytes: u64) -> u64 {
+    if cache_hit { cached_bytes } else { max_bytes }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,6 +764,14 @@ mod tests {
             Some(FfiError::Unknown(-99)) => {}
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cache_miss_searches_the_full_workspace_budget() {
+        assert_eq!(heuristic_workspace_request(false, 0, 32 << 20), 32 << 20);
+        assert_eq!(heuristic_workspace_request(false, 4096, 8 << 20), 8 << 20);
+        assert_eq!(heuristic_workspace_request(true, 4096, 32 << 20), 4096);
+        assert_eq!(heuristic_workspace_request(true, 0, 32 << 20), 0);
     }
 
     #[test]

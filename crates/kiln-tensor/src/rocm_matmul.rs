@@ -113,6 +113,27 @@ fn rocm_blaslt_request(request: BlasLtMatmulRequest) -> MatmulRequest {
     }
 }
 
+fn rocm_matmul_execution_error(
+    op: &str,
+    request: &MatmulRequest,
+    logical_batch: usize,
+    batch_index: usize,
+    error: impl std::fmt::Display,
+) -> crate::Error {
+    crate::Error::Msg(format!(
+        "{op}: hipBLASLt matmul failed: m={} n={} k={} logical_batch={} batch_index={} dtype={} output_dtype={} a_layout={:?} b_layout={:?}: {error}",
+        request.m,
+        request.n,
+        request.k,
+        logical_batch,
+        batch_index,
+        request.dtype,
+        request.output_dtype,
+        request.a_layout,
+        request.b_layout,
+    ))
+}
+
 fn env_truthy(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| {
         matches!(
@@ -885,7 +906,9 @@ fn rocm_matmul_dispatch(
         unsafe {
             handle
                 .matmul(&stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
-                .map_err(|e| crate::Error::Msg(format!("{op}: handle.matmul failed: {e}")))?;
+                .map_err(|error| {
+                    rocm_matmul_execution_error(op, &request, batch, batch_i, error)
+                })?;
         }
     }
 
@@ -997,7 +1020,9 @@ pub fn rocm_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
         unsafe {
             handle
                 .matmul(&stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
-                .map_err(|e| crate::Error::Msg(format!("{OP}: handle.matmul failed: {e}")))?;
+                .map_err(|error| {
+                    rocm_matmul_execution_error(OP, &request, batch, batch_i, error)
+                })?;
         }
     }
     sync_after_rocm_matmul_if_needed(device_index, OP, m, n, k_a, batch)?;
@@ -1110,7 +1135,9 @@ pub fn rocm_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
         unsafe {
             handle
                 .matmul(&stream, &request, a_ptr, b_ptr, c_ptr, bias_ptr)
-                .map_err(|e| crate::Error::Msg(format!("{OP}: handle.matmul failed: {e}")))?;
+                .map_err(|error| {
+                    rocm_matmul_execution_error(OP, &request, batch, batch_i, error)
+                })?;
         }
     }
 

@@ -386,3 +386,46 @@ fn matmul_bf16_inputs_f32_output() {
         .unwrap();
     check_close(&got, &want, 3e-2, (k as f32) * 1e-3, "bf16->f32 matmul");
 }
+
+#[test]
+fn matmul_bf16_inputs_f32_output_attention_chunk_shapes() {
+    if no_rocm() {
+        return;
+    }
+
+    use half::bf16;
+    for &(m, k, n) in &[
+        (32usize, 256usize, 32usize),
+        (32, 256, 64),
+        (32, 256, 96),
+        (32, 256, 128),
+        (32, 256, 160),
+        (32, 256, 192),
+        (32, 256, 224),
+        (14, 256, 238),
+    ] {
+        let a_bf: Vec<bf16> = (0..m * k).map(|i| bf16::from_f32(val(i, 1.0))).collect();
+        let b_bf: Vec<bf16> = (0..k * n)
+            .map(|i| bf16::from_f32(val(i + 13, 1.0)))
+            .collect();
+        let a_f32: Vec<f32> = a_bf.iter().map(|value| value.to_f32()).collect();
+        let b_f32: Vec<f32> = b_bf.iter().map(|value| value.to_f32()).collect();
+        let want = cpu_matmul(&a_f32, &b_f32, m, k, n);
+
+        let ta = Tensor::from_vec_on(Device::Rocm(0), a_bf, vec![m, k]).expect("attention q");
+        let tb = Tensor::from_vec_on(Device::Rocm(0), b_bf, vec![k, n]).expect("attention k");
+        let tc = kiln_tensor::rocm_matmul_to_dtype(&ta, &tb, DType::F32)
+            .unwrap_or_else(|error| panic!("attention bf16->f32 {m}x{k}x{n}: {error}"));
+        let got = kiln_tensor::rocm_to_host_copy(&tc)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        check_close(
+            &got,
+            &want,
+            3e-2,
+            (k as f32) * 1e-3,
+            &format!("attention bf16->f32 {m}x{k}x{n}"),
+        );
+    }
+}

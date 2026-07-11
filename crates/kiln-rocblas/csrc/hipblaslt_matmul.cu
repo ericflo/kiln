@@ -32,9 +32,12 @@
 //
 // # Determinism stance
 //
-// The same algo + same workspace + same stream produces bit-identical
-// outputs. The serialized `hipblasLtMatmulAlgo_t` blob pins the algo
-// selection so it is reproducible across calls.
+// The same explicit algo + same workspace + same stream produces
+// bit-identical outputs. The serialized `hipblasLtMatmulAlgo_t` blob pins
+// normal selection so it is reproducible across calls. If the explicit
+// heuristic returns no candidates for a valid shape, hipBLASLt's supported
+// implicit/default algorithm is a correctness fallback; it is reported with
+// algo id -1 and no cache blob rather than failing the request.
 //
 // # Error codes
 //
@@ -417,6 +420,7 @@ extern "C" int kiln_blas_hipblaslt_matmul(
     {
         hipblasLtMatmulAlgo_t algo;
         bool have_algo = false;
+        bool use_implicit_algo = false;
         uint64_t ws_actual = 0;
         int32_t algo_id_out = -1;
 
@@ -440,22 +444,25 @@ extern "C" int kiln_blas_hipblaslt_matmul(
                 ctx->lt, matmul_desc, b_desc, a_desc, c_desc, c_desc,
                 pref, 1, &h_result, &returned);
             if (hst != HIPBLAS_STATUS_SUCCESS || returned == 0) {
-                ret = KILN_BLAS_ERR_HEURISTIC;
-                goto cleanup;
-            }
-            algo = h_result.algo;
-            ws_actual = h_result.workspaceSize;
-            algo_id_out = algo_id_from_blob(algo);
+                use_implicit_algo = true;
+                ws_actual = 0;
+                algo_id_out = -1;
+                if (algo_blob_out_len != nullptr) *algo_blob_out_len = 0;
+            } else {
+                algo = h_result.algo;
+                ws_actual = h_result.workspaceSize;
+                algo_id_out = algo_id_from_blob(algo);
 
-            if (algo_blob_out != nullptr && algo_blob_out_len != nullptr) {
-                if (*algo_blob_out_len < sizeof(hipblasLtMatmulAlgo_t)) {
-                    ret = KILN_BLAS_ERR_ALGO_BLOB_TOO_SMALL;
-                    goto cleanup;
+                if (algo_blob_out != nullptr && algo_blob_out_len != nullptr) {
+                    if (*algo_blob_out_len < sizeof(hipblasLtMatmulAlgo_t)) {
+                        ret = KILN_BLAS_ERR_ALGO_BLOB_TOO_SMALL;
+                        goto cleanup;
+                    }
+                    std::memcpy(algo_blob_out, &algo, sizeof(hipblasLtMatmulAlgo_t));
+                    *algo_blob_out_len = sizeof(hipblasLtMatmulAlgo_t);
+                } else if (algo_blob_out_len != nullptr) {
+                    *algo_blob_out_len = 0;
                 }
-                std::memcpy(algo_blob_out, &algo, sizeof(hipblasLtMatmulAlgo_t));
-                *algo_blob_out_len = sizeof(hipblasLtMatmulAlgo_t);
-            } else if (algo_blob_out_len != nullptr) {
-                *algo_blob_out_len = 0;
             }
         }
 
@@ -463,7 +470,7 @@ extern "C" int kiln_blas_hipblaslt_matmul(
         if (chosen_workspace_bytes != nullptr) *chosen_workspace_bytes = ws_actual;
 
         // Reject if the algo's workspace exceeds the caller's budget.
-        if (ws_actual > workspace_bytes && workspace_bytes > 0) {
+        if (!use_implicit_algo && ws_actual > workspace_bytes && workspace_bytes > 0) {
             ret = KILN_BLAS_ERR_PREFERENCE;
             goto cleanup;
         }
@@ -476,11 +483,11 @@ extern "C" int kiln_blas_hipblaslt_matmul(
             &beta,
             c_ptr, c_desc,
             c_ptr, c_desc,
-            &algo,
+            use_implicit_algo ? nullptr : &algo,
             workspace_ptr, workspace_bytes,
             stream);
         if (st != HIPBLAS_STATUS_SUCCESS) {
-            ret = KILN_BLAS_ERR_MATMUL;
+            ret = use_implicit_algo ? KILN_BLAS_ERR_HEURISTIC : KILN_BLAS_ERR_MATMUL;
             goto cleanup;
         }
     }
