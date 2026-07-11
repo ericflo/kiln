@@ -91,11 +91,14 @@ max_decode_batch = "auto"                # Concurrent decode-row ceiling. "auto"
                                       # block. Omit for unlimited. Requests inherit this
                                       # when thinking_budget_tokens is omitted; explicit
                                       # JSON null disables the default, and 0 closes
-                                      # thinking immediately.
+                                      # thinking immediately. The environment override accepts
+                                      # only a non-negative integer or "unlimited" and otherwise
+                                      # fails startup.
 # default_thinking_budget_ms = 5000    # Optional thinking decode-time limit in milliseconds.
                                       # Queue and prefill time are excluded. Omit for
                                       # unlimited; thinking_budget_ms follows the same
-                                      # omitted/null/0 request semantics as the token limit.
+                                      # omitted/null/0 request semantics as the token limit. Its
+                                      # environment override uses the same strict grammar.
 # fold_reasoning_into_content = false # Optional. Compatibility mode for clients that expect
                                       # non-empty assistant content: duplicate separated
                                       # reasoning_content into content. Requests can override

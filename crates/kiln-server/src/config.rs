@@ -63,6 +63,10 @@ pub const DETERMINISTIC_ENV: &str = "KILN_DETERMINISTIC";
 pub const MAX_DECODE_BATCH_ENV: &str = "KILN_MAX_DECODE_BATCH";
 pub const MAX_DECODE_BATCH_MIN: usize = 1;
 pub const MAX_DECODE_BATCH_MAX: usize = MAX_BATCH_TOKENS_MAX;
+/// Strict startup override for the default open-thinking token limit.
+pub const DEFAULT_THINKING_BUDGET_TOKENS_ENV: &str = "KILN_DEFAULT_THINKING_BUDGET_TOKENS";
+/// Strict startup override for the default open-thinking decode-time limit.
+pub const DEFAULT_THINKING_BUDGET_MS_ENV: &str = "KILN_DEFAULT_THINKING_BUDGET_MS";
 
 /// Provenance of a resolved startup configuration value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -1665,6 +1669,7 @@ impl KilnConfig {
         config.apply_max_prefill_tokens_per_cycle_env_override()?;
         config.apply_max_prefill_layers_per_cycle_env_override()?;
         config.apply_max_decode_batch_env_override()?;
+        config.apply_default_thinking_budget_env_overrides()?;
         config.request_log.apply_env_overrides();
         config.validate()?;
         Ok(config)
@@ -1736,24 +1741,6 @@ impl KilnConfig {
             && let Some(enabled) = parse_bool_env(&v)
         {
             self.server.default_thinking_enabled = Some(enabled);
-        }
-        if let Ok(v) = std::env::var("KILN_DEFAULT_THINKING_BUDGET_TOKENS") {
-            match parse_optional_usize_env(&v) {
-                Ok(value) => self.server.default_thinking_budget_tokens = value,
-                Err(()) => tracing::warn!(
-                    value = %v,
-                    "ignoring invalid KILN_DEFAULT_THINKING_BUDGET_TOKENS; expected a non-negative integer or 'unlimited'"
-                ),
-            }
-        }
-        if let Ok(v) = std::env::var("KILN_DEFAULT_THINKING_BUDGET_MS") {
-            match parse_optional_u64_env(&v) {
-                Ok(value) => self.server.default_thinking_budget_ms = value,
-                Err(()) => tracing::warn!(
-                    value = %v,
-                    "ignoring invalid KILN_DEFAULT_THINKING_BUDGET_MS; expected a non-negative integer or 'unlimited'"
-                ),
-            }
         }
         if let Ok(v) = std::env::var("KILN_FOLD_REASONING_INTO_CONTENT")
             && let Some(enabled) = parse_bool_env(&v)
@@ -2074,6 +2061,21 @@ impl KilnConfig {
         Ok(())
     }
 
+    /// Resolve both server-default thinking limits before startup. Present
+    /// malformed or non-Unicode values are fatal instead of silently removing
+    /// the corresponding limit.
+    fn apply_default_thinking_budget_env_overrides(&mut self) -> Result<()> {
+        if let Some(raw) = read_optional_unicode_env(DEFAULT_THINKING_BUDGET_TOKENS_ENV)? {
+            self.server.default_thinking_budget_tokens =
+                parse_optional_usize_env(DEFAULT_THINKING_BUDGET_TOKENS_ENV, &raw)?;
+        }
+        if let Some(raw) = read_optional_unicode_env(DEFAULT_THINKING_BUDGET_MS_ENV)? {
+            self.server.default_thinking_budget_ms =
+                parse_optional_u64_env(DEFAULT_THINKING_BUDGET_MS_ENV, &raw)?;
+        }
+        Ok(())
+    }
+
     /// Validate configuration values. Returns an error describing the first invalid value.
     fn validate(&self) -> Result<()> {
         if self.server.port == 0 {
@@ -2204,27 +2206,34 @@ fn parse_bool_env(value: &str) -> Option<bool> {
     }
 }
 
+fn read_optional_unicode_env(name: &str) -> Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} must be valid UTF-8"),
+    }
+}
+
 fn optional_limit_is_unlimited(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "" | "none" | "null" | "off" | "unlimited"
-    )
+    value.trim().eq_ignore_ascii_case("unlimited")
 }
 
-fn parse_optional_usize_env(value: &str) -> Result<Option<usize>, ()> {
+fn parse_optional_usize_env(name: &str, value: &str) -> Result<Option<usize>> {
     if optional_limit_is_unlimited(value) {
-        Ok(None)
-    } else {
-        value.trim().parse::<usize>().map(Some).map_err(|_| ())
+        return Ok(None);
     }
+    value.trim().parse::<usize>().map(Some).with_context(|| {
+        format!("{name} must be 'unlimited' or a non-negative decimal integer, got {value:?}")
+    })
 }
 
-fn parse_optional_u64_env(value: &str) -> Result<Option<u64>, ()> {
+fn parse_optional_u64_env(name: &str, value: &str) -> Result<Option<u64>> {
     if optional_limit_is_unlimited(value) {
-        Ok(None)
-    } else {
-        value.trim().parse::<u64>().map(Some).map_err(|_| ())
+        return Ok(None);
     }
+    value.trim().parse::<u64>().map(Some).with_context(|| {
+        format!("{name} must be 'unlimited' or a non-negative decimal integer, got {value:?}")
+    })
 }
 
 #[cfg(test)]
@@ -2873,6 +2882,82 @@ port = 3000
             let detail = format!("{error:#}");
             assert!(detail.contains(name), "{detail}");
             assert!(detail.contains(invalid), "{detail}");
+        }
+    }
+
+    #[test]
+    fn thinking_budget_environment_grammar_is_strict() {
+        assert_eq!(
+            parse_optional_usize_env(DEFAULT_THINKING_BUDGET_TOKENS_ENV, " 0 ").unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            parse_optional_usize_env(DEFAULT_THINKING_BUDGET_TOKENS_ENV, "42").unwrap(),
+            Some(42)
+        );
+        assert_eq!(
+            parse_optional_u64_env(DEFAULT_THINKING_BUDGET_MS_ENV, " 1500 ").unwrap(),
+            Some(1500)
+        );
+        assert_eq!(
+            parse_optional_u64_env(DEFAULT_THINKING_BUDGET_MS_ENV, " UnLiMiTeD ").unwrap(),
+            None
+        );
+
+        for invalid in ["", "off", "none", "null", "-1", "1.5", "12ms"] {
+            for error in [
+                parse_optional_usize_env(DEFAULT_THINKING_BUDGET_TOKENS_ENV, invalid).unwrap_err(),
+                parse_optional_u64_env(DEFAULT_THINKING_BUDGET_MS_ENV, invalid).unwrap_err(),
+            ] {
+                let detail = format!("{error:#}");
+                assert!(detail.contains(&format!("{invalid:?}")), "{detail}");
+                assert!(
+                    detail.contains(DEFAULT_THINKING_BUDGET_TOKENS_ENV)
+                        || detail.contains(DEFAULT_THINKING_BUDGET_MS_ENV),
+                    "{detail}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn thinking_budget_environment_overrides_toml_and_invalid_values_fail_load() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("kiln.toml");
+        std::fs::write(
+            &path,
+            "[server]\ndefault_thinking_budget_tokens = 64\ndefault_thinking_budget_ms = 2500\n",
+        )
+        .unwrap();
+        let path = path.to_str().unwrap();
+
+        unsafe {
+            std::env::set_var(DEFAULT_THINKING_BUDGET_TOKENS_ENV, "unlimited");
+            std::env::set_var(DEFAULT_THINKING_BUDGET_MS_ENV, "0");
+        }
+        let config = KilnConfig::load(Some(path)).unwrap();
+        unsafe {
+            std::env::remove_var(DEFAULT_THINKING_BUDGET_TOKENS_ENV);
+            std::env::remove_var(DEFAULT_THINKING_BUDGET_MS_ENV);
+        }
+        assert_eq!(config.server.default_thinking_budget_tokens, None);
+        assert_eq!(config.server.default_thinking_budget_ms, Some(0));
+
+        for (name, invalid) in [
+            (DEFAULT_THINKING_BUDGET_TOKENS_ENV, "64 tokens"),
+            (DEFAULT_THINKING_BUDGET_MS_ENV, "2.5"),
+        ] {
+            unsafe {
+                std::env::set_var(name, invalid);
+            }
+            let error = KilnConfig::load(Some(path)).unwrap_err();
+            unsafe {
+                std::env::remove_var(name);
+            }
+            let detail = format!("{error:#}");
+            assert!(detail.contains(name), "{detail}");
+            assert!(detail.contains(&format!("{invalid:?}")), "{detail}");
         }
     }
 

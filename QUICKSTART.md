@@ -892,8 +892,8 @@ Key settings:
 | `server.max_batch_tokens` | `KILN_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per actor cycle; lower values favor decode latency during long prefills, higher values favor prefill throughput |
 | `server.max_decode_batch` | `KILN_MAX_DECODE_BATCH` | `auto` | Concurrent decode-row ceiling (`auto` or 1–65536); malformed values fail startup, and deterministic mode or `max_batch_tokens` may lower the reported effective value |
 | `server.deterministic` | `KILN_DETERMINISTIC` | false | Strict serving-repeatability mode; freezes the process-wide determinism selector and forces effective decode width 1. It does not make every accelerator kernel bitwise deterministic |
-| `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default token budget for an open thinking block |
-| `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block |
+| `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default token budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
+| `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference (rest for training) |
 | `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (halves memory, ~2x context) |
 | `logging.format` | `KILN_LOG_FORMAT` | auto | Log format: `auto` (pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, `human` |
