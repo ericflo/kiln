@@ -504,6 +504,17 @@ pub trait LogitSource: Send + Sync + Debug {
         None
     }
 
+    /// Stable identity of the exact numeric source used by training.
+    ///
+    /// Model-backed sources inherit the canonical teacher revision. Fixed
+    /// fixtures override this with a digest of their scored rows, which lets
+    /// exact resume verify composite and precomputed teachers without
+    /// pretending they are one model identity.
+    fn authoritative_content_revision(&self) -> Option<String> {
+        self.authoritative_teacher_identity()
+            .map(|identity| format!("sha256:{}", identity.content_revision()))
+    }
+
     /// Fetch teacher logprobs at the given positions in the given
     /// sequence.
     ///
@@ -663,6 +674,51 @@ impl LogitSource for FixtureLogitSource {
         self.identity.as_ref()
     }
 
+    fn authoritative_content_revision(&self) -> Option<String> {
+        #[derive(Serialize)]
+        struct FixtureRevisionRow<'a> {
+            tokens: &'a [u32],
+            position: usize,
+            indices: &'a [u32],
+            logprob_bits: Vec<u32>,
+        }
+
+        #[derive(Serialize)]
+        struct FixtureRevision<'a> {
+            schema: &'static str,
+            capabilities: &'a LogitSourceCaps,
+            top_k: usize,
+            rows: Vec<FixtureRevisionRow<'a>>,
+        }
+
+        let mut sequences = self.entries.iter().collect::<Vec<_>>();
+        sequences.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let mut rows = Vec::new();
+        for (tokens, positions) in sequences {
+            let mut positions = positions.iter().collect::<Vec<_>>();
+            positions.sort_by_key(|(position, _)| **position);
+            rows.extend(
+                positions
+                    .into_iter()
+                    .map(|(position, (indices, logprobs))| FixtureRevisionRow {
+                        tokens,
+                        position: *position,
+                        indices,
+                        logprob_bits: logprobs.iter().map(|value| value.to_bits()).collect(),
+                    }),
+            );
+        }
+        let descriptor = FixtureRevision {
+            schema: "kiln.fixture-logit-source.v1",
+            capabilities: &self.caps,
+            top_k: self.top_k,
+            rows,
+        };
+        serde_json::to_vec(&descriptor)
+            .ok()
+            .map(|bytes| crate::train_receipt::sha256_bytes(&bytes))
+    }
+
     fn fetch_logprobs(
         &self,
         tokens: &[u32],
@@ -736,6 +792,25 @@ impl DeterministicUniformLogitSource {
 impl LogitSource for DeterministicUniformLogitSource {
     fn capabilities(&self) -> LogitSourceCaps {
         self.caps.clone()
+    }
+
+    fn authoritative_content_revision(&self) -> Option<String> {
+        #[derive(Serialize)]
+        struct DeterministicUniformRevision<'a> {
+            schema: &'static str,
+            algorithm: &'static str,
+            capabilities: &'a LogitSourceCaps,
+            top_k: usize,
+        }
+
+        serde_json::to_vec(&DeterministicUniformRevision {
+            schema: "kiln.deterministic-logit-source.v1",
+            algorithm: "fnv1a64-tokens-position-uniform-topk-v1",
+            capabilities: &self.caps,
+            top_k: self.top_k,
+        })
+        .ok()
+        .map(|bytes| crate::train_receipt::sha256_bytes(&bytes))
     }
 
     fn fetch_logprobs(
@@ -1009,6 +1084,36 @@ mod tests {
     }
 
     #[test]
+    fn fixture_content_revision_is_order_independent_and_covers_every_row() {
+        let first_tokens = [1u32, 2, 3];
+        let second_tokens = [4u32, 5, 6];
+        let mut forward = FixtureLogitSource::uniform_topk("revision-test", 64, 2);
+        forward
+            .insert(&first_tokens, 1, vec![5, 6], vec![-1.0, -2.0])
+            .unwrap();
+        forward
+            .insert(&second_tokens, 0, vec![7, 8], vec![-1.25, -2.25])
+            .unwrap();
+
+        let mut reverse = FixtureLogitSource::uniform_topk("revision-test", 64, 2);
+        reverse
+            .insert(&second_tokens, 0, vec![7, 8], vec![-1.25, -2.25])
+            .unwrap();
+        reverse
+            .insert(&first_tokens, 1, vec![5, 6], vec![-1.0, -2.0])
+            .unwrap();
+
+        let revision = forward.authoritative_content_revision().unwrap();
+        assert!(revision.starts_with("sha256:"));
+        assert_eq!(revision, reverse.authoritative_content_revision().unwrap());
+
+        reverse
+            .insert(&first_tokens, 0, vec![9, 10], vec![-1.5, -2.5])
+            .unwrap();
+        assert_ne!(revision, reverse.authoritative_content_revision().unwrap());
+    }
+
+    #[test]
     fn fixture_rejects_overlarge_k() {
         let src = FixtureLogitSource::uniform_topk("test-teacher", 64, 4);
         let err = src.fetch_logprobs(&[1, 2, 3], &[1], Some(8)).unwrap_err();
@@ -1069,6 +1174,22 @@ mod tests {
             }
             _ => panic!("expected TopK"),
         }
+    }
+
+    #[test]
+    fn deterministic_uniform_revision_covers_its_algorithm_contract() {
+        let first = DeterministicUniformLogitSource::new("det", 256, 4);
+        let same = DeterministicUniformLogitSource::new("det", 256, 4);
+        let different = DeterministicUniformLogitSource::new("det", 256, 8);
+
+        assert_eq!(
+            first.authoritative_content_revision(),
+            same.authoritative_content_revision()
+        );
+        assert_ne!(
+            first.authoritative_content_revision(),
+            different.authoritative_content_revision()
+        );
     }
 
     #[test]

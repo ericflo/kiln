@@ -2882,13 +2882,12 @@ fn use_chat_template_rollout_prefixes() -> bool {
 /// Eagerly score every fixed off-policy action row and return an in-memory
 /// fixture carrying the verified source identity.
 ///
-/// Server workers call this before taking their actor-wide GPU write lock. A
-/// remote source is therefore never reachable from the training loop: cache
-/// misses, HTTP timeouts, and remote retries all complete (or fail the job)
-/// while inference is still allowed to use the GPU. On-policy distillation is
-/// deliberately rejected because its student-generated rollouts do not exist
-/// until GPU execution begins and cannot be prefetched without changing the
-/// algorithm.
+/// Server workers call this before bounded GPU phases begin. A remote source
+/// is therefore never reachable from those phases: cache misses, HTTP
+/// timeouts, and remote retries all complete (or fail the job) while inference
+/// can still use the GPU. On-policy distillation is deliberately rejected
+/// because its student-generated rollouts do not exist until GPU execution
+/// begins and cannot be prefetched without changing the algorithm.
 pub fn materialize_verified_off_policy_teacher(
     prompts: &[OpdPrompt],
     config: &OpdConfig,
@@ -2900,7 +2899,7 @@ pub fn materialize_verified_off_policy_teacher(
         .context("materialize remote teacher: unsupported OPD configuration")?;
     anyhow::ensure!(
         matches!(config.training_mode, OpdTrainingMode::OffPolicy),
-        "remote teacher scoring cannot run on-policy while GPU coordination is job-wide; use training_mode=\"off_policy\" with fixed assistant actions"
+        "remote teacher scoring cannot run on-policy inside bounded GPU phases; use training_mode=\"off_policy\" with fixed assistant actions"
     );
     anyhow::ensure!(
         matches!(config.loss, OpdLossGranularity::TeacherTopK),
@@ -3034,6 +3033,7 @@ pub fn materialize_verified_off_policy_teacher(
 struct OpdTeacherProvenance {
     teacher_id: String,
     identity: Option<crate::TeacherIdentityV1>,
+    content_revision: Option<String>,
 }
 
 impl OpdTeacherProvenance {
@@ -3041,13 +3041,12 @@ impl OpdTeacherProvenance {
         Self {
             teacher_id: capabilities.teacher_id.clone(),
             identity: source.authoritative_teacher_identity().cloned(),
+            content_revision: source.authoritative_content_revision(),
         }
     }
 
     fn content_revision(&self) -> Option<String> {
-        self.identity
-            .as_ref()
-            .map(|identity| format!("sha256:{}", identity.content_revision()))
+        self.content_revision.clone()
     }
 }
 
@@ -4910,6 +4909,7 @@ pub fn opd_train_to_with_checkpoint_root(
         &*backend_rt,
         "resident adapter and optimizer cleanup",
         || {
+            drop(teacher);
             if let Some(state) = opt_state.as_ref() {
                 state.evict_from_backend(&*backend_rt);
             }
