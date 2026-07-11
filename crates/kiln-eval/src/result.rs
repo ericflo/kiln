@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 pub use kiln_core::thinking_budget::ThinkingBudgetOutcome as EvalThinkingBudgetOutcome;
-use kiln_core::thinking_budget::ThinkingBudgetSource;
+pub use kiln_core::thinking_budget::ThinkingBudgetRecord as EvalThinkingBudget;
 use serde::{Deserialize, Serialize};
 
 /// Lifecycle of an eval job (mirrors the training-job state machine so
@@ -35,23 +35,6 @@ pub enum EvalOutcomeKind {
     /// rejected by sampler). Counted as a failure for headline accuracy but
     /// surfaced separately for triage.
     Error,
-}
-
-/// Effective thinking-budget configuration and provenance for one eval
-/// completion. Sources are stable strings such as `server_default`, `suite`,
-/// `run_override`, `example`, and their explicit `_unlimited` forms.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EvalThinkingBudget {
-    pub configured: bool,
-    pub applied: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_time_ms: Option<u64>,
-    pub tokens_source: ThinkingBudgetSource,
-    pub time_source: ThinkingBudgetSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<EvalThinkingBudgetOutcome>,
 }
 
 /// Per-example record returned in the `EvalResult`.
@@ -828,8 +811,8 @@ mod tests {
         let json = serde_json::to_value(&outcome).unwrap();
         assert_eq!(json["raw_completion_text"], "decoder continuation");
         assert_eq!(json["thinking_budget"]["max_tokens"], 12);
-        assert_eq!(json["thinking_budget"]["outcome"]["trigger"], "tokens");
-        assert_eq!(json["thinking_budget"]["outcome"]["closed"], true);
+        assert_eq!(json["thinking_budget"]["trigger"], "tokens");
+        assert_eq!(json["thinking_budget"]["closed"], true);
 
         let legacy = serde_json::json!({
             "example_id": "legacy",

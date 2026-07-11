@@ -17,8 +17,8 @@ use kiln_core::request::Request;
 use kiln_core::sampling::{SamplingParams, ThinkingBudget, ThinkingBudgetStatus};
 use kiln_core::thinking_budget::{
     EffectiveThinkingBudget, ThinkingBudgetDefaults, ThinkingBudgetOutcome,
-    ThinkingBudgetOverride as BudgetOverride, ThinkingBudgetOverrides, ThinkingBudgetScope,
-    ThinkingBudgetSource,
+    ThinkingBudgetOverride as BudgetOverride, ThinkingBudgetOverrides, ThinkingBudgetRecord,
+    ThinkingBudgetScope, ThinkingBudgetSource,
 };
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, ChatTemplateOptions, TokenizerError};
@@ -166,22 +166,8 @@ fn thinking_budget_metadata_for_request(
     starts_in_reasoning: bool,
 ) -> ThinkingBudgetMetadata {
     let effective = effective_thinking_budget_for_request(state, req);
-    let configuration = ThinkingBudgetConfigurationMetadata::from(effective);
-    ThinkingBudgetMetadata {
-        configured: configuration.configured,
-        applied: configuration.configured
-            && starts_in_reasoning
-            && chat_request_max_tokens(req) > 0,
-        max_tokens: configuration.max_tokens,
-        max_time_ms: configuration.max_time_ms,
-        tokens_source: configuration.tokens_source,
-        time_source: configuration.time_source,
-        triggered: false,
-        trigger: None,
-        closed: None,
-        thinking_tokens: None,
-        thinking_time_ms: None,
-    }
+    let applied = effective.configured() && starts_in_reasoning && chat_request_max_tokens(req) > 0;
+    ThinkingBudgetRecord::from_effective(effective, applied)
 }
 
 fn attach_thinking_budget_outcome(
@@ -201,11 +187,7 @@ fn apply_thinking_budget_status_to_metadata(
     metadata: &mut ThinkingBudgetMetadata,
     status: ThinkingBudgetStatus,
 ) {
-    metadata.triggered = status.trigger.is_some();
-    metadata.trigger = status.trigger.map(|value| value.as_str().to_string());
-    metadata.closed = Some(status.closed);
-    metadata.thinking_time_ms = Some(status.elapsed_ms);
-    metadata.thinking_tokens = Some(status.thinking_tokens);
+    metadata.set_outcome(status.into());
 }
 
 fn unresolved_request_thinking_budget(
@@ -235,7 +217,7 @@ fn unresolved_request_thinking_budget(
 fn recent_thinking_budget_from_metadata(
     metadata: &ThinkingBudgetMetadata,
 ) -> RequestThinkingBudget {
-    let has_outcome = metadata.closed.is_some();
+    let outcome = metadata.outcome;
     RequestThinkingBudget {
         configured: metadata.configured,
         max_tokens: metadata
@@ -245,13 +227,15 @@ fn recent_thinking_budget_from_metadata(
         tokens_source: metadata.tokens_source,
         time_source: metadata.time_source,
         applied: Some(metadata.applied),
-        triggered: has_outcome.then_some(metadata.triggered),
-        trigger: metadata.trigger.clone(),
-        closed: metadata.closed,
-        thinking_tokens: metadata
-            .thinking_tokens
+        triggered: outcome.map(|outcome| outcome.triggered),
+        trigger: outcome
+            .and_then(|outcome| outcome.trigger)
+            .map(|trigger| trigger.as_str().to_string()),
+        closed: outcome.map(|outcome| outcome.closed),
+        thinking_tokens: outcome
+            .map(|outcome| outcome.thinking_tokens)
             .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
-        thinking_time_ms: metadata.thinking_time_ms,
+        thinking_time_ms: outcome.map(|outcome| outcome.thinking_time_ms),
     }
 }
 
@@ -4254,26 +4238,7 @@ pub struct ChatCompletionMetadata {
     pub performance: Option<ChatCompletionPerformanceMetadata>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ThinkingBudgetMetadata {
-    pub configured: bool,
-    pub applied: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_time_ms: Option<u64>,
-    pub tokens_source: ThinkingBudgetSource,
-    pub time_source: ThinkingBudgetSource,
-    pub triggered: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trigger: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub closed: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_tokens: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_time_ms: Option<u64>,
-}
+pub type ThinkingBudgetMetadata = ThinkingBudgetRecord;
 
 /// Request-wide thinking-budget configuration and provenance. Batch outcomes
 /// remain completion-specific and are reported on each completion item.
@@ -4308,24 +4273,6 @@ impl Default for ThinkingBudgetConfigurationMetadata {
             max_time_ms: None,
             tokens_source: ThinkingBudgetSource::Unlimited,
             time_source: ThinkingBudgetSource::Unlimited,
-        }
-    }
-}
-
-impl Default for ThinkingBudgetMetadata {
-    fn default() -> Self {
-        Self {
-            configured: false,
-            applied: false,
-            max_tokens: None,
-            max_time_ms: None,
-            tokens_source: ThinkingBudgetSource::Unlimited,
-            time_source: ThinkingBudgetSource::Unlimited,
-            triggered: false,
-            trigger: None,
-            closed: None,
-            thinking_tokens: None,
-            thinking_time_ms: None,
         }
     }
 }
@@ -11914,6 +11861,9 @@ mod tests {
             }],
         };
         let mut metadata = ThinkingBudgetMetadata::default();
+        metadata.configured = true;
+        metadata.max_tokens = Some(16);
+        metadata.tokens_source = ThinkingBudgetSource::Request;
         metadata.applied = true;
         apply_thinking_budget_status_to_metadata(
             &mut metadata,

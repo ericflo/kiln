@@ -138,6 +138,13 @@ For completed chat streams, reassembly retains the finish chunk's
 An interrupted stream is marked `stream_interrupted=true`; if it ended before
 the finish chunk, the log does not invent a budget outcome.
 
+Each generated eval `ExampleOutcome` uses the same flat `thinking_budget`
+record as chat metadata: effective limits and sources, `applied`, and terminal
+`triggered`, `trigger`, `closed`, `thinking_tokens`, and `thinking_time_ms`
+fields when an outcome exists. Readers still accept the earlier eval-only
+shape that nested those terminal fields under `outcome`; new results always
+write the shared flat shape.
+
 ```bash
 # SFT dataset from successful chats (request messages + assistant reply):
 zcat -f ~/models/Qwen3.5-4B/adapters/.requests/requests-*.jsonl* \
