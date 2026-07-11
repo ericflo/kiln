@@ -2520,13 +2520,26 @@ impl BatchingEngineActor {
         let short_tail_limit = self
             .max_prefill_tokens_per_cycle
             .saturating_mul(SHORT_PREFILL_PRIORITY_MAX_CHUNKS);
+        let Some(round_robin_remaining) = self
+            .forward
+            .remaining_prefill_tokens(&self.active[round_robin].slot)
+        else {
+            return Some((round_robin, false));
+        };
         let priority = (0..active_len)
             .filter(|&idx| eligible(idx))
             .filter_map(|idx| {
                 let remaining = self
                     .forward
                     .remaining_prefill_tokens(&self.active[idx].slot)?;
-                (remaining <= short_tail_limit).then_some((idx, remaining))
+                // The priority lane is for materially shorter work, not for
+                // an equal prompt that happens to win a tie after normal
+                // round-robin progress. The strict half comparison keeps
+                // equal-sized cohorts aligned even after one row completes a
+                // token chunk, while 128-vs-1K interactive tails still pass.
+                (remaining <= short_tail_limit
+                    && remaining.saturating_mul(2) < round_robin_remaining)
+                    .then_some((idx, remaining))
             })
             .min_by_key(|&(idx, remaining)| {
                 let round_robin_distance = (idx + active_len - round_robin_start) % active_len;
@@ -5756,12 +5769,69 @@ mod tests {
                 LONG_D, SHORT,
             ]
         );
-        assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 3);
+        assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 2);
         assert_eq!(actor.snapshot.total_errors, 0);
         assert!(!forward.is_prefilling(&actor.active[4].slot));
         for active in &actor.active[..4] {
             assert!(forward.is_prefilling(&active.slot));
         }
+
+        actor.fail_all("test complete");
+    }
+
+    #[test]
+    fn equal_prefill_work_never_consumes_the_short_tail_lane() {
+        const KEYS: [TokenId; 5] = [30_001, 30_002, 30_003, 30_004, 30_005];
+
+        let forward = Arc::new(SyntheticPrefillForward {
+            layers_per_chunk: 8,
+            ..SyntheticPrefillForward::default()
+        });
+        let (_command_tx, command_rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let mut actor = test_actor(
+            command_rx,
+            forward.clone(),
+            KEYS.len(),
+            false,
+            KEYS.len(),
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        for key in KEYS {
+            let req = request_with_tokens(vec![key; 128], 1);
+            let RequestPreparation::Prefilling { slot, .. } = forward
+                .prepare_request_chunked(&req, 64)
+                .expect("initialize equal synthetic prefill")
+            else {
+                panic!("synthetic prompt unexpectedly became ready")
+            };
+            let (response_tx, _response_rx) = mpsc::channel(8);
+            push_test_active(&mut actor, req, response_tx, slot);
+        }
+
+        for _ in 0..20 {
+            assert!(actor.run_prefill_budget(64));
+        }
+
+        let layer_order: Vec<TokenId> = forward
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                SchedulingEvent::PrefillLayers { key, .. } => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(layer_order, KEYS.repeat(4));
+        assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 0);
+        assert_eq!(actor.snapshot.total_errors, 0);
+        assert!(
+            actor
+                .active
+                .iter()
+                .all(|active| { !forward.is_prefilling(&active.slot) })
+        );
 
         actor.fail_all("test complete");
     }
