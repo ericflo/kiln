@@ -67,6 +67,8 @@ max_prefill_layers_per_cycle = 4         # Transformer layers processed before a
                                         # values favor ITL; higher values reduce scheduling and
                                         # synchronization overhead. Valid range: 1..=1024. Override
                                         # strictly with KILN_MAX_PREFILL_LAYERS_PER_CYCLE.
+                                        # Three dispatches remain round-robin; every fourth may
+                                        # accelerate the shortest tail of at most four token chunks.
 # eval_mode = false
 # default_thinking_enabled = false     # Optional. Qwen3.5-4B profile preserves the
                                       # official template thinking default unless this

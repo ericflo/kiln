@@ -41,6 +41,12 @@ const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
 const DEFAULT_PREFILL_ADMISSION_QUANTUM: usize = 4;
 const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
+/// Preserve three round-robin dispatches for every opportunity to accelerate
+/// a short prompt tail. This bounds long-prompt slowdown under continuous
+/// short arrivals without making interactive prompts wait a full active-set
+/// rotation for every layer group.
+const SHORT_PREFILL_PRIORITY_INTERVAL: usize = 4;
+const SHORT_PREFILL_PRIORITY_MAX_CHUNKS: usize = 4;
 
 /// Actor work above this wall time is material to the qualification stall
 /// gate and gets one bounded structured event after the phase completes.
@@ -249,6 +255,7 @@ pub struct BatchingEngineSnapshot {
     pub total_prefill_forwards: u64,
     pub total_prefill_layers: u64,
     pub total_prefill_layer_yields: u64,
+    pub total_short_prefill_priority_forwards: u64,
     pub total_decode_tokens: u64,
     pub total_prefill_tokens: u64,
     pub total_errors: u64,
@@ -397,6 +404,12 @@ pub trait DecodeForward: Send + Sync + 'static {
     /// Token width fixed when a layer-resumable chunk began. The actor must
     /// not resume it in a later cycle with less remaining token budget.
     fn inflight_prefill_token_width(&self, _slot: &DecodeSlot) -> Option<usize> {
+        None
+    }
+    /// Remaining prompt tokens, including an in-flight retained chunk. Used
+    /// only for the bounded short-tail service opportunity; `None` keeps the
+    /// row on the ordinary round-robin path.
+    fn remaining_prefill_tokens(&self, _slot: &DecodeSlot) -> Option<usize> {
         None
     }
     fn can_reuse_as_strict_prefix(&self, _prompt_token_len: usize) -> bool {
@@ -700,6 +713,16 @@ impl DecodeForward for RealDecodeForward {
             return None;
         };
         state.pending_layer_chunk_tokens()
+    }
+
+    fn remaining_prefill_tokens(&self, slot: &DecodeSlot) -> Option<usize> {
+        let DecodeSlot::RealPrefill {
+            state: Some(state), ..
+        } = slot
+        else {
+            return None;
+        };
+        Some(state.remaining_tokens())
     }
 
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
@@ -1644,6 +1667,7 @@ struct BatchingEngineActor {
     max_prefill_tokens_per_cycle: usize,
     max_prefill_layers_per_cycle: usize,
     next_prefill_index: usize,
+    short_prefill_priority_cursor: usize,
     prefix_aware_admission: bool,
     max_prefill_admissions_per_cycle: usize,
     // #1082 CUDA concurrency regression: when true, admit_waiting refills the
@@ -1747,6 +1771,7 @@ impl BatchingEngineActor {
             max_prefill_tokens_per_cycle,
             max_prefill_layers_per_cycle,
             next_prefill_index: 0,
+            short_prefill_priority_cursor: 0,
             prefix_aware_admission,
             max_prefill_admissions_per_cycle,
             burst_refill,
@@ -2466,6 +2491,72 @@ impl BatchingEngineActor {
             .submitted_first_tokens
     }
 
+    fn select_prefill_index(&mut self, budget: usize) -> Option<(usize, bool)> {
+        let active_len = self.active.len();
+        let round_robin_start = self.next_prefill_index % active_len;
+        let eligible = |idx: usize| {
+            self.active[idx].delivery_state == ActiveDeliveryState::Ready
+                && self.forward.is_prefilling(&self.active[idx].slot)
+                && (budget > 0
+                    || self
+                        .forward
+                        .inflight_prefill_token_width(&self.active[idx].slot)
+                        .is_some())
+        };
+        let round_robin = (0..active_len)
+            .map(|offset| (round_robin_start + offset) % active_len)
+            .find(|&idx| eligible(idx))?;
+
+        self.short_prefill_priority_cursor =
+            (self.short_prefill_priority_cursor + 1) % SHORT_PREFILL_PRIORITY_INTERVAL;
+        if self.short_prefill_priority_cursor != 0 {
+            return Some((round_robin, false));
+        }
+
+        let short_tail_limit = self
+            .max_prefill_tokens_per_cycle
+            .saturating_mul(SHORT_PREFILL_PRIORITY_MAX_CHUNKS);
+        let priority = (0..active_len)
+            .filter(|&idx| eligible(idx))
+            .filter_map(|idx| {
+                let remaining = self
+                    .forward
+                    .remaining_prefill_tokens(&self.active[idx].slot)?;
+                (remaining <= short_tail_limit).then_some((idx, remaining))
+            })
+            .min_by_key(|&(idx, remaining)| {
+                let round_robin_distance = (idx + active_len - round_robin_start) % active_len;
+                (remaining, round_robin_distance)
+            })
+            .map(|(idx, _)| idx);
+        if let Some(priority) = priority {
+            self.snapshot.total_short_prefill_priority_forwards = self
+                .snapshot
+                .total_short_prefill_priority_forwards
+                .saturating_add(1);
+            Some((priority, true))
+        } else {
+            Some((round_robin, false))
+        }
+    }
+
+    fn update_prefill_cursor(
+        &mut self,
+        selected_idx: usize,
+        selected_by_priority: bool,
+        reinserted: bool,
+    ) {
+        if self.active.is_empty() {
+            self.next_prefill_index = 0;
+        } else if selected_by_priority {
+            self.next_prefill_index %= self.active.len();
+        } else if reinserted {
+            self.next_prefill_index = (selected_idx + 1) % self.active.len();
+        } else {
+            self.next_prefill_index = selected_idx % self.active.len();
+        }
+    }
+
     /// Spend the combined-cycle remainder on newly selected prompt chunks.
     /// Retained layer groups were charged when their chunk began and resume
     /// without a second token charge; the independent layer ceiling still
@@ -2474,19 +2565,7 @@ impl BatchingEngineActor {
     fn run_prefill_budget(&mut self, mut budget: usize) -> bool {
         let mut advanced = false;
         while !self.active.is_empty() {
-            let active_len = self.active.len();
-            let Some(idx) = (0..active_len)
-                .map(|offset| (self.next_prefill_index + offset) % active_len)
-                .find(|&idx| {
-                    self.active[idx].delivery_state == ActiveDeliveryState::Ready
-                        && self.forward.is_prefilling(&self.active[idx].slot)
-                        && (budget > 0
-                            || self
-                                .forward
-                                .inflight_prefill_token_width(&self.active[idx].slot)
-                                .is_some())
-                })
-            else {
+            let Some((idx, selected_by_priority)) = self.select_prefill_index(budget) else {
                 break;
             };
             let reserved_width = self
@@ -2523,11 +2602,7 @@ impl BatchingEngineActor {
                 Err(error) => {
                     self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
                     self.terminate_delivery(delivery_key, format!("{error:#}"));
-                    self.next_prefill_index = if self.active.is_empty() {
-                        0
-                    } else {
-                        idx % self.active.len()
-                    };
+                    self.update_prefill_cursor(idx, selected_by_priority, false);
                     self.refresh_snapshot();
                     advanced = true;
                     continue;
@@ -2570,11 +2645,7 @@ impl BatchingEngineActor {
                         self.max_prefill_layers_per_cycle
                     ),
                 );
-                self.next_prefill_index = if self.active.is_empty() {
-                    0
-                } else {
-                    idx % self.active.len()
-                };
+                self.update_prefill_cursor(idx, selected_by_priority, false);
                 self.refresh_snapshot();
                 advanced = true;
                 continue;
@@ -2598,11 +2669,7 @@ impl BatchingEngineActor {
                         "prefill forward violated token reservation: prior={reserved_width:?}, scheduled={tokens_scheduled}, completed={tokens_processed}, new-token budget={budget}"
                     ),
                 );
-                self.next_prefill_index = if self.active.is_empty() {
-                    0
-                } else {
-                    idx % self.active.len()
-                };
+                self.update_prefill_cursor(idx, selected_by_priority, false);
                 self.refresh_snapshot();
                 advanced = true;
                 continue;
@@ -2622,11 +2689,7 @@ impl BatchingEngineActor {
                         "prefill forward reported zero tokens without retained layer progress"
                             .to_string(),
                     );
-                    self.next_prefill_index = if self.active.is_empty() {
-                        0
-                    } else {
-                        idx % self.active.len()
-                    };
+                    self.update_prefill_cursor(idx, selected_by_priority, false);
                     self.refresh_snapshot();
                     return true;
                 }
@@ -2640,7 +2703,7 @@ impl BatchingEngineActor {
                         slot,
                     },
                 );
-                self.next_prefill_index = (idx + 1) % self.active.len();
+                self.update_prefill_cursor(idx, selected_by_priority, true);
                 self.snapshot.total_prefill_layer_yields =
                     self.snapshot.total_prefill_layer_yields.saturating_add(1);
                 self.refresh_snapshot();
@@ -2661,7 +2724,7 @@ impl BatchingEngineActor {
                     slot,
                 },
             );
-            self.next_prefill_index = (idx + 1) % self.active.len();
+            self.update_prefill_cursor(idx, selected_by_priority, true);
             if ready {
                 self.emit_pending_first_token_at(idx);
             }
@@ -3365,6 +3428,14 @@ mod tests {
 
         fn inflight_prefill_token_width(&self, slot: &DecodeSlot) -> Option<usize> {
             self.pending_token_widths
+                .lock()
+                .unwrap()
+                .get(&Self::slot_key(slot))
+                .copied()
+        }
+
+        fn remaining_prefill_tokens(&self, slot: &DecodeSlot) -> Option<usize> {
+            self.remaining
                 .lock()
                 .unwrap()
                 .get(&Self::slot_key(slot))
@@ -5615,6 +5686,77 @@ mod tests {
                 remaining: 64,
             })
         ));
+
+        actor.fail_all("test complete");
+    }
+
+    #[test]
+    fn short_prefill_priority_is_bounded_by_round_robin_service() {
+        const LONG_A: TokenId = 10_001;
+        const LONG_B: TokenId = 10_002;
+        const LONG_C: TokenId = 10_003;
+        const LONG_D: TokenId = 10_004;
+        const SHORT: TokenId = 20_000;
+
+        let forward = Arc::new(SyntheticPrefillForward {
+            layers_per_chunk: 8,
+            ..SyntheticPrefillForward::default()
+        });
+        let (_command_tx, command_rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let mut actor = test_actor(
+            command_rx,
+            forward.clone(),
+            5,
+            false,
+            5,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        for (key, tokens) in [
+            (LONG_A, 1_024),
+            (LONG_B, 1_024),
+            (LONG_C, 1_024),
+            (LONG_D, 1_024),
+            (SHORT, 128),
+        ] {
+            let req = request_with_tokens(vec![key; tokens], 1);
+            let RequestPreparation::Prefilling { slot, .. } = forward
+                .prepare_request_chunked(&req, 64)
+                .expect("initialize synthetic mixed prefill")
+            else {
+                panic!("synthetic prompt unexpectedly became ready")
+            };
+            let (response_tx, _response_rx) = mpsc::channel(8);
+            push_test_active(&mut actor, req, response_tx, slot);
+        }
+
+        for _ in 0..12 {
+            assert!(actor.run_prefill_budget(64));
+        }
+
+        let layer_order: Vec<TokenId> = forward
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                SchedulingEvent::PrefillLayers { key, .. } => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            layer_order,
+            vec![
+                LONG_A, LONG_B, LONG_C, SHORT, LONG_D, SHORT, LONG_A, SHORT, LONG_B, LONG_C,
+                LONG_D, SHORT,
+            ]
+        );
+        assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 3);
+        assert_eq!(actor.snapshot.total_errors, 0);
+        assert!(!forward.is_prefilling(&actor.active[4].slot));
+        for active in &actor.active[..4] {
+            assert!(forward.is_prefilling(&active.slot));
+        }
 
         actor.fail_all("test complete");
     }

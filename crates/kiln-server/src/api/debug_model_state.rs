@@ -142,6 +142,7 @@ struct BatchingEngineSnapshotDebug {
     total_prefill_tokens: u64,
     total_prefill_layers: u64,
     total_prefill_layer_yields: u64,
+    total_short_prefill_priority_forwards: u64,
     total_errors: u64,
     response_delivery_in_flight: usize,
     response_delivery_backpressured: usize,
@@ -579,6 +580,7 @@ impl From<BatchingEngineSnapshot> for BatchingEngineSnapshotDebug {
             total_prefill_tokens: snapshot.total_prefill_tokens,
             total_prefill_layers: snapshot.total_prefill_layers,
             total_prefill_layer_yields: snapshot.total_prefill_layer_yields,
+            total_short_prefill_priority_forwards: snapshot.total_short_prefill_priority_forwards,
             total_errors: snapshot.total_errors,
             response_delivery_in_flight: snapshot.response_delivery_in_flight,
             response_delivery_backpressured: snapshot.response_delivery_backpressured,
@@ -791,6 +793,7 @@ mod tests {
             total_prefill_forwards: 11,
             total_prefill_layers: 33,
             total_prefill_layer_yields: 22,
+            total_short_prefill_priority_forwards: 6,
             response_delivery_in_flight: 4,
             response_delivery_backpressured: 2,
             response_delivery_pending_terminal: 1,
@@ -822,6 +825,7 @@ mod tests {
         assert_eq!(json["total_prefill_forwards"], 11);
         assert_eq!(json["total_prefill_layers"], 33);
         assert_eq!(json["total_prefill_layer_yields"], 22);
+        assert_eq!(json["total_short_prefill_priority_forwards"], 6);
         assert_eq!(json["response_delivery_in_flight"], 4);
         assert_eq!(json["response_delivery_backpressured"], 2);
         assert_eq!(json["response_delivery_pending_terminal"], 1);

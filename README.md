@@ -740,7 +740,12 @@ quantum controls latency without multiplying full-model prompt passes as a
 smaller token chunk can. The actor charges a chunk's token width once, when it
 selects that chunk; later layer groups resume the same width without competing
 for a second new-token budget, shrinking the chunk, or replaying completed
-layers. Cancellation and shutdown release partial KV ownership
+layers. Three of every four prefill dispatches remain round-robin. The fourth
+may accelerate the shortest remaining prompt tail when it is no more than four
+token chunks, so an interactive request need not wait a full long-prompt
+rotation while the round-robin lane retains 75% of dispatch capacity.
+Cancellation and
+shutdown release partial KV ownership
 only after the backend synchronization boundary; an unsettled device failure is
 quarantined instead of recycling pages. `/health` and `/v1/debug/model-state`
 expose `active_prefill`, both effective budgets and their sources, the last token
@@ -751,7 +756,9 @@ Prometheus exports the corresponding `kiln_batching_engine_active_prefill`,
 `kiln_batching_engine_max_prefill_layers_per_cycle`,
 `kiln_batching_engine_last_prefill_tokens`, and
 `kiln_batching_engine_{last_prefill_layers,prefill_layers_total,prefill_layer_yields_total}`
-series. Admission, bounded-prefill, and decode-forward wall time is also
+series. Bounded short-tail service is counted by
+`kiln_batching_engine_short_prefill_priority_forwards_total`. Admission,
+bounded-prefill, and decode-forward wall time is also
 available as cumulative, process-maximum, and 100 ms slow-phase counters under
 `kiln_batching_engine_{admission,prefill_forward,decode_forward}_*`.
 The same values appear in health and debug snapshots. A phase crossing 100 ms

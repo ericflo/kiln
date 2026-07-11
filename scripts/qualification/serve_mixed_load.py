@@ -224,6 +224,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "batching_prefill_forward_ms_total": ("ms", "sum", True),
     "batching_prefill_layer_count": ("layers", "sum", True),
     "batching_prefill_layer_yield_count": ("count", "sum", True),
+    "batching_short_prefill_priority_forward_count": ("count", "sum", False),
     "batching_slow_admission_count": ("count", "sum", True),
     "batching_slow_decode_forward_count": ("count", "sum", True),
     "batching_slow_prefill_forward_count": ("count", "sum", True),
@@ -1692,6 +1693,7 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int]:
         "total_prefill_forwards",
         "total_prefill_layers",
         "total_prefill_layer_yields",
+        "total_short_prefill_priority_forwards",
         "total_admission_calls",
         "slow_admission_count",
         "slow_prefill_forward_count",
@@ -2159,6 +2161,9 @@ def metric_values(
         "batching_prefill_layer_yield_count": counter_delta(
             batching_start, batching_end, "total_prefill_layer_yields"
         ),
+        "batching_short_prefill_priority_forward_count": counter_delta(
+            batching_start, batching_end, "total_short_prefill_priority_forwards"
+        ),
         "batching_slow_admission_count": counter_delta(
             batching_start, batching_end, "slow_admission_count"
         ),
@@ -2571,6 +2576,10 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             status_failures.append("measured load processed no bounded prefill layers")
         if values["batching_prefill_layer_yield_count"] < 1:
             status_failures.append("measured load exercised no inter-layer prefill yield")
+        if values["batching_short_prefill_priority_forward_count"] < 1:
+            status_failures.append(
+                "measured load exercised no bounded short-prefill service opportunity"
+            )
         if values["external_yield_sync_call_count"] < 1:
             status_failures.append(
                 "measured load exercised no attributed backend synchronization boundary"
