@@ -1746,6 +1746,20 @@ fn checkpoint_ensure_finite_f32(tensor: &KtTensor, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn checkpoint_ensure_finite_tensor(tensor: &KtTensor, label: &str) -> Result<()> {
+    let values = tensor
+        .to_dtype(KtDType::F32)
+        .and_then(|tensor| tensor.to_device(kiln_tensor::Device::Cpu))
+        .and_then(|tensor| tensor.contiguous())
+        .and_then(|tensor| tensor.to_vec::<f32>())
+        .map_err(|error| anyhow::anyhow!("read checkpoint tensor {label}: {error}"))?;
+    anyhow::ensure!(
+        values.iter().all(|value| value.is_finite()),
+        "checkpoint tensor {label} contains non-finite values"
+    );
+    Ok(())
+}
+
 fn checkpoint_validate_f32_state_shape(
     tensor: &KtTensor,
     param: &Parameter,
@@ -1828,6 +1842,18 @@ fn make_opt_state(
             device,
         )?)),
     }
+}
+
+fn checkpoint_parameter_key(layer_idx: usize, module: &str, matrix: &str) -> String {
+    let sub = if matches!(
+        module,
+        "q_proj" | "k_proj" | "v_proj" | "o_proj" | "in_proj_qkv" | "in_proj_z" | "out_proj"
+    ) {
+        "self_attn"
+    } else {
+        "mlp"
+    };
+    format!("base_model.model.model.layers.{layer_idx}.{sub}.{module}.lora_{matrix}.weight")
 }
 
 impl TrainableLoraParams {
@@ -1954,26 +1980,7 @@ impl TrainableLoraParams {
     fn checkpoint_param_keys(&self) -> Vec<String> {
         self.all_params_with_modules()
             .into_iter()
-            .map(|entry| {
-                let sub = if matches!(
-                    entry.module,
-                    "q_proj"
-                        | "k_proj"
-                        | "v_proj"
-                        | "o_proj"
-                        | "in_proj_qkv"
-                        | "in_proj_z"
-                        | "out_proj"
-                ) {
-                    "self_attn"
-                } else {
-                    "mlp"
-                };
-                format!(
-                    "base_model.model.model.layers.{}.{sub}.{}.lora_{}.weight",
-                    entry.layer_idx, entry.module, entry.matrix
-                )
-            })
+            .map(|entry| checkpoint_parameter_key(entry.layer_idx, entry.module, entry.matrix))
             .collect()
     }
 
@@ -2045,6 +2052,7 @@ impl TrainableLoraParams {
                 current.dtype(),
                 tensor.dtype()
             );
+            checkpoint_ensure_finite_tensor(tensor, &key)?;
         }
 
         for (key, param) in self.checkpoint_params_mut() {
@@ -8920,6 +8928,189 @@ fn lora_snapshot_capture_or_blend(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    Ok(LoraWeights {
+        layers,
+        mtp: None,
+        rank: current.rank,
+        alpha: current.alpha,
+        scale: current.scale,
+        source_identity: None,
+    })
+}
+
+fn capture_lora_reference_checkpoint(snapshot: &LoraWeights) -> Result<CheckpointTensorSnapshot> {
+    anyhow::ensure!(
+        snapshot.mtp.is_none(),
+        "GRPO EMA reference checkpoint must not contain MTP weights"
+    );
+    let mut tensors = Vec::new();
+    for (layer_idx, layer) in snapshot.layers.iter().enumerate() {
+        for (module, projection) in [
+            ("q_proj", &layer.q_proj),
+            ("k_proj", &layer.k_proj),
+            ("v_proj", &layer.v_proj),
+            ("o_proj", &layer.o_proj),
+            ("in_proj_qkv", &layer.in_proj_qkv),
+            ("in_proj_z", &layer.in_proj_z),
+            ("out_proj", &layer.gdn_out_proj),
+            ("gate_proj", &layer.gate_proj),
+            ("up_proj", &layer.up_proj),
+            ("down_proj", &layer.down_proj),
+        ] {
+            let Some(projection) = projection else {
+                continue;
+            };
+            for (matrix, tensor) in [("A", &projection.a), ("B", &projection.b)] {
+                let key = checkpoint_parameter_key(layer_idx, module, matrix);
+                let tensor = tensor
+                    .to_device(kiln_tensor::Device::Cpu)
+                    .and_then(|tensor| tensor.contiguous())
+                    .map_err(|error| {
+                        anyhow::anyhow!("capture GRPO EMA reference tensor {key}: {error}")
+                    })?;
+                checkpoint_ensure_finite_tensor(&tensor, &key)?;
+                tensors.push((key, tensor));
+            }
+        }
+    }
+    CheckpointTensorSnapshot::new(tensors, "GRPO EMA reference")
+}
+
+fn restore_lora_reference_tensor(
+    loaded: &mut HashMap<String, KtTensor>,
+    key: &str,
+    current: &KtTensor,
+) -> Result<KtTensor> {
+    let tensor = loaded
+        .remove(key)
+        .with_context(|| format!("GRPO EMA reference tensor {key} missing"))?;
+    anyhow::ensure!(
+        tensor.dims() == current.dims(),
+        "GRPO EMA reference tensor {key} shape mismatch: expected {:?}, found {:?}",
+        current.dims(),
+        tensor.dims()
+    );
+    anyhow::ensure!(
+        tensor.dtype() == current.dtype(),
+        "GRPO EMA reference tensor {key} dtype mismatch: expected {}, found {}",
+        current.dtype(),
+        tensor.dtype()
+    );
+    checkpoint_ensure_finite_tensor(&tensor, key)?;
+    tensor
+        .to_device(current.device())
+        .and_then(|tensor| tensor.contiguous())
+        .map_err(|error| anyhow::anyhow!("restore GRPO EMA reference tensor {key}: {error}"))
+}
+
+fn restore_lora_reference_projection(
+    loaded: &mut HashMap<String, KtTensor>,
+    layer_idx: usize,
+    module: &str,
+    current: &Option<(Parameter, Parameter)>,
+) -> Result<Option<LoraProjectionWeights>> {
+    let Some((current_a, current_b)) = current else {
+        return Ok(None);
+    };
+    let a_key = checkpoint_parameter_key(layer_idx, module, "A");
+    let b_key = checkpoint_parameter_key(layer_idx, module, "B");
+    Ok(Some(LoraProjectionWeights {
+        a: restore_lora_reference_tensor(
+            loaded,
+            &a_key,
+            current_a.forward_storage().primary_tensor(),
+        )?,
+        b: restore_lora_reference_tensor(
+            loaded,
+            &b_key,
+            current_b.forward_storage().primary_tensor(),
+        )?,
+    }))
+}
+
+fn load_lora_reference_checkpoint(
+    path: &Path,
+    current: &TrainableLoraParams,
+) -> Result<LoraWeights> {
+    let mut loaded = kiln_tensor::safetensors::load_cpu(path)
+        .map_err(|error| anyhow::anyhow!("load GRPO EMA reference checkpoint: {error}"))?;
+    let expected: BTreeSet<_> = current.checkpoint_param_keys().into_iter().collect();
+    let actual: BTreeSet<_> = loaded.keys().cloned().collect();
+    anyhow::ensure!(
+        actual == expected,
+        "GRPO EMA reference tensor set mismatch: expected {expected:?}, found {actual:?}"
+    );
+
+    let layers = current
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(layer_idx, layer)| {
+            Ok::<_, anyhow::Error>(LoraLayerWeights {
+                q_proj: restore_lora_reference_projection(
+                    &mut loaded,
+                    layer_idx,
+                    "q_proj",
+                    &layer.q_proj,
+                )?,
+                k_proj: restore_lora_reference_projection(
+                    &mut loaded,
+                    layer_idx,
+                    "k_proj",
+                    &layer.k_proj,
+                )?,
+                v_proj: restore_lora_reference_projection(
+                    &mut loaded,
+                    layer_idx,
+                    "v_proj",
+                    &layer.v_proj,
+                )?,
+                o_proj: restore_lora_reference_projection(
+                    &mut loaded,
+                    layer_idx,
+                    "o_proj",
+                    &layer.o_proj,
+                )?,
+                in_proj_qkv: restore_lora_reference_projection(
+                    &mut loaded,
+                    layer_idx,
+                    "in_proj_qkv",
+                    &layer.in_proj_qkv,
+                )?,
+                in_proj_z: restore_lora_reference_projection(
+                    &mut loaded,
+                    layer_idx,
+                    "in_proj_z",
+                    &layer.in_proj_z,
+                )?,
+                gdn_out_proj: restore_lora_reference_projection(
+                    &mut loaded,
+                    layer_idx,
+                    "out_proj",
+                    &layer.gdn_out_proj,
+                )?,
+                gate_proj: restore_lora_reference_projection(
+                    &mut loaded,
+                    layer_idx,
+                    "gate_proj",
+                    &layer.gate_proj,
+                )?,
+                up_proj: restore_lora_reference_projection(
+                    &mut loaded,
+                    layer_idx,
+                    "up_proj",
+                    &layer.up_proj,
+                )?,
+                down_proj: restore_lora_reference_projection(
+                    &mut loaded,
+                    layer_idx,
+                    "down_proj",
+                    &layer.down_proj,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(loaded.is_empty(), "unconsumed GRPO EMA reference tensors");
     Ok(LoraWeights {
         layers,
         mtp: None,
@@ -17185,6 +17376,110 @@ pub(crate) mod tests {
         )
     }
 
+    fn checkpoint_ema_reference_continuation_round_trip(device: Device) -> Result<()> {
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+        let backend = backend::for_device_kt(&device);
+        let mut params =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(11))?;
+        let optimizer = Optimizer::AdamW {
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.01,
+        };
+        let mut opt_state = make_opt_state(&params, optimizer, 1e-3, &device)?
+            .context("EMA checkpoint fixture requires optimizer state")?;
+        params.register_with_backend(&*backend)?;
+        opt_state.register_with_backend(&*backend)?;
+        let initial = lora_snapshot_capture_or_blend(&params, None, 0.8)?;
+        let grads = checkpoint_test_grad_map(&params, 0.025)?;
+        optimizer_step_from_map(
+            &*backend,
+            &mut params,
+            &grads,
+            1e-3,
+            optimizer,
+            Some(&mut opt_state),
+        )?;
+        params.sync_to_master(&*backend)?;
+        let uninterrupted = lora_snapshot_capture_or_blend(&params, Some(&initial), 0.8)?;
+
+        let temp = tempfile::tempdir()?;
+        let checkpoint = temp.path().join("ema-reference.safetensors");
+        capture_lora_reference_checkpoint(&uninterrupted)?.save(&checkpoint)?;
+        let restored = load_lora_reference_checkpoint(&checkpoint, &params)?;
+
+        let uninterrupted_next =
+            lora_snapshot_capture_or_blend(&params, Some(&uninterrupted), 0.8)?;
+        let restored_next = lora_snapshot_capture_or_blend(&params, Some(&restored), 0.8)?;
+        let uninterrupted_path = temp.path().join("uninterrupted-next.safetensors");
+        let restored_path = temp.path().join("restored-next.safetensors");
+        capture_lora_reference_checkpoint(&uninterrupted_next)?.save(&uninterrupted_path)?;
+        capture_lora_reference_checkpoint(&restored_next)?.save(&restored_path)?;
+        anyhow::ensure!(
+            std::fs::read(uninterrupted_path)? == std::fs::read(restored_path)?,
+            "restored EMA reference differs after the next refresh"
+        );
+        opt_state.evict_from_backend(&*backend);
+        params.evict_from_backend(&*backend);
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_codec_preserves_ema_reference_continuation() -> Result<()> {
+        checkpoint_ema_reference_continuation_round_trip(cpu_device())
+    }
+
+    #[test]
+    fn checkpoint_adapter_restore_rejects_non_finite_state_before_mutation() -> Result<()> {
+        let config = tiny_config();
+        let device = cpu_device();
+        let weights = tiny_weights(&config, &device)?;
+        let source =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(11))?;
+        let mut destination =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(99))?;
+        let temp = tempfile::tempdir()?;
+        let valid_path = temp.path().join("valid.safetensors");
+        let corrupt_path = temp.path().join("corrupt.safetensors");
+        let before_path = temp.path().join("before.safetensors");
+        let after_path = temp.path().join("after.safetensors");
+        source.save_checkpoint_parameters(&valid_path)?;
+        destination.save_checkpoint_parameters(&before_path)?;
+
+        let mut tensors = kiln_tensor::safetensors::load_cpu(&valid_path)?;
+        let key = tensors
+            .keys()
+            .next()
+            .context("checkpoint fixture has no adapter tensor")?
+            .clone();
+        let original = tensors.get(&key).expect("selected tensor must exist");
+        let non_finite = KtTensor::from_vec_on(
+            kiln_tensor::Device::Cpu,
+            vec![f32::NAN; original.elem_count()],
+            original.dims().to_vec(),
+        )?
+        .to_dtype(original.dtype())?;
+        tensors.insert(key, non_finite);
+        let refs: HashMap<&str, &KtTensor> = tensors
+            .iter()
+            .map(|(name, tensor)| (name.as_str(), tensor))
+            .collect();
+        kiln_tensor::safetensors::save_cpu(&refs, &corrupt_path)?;
+
+        let error = destination
+            .load_checkpoint_parameters(&corrupt_path)
+            .expect_err("non-finite adapter checkpoint must reject");
+        assert!(format!("{error:#}").contains("non-finite"));
+        destination.save_checkpoint_parameters(&after_path)?;
+        anyhow::ensure!(
+            std::fs::read(before_path)? == std::fs::read(after_path)?,
+            "failed adapter validation mutated live parameters"
+        );
+        Ok(())
+    }
+
     #[cfg(feature = "rocm")]
     #[test]
     fn rocm_checkpoint_codec_preserves_stateful_optimizer_continuation() -> Result<()> {
@@ -17218,7 +17513,8 @@ pub(crate) mod tests {
                 weight_decay: 0.01,
             },
             2e-2,
-        )
+        )?;
+        checkpoint_ema_reference_continuation_round_trip(Device::Rocm(0))
     }
 
     #[cfg(feature = "rocm")]

@@ -429,8 +429,12 @@ impl GrpoPolicyAuditAccumulator {
             crate::IsLevel::Sequence => "sequence",
             crate::IsLevel::Token | crate::IsLevel::Cispo => "token",
         };
+        let ratio_scope_matches = match self.ratio_scope.as_deref() {
+            None => true,
+            Some(current) => current == scope,
+        };
         anyhow::ensure!(
-            self.ratio_scope.as_deref().is_none_or(|current| current == scope),
+            ratio_scope_matches,
             "GRPO policy audit ratio scope changed within one run"
         );
         self.ratio_scope = Some(scope.to_string());
