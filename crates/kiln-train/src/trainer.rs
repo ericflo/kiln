@@ -2972,7 +2972,7 @@ fn checkpoint_dtype_name(dtype: KtDType) -> String {
     dtype.to_string().to_ascii_lowercase()
 }
 
-fn sft_checkpoint_precision(
+fn training_checkpoint_precision(
     params: &TrainableLoraParams,
     opt_state: Option<&OptimizerState>,
 ) -> Result<crate::checkpoint::TrainingCheckpointPrecision> {
@@ -3088,6 +3088,558 @@ fn load_sft_checkpoint_loop_state(
     let bytes = std::fs::read(&path)
         .with_context(|| format!("read SFT checkpoint loop state {}", path.display()))?;
     serde_json::from_slice(&bytes).context("parse strict SFT checkpoint loop state")
+}
+
+const GRPO_CHECKPOINT_LOOP_STATE_SCHEMA_VERSION: u32 = 1;
+const GRPO_CHECKPOINT_LOOP_STATE_TYPE: &str = "kiln.grpo-loop-state.v1";
+const GRPO_CHECKPOINT_ADAPTER_FILE: &str = "adapter.safetensors";
+const GRPO_CHECKPOINT_OPTIMIZER_FILE: &str = "optimizer.safetensors";
+const GRPO_CHECKPOINT_REFERENCE_FILE: &str = "reference.safetensors";
+const GRPO_CHECKPOINT_LOOP_STATE_FILE: &str = "grpo_loop_state.json";
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum GrpoCheckpointRoute {
+    Inline,
+    Jsonl,
+}
+
+impl GrpoCheckpointRoute {
+    fn source_kind(self) -> &'static str {
+        match self {
+            Self::Inline => "inline-grpo-trainable-order-v1",
+            Self::Jsonl => "jsonl-grpo-trainable-order-v1",
+        }
+    }
+}
+
+/// CPU-owned state required to continue GRPO at the next optimizer-group
+/// boundary. Tensor state lives in the adjacent safetensors artifacts; this
+/// strict JSON owns cursors and receipt accumulators that would otherwise be
+/// silently reset after a restart.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct GrpoCheckpointLoopState {
+    schema_version: u32,
+    state_type: String,
+    route: GrpoCheckpointRoute,
+    global_step: u64,
+    /// Exact byte offset of the next unread JSONL line. Inline runs have no
+    /// source-file cursor and therefore store `None`.
+    source_byte_offset: Option<u64>,
+    /// Number of physical JSONL lines already consumed. This restores line
+    /// attribution after seeking, including blank lines.
+    source_lines_consumed: Option<u64>,
+    processed_completions: u64,
+    loss_history: Vec<f64>,
+    last_loss: Option<f64>,
+    data_stats: crate::train_receipt::DataStatsReceipt,
+    token_counts: crate::train_receipt::TokenCountReceipt,
+    dynamic_groups_filtered: u64,
+    echo_metrics: crate::train_receipt::EchoActivityMetrics,
+    lora_grad_norms: crate::train_receipt::LoraGradNormAccumulator,
+    policy_audit: crate::train_receipt::GrpoPolicyAuditAccumulator,
+    phase_timings: GrpoBenchmarkTimings,
+    gpu_writer_timings: GrpoGpuWriterTimings,
+    /// Present exactly when the KL reference is an EMA snapshot.
+    ema_groups_since_refresh: Option<u64>,
+}
+
+impl GrpoCheckpointLoopState {
+    fn validate(&self, progress: &crate::checkpoint::TrainingCheckpointProgress) -> Result<()> {
+        anyhow::ensure!(
+            self.schema_version == GRPO_CHECKPOINT_LOOP_STATE_SCHEMA_VERSION
+                && self.state_type == GRPO_CHECKPOINT_LOOP_STATE_TYPE,
+            "unsupported GRPO checkpoint loop-state contract"
+        );
+        anyhow::ensure!(
+            progress.epoch_index == 0
+                && self.global_step == progress.global_step
+                && self.global_step == progress.cursor_in_epoch,
+            "GRPO checkpoint loop state disagrees with manifest progress"
+        );
+        anyhow::ensure!(
+            self.loss_history.len() as u64 == self.global_step,
+            "GRPO checkpoint loss-history length {} does not match global step {}",
+            self.loss_history.len(),
+            self.global_step
+        );
+        anyhow::ensure!(
+            self.loss_history.iter().all(|loss| loss.is_finite()),
+            "GRPO checkpoint loss history contains a non-finite value"
+        );
+        match (self.loss_history.last().copied(), self.last_loss) {
+            (None, None) => {}
+            (Some(expected), Some(actual)) if expected == actual && actual.is_finite() => {}
+            _ => anyhow::bail!("GRPO checkpoint last_loss does not match loss history"),
+        }
+        anyhow::ensure!(
+            self.data_stats.groups_trained as u64 == self.global_step,
+            "GRPO checkpoint trained-group count does not match global step"
+        );
+        anyhow::ensure!(
+            self.data_stats.completions_trained as u64 == self.processed_completions,
+            "GRPO checkpoint trained-completion count does not match loop state"
+        );
+        anyhow::ensure!(
+            self.dynamic_groups_filtered as usize <= self.data_stats.groups_filtered,
+            "GRPO checkpoint dynamic-filter count exceeds all filtered groups"
+        );
+        match self.route {
+            GrpoCheckpointRoute::Inline => anyhow::ensure!(
+                self.source_byte_offset.is_none() && self.source_lines_consumed.is_none(),
+                "inline GRPO checkpoint unexpectedly contains a JSONL cursor"
+            ),
+            GrpoCheckpointRoute::Jsonl => anyhow::ensure!(
+                self.source_byte_offset.is_some() && self.source_lines_consumed.is_some(),
+                "JSONL GRPO checkpoint is missing its exact source cursor"
+            ),
+        }
+        let timing_values = [
+            self.phase_timings.tokenize_ms,
+            self.phase_timings.mask_build_ms,
+            self.phase_timings.reference_forward_ms,
+            self.phase_timings.policy_forward_ms,
+            self.phase_timings.backward_ms,
+            self.phase_timings.optimizer_ms,
+            self.phase_timings.gpu_writer_wait_ms,
+            self.phase_timings.gpu_writer_held_ms,
+            self.gpu_writer_timings.wait_ms,
+            self.gpu_writer_timings.held_ms,
+        ];
+        anyhow::ensure!(
+            timing_values
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0),
+            "GRPO checkpoint contains an invalid phase timing"
+        );
+        anyhow::ensure!(
+            self.echo_metrics.initial_env_ce.is_none_or(f64::is_finite)
+                && self.echo_metrics.final_env_ce.is_none_or(f64::is_finite),
+            "GRPO checkpoint contains a non-finite ECHO measurement"
+        );
+        anyhow::ensure!(
+            (self.echo_metrics.measurements == 0)
+                == (self.echo_metrics.initial_env_ce.is_none()
+                    && self.echo_metrics.final_env_ce.is_none()),
+            "GRPO checkpoint ECHO accumulator is inconsistent"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GrpoCheckpointDescriptor {
+    route: GrpoCheckpointRoute,
+    adapter_name: String,
+    effective_config: serde_json::Value,
+    precision_policy: crate::checkpoint::TrainingCheckpointPrecision,
+    data: crate::checkpoint::TrainingCheckpointData,
+    init_seed: u64,
+    optimizer: Optimizer,
+    learning_rate: f64,
+    total_steps: usize,
+    base_model_weights_sha256: Option<String>,
+    auxiliary_state: serde_json::Value,
+    ema_refresh_every: Option<usize>,
+}
+
+#[derive(Debug)]
+struct GrpoCheckpointSnapshot {
+    target: PathBuf,
+    manifest: crate::checkpoint::TrainingCheckpointManifest,
+    artifacts: Vec<crate::checkpoint::CheckpointArtifact>,
+    adapter_parameters: CheckpointTensorSnapshot,
+    optimizer_state: Option<CheckpointTensorSnapshot>,
+    reference_state: Option<CheckpointTensorSnapshot>,
+    loop_state_bytes: Vec<u8>,
+}
+
+impl GrpoCheckpointSnapshot {
+    fn replace_loop_state(&mut self, loop_state: &GrpoCheckpointLoopState) -> Result<()> {
+        self.loop_state_bytes = serde_json::to_vec_pretty(loop_state)
+            .context("serialize GRPO checkpoint loop state")?;
+        Ok(())
+    }
+
+    fn publish(self) -> Result<PathBuf> {
+        let Self {
+            target,
+            manifest,
+            artifacts,
+            adapter_parameters,
+            optimizer_state,
+            reference_state,
+            loop_state_bytes,
+        } = self;
+        crate::checkpoint::write_training_checkpoint_atomic(
+            &target,
+            manifest,
+            &artifacts,
+            move |staging| {
+                adapter_parameters.save(&staging.join(GRPO_CHECKPOINT_ADAPTER_FILE))?;
+                if let Some(state) = optimizer_state.as_ref() {
+                    state.save(&staging.join(GRPO_CHECKPOINT_OPTIMIZER_FILE))?;
+                }
+                if let Some(state) = reference_state.as_ref() {
+                    state.save(&staging.join(GRPO_CHECKPOINT_REFERENCE_FILE))?;
+                }
+                std::fs::write(
+                    staging.join(GRPO_CHECKPOINT_LOOP_STATE_FILE),
+                    &loop_state_bytes,
+                )
+                .context("write GRPO checkpoint loop state")?;
+                Ok(())
+            },
+        )
+    }
+}
+
+impl GrpoCheckpointDescriptor {
+    fn optimizer_state_file(&self) -> Option<String> {
+        (!matches!(self.optimizer, Optimizer::Sgd))
+            .then(|| GRPO_CHECKPOINT_OPTIMIZER_FILE.to_string())
+    }
+
+    fn reference_state_file(&self) -> Option<String> {
+        self.ema_refresh_every
+            .map(|_| GRPO_CHECKPOINT_REFERENCE_FILE.to_string())
+    }
+
+    fn optimizer_manifest(
+        &self,
+        step: u64,
+    ) -> Result<crate::checkpoint::TrainingCheckpointOptimizer> {
+        let kind = match self.optimizer {
+            Optimizer::Sgd => "sgd",
+            Optimizer::AdamW { .. } => "adam_w",
+            Optimizer::Muon { .. } => "muon",
+        };
+        let hyperparameters = canonical_checkpoint_json_value(serde_json::json!({
+            "learning_rate": self.learning_rate,
+            "optimizer": serde_json::to_value(self.optimizer)
+                .context("serialize GRPO checkpoint optimizer")?,
+        }))?;
+        Ok(crate::checkpoint::TrainingCheckpointOptimizer {
+            kind: kind.to_string(),
+            step,
+            hyperparameters,
+            state_file: self.optimizer_state_file(),
+        })
+    }
+
+    fn scheduler_manifest(&self, step: u64) -> crate::checkpoint::TrainingCheckpointScheduler {
+        crate::checkpoint::TrainingCheckpointScheduler {
+            kind: "constant".to_string(),
+            step,
+            state: serde_json::json!({"learning_rate": self.learning_rate}),
+        }
+    }
+
+    fn rng_states(
+        &self,
+        step: u64,
+    ) -> BTreeMap<String, crate::checkpoint::TrainingCheckpointRngState> {
+        let mut states = BTreeMap::from([(
+            "lora-init".to_string(),
+            crate::checkpoint::TrainingCheckpointRngState {
+                algorithm: "kiln.seeded-lora-init.v1".to_string(),
+                seed: self.init_seed,
+                position: 0,
+                state_file: None,
+            },
+        )]);
+        let rounding = &self.precision_policy.stochastic_rounding;
+        if rounding.get("mode").and_then(serde_json::Value::as_str) == Some("stochastic") {
+            if let Some(seed) = rounding.get("seed").and_then(serde_json::Value::as_u64) {
+                states.insert(
+                    "optimizer-rounding".to_string(),
+                    crate::checkpoint::TrainingCheckpointRngState {
+                        algorithm: "kiln.optimizer-stochastic-rounding.v1".to_string(),
+                        seed,
+                        position: step,
+                        state_file: None,
+                    },
+                );
+            }
+        }
+        states
+    }
+
+    fn data_order(&self) -> Vec<u64> {
+        (0..self.total_steps as u64).collect()
+    }
+
+    fn state_files(&self) -> crate::checkpoint::TrainingCheckpointStateFiles {
+        crate::checkpoint::TrainingCheckpointStateFiles {
+            adapter_parameters: GRPO_CHECKPOINT_ADAPTER_FILE.to_string(),
+            optimizer_state: self.optimizer_state_file(),
+            reference_state: self.reference_state_file(),
+            ema_state: None,
+            reward_normalization_state: None,
+            loss_history: Some(GRPO_CHECKPOINT_LOOP_STATE_FILE.to_string()),
+        }
+    }
+
+    fn progress(
+        &self,
+        loop_state: &GrpoCheckpointLoopState,
+    ) -> crate::checkpoint::TrainingCheckpointProgress {
+        crate::checkpoint::TrainingCheckpointProgress {
+            global_step: loop_state.global_step,
+            total_steps: self.total_steps as u64,
+            epoch_index: 0,
+            cursor_in_epoch: loop_state.global_step,
+            data_order: self.data_order(),
+        }
+    }
+
+    fn manifest(
+        &self,
+        progress: crate::checkpoint::TrainingCheckpointProgress,
+    ) -> Result<crate::checkpoint::TrainingCheckpointManifest> {
+        let step = progress.global_step;
+        Ok(crate::checkpoint::TrainingCheckpointManifest::new(
+            format!("grpo-step-{step:08}"),
+            crate::checkpoint::TrainingKind::Grpo,
+            &self.adapter_name,
+            self.effective_config.clone(),
+            self.precision_policy.clone(),
+            progress,
+            self.data.clone(),
+            self.rng_states(step),
+            self.optimizer_manifest(step)?,
+            self.scheduler_manifest(step),
+            self.state_files(),
+            self.auxiliary_state.clone(),
+        ))
+    }
+
+    fn validate_resume(
+        &self,
+        checkpoint: &crate::checkpoint::ValidatedTrainingCheckpoint,
+        loop_state: &GrpoCheckpointLoopState,
+    ) -> Result<()> {
+        let manifest = &checkpoint.manifest;
+        anyhow::ensure!(
+            manifest.training_kind == crate::checkpoint::TrainingKind::Grpo,
+            "resume checkpoint is {:?}, not GRPO",
+            manifest.training_kind
+        );
+        anyhow::ensure!(
+            manifest.adapter_name == self.adapter_name,
+            "resume checkpoint adapter {:?} does not match output adapter {:?}",
+            manifest.adapter_name,
+            self.adapter_name
+        );
+        anyhow::ensure!(
+            manifest.effective_config == self.effective_config,
+            "resume checkpoint effective GRPO configuration differs from this request: checkpoint={}, request={}",
+            manifest.effective_config,
+            self.effective_config
+        );
+        anyhow::ensure!(
+            manifest.precision_policy == self.precision_policy,
+            "resume checkpoint precision policy differs from this runtime"
+        );
+        anyhow::ensure!(
+            manifest.data == self.data,
+            "resume checkpoint GRPO data identity differs from this request"
+        );
+        anyhow::ensure!(
+            manifest.progress.total_steps == self.total_steps as u64
+                && manifest.progress.data_order == self.data_order(),
+            "resume checkpoint GRPO trainable order differs from this run"
+        );
+        anyhow::ensure!(
+            manifest.optimizer == self.optimizer_manifest(manifest.progress.global_step)?,
+            "resume checkpoint optimizer contract differs from this request"
+        );
+        anyhow::ensure!(
+            manifest.scheduler == self.scheduler_manifest(manifest.progress.global_step),
+            "resume checkpoint scheduler contract differs from this request"
+        );
+        anyhow::ensure!(
+            manifest.rng_states == self.rng_states(manifest.progress.global_step),
+            "resume checkpoint RNG streams differ from this request"
+        );
+        anyhow::ensure!(
+            manifest.state_files == self.state_files(),
+            "resume checkpoint GRPO artifact contract differs from this runtime"
+        );
+        anyhow::ensure!(
+            manifest.auxiliary_state == self.auxiliary_state,
+            "resume checkpoint model/tokenizer/runtime identity differs from this run"
+        );
+        anyhow::ensure!(
+            loop_state.route == self.route,
+            "resume checkpoint GRPO route differs from this request"
+        );
+        match (self.ema_refresh_every, loop_state.ema_groups_since_refresh) {
+            (None, None) => {}
+            (Some(refresh_every), Some(position)) => anyhow::ensure!(
+                position < refresh_every as u64,
+                "resume checkpoint EMA refresh cursor {position} exceeds cadence {refresh_every}"
+            ),
+            _ => anyhow::bail!("resume checkpoint EMA metadata differs from this request"),
+        }
+        loop_state.validate(&manifest.progress)
+    }
+
+    fn capture(
+        &self,
+        output_root: &Path,
+        backend: &dyn BackendRuntime,
+        params: &mut TrainableLoraParams,
+        opt_state: &mut Option<OptimizerState>,
+        ema_ref_state: Option<&EmaReferenceState>,
+        loop_state: &GrpoCheckpointLoopState,
+    ) -> Result<GrpoCheckpointSnapshot> {
+        anyhow::ensure!(
+            self.base_model_weights_sha256.is_some(),
+            "exact GRPO checkpointing requires base-model weights loaded with a content identity"
+        );
+        anyhow::ensure!(
+            self.ema_refresh_every.is_some() == ema_ref_state.is_some(),
+            "GRPO checkpoint EMA tensor state differs from its manifest contract"
+        );
+        match (&self.optimizer, opt_state.as_ref()) {
+            (Optimizer::Sgd, None) => {}
+            (Optimizer::Sgd, Some(_)) => {
+                anyhow::bail!("SGD GRPO checkpoint unexpectedly has optimizer state")
+            }
+            (_, Some(state)) => anyhow::ensure!(
+                u64::from(state.step_count()) == loop_state.global_step,
+                "GRPO optimizer step {} differs from loop step {}",
+                state.step_count(),
+                loop_state.global_step
+            ),
+            (_, None) => anyhow::bail!("stateful GRPO optimizer has no checkpoint state"),
+        }
+        match (ema_ref_state, loop_state.ema_groups_since_refresh) {
+            (None, None) => {}
+            (Some(state), Some(position)) => anyhow::ensure!(
+                state.groups_since_refresh as u64 == position,
+                "GRPO EMA tensor state cursor differs from loop state"
+            ),
+            _ => anyhow::bail!("GRPO checkpoint EMA cursor is inconsistent"),
+        }
+        let progress = self.progress(loop_state);
+        loop_state.validate(&progress)?;
+        let manifest = self.manifest(progress)?;
+        let target = output_root.join(format!(
+            "{}-checkpoint-step-{:08}.kiln-checkpoint",
+            self.adapter_name, loop_state.global_step
+        ));
+        params.sync_to_master(backend)?;
+        let adapter_parameters = params.capture_checkpoint_parameters()?;
+        let optimizer_state = opt_state
+            .as_mut()
+            .map(|state| state.capture_checkpoint_state(params, backend))
+            .transpose()?;
+        let reference_state = ema_ref_state
+            .map(|state| capture_lora_reference_checkpoint(&state.snapshot))
+            .transpose()?;
+
+        let mut artifacts = vec![
+            crate::checkpoint::CheckpointArtifact {
+                relative_path: GRPO_CHECKPOINT_ADAPTER_FILE.to_string(),
+                role: crate::checkpoint::CheckpointFileRole::AdapterParameters,
+            },
+            crate::checkpoint::CheckpointArtifact {
+                relative_path: GRPO_CHECKPOINT_LOOP_STATE_FILE.to_string(),
+                role: crate::checkpoint::CheckpointFileRole::LossHistory,
+            },
+        ];
+        if optimizer_state.is_some() {
+            artifacts.push(crate::checkpoint::CheckpointArtifact {
+                relative_path: GRPO_CHECKPOINT_OPTIMIZER_FILE.to_string(),
+                role: crate::checkpoint::CheckpointFileRole::OptimizerState,
+            });
+        }
+        if reference_state.is_some() {
+            artifacts.push(crate::checkpoint::CheckpointArtifact {
+                relative_path: GRPO_CHECKPOINT_REFERENCE_FILE.to_string(),
+                role: crate::checkpoint::CheckpointFileRole::ReferenceState,
+            });
+        }
+        let loop_state_bytes = serde_json::to_vec_pretty(loop_state)
+            .context("serialize GRPO checkpoint loop state")?;
+        Ok(GrpoCheckpointSnapshot {
+            target,
+            manifest,
+            artifacts,
+            adapter_parameters,
+            optimizer_state,
+            reference_state,
+            loop_state_bytes,
+        })
+    }
+}
+
+fn load_grpo_checkpoint_loop_state(
+    checkpoint: &crate::checkpoint::ValidatedTrainingCheckpoint,
+) -> Result<GrpoCheckpointLoopState> {
+    let relative = checkpoint
+        .manifest
+        .state_files
+        .loss_history
+        .as_deref()
+        .context("GRPO resume checkpoint has no loop-state file")?;
+    anyhow::ensure!(
+        relative == GRPO_CHECKPOINT_LOOP_STATE_FILE,
+        "unsupported GRPO loop-state artifact {relative:?}"
+    );
+    let path = checkpoint.artifact_path(relative)?;
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read GRPO checkpoint loop state {}", path.display()))?;
+    serde_json::from_slice(&bytes).context("parse strict GRPO checkpoint loop state")
+}
+
+fn grpo_checkpoint_effective_config(
+    config: &GrpoConfig,
+    learning_rate: f64,
+    effective_seed: u64,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(config).context("serialize effective GRPO config")?;
+    let object = value
+        .as_object_mut()
+        .context("serialized GRPO config is not an object")?;
+    object.remove("resume_checkpoint");
+    object.insert(
+        "learning_rate".to_string(),
+        serde_json::json!(learning_rate),
+    );
+    object.insert("seed".to_string(), serde_json::json!(effective_seed));
+    canonical_checkpoint_json_value(value)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn grpo_checkpoint_auxiliary_state(
+    route: GrpoCheckpointRoute,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    precision_policy: TrainingPrecisionPolicy,
+    base_model_weights_sha256: Option<&str>,
+    backend_runtime: &str,
+    trainable_order_sha256: &str,
+    gradient_checkpoint_plan_sha256: &str,
+) -> serde_json::Value {
+    let hashes =
+        kiln_core::config_hashes::ConfigHashes::from_model_tokenizer(model_config, tokenizer, None);
+    serde_json::json!({
+        "loop_state_type": GRPO_CHECKPOINT_LOOP_STATE_TYPE,
+        "route": route,
+        "model_config_sha256": hashes.model_config_hash,
+        "tokenizer_config_sha256": hashes.tokenizer_config_hash,
+        "chat_template_sha256": hashes.chat_template_hash,
+        "base_model_weights_sha256": base_model_weights_sha256,
+        "backend_runtime": backend_runtime,
+        "kiln_train_version": env!("CARGO_PKG_VERSION"),
+        "trainable_order_sha256": trainable_order_sha256,
+        "gradient_checkpoint_plan_sha256": gradient_checkpoint_plan_sha256,
+        "training_precision_policy": precision_policy.name,
+    })
 }
 
 fn sft_hyperparameters(
@@ -4303,7 +4855,8 @@ impl GpuStepCoordination {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 struct GrpoGpuWriterTimings {
     wait_ms: f64,
     held_ms: f64,
@@ -4856,7 +5409,7 @@ pub fn sft_train_to_with_checkpoint_root(
         let checkpoint_descriptor = SftCheckpointDescriptor {
             adapter_name: adapter_name.to_string(),
             effective_config: effective_checkpoint_config.clone(),
-            precision_policy: sft_checkpoint_precision(&params, opt_state.as_ref())?,
+            precision_policy: training_checkpoint_precision(&params, opt_state.as_ref())?,
             data: crate::checkpoint::TrainingCheckpointData {
                 source_kind: "sft-valid-example-order-v1".to_string(),
                 content_sha256: training_data_checkpoint_sha256.clone(),
@@ -17836,6 +18389,195 @@ pub(crate) mod tests {
     #[test]
     fn checkpoint_codec_preserves_ema_reference_continuation() -> Result<()> {
         checkpoint_ema_reference_continuation_round_trip(cpu_device())
+    }
+
+    fn grpo_checkpoint_loop_fixture() -> GrpoCheckpointLoopState {
+        GrpoCheckpointLoopState {
+            schema_version: GRPO_CHECKPOINT_LOOP_STATE_SCHEMA_VERSION,
+            state_type: GRPO_CHECKPOINT_LOOP_STATE_TYPE.to_string(),
+            route: GrpoCheckpointRoute::Inline,
+            global_step: 1,
+            source_byte_offset: None,
+            source_lines_consumed: None,
+            processed_completions: 2,
+            loss_history: vec![0.5],
+            last_loss: Some(0.5),
+            data_stats: crate::train_receipt::DataStatsReceipt {
+                groups_read: 2,
+                groups_trained: 1,
+                completions_read: 4,
+                completions_trained: 2,
+                ..Default::default()
+            },
+            token_counts: crate::train_receipt::TokenCountReceipt {
+                action_tokens: 3,
+                context_tokens: 5,
+                ..Default::default()
+            },
+            dynamic_groups_filtered: 0,
+            echo_metrics: crate::train_receipt::EchoActivityMetrics::default(),
+            lora_grad_norms: crate::train_receipt::LoraGradNormAccumulator::default(),
+            policy_audit: crate::train_receipt::GrpoPolicyAuditAccumulator::default(),
+            phase_timings: GrpoBenchmarkTimings {
+                tokenize_ms: 1.0,
+                optimizer_ms: 2.0,
+                ..Default::default()
+            },
+            gpu_writer_timings: GrpoGpuWriterTimings {
+                wait_ms: 0.25,
+                held_ms: 3.0,
+                acquisitions: 2,
+            },
+            ema_groups_since_refresh: Some(1),
+        }
+    }
+
+    #[test]
+    fn grpo_checkpoint_loop_state_round_trips_strictly() -> Result<()> {
+        let state = grpo_checkpoint_loop_fixture();
+        let progress = crate::checkpoint::TrainingCheckpointProgress {
+            global_step: 1,
+            total_steps: 2,
+            epoch_index: 0,
+            cursor_in_epoch: 1,
+            data_order: vec![0, 1],
+        };
+        state.validate(&progress)?;
+        let encoded = serde_json::to_value(&state)?;
+        let restored: GrpoCheckpointLoopState = serde_json::from_value(encoded.clone())?;
+        assert_eq!(restored, state);
+
+        let mut unknown = encoded;
+        unknown
+            .as_object_mut()
+            .context("GRPO loop state fixture must be an object")?
+            .insert("unknown".to_string(), serde_json::Value::Bool(true));
+        assert!(serde_json::from_value::<GrpoCheckpointLoopState>(unknown).is_err());
+
+        let mut invalid = state;
+        invalid.source_byte_offset = Some(7);
+        assert!(invalid.validate(&progress).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_checkpoint_bundle_preserves_all_exact_state_artifacts() -> Result<()> {
+        let device = cpu_device();
+        let model_config = tiny_config();
+        let weights = tiny_weights(&model_config, &device)?;
+        let backend = backend::for_device_kt(&device);
+        let optimizer = Optimizer::AdamW {
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.01,
+        };
+        let learning_rate = 1e-3;
+        let mut params = TrainableLoraParams::initialize_seeded(
+            &model_config,
+            &weights,
+            4,
+            8.0,
+            &device,
+            Some(11),
+        )?;
+        let mut opt_state = make_opt_state(&params, optimizer, learning_rate, &device)?;
+        let grads = checkpoint_test_grad_map(&params, 0.025)?;
+        optimizer_step_from_map(
+            &*backend,
+            &mut params,
+            &grads,
+            learning_rate,
+            optimizer,
+            opt_state.as_mut(),
+        )?;
+        let ema_ref_state = EmaReferenceState {
+            snapshot: lora_snapshot_capture_or_blend(&params, None, 0.8)?,
+            groups_since_refresh: 1,
+            refresh_every: 2,
+            decay: 0.8,
+        };
+        let loop_state = grpo_checkpoint_loop_fixture();
+        let descriptor = GrpoCheckpointDescriptor {
+            route: GrpoCheckpointRoute::Inline,
+            adapter_name: "exact-grpo".to_string(),
+            effective_config: serde_json::json!({"seed": 11}),
+            precision_policy: training_checkpoint_precision(&params, opt_state.as_ref())?,
+            data: crate::checkpoint::TrainingCheckpointData {
+                source_kind: GrpoCheckpointRoute::Inline.source_kind().to_string(),
+                content_sha256: "0".repeat(64),
+                item_count: 2,
+            },
+            init_seed: 11,
+            optimizer,
+            learning_rate,
+            total_steps: 2,
+            base_model_weights_sha256: Some(format!("sha256:{}", "1".repeat(64))),
+            auxiliary_state: serde_json::json!({"fixture": true}),
+            ema_refresh_every: Some(2),
+        };
+
+        let temp = tempfile::tempdir()?;
+        let snapshot = descriptor.capture(
+            temp.path(),
+            &*backend,
+            &mut params,
+            &mut opt_state,
+            Some(&ema_ref_state),
+            &loop_state,
+        )?;
+        let checkpoint_path = snapshot.publish()?;
+        let checkpoint = crate::checkpoint::load_training_checkpoint(&checkpoint_path)?;
+        let restored_loop = load_grpo_checkpoint_loop_state(&checkpoint)?;
+        assert_eq!(restored_loop, loop_state);
+        descriptor.validate_resume(&checkpoint, &restored_loop)?;
+        assert_eq!(checkpoint.manifest.files.len(), 4);
+
+        let mut restored_params = TrainableLoraParams::initialize_seeded(
+            &model_config,
+            &weights,
+            4,
+            8.0,
+            &device,
+            Some(99),
+        )?;
+        let adapter_path =
+            checkpoint.artifact_path(&checkpoint.manifest.state_files.adapter_parameters)?;
+        restored_params.load_checkpoint_parameters(&adapter_path)?;
+        assert_checkpoint_params_equal(&params, &restored_params)?;
+
+        let mut restored_optimizer =
+            make_opt_state(&restored_params, optimizer, learning_rate, &device)?
+                .context("fixture optimizer must be stateful")?;
+        let optimizer_path = checkpoint.artifact_path(
+            checkpoint
+                .manifest
+                .state_files
+                .optimizer_state
+                .as_deref()
+                .context("fixture checkpoint optimizer path")?,
+        )?;
+        restored_optimizer.load_checkpoint_state(&restored_params, &optimizer_path, 1)?;
+        assert_eq!(restored_optimizer.step_count(), 1);
+
+        let reference_path = checkpoint.artifact_path(
+            checkpoint
+                .manifest
+                .state_files
+                .reference_state
+                .as_deref()
+                .context("fixture checkpoint reference path")?,
+        )?;
+        let restored_reference = load_lora_reference_checkpoint(&reference_path, &restored_params)?;
+        let expected_reference = temp.path().join("expected-reference.safetensors");
+        let actual_reference = temp.path().join("actual-reference.safetensors");
+        capture_lora_reference_checkpoint(&ema_ref_state.snapshot)?.save(&expected_reference)?;
+        capture_lora_reference_checkpoint(&restored_reference)?.save(&actual_reference)?;
+        assert_eq!(
+            std::fs::read(expected_reference)?,
+            std::fs::read(actual_reference)?
+        );
+        Ok(())
     }
 
     #[test]
