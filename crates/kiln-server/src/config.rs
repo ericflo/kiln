@@ -1643,6 +1643,26 @@ impl KilnConfig {
     /// 3. `./kiln.toml` (only if it exists)
     /// 4. No file — defaults only
     pub fn load(path: Option<&str>) -> Result<Self> {
+        let result = Self::load_inner(path);
+        if let Err(error) = &result {
+            let config_path = path
+                .map(String::from)
+                .or_else(|| std::env::var("KILN_CONFIG").ok())
+                .or_else(|| {
+                    Path::new("kiln.toml")
+                        .exists()
+                        .then(|| "kiln.toml".to_string())
+                });
+            tracing::error!(
+                config_path = config_path.as_deref().unwrap_or("<defaults>"),
+                error = %format!("{error:#}"),
+                "configuration_load_failed"
+            );
+        }
+        result
+    }
+
+    fn load_inner(path: Option<&str>) -> Result<Self> {
         let config_path = path
             .map(String::from)
             .or_else(|| std::env::var("KILN_CONFIG").ok());

@@ -161,6 +161,21 @@ fn preflight_http_send_buffer(
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Cli::parse();
+    let diagnostics_config_path = match &args.command {
+        Some(Commands::ConfigCheck { file }) => file.as_deref().or(args.config.as_deref()),
+        _ => args.config.as_deref(),
+    };
+    let bootstrap_logging = kiln_server::logging::bootstrap_config(diagnostics_config_path);
+    let bootstrap_level = args
+        .effective_log_level(&bootstrap_logging.level)
+        .to_string();
+    kiln_server::logging::init(&bootstrap_level, &bootstrap_logging.format)?;
+    tracing::debug!(
+        config_path = bootstrap_logging.config_path.as_deref().unwrap_or("<defaults>"),
+        level = %bootstrap_level,
+        format = %bootstrap_logging.format,
+        "startup_diagnostics_initialized"
+    );
 
     match args.command {
         // Client-side commands (talk to a running server)
@@ -368,8 +383,16 @@ async fn main() -> Result<()> {
         .context("failed to fix deterministic tensor behavior from startup configuration")?;
     let serving_policy = config.server.serving_profile.runtime_policy();
 
-    let level = args.effective_log_level(&config.logging.level);
-    kiln_server::logging::init(level, &config.logging.format)?;
+    let validated_level = args.effective_log_level(&config.logging.level);
+    if bootstrap_level != validated_level || bootstrap_logging.format != config.logging.format {
+        tracing::warn!(
+            bootstrap_level = %bootstrap_level,
+            validated_level,
+            bootstrap_format = %bootstrap_logging.format,
+            validated_format = %config.logging.format,
+            "logging_configuration_changed_during_startup"
+        );
+    }
 
     let serving_profile = config.server.serving_profile.diagnostics();
     let effective_policy = serving_profile.effective_policy;

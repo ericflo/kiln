@@ -185,7 +185,10 @@ By default, Kiln logs in colored "pretty" format when stderr is an interactive
 terminal and switches to structured JSON when stderr is piped or redirected
 (systemd, docker, CI). To force a specific format, set `KILN_LOG_FORMAT=json`
 or `KILN_LOG_FORMAT=pretty` (or the equivalent `[logging] format = "..."` in
-`kiln.toml`).
+`kiln.toml`). Kiln bootstraps those logging fields before it validates the rest
+of the configuration, so file-read, TOML, environment, and validation failures
+emit a structured `configuration_load_failed` event with the selected path and
+full cause before the process exits.
 
 You'll see the startup banner:
 

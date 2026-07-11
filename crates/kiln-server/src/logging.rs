@@ -11,8 +11,71 @@
 //! - `RUST_LOG`: if set, takes precedence over `KILN_LOG_LEVEL`.
 
 use std::io::IsTerminal;
+use std::path::Path;
 
 use tracing_subscriber::EnvFilter;
+
+use crate::config::LoggingConfig;
+
+/// Minimal logging policy resolved before full configuration validation.
+///
+/// Reading only string-valued fields from `[logging]` lets syntax, type, and
+/// validation failures elsewhere in the file flow through structured startup
+/// diagnostics without weakening the authoritative [`crate::config::KilnConfig`]
+/// parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapLoggingConfig {
+    pub level: String,
+    pub format: String,
+    pub config_path: Option<String>,
+}
+
+/// Resolve logging file/env precedence without requiring the rest of the
+/// configuration to be valid.
+pub fn bootstrap_config(explicit_path: Option<&str>) -> BootstrapLoggingConfig {
+    let config_path = explicit_path
+        .map(String::from)
+        .or_else(|| std::env::var("KILN_CONFIG").ok())
+        .or_else(|| {
+            Path::new("kiln.toml")
+                .exists()
+                .then(|| "kiln.toml".to_string())
+        });
+    let mut logging = LoggingConfig::default();
+
+    if let Some(path) = config_path.as_deref()
+        && let Ok(contents) = std::fs::read_to_string(path)
+    {
+        apply_logging_table(&mut logging, &contents);
+    }
+    if let Ok(level) = std::env::var("KILN_LOG_LEVEL") {
+        logging.level = level;
+    }
+    if let Ok(format) = std::env::var("KILN_LOG_FORMAT") {
+        logging.format = format;
+    }
+
+    BootstrapLoggingConfig {
+        level: logging.level,
+        format: logging.format,
+        config_path,
+    }
+}
+
+fn apply_logging_table(logging: &mut LoggingConfig, contents: &str) {
+    let Ok(document) = toml::from_str::<toml::Value>(contents) else {
+        return;
+    };
+    let Some(table) = document.get("logging").and_then(toml::Value::as_table) else {
+        return;
+    };
+    if let Some(level) = table.get("level").and_then(toml::Value::as_str) {
+        logging.level = level.to_string();
+    }
+    if let Some(format) = table.get("format").and_then(toml::Value::as_str) {
+        logging.format = format.to_string();
+    }
+}
 
 /// Build an `EnvFilter` from `RUST_LOG` (if set) or the provided level string.
 pub fn build_filter(level: &str) -> EnvFilter {
@@ -80,6 +143,28 @@ pub fn init(level: &str, format: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_logging_is_field_tolerant_of_other_configuration_errors() {
+        let mut logging = LoggingConfig::default();
+        apply_logging_table(
+            &mut logging,
+            r#"
+[server]
+port = "not-an-integer"
+
+[logging]
+level = "debug"
+format = "json"
+"#,
+        );
+        assert_eq!(logging.level, "debug");
+        assert_eq!(logging.format, "json");
+
+        apply_logging_table(&mut logging, "[logging\nlevel = ???");
+        assert_eq!(logging.level, "debug");
+        assert_eq!(logging.format, "json");
+    }
 
     // NOTE: env var manipulation is unsafe in Rust 1.78+ because it is not
     // thread-safe. We wrap each call in an unsafe block. These tests are

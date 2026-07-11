@@ -720,6 +720,11 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `request_log.enabled` | `KILN_REQUEST_LOG_ENABLED` | true | Durable JSONL request/response log for the inference endpoints |
 | `request_log.dir` | `KILN_REQUEST_LOG_DIR` | `<adapter_dir>/.requests` | Request log directory (rotated + gzipped, retention-capped) |
 
+Kiln resolves the logging table and its environment overrides before full
+configuration validation. Every file-read, TOML, environment, or validation
+error therefore emits `configuration_load_failed` with the selected config path
+and complete error chain in the configured pretty/JSON format before exiting.
+
 Streaming response channels are serviced by a fair delivery worker outside the
 compute actor. A full or disconnected client cannot park peer decode or control
 commands; final tokens remain ordered before `Done` or `Error`, and only the
