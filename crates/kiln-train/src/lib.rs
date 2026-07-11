@@ -6,6 +6,7 @@
 
 pub mod adapter_output;
 pub mod adapter_shape;
+pub mod checkpoint;
 // (#1082) Per-crate candle facade — every `candle_core::` path that
 // `trainer.rs` previously held inline (type aliases, generic constructor
 // helpers, safetensors I/O shims, `cd_bail!` macro) now lives in this
