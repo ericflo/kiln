@@ -506,7 +506,9 @@ kiln serve --config kiln.toml</code></pre>
           Set <code>thinking_budget_tokens</code>, <code>thinking_budget_ms</code>, or both on a chat or
           batch request. An omitted field inherits its server default; explicit <code>null</code> makes
           that dimension unlimited, even when the server has a default; <code>0</code> closes an open
-          thinking block immediately.
+          thinking block immediately. See the
+          <a href="https://github.com/ericflo/kiln/blob/main/docs/THINKING_BUDGET_CONTRACT.md">Thinking Budget Contract</a>
+          for the normative wire schema and executable semantics.
         </p>
         <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>{
   "messages": [{"role": "user", "content": "Solve this carefully."}],

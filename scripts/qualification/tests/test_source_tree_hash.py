@@ -25,6 +25,7 @@ class SourceTreeHashTests(unittest.TestCase):
         self._write("Cargo.toml", "[workspace]\n")
         self._write("crates/demo/src/lib.rs", "pub fn value() -> u32 { 1 }\n")
         self._write("scripts/qualification/tool.py", "VALUE = 1\n")
+        self._write("contracts/thinking-budget-v1.schema.json", "{}\n")
         self._write("qualification/schema/receipt.json", "{}\n")
         self._write("qualification/workloads/smoke.json", "{}\n")
         self._write("qualification/receipts/rocm/result.json", "{}\n")
@@ -53,8 +54,9 @@ class SourceTreeHashTests(unittest.TestCase):
         self._write("crates/demo/src/lib.rs", "pub fn value() -> u32 { 2 }\n")
         self.assertNotEqual(before, self._hash())
 
-    def test_qualification_tool_schema_and_workload_change_hash(self) -> None:
+    def test_contract_tool_schema_and_workload_change_hash(self) -> None:
         for relative in (
+            "contracts/thinking-budget-v1.schema.json",
             "scripts/qualification/tool.py",
             "qualification/schema/receipt.json",
             "qualification/workloads/smoke.json",

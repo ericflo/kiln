@@ -11,6 +11,13 @@ Kiln's versioned thinking-budget contract lives in:
 Those files are normative. Rust, browser, desktop, API, eval, and CLI tests
 must consume the vectors instead of maintaining independent examples.
 
+<!-- thinking-budget-contract-v1:generated:start -->
+- Contract version: `1`
+- Request override states: `inherit`, `unlimited`, `limit`
+- Source vocabulary: `unlimited`, `server_default`, `request`, `request_unlimited`, `suite`, `suite_unlimited`, `run_override`, `run_override_unlimited`, `example`, `example_unlimited`, `unknown`
+- Trigger vocabulary: `tokens`, `time`, `max_tokens`
+<!-- thinking-budget-contract-v1:generated:end -->
+
 ## Override Semantics
 
 Token and time dimensions resolve independently:

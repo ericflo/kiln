@@ -8,6 +8,8 @@ on:
       - 'assets/**'
       - 'README.md'
       - 'QUICKSTART.md'
+      - 'contracts/thinking-budget-v1.schema.json'
+      - 'contracts/thinking-budget-v1.conformance.json'
       - 'scripts/check_docs_site_smoke.mjs'
       - 'scripts/check_release_versions.py'
       - '.github/workflows/pages.yml'
@@ -28,6 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: actions/configure-pages@v6
+      - name: Check thinking-budget schema and documentation
+        run: node scripts/check_thinking_budget_contract.mjs
       - name: Check release version drift
         run: python3 scripts/check_release_versions.py
       - name: Locate Chromium
@@ -49,6 +53,8 @@ jobs:
           cp -r docs/site/. _site/
           mkdir -p _site/assets
           cp assets/logo.png _site/assets/logo.png
+          mkdir -p _site/contracts
+          cp contracts/thinking-budget-v1.schema.json contracts/thinking-budget-v1.conformance.json _site/contracts/
       - uses: actions/upload-pages-artifact@v5
         with:
           path: _site

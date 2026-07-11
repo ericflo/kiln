@@ -10,7 +10,12 @@ on:
       - 'QUICKSTART.md'
       - 'desktop/README.md'
       - 'docs/site/**'
+      - 'docs/EVAL_GUIDE.md'
+      - 'docs/THINKING_BUDGET_CONTRACT.md'
+      - 'contracts/thinking-budget-v1.schema.json'
+      - 'contracts/thinking-budget-v1.conformance.json'
       - 'crates/kiln-server/src/cli.rs'
+      - 'scripts/check_thinking_budget_contract.mjs'
       - 'scripts/check_release_versions.py'
       - '.github/workflows/release-version-drift.yml'
   pull_request:
@@ -21,7 +26,12 @@ on:
       - 'QUICKSTART.md'
       - 'desktop/README.md'
       - 'docs/site/**'
+      - 'docs/EVAL_GUIDE.md'
+      - 'docs/THINKING_BUDGET_CONTRACT.md'
+      - 'contracts/thinking-budget-v1.schema.json'
+      - 'contracts/thinking-budget-v1.conformance.json'
       - 'crates/kiln-server/src/cli.rs'
+      - 'scripts/check_thinking_budget_contract.mjs'
       - 'scripts/check_release_versions.py'
       - '.github/workflows/release-version-drift.yml'
   workflow_dispatch:
@@ -32,4 +42,5 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
+      - run: node scripts/check_thinking_budget_contract.mjs
       - run: python3 scripts/check_release_versions.py

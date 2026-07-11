@@ -31,6 +31,7 @@ INCLUDED_FILES = {
     "kiln.example.toml",
 }
 INCLUDED_PREFIXES = (
+    "contracts/",
     "crates/",
     "deploy/",
     "desktop/capabilities/",

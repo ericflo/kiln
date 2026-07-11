@@ -740,6 +740,8 @@ inherit `server.default_thinking_budget_tokens` and
 dimension and `0` closes the block immediately. If both limits are active, the
 first reached wins. Time starts at the first decode candidate, excluding queue
 and prefill, and is checked at token boundaries.
+The [Thinking Budget Contract](THINKING_BUDGET_CONTRACT.md) is the normative
+schema and cross-runtime semantics reference.
 
 A natural `</think>` always wins if it arrives first. Otherwise Kiln feeds the
 forced close-tag tokens into model context and continues decoding the answer;
