@@ -1,0 +1,235 @@
+{
+  "contract_version": 1,
+  "schema": "thinking-budget-v1.schema.json",
+  "resolution_cases": [
+    {
+      "name": "request_inherits_finite_defaults",
+      "scope": "request",
+      "defaults": { "tokens": 64, "time_ms": 1500 },
+      "tokens": { "state": "inherit" },
+      "time": { "state": "inherit" },
+      "request": {},
+      "effective": {
+        "configured": true,
+        "max_tokens": 64,
+        "max_time_ms": 1500,
+        "tokens_source": "server_default",
+        "time_source": "server_default"
+      }
+    },
+    {
+      "name": "request_inherits_unlimited_defaults",
+      "scope": "request",
+      "defaults": {},
+      "tokens": { "state": "inherit" },
+      "time": { "state": "inherit" },
+      "request": {},
+      "effective": {
+        "configured": false,
+        "tokens_source": "unlimited",
+        "time_source": "unlimited"
+      }
+    },
+    {
+      "name": "request_token_limit_preserves_inherited_time",
+      "scope": "request",
+      "defaults": { "tokens": 64, "time_ms": 1500 },
+      "tokens": { "state": "limit", "value": 0 },
+      "time": { "state": "inherit" },
+      "request": { "thinking_budget_tokens": 0 },
+      "effective": {
+        "configured": true,
+        "max_tokens": 0,
+        "max_time_ms": 1500,
+        "tokens_source": "request",
+        "time_source": "server_default"
+      }
+    },
+    {
+      "name": "request_time_unlimited_preserves_inherited_tokens",
+      "scope": "request",
+      "defaults": { "tokens": 64, "time_ms": 1500 },
+      "tokens": { "state": "inherit" },
+      "time": { "state": "unlimited" },
+      "request": { "thinking_budget_ms": null },
+      "effective": {
+        "configured": true,
+        "max_tokens": 64,
+        "tokens_source": "server_default",
+        "time_source": "request_unlimited"
+      }
+    },
+    {
+      "name": "request_token_unlimited_and_time_limit",
+      "scope": "request",
+      "defaults": { "tokens": 64 },
+      "tokens": { "state": "unlimited" },
+      "time": { "state": "limit", "value": 0 },
+      "request": { "thinking_budget_tokens": null, "thinking_budget_ms": 0 },
+      "effective": {
+        "configured": true,
+        "max_time_ms": 0,
+        "tokens_source": "request_unlimited",
+        "time_source": "request"
+      }
+    },
+    {
+      "name": "suite_explicit_pair",
+      "scope": "suite",
+      "defaults": {},
+      "tokens": { "state": "limit", "value": 12 },
+      "time": { "state": "unlimited" },
+      "effective": {
+        "configured": true,
+        "max_tokens": 12,
+        "tokens_source": "suite",
+        "time_source": "suite_unlimited"
+      }
+    },
+    {
+      "name": "run_override_explicit_pair",
+      "scope": "run_override",
+      "defaults": {},
+      "tokens": { "state": "unlimited" },
+      "time": { "state": "limit", "value": 250 },
+      "effective": {
+        "configured": true,
+        "max_time_ms": 250,
+        "tokens_source": "run_override_unlimited",
+        "time_source": "run_override"
+      }
+    },
+    {
+      "name": "example_explicit_pair",
+      "scope": "example",
+      "defaults": { "tokens": 9, "time_ms": 900 },
+      "tokens": { "state": "limit", "value": 3 },
+      "time": { "state": "unlimited" },
+      "effective": {
+        "configured": true,
+        "max_tokens": 3,
+        "tokens_source": "example",
+        "time_source": "example_unlimited"
+      }
+    }
+  ],
+  "record_cases": [
+    {
+      "name": "configured_inert",
+      "record": {
+        "configured": true,
+        "applied": false,
+        "max_tokens": 64,
+        "tokens_source": "request",
+        "time_source": "request_unlimited",
+        "triggered": false
+      }
+    },
+    {
+      "name": "natural_close",
+      "record": {
+        "configured": true,
+        "applied": true,
+        "max_tokens": 64,
+        "tokens_source": "request",
+        "time_source": "request_unlimited",
+        "triggered": false,
+        "closed": true,
+        "thinking_tokens": 17,
+        "thinking_time_ms": 42
+      }
+    },
+    {
+      "name": "token_limit_closed",
+      "record": {
+        "configured": true,
+        "applied": true,
+        "max_tokens": 64,
+        "max_time_ms": 1500,
+        "tokens_source": "request",
+        "time_source": "server_default",
+        "triggered": true,
+        "trigger": "tokens",
+        "closed": true,
+        "thinking_tokens": 64,
+        "thinking_time_ms": 800
+      }
+    },
+    {
+      "name": "time_limit_partial_close",
+      "record": {
+        "configured": true,
+        "applied": true,
+        "max_time_ms": 250,
+        "tokens_source": "request_unlimited",
+        "time_source": "request",
+        "triggered": true,
+        "trigger": "time",
+        "closed": false,
+        "thinking_tokens": 5,
+        "thinking_time_ms": 251
+      }
+    }
+  ],
+  "legacy_record_cases": [
+    {
+      "name": "nested_eval_outcome",
+      "record": {
+        "configured": true,
+        "applied": true,
+        "max_tokens": 12,
+        "tokens_source": "suite",
+        "time_source": "suite_unlimited",
+        "outcome": {
+          "triggered": true,
+          "trigger": "tokens",
+          "closed": true,
+          "thinking_tokens": 12,
+          "thinking_time_ms": 41
+        }
+      }
+    }
+  ],
+  "invalid_record_cases": [
+    {
+      "name": "configured_without_limit",
+      "record": {
+        "configured": true,
+        "applied": false,
+        "tokens_source": "unlimited",
+        "time_source": "unlimited",
+        "triggered": false
+      }
+    },
+    {
+      "name": "trigger_without_triggered",
+      "record": {
+        "configured": true,
+        "applied": true,
+        "max_tokens": 1,
+        "tokens_source": "request",
+        "time_source": "unlimited",
+        "triggered": false,
+        "trigger": "tokens",
+        "closed": true,
+        "thinking_tokens": 1,
+        "thinking_time_ms": 1
+      }
+    },
+    {
+      "name": "outcome_without_application",
+      "record": {
+        "configured": true,
+        "applied": false,
+        "max_tokens": 1,
+        "tokens_source": "request",
+        "time_source": "unlimited",
+        "triggered": true,
+        "trigger": "tokens",
+        "closed": true,
+        "thinking_tokens": 1,
+        "thinking_time_ms": 1
+      }
+    }
+  ]
+}

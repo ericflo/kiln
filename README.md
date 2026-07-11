@@ -809,6 +809,9 @@ instead of long `reasoning_content`. Operators can also set
 `KILN_DEFAULT_THINKING_ENABLED=false` for non-eval serving. The legacy
 `KILN_DEFAULT_NO_THINK` env var is still accepted as a compatibility alias.
 
+The normative wire schema and executable cross-runtime vectors are in the
+[Thinking Budget Contract](docs/THINKING_BUDGET_CONTRACT.md).
+
 Thinking can also be bounded without disabling it. Set
 `thinking_budget_tokens` and/or `thinking_budget_ms` on
 `POST /v1/chat/completions` or `POST /v1/completions/batch`:

@@ -852,4 +852,206 @@ mod tests {
             assert!(serde_json::from_value::<ThinkingBudgetRecord>(invalid).is_err());
         }
     }
+
+    #[test]
+    fn versioned_contract_vectors_match_core_resolution_and_records() {
+        #[derive(Deserialize)]
+        struct Contract {
+            contract_version: u32,
+            resolution_cases: Vec<ResolutionCase>,
+            record_cases: Vec<RecordCase>,
+            legacy_record_cases: Vec<RecordCase>,
+            invalid_record_cases: Vec<RecordCase>,
+        }
+
+        #[derive(Deserialize)]
+        struct ResolutionCase {
+            name: String,
+            scope: String,
+            defaults: ContractDefaults,
+            tokens: ContractOverride<usize>,
+            time: ContractOverride<u64>,
+            #[serde(default)]
+            request: serde_json::Value,
+            effective: ContractEffective,
+        }
+
+        #[derive(Deserialize)]
+        struct ContractDefaults {
+            tokens: Option<usize>,
+            time_ms: Option<u64>,
+        }
+
+        #[derive(Deserialize)]
+        struct ContractOverride<T> {
+            state: String,
+            value: Option<T>,
+        }
+
+        impl<T: Copy> ContractOverride<T> {
+            fn as_override(&self) -> ThinkingBudgetOverride<T> {
+                match self.state.as_str() {
+                    "inherit" => ThinkingBudgetOverride::Inherit,
+                    "unlimited" => ThinkingBudgetOverride::Unlimited,
+                    "limit" => ThinkingBudgetOverride::Limited(
+                        self.value.expect("limit conformance case requires value"),
+                    ),
+                    state => panic!("unknown conformance override state {state:?}"),
+                }
+            }
+        }
+
+        #[derive(Deserialize)]
+        struct ContractEffective {
+            configured: bool,
+            max_tokens: Option<usize>,
+            max_time_ms: Option<u64>,
+            tokens_source: ThinkingBudgetSource,
+            time_source: ThinkingBudgetSource,
+        }
+
+        #[derive(Deserialize)]
+        struct RecordCase {
+            name: String,
+            record: serde_json::Value,
+        }
+
+        let contract: Contract = serde_json::from_str(include_str!(
+            "../../../contracts/thinking-budget-v1.conformance.json"
+        ))
+        .unwrap();
+        assert_eq!(contract.contract_version, 1);
+
+        for case in contract.resolution_cases {
+            let scope = match case.scope.as_str() {
+                "request" => ThinkingBudgetScope::Request,
+                "suite" => ThinkingBudgetScope::Suite,
+                "run_override" => ThinkingBudgetScope::RunOverride,
+                "example" => ThinkingBudgetScope::Example,
+                scope => panic!("{} uses unknown scope {scope:?}", case.name),
+            };
+            let tokens = case.tokens.as_override();
+            let time_ms = case.time.as_override();
+            let effective = EffectiveThinkingBudget::resolve(
+                ThinkingBudgetOverrides { tokens, time_ms },
+                ThinkingBudgetDefaults {
+                    tokens: case.defaults.tokens,
+                    time_ms: case.defaults.time_ms,
+                },
+                scope,
+            );
+            assert_eq!(
+                effective.configured(),
+                case.effective.configured,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                effective.max_tokens, case.effective.max_tokens,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                effective.max_time_ms, case.effective.max_time_ms,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                effective.tokens_source, case.effective.tokens_source,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                effective.time_source, case.effective.time_source,
+                "{}",
+                case.name
+            );
+
+            if scope == ThinkingBudgetScope::Request {
+                let mut request = serde_json::Map::new();
+                match tokens {
+                    ThinkingBudgetOverride::Inherit => {}
+                    ThinkingBudgetOverride::Unlimited => {
+                        request.insert("thinking_budget_tokens".into(), serde_json::Value::Null);
+                    }
+                    ThinkingBudgetOverride::Limited(value) => {
+                        request.insert("thinking_budget_tokens".into(), value.into());
+                    }
+                }
+                match time_ms {
+                    ThinkingBudgetOverride::Inherit => {}
+                    ThinkingBudgetOverride::Unlimited => {
+                        request.insert("thinking_budget_ms".into(), serde_json::Value::Null);
+                    }
+                    ThinkingBudgetOverride::Limited(value) => {
+                        request.insert("thinking_budget_ms".into(), value.into());
+                    }
+                }
+                assert_eq!(
+                    serde_json::Value::Object(request),
+                    case.request,
+                    "{} request wire shape",
+                    case.name
+                );
+            }
+        }
+
+        for case in contract.record_cases {
+            let record = serde_json::from_value::<ThinkingBudgetRecord>(case.record.clone())
+                .unwrap_or_else(|error| panic!("{} failed: {error}", case.name));
+            assert_eq!(
+                serde_json::to_value(record).unwrap(),
+                case.record,
+                "{}",
+                case.name
+            );
+        }
+        for case in contract.legacy_record_cases {
+            let record = serde_json::from_value::<ThinkingBudgetRecord>(case.record)
+                .unwrap_or_else(|error| panic!("{} failed: {error}", case.name));
+            assert!(record.outcome.is_some(), "{}", case.name);
+            assert!(
+                serde_json::to_value(record)
+                    .unwrap()
+                    .get("outcome")
+                    .is_none()
+            );
+        }
+        for case in contract.invalid_record_cases {
+            assert!(
+                serde_json::from_value::<ThinkingBudgetRecord>(case.record).is_err(),
+                "{} unexpectedly passed",
+                case.name
+            );
+        }
+
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../contracts/thinking-budget-v1.schema.json"
+        ))
+        .unwrap();
+        let source_values = schema["$defs"]["source"]["enum"].as_array().unwrap();
+        for source in [
+            ThinkingBudgetSource::Unlimited,
+            ThinkingBudgetSource::ServerDefault,
+            ThinkingBudgetSource::Request,
+            ThinkingBudgetSource::RequestUnlimited,
+            ThinkingBudgetSource::Suite,
+            ThinkingBudgetSource::SuiteUnlimited,
+            ThinkingBudgetSource::RunOverride,
+            ThinkingBudgetSource::RunOverrideUnlimited,
+            ThinkingBudgetSource::Example,
+            ThinkingBudgetSource::ExampleUnlimited,
+            ThinkingBudgetSource::Unknown,
+        ] {
+            assert!(source_values.iter().any(|value| value == source.as_str()));
+        }
+        let trigger_values = schema["$defs"]["trigger"]["enum"].as_array().unwrap();
+        for trigger in [
+            ThinkingBudgetTrigger::Tokens,
+            ThinkingBudgetTrigger::Time,
+            ThinkingBudgetTrigger::MaxTokens,
+        ] {
+            assert!(trigger_values.iter().any(|value| value == trigger.as_str()));
+        }
+    }
 }

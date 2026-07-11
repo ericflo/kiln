@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/contracts/thinking-budget-v1.schema.json",
+  "title": "Kiln thinking-budget contract v1",
+  "description": "Canonical request, effective-configuration, outcome, and record shapes. An omitted request dimension inherits, null is explicitly unlimited, and a non-negative integer is a finite limit including zero.",
+  "$defs": {
+    "limitOverride": {
+      "description": "This definition applies only when the property is present. Property absence means inherit.",
+      "oneOf": [
+        { "type": "null", "description": "Explicit unlimited" },
+        { "type": "integer", "minimum": 0, "description": "Finite limit; zero closes immediately" }
+      ]
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "unlimited",
+        "server_default",
+        "request",
+        "request_unlimited",
+        "suite",
+        "suite_unlimited",
+        "run_override",
+        "run_override_unlimited",
+        "example",
+        "example_unlimited",
+        "unknown"
+      ]
+    },
+    "trigger": {
+      "type": "string",
+      "enum": ["tokens", "time", "max_tokens"]
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "thinking_budget_tokens": { "$ref": "#/$defs/limitOverride" },
+        "thinking_budget_ms": { "$ref": "#/$defs/limitOverride" }
+      },
+      "additionalProperties": true
+    },
+    "effective": {
+      "type": "object",
+      "required": ["configured", "tokens_source", "time_source"],
+      "properties": {
+        "configured": { "type": "boolean" },
+        "max_tokens": { "type": "integer", "minimum": 0 },
+        "max_time_ms": { "type": "integer", "minimum": 0 },
+        "tokens_source": { "$ref": "#/$defs/source" },
+        "time_source": { "$ref": "#/$defs/source" }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "required": ["triggered", "closed", "thinking_tokens", "thinking_time_ms"],
+      "properties": {
+        "triggered": { "type": "boolean" },
+        "trigger": { "$ref": "#/$defs/trigger" },
+        "closed": { "type": "boolean" },
+        "thinking_tokens": { "type": "integer", "minimum": 0 },
+        "thinking_time_ms": { "type": "integer", "minimum": 0 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "triggered": { "const": true } } },
+          "then": { "required": ["trigger"] },
+          "else": { "not": { "required": ["trigger"] } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "record": {
+      "allOf": [
+        { "$ref": "#/$defs/effective" },
+        {
+          "type": "object",
+          "required": ["applied", "triggered"],
+          "properties": {
+            "applied": { "type": "boolean" },
+            "triggered": { "type": "boolean" },
+            "trigger": { "$ref": "#/$defs/trigger" },
+            "closed": { "type": "boolean" },
+            "thinking_tokens": { "type": "integer", "minimum": 0 },
+            "thinking_time_ms": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "if": { "required": ["closed"] },
+          "then": {
+            "required": ["thinking_tokens", "thinking_time_ms"],
+            "if": { "properties": { "triggered": { "const": true } } },
+            "then": { "required": ["trigger"] },
+            "else": { "not": { "required": ["trigger"] } }
+          },
+          "else": {
+            "properties": { "triggered": { "const": false } },
+            "not": {
+              "anyOf": [
+                { "required": ["trigger"] },
+                { "required": ["thinking_tokens"] },
+                { "required": ["thinking_time_ms"] }
+              ]
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "recentRecord": {
+      "allOf": [
+        { "$ref": "#/$defs/effective" },
+        {
+          "type": "object",
+          "properties": {
+            "applied": { "type": "boolean" },
+            "triggered": { "type": "boolean" },
+            "trigger": { "$ref": "#/$defs/trigger" },
+            "closed": { "type": "boolean" },
+            "thinking_tokens": { "type": "integer", "minimum": 0 },
+            "thinking_time_ms": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}
