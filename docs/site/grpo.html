@@ -289,6 +289,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#rollouts">Rollouts</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#submit-training">Submit training</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#watch-status">Watch status</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#audit-policy">Audit update</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
         </div>
       </div>
@@ -313,27 +314,35 @@
         <div class="label mb-3">Rollouts</div>
         <h2 id="rollouts" class="text-2xl font-semibold mb-4">Generate multiple completions per prompt</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          Use <code>/v1/completions/batch</code> when you need efficient rollout generation. Send chat-format prompts plus <code>n</code> completions per prompt, then score each returned completion with your reward function before building the GRPO payload.
+          Use <code>kiln rollout-generate</code> when training with recorded importance correction. It requests one seeded, non-streaming choice at a time, validates the server-issued token and behavior-policy provenance before scoring, and atomically publishes GRPO JSONL only after every rollout passes.
         </p>
         <section class="endpoint">
-          <h3 class="font-semibold mb-2">Rollout generation shape</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/completions/batch \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompts": [
-      [{"role": "user", "content": "What is 47 + 138? Reply with just the number."}],
-      [{"role": "user", "content": "What is 23 * 17? Reply with just the number."}]
-    ],
-    "n": 8,
-    "temperature": 0.9,
-    "max_tokens": 64,
-    "seed": 42
-  }' \
-  | python3 -m json.tool</code></pre>
+          <h3 class="font-semibold mb-2">Provenance-bound rollout dataset</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln rollout-generate \
+  --adapter base \
+  --thinking false \
+  --tasks tasks.jsonl \
+  --seeds 8 \
+  --seed-start 42 \
+  --request-template request.json \
+  --scorer ./score_math.py \
+  --output math.rollouts.jsonl \
+  --summary-output math.rollouts.summary.json</code></pre>
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
-          The batch response identifies which prompt each completion came from, so your scorer can reshape completions back into per-prompt groups.
+          Submit the resulting dataset with <code>config.behavior_policy: "recorded"</code>. The trainer revalidates the exact prompt, sampled actions, tokenizer/template identity, behavior model revision, sampling controls, and selected-token log-probabilities before the first forward.
         </p>
+        <section class="endpoint mt-5">
+          <h3 class="font-semibold mb-2">Text-only batch alternative</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/completions/batch \
+  -H "Content-Type: application/json" \
+  -d '{"prompts": [[{"role": "user", "content": "What is 47 + 138?"}]],
+       "n": 8, "temperature": 0.9, "max_tokens": 64, "seed": 42}' \
+  | python3 -m json.tool</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-dim);">
+            This endpoint does not emit per-token behavior probabilities. Train its outputs only with <code>behavior_policy: "no_importance_correction"</code>; Kiln will not substitute the KL reference for the missing behavior denominator.
+          </p>
+        </section>
       </article>
 
       <article class="card p-6">
@@ -357,6 +366,7 @@
       ]
     }],
     "config": {
+      "behavior_policy": "no_importance_correction",
       "kl_coeff": 0.1,
       "clip_epsilon": 0.2,
       "lora_rank": 16,
@@ -371,6 +381,7 @@
             <h3 class="font-semibold mb-2">Common config fields</h3>
             <ul class="space-y-2 text-sm" style="color: var(--fg-dim);">
               <li><code>kl_coeff</code> and <code>clip_epsilon</code> tune the GRPO update; <code>learning_rate</code> is resolved per optimizer when omitted (Muon default: 2e-3).</li>
+              <li><code>behavior_policy</code> selects recorded rollout probabilities or an explicit fixed-one ratio; <code>kl_reference_policy</code> independently selects the frozen KL anchor.</li>
               <li><code>lora_rank</code> and <code>lora_alpha</code> control adapter capacity.</li>
               <li><code>base_adapter</code> continues from an existing adapter.</li>
               <li><code>output_name</code> names the saved adapter.</li>
@@ -419,6 +430,28 @@
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
           If a GRPO request is rejected or stays queued longer than expected, start with the <a href="troubleshooting.html">troubleshooting guide</a> and the full endpoint map in <a href="api.html#training">API training</a>.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Audit</div>
+        <h2 id="audit-policy" class="text-2xl font-semibold mb-4">Verify which policy comparisons trained the adapter</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          Every non-dry run that reaches the training loop writes <code>grpo.policy_audit</code> into <code>train_receipt.json</code>. The same versioned object is returned by the adapter receipt API and reports behavior-policy importance ratios separately from frozen-reference KL metrics.
+        </p>
+        <section class="endpoint">
+          <h3 class="font-semibold mb-2">Read the policy audit</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>ADAPTER=math-correctness
+curl -s http://localhost:8420/v1/adapters/$ADAPTER/receipt \
+  | jq '.grpo.policy_audit'</code></pre>
+        </section>
+        <ul class="space-y-2 text-sm mt-5" style="color: var(--fg-dim);">
+          <li><code>importance_sampling</code> reports ratios against recorded behavior probabilities, or exact unit ratios in no-correction mode.</li>
+          <li><code>kl_reference</code> reports K1/K3 observations against the independently selected reference, including entropy-mask coverage.</li>
+          <li><code>recorded_provenance</code> binds counts to content-addressed behavior model, adapter revision, tokenizer/template, sampling, and generation-backend identities.</li>
+        </ul>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          Counts are observations across the actual training loop, so repeated epochs count a completion each time it is trained. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md#audit-the-policy-update">full guide</a> for sequence-versus-token ratio and masked-KL denominator semantics.
         </p>
       </article>
     </div>

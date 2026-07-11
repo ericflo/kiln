@@ -301,6 +301,49 @@ struct GrpoRecordedBehaviorSourceAccumulator {
     receipt: GrpoRecordedBehaviorSourceReceipt,
 }
 
+/// Compact behavior-source identity retained beside a tokenized completion.
+/// It deliberately excludes the rollout's potentially long token arrays.
+#[derive(Debug, Clone)]
+pub(crate) struct GrpoRecordedBehaviorSourceObservation {
+    identity_sha256: String,
+    sampled_action_tokens: u64,
+    forced_action_tokens: u64,
+    behavior_policy: crate::RolloutBehaviorPolicyIdentityV1,
+    tokenizer: crate::RolloutTokenizerIdentityV1,
+    template_invocation: crate::RolloutChatTemplateInvocationV1,
+    sampling: crate::RolloutSamplingConfigV1,
+    generation_backend: String,
+}
+
+impl GrpoRecordedBehaviorSourceObservation {
+    pub(crate) fn from_provenance(provenance: &crate::RolloutProvenanceV1) -> Result<Self> {
+        provenance
+            .validate()
+            .map_err(anyhow::Error::msg)
+            .context("validate GRPO policy-audit rollout provenance")?;
+        let identity = GrpoBehaviorSourceIdentityV1 {
+            schema: GRPO_BEHAVIOR_SOURCE_SCHEMA_V1,
+            behavior_policy: &provenance.behavior_policy,
+            tokenizer: &provenance.tokenizer,
+            template_invocation: &provenance.template_invocation,
+            sampling: &provenance.sampling,
+            generation_backend: &provenance.generation_backend,
+        };
+        let encoded = serde_json::to_vec(&identity).context("serialize GRPO behavior source")?;
+        let sampled_action_tokens = provenance.sampled_action_tokens().count() as u64;
+        Ok(Self {
+            identity_sha256: kiln_core::config_hashes::sha256_bytes(&encoded),
+            sampled_action_tokens,
+            forced_action_tokens: provenance.action_tokens.len() as u64 - sampled_action_tokens,
+            behavior_policy: provenance.behavior_policy.clone(),
+            tokenizer: provenance.tokenizer.clone(),
+            template_invocation: provenance.template_invocation.clone(),
+            sampling: provenance.sampling.clone(),
+            generation_backend: provenance.generation_backend.clone(),
+        })
+    }
+}
+
 /// Accumulates receipt-grade GRPO diagnostics without retaining per-token
 /// values. The trainer feeds it selected policy log-probabilities already
 /// computed by the loss path, so this contract requires no second model
@@ -449,51 +492,52 @@ impl GrpoPolicyAuditAccumulator {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn observe_provenance(
         &mut self,
         provenance: &crate::RolloutProvenanceV1,
     ) -> Result<()> {
-        provenance
-            .validate()
-            .map_err(anyhow::Error::msg)
-            .context("validate GRPO policy-audit rollout provenance")?;
-        let identity = GrpoBehaviorSourceIdentityV1 {
-            schema: GRPO_BEHAVIOR_SOURCE_SCHEMA_V1,
-            behavior_policy: &provenance.behavior_policy,
-            tokenizer: &provenance.tokenizer,
-            template_invocation: &provenance.template_invocation,
-            sampling: &provenance.sampling,
-            generation_backend: &provenance.generation_backend,
-        };
-        let encoded = serde_json::to_vec(&identity).context("serialize GRPO behavior source")?;
-        let identity_sha256 = kiln_core::config_hashes::sha256_bytes(&encoded);
-        let sampled = provenance.sampled_action_tokens().count() as u64;
-        let forced = provenance.action_tokens.len() as u64 - sampled;
+        let observation = GrpoRecordedBehaviorSourceObservation::from_provenance(provenance)?;
+        self.observe_recorded_behavior_source(&observation);
+        Ok(())
+    }
+
+    pub(crate) fn observe_recorded_behavior_source(
+        &mut self,
+        observation: &GrpoRecordedBehaviorSourceObservation,
+    ) {
         let entry = self
             .behavior_sources
-            .entry(identity_sha256.clone())
+            .entry(observation.identity_sha256.clone())
             .or_insert_with(|| GrpoRecordedBehaviorSourceAccumulator {
                 receipt: GrpoRecordedBehaviorSourceReceipt {
-                    behavior_source_sha256: identity_sha256,
+                    behavior_source_sha256: observation.identity_sha256.clone(),
                     completion_count: 0,
                     sampled_action_tokens: 0,
                     forced_action_tokens: 0,
-                    behavior_policy: provenance.behavior_policy.clone(),
-                    tokenizer: provenance.tokenizer.clone(),
-                    template_invocation: provenance.template_invocation.clone(),
-                    sampling: provenance.sampling.clone(),
-                    generation_backend: provenance.generation_backend.clone(),
+                    behavior_policy: observation.behavior_policy.clone(),
+                    tokenizer: observation.tokenizer.clone(),
+                    template_invocation: observation.template_invocation.clone(),
+                    sampling: observation.sampling.clone(),
+                    generation_backend: observation.generation_backend.clone(),
                 },
             });
         entry.receipt.completion_count = entry.receipt.completion_count.saturating_add(1);
-        entry.receipt.sampled_action_tokens =
-            entry.receipt.sampled_action_tokens.saturating_add(sampled);
-        entry.receipt.forced_action_tokens =
-            entry.receipt.forced_action_tokens.saturating_add(forced);
+        entry.receipt.sampled_action_tokens = entry
+            .receipt
+            .sampled_action_tokens
+            .saturating_add(observation.sampled_action_tokens);
+        entry.receipt.forced_action_tokens = entry
+            .receipt
+            .forced_action_tokens
+            .saturating_add(observation.forced_action_tokens);
         self.recorded_completions = self.recorded_completions.saturating_add(1);
-        self.recorded_sampled_actions = self.recorded_sampled_actions.saturating_add(sampled);
-        self.recorded_forced_actions = self.recorded_forced_actions.saturating_add(forced);
-        Ok(())
+        self.recorded_sampled_actions = self
+            .recorded_sampled_actions
+            .saturating_add(observation.sampled_action_tokens);
+        self.recorded_forced_actions = self
+            .recorded_forced_actions
+            .saturating_add(observation.forced_action_tokens);
     }
 
     pub(crate) fn finish(self) -> Result<GrpoPolicyAuditReceipt> {
@@ -1972,9 +2016,14 @@ fn population_variance(values: &[f64]) -> f64 {
 /// safetensors loader migrated from `candle_core::safetensors::load`
 /// to `kt::safetensors::load_cpu` (#1082). Casts to F32 first so the
 /// accumulator preserves precision when the underlying adapter weight
-/// is BF16/F16; otherwise `l2_norm_scalar` would round-trip through
-/// the input dtype and lose precision on the returned scalar.
+/// is BF16/F16. Squaring and summation stay on the tensor's backend and only
+/// the scalar sum is copied to CPU, so receipt collection does not require a
+/// CPU-backed gradient tensor.
 pub(crate) fn tensor_l2_norm_kt(tensor: &kt::Tensor) -> Result<f64> {
+    anyhow::ensure!(
+        tensor.elem_count() > 0,
+        "cannot compute the L2 norm of an empty tensor"
+    );
     let f32_t = if tensor.dtype() == kt::DType::F32 {
         tensor.clone()
     } else {
@@ -1982,22 +2031,22 @@ pub(crate) fn tensor_l2_norm_kt(tensor: &kt::Tensor) -> Result<f64> {
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("cast adapter tensor to f32 for l2 norm")?
     };
-    let norm_t = kt::ops::tensor_norm::l2_norm_scalar(&f32_t)
+    let squared = kt::ops::mul(&f32_t, &f32_t)
         .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("kt l2_norm_scalar")?;
-    let storage = norm_t.storage();
-    let cpu = storage
-        .as_any()
-        .downcast_ref::<kt::CpuStorage>()
-        .context("kt l2_norm_scalar must produce CpuStorage")?;
-    let bytes = cpu.as_bytes();
+        .context("square tensor for L2 norm")?;
+    let sum = kt::ops::sum_all(&squared)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("sum squared tensor for L2 norm")?;
+    let sum = sum
+        .to_device(kt::Device::Cpu)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("copy L2 squared sum to CPU")?
+        .to_scalar::<f32>()?;
     anyhow::ensure!(
-        bytes.len() >= 4,
-        "kt l2_norm_scalar produced fewer than 4 bytes: {}",
-        bytes.len()
+        sum.is_finite() && sum >= 0.0,
+        "invalid L2 squared sum {sum}"
     );
-    let scalar = f32::from_le_bytes(bytes[..4].try_into().unwrap());
-    Ok(scalar as f64)
+    Ok(f64::from(sum).sqrt())
 }
 
 #[derive(Debug, Default, Clone)]

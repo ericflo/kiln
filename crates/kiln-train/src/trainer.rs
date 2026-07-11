@@ -1831,6 +1831,8 @@ pub struct GrpoBenchmarkReport {
     pub env_tokens: u64,
     pub context_tokens: u64,
     pub loss: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_audit: Option<crate::train_receipt::GrpoPolicyAuditReceipt>,
     pub timings: GrpoBenchmarkTimings,
     pub total_ms: f64,
     pub tokens_per_sec: f64,
@@ -2658,6 +2660,7 @@ fn build_grpo_train_receipt(
     dynamic_groups_filtered: usize,
     adapter_smoke_test: Option<crate::train_receipt::AdapterSmokeTestReceipt>,
     lora_grad_norms: Vec<crate::train_receipt::LoraGradNormSummary>,
+    policy_audit: Option<crate::train_receipt::GrpoPolicyAuditReceipt>,
     status_error: Option<String>,
 ) -> crate::train_receipt::TrainReceipt {
     let mut receipt = crate::train_receipt::TrainReceipt::new(
@@ -2671,7 +2674,9 @@ fn build_grpo_train_receipt(
     receipt.training_data = training_data;
     receipt.adapters.base = crate::train_receipt::adapter_file_receipt(base_adapter_dir);
     receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
-    receipt.grpo = Some(grpo_settings_receipt(config, dynamic_groups_filtered));
+    let mut grpo = grpo_settings_receipt(config, dynamic_groups_filtered);
+    grpo.policy_audit = policy_audit;
+    receipt.grpo = Some(grpo);
     receipt.echo = grpo_echo_receipt(config);
     echo_metrics.apply_to_echo_receipt(&mut receipt.echo);
     receipt.no_policy_loss = config.loss.no_policy_loss;
@@ -2738,8 +2743,34 @@ fn write_grpo_train_receipt_best_effort(
     dynamic_groups_filtered: usize,
     adapter_smoke_test: Option<crate::train_receipt::AdapterSmokeTestReceipt>,
     lora_grad_norms: Vec<crate::train_receipt::LoraGradNormSummary>,
+    policy_audit: Option<crate::train_receipt::GrpoPolicyAuditReceipt>,
     status_error: Option<String>,
 ) {
+    if let Some(audit) = policy_audit.as_ref() {
+        tracing::info!(
+            schema = %audit.schema,
+            ratio_scope = audit
+                .importance_sampling
+                .ratio_scope
+                .as_deref()
+                .unwrap_or("none"),
+            action_tokens = audit.importance_sampling.action_tokens,
+            ratio_observations = audit.importance_sampling.ratio_observations,
+            mean_ratio = ?audit.importance_sampling.mean_ratio,
+            outside_clip_fraction = ?audit.importance_sampling.outside_clip_fraction,
+            kl_tokens = audit.kl_reference.token_observations,
+            mean_kl_estimator = ?audit.kl_reference.mean_estimator,
+            mean_masked_kl_estimator = ?audit.kl_reference.mean_masked_estimator,
+            recorded_completions = audit.recorded_provenance.completion_count,
+            behavior_sources = audit.recorded_provenance.unique_behavior_sources,
+            behavior_source_manifest_sha256 = audit
+                .recorded_provenance
+                .behavior_source_manifest_sha256
+                .as_deref()
+                .unwrap_or("none"),
+            "GRPO policy audit"
+        );
+    }
     let receipt = build_grpo_train_receipt(
         adapter_name,
         model_config,
@@ -2759,10 +2790,28 @@ fn write_grpo_train_receipt_best_effort(
         dynamic_groups_filtered,
         adapter_smoke_test,
         lora_grad_norms,
+        policy_audit,
         status_error,
     );
     if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
         tracing::warn!(adapter = adapter_name, error = %err, "failed to write GRPO train receipt");
+    }
+}
+
+fn finish_grpo_policy_audit<T>(
+    training_result: &mut Result<T>,
+    accumulator: crate::train_receipt::GrpoPolicyAuditAccumulator,
+) -> Option<crate::train_receipt::GrpoPolicyAuditReceipt> {
+    match accumulator.finish().context("finalize GRPO policy audit") {
+        Ok(receipt) => Some(receipt),
+        Err(error) => {
+            if training_result.is_ok() {
+                *training_result = Err(error);
+            } else {
+                tracing::warn!(error = %error, "failed to finalize partial GRPO policy audit");
+            }
+            None
+        }
     }
 }
 
@@ -3876,6 +3925,7 @@ pub fn grpo_train_to(
     let mut echo_metrics = crate::train_receipt::EchoActivityMetrics::default();
     let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
     let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
+    let mut policy_audit = crate::train_receipt::GrpoPolicyAuditAccumulator::default();
     let mut phase_timings = GrpoBenchmarkTimings::default();
     let mut dynamic_groups_filtered = 0usize;
     let learning_rate = config.effective_learning_rate();
@@ -3937,6 +3987,7 @@ pub fn grpo_train_to(
                 dynamic_groups_filtered,
                 None,
                 Vec::new(),
+                None,
                 Some(message),
             );
             return Err(crate::train_receipt::annotate_training_error(err));
@@ -4000,6 +4051,7 @@ pub fn grpo_train_to(
                 dynamic_groups_filtered,
                 None,
                 Vec::new(),
+                None,
                 Some(message),
             );
             return Err(crate::train_receipt::annotate_training_error(err));
@@ -4311,6 +4363,7 @@ pub fn grpo_train_to(
                 opt_state.as_mut(),
                 &mut lora_grad_norms,
                 &lora_grad_index,
+                &mut policy_audit,
                 ema_ref_state.as_ref().map(|s| &s.snapshot),
                 Some(&mut phase_timings),
             )?;
@@ -4414,8 +4467,9 @@ pub fn grpo_train_to(
         Ok((output_dir.clone(), last_loss))
     };
 
-    let result = train_body();
+    let mut result = train_body();
     drop(train_body);
+    let policy_audit = finish_grpo_policy_audit(&mut result, policy_audit);
     let adapter_smoke_test = if config.adapter_smoke_test && result.is_ok() {
         Some(run_adapter_smoke_test_best_effort(
             adapter_name,
@@ -4468,6 +4522,7 @@ pub fn grpo_train_to(
         dynamic_groups_filtered,
         adapter_smoke_test,
         lora_grad_norms.finish(),
+        policy_audit,
         status_error,
     );
     result
@@ -4708,6 +4763,7 @@ pub fn grpo_dry_run_jsonl(
         dynamic_groups_filtered,
         None,
         Vec::new(),
+        None,
         status_error,
     );
     let receipt_write = receipt
@@ -4802,6 +4858,7 @@ pub fn grpo_train_jsonl_to(
     let mut echo_metrics = crate::train_receipt::EchoActivityMetrics::default();
     let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
     let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
+    let mut policy_audit = crate::train_receipt::GrpoPolicyAuditAccumulator::default();
     let mut phase_timings = GrpoBenchmarkTimings::default();
     let mut dynamic_groups_filtered = 0usize;
 
@@ -4865,6 +4922,7 @@ pub fn grpo_train_jsonl_to(
                 dynamic_groups_filtered,
                 None,
                 Vec::new(),
+                None,
                 Some(message),
             );
             return Err(crate::train_receipt::annotate_training_error(err));
@@ -4922,6 +4980,7 @@ pub fn grpo_train_jsonl_to(
                 dynamic_groups_filtered,
                 None,
                 Vec::new(),
+                None,
                 Some(message),
             );
             return Err(crate::train_receipt::annotate_training_error(err));
@@ -5273,6 +5332,7 @@ pub fn grpo_train_jsonl_to(
                 opt_state.as_mut(),
                 &mut lora_grad_norms,
                 &lora_grad_index,
+                &mut policy_audit,
                 ema_ref_state.as_ref().map(|s| &s.snapshot),
                 Some(&mut phase_timings),
             )?;
@@ -5398,8 +5458,9 @@ pub fn grpo_train_jsonl_to(
         Ok((output_dir.clone(), last_loss))
     };
 
-    let result = train_body();
+    let mut result = train_body();
     drop(train_body);
+    let policy_audit = finish_grpo_policy_audit(&mut result, policy_audit);
     let adapter_smoke_test = if config.adapter_smoke_test && result.is_ok() {
         Some(run_adapter_smoke_test_best_effort(
             adapter_name,
@@ -5445,6 +5506,7 @@ pub fn grpo_train_jsonl_to(
         dynamic_groups_filtered,
         adapter_smoke_test,
         lora_grad_norms.finish(),
+        policy_audit,
         status_error,
     );
     result
@@ -5482,6 +5544,9 @@ struct TokenizedGrpoCompletion {
     /// means the rollout was admitted only under an explicit
     /// no-importance-correction policy.
     recorded_behavior_log_probs: Option<Vec<f32>>,
+    /// Content-addressed rollout source identity without the provenance
+    /// record's potentially long token arrays.
+    recorded_behavior_source: Option<crate::train_receipt::GrpoRecordedBehaviorSourceObservation>,
 }
 
 /// A tokenized GRPO group ready for training.
@@ -5557,6 +5622,7 @@ fn grpo_benchmark_report_from_tokenized(
     tgroup: &TokenizedGrpoGroup,
     timings: GrpoBenchmarkTimings,
     loss: Option<f64>,
+    policy_audit: Option<crate::train_receipt::GrpoPolicyAuditReceipt>,
     elapsed: Duration,
 ) -> GrpoBenchmarkReport {
     let counts = token_counts_for_grpo_groups(std::slice::from_ref(tgroup));
@@ -5591,6 +5657,7 @@ fn grpo_benchmark_report_from_tokenized(
         env_tokens: counts.env_tokens,
         context_tokens: counts.context_tokens,
         loss,
+        policy_audit,
         timings,
         total_ms,
         tokens_per_sec,
@@ -5608,6 +5675,7 @@ pub fn grpo_benchmark_tokenization(
     Ok(grpo_benchmark_report_from_tokenized(
         &tgroup,
         timings,
+        None,
         None,
         started.elapsed(),
     ))
@@ -5632,6 +5700,7 @@ pub fn grpo_benchmark_training_step(
     let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
     let tgroup = tokenize_grpo_group_timed(group, tokenizer, &mask_cfg, Some(&mut timings))?;
     let mut grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
+    let mut policy_audit = crate::train_receipt::GrpoPolicyAuditAccumulator::default();
     let lora_grad_index = LoraGradNormIndex::new(params);
     let step_report = train_tokenized_grpo_group_with_grad_norms(
         backend,
@@ -5645,13 +5714,18 @@ pub fn grpo_benchmark_training_step(
         opt_state,
         &mut grad_norms,
         &lora_grad_index,
+        &mut policy_audit,
         None,
         Some(&mut timings),
     )?;
+    let policy_audit = policy_audit
+        .finish()
+        .context("finish GRPO benchmark policy audit")?;
     Ok(grpo_benchmark_report_from_tokenized(
         &tgroup,
         timings,
         Some(step_report.loss),
+        Some(policy_audit),
         started.elapsed(),
     ))
 }
@@ -6092,6 +6166,44 @@ fn chunked_log_probs_for_completion(
     Ok((correct_logits - log_sum_exp)?.squeeze(1)?)
 }
 
+fn observe_grpo_policy_audit_completion(
+    policy_audit: &mut crate::train_receipt::GrpoPolicyAuditAccumulator,
+    policy_log_probs: &Tensor,
+    behavior_log_probs: Option<&[f32]>,
+    kl_reference_log_probs: Option<&Tensor>,
+    loss_params: GrpoLossParams,
+    behavior_source: Option<&crate::train_receipt::GrpoRecordedBehaviorSourceObservation>,
+) -> Result<()> {
+    let policy_log_probs_host = policy_log_probs
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_device(cpu_device())?
+        .to_vec1::<f32>()?;
+    let kl_reference_log_probs_host = kl_reference_log_probs
+        .map(|reference| {
+            reference
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_device(cpu_device())?
+                .to_vec1::<f32>()
+        })
+        .transpose()?;
+    policy_audit.observe_policy_values(
+        &policy_log_probs_host,
+        behavior_log_probs,
+        kl_reference_log_probs_host.as_deref(),
+        loss_params.is_level,
+        loss_params.clip_low,
+        loss_params.clip_high,
+        loss_params.kl_estimator,
+        loss_params.entropy_aware_kl_quantile,
+    )?;
+    if let Some(source) = behavior_source {
+        policy_audit.observe_recorded_behavior_source(source);
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn train_tokenized_grpo_group_with_grad_norms(
     backend: &dyn BackendRuntime,
@@ -6107,6 +6219,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
     opt_state: Option<&mut OptimizerState>,
     grad_norms: &mut crate::train_receipt::LoraGradNormAccumulator,
     lora_grad_index: &LoraGradNormIndex,
+    policy_audit: &mut crate::train_receipt::GrpoPolicyAuditAccumulator,
     // Optional EMA-snapshot LoRA used as the KL reference when
     // `config.kl_reference_policy == KlReferencePolicy::Ema`. None means the
     // KL-reference forward runs without LoRA (`BasePerStep`) or is skipped.
@@ -6490,6 +6603,19 @@ fn train_tokenized_grpo_group_with_grad_norms(
             "GRPO loss returned {} selected policy log-probabilities for {num_active} active tokens",
             policy_log_probs.elem_count()
         );
+        let behavior_log_probs_host = match config.behavior_policy {
+            BehaviorPolicy::NoImportanceCorrection => None,
+            BehaviorPolicy::Recorded => comp.recorded_behavior_log_probs.as_deref(),
+        };
+        observe_grpo_policy_audit_completion(
+            policy_audit,
+            &policy_log_probs,
+            behavior_log_probs_host,
+            (!skip_kl_reference).then_some(&kl_reference_log_probs),
+            loss_params,
+            comp.recorded_behavior_source.as_ref(),
+        )
+        .with_context(|| format!("record GRPO policy metrics for completion {comp_idx}"))?;
         if token_level {
             // Cross-completion grad accumulation into the kt `GradMap`
             // (keyed by `Parameter::tensor_id()`).
@@ -7101,6 +7227,16 @@ fn tokenize_grpo_group_timed(
                 env_mask,
                 total_obs_len,
                 recorded_behavior_log_probs: Some(behavior_log_probs),
+                recorded_behavior_source: Some(
+                    crate::train_receipt::GrpoRecordedBehaviorSourceObservation::from_provenance(
+                        provenance,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "build completion {completion_idx} GRPO behavior-source observation"
+                        )
+                    })?,
+                ),
             });
             rewards.push(reward);
             continue;
@@ -7136,6 +7272,7 @@ fn tokenize_grpo_group_timed(
                 env_mask,
                 total_obs_len,
                 recorded_behavior_log_probs: None,
+                recorded_behavior_source: None,
             });
             rewards.push(reward);
             continue;
@@ -7179,6 +7316,7 @@ fn tokenize_grpo_group_timed(
             env_mask,
             total_obs_len: 0,
             recorded_behavior_log_probs: None,
+            recorded_behavior_source: None,
         });
         rewards.push(reward);
     }
@@ -12886,6 +13024,74 @@ pub(crate) mod tests {
         assert!((high - 0.2).abs() < 1e-12);
     }
 
+    #[test]
+    fn grpo_policy_audit_persists_at_public_receipt_path() -> Result<()> {
+        let mut accumulator = crate::train_receipt::GrpoPolicyAuditAccumulator::default();
+        accumulator.observe_policy_values(
+            &[-1.0, -2.0],
+            Some(&[-1.25, -1.75]),
+            Some(&[-0.8, -2.4]),
+            IsLevel::Token,
+            0.2,
+            0.2,
+            KlEstimator::K3,
+            None,
+        )?;
+        let audit = accumulator.finish()?;
+        let temp = tempfile::tempdir()?;
+        let output = temp.path().join("adapter");
+        let tokenizer = make_echo_smoke_tokenizer()?;
+        let config = GrpoConfig {
+            behavior_policy: BehaviorPolicy::Recorded,
+            kl_reference_policy: KlReferencePolicy::BasePerStep,
+            kl_estimator: KlEstimator::K3,
+            ..GrpoConfig::default()
+        };
+        let receipt = build_grpo_train_receipt(
+            "audit-receipt",
+            &ModelConfig::qwen3_5_4b(),
+            &tokenizer,
+            &config,
+            Some(7),
+            Some(2.0),
+            None,
+            &output,
+            crate::train_receipt::TrainingDataReceipt {
+                source: "inline".to_string(),
+                path: None,
+                sha256: None,
+            },
+            crate::train_receipt::DataStatsReceipt::default(),
+            crate::train_receipt::RewardStatsReceipt::default(),
+            crate::train_receipt::TokenCountReceipt::default(),
+            crate::train_receipt::TrainingPhaseTimingsReceipt::default(),
+            crate::train_receipt::EchoActivityMetrics::default(),
+            1,
+            0,
+            None,
+            Vec::new(),
+            Some(audit.clone()),
+            None,
+        );
+        receipt.write_to_adapter_dir(&output)?;
+
+        let wire: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(output.join("train_receipt.json"))?)?;
+        assert_eq!(
+            wire.pointer("/grpo/policy_audit/schema"),
+            Some(&serde_json::json!(
+                crate::train_receipt::GRPO_POLICY_AUDIT_SCHEMA_V1
+            ))
+        );
+        let round_trip = crate::train_receipt::TrainReceipt::read_from_adapter_dir(&output)?
+            .context("persisted GRPO train receipt")?;
+        assert_eq!(
+            round_trip.grpo.context("GRPO receipt")?.policy_audit,
+            Some(audit)
+        );
+        Ok(())
+    }
+
     /// Pins the kiln-default GRPO recipe (post Phase 1 ablation). If any of
     /// these change, the change should be intentional and accompanied by a
     /// new ablation justifying the move.
@@ -16906,6 +17112,52 @@ pub(crate) mod tests {
 
         assert!(loss_val.is_finite(), "GRPO loss not finite: {loss_val}");
         assert_eq!(policy_log_probs.elem_count(), num_active);
+        let policy_host = policy_log_probs
+            .to_device(Device::Cpu)
+            .and_then(|tensor| tensor.to_vec1::<f32>())
+            .expect("selected policy log-probabilities to host");
+        let behavior_host = policy_host
+            .iter()
+            .map(|value| value - 0.2)
+            .collect::<Vec<_>>();
+        let kl_reference_host = policy_host
+            .iter()
+            .map(|value| value + 0.3)
+            .collect::<Vec<_>>();
+        let kl_reference = Tensor::from_vec_on(
+            device,
+            kl_reference_host,
+            vec![policy_log_probs.elem_count()],
+        )
+        .expect("distinct Vulkan KL reference");
+        let mut audit = crate::train_receipt::GrpoPolicyAuditAccumulator::default();
+        observe_grpo_policy_audit_completion(
+            &mut audit,
+            &policy_log_probs,
+            Some(&behavior_host),
+            Some(&kl_reference),
+            GrpoLossParams {
+                clip_low: 0.1,
+                clip_high: 0.1,
+                kl_coeff: 0.1,
+                kl_estimator: KlEstimator::K3,
+                reinforce: false,
+                ..loss_params
+            },
+            None,
+        )
+        .expect("observe Vulkan GRPO policy audit");
+        let audit = audit.finish().expect("finish Vulkan GRPO policy audit");
+        assert_eq!(
+            audit.importance_sampling.ratio_observations,
+            num_active as u64
+        );
+        assert_eq!(
+            audit.importance_sampling.above_clip_count,
+            num_active as u64
+        );
+        assert!((audit.importance_sampling.mean_ratio.unwrap() - 0.2_f64.exp()).abs() < 1e-5);
+        assert!((audit.kl_reference.mean_policy_reference_log_ratio.unwrap() + 0.3).abs() < 1e-5);
         let present = vk_report_grad_coverage("GRPO", &params, &grads);
         assert!(
             !grads.is_empty() && present > 0,
@@ -16913,6 +17165,162 @@ pub(crate) mod tests {
              root did not connect through the F32 model to any LoRA leaf"
         );
         eprintln!("[GRPO F32 Vulkan] loss={loss_val:.6} grad_leaves={present}");
+    }
+
+    #[cfg(any(feature = "vulkan", feature = "rocm"))]
+    fn assert_recorded_policy_audit_report(report: &GrpoBenchmarkReport) {
+        let audit = report
+            .policy_audit
+            .as_ref()
+            .expect("benchmark policy audit");
+        assert_eq!(
+            audit.schema,
+            crate::train_receipt::GRPO_POLICY_AUDIT_SCHEMA_V1
+        );
+        assert_eq!(
+            audit.importance_sampling.action_tokens,
+            report.action_tokens
+        );
+        assert_eq!(
+            audit.importance_sampling.ratio_observations,
+            report.action_tokens
+        );
+        assert_ne!(audit.importance_sampling.mean_ratio, Some(1.0));
+        assert_eq!(audit.kl_reference.token_observations, report.action_tokens);
+        assert_eq!(audit.recorded_provenance.completion_count, 1);
+        assert_eq!(audit.recorded_provenance.unique_behavior_sources, 1);
+        assert!(
+            audit
+                .recorded_provenance
+                .behavior_source_manifest_sha256
+                .is_some()
+        );
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vk_f32_grpo_benchmark_reports_recorded_policy_audit() -> Result<()> {
+        let test_name = "vk_f32_grpo_benchmark_reports_recorded_policy_audit";
+        if !vk_validation_enabled(test_name) {
+            return Ok(());
+        }
+        vk_set_all_tape_gates();
+
+        let device = Device::Vulkan(0);
+        let model_config = tiny_config_full_attn();
+        let weights = tiny_weights(&model_config, &device)?;
+        let mut params = TrainableLoraParams::initialize_seeded(
+            &model_config,
+            &weights,
+            4,
+            8.0,
+            &device,
+            Some(7),
+        )?;
+        let backend = backend::for_device_kt(&device);
+        params.register_with_backend(&*backend)?;
+
+        let tokenizer = make_echo_smoke_tokenizer()?;
+        let mut group = dry_run_group(vec![crate::ScoredRollout::legacy("b".to_string(), 1.0)]);
+        attach_test_rollout_provenance(&mut group, &tokenizer, false)?;
+        let config = GrpoConfig {
+            behavior_policy: BehaviorPolicy::Recorded,
+            kl_reference_policy: KlReferencePolicy::BasePerStep,
+            kl_estimator: KlEstimator::K3,
+            kl_coeff: 0.1,
+            dynamic_sampling: false,
+            optimizer: Optimizer::Sgd,
+            lora_rank: 4,
+            lora_alpha: 8.0,
+            ..GrpoConfig::default()
+        };
+
+        let result = grpo_benchmark_training_step(
+            &*backend,
+            &group,
+            &weights,
+            &model_config,
+            &mut params,
+            &config,
+            None,
+            &device,
+            &tokenizer,
+            None,
+        );
+        params.evict_from_backend(&*backend);
+        let report = result?;
+        assert_recorded_policy_audit_report(&report);
+        Ok(())
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn rocm_grpo_benchmark_reports_recorded_policy_audit() -> Result<()> {
+        if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+            eprintln!("skip rocm_grpo_benchmark_reports_recorded_policy_audit: qualification off");
+            return Ok(());
+        }
+        anyhow::ensure!(
+            kiln_tensor::rocm_is_available(),
+            "ROCm qualification requested but no ROCm device is available"
+        );
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+        }
+
+        let device = Device::Rocm(0);
+        let model_config = tiny_config_full_attn_bf16();
+        let weights = tiny_weights_bf16(&model_config, &device)?;
+        let mut params = TrainableLoraParams::initialize_seeded(
+            &model_config,
+            &weights,
+            4,
+            8.0,
+            &device,
+            Some(7),
+        )?;
+        let backend = backend::for_device_kt(&device);
+        params.register_with_backend(&*backend)?;
+
+        let tokenizer = make_echo_smoke_tokenizer()?;
+        let mut group = dry_run_group(vec![crate::ScoredRollout::legacy("b".to_string(), 1.0)]);
+        attach_test_rollout_provenance(&mut group, &tokenizer, false)?;
+        let config = GrpoConfig {
+            behavior_policy: BehaviorPolicy::Recorded,
+            kl_reference_policy: KlReferencePolicy::BasePerStep,
+            kl_estimator: KlEstimator::K3,
+            kl_coeff: 0.1,
+            dynamic_sampling: false,
+            optimizer: Optimizer::Sgd,
+            lora_rank: 4,
+            lora_alpha: 8.0,
+            ..GrpoConfig::default()
+        };
+
+        let result = grpo_benchmark_training_step(
+            &*backend,
+            &group,
+            &weights,
+            &model_config,
+            &mut params,
+            &config,
+            None,
+            &device,
+            &tokenizer,
+            None,
+        );
+        params.evict_from_backend(&*backend);
+        let report = result?;
+        assert_recorded_policy_audit_report(&report);
+        Ok(())
     }
 
     // ====================================================================

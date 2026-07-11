@@ -43,6 +43,8 @@ writes the full record array. Records include:
 - `peak_vram_mib`
 - `kernel_launch_count` (`null` until a launch counter is wired)
 - `report.tokens_per_sec`
+- `report.policy_audit` for a training step (absent in `--dry-run`), using the
+  same `kiln.grpo-policy-audit.v1` object persisted in `train_receipt.json`
 
 Use `--lengths` for shorter smoke runs in CI or development environments. Use
 `--segments 0` to disable checkpointing for small CUDA comparisons; leave

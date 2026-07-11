@@ -671,6 +671,9 @@ curl -s -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           Training writes every artifact beneath a hidden staging root and captures the target&rsquo;s starting content revision. Publication compares that revision again: if another operation won, the job fails with <code>adapter_revision_conflict</code> and preserves the newer adapter. An ungated same-name adapter that is already loaded is reloaded atomically with the directory replacement, even when <code>auto_load=false</code>. A gated <code>post_eval.min_accuracy</code> rewrite of a physically loaded same-name target is rejected before GPU work; unload it or choose a versioned <code>config.output_name</code>.
         </p>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          A GRPO run that reaches the training loop records <code>grpo.policy_audit</code> in the adapter receipt returned by <code>GET /v1/adapters/{name}/receipt</code>. The versioned <code>kiln.grpo-policy-audit.v1</code> object reports behavior-policy importance ratios, independently referenced K1/K3 metrics, entropy-mask coverage, clipping tails, and content-addressed rollout-source identities. No-correction runs report unit ratios; they never substitute the KL reference for missing behavior probabilities. See the <a href="grpo.html#audit-policy">GRPO audit guide</a> for denominator and count semantics.
+        </p>
       </article>
 
       <article class="card p-6">

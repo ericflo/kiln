@@ -405,6 +405,44 @@ server-side default, so omit anything you don't want to override:
 For full schema details, see
 [QUICKSTART.md §9.4](../QUICKSTART.md#94-grpo-rollout-generation).
 
+## Audit the policy update
+
+Every non-dry GRPO run that reaches the training loop writes a versioned audit
+at `train_receipt.json` -> `grpo.policy_audit`. The same object appears as
+`report.policy_audit` in the long-context training benchmark and the trainer
+emits a compact `GRPO policy audit` structured log event when it writes the
+receipt. Retrieve a published adapter's receipt with:
+
+```bash
+ADAPTER=math-grpo
+curl -s http://localhost:8420/v1/adapters/$ADAPTER/receipt \
+  | jq '.grpo.policy_audit'
+```
+
+The object has schema `kiln.grpo-policy-audit.v1` and keeps the two policy
+comparisons separate:
+
+- `importance_sampling` uses `exp(log p_policy - log p_behavior)`. Token PPO
+  and CISPO report one ratio observation per action token; sequence/GSPO
+  reports one per completion while retaining the total action-token count.
+  `no_importance_correction` reports an exact ratio of `1.0` and does not
+  borrow the KL reference as a denominator.
+- `kl_reference` uses `log p_policy - log p_reference`. Its K1/K3 means are
+  reported before multiplying by `kl_coeff`; `mean_masked_estimator` includes
+  zeros for entropy-masked tokens and remains normalized over every observed
+  action token, matching the loss contribution's denominator.
+- `recorded_provenance` counts sampled and controller-forced actions and lists
+  content-addressed behavior sources. A source binds the behavior model and
+  adapter revision, tokenizer/template invocation, sampling controls, and
+  generation backend. `behavior_source_manifest_sha256` is stable regardless
+  of input order and changes when any source identity changes.
+
+Counts are runtime observations, so multiple epochs count a completion each
+time it is trained. The receipt intentionally stores aggregate metrics and
+source identities rather than duplicating every per-token log-probability from
+the rollout dataset. Dry runs and failures before the training loop omit the
+audit instead of inventing zero-work policy evidence.
+
 ## What to expect at the wall clock
 
 On a single A6000 with rank-8 LoRA, end-to-end timing for the loops above is
