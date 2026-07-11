@@ -35,7 +35,7 @@ struct ImmutableModelSnapshot {
 
 impl ImmutableModelSnapshot {
     fn root(&self) -> &Path {
-        self.lease.directory.path()
+        self.lease.path()
     }
 }
 
@@ -460,7 +460,7 @@ fn create_immutable_model_snapshot(
         "created private immutable model snapshot"
     );
     Ok(ImmutableModelSnapshot {
-        lease: Arc::new(ModelSnapshotLease { directory }),
+        lease: Arc::new(ModelSnapshotLease::new(directory)),
     })
 }
 
@@ -963,7 +963,7 @@ fn loaded_shard_content_guard(
 #[cfg(test)]
 fn loaded_shard_content_sha256(shards: &[LoadedShard]) -> String {
     let directory = tempfile::tempdir().unwrap();
-    let lease = Arc::new(ModelSnapshotLease { directory });
+    let lease = Arc::new(ModelSnapshotLease::new(directory));
     loaded_shard_content_guard(shards, lease)
         .initial_sha256()
         .to_string()
@@ -2115,6 +2115,31 @@ mod tests {
         assert!(snapshot_root.is_dir());
         drop(weights);
         assert!(!snapshot_root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_snapshot_cleanup_recovers_read_only_directory_after_last_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix(".kiln-model-snapshot-")
+            .tempdir_in(parent.path())
+            .unwrap();
+        let root = directory.path().to_path_buf();
+        let payload = root.join("model.safetensors");
+        fs::write(&payload, b"weights").unwrap();
+        fs::set_permissions(&payload, fs::Permissions::from_mode(0o400)).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let first = Arc::new(ModelSnapshotLease::new(directory));
+        let last = Arc::clone(&first);
+        drop(first);
+        assert!(root.is_dir());
+        drop(last);
+        assert!(!root.exists());
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
     }
 
     #[test]

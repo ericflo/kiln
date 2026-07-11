@@ -1,9 +1,10 @@
 use std::fmt;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io;
 use std::ops::Deref;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
@@ -356,7 +357,105 @@ pub struct DeferredMtpSource {
 /// the last CPU source guard or deferred-MTP source releases it.
 #[derive(Debug)]
 pub(crate) struct ModelSnapshotLease {
-    pub(crate) directory: tempfile::TempDir,
+    directory: Option<tempfile::TempDir>,
+}
+
+impl ModelSnapshotLease {
+    pub(crate) fn new(directory: tempfile::TempDir) -> Self {
+        Self {
+            directory: Some(directory),
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.directory
+            .as_ref()
+            .expect("model snapshot directory is present until lease drop")
+            .path()
+    }
+}
+
+impl Drop for ModelSnapshotLease {
+    fn drop(&mut self) {
+        let Some(directory) = self.directory.take() else {
+            return;
+        };
+        let path = directory.path().to_path_buf();
+        let started = Instant::now();
+        match directory.close() {
+            Ok(()) => tracing::info!(
+                snapshot = %path.display(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                cleanup_retries = 0,
+                "private model snapshot removed"
+            ),
+            Err(initial_error) => {
+                let initial_error_text = initial_error.to_string();
+                let mut last_error = initial_error;
+                for attempt in 1..=3u32 {
+                    make_snapshot_tree_removable(&path);
+                    match fs::remove_dir_all(&path) {
+                        Ok(()) => {
+                            tracing::warn!(
+                                snapshot = %path.display(),
+                                elapsed_ms = started.elapsed().as_millis() as u64,
+                                cleanup_retries = attempt,
+                                initial_error = %initial_error_text,
+                                "private model snapshot cleanup recovered after retry"
+                            );
+                            return;
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+                        Err(error) => last_error = error,
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                tracing::error!(
+                    snapshot = %path.display(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    cleanup_retries = 3,
+                    error = %last_error,
+                    "private model snapshot cleanup failed; remove the path manually"
+                );
+            }
+        }
+    }
+}
+
+fn make_snapshot_tree_removable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                let Ok(metadata) = fs::symlink_metadata(&entry_path) else {
+                    continue;
+                };
+                if metadata.is_dir() {
+                    let _ = fs::set_permissions(&entry_path, fs::Permissions::from_mode(0o700));
+                } else if metadata.is_file() {
+                    let _ = fs::set_permissions(&entry_path, fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&entry_path) else {
+                continue;
+            };
+            if metadata.is_file() {
+                let mut permissions = metadata.permissions();
+                permissions.set_readonly(false);
+                let _ = fs::set_permissions(entry_path, permissions);
+            }
+        }
+    }
 }
 
 /// Loader-owned proof that the bytes used to construct CPU weights remain the
@@ -414,7 +513,7 @@ impl SourceContentGuard {
 
     #[cfg(test)]
     pub(crate) fn snapshot_root(&self) -> &std::path::Path {
-        self._snapshot_lease.directory.path()
+        self._snapshot_lease.path()
     }
 
     fn verify_unchanged(&self) -> Result<()> {
