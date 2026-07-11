@@ -6,6 +6,10 @@ on:
     paths:
       - 'docs/site/**'
       - 'assets/**'
+      - 'README.md'
+      - 'QUICKSTART.md'
+      - 'scripts/check_docs_site_smoke.mjs'
+      - 'scripts/check_release_versions.py'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
