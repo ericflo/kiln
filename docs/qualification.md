@@ -115,7 +115,7 @@ call/failure/slow count, total time, and maximum duration. A failed sync, a sync
 lasting at least 100 ms, any physical resize/reclaim/graph event, or any
 unexplained ITL outlier fails the stable arm.
 
-The stable serving run also attests the default 64-token prompt-work ceiling
+The stable serving run also attests the default 32-token prompt-work ceiling
 (`server.max_prefill_tokens_per_cycle`) and its startup provenance. Admission
 and resumable prefill share that ceiling after ready decode rows reserve their
 tokens; the receipt records its effective value plus cumulative/max actor-phase
