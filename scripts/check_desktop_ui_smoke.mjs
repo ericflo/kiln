@@ -5,6 +5,8 @@ import vm from 'node:vm';
 const files = {
   dashboard: 'desktop/ui/dashboard.html',
   settings: 'desktop/ui/settings.html',
+  desktopMain: 'desktop/src/main.rs',
+  desktopSettings: 'desktop/src/settings.rs',
   runtimeDefaults: 'desktop/ui/_kiln-runtime-defaults.js',
   runtimeDefaultsContract: 'contracts/runtime-defaults-v1.json',
   thinkingBudgetContract: 'contracts/thinking-budget-v1.conformance.json',
@@ -77,6 +79,12 @@ function checkSettings(html) {
   const text = stripHtml(html);
   assertContains(html, '_kiln-runtime-defaults.js', 'settings runtime defaults');
   assertContains(html, 'KILN_RUNTIME_DEFAULTS.serverPort', 'settings port fallback');
+  assertContains(html, 'id="settings-load-warning"', 'settings load warning');
+  assertContains(html, 'invoke("get_settings_status")', 'settings load status IPC');
+  assertContains(html, 'status.can_save !== false', 'settings future-schema write guard');
+  assertContains(html, 'settingsNeedsRepair = settingsCanSave && issues.length > 0', 'settings repair save state');
+  assertContains(html, '@media (max-width: 460px)', 'settings constrained-width layout');
+  assertContains(html, '.path-row { width: 100%; flex-wrap: wrap; }', 'settings responsive path rows');
   assertContains(html, quickstartHref, 'settings setup help');
   assertContains(html, troubleshootingHref, 'settings setup help');
   assertContains(text, 'quickstart', 'settings setup help text');
@@ -97,9 +105,10 @@ function checkSettings(html) {
   const context = vm.createContext({
     document: { getElementById: (id) => inputs[id] },
     thinkingBudgetMode: 'custom',
+    KILN_RUNTIME_DEFAULTS: { serverPort: 8420 },
   });
   vm.runInContext(
-    `${html.slice(parserStart, parserEnd)}\nthis.parsers = { strictThinkingBudgetInteger, strictThinkingBudgetMilliseconds, readThinkingBudget };`,
+    `${html.slice(parserStart, parserEnd)}\nthis.parsers = { strictThinkingBudgetInteger, strictThinkingBudgetMilliseconds, readThinkingBudget, readPort, readInferenceFraction };`,
     context,
   );
 
@@ -170,6 +179,42 @@ function checkSettings(html) {
       throw new Error(`${testCase.name} produced ${JSON.stringify(actual)}; expected ${JSON.stringify(testCase.settings)}`);
     }
   }
+
+  const numberInput = (value, badInput = false) => ({ value, validity: { badInput } });
+  if (context.parsers.readPort(numberInput('')) !== 8420 || context.parsers.readPort(numberInput('65535')) !== 65535) {
+    throw new Error('settings port parser did not preserve the shared default and valid upper bound');
+  }
+  for (const input of [numberInput('0'), numberInput('65536'), numberInput('1.5'), numberInput('1e3'), numberInput('', true)]) {
+    assertThrows(() => context.parsers.readPort(input), /whole number/, 'settings invalid port');
+  }
+  if (context.parsers.readInferenceFraction(numberInput('0')) !== 0 ||
+      context.parsers.readInferenceFraction(numberInput('.5')) !== 0.5 ||
+      context.parsers.readInferenceFraction(numberInput('1')) !== 1) {
+    throw new Error('settings inference-fraction parser rejected a valid boundary');
+  }
+  for (const input of [numberInput(''), numberInput('-0.1'), numberInput('1.1'), numberInput('', true)]) {
+    assertThrows(() => context.parsers.readInferenceFraction(input), /from 0 through 1/, 'settings invalid inference fraction');
+  }
+  if (html.includes('parseInt(n("port")') || html.includes('parseFloat(n("inference_fraction")')) {
+    throw new Error('settings numeric fields must not use permissive parseInt/parseFloat coercion');
+  }
+}
+
+function checkSettingsPersistenceContract() {
+  const main = read(files.desktopMain);
+  const settings = read(files.desktopSettings);
+  assertContains(settings, 'pub const SETTINGS_SCHEMA_VERSION: u32 = 1;', 'settings schema version');
+  assertContains(settings, 'decode_field::<', 'field-tolerant settings decoder');
+  assertContains(settings, 'atomic_replace_settings_with', 'atomic settings writer');
+  assertContains(settings, 'settings_backup_path', 'settings backup path');
+  assertContains(settings, 'auto_start_suppressed', 'settings auto-start safety gate');
+  if (settings.includes('serde_json::from_str(&data).unwrap_or_default()')) {
+    throw new Error('desktop settings must not reset the whole document after one parse error');
+  }
+  assertContains(main, 'async fn get_settings_status(', 'settings status IPC');
+  assertContains(main, '!settings_status.auto_start_suppressed', 'startup settings safety gate');
+  assertContains(main, 'if !status.can_save', 'future-schema save guard');
+  assertContains(main, 'if settings_status.has_issues()', 'automatic settings repair guard');
 }
 
 function checkRuntimeDefaults() {
@@ -206,7 +251,18 @@ function assertThrowsBudgetRead(context, pattern, label) {
   throw new Error(`${label} was accepted`);
 }
 
+function assertThrows(action, pattern, label) {
+  try {
+    action();
+  } catch (error) {
+    if (pattern.test(error.message)) return;
+    throw new Error(`${label} failed with unexpected error: ${error.message}`);
+  }
+  throw new Error(`${label} was accepted`);
+}
+
 checkRuntimeDefaults();
 checkDashboard(read(files.dashboard));
 checkSettings(read(files.settings));
+checkSettingsPersistenceContract();
 console.log('Desktop UI smoke checks passed');

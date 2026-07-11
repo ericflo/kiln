@@ -71,7 +71,7 @@ Kiln Desktop (Tauri)
 ├── Subprocess supervisor       (Rust — tokio child process, stdout/stderr ring buffer,
 │                                crash restart with backoff)
 ├── HTTP health/status poller   (Rust — /v1/health, /v1/train/status)
-├── Settings store              (Rust — tauri-plugin-store)
+├── Settings store              (Rust — versioned JSON, atomic replace + backup recovery)
 ├── Dashboard window            (HTML, iframes the kiln server's /ui/)
 ├── Settings window             (HTML + invoke())
 └── Log viewer window           (HTML + invoke())
@@ -83,6 +83,10 @@ Kiln Desktop (Tauri)
 ## Workspace isolation
 
 This crate is **not** a member of the root `kiln` Cargo workspace. `desktop/Cargo.toml` declares its own empty `[workspace]` section so it is its own workspace root. This keeps Tauri and system-webview dependencies out of the inference workspace and vice versa, and means the desktop app builds without CUDA or Metal — only the `kiln` child process needs a GPU toolchain.
+
+## Settings durability
+
+Desktop settings live in a flat, versioned `settings.json`. Missing fields migrate to current defaults, while an invalid field is reported and defaulted without discarding other valid fields. Saves write and fsync a sibling temporary file before promotion; the prior supported document remains as `settings.json.bak`. If the primary document is truncated or unreadable, the app loads the backup, suppresses automatic server launch, sends a notification, and keeps the recovery warning visible in Settings until the repaired values are saved. A document from a newer schema is read-only so an older app cannot erase settings it does not understand.
 
 ## Build
 
@@ -163,6 +167,8 @@ Common first-run issues and how to recover.
 - **CUDA driver too old.** Settings shows the detected NVIDIA driver and the minimum required by the selected kiln release. If the gate trips ("CUDA driver too old: …  Update blocked"), update your NVIDIA driver to at least the version shown — see <https://www.nvidia.com/drivers> — then restart the desktop app. The same gate blocks in-app server-binary updates until the driver is current.
 
 - **Port already in use.** Default server port is `8420`. If another process is bound, open Settings, change "Port" to a free port (e.g. `8421`), and Save. Then restart the server from the tray menu and update any OpenAI-compatible client to the new `http://localhost:<port>/v1` base URL.
+
+- **Settings reports an invalid or recovered file.** Valid fields remain loaded and invalid fields show their defaults. Review the warning and values, then Save to repair `settings.json`; the pre-repair document is retained as `settings.json.bak` (malformed primary bytes are retained as `settings.json.invalid`). If the warning says the schema is newer, update Kiln Desktop instead; saving and automatic launch remain disabled to avoid a destructive downgrade.
 
 - **Server keeps crashing or restarts in a loop.** Open the Logs window (Ctrl/Cmd+L) to inspect the captured stderr. The most common causes are: corrupt or partial model weights (re-download), insufficient VRAM for the model + KV cache (lower the inference memory fraction in Settings, or enable FP8 KV cache), and a CUDA runtime/driver mismatch (see above). The supervisor backs off exponentially between restart attempts; "Stop server" from the tray will halt the loop.
 

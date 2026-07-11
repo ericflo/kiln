@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use settings::{
     apply_desktop_launch_contract, apply_to_supervisor_config, normalize_for_platform, Settings,
+    SettingsLoadStatus, SETTINGS_SCHEMA_VERSION,
 };
 use supervisor::{ServerState, Supervisor, SupervisorConfig};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -69,6 +70,7 @@ fn build_supervisor_config(
 }
 
 type SettingsState = Arc<RwLock<Settings>>;
+type SettingsStatusState = Arc<RwLock<SettingsLoadStatus>>;
 
 /// Shared cancel/busy flags for the install pipeline.
 ///
@@ -138,6 +140,13 @@ async fn get_settings(state: State<'_, SettingsState>) -> Result<Settings, Strin
 }
 
 #[tauri::command]
+async fn get_settings_status(
+    state: State<'_, SettingsStatusState>,
+) -> Result<SettingsLoadStatus, String> {
+    Ok(state.read().await.clone())
+}
+
+#[tauri::command]
 async fn default_settings() -> Result<Settings, String> {
     Ok(Settings::default())
 }
@@ -189,9 +198,23 @@ async fn get_binary_status(
 async fn download_kiln_server(
     app: AppHandle,
     settings_state: State<'_, SettingsState>,
+    settings_status_state: State<'_, SettingsStatusState>,
     sup: State<'_, Arc<Supervisor>>,
     inst: State<'_, InstallerHandle>,
 ) -> Result<(), String> {
+    let settings_status = settings_status_state.read().await;
+    if !settings_status.can_save {
+        return Err(format!(
+            "settings cannot be saved: {}",
+            settings_status.summary()
+        ));
+    }
+    if settings_status.has_issues() {
+        return Err(
+            "review and save the settings warning before installing a server binary".to_string(),
+        );
+    }
+    drop(settings_status);
     // Reject overlapping installs rather than racing two downloads into
     // the same file. The frontend's "Download" button is disabled while
     // `in_progress` is true, but belt-and-suspenders: we also guard here.
@@ -202,6 +225,7 @@ async fn download_kiln_server(
 
     let app_for_task = app.clone();
     let settings_state = (*settings_state).clone();
+    let settings_status_state = (*settings_status_state).clone();
     let supervisor = (*sup).clone();
     let inst_for_task = (*inst).clone();
 
@@ -213,18 +237,16 @@ async fn download_kiln_server(
         .await;
         match result {
             Ok((path, version)) => {
-                let cfg_update = {
-                    let mut s = settings_state.write().await;
-                    s.kiln_binary = Some(path.clone());
-                    let normalized = normalize_for_platform(s.clone());
-                    *s = normalized;
-                    if let Err(e) = s.save(&app_for_task) {
-                        eprintln!("[install] settings.save failed: {}", e);
-                    }
-                    build_supervisor_config(&app_for_task, &s)
-                };
+                let mut next = settings_state.read().await.clone();
+                next.kiln_binary = Some(path.clone());
+                next.schema_version = SETTINGS_SCHEMA_VERSION;
+                let next = normalize_for_platform(next);
+                let cfg_update = build_supervisor_config(&app_for_task, &next)
+                    .and_then(|cfg| next.save(&app_for_task).map(|_| cfg));
                 match cfg_update {
                     Ok(cfg) => {
+                        *settings_state.write().await = next;
+                        *settings_status_state.write().await = SettingsLoadStatus::saved();
                         supervisor.update_config(cfg).await;
                         let _ = app_for_task.emit(
                             installer::INSTALL_DONE_EVENT,
@@ -1017,18 +1039,26 @@ async fn get_training_status(
 /// args take effect on the next `start_server` call.
 #[tauri::command]
 async fn set_settings(
-    new: Settings,
+    mut new: Settings,
     app: tauri::AppHandle,
     state: State<'_, SettingsState>,
+    status_state: State<'_, SettingsStatusState>,
     sup: State<'_, Arc<Supervisor>>,
 ) -> Result<(), String> {
+    let status = status_state.read().await;
+    if !status.can_save {
+        return Err(format!("settings cannot be saved: {}", status.summary()));
+    }
+    drop(status);
+    new.schema_version = SETTINGS_SCHEMA_VERSION;
     let new = normalize_for_platform(new);
+    let cfg = build_supervisor_config(&app, &new)?;
     new.save(&app)?;
     {
         let mut guard = state.write().await;
         *guard = new.clone();
     }
-    let cfg = build_supervisor_config(&app, &new)?;
+    *status_state.write().await = SettingsLoadStatus::saved();
     sup.update_config(cfg).await;
     if let Err(body) = reconcile_autolaunch(&app, new.launch_at_login) {
         let _ = app
@@ -1070,25 +1100,43 @@ fn main() {
         ))
         .setup(|app| {
             let handle = app.handle().clone();
-            let settings = Settings::load(&handle);
+            let loaded = Settings::load(&handle);
+            let settings = loaded.settings;
+            let settings_status = loaded.status;
 
             let cfg = build_supervisor_config(&handle, &settings)?;
             let supervisor = Arc::new(Supervisor::new(cfg));
             let settings_state: SettingsState = Arc::new(RwLock::new(settings.clone()));
+            let settings_status_state: SettingsStatusState =
+                Arc::new(RwLock::new(settings_status.clone()));
 
             app.manage(Arc::clone(&supervisor));
             app.manage(Arc::clone(&settings_state));
+            app.manage(Arc::clone(&settings_status_state));
             app.manage(Arc::new(InstallerState::default()) as InstallerHandle);
 
             tray::build_tray(app.handle(), Arc::clone(&supervisor))?;
 
-            let _ = reconcile_autolaunch(&handle, settings.launch_at_login);
+            if settings_status.has_issues() {
+                eprintln!("[main] {}", settings_status.summary());
+                let _ = handle
+                    .notification()
+                    .builder()
+                    .title("Kiln settings need attention")
+                    .body(settings_status.summary())
+                    .show();
+            }
+
+            if !settings_status.auto_start_suppressed {
+                let _ = reconcile_autolaunch(&handle, settings.launch_at_login);
+            }
 
             let configured_binary = settings
                 .kiln_binary
                 .clone()
                 .unwrap_or_else(|| std::path::PathBuf::from("kiln"));
-            let should_auto_start = settings.auto_start
+            let should_auto_start = !settings_status.auto_start_suppressed
+                && settings.auto_start
                 && tray::is_model_path_set(&settings)
                 && tray::is_binary_available(&configured_binary);
 
@@ -1099,10 +1147,12 @@ fn main() {
                         eprintln!("[main] auto_start failed: {}", e);
                     }
                 });
-            } else if settings.auto_start {
+            } else if settings.auto_start && !settings_status.auto_start_suppressed {
                 eprintln!(
                     "[main] auto_start skipped: waiting for both a model path and an installed kiln binary"
                 );
+            } else if settings.auto_start {
+                eprintln!("[main] auto_start suppressed until settings errors are reviewed");
             }
 
             // Non-blocking auto-check for a newer kiln binary. Runs once per
@@ -1128,6 +1178,7 @@ fn main() {
             copy_logs,
             save_logs_to_file,
             get_settings,
+            get_settings_status,
             default_settings,
             set_settings,
             get_kiln_url,

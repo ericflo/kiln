@@ -19,6 +19,8 @@
         border-radius: 6px;
         padding: 12px 16px 16px 16px;
         margin: 0 0 16px 0;
+        box-sizing: border-box;
+        min-width: 0;
       }
       legend { padding: 0 6px; color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
       label.row {
@@ -98,6 +100,8 @@
         display: flex;
         align-items: center;
         gap: 6px;
+        min-width: 0;
+        max-width: 100%;
       }
       .path-row > input[type="text"] {
         width: 204px;
@@ -182,6 +186,32 @@
         text-decoration: none;
       }
       .help-row a:hover { text-decoration: underline; }
+      .settings-load-warning {
+        border: 1px solid var(--warning-fg);
+        border-radius: 6px;
+        background: var(--warning-bg);
+        color: var(--warning-fg);
+        padding: 10px 12px;
+        margin: 0 0 16px 0;
+        font-size: 12px;
+        line-height: 1.4;
+      }
+      .settings-load-warning.error {
+        border-color: var(--danger-fg);
+        background: var(--danger-bg);
+        color: var(--danger-fg);
+      }
+      .settings-load-warning[hidden] { display: none; }
+      .settings-load-warning strong { display: block; color: inherit; margin-bottom: 4px; }
+      .settings-load-warning ul { margin: 4px 0; padding-left: 18px; }
+      .settings-load-warning p { margin: 6px 0 0 0; }
+      .form-warning {
+        color: var(--danger-fg);
+        font-size: 12px;
+        line-height: 1.35;
+        min-height: 16px;
+        margin: 8px 0 0 0;
+      }
       .actions {
         display: flex;
         gap: 8px;
@@ -354,6 +384,20 @@
         justify-content: flex-end;
         margin-top: 16px;
       }
+      @media (max-width: 460px) {
+        .wrap { width: 100%; max-width: 100%; padding: 16px; }
+        label.row { align-items: stretch; }
+        label.row > span.name { flex-basis: 100%; }
+        label.row > input[type="text"],
+        label.row > input[type="number"],
+        label.row > input[type="number"].small {
+          width: 100%;
+          min-width: 0;
+        }
+        .path-row { width: 100%; flex-wrap: wrap; }
+        .path-row > input[type="text"] { flex: 1 0 100%; width: 100%; min-width: 0; }
+        .actions { flex-wrap: wrap; }
+      }
     </style>
     <link rel="stylesheet" href="_kiln-tokens.css" />
   </head>
@@ -366,6 +410,12 @@
     </defs></svg>
     <div class="wrap">
       <h1>Kiln Settings</h1>
+
+      <div id="settings-load-warning" class="settings-load-warning" role="alert" hidden>
+        <strong id="settings-load-warning-title"></strong>
+        <ul id="settings-load-warning-issues"></ul>
+        <p id="settings-load-warning-action"></p>
+      </div>
 
       <fieldset>
         <legend>Server</legend>
@@ -494,6 +544,7 @@
         <button class="secondary" id="restart" hidden>Restart now</button>
         <button class="primary" id="save" title="Save (Cmd/Ctrl+S)">Save</button>
       </div>
+      <div class="form-warning" id="form-warning" role="alert"></div>
       <div class="status" id="status"></div>
       <div class="version-footer">Kiln Desktop v<span id="app-version">—</span></div>
     </div>
@@ -557,6 +608,8 @@
       const isMacOS = /mac/i.test(navigator.userAgent || "");
       let lastSavedSnapshot = null;
       let thinkingBudgetMode = "unlimited";
+      let settingsCanSave = true;
+      let settingsNeedsRepair = false;
 
       const fields = [
         "kiln_binary", "model_path", "host", "port",
@@ -571,6 +624,51 @@
         const warning = document.getElementById("thinking_budget_warning");
         warning.textContent = message || "";
         warning.classList.toggle("visible", !!message);
+      }
+
+      function setFormWarning(message) {
+        document.getElementById("form-warning").textContent = message || "";
+      }
+
+      function renderSettingsLoadStatus(status) {
+        const warning = document.getElementById("settings-load-warning");
+        const issues = status && Array.isArray(status.issues) ? status.issues : [];
+        settingsCanSave = !status || status.can_save !== false;
+        settingsNeedsRepair = settingsCanSave && issues.length > 0;
+        document.getElementById("restore-defaults").disabled = !settingsCanSave;
+
+        if (!issues.length) {
+          warning.hidden = true;
+          warning.classList.remove("error");
+          updateDirtyIndicator();
+          return;
+        }
+
+        const titles = {
+          migrated: "Settings format updated",
+          partial: "Some settings were invalid",
+          recovered: "Loaded the settings backup",
+          error: "Settings could not be loaded",
+          unsupported: "Settings require a newer app",
+        };
+        document.getElementById("settings-load-warning-title").textContent =
+          titles[status.kind] || "Settings need attention";
+        const list = document.getElementById("settings-load-warning-issues");
+        list.replaceChildren();
+        for (const issue of issues) {
+          const item = document.createElement("li");
+          item.textContent = issue && issue.message ? issue.message : String(issue);
+          list.appendChild(item);
+        }
+        document.getElementById("settings-load-warning-action").textContent = settingsCanSave
+          ? "Review the values below and Save to repair settings.json. Kiln keeps the prior document as a backup."
+          : "Saving and automatic launch are disabled. Update Kiln Desktop for a newer schema; for a filesystem error, fix the app configuration directory and restart.";
+        warning.classList.toggle(
+          "error",
+          status.kind === "error" || status.kind === "unsupported",
+        );
+        warning.hidden = false;
+        updateDirtyIndicator();
       }
 
       function setThinkingBudgetMode(mode) {
@@ -649,6 +747,34 @@
         };
       }
 
+      function readPort(input) {
+        if (input.validity && input.validity.badInput) {
+          throw new Error("Port must be a whole number from 1 through 65535.");
+        }
+        const raw = input.value.trim();
+        if (!raw.length) return KILN_RUNTIME_DEFAULTS.serverPort;
+        if (!/^\d+$/.test(raw)) {
+          throw new Error("Port must be a whole number from 1 through 65535.");
+        }
+        const value = Number(raw);
+        if (!Number.isSafeInteger(value) || value < 1 || value > 65535) {
+          throw new Error("Port must be a whole number from 1 through 65535.");
+        }
+        return value;
+      }
+
+      function readInferenceFraction(input) {
+        if (input.validity && input.validity.badInput) {
+          throw new Error("Inference fraction must be a number from 0 through 1.");
+        }
+        const raw = input.value.trim();
+        const value = Number(raw);
+        if (!raw.length || !Number.isFinite(value) || value < 0 || value > 1) {
+          throw new Error("Inference fraction must be a number from 0 through 1.");
+        }
+        return value;
+      }
+
       function readForm() {
         const n = (id) => document.getElementById(id);
         const strOrNull = (id) => {
@@ -660,8 +786,8 @@
           kiln_binary: strOrNull("kiln_binary"),
           model_path: strOrNull("model_path"),
           host: n("host").value.trim() || KILN_RUNTIME_DEFAULTS.serverHost,
-          port: parseInt(n("port").value, 10) || KILN_RUNTIME_DEFAULTS.serverPort,
-          inference_fraction: parseFloat(n("inference_fraction").value) || 0.9,
+          port: readPort(n("port")),
+          inference_fraction: readInferenceFraction(n("inference_fraction")),
           fp8_kv_cache: n("fp8_kv_cache").checked,
           cuda_graphs: n("cuda_graphs").checked,
           prefix_cache: n("prefix_cache").checked,
@@ -772,7 +898,7 @@
       function isDirty() {
         if (lastSavedSnapshot === null) return false;
         try {
-          return JSON.stringify(readForm()) !== lastSavedSnapshot;
+          return settingsNeedsRepair || JSON.stringify(readForm()) !== lastSavedSnapshot;
         } catch (_) {
           return true;
         }
@@ -786,13 +912,16 @@
         } catch (e) {
           validationError = String(e && e.message ? e.message : e);
         }
-        setThinkingBudgetWarning(validationError);
+        const thinkingError = /budget|Unlimited/.test(validationError) ? validationError : "";
+        setThinkingBudgetWarning(thinkingError);
+        setFormWarning(validationError);
         const dirty = validationError
           ? true
-          : lastSavedSnapshot !== null && JSON.stringify(current) !== lastSavedSnapshot;
+          : settingsNeedsRepair ||
+            (lastSavedSnapshot !== null && JSON.stringify(current) !== lastSavedSnapshot);
         const btn = document.getElementById("save");
         btn.classList.toggle("dirty", dirty);
-        btn.disabled = !dirty || !!validationError;
+        btn.disabled = !settingsCanSave || !dirty || !!validationError;
       }
 
       function setStatus(msg, err) {
@@ -823,13 +952,19 @@
 
       async function load() {
         try {
-          const s = await invoke("get_settings");
+          const [s, loadStatus] = await Promise.all([
+            invoke("get_settings"),
+            invoke("get_settings_status"),
+          ]);
           writeForm(s);
           lastSavedSnapshot = JSON.stringify(readForm());
+          renderSettingsLoadStatus(loadStatus);
           updateDirtyIndicator();
           hideRestart();
           validateAllPaths();
-          setStatus("Loaded.");
+          setStatus(loadStatus && loadStatus.issues && loadStatus.issues.length
+            ? "Loaded with settings warnings."
+            : "Loaded.");
         } catch (e) {
           setStatus("Failed to load: " + e, true);
         }
@@ -840,6 +975,8 @@
           const settings = readForm();
           await invoke("set_settings", { new: settings });
           lastSavedSnapshot = JSON.stringify(settings);
+          settingsNeedsRepair = false;
+          renderSettingsLoadStatus(await invoke("get_settings_status"));
           updateDirtyIndicator();
           let running = false;
           try {

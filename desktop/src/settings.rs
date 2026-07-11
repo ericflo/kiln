@@ -1,16 +1,126 @@
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tauri::{AppHandle, Manager};
 
 use crate::runtime_defaults::{DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT};
 use crate::supervisor::SupervisorConfig;
 
 const DESKTOP_RUNTIME_CONFIG_NAME: &str = "kiln-desktop-runtime.toml";
+pub const SETTINGS_SCHEMA_VERSION: u32 = 1;
+static SETTINGS_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static SETTINGS_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsLoadKind {
+    Ok,
+    Migrated,
+    Partial,
+    Recovered,
+    Error,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsSource {
+    Defaults,
+    Primary,
+    Backup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SettingsIssue {
+    pub field: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SettingsLoadStatus {
+    pub kind: SettingsLoadKind,
+    pub source: SettingsSource,
+    pub loaded_schema_version: Option<u32>,
+    pub current_schema_version: u32,
+    pub issues: Vec<SettingsIssue>,
+    pub can_save: bool,
+    pub auto_start_suppressed: bool,
+    pub backup_available: bool,
+}
+
+impl SettingsLoadStatus {
+    fn fresh() -> Self {
+        Self {
+            kind: SettingsLoadKind::Ok,
+            source: SettingsSource::Defaults,
+            loaded_schema_version: None,
+            current_schema_version: SETTINGS_SCHEMA_VERSION,
+            issues: Vec::new(),
+            can_save: true,
+            auto_start_suppressed: false,
+            backup_available: false,
+        }
+    }
+
+    pub fn saved() -> Self {
+        Self {
+            kind: SettingsLoadKind::Ok,
+            source: SettingsSource::Primary,
+            loaded_schema_version: Some(SETTINGS_SCHEMA_VERSION),
+            current_schema_version: SETTINGS_SCHEMA_VERSION,
+            issues: Vec::new(),
+            can_save: true,
+            auto_start_suppressed: false,
+            // The next load probes the filesystem for the exact value. A
+            // first-ever save has no prior document to retain.
+            backup_available: false,
+        }
+    }
+
+    pub fn has_issues(&self) -> bool {
+        !self.issues.is_empty()
+    }
+
+    pub fn summary(&self) -> String {
+        let prefix = match self.kind {
+            SettingsLoadKind::Ok => "Settings loaded.",
+            SettingsLoadKind::Migrated => "Legacy settings were migrated in memory.",
+            SettingsLoadKind::Partial => {
+                "Some settings were invalid; valid fields were preserved and defaults filled the rest."
+            }
+            SettingsLoadKind::Recovered => {
+                "The primary settings file could not be used, so Kiln loaded its backup."
+            }
+            SettingsLoadKind::Error => {
+                "Kiln could not load the settings file or its backup; safe defaults are active."
+            }
+            SettingsLoadKind::Unsupported => {
+                "The settings file was written by a newer Kiln Desktop version."
+            }
+        };
+        match self.issues.first() {
+            Some(issue) => format!("{prefix} {}", issue.message),
+            None => prefix.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SettingsLoadOutcome {
+    pub settings: Settings,
+    pub status: SettingsLoadStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub schema_version: u32,
     pub kiln_binary: Option<PathBuf>,
     pub model_path: Option<PathBuf>,
     pub host: String,
@@ -36,6 +146,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            schema_version: SETTINGS_SCHEMA_VERSION,
             kiln_binary: None,
             model_path: None,
             host: DEFAULT_SERVER_HOST.to_string(),
@@ -65,37 +176,611 @@ impl Settings {
         Ok(dir.join("settings.json"))
     }
 
-    pub fn load(app: &AppHandle) -> Self {
+    pub fn load(app: &AppHandle) -> SettingsLoadOutcome {
         let path = match Self::path(app) {
             Ok(p) => p,
-            Err(_) => return Self::default(),
+            Err(error) => {
+                return SettingsLoadOutcome {
+                    settings: Self::default(),
+                    status: SettingsLoadStatus {
+                        kind: SettingsLoadKind::Error,
+                        source: SettingsSource::Defaults,
+                        loaded_schema_version: None,
+                        current_schema_version: SETTINGS_SCHEMA_VERSION,
+                        issues: vec![SettingsIssue {
+                            field: None,
+                            message: error,
+                        }],
+                        can_save: false,
+                        auto_start_suppressed: true,
+                        backup_available: false,
+                    },
+                };
+            }
         };
-        let Ok(data) = std::fs::read_to_string(&path) else {
-            return Self::default();
-        };
-        normalize_for_platform(serde_json::from_str(&data).unwrap_or_default())
+        load_settings_from_path(&path)
     }
 
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let path = Self::path(app)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create settings dir: {}", e))?;
-        }
-        let body = serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {}", e))?;
-        std::fs::write(&path, body).map_err(|e| format!("write settings.json: {}", e))
+        save_settings_to_path(self, &path)
     }
 }
 
-pub fn normalize_for_platform(mut s: Settings) -> Settings {
+#[derive(Debug)]
+struct DecodedSettings {
+    settings: Settings,
+    source_version: u32,
+    migrated: bool,
+    issues: Vec<SettingsIssue>,
+}
+
+#[derive(Debug)]
+enum SettingsCandidate {
+    Missing,
+    Loaded(DecodedSettings),
+    Invalid(String),
+    Unsupported(u64),
+}
+
+fn load_settings_from_path(path: &Path) -> SettingsLoadOutcome {
+    let backup = settings_backup_path(path);
+    let backup_available = backup.is_file();
+    match read_settings_candidate(path) {
+        SettingsCandidate::Loaded(decoded) => {
+            outcome_from_primary(decoded, backup_available)
+        }
+        SettingsCandidate::Missing => match read_settings_candidate(&backup) {
+            SettingsCandidate::Missing => SettingsLoadOutcome {
+                settings: Settings::default(),
+                status: SettingsLoadStatus::fresh(),
+            },
+            backup_candidate => outcome_from_backup(
+                backup_candidate,
+                SettingsIssue {
+                    field: None,
+                    message: "The primary settings file is missing; Kiln tried its backup."
+                        .to_string(),
+                },
+                false,
+                backup_available,
+            ),
+        },
+        SettingsCandidate::Invalid(message) => outcome_from_backup(
+            read_settings_candidate(&backup),
+            SettingsIssue {
+                field: None,
+                message,
+            },
+            false,
+            backup_available,
+        ),
+        SettingsCandidate::Unsupported(version) => outcome_from_backup(
+            read_settings_candidate(&backup),
+            SettingsIssue {
+                field: Some("schema_version".to_string()),
+                message: format!(
+                    "settings.json uses schema version {version}, but this app supports version {SETTINGS_SCHEMA_VERSION}."
+                ),
+            },
+            true,
+            backup_available,
+        ),
+    }
+}
+
+fn outcome_from_primary(decoded: DecodedSettings, backup_available: bool) -> SettingsLoadOutcome {
+    let damaged = !decoded.issues.is_empty();
+    let mut issues = decoded.issues;
+    if decoded.migrated {
+        issues.push(SettingsIssue {
+            field: Some("schema_version".to_string()),
+            message: format!(
+                "Legacy settings schema {} was migrated in memory; Save will persist schema {}.",
+                decoded.source_version, SETTINGS_SCHEMA_VERSION
+            ),
+        });
+    }
+    let kind = if damaged {
+        SettingsLoadKind::Partial
+    } else if decoded.migrated {
+        SettingsLoadKind::Migrated
+    } else {
+        SettingsLoadKind::Ok
+    };
+    SettingsLoadOutcome {
+        settings: normalize_for_platform(decoded.settings),
+        status: SettingsLoadStatus {
+            kind,
+            source: SettingsSource::Primary,
+            loaded_schema_version: Some(decoded.source_version),
+            current_schema_version: SETTINGS_SCHEMA_VERSION,
+            issues,
+            can_save: true,
+            auto_start_suppressed: damaged,
+            backup_available,
+        },
+    }
+}
+
+fn outcome_from_backup(
+    backup_candidate: SettingsCandidate,
+    primary_issue: SettingsIssue,
+    primary_unsupported: bool,
+    backup_available: bool,
+) -> SettingsLoadOutcome {
+    match backup_candidate {
+        SettingsCandidate::Loaded(decoded) => {
+            let mut issues = vec![primary_issue];
+            issues.extend(decoded.issues);
+            if decoded.migrated {
+                issues.push(SettingsIssue {
+                    field: Some("schema_version".to_string()),
+                    message: format!(
+                        "The backup used legacy schema {}; Save will persist schema {}.",
+                        decoded.source_version, SETTINGS_SCHEMA_VERSION
+                    ),
+                });
+            }
+            SettingsLoadOutcome {
+                settings: normalize_for_platform(decoded.settings),
+                status: SettingsLoadStatus {
+                    kind: SettingsLoadKind::Recovered,
+                    source: SettingsSource::Backup,
+                    loaded_schema_version: Some(decoded.source_version),
+                    current_schema_version: SETTINGS_SCHEMA_VERSION,
+                    issues,
+                    can_save: !primary_unsupported,
+                    auto_start_suppressed: true,
+                    backup_available,
+                },
+            }
+        }
+        SettingsCandidate::Missing => defaults_after_load_failure(
+            vec![
+                primary_issue,
+                SettingsIssue {
+                    field: None,
+                    message: "No settings backup is available.".to_string(),
+                },
+            ],
+            primary_unsupported,
+            backup_available,
+        ),
+        SettingsCandidate::Invalid(message) => defaults_after_load_failure(
+            vec![
+                primary_issue,
+                SettingsIssue {
+                    field: None,
+                    message: format!("The settings backup is also unusable: {message}"),
+                },
+            ],
+            primary_unsupported,
+            backup_available,
+        ),
+        SettingsCandidate::Unsupported(version) => defaults_after_load_failure(
+            vec![
+                primary_issue,
+                SettingsIssue {
+                    field: Some("schema_version".to_string()),
+                    message: format!(
+                        "The settings backup uses unsupported schema version {version}."
+                    ),
+                },
+            ],
+            true,
+            backup_available,
+        ),
+    }
+}
+
+fn defaults_after_load_failure(
+    issues: Vec<SettingsIssue>,
+    unsupported: bool,
+    backup_available: bool,
+) -> SettingsLoadOutcome {
+    SettingsLoadOutcome {
+        settings: Settings::default(),
+        status: SettingsLoadStatus {
+            kind: if unsupported {
+                SettingsLoadKind::Unsupported
+            } else {
+                SettingsLoadKind::Error
+            },
+            source: SettingsSource::Defaults,
+            loaded_schema_version: None,
+            current_schema_version: SETTINGS_SCHEMA_VERSION,
+            issues,
+            can_save: !unsupported,
+            auto_start_suppressed: true,
+            backup_available,
+        },
+    }
+}
+
+fn read_settings_candidate(path: &Path) -> SettingsCandidate {
+    let data = match std::fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return SettingsCandidate::Missing;
+        }
+        Err(error) => {
+            return SettingsCandidate::Invalid(format!(
+                "Could not read {}: {error}",
+                display_file_name(path)
+            ));
+        }
+    };
+    match decode_settings_document(&data) {
+        Ok(decoded) => SettingsCandidate::Loaded(decoded),
+        Err(SettingsDocumentError::Invalid(message)) => SettingsCandidate::Invalid(format!(
+            "Could not parse {}: {message}",
+            display_file_name(path)
+        )),
+        Err(SettingsDocumentError::Unsupported(version)) => SettingsCandidate::Unsupported(version),
+    }
+}
+
+#[derive(Debug)]
+enum SettingsDocumentError {
+    Invalid(String),
+    Unsupported(u64),
+}
+
+fn decode_settings_document(data: &str) -> Result<DecodedSettings, SettingsDocumentError> {
+    let value: Value = serde_json::from_str(data)
+        .map_err(|error| SettingsDocumentError::Invalid(error.to_string()))?;
+    let object = value.as_object().ok_or_else(|| {
+        SettingsDocumentError::Invalid("the document root must be a JSON object".to_string())
+    })?;
+
+    let mut issues = Vec::new();
+    let source_version = match object.get("schema_version") {
+        None => 0,
+        Some(value) => match value.as_u64() {
+            Some(version) if version > u32::MAX as u64 => {
+                return Err(SettingsDocumentError::Unsupported(version));
+            }
+            Some(version) => version as u32,
+            None => {
+                return Err(SettingsDocumentError::Invalid(
+                    "`schema_version` must be a nonnegative whole number".to_string(),
+                ));
+            }
+        },
+    };
+    if source_version > SETTINGS_SCHEMA_VERSION {
+        return Err(SettingsDocumentError::Unsupported(source_version as u64));
+    }
+
+    let mut settings = Settings::default();
+    if let Some(value) =
+        decode_field::<Option<PathBuf>>(object, "kiln_binary", "a path string or null", &mut issues)
+    {
+        settings.kiln_binary = value;
+    }
+    if let Some(value) =
+        decode_field::<Option<PathBuf>>(object, "model_path", "a path string or null", &mut issues)
+    {
+        settings.model_path = value;
+    }
+    if let Some(value) = decode_field::<String>(object, "host", "a nonempty string", &mut issues) {
+        if value.trim().is_empty() {
+            issues.push(invalid_field_issue("host", "a nonempty string"));
+        } else {
+            settings.host = value.trim().to_string();
+        }
+    }
+    if let Some(value) = decode_field::<u16>(
+        object,
+        "port",
+        "an integer from 1 through 65535",
+        &mut issues,
+    ) {
+        if value == 0 {
+            issues.push(invalid_field_issue(
+                "port",
+                "an integer from 1 through 65535",
+            ));
+        } else {
+            settings.port = value;
+        }
+    }
+    if let Some(value) = decode_field::<f32>(
+        object,
+        "inference_fraction",
+        "a finite number from 0 through 1",
+        &mut issues,
+    ) {
+        if value.is_finite() && (0.0..=1.0).contains(&value) {
+            settings.inference_fraction = value;
+        } else {
+            issues.push(invalid_field_issue(
+                "inference_fraction",
+                "a finite number from 0 through 1",
+            ));
+        }
+    }
+
+    macro_rules! decode_setting {
+        ($field:ident, $type:ty, $expected:literal) => {
+            if let Some(value) =
+                decode_field::<$type>(object, stringify!($field), $expected, &mut issues)
+            {
+                settings.$field = value;
+            }
+        };
+    }
+
+    decode_setting!(fp8_kv_cache, bool, "true or false");
+    decode_setting!(cuda_graphs, bool, "true or false");
+    decode_setting!(prefix_cache, bool, "true or false");
+    decode_setting!(speculative_decoding, bool, "true or false");
+    decode_setting!(adapter_dir, Option<PathBuf>, "a path string or null");
+    decode_setting!(served_model_id, Option<String>, "a string or null");
+    decode_setting!(
+        default_thinking_budget_tokens,
+        Option<usize>,
+        "a nonnegative whole number or null"
+    );
+    decode_setting!(
+        default_thinking_budget_ms,
+        Option<u64>,
+        "a nonnegative whole number or null"
+    );
+    decode_setting!(auto_start, bool, "true or false");
+    decode_setting!(auto_restart, bool, "true or false");
+    decode_setting!(launch_at_login, bool, "true or false");
+
+    let known_fields = BTreeSet::from([
+        "schema_version",
+        "kiln_binary",
+        "model_path",
+        "host",
+        "port",
+        "inference_fraction",
+        "fp8_kv_cache",
+        "cuda_graphs",
+        "prefix_cache",
+        "speculative_decoding",
+        "adapter_dir",
+        "served_model_id",
+        "default_thinking_budget_tokens",
+        "default_thinking_budget_ms",
+        "auto_start",
+        "auto_restart",
+        "launch_at_login",
+    ]);
+    let unknown_fields = object
+        .keys()
+        .filter(|key| !known_fields.contains(key.as_str()))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !unknown_fields.is_empty() {
+        issues.push(SettingsIssue {
+            field: None,
+            message: format!(
+                "Unknown settings fields were ignored: {}.",
+                unknown_fields.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+        });
+    }
+
+    settings.schema_version = SETTINGS_SCHEMA_VERSION;
+    Ok(DecodedSettings {
+        settings,
+        source_version,
+        migrated: source_version < SETTINGS_SCHEMA_VERSION,
+        issues,
+    })
+}
+
+fn decode_field<T: DeserializeOwned>(
+    object: &Map<String, Value>,
+    field: &str,
+    expected: &str,
+    issues: &mut Vec<SettingsIssue>,
+) -> Option<T> {
+    let value = object.get(field)?;
+    match serde_json::from_value::<T>(value.clone()) {
+        Ok(value) => Some(value),
+        Err(_) => {
+            issues.push(invalid_field_issue(field, expected));
+            None
+        }
+    }
+}
+
+fn invalid_field_issue(field: &str, expected: &str) -> SettingsIssue {
+    SettingsIssue {
+        field: Some(field.to_string()),
+        message: format!(
+            "Invalid `{field}` value; expected {expected}. The default is active for this field."
+        ),
+    }
+}
+
+fn validate_settings(settings: &Settings) -> Result<(), String> {
+    let mut errors = Vec::new();
+    if settings.schema_version != SETTINGS_SCHEMA_VERSION {
+        errors.push(format!("schema_version must be {SETTINGS_SCHEMA_VERSION}"));
+    }
+    if settings.host.trim().is_empty() {
+        errors.push("host must not be empty".to_string());
+    }
+    if settings.port == 0 {
+        errors.push("port must be between 1 and 65535".to_string());
+    }
+    if !settings.inference_fraction.is_finite()
+        || !(0.0..=1.0).contains(&settings.inference_fraction)
+    {
+        errors.push("inference_fraction must be between 0 and 1".to_string());
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("invalid settings: {}", errors.join("; ")))
+    }
+}
+
+fn save_settings_to_path(settings: &Settings, path: &Path) -> Result<(), String> {
+    let _write_guard = SETTINGS_WRITE_LOCK
+        .lock()
+        .map_err(|_| "settings write lock is poisoned".to_string())?;
+    let mut persisted = normalize_for_platform(settings.clone());
+    persisted.schema_version = SETTINGS_SCHEMA_VERSION;
+    persisted.host = persisted.host.trim().to_string();
+    validate_settings(&persisted)?;
+    let mut body =
+        serde_json::to_vec_pretty(&persisted).map_err(|error| format!("serialize: {error}"))?;
+    body.push(b'\n');
+    atomic_replace_settings(path, &body)
+}
+
+fn atomic_replace_settings(path: &Path, body: &[u8]) -> Result<(), String> {
+    atomic_replace_settings_with(path, body, |source, destination| {
+        std::fs::rename(source, destination)
+    })
+}
+
+fn atomic_replace_settings_with<F>(path: &Path, body: &[u8], promote: F) -> Result<(), String>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    let parent = path
+        .parent()
+        .ok_or_else(|| "settings path has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("create settings directory: {error}"))?;
+    let temp = write_settings_temp_file(path, body)?;
+
+    let mut displaced = None;
+    if path_entry_exists(path) {
+        let destination = match read_settings_candidate(path) {
+            SettingsCandidate::Loaded(_) => settings_backup_path(path),
+            _ => settings_invalid_path(path),
+        };
+        if path_entry_exists(&destination) {
+            if let Err(error) = std::fs::remove_file(&destination) {
+                let _ = std::fs::remove_file(&temp);
+                return Err(format!(
+                    "remove stale {}: {error}",
+                    display_file_name(&destination)
+                ));
+            }
+        }
+        if let Err(error) = std::fs::rename(path, &destination) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(format!(
+                "preserve prior settings as {}: {error}",
+                display_file_name(&destination)
+            ));
+        }
+        displaced = Some(destination);
+        sync_settings_directory(parent);
+    }
+
+    if let Err(error) = promote(&temp, path) {
+        let rollback = displaced
+            .as_ref()
+            .map(|prior| std::fs::rename(prior, path))
+            .transpose();
+        let _ = std::fs::remove_file(&temp);
+        return match rollback {
+            Ok(_) => Err(format!(
+                "promote staged settings: {error}; restored the prior settings"
+            )),
+            Err(rollback_error) => Err(format!(
+                "promote staged settings: {error}; restoring the prior settings also failed: {rollback_error}"
+            )),
+        };
+    }
+    sync_settings_directory(parent);
+    Ok(())
+}
+
+fn write_settings_temp_file(path: &Path, body: &[u8]) -> Result<PathBuf, String> {
+    for _ in 0..32 {
+        let sequence = SETTINGS_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let thread = format!("{:?}", std::thread::current().id())
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .collect::<String>();
+        let temp = sibling_path(
+            path,
+            &format!(".{}.{}.{}.tmp", std::process::id(), thread, sequence),
+        );
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = match options.open(&temp) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("create staged settings: {error}")),
+        };
+        if let Err(error) = file.write_all(body).and_then(|_| file.sync_all()) {
+            drop(file);
+            let _ = std::fs::remove_file(&temp);
+            return Err(format!("write staged settings: {error}"));
+        }
+        drop(file);
+        return Ok(temp);
+    }
+    Err("could not allocate a unique staged settings file".to_string())
+}
+
+fn settings_backup_path(path: &Path) -> PathBuf {
+    sibling_path(path, ".bak")
+}
+
+fn settings_invalid_path(path: &Path) -> PathBuf {
+    sibling_path(path, ".invalid")
+}
+
+fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("settings.json");
+    path.with_file_name(format!("{file_name}{suffix}"))
+}
+
+fn display_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("settings file")
+        .to_string()
+}
+
+fn path_entry_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+fn sync_settings_directory(path: &Path) {
+    if let Ok(directory) = std::fs::File::open(path) {
+        let _ = directory.sync_all();
+    }
+}
+
+pub fn normalize_for_platform(s: Settings) -> Settings {
     #[cfg(target_os = "macos")]
     {
+        let mut s = s;
         // These desktop toggles are CUDA-only today. Keep persisted settings
         // aligned with the actual macOS launch contract instead of storing
         // values the child process will ignore or internally override.
         s.fp8_kv_cache = false;
         s.cuda_graphs = false;
+        s
     }
-    s
+    #[cfg(not(target_os = "macos"))]
+    {
+        s
+    }
 }
 
 /// Ensure the desktop always launches kiln with a config file under the app's
@@ -238,6 +923,41 @@ fn optional_limit_env<T: ToString>(value: Option<T>) -> String {
 mod tests {
     use super::*;
 
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let sequence = SETTINGS_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "kiln-desktop-settings-{label}-{}-{sequence}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn settings_path(&self) -> PathBuf {
+            self.0.join("settings.json")
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_settings_document(path: &Path, settings: &Settings) {
+        std::fs::write(path, serde_json::to_vec_pretty(settings).unwrap()).unwrap();
+    }
+
+    fn read_settings_document(path: &Path) -> Settings {
+        decode_settings_document(&std::fs::read_to_string(path).unwrap())
+            .unwrap()
+            .settings
+    }
+
     #[test]
     fn runtime_defaults_contract_matches_desktop_defaults() {
         let contract: serde_json::Value =
@@ -251,6 +971,7 @@ mod tests {
     #[test]
     fn default_values_are_sane() {
         let s = Settings::default();
+        assert_eq!(s.schema_version, SETTINGS_SCHEMA_VERSION);
         assert_eq!(s.host, DEFAULT_SERVER_HOST);
         assert_eq!(s.port, DEFAULT_SERVER_PORT);
         let expected_fraction = if cfg!(target_os = "macos") { 0.7 } else { 0.9 };
@@ -357,6 +1078,7 @@ mod tests {
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.schema_version, SETTINGS_SCHEMA_VERSION);
         assert_eq!(back.port, s.port);
         assert_eq!(back.host, s.host);
         assert_eq!(back.default_thinking_budget_tokens, Some(0));
@@ -403,8 +1125,12 @@ mod tests {
             "port": 8420,
             "auto_start": false
         }"#;
-        let s: Settings = serde_json::from_str(legacy).unwrap();
+        let decoded = decode_settings_document(legacy).unwrap();
+        let s = decoded.settings;
 
+        assert_eq!(decoded.source_version, 0);
+        assert!(decoded.migrated);
+        assert_eq!(s.schema_version, SETTINGS_SCHEMA_VERSION);
         assert_eq!(s.host, "0.0.0.0");
         assert_eq!(s.port, 8420);
         assert!(!s.auto_start);
@@ -446,5 +1172,227 @@ mod tests {
         let normalized = normalize_for_platform(s);
         assert_eq!(normalized.fp8_kv_cache, !cfg!(target_os = "macos"));
         assert_eq!(normalized.cuda_graphs, !cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn malformed_field_preserves_every_other_valid_field() {
+        let dir = TestDirectory::new("partial");
+        let path = dir.settings_path();
+        std::fs::write(
+            &path,
+            r#"{
+                "schema_version": 1,
+                "host": "0.0.0.0",
+                "port": "not-a-port",
+                "auto_start": false,
+                "prefix_cache": false
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_settings_from_path(&path);
+        assert_eq!(loaded.settings.host, "0.0.0.0");
+        assert_eq!(loaded.settings.port, DEFAULT_SERVER_PORT);
+        assert!(!loaded.settings.auto_start);
+        assert!(!loaded.settings.prefix_cache);
+        assert_eq!(loaded.status.kind, SettingsLoadKind::Partial);
+        assert_eq!(loaded.status.source, SettingsSource::Primary);
+        assert!(loaded.status.auto_start_suppressed);
+        assert!(loaded.status.can_save);
+        assert!(loaded.status.issues.iter().any(|issue| {
+            issue.field.as_deref() == Some("port") && issue.message.contains("default is active")
+        }));
+    }
+
+    #[test]
+    fn corrupt_primary_recovers_backup_without_auto_starting() {
+        let dir = TestDirectory::new("recover");
+        let path = dir.settings_path();
+        let backup = settings_backup_path(&path);
+        std::fs::write(&path, b"{ definitely not json").unwrap();
+        let settings = Settings {
+            port: 9001,
+            auto_start: false,
+            ..Settings::default()
+        };
+        write_settings_document(&backup, &settings);
+
+        let loaded = load_settings_from_path(&path);
+        assert_eq!(loaded.settings.port, 9001);
+        assert!(!loaded.settings.auto_start);
+        assert_eq!(loaded.status.kind, SettingsLoadKind::Recovered);
+        assert_eq!(loaded.status.source, SettingsSource::Backup);
+        assert!(loaded.status.backup_available);
+        assert!(loaded.status.auto_start_suppressed);
+        assert!(loaded.status.can_save);
+    }
+
+    #[test]
+    fn corrupt_settings_without_backup_are_visible_and_repairable() {
+        let dir = TestDirectory::new("corrupt");
+        let path = dir.settings_path();
+        std::fs::write(&path, b"[").unwrap();
+
+        let loaded = load_settings_from_path(&path);
+        assert_eq!(loaded.settings, Settings::default());
+        assert_eq!(loaded.status.kind, SettingsLoadKind::Error);
+        assert_eq!(loaded.status.source, SettingsSource::Defaults);
+        assert!(loaded.status.auto_start_suppressed);
+        assert!(loaded.status.can_save);
+        assert!(loaded.status.summary().contains("safe defaults"));
+    }
+
+    #[test]
+    fn future_primary_schema_is_read_only_even_with_usable_backup() {
+        let dir = TestDirectory::new("future");
+        let path = dir.settings_path();
+        std::fs::write(&path, r#"{"schema_version": 2, "port": 9002}"#).unwrap();
+        let backup_settings = Settings {
+            port: 9001,
+            ..Settings::default()
+        };
+        write_settings_document(&settings_backup_path(&path), &backup_settings);
+
+        let loaded = load_settings_from_path(&path);
+        assert_eq!(loaded.settings.port, 9001);
+        assert_eq!(loaded.status.kind, SettingsLoadKind::Recovered);
+        assert_eq!(loaded.status.source, SettingsSource::Backup);
+        assert!(!loaded.status.can_save);
+        assert!(loaded.status.auto_start_suppressed);
+        assert!(loaded.status.issues.iter().any(|issue| {
+            issue.field.as_deref() == Some("schema_version")
+                && issue.message.contains("schema version 2")
+        }));
+    }
+
+    #[test]
+    fn malformed_present_schema_version_is_not_treated_as_legacy() {
+        let dir = TestDirectory::new("malformed-version");
+        let path = dir.settings_path();
+        std::fs::write(&path, r#"{"schema_version": "future", "port": 9002}"#).unwrap();
+
+        let loaded = load_settings_from_path(&path);
+        assert_eq!(loaded.settings, Settings::default());
+        assert_eq!(loaded.status.kind, SettingsLoadKind::Error);
+        assert!(loaded.status.auto_start_suppressed);
+        assert!(loaded.status.issues.iter().any(|issue| {
+            issue.message.contains("schema_version")
+                && issue.message.contains("nonnegative whole number")
+        }));
+    }
+
+    #[test]
+    fn atomic_save_versions_document_and_keeps_previous_backup() {
+        let dir = TestDirectory::new("atomic");
+        let path = dir.settings_path();
+        let first = Settings {
+            port: 9001,
+            ..Settings::default()
+        };
+        save_settings_to_path(&first, &path).unwrap();
+        assert!(!settings_backup_path(&path).exists());
+
+        let second = Settings {
+            port: 9002,
+            ..Settings::default()
+        };
+        save_settings_to_path(&second, &path).unwrap();
+
+        assert_eq!(read_settings_document(&path).port, 9002);
+        assert_eq!(
+            read_settings_document(&settings_backup_path(&path)).port,
+            9001
+        );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains(r#""schema_version": 1"#));
+        assert!(raw.ends_with('\n'));
+        assert!(!std::fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_uses_private_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TestDirectory::new("permissions");
+        let path = dir.settings_path();
+        save_settings_to_path(&Settings::default(), &path).unwrap();
+
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn repairing_corrupt_primary_preserves_it_without_clobbering_backup() {
+        let dir = TestDirectory::new("preserve-corrupt");
+        let path = dir.settings_path();
+        let backup = settings_backup_path(&path);
+        std::fs::write(&path, b"{broken").unwrap();
+        let prior = Settings {
+            port: 9001,
+            ..Settings::default()
+        };
+        write_settings_document(&backup, &prior);
+        let repaired = Settings {
+            port: 9002,
+            ..Settings::default()
+        };
+
+        save_settings_to_path(&repaired, &path).unwrap();
+
+        assert_eq!(read_settings_document(&path).port, 9002);
+        assert_eq!(read_settings_document(&backup).port, 9001);
+        assert_eq!(
+            std::fs::read_to_string(settings_invalid_path(&path)).unwrap(),
+            "{broken"
+        );
+    }
+
+    #[test]
+    fn failed_atomic_promotion_restores_primary_and_removes_temp() {
+        let dir = TestDirectory::new("rollback");
+        let path = dir.settings_path();
+        let original = Settings {
+            port: 9001,
+            ..Settings::default()
+        };
+        write_settings_document(&path, &original);
+        let replacement = serde_json::to_vec_pretty(&Settings {
+            port: 9002,
+            ..Settings::default()
+        })
+        .unwrap();
+
+        let error = atomic_replace_settings_with(&path, &replacement, |_, _| {
+            Err(std::io::Error::other("injected promotion failure"))
+        })
+        .unwrap_err();
+
+        assert!(error.contains("restored the prior settings"));
+        assert_eq!(read_settings_document(&path).port, 9001);
+        assert!(!settings_backup_path(&path).exists());
+        assert!(!std::fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")));
+    }
+
+    #[test]
+    fn save_rejects_semantically_invalid_values_before_touching_disk() {
+        let dir = TestDirectory::new("validation");
+        let path = dir.settings_path();
+        let invalid = Settings {
+            port: 0,
+            inference_fraction: 1.5,
+            ..Settings::default()
+        };
+
+        let error = save_settings_to_path(&invalid, &path).unwrap_err();
+        assert!(error.contains("port must be between 1 and 65535"));
+        assert!(error.contains("inference_fraction must be between 0 and 1"));
+        assert!(!path.exists());
     }
 }

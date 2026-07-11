@@ -48,12 +48,33 @@ const targets = [
 
 const tauriStub = () => {
   const demoSettings = {
+    schema_version: 1,
+    kiln_binary: "/Applications/Kiln Desktop.app/Contents/Resources/kiln",
     model_path: "/Users/eric/models/Qwen3.5-4B-bf16",
+    host: "127.0.0.1",
+    port: 8420,
+    inference_fraction: 0.7,
+    fp8_kv_cache: false,
+    cuda_graphs: false,
+    prefix_cache: true,
+    speculative_decoding: false,
+    adapter_dir: "/Users/eric/.kiln/adapters",
+    served_model_id: "qwen3.5-4b-kiln",
+    default_thinking_budget_tokens: null,
+    default_thinking_budget_ms: null,
     auto_start: true,
-    auto_install_updates: false,
-    server_port: 8420,
-    log_level: "info",
-    binary_path: "/Applications/Kiln Desktop.app/Contents/Resources/kiln",
+    auto_restart: true,
+    launch_at_login: false,
+  };
+  const demoSettingsStatus = {
+    kind: "ok",
+    source: "primary",
+    loaded_schema_version: 1,
+    current_schema_version: 1,
+    issues: [],
+    can_save: true,
+    auto_start_suppressed: false,
+    backup_available: true,
   };
   const demoBinaryStatus = {
     platform_supported: true,
@@ -108,6 +129,7 @@ const tauriStub = () => {
     server_state: () => demoServerState,
     get_binary_status: () => demoBinaryStatus,
     get_settings: () => demoSettings,
+    get_settings_status: () => demoSettingsStatus,
     default_settings: () => demoSettings,
     get_kiln_url: () => window.__KILN_DEMO_IFRAME_URL || "http://127.0.0.1:8420",
     get_openai_base_url: () => "http://127.0.0.1:8420/v1",
