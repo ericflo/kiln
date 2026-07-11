@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, TryLockError};
 use std::time::{Duration, Instant};
 
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+use anyhow::Context as _;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 // (#1082) Fully kt-typed: `tiny_weights` builds kt `Tensor`s directly into the
@@ -136,6 +138,40 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
         rotary_inv_freq,
         mtp: None,
     }
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn tiny_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
+    let mut weights = tiny_weights(config, device);
+    let bf16 = |tensor: &Tensor| tensor.to_dtype(DType::BF16).unwrap();
+
+    weights.embed_tokens = bf16(&weights.embed_tokens);
+    weights.embed_tokens_t = bf16(&weights.embed_tokens_t);
+    weights.final_norm = bf16(&weights.final_norm);
+    for layer in &mut weights.layers {
+        layer.input_layernorm = bf16(&layer.input_layernorm);
+        layer.post_attention_layernorm = bf16(&layer.post_attention_layernorm);
+        let GpuAttentionWeights::Full(attention) = &mut layer.attention else {
+            unreachable!("tiny public GRPO fixture changed attention type")
+        };
+        attention.q_proj = bf16(&attention.q_proj);
+        attention.k_proj = bf16(&attention.k_proj);
+        attention.v_proj = bf16(&attention.v_proj);
+        attention.o_proj = bf16(&attention.o_proj);
+        attention.q_norm = bf16(&attention.q_norm);
+        attention.k_norm = bf16(&attention.k_norm);
+        attention.q_proj_t = bf16(&attention.q_proj_t);
+        attention.k_proj_t = bf16(&attention.k_proj_t);
+        attention.v_proj_t = bf16(&attention.v_proj_t);
+        attention.o_proj_t = bf16(&attention.o_proj_t);
+        layer.mlp.gate_proj = bf16(&layer.mlp.gate_proj);
+        layer.mlp.up_proj = bf16(&layer.mlp.up_proj);
+        layer.mlp.down_proj = bf16(&layer.mlp.down_proj);
+        layer.mlp.gate_proj_t = bf16(&layer.mlp.gate_proj_t);
+        layer.mlp.up_proj_t = bf16(&layer.mlp.up_proj_t);
+        layer.mlp.down_proj_t = bf16(&layer.mlp.down_proj_t);
+    }
+    weights
 }
 
 fn tiny_weights_preferring_token(
@@ -361,7 +397,7 @@ fn real_runner(state: &AppState) -> Arc<std::sync::RwLock<ModelRunner>> {
     }
 }
 
-#[cfg(feature = "vulkan")]
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
 fn enable_experimental_serving(state: &mut AppState) {
     state.serving_profile =
         ServingProfileSetting::new(ServingProfile::Experimental, ConfigValueSource::ConfigFile);
@@ -871,6 +907,574 @@ async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {
         }
         _ => panic!("expected queued GRPO job"),
     }
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+static PUBLIC_GRPO_QUALIFICATION_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(feature = "vulkan")]
+struct PublicGrpoEnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+#[cfg(feature = "vulkan")]
+impl PublicGrpoEnvRestore {
+    fn set(pairs: &[(&'static str, &'static str)]) -> Self {
+        let prior = pairs
+            .iter()
+            .map(|(name, value)| {
+                let prior = std::env::var_os(name);
+                // These tests run behind one process-local lock and restore
+                // every value before releasing it.
+                unsafe { std::env::set_var(name, value) };
+                (*name, prior)
+            })
+            .collect();
+        Self(prior)
+    }
+}
+
+#[cfg(feature = "vulkan")]
+impl Drop for PublicGrpoEnvRestore {
+    fn drop(&mut self) {
+        for (name, value) in self.0.drain(..).rev() {
+            match value {
+                Some(value) => unsafe { std::env::set_var(name, value) },
+                None => unsafe { std::env::remove_var(name) },
+            }
+        }
+    }
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn public_grpo_training_tokenizer() -> KilnTokenizer {
+    test_tokenizer().with_chat_template(ROLLOUT_CHAT_TEMPLATE.to_string())
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn public_grpo_state(
+    device: Device,
+    expected_backend: &str,
+    adapter_dir: &std::path::Path,
+) -> AppState {
+    let mut config = tiny_config();
+    let mut weights = if matches!(&device, Device::Rocm(_)) {
+        config.dtype = kiln_core::config::DType::BF16;
+        tiny_weights_bf16(&config, &device)
+    } else {
+        tiny_weights(&config, &device)
+    };
+    weights.source_content_sha256 = Some(format!("sha256:{}", "a".repeat(64)));
+    let runner_tokenizer = public_grpo_training_tokenizer();
+    let state_tokenizer = public_grpo_training_tokenizer();
+    let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
+    assert_eq!(
+        runner.backend_name(),
+        expected_backend,
+        "public GRPO qualification selected the wrong backend"
+    );
+    let base_teacher_identity =
+        synthetic_base_teacher_identity(&config, &state_tokenizer, runner.backend_name());
+    let mut state = AppState::new_real(
+        config,
+        runner,
+        state_tokenizer,
+        device,
+        adapter_dir.to_path_buf(),
+        &kiln_server::config::MemoryConfig::default(),
+        kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
+        120,
+        "Qwen3.5-4B".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
+        Some(base_teacher_identity),
+    );
+    enable_experimental_serving(&mut state);
+    state
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+async fn public_training_json(
+    app: &axum::Router,
+    method: axum::http::Method,
+    uri: &str,
+    body: Option<&Value>,
+) -> anyhow::Result<(StatusCode, Value)> {
+    let mut builder = Request::builder().method(method).uri(uri);
+    let request_body = if let Some(body) = body {
+        builder = builder.header("content-type", "application/json");
+        Body::from(serde_json::to_vec(body)?)
+    } else {
+        Body::empty()
+    };
+    let response = app.clone().oneshot(builder.body(request_body)?).await?;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| json!({"unparsed_body": String::from_utf8_lossy(&bytes).into_owned()}));
+    Ok((status, value))
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+async fn wait_for_public_training_state(
+    app: &axum::Router,
+    job_id: &str,
+    wanted: &[&str],
+) -> anyhow::Result<Value> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let (status, detail) = public_training_json(
+            app,
+            axum::http::Method::GET,
+            &format!("/v1/train/jobs/{job_id}"),
+            None,
+        )
+        .await?;
+        anyhow::ensure!(
+            status == StatusCode::OK,
+            "job detail failed: {status} {detail}"
+        );
+        let state = detail["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if wanted.iter().any(|wanted| state == *wanted) {
+            return Ok(detail);
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for job {job_id} in {wanted:?}; last detail={detail}"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn public_grpo_config(adapter_name: &str, seed: u64, resume_checkpoint: Option<&str>) -> Value {
+    let mut config = json!({
+        "output_name": adapter_name,
+        "auto_load": false,
+        "learning_rate": 0.001,
+        "lora_rank": 2,
+        "lora_alpha": 4.0,
+        "seed": seed,
+        "checkpoint_interval": 3,
+        "optimizer": {"kind": "adam_w"},
+        "behavior_policy": "no_importance_correction",
+        "kl_reference_policy": {"kind": "ema", "decay": 0.8, "refresh_every": 2},
+        "loss": {"echo": null}
+    });
+    if let Some(checkpoint) = resume_checkpoint {
+        config["resume_checkpoint"] = json!(checkpoint);
+    }
+    config
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn public_grpo_request(source: &Value, config: Value) -> Value {
+    let mut request = source.clone();
+    request
+        .as_object_mut()
+        .expect("public GRPO source must be an object")
+        .insert("config".to_string(), config);
+    request
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn public_job_losses(detail: &Value) -> anyhow::Result<Vec<f64>> {
+    detail["loss_history"]
+        .as_array()
+        .context("job detail loss_history is not an array")?
+        .iter()
+        .map(|sample| {
+            sample["loss"]
+                .as_f64()
+                .context("job detail loss sample is not finite")
+        })
+        .collect()
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn public_checkpoint_path(
+    adapter_dir: &std::path::Path,
+    detail: &Value,
+) -> anyhow::Result<std::path::PathBuf> {
+    let basename = detail["latest_checkpoint"]["resume_checkpoint"]
+        .as_str()
+        .context("job detail did not expose latest_checkpoint.resume_checkpoint")?;
+    anyhow::ensure!(
+        std::path::Path::new(basename).components().count() == 1,
+        "job detail exposed a path instead of a checkpoint basename: {basename}"
+    );
+    Ok(adapter_dir.join(basename))
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn public_grpo_semantic_loop_state(checkpoint_dir: &std::path::Path) -> anyhow::Result<Value> {
+    let loop_state: Value =
+        serde_json::from_slice(&std::fs::read(checkpoint_dir.join("grpo_loop_state.json"))?)?;
+    let mut semantic = serde_json::Map::new();
+    for key in [
+        "route",
+        "global_step",
+        "total_steps",
+        "loss_history",
+        "last_loss",
+        "processed_completions",
+        "data_stats",
+        "token_counts",
+        "dynamic_groups_filtered",
+        "echo_metrics",
+        "lora_grad_norms",
+        "policy_audit",
+        "ema_groups_since_refresh",
+        "source_byte_offset",
+        "source_lines_consumed",
+    ] {
+        semantic.insert(
+            key.to_string(),
+            loop_state.get(key).cloned().unwrap_or(Value::Null),
+        );
+    }
+    Ok(Value::Object(semantic))
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn public_grpo_semantic_manifest(
+    checkpoint: &kiln_train::checkpoint::ValidatedTrainingCheckpoint,
+) -> anyhow::Result<Value> {
+    let manifest = serde_json::to_value(&checkpoint.manifest)?;
+    let mut semantic = serde_json::Map::new();
+    for key in [
+        "schema_version",
+        "manifest_type",
+        "checkpoint_kind",
+        "checkpoint_id",
+        "training_kind",
+        "adapter_name",
+        "effective_config",
+        "precision_policy",
+        "progress",
+        "data",
+        "rng_states",
+        "optimizer",
+        "scheduler",
+        "state_files",
+        "auxiliary_state",
+    ] {
+        semantic.insert(
+            key.to_string(),
+            manifest.get(key).cloned().unwrap_or(Value::Null),
+        );
+    }
+    Ok(Value::Object(semantic))
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+struct PublicGrpoControl {
+    losses: Vec<f64>,
+    final_adapter: Vec<u8>,
+    adapter_state: Vec<u8>,
+    optimizer_state: Vec<u8>,
+    reference_state: Vec<u8>,
+    semantic_manifest: Value,
+    semantic_loop_state: Value,
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn capture_public_grpo_control(
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    detail: &Value,
+) -> anyhow::Result<PublicGrpoControl> {
+    let checkpoint = public_checkpoint_path(adapter_dir, detail)?;
+    let loaded = kiln_train::checkpoint::load_training_checkpoint(&checkpoint)?;
+    Ok(PublicGrpoControl {
+        losses: public_job_losses(detail)?,
+        final_adapter: std::fs::read(
+            adapter_dir
+                .join(adapter_name)
+                .join("adapter_model.safetensors"),
+        )?,
+        adapter_state: std::fs::read(checkpoint.join("adapter.safetensors"))?,
+        optimizer_state: std::fs::read(checkpoint.join("optimizer.safetensors"))?,
+        reference_state: std::fs::read(checkpoint.join("reference.safetensors"))?,
+        semantic_manifest: public_grpo_semantic_manifest(&loaded)?,
+        semantic_loop_state: public_grpo_semantic_loop_state(&checkpoint)?,
+    })
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn remove_public_grpo_control_artifacts(
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+) -> anyhow::Result<()> {
+    let final_adapter = adapter_dir.join(adapter_name);
+    if final_adapter.exists() {
+        std::fs::remove_dir_all(final_adapter)?;
+    }
+    let checkpoint_prefix = format!("{adapter_name}-checkpoint-step-");
+    for entry in std::fs::read_dir(adapter_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&checkpoint_prefix) && name.ends_with(".kiln-checkpoint") {
+            std::fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+async fn qualify_public_grpo_source(
+    app: &axum::Router,
+    adapter_dir: &std::path::Path,
+    source: &Value,
+    adapter_name: &str,
+    seed: u64,
+    expected_source_kind: &str,
+) -> anyhow::Result<()> {
+    let control_request = public_grpo_request(source, public_grpo_config(adapter_name, seed, None));
+    let (status, response) = public_training_json(
+        app,
+        axum::http::Method::POST,
+        "/v1/train/grpo",
+        Some(&control_request),
+    )
+    .await?;
+    anyhow::ensure!(
+        status == StatusCode::OK,
+        "control submit failed: {status} {response}"
+    );
+    let control_job = response["job_id"]
+        .as_str()
+        .context("control submit omitted job_id")?;
+    let control_detail =
+        wait_for_public_training_state(app, control_job, &["completed", "failed"]).await?;
+    anyhow::ensure!(
+        control_detail["state"].as_str() == Some("completed"),
+        "uninterrupted public GRPO job failed: {control_detail}"
+    );
+    anyhow::ensure!(
+        control_detail["latest_checkpoint"]["training_kind"].as_str() == Some("grpo")
+            && control_detail["latest_checkpoint"]["data_source_kind"].as_str()
+                == Some(expected_source_kind),
+        "control checkpoint route identity is wrong: {control_detail}"
+    );
+    let control = capture_public_grpo_control(adapter_dir, adapter_name, &control_detail)?;
+    remove_public_grpo_control_artifacts(adapter_dir, adapter_name)?;
+
+    let interrupted_request =
+        public_grpo_request(source, public_grpo_config(adapter_name, seed, None));
+    let (status, response) = public_training_json(
+        app,
+        axum::http::Method::POST,
+        "/v1/train/grpo",
+        Some(&interrupted_request),
+    )
+    .await?;
+    anyhow::ensure!(
+        status == StatusCode::OK,
+        "interrupt submit failed: {status} {response}"
+    );
+    let interrupted_job = response["job_id"]
+        .as_str()
+        .context("interrupt submit omitted job_id")?;
+    let running =
+        wait_for_public_training_state(app, interrupted_job, &["running", "completed", "failed"])
+            .await?;
+    anyhow::ensure!(
+        running["state"].as_str() == Some("running"),
+        "public GRPO job finished before cancellation could be requested: {running}"
+    );
+    let (cancel_status, cancel_response) = public_training_json(
+        app,
+        axum::http::Method::DELETE,
+        &format!("/v1/train/queue/{interrupted_job}"),
+        None,
+    )
+    .await?;
+    anyhow::ensure!(
+        cancel_status == StatusCode::OK,
+        "public cancellation failed: {cancel_status} {cancel_response}"
+    );
+    let interrupted_detail =
+        wait_for_public_training_state(app, interrupted_job, &["completed", "failed"]).await?;
+    anyhow::ensure!(
+        interrupted_detail["state"].as_str() == Some("failed")
+            && interrupted_detail["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("cancelled by user")),
+        "public cancellation did not produce a resumable failed job: {interrupted_detail}"
+    );
+    let interrupted_checkpoint = &interrupted_detail["latest_checkpoint"];
+    let committed_step = interrupted_checkpoint["global_step"]
+        .as_u64()
+        .context("cancelled job checkpoint omitted global_step")?;
+    let total_steps = interrupted_checkpoint["total_steps"]
+        .as_u64()
+        .context("cancelled job checkpoint omitted total_steps")?;
+    anyhow::ensure!(
+        committed_step > 0
+            && committed_step < total_steps
+            && interrupted_checkpoint["training_kind"].as_str() == Some("grpo")
+            && interrupted_checkpoint["data_source_kind"].as_str() == Some(expected_source_kind),
+        "cancelled public checkpoint is not a mid-run {expected_source_kind} checkpoint: {interrupted_detail}"
+    );
+    let resume_basename = interrupted_checkpoint["resume_checkpoint"]
+        .as_str()
+        .context("cancelled job detail omitted resume checkpoint basename")?;
+    kiln_train::checkpoint::load_training_checkpoint(&adapter_dir.join(resume_basename))?;
+
+    let resume_request = public_grpo_request(
+        source,
+        public_grpo_config(adapter_name, seed, Some(resume_basename)),
+    );
+    let (status, response) = public_training_json(
+        app,
+        axum::http::Method::POST,
+        "/v1/train/grpo",
+        Some(&resume_request),
+    )
+    .await?;
+    anyhow::ensure!(
+        status == StatusCode::OK,
+        "resume submit failed: {status} {response}"
+    );
+    let resumed_job = response["job_id"]
+        .as_str()
+        .context("resume submit omitted job_id")?;
+    let resumed_detail =
+        wait_for_public_training_state(app, resumed_job, &["completed", "failed"]).await?;
+    anyhow::ensure!(
+        resumed_detail["state"].as_str() == Some("completed"),
+        "resumed public GRPO job failed: {resumed_detail}"
+    );
+    let resumed = capture_public_grpo_control(adapter_dir, adapter_name, &resumed_detail)?;
+    let mut combined_losses = public_job_losses(&interrupted_detail)?;
+    combined_losses.extend(public_job_losses(&resumed_detail)?);
+    anyhow::ensure!(
+        control.losses == combined_losses,
+        "public GRPO loss sequence differs after resume: control={:?}, resumed={combined_losses:?}",
+        control.losses
+    );
+    anyhow::ensure!(
+        control.final_adapter == resumed.final_adapter,
+        "public GRPO final adapter differs after resume"
+    );
+    anyhow::ensure!(
+        control.adapter_state == resumed.adapter_state
+            && control.optimizer_state == resumed.optimizer_state
+            && control.reference_state == resumed.reference_state,
+        "public GRPO final checkpoint tensor state differs after resume"
+    );
+    anyhow::ensure!(
+        control.semantic_manifest == resumed.semantic_manifest,
+        "public GRPO semantic checkpoint manifest differs after resume: control={}, resumed={}",
+        control.semantic_manifest,
+        resumed.semantic_manifest
+    );
+    anyhow::ensure!(
+        control.semantic_loop_state == resumed.semantic_loop_state,
+        "public GRPO semantic loop state differs after resume: control={}, resumed={}",
+        control.semantic_loop_state,
+        resumed.semantic_loop_state
+    );
+    Ok(())
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+async fn qualify_public_grpo_routes(device: Device, backend: &str) -> anyhow::Result<()> {
+    let adapter_root = tempfile::tempdir()?;
+    let state = public_grpo_state(device, backend, adapter_root.path());
+    let app = api::router(state.clone());
+    kiln_server::training_queue::spawn_training_worker(state.clone(), state.shutdown.clone());
+
+    let groups: Vec<Value> = (0..12)
+        .map(|_| {
+            json!({
+                "messages": [{"role": "user", "content": "t1"}],
+                "completions": [
+                    {"text": "t2", "reward": 1.0},
+                    {"text": "t3", "reward": 0.0}
+                ]
+            })
+        })
+        .collect();
+    qualify_public_grpo_source(
+        &app,
+        adapter_root.path(),
+        &json!({"groups": groups.clone()}),
+        "public-inline-grpo",
+        0xA11CE,
+        "inline-grpo-trainable-order-v1",
+    )
+    .await?;
+
+    let jsonl_root = tempfile::tempdir()?;
+    let jsonl_path = jsonl_root.path().join("groups.jsonl");
+    let mut jsonl = String::new();
+    for (index, group) in groups.iter().enumerate() {
+        if index % 3 == 0 {
+            jsonl.push('\n');
+        }
+        jsonl.push_str(&serde_json::to_string(group)?);
+        jsonl.push('\n');
+    }
+    std::fs::write(&jsonl_path, jsonl)?;
+    qualify_public_grpo_source(
+        &app,
+        adapter_root.path(),
+        &json!({"dataset_path": jsonl_path}),
+        "public-jsonl-grpo",
+        0xA11CF,
+        "jsonl-grpo-trainable-order-v1",
+    )
+    .await?;
+
+    let health = match state.backend.as_ref() {
+        ModelBackend::Real { backend_health, .. } => backend_health.snapshot(),
+        ModelBackend::Mock { .. } => unreachable!("qualification state is real"),
+    };
+    anyhow::ensure!(
+        !health.quarantined,
+        "public GRPO qualification quarantined the backend: {:?}",
+        health.reason
+    );
+    state
+        .shutdown
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(550)).await;
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_grpo_exact_resume_routes_rocm() -> anyhow::Result<()> {
+    if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+        eprintln!("skip public_grpo_exact_resume_routes_rocm: qualification off");
+        return Ok(());
+    }
+    anyhow::ensure!(
+        kiln_tensor::rocm_is_available(),
+        "ROCm qualification requested but no ROCm device is available"
+    );
+    let _lock = PUBLIC_GRPO_QUALIFICATION_ENV.lock().unwrap();
+    qualify_public_grpo_routes(Device::Rocm(0), "rocm").await
+}
+
+#[cfg(feature = "vulkan")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_grpo_exact_resume_routes_vulkan() -> anyhow::Result<()> {
+    if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+        eprintln!("skip public_grpo_exact_resume_routes_vulkan: qualification off");
+        return Ok(());
+    }
+    anyhow::ensure!(
+        kiln_model::backend::vulkan::vulkan_is_available(),
+        "Vulkan qualification requested but no Vulkan device is available"
+    );
+    let _lock = PUBLIC_GRPO_QUALIFICATION_ENV.lock().unwrap();
+    let _env = PublicGrpoEnvRestore::set(&[("KILN_TRAIN_RESIDENT", "1")]);
+    qualify_public_grpo_routes(Device::Vulkan(0), "vulkan").await
 }
 
 #[tokio::test]
