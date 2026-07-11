@@ -2867,6 +2867,7 @@ fn batching_forward_rejects_queued_request_after_same_name_revision_swap() {
             name: "same-name".to_string(),
             content_revision: "old-revision".to_string(),
         }),
+        capture_behavior_logprobs: false,
         cancel: CancelHandle::new(),
     };
 
@@ -3068,12 +3069,13 @@ fn assert_resumable_paged_prefill_matches_monolithic(
     ));
     let chunked_cache = prefix_test_paged_cache_on(&config, cache_device);
     let start = runner
-        .begin_paged_batched_decode_with_prefix_cache(
+        .begin_paged_batched_decode_with_prefix_cache_and_behavior_logprobs(
             &prompt,
             &sampling,
             &chunked_blocks,
             &chunked_cache,
             None,
+            true,
             true,
             None,
         )
@@ -3126,6 +3128,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(
     assert_eq!(scheduled_chunks, chunks);
     assert_eq!(chunks.iter().sum::<usize>(), prompt.len());
     assert_eq!(chunked.next_token, control.next_token);
+    assert_eq!(chunked.next_token_logprob, Some(0.0));
     assert_eq!(chunked.seq_len, control.seq_len);
     assert_linear_attention_state_close(
         &chunked.linear_state,
@@ -3176,7 +3179,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(
         .synchronize_external_yield("monolithic post-prefill decode")
         .unwrap();
     let chunked_decode = runner
-        .paged_batched_decode_step(
+        .paged_batched_decode_step_with_behavior_logprobs(
             &mut [&mut chunked],
             std::slice::from_ref(&sampling),
             &chunked_cache,
@@ -3185,7 +3188,8 @@ fn assert_resumable_paged_prefill_matches_monolithic(
     runner
         .synchronize_external_yield("resumable post-prefill decode")
         .unwrap();
-    assert_eq!(chunked_decode, control_decode);
+    assert_eq!(chunked_decode[0].token_id, control_decode[0]);
+    assert_eq!(chunked_decode[0].logprob, 0.0);
     assert_eq!(chunked.seq_len, control.seq_len);
     assert_linear_attention_state_close(
         &chunked.linear_state,
@@ -3196,7 +3200,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(
 
     eprintln!(
         "[{backend} PREFILL PASS] quanta={chunks:?} layer_yields={layer_yields} first_token={} next_decode_token={} split_position=80",
-        chunked.next_token, chunked_decode[0]
+        chunked.next_token, chunked_decode[0].token_id
     );
 
     control_blocks
@@ -3307,6 +3311,7 @@ fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
         prompt_tokens: prefix_test_turn1_prompt(),
         sampling: sampling.clone(),
         adapter: None,
+        capture_behavior_logprobs: false,
         cancel: CancelHandle::new(),
     };
     let RequestPreparation::Prefilling {
@@ -3349,6 +3354,7 @@ fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
         prompt_tokens: prefix_test_turn1_prompt(),
         sampling: sampling.clone(),
         adapter: None,
+        capture_behavior_logprobs: false,
         cancel: CancelHandle::new(),
     };
     let RequestPreparation::Prefilling { slot, .. } = forward
@@ -3419,6 +3425,7 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
         prompt_tokens: turn1.clone(),
         sampling: sampling.clone(),
         adapter: None,
+        capture_behavior_logprobs: false,
         cancel: CancelHandle::new(),
     };
     let slot1 = forward.prepare_request(&req1).expect("turn-1 prepare");
@@ -3452,6 +3459,7 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
         prompt_tokens: turn1.clone(),
         sampling: sampling.clone(),
         adapter: None,
+        capture_behavior_logprobs: false,
         cancel: CancelHandle::new(),
     };
     let retry_slot = forward
@@ -3491,6 +3499,7 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
         prompt_tokens: turn2,
         sampling,
         adapter: None,
+        capture_behavior_logprobs: false,
         cancel: CancelHandle::new(),
     };
     let slot2 = forward.prepare_request(&req2).expect("turn-2 prepare");

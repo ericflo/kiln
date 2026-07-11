@@ -533,6 +533,7 @@ impl EvalGenerator for LiveEvalGenerator {
                     prompt_tokens: prompt_tokens.clone(),
                     sampling,
                     adapter: active_adapter,
+                    capture_behavior_logprobs: false,
                     cancel: cancel.clone(),
                 })
             };

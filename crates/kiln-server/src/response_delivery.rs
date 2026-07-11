@@ -39,7 +39,7 @@ impl DeliveryKey {
 ///
 /// A terminal batch may include the final token so cancellation, completion,
 /// or a full channel cannot reorder the terminal event ahead of that token.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DeliveryBatch {
     Token {
         token: TokenId,
@@ -85,7 +85,7 @@ impl DeliveryBatch {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DeliveryTerminal {
     Done(BatchedGenerationOutput),
     Error(String),
@@ -984,6 +984,7 @@ mod tests {
             token_ids: vec![token],
             finish_reason: FinishReason::MaxTokens,
             completion_tokens: 1,
+            action_tokens: None,
             prefill_duration: Duration::from_millis(2),
             decode_duration: Duration::from_millis(3),
         }

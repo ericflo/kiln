@@ -41,6 +41,39 @@ pub struct ThinkingBudgetStatus {
     pub elapsed_ms: u64,
 }
 
+/// Provenance for the token returned by a thinking-budget decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingBudgetTokenSource {
+    /// The behavior policy's sampled token was accepted unchanged.
+    Sampled,
+    /// The runtime controller selected the next close-sequence token.
+    Forced,
+}
+
+/// One token after the thinking-budget controller has resolved the sampled
+/// candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThinkingBudgetDecision {
+    pub token: TokenId,
+    pub source: ThinkingBudgetTokenSource,
+}
+
+impl ThinkingBudgetDecision {
+    const fn sampled(token: TokenId) -> Self {
+        Self {
+            token,
+            source: ThinkingBudgetTokenSource::Sampled,
+        }
+    }
+
+    const fn forced(token: TokenId) -> Self {
+        Self {
+            token,
+            source: ThinkingBudgetTokenSource::Forced,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct ThinkingBudgetRuntime {
     started_at: OnceLock<Instant>,
@@ -134,13 +167,33 @@ impl ThinkingBudget {
 
     /// Apply the budget decision at the current token boundary.
     pub fn apply(&self, generated: &[TokenId], sampled: TokenId) -> TokenId {
-        self.apply_at(generated, sampled, Instant::now())
+        self.apply_with_source(generated, sampled).token
     }
 
+    /// Apply the budget and report whether the returned token came from the
+    /// behavior policy or the deterministic close-sequence controller.
+    pub fn apply_with_source(
+        &self,
+        generated: &[TokenId],
+        sampled: TokenId,
+    ) -> ThinkingBudgetDecision {
+        self.apply_decision_at(generated, sampled, Instant::now())
+    }
+
+    #[cfg(test)]
     fn apply_at(&self, generated: &[TokenId], sampled: TokenId, now: Instant) -> TokenId {
+        self.apply_decision_at(generated, sampled, now).token
+    }
+
+    fn apply_decision_at(
+        &self,
+        generated: &[TokenId],
+        sampled: TokenId,
+        now: Instant,
+    ) -> ThinkingBudgetDecision {
         let mut state = self.load_state();
         if budget_is_closed(state) {
-            return sampled;
+            return ThinkingBudgetDecision::sampled(sampled);
         }
 
         let started_at = *self.runtime.started_at.get_or_init(|| now);
@@ -165,7 +218,7 @@ impl ThinkingBudget {
                 state = self.load_state();
             }
             if budget_is_closed(state) {
-                return sampled;
+                return ThinkingBudgetDecision::sampled(sampled);
             }
         }
 
@@ -182,7 +235,7 @@ impl ThinkingBudget {
                     Ordering::Acquire,
                 );
             }
-            return expected;
+            return ThinkingBudgetDecision::forced(expected);
         }
 
         let trigger = {
@@ -210,7 +263,7 @@ impl ThinkingBudget {
             {
                 self.publish_active_outcome(BUDGET_NATURALLY_CLOSED, thinking_tokens, elapsed);
             }
-            return sampled;
+            return ThinkingBudgetDecision::sampled(sampled);
         };
         let expected = self.close_token_ids[close_progress];
 
@@ -221,7 +274,7 @@ impl ThinkingBudget {
             if close_progress + 1 == self.close_token_ids.len() {
                 self.publish_active_outcome(BUDGET_NATURALLY_CLOSED, thinking_tokens, elapsed);
             }
-            return sampled;
+            return ThinkingBudgetDecision::sampled(sampled);
         }
 
         let forcing_state = forcing_state_for(trigger);
@@ -231,7 +284,7 @@ impl ThinkingBudget {
             forcing_state
         };
         self.publish_active_outcome(published_state, thinking_tokens, elapsed);
-        expected
+        ThinkingBudgetDecision::forced(expected)
     }
 
     pub fn status(&self) -> ThinkingBudgetStatus {
@@ -560,10 +613,21 @@ impl SamplingParams {
     /// Replace a sampled token with the next forced close-tag token when the
     /// active thinking budget has elapsed.
     pub fn apply_thinking_budget(&self, generated: &[TokenId], sampled: TokenId) -> TokenId {
+        self.apply_thinking_budget_with_source(generated, sampled)
+            .token
+    }
+
+    /// Resolve the thinking-budget controller while retaining the provenance
+    /// needed to distinguish policy samples from forced close tokens.
+    pub fn apply_thinking_budget_with_source(
+        &self,
+        generated: &[TokenId],
+        sampled: TokenId,
+    ) -> ThinkingBudgetDecision {
         self.thinking_budget
             .as_ref()
-            .map(|budget| budget.apply(generated, sampled))
-            .unwrap_or(sampled)
+            .map(|budget| budget.apply_with_source(generated, sampled))
+            .unwrap_or_else(|| ThinkingBudgetDecision::sampled(sampled))
     }
 }
 
@@ -649,6 +713,50 @@ mod tests {
         assert_eq!(status.trigger, Some(ThinkingBudgetTrigger::Tokens));
         assert!(status.closed);
         assert_eq!(status.thinking_tokens, 2);
+    }
+
+    #[test]
+    fn thinking_budget_reports_sampled_and_forced_token_provenance() {
+        let budget = ThinkingBudget::new(Some(1), None, 16, vec![90, 91]).unwrap();
+        let started = Instant::now();
+
+        assert_eq!(
+            budget.apply_decision_at(&[], 10, started),
+            ThinkingBudgetDecision::sampled(10)
+        );
+        assert_eq!(
+            budget.apply_decision_at(&[10], 12, started),
+            ThinkingBudgetDecision::forced(90)
+        );
+        // Once forcing has started, the controller remains the decision source
+        // even if the ignored model candidate happens to equal the next token.
+        assert_eq!(
+            budget.apply_decision_at(&[10, 90], 91, started),
+            ThinkingBudgetDecision::forced(91)
+        );
+        assert_eq!(
+            budget.apply_decision_at(&[10, 90, 91], 13, started),
+            ThinkingBudgetDecision::sampled(13)
+        );
+
+        let natural = ThinkingBudget::new(Some(1), None, 16, vec![90, 91]).unwrap();
+        assert_eq!(
+            natural.apply_decision_at(&[], 10, started),
+            ThinkingBudgetDecision::sampled(10)
+        );
+        assert_eq!(
+            natural.apply_decision_at(&[10], 90, started),
+            ThinkingBudgetDecision::sampled(90)
+        );
+        assert_eq!(
+            natural.apply_decision_at(&[10, 90], 91, started),
+            ThinkingBudgetDecision::sampled(91)
+        );
+
+        assert_eq!(
+            SamplingParams::greedy().apply_thinking_budget_with_source(&[], 7),
+            ThinkingBudgetDecision::sampled(7)
+        );
     }
 
     #[test]

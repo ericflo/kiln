@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use kiln_core::block::BlockManager;
-use kiln_core::sampling::SamplingParams;
+use kiln_core::sampling::{SamplingParams, ThinkingBudgetTokenSource};
 use kiln_core::token::TokenId;
 use kiln_model::{
     BackendHealthHandle, CancelHandle, DecodeBatcherPolicy, FinishReason, GenerationOutput,
@@ -212,22 +212,64 @@ pub struct EngineRequest {
     pub prompt_tokens: Vec<TokenId>,
     pub sampling: SamplingParams,
     pub adapter: Option<LoadedAdapterIdentity>,
+    /// Opt in to exact per-action behavior log-probabilities for rollout
+    /// provenance. Ordinary serving requests leave this disabled.
+    pub capture_behavior_logprobs: bool,
     pub cancel: CancelHandle,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EngineSampledToken {
+    pub token_id: TokenId,
+    pub behavior_logprob: Option<f32>,
+}
+
+impl EngineSampledToken {
+    fn untraced(token_id: TokenId) -> Self {
+        Self {
+            token_id,
+            behavior_logprob: None,
+        }
+    }
+
+    fn traced(token_id: TokenId, behavior_logprob: f32) -> Self {
+        Self {
+            token_id,
+            behavior_logprob: Some(behavior_logprob),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineActionTokenSource {
+    Sampled,
+    Forced,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineActionToken {
+    /// Index within the generated suffix, before the API adds the prompt
+    /// boundary to produce a full-sequence provenance index.
+    pub generated_index: usize,
+    pub token_id: TokenId,
+    pub source: EngineActionTokenSource,
+    pub behavior_logprob: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
     Token { token: TokenId, ready_at: Instant },
     Done { output: BatchedGenerationOutput },
     Error(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BatchedGenerationOutput {
     pub text: String,
     pub token_ids: Vec<TokenId>,
     pub finish_reason: FinishReason,
     pub completion_tokens: usize,
+    pub action_tokens: Option<Vec<EngineActionToken>>,
     pub prefill_duration: Duration,
     pub decode_duration: Duration,
 }
@@ -358,7 +400,7 @@ pub enum RequestPreparation {
 fn collect_ready_decode_indices(
     slots: &mut [&mut DecodeSlot],
     sampling: &[SamplingParams],
-    output: &mut [TokenId],
+    output: &mut [EngineSampledToken],
 ) -> Result<(Vec<usize>, Vec<SamplingParams>)> {
     anyhow::ensure!(
         slots.len() == sampling.len() && slots.len() == output.len(),
@@ -377,7 +419,10 @@ fn collect_ready_decode_indices(
                 first_token_pending,
                 ..
             } if *first_token_pending => {
-                output[idx] = state.next_token;
+                output[idx] = match state.next_token_logprob {
+                    Some(logprob) => EngineSampledToken::traced(state.next_token, logprob),
+                    None => EngineSampledToken::untraced(state.next_token),
+                };
                 *first_token_pending = false;
             }
             DecodeSlot::Real { .. } => {
@@ -465,6 +510,21 @@ pub trait DecodeForward: Send + Sync + 'static {
         slots: &mut [&mut DecodeSlot],
         sampling: &[SamplingParams],
     ) -> Result<Vec<TokenId>>;
+    /// Decode with optional behavior-policy metadata. Test doubles and custom
+    /// forwards inherit the token-only adapter; production overrides this to
+    /// honor trace-mode rows.
+    fn forward_decode_with_metadata(
+        &self,
+        slots: &mut [&mut DecodeSlot],
+        sampling: &[SamplingParams],
+    ) -> Result<Vec<EngineSampledToken>> {
+        self.forward_decode(slots, sampling).map(|tokens| {
+            tokens
+                .into_iter()
+                .map(EngineSampledToken::untraced)
+                .collect()
+        })
+    }
     fn is_eos_token(&self, _token: TokenId) -> Result<bool> {
         Ok(false)
     }
@@ -830,15 +890,17 @@ impl DecodeForward for RealDecodeForward {
             next_token: hit.next_token,
         });
 
-        let prepared = runner_guard.begin_paged_batched_decode_with_prefix_cache(
-            &req.prompt_tokens,
-            &req.sampling,
-            self.block_manager.as_ref(),
-            self.paged_cache.as_ref(),
-            cached_prefix,
-            prefix_cache_enabled,
-            Some(&req.cancel),
-        );
+        let prepared = runner_guard
+            .begin_paged_batched_decode_with_prefix_cache_and_behavior_logprobs(
+                &req.prompt_tokens,
+                &req.sampling,
+                self.block_manager.as_ref(),
+                self.paged_cache.as_ref(),
+                cached_prefix,
+                prefix_cache_enabled,
+                req.capture_behavior_logprobs,
+                Some(&req.cancel),
+            );
         let synchronized =
             runner_guard.synchronize_external_yield("batched request prefill initialization");
         drop(runner_guard);
@@ -960,15 +1022,28 @@ impl DecodeForward for RealDecodeForward {
         slots: &mut [&mut DecodeSlot],
         sampling: &[SamplingParams],
     ) -> Result<Vec<TokenId>> {
+        self.forward_decode_with_metadata(slots, sampling)
+            .map(|tokens| tokens.into_iter().map(|sampled| sampled.token_id).collect())
+    }
+
+    fn forward_decode_with_metadata(
+        &self,
+        slots: &mut [&mut DecodeSlot],
+        sampling: &[SamplingParams],
+    ) -> Result<Vec<EngineSampledToken>> {
         self.grow_ready_decode_slots(slots)?;
-        let mut output = vec![0; slots.len()];
+        let mut output = vec![EngineSampledToken::untraced(0); slots.len()];
         let (decode_indices, decode_params) =
             collect_ready_decode_indices(slots, sampling, &mut output)?;
 
         if !decode_indices.is_empty() {
             let gpu_guard = gpu_coordination_read_guard(&self.gpu_lock);
-            let mut row_refs: Vec<&mut PagedBatchedDecodeState> =
-                Vec::with_capacity(decode_indices.len());
+            let mut ordinary_rows = Vec::with_capacity(decode_indices.len());
+            let mut ordinary_params = Vec::with_capacity(decode_indices.len());
+            let mut ordinary_output_indices = Vec::with_capacity(decode_indices.len());
+            let mut traced_rows = Vec::new();
+            let mut traced_params = Vec::new();
+            let mut traced_output_indices = Vec::new();
             let mut next_decode_index = decode_indices.iter().copied().peekable();
             for (idx, slot) in slots.iter_mut().enumerate() {
                 if next_decode_index.peek() != Some(&idx) {
@@ -980,7 +1055,17 @@ impl DecodeForward for RealDecodeForward {
                         first_token_pending: false,
                         ..
                     } => {
-                        row_refs.push(state);
+                        let param_idx = ordinary_rows.len() + traced_rows.len();
+                        let params = decode_params[param_idx].clone();
+                        if state.capture_behavior_logprobs {
+                            traced_rows.push(state);
+                            traced_params.push(params);
+                            traced_output_indices.push(idx);
+                        } else {
+                            ordinary_rows.push(state);
+                            ordinary_params.push(params);
+                            ordinary_output_indices.push(idx);
+                        }
                         next_decode_index.next();
                     }
                     DecodeSlot::Real { .. } => {
@@ -995,19 +1080,19 @@ impl DecodeForward for RealDecodeForward {
                 }
             }
             anyhow::ensure!(
-                row_refs.len() == decode_params.len(),
+                ordinary_rows.len() + traced_rows.len() == decode_params.len(),
                 "decode row length {} != params length {} after row selection",
-                row_refs.len(),
+                ordinary_rows.len() + traced_rows.len(),
                 decode_params.len()
             );
             let runner_guard = self.runner_guard()?;
-            let decode_result = (|| -> Result<Vec<TokenId>> {
-                if self.rowwise_decode && row_refs.len() > 1 {
-                    // Operator-forced comparison/fallback path: dispatch one
-                    // single-row forward per active slot instead of one batched
-                    // decode step.
-                    let mut tokens = Vec::with_capacity(row_refs.len());
-                    for (row, params) in row_refs.iter_mut().zip(decode_params.iter()) {
+            let decode_result = (|| -> Result<Vec<(usize, EngineSampledToken)>> {
+                let mut decoded = Vec::with_capacity(decode_indices.len());
+                let ordinary_tokens = if ordinary_rows.is_empty() {
+                    Vec::new()
+                } else if self.rowwise_decode && ordinary_rows.len() > 1 {
+                    let mut tokens = Vec::with_capacity(ordinary_rows.len());
+                    for (row, params) in ordinary_rows.iter_mut().zip(ordinary_params.iter()) {
                         let mut single_row: [&mut PagedBatchedDecodeState; 1] = [&mut **row];
                         let single_params = std::slice::from_ref(params);
                         let mut next = runner_guard.paged_batched_decode_step(
@@ -1022,14 +1107,65 @@ impl DecodeForward for RealDecodeForward {
                         );
                         tokens.push(next.remove(0));
                     }
-                    Ok(tokens)
+                    tokens
                 } else {
                     runner_guard.paged_batched_decode_step(
-                        &mut row_refs,
-                        &decode_params,
+                        &mut ordinary_rows,
+                        &ordinary_params,
                         self.paged_cache.as_ref(),
-                    )
+                    )?
+                };
+                for ((output_idx, row), token) in ordinary_output_indices
+                    .iter()
+                    .copied()
+                    .zip(ordinary_rows.iter_mut())
+                    .zip(ordinary_tokens)
+                {
+                    row.next_token_logprob = None;
+                    decoded.push((output_idx, EngineSampledToken::untraced(token)));
                 }
+
+                let traced_tokens = if traced_rows.is_empty() {
+                    Vec::new()
+                } else if self.rowwise_decode && traced_rows.len() > 1 {
+                    let mut tokens = Vec::with_capacity(traced_rows.len());
+                    for (row, params) in traced_rows.iter_mut().zip(traced_params.iter()) {
+                        let mut single_row: [&mut PagedBatchedDecodeState; 1] = [&mut **row];
+                        let single_params = std::slice::from_ref(params);
+                        let mut next = runner_guard
+                            .paged_batched_decode_step_with_behavior_logprobs(
+                                &mut single_row,
+                                single_params,
+                                self.paged_cache.as_ref(),
+                            )?;
+                        anyhow::ensure!(
+                            next.len() == 1,
+                            "rowwise behavior-logprob decode returned {} tokens for a 1-row step",
+                            next.len()
+                        );
+                        tokens.push(next.remove(0));
+                    }
+                    tokens
+                } else {
+                    runner_guard.paged_batched_decode_step_with_behavior_logprobs(
+                        &mut traced_rows,
+                        &traced_params,
+                        self.paged_cache.as_ref(),
+                    )?
+                };
+                for ((output_idx, row), sampled) in traced_output_indices
+                    .iter()
+                    .copied()
+                    .zip(traced_rows.iter_mut())
+                    .zip(traced_tokens)
+                {
+                    row.next_token_logprob = Some(sampled.logprob);
+                    decoded.push((
+                        output_idx,
+                        EngineSampledToken::traced(sampled.token_id, sampled.logprob),
+                    ));
+                }
+                Ok(decoded)
             })();
             let synchronized = runner_guard.synchronize_external_yield("batched decode step");
             drop(runner_guard);
@@ -1037,8 +1173,7 @@ impl DecodeForward for RealDecodeForward {
                 std::mem::forget(gpu_guard);
                 return Err(err);
             }
-            let next_tokens = decode_result?;
-            for (idx, token) in decode_indices.into_iter().zip(next_tokens) {
+            for (idx, token) in decode_result? {
                 output[idx] = token;
             }
         }
@@ -1657,6 +1792,7 @@ struct ActiveRequest {
     /// This is immutable so the short-prefill lane compares request classes,
     /// not mutable progress that would split an equal-work cohort.
     initial_prefill_work_tokens: Option<usize>,
+    action_tokens: Option<Vec<EngineActionToken>>,
     slot: DecodeSlot,
 }
 
@@ -2482,12 +2618,14 @@ impl BatchingEngineActor {
                     } else {
                         self.forward.remaining_prefill_tokens(&slot)
                     };
+                    let action_tokens = queued.req.capture_behavior_logprobs.then(Vec::new);
                     self.active.push(ActiveRequest {
                         req: queued.req,
                         delivery_key: queued.delivery_key,
                         delivery_state: ActiveDeliveryState::Ready,
                         next_delivery_sequence: 0,
                         initial_prefill_work_tokens,
+                        action_tokens,
                         slot,
                     });
                     // Publish admission before first-token delivery, which can
@@ -2638,6 +2776,7 @@ impl BatchingEngineActor {
                 delivery_state,
                 next_delivery_sequence,
                 initial_prefill_work_tokens,
+                action_tokens,
                 slot,
             } = self.active.remove(idx);
             let started = Instant::now();
@@ -2762,6 +2901,7 @@ impl BatchingEngineActor {
                         delivery_state,
                         next_delivery_sequence,
                         initial_prefill_work_tokens,
+                        action_tokens,
                         slot,
                     },
                 );
@@ -2784,6 +2924,7 @@ impl BatchingEngineActor {
                     delivery_state,
                     next_delivery_sequence,
                     initial_prefill_work_tokens,
+                    action_tokens,
                     slot,
                 },
             );
@@ -2803,7 +2944,7 @@ impl BatchingEngineActor {
         advanced
     }
 
-    fn pending_first_token_at(&mut self, idx: usize) -> Option<TokenId> {
+    fn pending_first_token_at(&mut self, idx: usize) -> Option<EngineSampledToken> {
         match self.active.get_mut(idx).map(|active| &mut active.slot) {
             Some(DecodeSlot::Real {
                 state,
@@ -2811,7 +2952,10 @@ impl BatchingEngineActor {
                 ..
             }) if *first_token_pending => {
                 *first_token_pending = false;
-                Some(state.next_token)
+                Some(match state.next_token_logprob {
+                    Some(logprob) => EngineSampledToken::traced(state.next_token, logprob),
+                    None => EngineSampledToken::untraced(state.next_token),
+                })
             }
             _ => None,
         }
@@ -2826,15 +2970,32 @@ impl BatchingEngineActor {
         true
     }
 
-    fn emit_output_token_at(&mut self, idx: usize, token: TokenId) {
+    fn emit_output_token_at(&mut self, idx: usize, sampled: EngineSampledToken) {
         let ready_at = Instant::now();
-        let token = {
+        if self.active[idx].req.capture_behavior_logprobs
+            && !sampled
+                .behavior_logprob
+                .is_some_and(|logprob| logprob.is_finite() && logprob <= 1e-6)
+        {
+            self.finish_one_with_error(
+                idx,
+                format!(
+                    "behavior-logprob capture produced no valid probability for sampled token {}",
+                    sampled.token_id
+                ),
+                None,
+            );
+            return;
+        }
+        let generated_index = self.generated_tokens_for(idx).len();
+        let decision = {
             let generated_tokens = self.generated_tokens_for(idx);
             self.active[idx]
                 .req
                 .sampling
-                .apply_thinking_budget(generated_tokens, token)
+                .apply_thinking_budget_with_source(generated_tokens, sampled.token_id)
         };
+        let token = decision.token;
         match self.forward.is_eos_token(token) {
             Ok(true) => {
                 self.finish_active(idx, FinishReason::Eos, None);
@@ -2854,6 +3015,20 @@ impl BatchingEngineActor {
                 return;
             }
         };
+        if let Some(action_tokens) = self.active[idx].action_tokens.as_mut() {
+            let (source, behavior_logprob) = match decision.source {
+                ThinkingBudgetTokenSource::Sampled => {
+                    (EngineActionTokenSource::Sampled, sampled.behavior_logprob)
+                }
+                ThinkingBudgetTokenSource::Forced => (EngineActionTokenSource::Forced, None),
+            };
+            action_tokens.push(EngineActionToken {
+                generated_index,
+                token_id: token,
+                source,
+                behavior_logprob,
+            });
+        }
         self.snapshot.total_decode_tokens += 1;
 
         // No per-token Vec clone: `forward` is an Arc, so a cheap handle
@@ -3010,7 +3185,9 @@ impl BatchingEngineActor {
             .filter_map(|(idx, active)| ready_indices.contains(&idx).then_some(&mut active.slot))
             .collect();
         let started = Instant::now();
-        let result = self.forward.forward_decode(&mut slots, &sampling);
+        let result = self
+            .forward
+            .forward_decode_with_metadata(&mut slots, &sampling);
         let elapsed = started.elapsed();
         drop(slots);
         self.record_decode_forward_duration(elapsed, batch_len);
@@ -3119,6 +3296,7 @@ impl BatchingEngineActor {
                     token_ids: output.output.token_ids,
                     finish_reason: output.output.finish_reason,
                     completion_tokens,
+                    action_tokens: active.action_tokens,
                     prefill_duration: output.prefill_duration,
                     decode_duration: output.decode_duration,
                 })
@@ -3653,7 +3831,13 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .saturating_add(10);
-            Ok(real_slot(next_token, true))
+            let mut slot = real_slot(next_token, true);
+            let DecodeSlot::Real { state, .. } = &mut slot else {
+                unreachable!()
+            };
+            state.capture_behavior_logprobs = req.capture_behavior_logprobs;
+            state.next_token_logprob = req.capture_behavior_logprobs.then_some(-0.25);
+            Ok(slot)
         }
 
         fn forward_decode(
@@ -3670,6 +3854,25 @@ mod tests {
                 .collect();
             self.calls.lock().unwrap().push(input_tokens.clone());
             Ok(input_tokens.iter().map(|token| token + 10).collect())
+        }
+
+        fn forward_decode_with_metadata(
+            &self,
+            slots: &mut [&mut DecodeSlot],
+            sampling: &[SamplingParams],
+        ) -> Result<Vec<EngineSampledToken>> {
+            let tokens = self.forward_decode(slots, sampling)?;
+            Ok(tokens
+                .into_iter()
+                .zip(slots.iter())
+                .map(|(token, slot)| match slot {
+                    DecodeSlot::Real { state, .. } if state.capture_behavior_logprobs => {
+                        EngineSampledToken::traced(token, -0.5)
+                    }
+                    DecodeSlot::Real { .. } => EngineSampledToken::untraced(token),
+                    DecodeSlot::Mock { .. } | DecodeSlot::RealPrefill { .. } => unreachable!(),
+                })
+                .collect())
         }
 
         fn is_eos_token(&self, _token: TokenId) -> Result<bool> {
@@ -3718,6 +3921,7 @@ mod tests {
                 ..SamplingParams::default()
             },
             adapter: None,
+            capture_behavior_logprobs: false,
             cancel: CancelHandle::new(),
         }
     }
@@ -3732,8 +3936,10 @@ mod tests {
                 },
                 seq_len: 1,
                 next_token,
+                next_token_logprob: None,
                 generated_tokens: Vec::new(),
                 step_seed: None,
+                capture_behavior_logprobs: false,
                 registration: None,
                 allocated_blocks: Vec::new(),
                 prefill_duration: Duration::ZERO,
@@ -3817,12 +4023,14 @@ mod tests {
             .register_delivery(req.request_id, response_tx)
             .expect("test delivery lane registers");
         let initial_prefill_work_tokens = actor.forward.remaining_prefill_tokens(&slot);
+        let action_tokens = req.capture_behavior_logprobs.then(Vec::new);
         actor.active.push(ActiveRequest {
             req,
             delivery_key,
             delivery_state: ActiveDeliveryState::Ready,
             next_delivery_sequence: 0,
             initial_prefill_work_tokens,
+            action_tokens,
             slot,
         });
     }
@@ -5080,12 +5288,20 @@ mod tests {
                 ..SamplingParams::default()
             },
         ];
-        let mut output = vec![0; slots.len()];
+        let mut output = vec![EngineSampledToken::untraced(0); slots.len()];
 
         let (decode_indices, decode_params) =
             collect_ready_decode_indices(&mut slots, &sampling, &mut output).unwrap();
 
-        assert_eq!(output, vec![101, 0, 303, 0]);
+        assert_eq!(
+            output,
+            vec![
+                EngineSampledToken::untraced(101),
+                EngineSampledToken::untraced(0),
+                EngineSampledToken::untraced(303),
+                EngineSampledToken::untraced(0),
+            ]
+        );
         assert_eq!(decode_indices, vec![1, 3]);
         assert_eq!(decode_params.len(), decode_indices.len());
         assert_eq!(decode_params[0].max_tokens, 22);
@@ -5275,6 +5491,94 @@ mod tests {
         assert_eq!(snapshot.total_batched_decode_forwards, 1);
         assert_eq!(snapshot.total_decode_rows, 2);
         assert_eq!(snapshot.total_decode_tokens, 2);
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn behavior_trace_records_sampled_actions_from_prefill_and_decode() {
+        let handle = BatchingEngineHandle::start_with_options(
+            Arc::new(PendingFirstTokenForward::default()),
+            8,
+        );
+        let mut req = request(100, 2);
+        req.capture_behavior_logprobs = true;
+        let mut rx = handle.enqueue(req).await.unwrap();
+
+        assert_token_event(rx.recv().await, 110);
+        assert_token_event(rx.recv().await, 120);
+        let Some(EngineEvent::Done { output }) = rx.recv().await else {
+            panic!("traced request did not finish")
+        };
+        assert_eq!(output.token_ids, vec![110, 120]);
+        assert_eq!(
+            output.action_tokens,
+            Some(vec![
+                EngineActionToken {
+                    generated_index: 0,
+                    token_id: 110,
+                    source: EngineActionTokenSource::Sampled,
+                    behavior_logprob: Some(-0.25),
+                },
+                EngineActionToken {
+                    generated_index: 1,
+                    token_id: 120,
+                    source: EngineActionTokenSource::Sampled,
+                    behavior_logprob: Some(-0.5),
+                },
+            ])
+        );
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn behavior_trace_marks_every_controller_close_token_as_forced() {
+        let handle = BatchingEngineHandle::start_with_options(
+            Arc::new(PendingFirstTokenForward::default()),
+            8,
+        );
+        let mut req = request(100, 2);
+        req.capture_behavior_logprobs = true;
+        req.sampling.thinking_budget =
+            Some(ThinkingBudget::new(Some(0), None, 2, vec![90, 91]).unwrap());
+        let mut rx = handle.enqueue(req).await.unwrap();
+
+        assert_token_event(rx.recv().await, 90);
+        assert_token_event(rx.recv().await, 91);
+        let Some(EngineEvent::Done { output }) = rx.recv().await else {
+            panic!("forced traced request did not finish")
+        };
+        assert_eq!(output.token_ids, vec![90, 91]);
+        assert_eq!(
+            output.action_tokens,
+            Some(vec![
+                EngineActionToken {
+                    generated_index: 0,
+                    token_id: 90,
+                    source: EngineActionTokenSource::Forced,
+                    behavior_logprob: None,
+                },
+                EngineActionToken {
+                    generated_index: 1,
+                    token_id: 91,
+                    source: EngineActionTokenSource::Forced,
+                    behavior_logprob: None,
+                },
+            ])
+        );
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn behavior_trace_fails_closed_when_forward_omits_probability() {
+        let handle = BatchingEngineHandle::start_with_options(Arc::new(MockForward::default()), 8);
+        let mut req = request(100, 1);
+        req.capture_behavior_logprobs = true;
+        let mut rx = handle.enqueue(req).await.unwrap();
+
+        let Some(EngineEvent::Error(error)) = rx.recv().await else {
+            panic!("trace without a probability did not fail")
+        };
+        assert!(error.contains("produced no valid probability"), "{error}");
         handle.stop().await.unwrap();
     }
 

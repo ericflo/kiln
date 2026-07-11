@@ -6816,6 +6816,7 @@ async fn generate_real_batched(
             prompt_tokens: prompt_tokens.to_vec(),
             sampling: sampling.clone(),
             adapter,
+            capture_behavior_logprobs: false,
             cancel: cancel.clone(),
         })
         .await
@@ -6974,6 +6975,7 @@ async fn generate_real_batched_streaming(
             prompt_tokens: prompt_tokens.to_vec(),
             sampling: sampling.clone(),
             adapter,
+            capture_behavior_logprobs: false,
             cancel: cancel.clone(),
         })
         .await

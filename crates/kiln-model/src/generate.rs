@@ -57,7 +57,9 @@ use crate::packed_weight_registry::GpuPackedWeightRegistry;
 // existing call sites + the `model_forward_paged*` params (which the PAGED
 // agent resolves to the same kt cache) converge on one type.
 use crate::paged_kv_cache_kt::PagedKvCacheKt as PagedKvCache;
-use crate::sampling::{greedy_sample, sample_step, sample_with_full_params};
+use crate::sampling::{
+    SampledToken, greedy_sample, sample_step, sample_step_with_logprob, sample_with_full_params,
+};
 use crate::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
     speculative_mtp_decode_step,
@@ -560,8 +562,14 @@ pub struct PagedBatchedDecodeState {
     pub linear_state: LinearAttentionState,
     pub seq_len: usize,
     pub next_token: TokenId,
+    /// Exact post-filter behavior log-probability for `next_token` when this
+    /// row opted into rollout provenance capture.
+    pub next_token_logprob: Option<f32>,
     pub generated_tokens: Vec<TokenId>,
     pub step_seed: Option<u64>,
+    /// Trace-mode rows deliberately bypass token-only fused sampling paths so
+    /// every accepted model action has an exact selected-token probability.
+    pub capture_behavior_logprobs: bool,
     pub registration: Option<PagedPrefixRegistration>,
     pub allocated_blocks: Vec<u32>,
     pub prefill_duration: std::time::Duration,
@@ -595,6 +603,37 @@ pub struct PagedBatchedDecodeState {
     pub id: u64,
 }
 
+fn complete_paged_batched_decode_step(
+    states: &mut [&mut PagedBatchedDecodeState],
+    decode_duration: std::time::Duration,
+) {
+    for state in states {
+        state.seq_len += 1;
+        state.decode_duration += decode_duration;
+        // Preserve the existing rolling prefix-cache snapshot semantics for
+        // both token-only and provenance-capturing decode paths.
+        if state.block_size > 0 && state.seq_len % state.block_size == 0 {
+            match state.linear_state.snapshot() {
+                Ok(snap) => {
+                    state.rolling_snapshot = Some(RollingPrefixSnapshot {
+                        position: state.seq_len,
+                        linear_state: snap,
+                    });
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        seq_len = state.seq_len,
+                        block_size = state.block_size,
+                        error = %err,
+                        "failed to snapshot linear state at block boundary; \
+                         extended prefix-cache entry will not be available for this request"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Resumable prompt-prefill ownership for the server batching actor.
 ///
 /// A state is created after prefix lookup and block allocation, then advanced
@@ -613,6 +652,7 @@ pub struct PagedBatchedPrefillState {
     prefill_split_snapshot: Option<LinearAttentionState>,
     streaming: bool,
     prefill_duration: std::time::Duration,
+    capture_behavior_logprobs: bool,
     /// Keeps an intermediate chunk's output alive until the caller performs
     /// its mandatory external-yield synchronization.
     pending_logits: Option<kiln_tensor::Tensor>,
@@ -2182,6 +2222,16 @@ fn sample_first_decode_token(
     }
 }
 
+fn sample_first_decode_token_with_logprob(
+    logits: &kiln_tensor::Tensor,
+    params: &SamplingParams,
+) -> Result<SampledToken> {
+    // First decode token has no generated history. The traced sampler still
+    // resolves every configured filter and requires the request's effective
+    // seed for stochastic behavior.
+    sample_step_with_logprob(logits, params, params.seed, &[])
+}
+
 /// Composite per-request emit gate: incremental detokenization + stop
 /// holdback. One per streaming generation; finish() drains residue at
 /// non-stop exits (a stop can complete inside held bytes).
@@ -3243,6 +3293,33 @@ impl ModelRunner {
         capture_prefix_split: bool,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedPrefillStart> {
+        self.begin_paged_batched_decode_with_prefix_cache_and_behavior_logprobs(
+            prompt_tokens,
+            params,
+            block_manager,
+            _paged_cache,
+            cached_prefix,
+            capture_prefix_split,
+            false,
+            cancel,
+        )
+    }
+
+    /// Begin paged batched generation with optional exact behavior-policy
+    /// log-probability capture. Capture affects only sampling/output metadata;
+    /// prefix lookup and KV ownership remain identical to ordinary serving.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_paged_batched_decode_with_prefix_cache_and_behavior_logprobs(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        _paged_cache: &PagedKvCache,
+        cached_prefix: Option<PagedPrefixReuse>,
+        capture_prefix_split: bool,
+        capture_behavior_logprobs: bool,
+        cancel: Option<&CancelHandle>,
+    ) -> Result<PagedBatchedPrefillStart> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
         check_cancelled(cancel)?;
 
@@ -3282,6 +3359,7 @@ impl ModelRunner {
             block_size,
             allocated_blocks.clone(),
             capture_prefix_split,
+            capture_behavior_logprobs,
             cancel,
         );
 
@@ -3831,6 +3909,7 @@ impl ModelRunner {
         block_size: usize,
         allocated_blocks: Vec<u32>,
         capture_prefix_split: bool,
+        capture_behavior_logprobs: bool,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedPrefillStart> {
         let (cached_tokens, exact_next_token, linear_state) = match cached_prefix {
@@ -3846,14 +3925,20 @@ impl ModelRunner {
         };
 
         if let Some(next_token) = exact_next_token {
-            let next_token = match next_token {
-                PagedPrefixNextToken::Logits(logits) => sample_first_decode_token(&logits, params)?,
+            let (next_token, next_token_logprob) = match next_token {
+                PagedPrefixNextToken::Logits(logits) if capture_behavior_logprobs => {
+                    let sampled = sample_first_decode_token_with_logprob(&logits, params)?;
+                    (sampled.token_id, Some(sampled.logprob))
+                }
+                PagedPrefixNextToken::Logits(logits) => {
+                    (sample_first_decode_token(&logits, params)?, None)
+                }
                 PagedPrefixNextToken::GreedyToken(token) => {
                     anyhow::ensure!(
                         params.is_effectively_greedy(),
                         "greedy cached first token cannot serve non-greedy sampling"
                     );
-                    token
+                    (token, capture_behavior_logprobs.then_some(0.0))
                 }
             };
             return Ok(PagedBatchedPrefillStart::Ready(PagedBatchedDecodeState {
@@ -3861,8 +3946,10 @@ impl ModelRunner {
                 linear_state,
                 seq_len: prompt_tokens.len(),
                 next_token,
+                next_token_logprob,
                 generated_tokens: Vec::new(),
                 step_seed: params.seed,
+                capture_behavior_logprobs,
                 registration: None,
                 allocated_blocks,
                 prefill_duration: std::time::Duration::ZERO,
@@ -3903,6 +3990,7 @@ impl ModelRunner {
                 prefill_split_snapshot: None,
                 streaming,
                 prefill_duration: std::time::Duration::ZERO,
+                capture_behavior_logprobs,
                 pending_logits: None,
                 pending_layer_forward: None,
                 pending_chunk_end: None,
@@ -4079,7 +4167,12 @@ impl ModelRunner {
             .pending_logits
             .as_ref()
             .context("completed prefill did not retain final logits")?;
-        let next_token = sample_first_decode_token(logits, params)?;
+        let (next_token, next_token_logprob) = if state.capture_behavior_logprobs {
+            let sampled = sample_first_decode_token_with_logprob(logits, params)?;
+            (sampled.token_id, Some(sampled.logprob))
+        } else {
+            (sample_first_decode_token(logits, params)?, None)
+        };
         let registration = self.completed_prompt_registration(
             &state.prompt_tokens,
             &state.block_table,
@@ -4107,8 +4200,10 @@ impl ModelRunner {
                 linear_state: state.linear_state,
                 seq_len: state.prompt_tokens.len(),
                 next_token,
+                next_token_logprob,
                 generated_tokens: Vec::new(),
                 step_seed: params.seed,
+                capture_behavior_logprobs: state.capture_behavior_logprobs,
                 registration,
                 allocated_blocks: state.allocated_blocks,
                 prefill_duration: state.prefill_duration,
@@ -4868,37 +4963,90 @@ impl ModelRunner {
         };
         let decode_duration = started.elapsed();
 
-        for state in states.iter_mut() {
-            state.seq_len += 1;
-            state.decode_duration += decode_duration;
-            // When the new seq_len lands on a block boundary, snapshot the
-            // recurrent linear-attention state. At finish time the most
-            // recent snapshot becomes the basis for an extended prefix-cache
-            // entry covering prompt + decoded tokens, which is the only way
-            // the next agentic turn (whose prompt = previous prompt +
-            // assistant reply + new user input) can hit the cache on
-            // anything beyond the original prompt.
-            if state.block_size > 0 && state.seq_len % state.block_size == 0 {
-                match state.linear_state.snapshot() {
-                    Ok(snap) => {
-                        state.rolling_snapshot = Some(RollingPrefixSnapshot {
-                            position: state.seq_len,
-                            linear_state: snap,
-                        });
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            seq_len = state.seq_len,
-                            block_size = state.block_size,
-                            error = %err,
-                            "failed to snapshot linear state at block boundary; \
-                             extended prefix-cache entry will not be available for this request"
-                        );
-                    }
-                }
-            }
+        complete_paged_batched_decode_step(states, decode_duration);
+
+        Ok(sampled)
+    }
+
+    /// Decode one step while retaining each selected token's exact effective
+    /// behavior-policy log-probability. Trace mode deliberately performs the
+    /// LM head and host-visible post-filter sampler instead of accepting a
+    /// token-only fused result whose probability cannot be reconstructed.
+    pub fn paged_batched_decode_step_with_behavior_logprobs(
+        &self,
+        states: &mut [&mut PagedBatchedDecodeState],
+        params: &[SamplingParams],
+        paged_cache: &PagedKvCache,
+    ) -> Result<Vec<SampledToken>> {
+        anyhow::ensure!(
+            states.len() == params.len(),
+            "decode state length {} != params length {}",
+            states.len(),
+            params.len()
+        );
+        anyhow::ensure!(!states.is_empty(), "batched decode step requires rows");
+        anyhow::ensure!(
+            states.iter().all(|state| state.capture_behavior_logprobs),
+            "behavior-logprob decode received a row that did not opt into capture"
+        );
+
+        let row_count = states.len();
+        self.ensure_decode_buffers(row_count)?;
+        let input_tokens: Vec<TokenId> = states.iter().map(|state| state.next_token).collect();
+        let block_tables: Vec<BlockTable> = states
+            .iter()
+            .map(|state| state.block_table.clone())
+            .collect();
+        let sequence_lengths: Vec<usize> = states.iter().map(|state| state.seq_len).collect();
+        let step_seeds: Vec<Option<u64>> = states.iter().map(|state| state.step_seed).collect();
+        let generated_tokens: Vec<Vec<TokenId>> = states
+            .iter()
+            .map(|state| state.generated_tokens.clone())
+            .collect();
+        let mut linear_states: Vec<&mut LinearAttentionState> = states
+            .iter_mut()
+            .map(|state| &mut state.linear_state)
+            .collect();
+
+        let started = std::time::Instant::now();
+        let hidden = {
+            let pc_guard = lock_paged_cache(paged_cache)?;
+            model_forward_paged_batched_decode_hidden(
+                &*self.backend,
+                &input_tokens,
+                &self.weights,
+                &self.config,
+                pc_guard,
+                &block_tables,
+                &sequence_lengths,
+                &mut linear_states,
+                self.active_lora.as_ref(),
+            )
+            .context("behavior-logprob batched decode forward pass failed")?
+        };
+        drop(linear_states);
+        let logits = crate::forward::model_forward_head_backend_decode_if(
+            Some(&*self.backend),
+            &hidden,
+            &self.weights,
+            &self.config,
+        )
+        .context("behavior-logprob batched decode lm head")?;
+        let mut sampled = Vec::with_capacity(row_count);
+        for (idx, param) in params.iter().enumerate() {
+            let row = logits
+                .narrow(0, idx, 1)
+                .with_context(|| format!("behavior-logprob batched decode lm head row {idx}"))?;
+            sampled.push(sample_step_with_logprob(
+                &row,
+                param,
+                step_seeds[idx],
+                &generated_tokens[idx],
+            )?);
         }
 
+        let decode_duration = started.elapsed();
+        complete_paged_batched_decode_step(states, decode_duration);
         Ok(sampled)
     }
 
