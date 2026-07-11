@@ -40,6 +40,33 @@ The runner rejects a dirty worktree, an uncommitted workload, missing required
 variables, a missing required device, silent skips, and an existing receipt or
 raw-run directory. Do not bypass those checks.
 
+## Refresh The GRPO Reference Oracle
+
+The compact fixture at
+`crates/kiln-train/tests/fixtures/grpo_trl_oracle_v1.json` pins scalar GRPO
+semantics independently of Kiln. Its generator hash-checks TRL 1.8.0's
+`grpo_trainer.py`, calls the real `GRPOTrainer._compute_loss` with precomputed
+policy/behavior/reference log-probabilities, differentiates with PyTorch
+2.13.0, and takes one `torch.optim.AdamW` step. It runs entirely on CPU.
+
+Use PyTorch's CPU wheel index so refreshing a scalar fixture does not download
+CUDA libraries:
+
+```bash
+uv run \
+  --index https://download.pytorch.org/whl/cpu \
+  --index-strategy unsafe-best-match \
+  --with 'torch==2.13.0+cpu' \
+  --with 'trl==1.8.0' \
+  python scripts/qualification/grpo_trl_oracle.py --check
+```
+
+Omit `--check` only when intentionally regenerating the fixture after changing
+the pinned oracle or its input cases. Review the entire JSON diff. Automatic CI
+validates the pins, canonical encoding, input hash, coverage, finiteness, and
+shapes without installing TRL or PyTorch; Rust tests consume the numeric outputs
+directly on each supported backend.
+
 ## Run A Workload
 
 Choose a stable, non-secret host ID that identifies the physical machine. Run
