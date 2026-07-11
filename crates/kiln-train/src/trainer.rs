@@ -81,9 +81,9 @@ use kiln_model::backend::SftFlceLossRoute;
 ))]
 use kiln_model::backend::TrainingTapeRoute;
 use kiln_model::backend::{
-    self, BackendIdentity, BackendRuntime, FallbackPolicy, FinalRmsNormBackwardRoute,
-    GrpoKlAuxiliaryRoute, OptimizerBackend, ResidencyBackend, TrainingLossBackend,
-    TrainingPrecisionPolicy,
+    self, BackendIdentity, BackendRuntime, ExternalYieldBackend, FallbackPolicy,
+    FinalRmsNormBackwardRoute, GrpoKlAuxiliaryRoute, OptimizerBackend, ResidencyBackend,
+    TrainingLossBackend, TrainingPrecisionPolicy,
 };
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
@@ -2313,6 +2313,12 @@ pub struct GrpoBenchmarkTimings {
     pub policy_forward_ms: f64,
     pub backward_ms: f64,
     pub optimizer_ms: f64,
+    #[serde(default)]
+    pub gpu_writer_wait_ms: f64,
+    #[serde(default)]
+    pub gpu_writer_held_ms: f64,
+    #[serde(default)]
+    pub gpu_writer_acquisitions: u64,
 }
 
 impl GrpoBenchmarkTimings {
@@ -2348,6 +2354,9 @@ impl GrpoBenchmarkTimings {
             policy_forward_ms: self.policy_forward_ms,
             backward_ms: self.backward_ms,
             optimizer_ms: self.optimizer_ms,
+            gpu_writer_wait_ms: self.gpu_writer_wait_ms,
+            gpu_writer_held_ms: self.gpu_writer_held_ms,
+            gpu_writer_acquisitions: self.gpu_writer_acquisitions,
         }
     }
 }
@@ -4294,6 +4303,82 @@ impl GpuStepCoordination {
     }
 }
 
+#[derive(Debug, Default)]
+struct GrpoGpuWriterTimings {
+    wait_ms: f64,
+    held_ms: f64,
+    acquisitions: u64,
+}
+
+impl GrpoGpuWriterTimings {
+    fn apply_to(&self, timings: &mut GrpoBenchmarkTimings) {
+        timings.gpu_writer_wait_ms = self.wait_ms;
+        timings.gpu_writer_held_ms = self.held_ms;
+        timings.gpu_writer_acquisitions = self.acquisitions;
+    }
+}
+
+fn run_coordinated_grpo_gpu_phase<T>(
+    coordination: Option<&GpuStepCoordination>,
+    backend: &dyn BackendRuntime,
+    timings: &mut GrpoGpuWriterTimings,
+    phase: &'static str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let Some(coordination) = coordination else {
+        return operation();
+    };
+
+    let wait_started = Instant::now();
+    let guard = coordination
+        .blocking_write()
+        .with_context(|| format!("acquire healthy backend for GRPO {phase}"))?;
+    let wait_ms = wait_started.elapsed().as_secs_f64() * 1000.0;
+    timings.wait_ms += wait_ms;
+    timings.acquisitions = timings.acquisitions.saturating_add(1);
+
+    let held_started = Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+    let sync_result = ExternalYieldBackend::runtime_synchronize_external_yield(backend)
+        .with_context(|| format!("synchronize backend after GRPO {phase}"));
+    let held_ms = held_started.elapsed().as_secs_f64() * 1000.0;
+    timings.held_ms += held_ms;
+    drop(guard);
+    tracing::debug!(
+        phase,
+        wait_ms,
+        held_ms,
+        "completed coordinated GRPO GPU phase"
+    );
+
+    match result {
+        Ok(operation_result) => match sync_result {
+            Ok(()) => operation_result,
+            Err(sync_error) => {
+                coordination.backend_health.quarantine(format!(
+                    "GRPO {phase} external-yield synchronization failed: {sync_error:#}"
+                ));
+                match operation_result {
+                    Ok(_) => Err(sync_error),
+                    Err(operation_error) => Err(anyhow::anyhow!(
+                        "GRPO {phase} failed ({operation_error:#}) and backend settlement also failed ({sync_error:#})"
+                    )),
+                }
+            }
+        },
+        Err(payload) => {
+            let sync_suffix = sync_result
+                .err()
+                .map(|error| format!("; settlement also failed: {error:#}"))
+                .unwrap_or_default();
+            coordination
+                .backend_health
+                .quarantine(format!("GRPO {phase} panicked{sync_suffix}"));
+            std::panic::resume_unwind(payload)
+        }
+    }
+}
+
 pub fn sft_train(
     examples: &[SftExample],
     config: &SftConfig,
@@ -5355,6 +5440,38 @@ pub fn grpo_train_to(
     progress_cb: Option<ProgressCallback>,
     replay_ctx: Option<ReplayContext>,
 ) -> Result<PathBuf> {
+    grpo_train_to_with_coordination(
+        groups,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+        None,
+    )
+}
+
+/// Staged-output GRPO with bounded server GPU ownership. Direct callers should
+/// normally use [`grpo_train_to`]; the server supplies coordination so
+/// inference can run between optimizer groups and checkpoint snapshots.
+#[allow(clippy::too_many_arguments)]
+pub fn grpo_train_to_with_coordination(
+    groups: &[GrpoGroup],
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+    gpu_step_coordination: Option<GpuStepCoordination>,
+) -> Result<PathBuf> {
     let run_started = Instant::now();
     // Fail fast on loss compositions the kt-tape path cannot train —
     // BEFORE any forward pass. The old order discovered this per-step,
@@ -5379,17 +5496,24 @@ pub fn grpo_train_to(
     let requested_base_adapter_dir = config.base_adapter.as_deref().map(|name| {
         resolve_base_adapter_dir_from_roots(name, adapter_dir, output_adapter_dir, adapter_name)
     });
+    let mut gpu_writer_timings = GrpoGpuWriterTimings::default();
     // (#1082) `embed_tokens.device()` is a kt Device; the GRPO body is now
     // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward),
     // so keep `device` kt downstream. The only candle touch is safetensors
     // adapter I/O, which bridges kt->candle locally inside save/load.
     let device = training_device_for_weights(weights);
+    let backend = backend::for_device_kt(&device);
     // Training-session residency: upload a one-device copy of the weights
     // when the substrate needs it (Vulkan hybrid). Shadow `weights` so the
     // whole body trains against the resident copy; it drops at return.
-    let resident_weights = resident_training_weights(weights, &device)?;
+    let resident_weights = run_coordinated_grpo_gpu_phase(
+        gpu_step_coordination.as_ref(),
+        &*backend,
+        &mut gpu_writer_timings,
+        "resident model setup",
+        || resident_training_weights(weights, &device),
+    )?;
     let weights = resident_weights.as_ref().unwrap_or(weights);
-    let backend = backend::for_device_kt(&device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
     let total_completions: usize = groups.iter().map(|g| g.completions.len()).sum();
@@ -5535,15 +5659,41 @@ pub fn grpo_train_to(
         }
     };
 
-    // Initialize trainable LoRA parameters
-    let mut params = TrainableLoraParams::initialize_seeded_with_precision_policy(
-        model_config,
-        weights,
-        config.lora_rank,
-        config.lora_alpha,
-        &device,
-        effective_seed,
-        training_precision_policy,
+    // Initialization, optional base-adapter upload, and registry admission all
+    // mutate backend state. Keep them in one explicit setup phase, then release
+    // serving before reward filtering and tokenization.
+    let (mut params, mut opt_state) = run_coordinated_grpo_gpu_phase(
+        gpu_step_coordination.as_ref(),
+        &*backend,
+        &mut gpu_writer_timings,
+        "adapter and optimizer setup",
+        || {
+            let mut params = TrainableLoraParams::initialize_seeded_with_precision_policy(
+                model_config,
+                weights,
+                config.lora_rank,
+                config.lora_alpha,
+                &device,
+                effective_seed,
+                training_precision_policy,
+            )?;
+
+            if let Some(base_dir) = base_adapter_dir.as_deref() {
+                let n_loaded = params.load_from_safetensors(base_dir, &device)?;
+                tracing::info!(
+                    base = %base_dir.display(),
+                    num_tensors = n_loaded,
+                    "loaded base adapter — continuing GRPO from those weights"
+                );
+            }
+
+            params.register_with_backend(&*backend)?;
+            let opt_state = make_opt_state(&params, config.optimizer, learning_rate, &device)?;
+            if let Some(state) = opt_state.as_ref() {
+                state.register_with_backend(&*backend)?;
+            }
+            Ok((params, opt_state))
+        },
     )?;
 
     tracing::info!(
@@ -5551,29 +5701,6 @@ pub fn grpo_train_to(
         "initialized trainable LoRA parameters"
     );
     let lora_grad_index = LoraGradNormIndex::new(&params);
-
-    if let Some(base_dir) = base_adapter_dir.as_deref() {
-        let n_loaded = params.load_from_safetensors(base_dir, &device)?;
-        tracing::info!(
-            base = %base_dir.display(),
-            num_tensors = n_loaded,
-            "loaded base adapter — continuing GRPO from those weights"
-        );
-    }
-
-    // Phase 4.1: register LoRA Vars in the resident activation
-    // registry. Forward LoRA dispatches via `lora_delta_resident`
-    // (CustomOp3 with autograd backward) and the optimizer step
-    // dispatches on-device against the registry buffers.
-    params.register_with_backend(&*backend)?;
-
-    let mut opt_state = make_opt_state(&params, config.optimizer, learning_rate, &device)?;
-    // C1 fix: register per-param AdamW `m`/`v` device moments resident so the
-    // on-device kernel fires with REAL distinct moments (not the param aliased
-    // onto itself).
-    if let Some(state) = opt_state.as_ref() {
-        state.register_with_backend(&*backend)?;
-    }
 
     let mut train_body = || -> Result<(PathBuf, f64)> {
         let dynamic_sampling = config.dynamic_sampling;
@@ -5769,8 +5896,16 @@ pub fn grpo_train_to(
                     decay,
                     refresh_every,
                 } => {
-                    let snapshot = lora_snapshot_capture_or_blend(&params, None, *decay)
-                        .context("initial EMA reference snapshot")?;
+                    let snapshot = run_coordinated_grpo_gpu_phase(
+                        gpu_step_coordination.as_ref(),
+                        &*backend,
+                        &mut gpu_writer_timings,
+                        "initial EMA reference snapshot",
+                        || {
+                            lora_snapshot_capture_or_blend(&params, None, *decay)
+                                .context("initial EMA reference snapshot")
+                        },
+                    )?;
                     Some(EmaReferenceState {
                         snapshot,
                         groups_since_refresh: 0,
@@ -5828,57 +5963,82 @@ pub fn grpo_train_to(
                 }
                 last_ckpt_log_key = Some(ckpt_log_key);
             }
-            let step_report = train_tokenized_grpo_group_with_grad_norms(
+            let step_report = run_coordinated_grpo_gpu_phase(
+                gpu_step_coordination.as_ref(),
                 &*backend,
-                tgroup,
-                weights,
-                model_config,
-                &mut params,
-                config,
-                segments.as_deref(),
-                &device,
-                opt_state.as_mut(),
-                &mut lora_grad_norms,
-                &lora_grad_index,
-                &mut policy_audit,
-                ema_ref_state.as_ref().map(|s| &s.snapshot),
-                Some(&mut phase_timings),
+                &mut gpu_writer_timings,
+                "optimizer group",
+                || {
+                    let step_report = train_tokenized_grpo_group_with_grad_norms(
+                        &*backend,
+                        tgroup,
+                        weights,
+                        model_config,
+                        &mut params,
+                        config,
+                        segments.as_deref(),
+                        &device,
+                        opt_state.as_mut(),
+                        &mut lora_grad_norms,
+                        &lora_grad_index,
+                        &mut policy_audit,
+                        ema_ref_state.as_ref().map(|s| &s.snapshot),
+                        Some(&mut phase_timings),
+                    )?;
+
+                    // Refresh while the same writer is held: both the policy
+                    // update and the frozen reference transition form one
+                    // exact optimizer-group boundary.
+                    if let Some(state) = ema_ref_state.as_mut() {
+                        state.groups_since_refresh += 1;
+                        if state.groups_since_refresh >= state.refresh_every {
+                            state.snapshot = lora_snapshot_capture_or_blend(
+                                &params,
+                                Some(&state.snapshot),
+                                state.decay,
+                            )
+                            .context("EMA reference snapshot refresh")?;
+                            state.groups_since_refresh = 0;
+                            tracing::debug!(
+                                group = group_idx + 1,
+                                refresh_every = state.refresh_every,
+                                decay = state.decay,
+                                "GRPO EMA reference snapshot refreshed"
+                            );
+                        }
+                    }
+                    Ok(step_report)
+                },
             )?;
             let avg_group_loss = step_report.loss;
             echo_metrics.observe_env_ce(step_report.echo_env_ce);
             last_loss = avg_group_loss;
             global_step += 1;
 
-            // Phase 3b: refresh the EMA reference every `refresh_every` groups.
-            if let Some(state) = ema_ref_state.as_mut() {
-                state.groups_since_refresh += 1;
-                if state.groups_since_refresh >= state.refresh_every {
-                    state.snapshot =
-                        lora_snapshot_capture_or_blend(&params, Some(&state.snapshot), state.decay)
-                            .context("EMA reference snapshot refresh")?;
-                    state.groups_since_refresh = 0;
-                    tracing::debug!(
-                        group = group_idx + 1,
-                        refresh_every = state.refresh_every,
-                        decay = state.decay,
-                        "GRPO EMA reference snapshot refreshed"
-                    );
-                }
-            }
-
             // Periodic adapter checkpoint
             if let Some(interval) = config.checkpoint_interval {
                 if interval > 0 && global_step % interval == 0 && global_step < total_steps {
                     let ckpt_dir =
                         output_adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
-                    if let Err(e) = params.sync_to_master(&*backend) {
-                        tracing::warn!(step = global_step, error = %e, "failed to sync LoRA Vars to candle for GRPO checkpoint");
-                    }
-                    if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
-                        tracing::warn!(step = global_step, error = %e, "failed to save GRPO training checkpoint");
-                    } else {
-                        tracing::info!(step = global_step, "saved GRPO training checkpoint");
-                    }
+                    run_coordinated_grpo_gpu_phase(
+                        gpu_step_coordination.as_ref(),
+                        &*backend,
+                        &mut gpu_writer_timings,
+                        "checkpoint device snapshot",
+                        || {
+                            params
+                                .sync_to_master(&*backend)
+                                .context("capture GRPO checkpoint adapter state")
+                        },
+                    )?;
+                    // The master snapshot is CPU-owned, so encoding and disk
+                    // publication must not extend the GPU writer interval.
+                    params
+                        .save_peft(&ckpt_dir, model_config.num_layers)
+                        .with_context(|| {
+                            format!("save GRPO adapter checkpoint at {}", ckpt_dir.display())
+                        })?;
+                    tracing::info!(step = global_step, "saved GRPO training checkpoint");
                 }
             }
 
@@ -5928,7 +6088,17 @@ pub fn grpo_train_to(
 
         // Pull current Var values from registry into candle CPU
         // storage before final save_peft.
-        let synced = params.sync_to_master(&*backend).unwrap_or(0);
+        let synced = run_coordinated_grpo_gpu_phase(
+            gpu_step_coordination.as_ref(),
+            &*backend,
+            &mut gpu_writer_timings,
+            "final adapter snapshot",
+            || {
+                params
+                    .sync_to_master(&*backend)
+                    .context("capture final GRPO adapter state")
+            },
+        )?;
         tracing::debug!(synced, "synced LoRA Vars to candle before GRPO save");
 
         // Save the trained adapter
@@ -5947,25 +6117,39 @@ pub fn grpo_train_to(
     let mut result = train_body();
     drop(train_body);
     let policy_audit = finish_grpo_policy_audit(&mut result, policy_audit);
-    let adapter_smoke_test = if config.adapter_smoke_test && result.is_ok() {
-        Some(run_adapter_smoke_test_best_effort(
-            adapter_name,
-            &*backend,
-            weights,
-            model_config,
-            tokenizer,
-            &params,
-        ))
-    } else {
-        None
-    };
-    // Phase 4.1 cleanup: same as sft_train — evict the LoRA Vars
-    // and any optimizer-state moment Vars from the registry on
-    // completion so stale entries don't accumulate across jobs.
-    if let Some(state) = opt_state.as_ref() {
-        state.evict_from_backend(&*backend);
+    let mut adapter_smoke_test = None;
+    let cleanup_result = run_coordinated_grpo_gpu_phase(
+        gpu_step_coordination.as_ref(),
+        &*backend,
+        &mut gpu_writer_timings,
+        "adapter smoke test and cleanup",
+        || {
+            if config.adapter_smoke_test && result.is_ok() {
+                adapter_smoke_test = Some(run_adapter_smoke_test_best_effort(
+                    adapter_name,
+                    &*backend,
+                    weights,
+                    model_config,
+                    tokenizer,
+                    &params,
+                ));
+            }
+            // Registry eviction is backend mutation too; keep it within the
+            // final bounded phase even after a failed training step.
+            if let Some(state) = opt_state.as_ref() {
+                state.evict_from_backend(&*backend);
+            }
+            params.evict_from_backend(&*backend);
+            Ok(())
+        },
+    );
+    if let Err(error) = cleanup_result {
+        if result.is_ok() {
+            result = Err(error.context("complete coordinated GRPO cleanup"));
+        } else {
+            tracing::warn!(error = %format!("{error:#}"), "GRPO cleanup could not acquire healthy backend");
+        }
     }
-    params.evict_from_backend(&*backend);
     if let Some(state) = replay_state {
         let outcome = match &result {
             Ok((_, loss)) => Ok(*loss),
@@ -5975,6 +6159,7 @@ pub fn grpo_train_to(
             tracing::warn!(error = %e, "failed to append GRPO replay outcome record");
         }
     }
+    gpu_writer_timings.apply_to(&mut phase_timings);
     let status_error = result.as_ref().err().map(|err| format!("{err:#}"));
     write_grpo_train_receipt_best_effort(
         adapter_name,
@@ -6305,6 +6490,36 @@ pub fn grpo_train_jsonl_to(
     progress_cb: Option<ProgressCallback>,
     replay_ctx: Option<ReplayContext>,
 ) -> Result<PathBuf> {
+    grpo_train_jsonl_to_with_coordination(
+        dataset_path,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+        None,
+    )
+}
+
+/// Streaming staged-output GRPO with bounded server GPU ownership.
+#[allow(clippy::too_many_arguments)]
+pub fn grpo_train_jsonl_to_with_coordination(
+    dataset_path: &Path,
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+    gpu_step_coordination: Option<GpuStepCoordination>,
+) -> Result<PathBuf> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
@@ -6337,6 +6552,7 @@ pub fn grpo_train_jsonl_to(
     let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
     let mut policy_audit = crate::train_receipt::GrpoPolicyAuditAccumulator::default();
     let mut phase_timings = GrpoBenchmarkTimings::default();
+    let mut gpu_writer_timings = GrpoGpuWriterTimings::default();
     let mut dynamic_groups_filtered = 0usize;
 
     // (#1082) `embed_tokens.device()` is a kt Device; the OPD/GRPO body is now
@@ -6344,12 +6560,18 @@ pub fn grpo_train_jsonl_to(
     // keep `device` kt downstream. The only candle touch is safetensors adapter
     // I/O, which bridges kt->candle locally inside save/load.
     let device = training_device_for_weights(weights);
+    let backend = backend::for_device_kt(&device);
     // Training-session residency: upload a one-device copy of the weights
     // when the substrate needs it (Vulkan hybrid). Shadow `weights` so the
     // whole body trains against the resident copy; it drops at return.
-    let resident_weights = resident_training_weights(weights, &device)?;
+    let resident_weights = run_coordinated_grpo_gpu_phase(
+        gpu_step_coordination.as_ref(),
+        &*backend,
+        &mut gpu_writer_timings,
+        "streamed resident model setup",
+        || resident_training_weights(weights, &device),
+    )?;
     let weights = resident_weights.as_ref().unwrap_or(weights);
-    let backend = backend::for_device_kt(&device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
     let learning_rate = config.effective_learning_rate();
@@ -6464,14 +6686,36 @@ pub fn grpo_train_jsonl_to(
         }
     };
 
-    let mut params = TrainableLoraParams::initialize_seeded_with_precision_policy(
-        model_config,
-        weights,
-        config.lora_rank,
-        config.lora_alpha,
-        &device,
-        effective_seed,
-        training_precision_policy,
+    let (mut params, mut opt_state) = run_coordinated_grpo_gpu_phase(
+        gpu_step_coordination.as_ref(),
+        &*backend,
+        &mut gpu_writer_timings,
+        "streamed adapter and optimizer setup",
+        || {
+            let mut params = TrainableLoraParams::initialize_seeded_with_precision_policy(
+                model_config,
+                weights,
+                config.lora_rank,
+                config.lora_alpha,
+                &device,
+                effective_seed,
+                training_precision_policy,
+            )?;
+            if let Some(base_dir) = base_adapter_dir.as_deref() {
+                let n_loaded = params.load_from_safetensors(base_dir, &device)?;
+                tracing::info!(
+                    base = %base_dir.display(),
+                    num_tensors = n_loaded,
+                    "loaded base adapter — continuing streamed GRPO from those weights"
+                );
+            }
+            params.register_with_backend(&*backend)?;
+            let opt_state = make_opt_state(&params, config.optimizer, learning_rate, &device)?;
+            if let Some(state) = opt_state.as_ref() {
+                state.register_with_backend(&*backend)?;
+            }
+            Ok((params, opt_state))
+        },
     )?;
 
     tracing::info!(
@@ -6479,27 +6723,6 @@ pub fn grpo_train_jsonl_to(
         "initialized streamed GRPO trainable LoRA parameters"
     );
     let lora_grad_index = LoraGradNormIndex::new(&params);
-
-    // Phase 3 chaining: load a previously-saved, shape-compatible adapter into
-    // the seeded Vars, replacing the random init.
-    if let Some(base_dir) = base_adapter_dir.as_deref() {
-        let n_loaded = params.load_from_safetensors(base_dir, &device)?;
-        tracing::info!(
-            base = %base_dir.display(),
-            num_tensors = n_loaded,
-            "loaded base adapter — continuing training from those weights"
-        );
-    }
-
-    params.register_with_backend(&*backend)?;
-
-    let mut opt_state = make_opt_state(&params, config.optimizer, learning_rate, &device)?;
-    // C1 fix: register per-param AdamW `m`/`v` device moments resident so the
-    // on-device kernel fires with REAL distinct moments (not the param aliased
-    // onto itself).
-    if let Some(state) = opt_state.as_ref() {
-        state.register_with_backend(&*backend)?;
-    }
 
     let mut train_body = || -> Result<(PathBuf, f64)> {
         // Streaming GRPO does not know max_seq_len until a group is
@@ -6656,8 +6879,16 @@ pub fn grpo_train_jsonl_to(
                     decay,
                     refresh_every,
                 } => {
-                    let snapshot = lora_snapshot_capture_or_blend(&params, None, *decay)
-                        .context("initial EMA reference snapshot")?;
+                    let snapshot = run_coordinated_grpo_gpu_phase(
+                        gpu_step_coordination.as_ref(),
+                        &*backend,
+                        &mut gpu_writer_timings,
+                        "streamed initial EMA reference snapshot",
+                        || {
+                            lora_snapshot_capture_or_blend(&params, None, *decay)
+                                .context("initial EMA reference snapshot")
+                        },
+                    )?;
                     Some(EmaReferenceState {
                         snapshot,
                         groups_since_refresh: 0,
@@ -6797,21 +7028,48 @@ pub fn grpo_train_jsonl_to(
                 last_ckpt_log_key = Some(ckpt_log_key);
             }
 
-            let step_report = train_tokenized_grpo_group_with_grad_norms(
+            let step_report = run_coordinated_grpo_gpu_phase(
+                gpu_step_coordination.as_ref(),
                 &*backend,
-                &tgroup,
-                weights,
-                model_config,
-                &mut params,
-                config,
-                segments.as_deref(),
-                &device,
-                opt_state.as_mut(),
-                &mut lora_grad_norms,
-                &lora_grad_index,
-                &mut policy_audit,
-                ema_ref_state.as_ref().map(|s| &s.snapshot),
-                Some(&mut phase_timings),
+                &mut gpu_writer_timings,
+                "streamed optimizer group",
+                || {
+                    let step_report = train_tokenized_grpo_group_with_grad_norms(
+                        &*backend,
+                        &tgroup,
+                        weights,
+                        model_config,
+                        &mut params,
+                        config,
+                        segments.as_deref(),
+                        &device,
+                        opt_state.as_mut(),
+                        &mut lora_grad_norms,
+                        &lora_grad_index,
+                        &mut policy_audit,
+                        ema_ref_state.as_ref().map(|s| &s.snapshot),
+                        Some(&mut phase_timings),
+                    )?;
+                    if let Some(state) = ema_ref_state.as_mut() {
+                        state.groups_since_refresh += 1;
+                        if state.groups_since_refresh >= state.refresh_every {
+                            state.snapshot = lora_snapshot_capture_or_blend(
+                                &params,
+                                Some(&state.snapshot),
+                                state.decay,
+                            )
+                            .context("EMA reference snapshot refresh")?;
+                            state.groups_since_refresh = 0;
+                            tracing::debug!(
+                                group = processed_groups,
+                                refresh_every = state.refresh_every,
+                                decay = state.decay,
+                                "streamed GRPO EMA reference snapshot refreshed"
+                            );
+                        }
+                    }
+                    Ok(step_report)
+                },
             )?;
             let avg_group_loss = step_report.loss;
             echo_metrics.observe_env_ce(step_report.echo_env_ce);
@@ -6820,23 +7078,6 @@ pub fn grpo_train_jsonl_to(
                 "grpo_train_jsonl: non-finite loss {avg_group_loss} at group {processed_groups}"
             );
             last_loss = avg_group_loss;
-
-            // Phase 3b: refresh the EMA reference every `refresh_every` groups.
-            if let Some(state) = ema_ref_state.as_mut() {
-                state.groups_since_refresh += 1;
-                if state.groups_since_refresh >= state.refresh_every {
-                    state.snapshot =
-                        lora_snapshot_capture_or_blend(&params, Some(&state.snapshot), state.decay)
-                            .context("EMA reference snapshot refresh")?;
-                    state.groups_since_refresh = 0;
-                    tracing::debug!(
-                        group = processed_groups,
-                        refresh_every = state.refresh_every,
-                        decay = state.decay,
-                        "streamed GRPO EMA reference snapshot refreshed"
-                    );
-                }
-            }
 
             let (step, total_steps, progress) = jsonl_byte_progress(total_bytes, bytes_read);
             if let Some(ref cb) = progress_cb {
@@ -6878,17 +7119,29 @@ pub fn grpo_train_jsonl_to(
                 if interval > 0 && processed_groups % interval == 0 && bytes_read < total_bytes {
                     let ckpt_dir = output_adapter_dir
                         .join(format!("{adapter_name}-checkpoint-{processed_groups}"));
-                    if let Err(e) = params.sync_to_master(&*backend) {
-                        tracing::warn!(step = processed_groups, error = %e, "failed to sync LoRA Vars to candle for streamed GRPO checkpoint");
-                    }
-                    if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
-                        tracing::warn!(step = processed_groups, error = %e, "failed to save streamed GRPO training checkpoint");
-                    } else {
-                        tracing::info!(
-                            step = processed_groups,
-                            "saved streamed GRPO training checkpoint"
-                        );
-                    }
+                    run_coordinated_grpo_gpu_phase(
+                        gpu_step_coordination.as_ref(),
+                        &*backend,
+                        &mut gpu_writer_timings,
+                        "streamed checkpoint device snapshot",
+                        || {
+                            params
+                                .sync_to_master(&*backend)
+                                .context("capture streamed GRPO checkpoint adapter state")
+                        },
+                    )?;
+                    params
+                        .save_peft(&ckpt_dir, model_config.num_layers)
+                        .with_context(|| {
+                            format!(
+                                "save streamed GRPO adapter checkpoint at {}",
+                                ckpt_dir.display()
+                            )
+                        })?;
+                    tracing::info!(
+                        step = processed_groups,
+                        "saved streamed GRPO training checkpoint"
+                    );
                 }
             }
         }
@@ -6915,7 +7168,17 @@ pub fn grpo_train_jsonl_to(
             &token_counts,
         );
 
-        let synced = params.sync_to_master(&*backend).unwrap_or(0);
+        let synced = run_coordinated_grpo_gpu_phase(
+            gpu_step_coordination.as_ref(),
+            &*backend,
+            &mut gpu_writer_timings,
+            "streamed final adapter snapshot",
+            || {
+                params
+                    .sync_to_master(&*backend)
+                    .context("capture final streamed GRPO adapter state")
+            },
+        )?;
         tracing::debug!(
             synced,
             "synced LoRA Vars to candle before streamed GRPO save"
@@ -6938,22 +7201,37 @@ pub fn grpo_train_jsonl_to(
     let mut result = train_body();
     drop(train_body);
     let policy_audit = finish_grpo_policy_audit(&mut result, policy_audit);
-    let adapter_smoke_test = if config.adapter_smoke_test && result.is_ok() {
-        Some(run_adapter_smoke_test_best_effort(
-            adapter_name,
-            &*backend,
-            weights,
-            model_config,
-            tokenizer,
-            &params,
-        ))
-    } else {
-        None
-    };
-    if let Some(state) = opt_state.as_ref() {
-        state.evict_from_backend(&*backend);
+    let mut adapter_smoke_test = None;
+    let cleanup_result = run_coordinated_grpo_gpu_phase(
+        gpu_step_coordination.as_ref(),
+        &*backend,
+        &mut gpu_writer_timings,
+        "streamed adapter smoke test and cleanup",
+        || {
+            if config.adapter_smoke_test && result.is_ok() {
+                adapter_smoke_test = Some(run_adapter_smoke_test_best_effort(
+                    adapter_name,
+                    &*backend,
+                    weights,
+                    model_config,
+                    tokenizer,
+                    &params,
+                ));
+            }
+            if let Some(state) = opt_state.as_ref() {
+                state.evict_from_backend(&*backend);
+            }
+            params.evict_from_backend(&*backend);
+            Ok(())
+        },
+    );
+    if let Err(error) = cleanup_result {
+        if result.is_ok() {
+            result = Err(error.context("complete coordinated streamed GRPO cleanup"));
+        } else {
+            tracing::warn!(error = %format!("{error:#}"), "streamed GRPO cleanup could not acquire healthy backend");
+        }
     }
-    params.evict_from_backend(&*backend);
     if let Some(state) = replay_state {
         let outcome = match &result {
             Ok((_, loss)) => Ok(*loss),
@@ -6963,6 +7241,7 @@ pub fn grpo_train_jsonl_to(
             tracing::warn!(error = %e, "failed to append streamed GRPO replay outcome record");
         }
     }
+    gpu_writer_timings.apply_to(&mut phase_timings);
     let status_error = result.as_ref().err().map(|err| format!("{err:#}"));
     write_grpo_train_receipt_best_effort(
         adapter_name,
@@ -13676,6 +13955,120 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn coordinated_grpo_phases_release_writer_between_groups_and_record_timing() {
+        let lock = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+        let coordination =
+            GpuStepCoordination::new(lock.clone(), kiln_model::BackendHealthHandle::default());
+        let backend = backend::for_device_kt(&cpu_device());
+        let mut writer_timings = GrpoGpuWriterTimings::default();
+
+        run_coordinated_grpo_gpu_phase(
+            Some(&coordination),
+            &*backend,
+            &mut writer_timings,
+            "test group one",
+            || {
+                assert!(
+                    lock.clone().try_read_owned().is_err(),
+                    "inference must not enter during a GRPO backend phase"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let between_groups = lock
+            .clone()
+            .try_read_owned()
+            .expect("GRPO must release the writer between optimizer groups");
+        drop(between_groups);
+
+        run_coordinated_grpo_gpu_phase(
+            Some(&coordination),
+            &*backend,
+            &mut writer_timings,
+            "test group two",
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(writer_timings.acquisitions, 2);
+        assert!(writer_timings.wait_ms.is_finite());
+        assert!(writer_timings.held_ms.is_finite());
+
+        let mut receipt_timings = GrpoBenchmarkTimings::default();
+        writer_timings.apply_to(&mut receipt_timings);
+        assert_eq!(receipt_timings.gpu_writer_acquisitions, 2);
+        assert_eq!(receipt_timings.gpu_writer_wait_ms, writer_timings.wait_ms);
+        assert_eq!(receipt_timings.gpu_writer_held_ms, writer_timings.held_ms);
+    }
+
+    #[test]
+    fn coordinated_grpo_sync_failure_quarantines_before_releasing_writer() {
+        let lock = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+        let backend_health = kiln_model::BackendHealthHandle::default();
+        let coordination = GpuStepCoordination::new(lock.clone(), backend_health.clone());
+        let backend = NamedTestBackend::failing_external_yield_sync();
+        let mut writer_timings = GrpoGpuWriterTimings::default();
+
+        let error = run_coordinated_grpo_gpu_phase(
+            Some(&coordination),
+            &*backend,
+            &mut writer_timings,
+            "injected sync failure",
+            || Ok(()),
+        )
+        .expect_err("failed GRPO settlement must reject the phase");
+        assert!(
+            format!("{error:#}").contains("injected external-yield synchronization failure"),
+            "{error:#}"
+        );
+        let health = backend_health.snapshot();
+        assert!(health.quarantined);
+        assert!(
+            health
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("injected sync failure"))
+        );
+        assert!(
+            lock.try_write().is_ok(),
+            "the process lock must not leak even though quarantine blocks reuse"
+        );
+    }
+
+    #[test]
+    fn coordinated_grpo_panic_quarantines_and_resumes_unwind() {
+        let lock = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+        let backend_health = kiln_model::BackendHealthHandle::default();
+        let coordination = GpuStepCoordination::new(lock.clone(), backend_health.clone());
+        let backend = backend::for_device_kt(&cpu_device());
+        let mut writer_timings = GrpoGpuWriterTimings::default();
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<()> = run_coordinated_grpo_gpu_phase(
+                Some(&coordination),
+                &*backend,
+                &mut writer_timings,
+                "injected panic",
+                || panic!("injected GRPO backend panic"),
+            );
+        }));
+        assert!(
+            panic.is_err(),
+            "the helper must not swallow a trainer panic"
+        );
+        let health = backend_health.snapshot();
+        assert!(health.quarantined);
+        assert!(
+            health
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("injected panic"))
+        );
+        assert!(lock.try_write().is_ok());
+    }
+
+    #[test]
     fn training_optimizer_fallback_policy_defaults_to_native_required_on_gpus() {
         assert_eq!(
             kiln_model::BackendFallbackCapabilities::for_backend("cpu", kiln_tensor::Device::Cpu)
@@ -15710,6 +16103,7 @@ pub(crate) mod tests {
     struct NamedTestBackend {
         name: &'static str,
         device: Device,
+        fail_external_yield_sync: bool,
     }
 
     impl NamedTestBackend {
@@ -15717,6 +16111,15 @@ pub(crate) mod tests {
             std::sync::Arc::new(Self {
                 name,
                 device: cpu_device(),
+                fail_external_yield_sync: false,
+            })
+        }
+
+        fn failing_external_yield_sync() -> std::sync::Arc<dyn BackendRuntime> {
+            std::sync::Arc::new(Self {
+                name: "failing-sync",
+                device: cpu_device(),
+                fail_external_yield_sync: true,
             })
         }
     }
@@ -15748,6 +16151,10 @@ pub(crate) mod tests {
 
     impl kiln_model::backend::ExternalYieldBackend for NamedTestBackend {
         fn runtime_synchronize_external_yield(&self) -> anyhow::Result<()> {
+            anyhow::ensure!(
+                !self.fail_external_yield_sync,
+                "injected external-yield synchronization failure"
+            );
             Ok(())
         }
     }
@@ -19466,16 +19873,34 @@ pub(crate) mod tests {
         let device = Device::Rocm(0);
         let model_config = tiny_config_full_attn_bf16();
         let weights = tiny_weights_bf16(&model_config, &device)?;
-        let mut params = TrainableLoraParams::initialize_seeded(
-            &model_config,
-            &weights,
-            4,
-            8.0,
-            &device,
-            Some(7),
-        )?;
         let backend = backend::for_device_kt(&device);
-        params.register_with_backend(&*backend)?;
+        let gpu_lock = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+        let coordination =
+            GpuStepCoordination::new(gpu_lock.clone(), kiln_model::BackendHealthHandle::default());
+        let mut writer_timings = GrpoGpuWriterTimings::default();
+        let mut params = run_coordinated_grpo_gpu_phase(
+            Some(&coordination),
+            &*backend,
+            &mut writer_timings,
+            "ROCm qualification setup",
+            || {
+                let params = TrainableLoraParams::initialize_seeded(
+                    &model_config,
+                    &weights,
+                    4,
+                    8.0,
+                    &device,
+                    Some(7),
+                )?;
+                params.register_with_backend(&*backend)?;
+                Ok(params)
+            },
+        )?;
+        let between_setup_and_step = gpu_lock
+            .clone()
+            .try_read_owned()
+            .expect("ROCm GRPO setup must yield to inference before the optimizer group");
+        drop(between_setup_and_step);
 
         let tokenizer = make_echo_smoke_tokenizer()?;
         let mut group = dry_run_group(vec![crate::ScoredRollout::legacy("b".to_string(), 1.0)]);
@@ -19492,20 +19917,44 @@ pub(crate) mod tests {
             ..GrpoConfig::default()
         };
 
-        let result = grpo_benchmark_training_step(
+        let report = run_coordinated_grpo_gpu_phase(
+            Some(&coordination),
             &*backend,
-            &group,
-            &weights,
-            &model_config,
-            &mut params,
-            &config,
-            None,
-            &device,
-            &tokenizer,
-            None,
-        );
-        params.evict_from_backend(&*backend);
-        let report = result?;
+            &mut writer_timings,
+            "ROCm qualification optimizer group",
+            || {
+                grpo_benchmark_training_step(
+                    &*backend,
+                    &group,
+                    &weights,
+                    &model_config,
+                    &mut params,
+                    &config,
+                    None,
+                    &device,
+                    &tokenizer,
+                    None,
+                )
+            },
+        )?;
+        let between_step_and_cleanup = gpu_lock
+            .clone()
+            .try_read_owned()
+            .expect("ROCm GRPO optimizer group must settle before yielding to inference");
+        drop(between_step_and_cleanup);
+        run_coordinated_grpo_gpu_phase(
+            Some(&coordination),
+            &*backend,
+            &mut writer_timings,
+            "ROCm qualification cleanup",
+            || {
+                params.evict_from_backend(&*backend);
+                Ok(())
+            },
+        )?;
+        assert_eq!(writer_timings.acquisitions, 3);
+        assert!(writer_timings.wait_ms.is_finite());
+        assert!(writer_timings.held_ms > 0.0);
         assert_recorded_policy_audit_report(&report);
         Ok(())
     }

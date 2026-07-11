@@ -837,6 +837,16 @@ pub struct TrainingPhaseTimingsReceipt {
     pub policy_forward_ms: f64,
     pub backward_ms: f64,
     pub optimizer_ms: f64,
+    /// Time spent waiting for server inference readers before a bounded GRPO
+    /// GPU phase. Zero for direct trainer calls without server coordination.
+    #[serde(default)]
+    pub gpu_writer_wait_ms: f64,
+    /// Time for which bounded GRPO phases held the server GPU writer.
+    #[serde(default)]
+    pub gpu_writer_held_ms: f64,
+    /// Number of separately scheduled GRPO GPU phases.
+    #[serde(default)]
+    pub gpu_writer_acquisitions: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

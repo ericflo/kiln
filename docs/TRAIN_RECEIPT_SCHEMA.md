@@ -96,8 +96,16 @@ filters.
 - `policy_forward_ms`
 - `backward_ms`
 - `optimizer_ms`
+- `gpu_writer_wait_ms`: cumulative time waiting for in-flight inference readers
+  before bounded server-coordinated GRPO phases.
+- `gpu_writer_held_ms`: cumulative time those phases held exclusive GPU
+  ownership, including the mandatory device settlement before each yield.
+- `gpu_writer_acquisitions`: number of separately scheduled GRPO GPU phases.
 
 GRPO and GRPO dry-run paths populate tokenization and mask timings. GRPO
 training paths additionally populate reference, policy, backward, and optimizer
-timings. Other training paths may leave fields at `0.0` until they wire the same
-instrumentation.
+timings. Server-submitted GRPO additionally populates the three GPU-writer
+fields; direct library calls without coordination leave them at zero. Other
+training paths may leave fields at `0.0` until they wire the same
+instrumentation. Disk encoding and checkpoint publication are deliberately not
+included in writer-held time.

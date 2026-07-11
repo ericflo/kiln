@@ -40,11 +40,19 @@ writes the full record array. Records include:
 - `report.timings.policy_forward_ms`
 - `report.timings.backward_ms`
 - `report.timings.optimizer_ms`
+- `report.timings.gpu_writer_wait_ms`
+- `report.timings.gpu_writer_held_ms`
+- `report.timings.gpu_writer_acquisitions`
 - `peak_vram_mib`
 - `kernel_launch_count` (`null` until a launch counter is wired)
 - `report.tokens_per_sec`
 - `report.policy_audit` for a training step (absent in `--dry-run`), using the
   same `kiln.grpo-policy-audit.v1` object persisted in `train_receipt.json`
+
+The three writer fields are zero for this standalone benchmark. They become
+nonzero when the server coordinates a GRPO job with concurrent inference.
+Writer-held time includes backend synchronization at each external-yield
+boundary; tokenization and filesystem publication remain outside the writer.
 
 Use `--lengths` for shorter smoke runs in CI or development environments. Use
 `--segments 0` to disable checkpointing for small CUDA comparisons; leave

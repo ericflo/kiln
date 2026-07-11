@@ -25,6 +25,63 @@ fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> 
 }
 
 #[test]
+fn grpo_uses_settled_group_boundaries_instead_of_a_job_long_gpu_writer() {
+    let queue = read("crates/kiln-server/src/training_queue.rs");
+    let branch = source_between(
+        &queue,
+        "QueuedJob::Grpo(mut req) => {",
+        "QueuedJob::Opd(mut req) => {",
+    );
+    assert!(
+        !branch.contains("gpu_coordination_write_guard_while_healthy"),
+        "GRPO must not retain one GPU writer across dataset I/O and the full job"
+    );
+    assert!(branch.contains("Some(trainer::GpuStepCoordination::new("));
+
+    let trainer = read("crates/kiln-train/src/trainer.rs");
+    let helper = source_between(
+        &trainer,
+        "fn run_coordinated_grpo_gpu_phase<T>(",
+        "pub fn sft_train(",
+    );
+    for required in [
+        "catch_unwind",
+        "runtime_synchronize_external_yield",
+        "backend_health.quarantine",
+        "drop(guard)",
+    ] {
+        assert!(
+            helper.contains(required),
+            "coordinated GRPO phases must settle and fail closed before yielding: {required}"
+        );
+    }
+
+    let inline = source_between(
+        &trainer,
+        "pub fn grpo_train_to_with_coordination(",
+        "pub fn grpo_dry_run_jsonl(",
+    );
+    let streamed = source_between(
+        &trainer,
+        "pub fn grpo_train_jsonl_to_with_coordination(",
+        "/// Tokenized data for a single completion",
+    );
+    for (route, source) in [("inline", inline), ("streamed", streamed)] {
+        assert!(
+            source.contains("optimizer group"),
+            "{route} GRPO step is not coordinated"
+        );
+        assert!(source.contains("checkpoint device snapshot"));
+        assert!(source.contains("final adapter snapshot"));
+        assert!(source.contains("adapter smoke test and cleanup"));
+        assert!(
+            source.contains("save_peft(&ckpt_dir") && source.contains("save_peft(&output_dir"),
+            "{route} GRPO must publish captured CPU state outside its GPU phases"
+        );
+    }
+}
+
+#[test]
 fn rocm_disk_cache_persistence_has_no_server_call_sites() {
     let main = read("crates/kiln-server/src/main.rs");
     for forbidden in [

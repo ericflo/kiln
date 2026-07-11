@@ -594,6 +594,7 @@ fn run_grpo(
     progress_cb: trainer::ProgressCallback,
     replay_ctx: trainer::ReplayContext,
     job_id: &str,
+    gpu_step_coordination: Option<trainer::GpuStepCoordination>,
 ) -> std::result::Result<PathBuf, String> {
     if let Some(dataset_path) = req.dataset_path.as_deref() {
         if dataset_path.trim().is_empty() {
@@ -615,7 +616,7 @@ fn run_grpo(
                     "backend native training route enabled - routing streamed GRPO dataset to \
                      cuda_native_grpo_train_jsonl"
                 );
-                return kiln_train::cuda_train::cuda_native_grpo_train_jsonl_to(
+                return kiln_train::cuda_train::cuda_native_grpo_train_jsonl_to_with_coordination(
                     std::path::Path::new(dataset_path),
                     &req.config,
                     model_config,
@@ -625,6 +626,7 @@ fn run_grpo(
                     output_adapter_dir,
                     adapter_name,
                     Some(progress_cb),
+                    gpu_step_coordination.clone(),
                 )
                 .map_err(|e| format!("{e:#}"));
             }
@@ -645,7 +647,7 @@ fn run_grpo(
                 dataset_path,
                 "routing streamed GRPO dataset to generic trainer"
             );
-            return trainer::grpo_train_jsonl_to(
+            return trainer::grpo_train_jsonl_to_with_coordination(
                 std::path::Path::new(dataset_path),
                 &req.config,
                 model_config,
@@ -656,6 +658,7 @@ fn run_grpo(
                 adapter_name,
                 Some(progress_cb),
                 Some(replay_ctx),
+                gpu_step_coordination,
             )
             .map_err(|e| format!("{e:#}"));
         }
@@ -669,7 +672,7 @@ fn run_grpo(
                 native_route_env,
                 "backend native training route enabled - routing GRPO to cuda_native_grpo_train"
             );
-            return kiln_train::cuda_train::cuda_native_grpo_train_to(
+            return kiln_train::cuda_train::cuda_native_grpo_train_to_with_coordination(
                 &req.groups,
                 &req.config,
                 model_config,
@@ -679,6 +682,7 @@ fn run_grpo(
                 output_adapter_dir,
                 adapter_name,
                 Some(progress_cb),
+                gpu_step_coordination.clone(),
             )
             .map_err(|e| format!("{e:#}"));
         }
@@ -693,7 +697,7 @@ fn run_grpo(
             );
         }
     }
-    trainer::grpo_train_to(
+    trainer::grpo_train_to_with_coordination(
         &req.groups,
         &req.config,
         model_config,
@@ -704,6 +708,7 @@ fn run_grpo(
         adapter_name,
         Some(progress_cb),
         Some(replay_ctx),
+        gpu_step_coordination,
     )
     .map_err(|e| format!("{e:#}"))
 }
@@ -3216,28 +3221,31 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     request_body,
                     base_model: base_model.clone(),
                 };
-                gpu_coordination_write_guard_while_healthy(&state.gpu_lock, &backend_health)
-                    .map_err(|error| format!("{error:#}"))
-                    .and_then(|_gpu_guard| {
-                        let guard = runner_arc.read().unwrap();
-                        let training_dispatch =
-                            guard.backend_capabilities().training.server_dispatch;
-                        let native_route_enabled = training_dispatch.native_route_enabled();
-                        run_grpo(
-                            native_route_enabled,
-                            training_dispatch.native_training_env,
-                            &req,
-                            &state.model_config,
-                            &guard.weights,
-                            &state.tokenizer,
-                            &state.adapter_dir,
-                            output_adapter_dir,
-                            &adapter_name,
-                            progress_cb,
-                            replay_ctx,
-                            &job_id,
-                        )
-                    })
+                // GRPO coordinates setup, each optimizer group, snapshots, and
+                // cleanup independently. Dataset reads, tokenization, and disk
+                // publication therefore cannot strand healthy inference behind
+                // one job-long writer.
+                let guard = runner_arc.read().unwrap();
+                let training_dispatch = guard.backend_capabilities().training.server_dispatch;
+                let native_route_enabled = training_dispatch.native_route_enabled();
+                run_grpo(
+                    native_route_enabled,
+                    training_dispatch.native_training_env,
+                    &req,
+                    &state.model_config,
+                    &guard.weights,
+                    &state.tokenizer,
+                    &state.adapter_dir,
+                    output_adapter_dir,
+                    &adapter_name,
+                    progress_cb,
+                    replay_ctx,
+                    &job_id,
+                    Some(trainer::GpuStepCoordination::new(
+                        state.gpu_lock.clone(),
+                        backend_health.clone(),
+                    )),
+                )
             }
             QueuedJob::Opd(mut req) => {
                 if req.config.checkpoint_interval.is_none() {

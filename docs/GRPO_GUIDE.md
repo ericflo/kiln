@@ -218,6 +218,24 @@ mean reward typically climbs from ~0.4 (some completions already nail it) to
 ~0.85 within the first dozen rounds for arithmetic this simple. Re-running
 with the same `seed` lets you compare runs directly.
 
+### Serving during training
+
+Server-submitted GRPO does not reserve the GPU for the lifetime of the job.
+Model residency/setup, each complete optimizer group (including any EMA
+reference refresh), device snapshots, and final smoke/cleanup work acquire
+exclusive GPU ownership separately. The backend is synchronized before every
+release, and a failed settlement or panic quarantines the process until restart.
+Reward filtering, JSONL reads, tokenization, progress callbacks, safetensors
+encoding, and filesystem publication run without the GPU writer, so healthy
+inference can make progress between groups.
+
+Each group is still one atomic training interval. A very large or long-context
+group can therefore produce a correspondingly long attributed inference wait.
+Inspect `phase_timings.gpu_writer_wait_ms`, `gpu_writer_held_ms`, and
+`gpu_writer_acquisitions` in `train_receipt.json` when diagnosing pauses; these
+fields distinguish expected group-level contention from time spent outside GPU
+ownership.
+
 ## Worked example 2: JSON-validity reward (format compliance)
 
 A reward function doesn't have to be binary. Partial credit for *almost*
