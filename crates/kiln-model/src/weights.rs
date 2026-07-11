@@ -360,6 +360,50 @@ pub(crate) struct ModelSnapshotLease {
     directory: Option<tempfile::TempDir>,
 }
 
+/// Explicit shutdown owner for a loader-created immutable model snapshot.
+///
+/// Servers must call [`cleanup`](Self::cleanup) only after model-backed work
+/// has drained. Library callers can rely on the lease destructor as a fallback.
+#[derive(Clone, Debug)]
+pub struct ModelSnapshotCleanup {
+    path: PathBuf,
+}
+
+impl ModelSnapshotCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn cleanup(&self) -> io::Result<()> {
+        let started = Instant::now();
+        match remove_snapshot_path(&self.path) {
+            Ok(retries) => {
+                tracing::info!(
+                    snapshot = %self.path.display(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    cleanup_retries = retries,
+                    "private model snapshot removed during drained shutdown"
+                );
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(
+                    snapshot = %self.path.display(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    cleanup_retries = 3,
+                    error = %error,
+                    "private model snapshot cleanup failed during drained shutdown"
+                );
+                Err(error)
+            }
+        }
+    }
+}
+
 impl ModelSnapshotLease {
     pub(crate) fn new(directory: tempfile::TempDir) -> Self {
         Self {
@@ -391,35 +435,45 @@ impl Drop for ModelSnapshotLease {
             ),
             Err(initial_error) => {
                 let initial_error_text = initial_error.to_string();
-                let mut last_error = initial_error;
-                for attempt in 1..=3u32 {
-                    make_snapshot_tree_removable(&path);
-                    match fs::remove_dir_all(&path) {
-                        Ok(()) => {
-                            tracing::warn!(
-                                snapshot = %path.display(),
-                                elapsed_ms = started.elapsed().as_millis() as u64,
-                                cleanup_retries = attempt,
-                                initial_error = %initial_error_text,
-                                "private model snapshot cleanup recovered after retry"
-                            );
-                            return;
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
-                        Err(error) => last_error = error,
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
+                match remove_snapshot_path(&path) {
+                    Ok(retries) => tracing::warn!(
+                        snapshot = %path.display(),
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        cleanup_retries = retries,
+                        initial_error = %initial_error_text,
+                        "private model snapshot cleanup recovered after retry"
+                    ),
+                    Err(error) => tracing::error!(
+                        snapshot = %path.display(),
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        cleanup_retries = 3,
+                        error = %error,
+                        "private model snapshot cleanup failed; remove the path manually"
+                    ),
                 }
-                tracing::error!(
-                    snapshot = %path.display(),
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    cleanup_retries = 3,
-                    error = %last_error,
-                    "private model snapshot cleanup failed; remove the path manually"
-                );
             }
         }
     }
+}
+
+fn remove_snapshot_path(path: &Path) -> io::Result<u32> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => return Ok(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(_) => {}
+    }
+
+    let mut last_error = None;
+    for attempt in 1..=3u32 {
+        make_snapshot_tree_removable(path);
+        match fs::remove_dir_all(path) {
+            Ok(()) => return Ok(attempt),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(attempt),
+            Err(error) => last_error = Some(error),
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(last_error.expect("snapshot cleanup retry records its final error"))
 }
 
 fn make_snapshot_tree_removable(path: &Path) {
@@ -663,6 +717,15 @@ pub struct ModelWeights {
 }
 
 impl ModelWeights {
+    /// Retain an explicit cleanup handle for server shutdown. The handle does
+    /// not keep mapped weights alive and must only be invoked after model work
+    /// has drained.
+    pub fn snapshot_cleanup_handle(&self) -> Option<ModelSnapshotCleanup> {
+        self.source_content_guard
+            .as_ref()
+            .map(|guard| ModelSnapshotCleanup::new(guard._snapshot_lease.path().to_path_buf()))
+    }
+
     /// Verify that the loader's exact source shards still match the revision
     /// recorded before safetensors parsing.
     ///

@@ -544,10 +544,12 @@ full bounded copy and requires enough free space plus a reserve. Set
 `model.snapshot_dir` (or its `KILN_MODEL_SNAPSHOT_DIR` override) to a private
 filesystem with suitable capacity when the model directory's parent is not
 appropriate. The snapshot stays alive for
-deferred MTP loading and is removed when the runner exits. Cleanup retries after
-restoring owner-only deletion permissions and emits a structured error with the
-exact residual path if removal still fails. Mutating the original checkpoint
-after startup cannot change loaded bytes or their revision. A user
+deferred MTP loading. The server explicitly removes it after model-backed work
+drains; the loader lease also removes it on drop for startup errors and library
+callers. Cleanup retries after restoring owner-only deletion permissions and a
+server shutdown fails with the exact residual path if removal still fails.
+Mutating the original checkpoint after startup cannot change loaded bytes or
+their revision. A user
 with the same UID (or root) can still discover and rewrite process-owned files;
 Kiln treats that as part of the trusted host boundary.
 

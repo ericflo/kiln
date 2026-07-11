@@ -475,6 +475,7 @@ async fn main() -> Result<()> {
     let response_delivery_policy = kiln_server::batching_engine::ResponseDeliveryPolicy::from(
         config.server.stream_stall_grace_ms,
     );
+    let mut model_snapshot_cleanup = None;
     let mut state = if let Some(mp) = model_path {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::debug!("loading model weights from {mp}");
@@ -495,6 +496,7 @@ async fn main() -> Result<()> {
             .source_content_sha256
             .clone()
             .context("loaded model is missing its loader-owned source content revision")?;
+        model_snapshot_cleanup = model_weights.snapshot_cleanup_handle();
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message("uploading weights to GPU");
         }
@@ -1050,6 +1052,11 @@ async fn main() -> Result<()> {
         ))
         .await?;
 
+    if let Some(cleanup) = model_snapshot_cleanup {
+        cleanup
+            .cleanup()
+            .with_context(|| format!("remove model snapshot {}", cleanup.path().display()))?;
+    }
     tracing::info!("server stopped cleanly");
     Ok(())
 }

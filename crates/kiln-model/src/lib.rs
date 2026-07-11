@@ -96,4 +96,4 @@ pub use lora_loader::LoraWeights;
 pub use paged_kv_cache_kt::PagedKvCacheKt;
 pub use rocm_graph::RocmGraphStats;
 pub use speculative::SpeculativeConfig;
-pub use weights::ModelWeights;
+pub use weights::{ModelSnapshotCleanup, ModelWeights};

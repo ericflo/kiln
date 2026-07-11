@@ -2117,6 +2117,20 @@ mod tests {
         assert!(!snapshot_root.exists());
     }
 
+    #[test]
+    fn private_snapshot_explicit_cleanup_is_idempotent_while_owner_is_alive() {
+        let (_dir, _source, weights) = load_tiny_source_guard_fixture();
+        let cleanup = weights.snapshot_cleanup_handle().unwrap();
+        let snapshot_root = cleanup.path().to_path_buf();
+        assert!(snapshot_root.is_dir());
+
+        cleanup.cleanup().unwrap();
+        assert!(!snapshot_root.exists());
+        cleanup.cleanup().unwrap();
+        drop(weights);
+        assert!(!snapshot_root.exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn private_snapshot_cleanup_recovers_read_only_directory_after_last_owner() {
