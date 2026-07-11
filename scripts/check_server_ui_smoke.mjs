@@ -468,6 +468,47 @@ function sse(res, chunks) {
   res.end();
 }
 
+function smokeThinkingBudgetMetadata(body, { triggered = true, trigger = 'tokens' } = {}) {
+  const hasTokens = Object.hasOwn(body, 'thinking_budget_tokens');
+  const hasTime = Object.hasOwn(body, 'thinking_budget_ms');
+  const maxTokens = hasTokens ? body.thinking_budget_tokens : 8;
+  const maxTimeMs = hasTime ? body.thinking_budget_ms : null;
+  const tokensSource = hasTokens
+    ? (maxTokens === null ? 'request_unlimited' : 'request')
+    : 'server_default';
+  const timeSource = hasTime
+    ? (maxTimeMs === null ? 'request_unlimited' : 'request')
+    : 'unlimited';
+  const configured = maxTokens !== null || maxTimeMs !== null;
+  const metadata = {
+    configured,
+    applied: configured,
+    tokens_source: tokensSource,
+    time_source: timeSource,
+    triggered: configured && triggered,
+  };
+  if (maxTokens !== null) metadata.max_tokens = maxTokens;
+  if (maxTimeMs !== null) metadata.max_time_ms = maxTimeMs;
+  if (configured) {
+    if (triggered) metadata.trigger = trigger;
+    metadata.closed = true;
+    metadata.thinking_tokens = maxTokens ?? 2;
+    metadata.thinking_time_ms = 7;
+  }
+  return metadata;
+}
+
+function smokeThinkingBudgetOutcome(metadata) {
+  if (!metadata.applied) return undefined;
+  return {
+    triggered: metadata.triggered,
+    ...(metadata.trigger ? { trigger: metadata.trigger } : {}),
+    closed: metadata.closed,
+    thinking_tokens: metadata.thinking_tokens,
+    thinking_time_ms: metadata.thinking_time_ms,
+  };
+}
+
 async function startServer({
   failDashboardApis = false,
   availableAdapters = defaultAvailableAdapters,
@@ -1290,15 +1331,71 @@ async function startServer({
         ]);
         return;
       }
+      if (body?.stream && /Compare stream failure\./.test(prompt)) {
+        if (body.adapter === 'adapter-alpha') {
+          sse(res, [{
+            error: {
+              message: 'Injected compare stream failure.',
+              type: 'server_error',
+              code: 'generation_error',
+            },
+          }]);
+        } else {
+          const metadata = smokeThinkingBudgetMetadata(body, { triggered: false });
+          sse(res, [
+            { choices: [{ delta: { content: 'Healthy side.' } }] },
+            {
+              choices: [{
+                delta: {},
+                finish_reason: 'stop',
+                thinking_budget: smokeThinkingBudgetOutcome(metadata),
+              }],
+              metadata: { thinking_budget: metadata },
+            },
+          ]);
+        }
+        return;
+      }
+      if (body?.stream && /Compare budget outcomes\./.test(prompt)) {
+        const capped = body.adapter === 'adapter-alpha';
+        const metadata = smokeThinkingBudgetMetadata(body, {
+          triggered: capped,
+          trigger: 'tokens',
+        });
+        sse(res, [
+          { choices: [{ delta: { role: 'assistant' } }] },
+          { choices: [{ delta: { reasoning_content: capped ? 'Adapter reasoning.' : 'Base reasoning.' } }] },
+          { choices: [{ delta: { content: capped ? 'Adapter final.' : 'Base final.' } }] },
+          {
+            choices: [{
+              delta: {},
+              finish_reason: capped ? 'length' : 'stop',
+              thinking_budget: smokeThinkingBudgetOutcome(metadata),
+            }],
+            metadata: { thinking_budget: metadata },
+          },
+        ]);
+        return;
+      }
       if (!body?.stream || !/Explain Kiln in one sentence\./.test(prompt)) {
         res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ detail: 'Unexpected Quick Inference smoke request' }));
         return;
       }
+      const metadata = smokeThinkingBudgetMetadata(body);
       sse(res, [
         { choices: [{ delta: { role: 'assistant' } }] },
+        { choices: [{ delta: { reasoning_content: 'Checked the active thinking budget.' } }] },
         { choices: [{ delta: { content: 'Kiln serves one tuned model' } }] },
         { choices: [{ delta: { content: ' and learns from feedback live.' } }] },
+        {
+          choices: [{
+            delta: {},
+            finish_reason: 'stop',
+            thinking_budget: smokeThinkingBudgetOutcome(metadata),
+          }],
+          metadata: { thinking_budget: metadata },
+        },
       ]);
       return;
     }
@@ -2971,6 +3068,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       fail(`Custom thinking budget should send token zero and fractional seconds as integer ms, got ${JSON.stringify(customBudgetBody)}`);
     }
     await waitForPanelText(page, '#chat-output', /Kiln serves one tuned model and learns from feedback live\./, 'Quick Inference response missing');
+    await waitForPanelText(page, '#chat-output', /token cap/, 'Quick Inference should render the final thinking-budget outcome');
     await expectDisabled(page, '#copy-chat-response', false, 'Copy response should enable after an assistant response renders');
     await clickAndWait(page, '#copy-chat-response', 'Could not click Copy response');
     await page.waitForFunction(
@@ -3021,6 +3119,54 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await clickAndWait(page, '#chat-clear', 'Could not clear inherited thinking-budget response');
     await waitForPanelText(page, '#chat-output', /Send a message to test inference\./, 'Quick Inference clear should restore the empty state');
     await expectDisabled(page, '#copy-chat-response', true, 'Copy response should disable after clearing chat');
+
+    // Compare must consume and render the exact same SSE finish metadata as
+    // normal Playground chat. Side A closes naturally; side B hits the token
+    // cap and finishes by length, proving per-side outcomes stay independent.
+    await page.$eval('#chat-compare-toggle', (input) => {
+      if (!input.checked) input.click();
+    });
+    await page.waitForFunction(() => {
+      const pair = document.getElementById('chat-compare-pair');
+      return pair && getComputedStyle(pair).display !== 'none';
+    }, { timeout: 5000 }).catch(async () => {
+      const state = await page.evaluate(() => ({
+        checked: document.getElementById('chat-compare-toggle')?.checked,
+        pairInlineDisplay: document.getElementById('chat-compare-pair')?.style.display,
+        pairComputedDisplay: getComputedStyle(document.getElementById('chat-compare-pair')).display,
+        adapterBDisplay: document.getElementById('chat-adapter-b')?.style.display,
+      }));
+      fail(`Compare mode should reveal the side-by-side response panel, got ${JSON.stringify(state)}`);
+    });
+    await page.waitForFunction(() => (
+      Array.from(document.getElementById('chat-adapter-b')?.options || [])
+        .some((option) => option.value === 'adapter-alpha')
+    ), { timeout: 5000 }).catch(() => fail('Compare adapter options should include adapter-alpha'));
+    await page.select('#chat-adapter', '');
+    await page.select('#chat-adapter-b', 'adapter-alpha');
+    await page.type('#chat-input', 'Compare budget outcomes.');
+    await expectDisabled(page, '#chat-send', false, 'Compare send should enable after text is entered');
+    await clickAndWait(page, '#chat-send', 'Could not send the Playground comparison');
+    await page.waitForFunction(() => {
+      const a = document.getElementById('chat-compare-a-body')?.textContent || '';
+      const b = document.getElementById('chat-compare-b-body')?.textContent || '';
+      return /Base final\./.test(a)
+        && /natural close/.test(a)
+        && /Adapter final\./.test(b)
+        && /token cap/.test(b)
+        && /truncated/.test(b)
+        && document.getElementById('chat-save-judgment')?.disabled === false;
+    }, { timeout: 5000 }).catch(() => fail('Compare mode should render independent content, budget outcomes, and finish reasons'));
+    await page.type('#chat-input', 'Compare stream failure.');
+    await clickAndWait(page, '#chat-send', 'Could not send the compare stream-error regression');
+    await page.waitForFunction(() => {
+      const a = document.getElementById('chat-compare-a-body')?.textContent || '';
+      const b = document.getElementById('chat-compare-b-body')?.textContent || '';
+      return /Healthy side\./.test(a) && /Injected compare stream failure\./.test(b);
+    }, { timeout: 5000 }).catch(() => fail('A structured generation_error must fail only its compare side and remain visible'));
+    await page.$eval('#chat-compare-toggle', (input) => {
+      if (input.checked) input.click();
+    });
 
     // ---- Evals golden path: a first-five-minutes user with no data must not
     // dead-end. Suites empty state routes to Datasets (no raw-API copy);

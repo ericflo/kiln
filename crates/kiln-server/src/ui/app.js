@@ -4865,6 +4865,131 @@ function thinkingBudgetSummary(outcome) {
   return outcome.closed ? 'natural close' : 'unclosed';
 }
 
+function appendCompletionOutcomeStats(stats, message, hasReasoning) {
+  const budgetOutcome = !message.pending && !hasReasoning
+    ? thinkingBudgetSummary(message.thinkingBudget)
+    : '';
+  if (budgetOutcome) {
+    stats.push(`<span class="stat"><strong>Thinking</strong> ${escapeHtml(budgetOutcome)}</span>`);
+  }
+  if (!message.pending && message.finishReason && message.finishReason !== 'stop') {
+    const kind = message.finishReason === 'length' ? 'truncated' : message.finishReason;
+    const cls = message.finishReason === 'length' ? 'stat finish-warn' : 'stat';
+    const title = message.finishReason === 'length'
+      ? 'Response was cut off — increase Max tokens to let the model finish.'
+      : `Generation ended with finish_reason=${message.finishReason}.`;
+    stats.push(`<span class="${cls}" title="${escapeHtml(title)}">${icon('warning','icn-sm')} ${escapeHtml(kind)}</span>`);
+  }
+}
+
+function applyChatCompletionStreamChunk(message, chunk, now = performance.now()) {
+  const choice = chunk?.choices?.[0];
+  const delta = choice?.delta;
+  let changed = false;
+
+  if (choice?.finish_reason) {
+    message.finishReason = choice.finish_reason;
+    changed = true;
+  }
+  const thinkingBudget = chunk?.metadata?.thinking_budget;
+  if (thinkingBudget && typeof thinkingBudget === 'object') {
+    message.thinkingBudget = thinkingBudget;
+    changed = true;
+  }
+
+  const reasoning = typeof delta?.reasoning_content === 'string'
+    ? delta.reasoning_content
+    : '';
+  const content = typeof delta?.content === 'string' ? delta.content : '';
+  if (!reasoning && !content) return changed;
+
+  if (message.firstTokenMs == null) {
+    message.firstTokenMs = now;
+    message.ttftMs = now - message.startMs;
+  }
+  if (reasoning) {
+    if (message.thinkStartMs == null) message.thinkStartMs = now;
+    message.reasoning += reasoning;
+  }
+  if (content) {
+    if (message.thinkStartMs != null && message.thinkEndMs == null) {
+      message.thinkEndMs = now;
+    }
+    if (message.firstContentTokenMs == null) message.firstContentTokenMs = now;
+    message.content += content;
+  }
+  message.pending = true;
+  message.lastTokenMs = now;
+  message.durationMs = now - message.startMs;
+  return true;
+}
+
+async function consumeChatCompletionSse(response, message, onUpdate, logLabel) {
+  if (!response.body) throw new Error('Streaming response did not include a body.');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let sawDone = false;
+
+  const consumeLine = (rawLine) => {
+    let line = rawLine;
+    if (line.endsWith('\r')) line = line.slice(0, -1);
+    if (!line.startsWith('data:')) return;
+    let payload = line.slice(5);
+    if (payload.startsWith(' ')) payload = payload.slice(1);
+    if (payload === '[DONE]') {
+      sawDone = true;
+      return;
+    }
+    if (!payload) return;
+
+    let chunk;
+    try {
+      chunk = JSON.parse(payload);
+    } catch (parseErr) {
+      console.warn(`[${logLabel}] skipped malformed SSE chunk`, parseErr, payload.slice(0, 120));
+      return;
+    }
+    if (chunk?.error) {
+      const error = new Error(chunk.error.message || chunk.error.detail || 'Streaming generation failed.');
+      if (chunk.error.code) error.code = chunk.error.code;
+      throw error;
+    }
+    if (applyChatCompletionStreamChunk(message, chunk)) onUpdate(message);
+  };
+
+  const drainLines = (flush) => {
+    let newline;
+    while ((newline = buffer.indexOf('\n')) !== -1) {
+      consumeLine(buffer.slice(0, newline));
+      buffer = buffer.slice(newline + 1);
+      if (sawDone) return;
+    }
+    if (flush && buffer) {
+      consumeLine(buffer);
+      buffer = '';
+    }
+  };
+
+  try {
+    while (!sawDone) {
+      const { done, value } = await reader.read();
+      if (done) {
+        buffer += decoder.decode();
+        drainLines(true);
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      drainLines(false);
+    }
+    if (!sawDone) {
+      throw new Error('Streaming response ended before the [DONE] sentinel.');
+    }
+  } finally {
+    try { await reader.cancel(); } catch (_) {}
+  }
+}
+
 function renderAssistantBubble(m) {
   const parts = [];
   const hasReasoning = !!(m.reasoning && m.reasoning.length);
@@ -4939,16 +5064,7 @@ function renderAssistantBubble(m) {
     if (m.durationMs != null) stats.push(`<span class="stat"><strong>${m.pending ? 'Elapsed' : 'Total'}</strong> ${escapeHtml(formatChatDuration(m.durationMs))}</span>`);
     const tps = chatTokensPerSec(m);
     if (tps != null)          stats.push(`<span class="stat"><strong>~${tps.toFixed(tps >= 100 ? 0 : 1)}</strong> tok/s</span>`);
-    const budgetOutcome = !m.pending && !hasReasoning ? thinkingBudgetSummary(m.thinkingBudget) : '';
-    if (budgetOutcome)        stats.push(`<span class="stat"><strong>Thinking</strong> ${escapeHtml(budgetOutcome)}</span>`);
-    if (!m.pending && m.finishReason && m.finishReason !== 'stop') {
-      const kind = m.finishReason === 'length' ? 'truncated' : m.finishReason;
-      const cls = m.finishReason === 'length' ? 'stat finish-warn' : 'stat';
-      const title = m.finishReason === 'length'
-        ? 'Response was cut off — increase Max tokens to let the model finish.'
-        : `Generation ended with finish_reason=${m.finishReason}.`;
-      stats.push(`<span class="${cls}" title="${escapeHtml(title)}">${icon('warning','icn-sm')} ${escapeHtml(kind)}</span>`);
-    }
+    appendCompletionOutcomeStats(stats, m, hasReasoning);
     stats.push(`<span class="spacer"></span>`);
     if (!m.pending && m.error) {
       stats.push(`<button class="turn-btn" type="button" data-chat-action="regenerate" data-chat-id="${escapeHtml(m._id)}" title="Retry this request"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-refresh"></use></svg> retry</button>`);
@@ -5308,74 +5424,12 @@ async function streamAssistantTurn(temp, thinkingBudget) {
       throw new Error(err.detail || err.error || `HTTP ${res.status}`);
     }
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-
-    streamLoop:
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-
-      const lines = buf.split('\n');
-      buf = lines.pop();
-
-      for (let line of lines) {
-        // Strip CR for servers that emit `\r\n` line terminators (some
-        // proxies, some SSE polyfills). Without this, `payload` ends in
-        // `\r` and the `=== '[DONE]'` check never matches, so the loop
-        // only exits when the server closes the socket — which can be
-        // significantly after [DONE] in keep-alive setups.
-        if (line.endsWith('\r')) line = line.slice(0, -1);
-        if (!line.startsWith('data:')) continue;
-        // The SSE spec allows `data:value` (no space) too; accept both.
-        let payload = line.slice(5);
-        if (payload.startsWith(' ')) payload = payload.slice(1);
-        if (payload === '[DONE]') break streamLoop;
-        try {
-          const chunk = JSON.parse(payload);
-          const choice = chunk.choices?.[0];
-          const delta = choice?.delta;
-          if (choice?.finish_reason) {
-            assistant.finishReason = choice.finish_reason;
-          }
-          if (chunk.metadata?.thinking_budget?.applied) {
-            assistant.thinkingBudget = chunk.metadata.thinking_budget;
-          }
-          if (!delta) continue;
-          const now = performance.now();
-          if (assistant.firstTokenMs == null) {
-            assistant.firstTokenMs = now;
-            assistant.ttftMs = now - assistant.startMs;
-          }
-          if (delta.reasoning_content) {
-            if (assistant.thinkStartMs == null) assistant.thinkStartMs = now;
-            assistant.reasoning += delta.reasoning_content;
-            assistant.pending = true;
-            assistant.lastTokenMs = now;
-            assistant.durationMs = now - assistant.startMs;
-            patchAssistantBubble(assistant);
-          }
-          if (delta.content) {
-            if (assistant.thinkStartMs != null && assistant.thinkEndMs == null) {
-              assistant.thinkEndMs = now;
-            }
-            if (assistant.firstContentTokenMs == null) assistant.firstContentTokenMs = now;
-            assistant.content += delta.content;
-            assistant.pending = true;
-            assistant.lastTokenMs = now;
-            assistant.durationMs = now - assistant.startMs;
-            patchAssistantBubble(assistant);
-          }
-        } catch (parseErr) {
-          // Don't swallow the *whole* stream when one chunk is
-          // malformed. Log so we can see this in a user's devtools if
-          // they report a stuck stream.
-          console.warn('[playground] skipped malformed SSE chunk', parseErr, payload.slice(0, 120));
-        }
-      }
-    }
+    await consumeChatCompletionSse(
+      res,
+      assistant,
+      () => patchAssistantBubble(assistant),
+      'playground',
+    );
     assistant.pending = false;
     assistant.durationMs = (assistant.lastTokenMs || performance.now()) - assistant.startMs;
     if (assistant.thinkStartMs != null && assistant.thinkEndMs == null && assistant.content) {
@@ -9314,7 +9368,9 @@ function _renderCompareSide(side, m) {
       ? formatChatDuration(m.thinkEndMs - m.thinkStartMs)
       : (live && m.thinkStartMs ? formatChatDuration(performance.now() - m.thinkStartMs) : null);
     const label = live ? 'Thinking' : 'Thought';
-    const meta  = dur ? `<span class="think-meta"> · ${live ? '' : 'for '}${escapeHtml(dur)}</span>` : '';
+    const outcome = live ? '' : thinkingBudgetSummary(m.thinkingBudget);
+    const meta = `${dur ? `<span class="think-meta"> · ${live ? '' : 'for '}${escapeHtml(dur)}</span>` : ''}`
+      + `${outcome ? `<span class="think-meta"> · ${escapeHtml(outcome)}</span>` : ''}`;
     html += `<details class="think-block compare-think${live ? ' live' : ''}"${live ? ' open' : ''}>
       <summary><span class="think-label">${label}</span>${meta}</summary>
       <div class="think-body">${escapeHtml(m.reasoning)}</div>
@@ -9335,6 +9391,7 @@ function _renderCompareSide(side, m) {
     if (m.durationMs != null) stats.push(`<span class="stat"><strong>${m.pending ? 'Elapsed' : 'Total'}</strong> ${escapeHtml(formatChatDuration(m.durationMs))}</span>`);
     const tps = chatTokensPerSec(m);
     if (tps != null) stats.push(`<span class="stat"><strong>~${tps.toFixed(tps >= 100 ? 0 : 1)}</strong> tok/s</span>`);
+    appendCompletionOutcomeStats(stats, m, !!m.reasoning);
     html += `<div class="turn-foot" style="margin-top:6px;">${stats.join('')}</div>`;
   }
   head.innerHTML = html;
@@ -9379,46 +9436,12 @@ async function streamCompareSide(side, adapterName, prompt, temp, thinkingBudget
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || err.error || `HTTP ${res.status}`);
     }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    streamLoop:
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (let line of lines) {
-        if (line.endsWith('\r')) line = line.slice(0, -1);
-        if (!line.startsWith('data:')) continue;
-        let payload = line.slice(5);
-        if (payload.startsWith(' ')) payload = payload.slice(1);
-        if (payload === '[DONE]') break streamLoop;
-        try {
-          const chunk = JSON.parse(payload);
-          const choice = chunk.choices?.[0];
-          const delta = choice?.delta;
-          if (choice?.finish_reason) m.finishReason = choice.finish_reason;
-          if (!delta) continue;
-          const now = performance.now();
-          if (m.firstTokenMs == null) { m.firstTokenMs = now; m.ttftMs = now - m.startMs; }
-          if (delta.reasoning_content) {
-            if (m.thinkStartMs == null) m.thinkStartMs = now;
-            m.reasoning += delta.reasoning_content;
-          }
-          if (delta.content) {
-            if (m.thinkStartMs != null && m.thinkEndMs == null) m.thinkEndMs = now;
-            m.content += delta.content;
-          }
-          m.lastTokenMs = now;
-          m.durationMs = now - m.startMs;
-          _renderCompareSide(side, m);
-        } catch (parseErr) {
-          console.warn('[playground compare] skipped malformed SSE chunk', parseErr, payload.slice(0, 120));
-        }
-      }
-    }
+    await consumeChatCompletionSse(
+      res,
+      m,
+      () => _renderCompareSide(side, m),
+      'playground compare',
+    );
     m.pending = false;
     m.durationMs = (m.lastTokenMs || performance.now()) - m.startMs;
     if (m.thinkStartMs != null && m.thinkEndMs == null && m.content) {
