@@ -4665,7 +4665,7 @@ pub fn sft_train_to_with_checkpoint_root(
                 training_precision_policy,
                 &valid_indices,
                 weights.source_content_sha256.as_deref(),
-                backend.name(),
+                BackendIdentity::runtime_name(backend.as_ref()),
                 &gradient_checkpoint_plan_sha256,
             )?,
         };
