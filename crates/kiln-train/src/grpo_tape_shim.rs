@@ -554,6 +554,7 @@ fn vulkan_grpo_loss_kt(
 ) -> Result<
     Option<(
         kiln_tensor::Tensor,
+        kiln_tensor::Tensor,
         kiln_vulkan_kernel::vk_ops::flce::GrpoSavedState,
         Vec<u32>,
         usize,
@@ -600,9 +601,23 @@ fn vulkan_grpo_loss_kt(
         0,
     )
     .context("vulkan GRPO fused loss")?;
+    let policy_log_probs_vk =
+        kiln_vulkan_kernel::vk_ops::flce::vk_grpo_selected_log_probs_from_saved_state(&saved)
+            .context("vulkan GRPO fused selected policy log-probabilities")?;
     let loss = kiln_tensor::kt_tensor_from_vk(&loss_vk, device_index)
         .map_err(|e| anyhow::anyhow!("vulkan GRPO fused loss: bridge loss: {e}"))?;
-    Ok(Some((loss, saved, active_positions, seq_len, device_index)))
+    let policy_log_probs = kiln_tensor::kt_tensor_from_vk(&policy_log_probs_vk, device_index)
+        .map_err(|e| {
+            anyhow::anyhow!("vulkan GRPO fused loss: bridge policy log-probabilities: {e}")
+        })?;
+    Ok(Some((
+        loss,
+        policy_log_probs,
+        saved,
+        active_positions,
+        seq_len,
+        device_index,
+    )))
 }
 
 #[cfg(feature = "vulkan")]
@@ -1751,7 +1766,12 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
     chunk_size: usize,
     echo_env: Option<&EchoEnvSpec>,
     no_pg: bool,
-) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor, Option<f64>)> {
+) -> Result<(
+    kiln_tensor::Tensor,
+    kiln_tensor::Tensor,
+    Option<f64>,
+    kiln_tensor::Tensor,
+)> {
     let state = selected_log_probs_from_normed_hidden_chunked_state_kt(
         normed_hidden,
         head_t,
@@ -1845,7 +1865,7 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
             (loss_kt, grad_hidden, Some(env_ce_val))
         }
     };
-    Ok((loss_kt, grad_hidden, env_ce))
+    Ok((loss_kt, grad_hidden, env_ce, state.policy_log_probs))
 }
 
 /// kt-native analytic `dL/d(logits)` for the GRPO scalar loss. Pure kt ops on
@@ -2192,7 +2212,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
     chunk_size: usize,
     echo_env: Option<&EchoEnvSpec>,
     no_pg: bool,
-) -> Result<Option<(kiln_tensor::Tensor, Option<f64>)>> {
+) -> Result<Option<(kiln_tensor::Tensor, Option<f64>, kiln_tensor::Tensor)>> {
     if !tape_forward_enabled() {
         return Ok(None);
     }
@@ -2311,7 +2331,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
     };
     let loss_kt =
         loss_kt.context("try_tape_grpo_pg_loss_from_normed_hidden_kt: kt-tape forward failed")?;
-    Ok(Some((loss_kt, env_ce)))
+    Ok(Some((loss_kt, env_ce, selected_state.policy_log_probs)))
 }
 
 #[cfg(feature = "vulkan")]
@@ -2364,7 +2384,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
     behavior_log_probs: &kiln_tensor::Tensor,
     kl_reference_log_probs: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
-) -> Result<Option<kiln_tensor::Tensor>> {
+) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
     if !tape_forward_enabled() {
         return Ok(None);
     }
@@ -2382,16 +2402,17 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
         return Ok(None);
     }
 
-    let Some((loss_kt, saved, active_positions, seq_len, device_index)) = vulkan_grpo_loss_kt(
-        normed_hidden,
-        weight,
-        input_ids,
-        action_mask,
-        behavior_log_probs,
-        kl_reference_log_probs,
-        loss_params,
-    )
-    .context("vulkan GRPO scalar kt loss")?
+    let Some((loss_kt, policy_log_probs, saved, active_positions, seq_len, device_index)) =
+        vulkan_grpo_loss_kt(
+            normed_hidden,
+            weight,
+            input_ids,
+            action_mask,
+            behavior_log_probs,
+            kl_reference_log_probs,
+            loss_params,
+        )
+        .context("vulkan GRPO scalar kt loss")?
     else {
         return Ok(None);
     };
@@ -2414,7 +2435,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
         None => return Ok(None),
     };
 
-    Ok(Some(loss_kt))
+    Ok(Some((loss_kt, policy_log_probs)))
 }
 
 #[cfg(feature = "vulkan")]
@@ -2427,17 +2448,24 @@ pub(crate) fn vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
     behavior_log_probs: &kiln_tensor::Tensor,
     kl_reference_log_probs: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
-) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-    let Some((loss, saved, active_positions, seq_len, device_index)) = vulkan_grpo_loss_kt(
-        normed_hidden,
-        weight,
-        input_ids,
-        action_mask,
-        behavior_log_probs,
-        kl_reference_log_probs,
-        loss_params,
-    )
-    .context("vulkan GRPO tail loss")?
+) -> Result<
+    Option<(
+        kiln_tensor::Tensor,
+        kiln_tensor::Tensor,
+        kiln_tensor::Tensor,
+    )>,
+> {
+    let Some((loss, policy_log_probs, saved, active_positions, seq_len, device_index)) =
+        vulkan_grpo_loss_kt(
+            normed_hidden,
+            weight,
+            input_ids,
+            action_mask,
+            behavior_log_probs,
+            kl_reference_log_probs,
+            loss_params,
+        )
+        .context("vulkan GRPO tail loss")?
     else {
         return Ok(None);
     };
@@ -2452,7 +2480,7 @@ pub(crate) fn vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
         &grad_seed,
     )
     .map_err(|e| anyhow::anyhow!("vulkan GRPO tail grad: {e}"))?;
-    Ok(Some((loss, grad)))
+    Ok(Some((loss, grad, policy_log_probs)))
 }
 
 #[cfg(test)]
@@ -2741,7 +2769,7 @@ mod tests {
             lambda,
         };
         // Echo WITH the PG term (reference) and the no_pg variant.
-        let (loss_full, _grad_full, env_ce_full) =
+        let (loss_full, _grad_full, env_ce_full, _policy_full) =
             super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
                 &normed_hidden,
                 &head_t,
@@ -2758,7 +2786,7 @@ mod tests {
                 false,
             )
             .unwrap();
-        let (loss_np, grad_np, env_ce_np) =
+        let (loss_np, grad_np, env_ce_np, _policy_np) =
             super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
                 &normed_hidden,
                 &head_t,
@@ -2793,38 +2821,40 @@ mod tests {
         );
         // Gradient: equals the env-only delta from the echo closed-form
         // test = (echo grad) − (no-echo grad). Compute both references.
-        let (_l0, grad_no_echo, _e0) = super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
-            &normed_hidden,
-            &head_t,
-            &input_ids,
-            &action_mask,
-            &ref_kt,
-            &ref_kt,
-            params,
-            GrpoKlAuxiliaryRoute::HostComposite,
-            1.0,
-            &device,
-            3,
-            None,
-            false,
-        )
-        .unwrap();
-        let (_l1, grad_echo, _e1) = super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
-            &normed_hidden,
-            &head_t,
-            &input_ids,
-            &action_mask,
-            &ref_kt,
-            &ref_kt,
-            params,
-            GrpoKlAuxiliaryRoute::HostComposite,
-            1.0,
-            &device,
-            3,
-            Some(&spec),
-            false,
-        )
-        .unwrap();
+        let (_l0, grad_no_echo, _e0, _policy_no_echo) =
+            super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+                &normed_hidden,
+                &head_t,
+                &input_ids,
+                &action_mask,
+                &ref_kt,
+                &ref_kt,
+                params,
+                GrpoKlAuxiliaryRoute::HostComposite,
+                1.0,
+                &device,
+                3,
+                None,
+                false,
+            )
+            .unwrap();
+        let (_l1, grad_echo, _e1, _policy_echo) =
+            super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+                &normed_hidden,
+                &head_t,
+                &input_ids,
+                &action_mask,
+                &ref_kt,
+                &ref_kt,
+                params,
+                GrpoKlAuxiliaryRoute::HostComposite,
+                1.0,
+                &device,
+                3,
+                Some(&spec),
+                false,
+            )
+            .unwrap();
         let g_np = read(&grad_np);
         let g_ne = read(&grad_no_echo);
         let g_e = read(&grad_echo);
@@ -2901,7 +2931,7 @@ mod tests {
             entropy_aware_kl_quantile: None,
         };
 
-        let (loss_base, grad_base, env_ce_base) =
+        let (loss_base, grad_base, env_ce_base, policy_base) =
             super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
                 &normed_hidden,
                 &head_t,
@@ -2919,13 +2949,14 @@ mod tests {
             )
             .unwrap();
         assert!(env_ce_base.is_none());
+        assert_eq!(read(&policy_base), read(&plp));
 
         let spec = super::EchoEnvSpec {
             env_mask: env_mask.clone(),
             total_obs_len,
             lambda,
         };
-        let (loss_echo, grad_echo, env_ce) =
+        let (loss_echo, grad_echo, env_ce, policy_echo) =
             super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
                 &normed_hidden,
                 &head_t,
@@ -2943,6 +2974,7 @@ mod tests {
             )
             .unwrap();
         let env_ce = env_ce.expect("env rows present → env_ce reported");
+        assert_eq!(read(&policy_echo), read(&plp));
 
         // --- Dense closed form on the host. ---
         let row_logits = |p: usize| -> Vec<f32> {
@@ -3167,7 +3199,7 @@ mod tests {
             )
             .unwrap();
             let loss_expected = grpo_loss(&plp_hidden, &ref_kt, &ref_kt, params, &device).unwrap();
-            let (loss_cached, cached_hidden, _env_ce) =
+            let (loss_cached, cached_hidden, _env_ce, cached_policy) =
                 super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
                     &normed_hidden,
                     &head_t,
@@ -3186,6 +3218,7 @@ mod tests {
                 .unwrap();
             let loss_diff = (read(&loss_expected)[0] - read(&loss_cached)[0]).abs();
             assert!(loss_diff < 1e-6, "{name}: cached loss drift {loss_diff:e}");
+            assert_eq!(read(&cached_policy), read(&plp_hidden));
             let expected = read(&expected_hidden);
             let actual = read(&actual_hidden);
             let cached = read(&cached_hidden);

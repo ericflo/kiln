@@ -17,7 +17,8 @@ use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::flce::{
     VK_GRPO_IS_MODE_CISPO, VK_GRPO_KL_MODE_K3, flce_recommended_chunk_len_from_limits,
     vk_flce_loss, vk_grpo_backward_with_saved_state, vk_grpo_loss,
-    vk_grpo_loss_with_saved_state_ext, vk_selected_log_probs,
+    vk_grpo_loss_with_saved_state_ext, vk_grpo_selected_log_probs_from_saved_state,
+    vk_selected_log_probs,
 };
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
 use std::sync::Arc;
@@ -591,6 +592,9 @@ fn vk_grpo_ext_cispo_k3_asym_parity_small() -> Result<()> {
     )?;
     let grad_seed = upload_f32(&dev, &[1.0], &[1])?;
     let grad_h = vk_grpo_backward_with_saved_state(&hidden, &saved, &grad_seed)?.to_vec_f32()?;
+    let saved_selected = vk_grpo_selected_log_probs_from_saved_state(&saved)?.to_vec_f32()?;
+    let direct_selected = vk_selected_log_probs(&hidden, &weight, &labels, chunk)?.to_vec_f32()?;
+    assert_eq!(saved_selected, direct_selected);
 
     let (exp_loss, exp_dh) = cpu_grpo_ext(
         &h_data,

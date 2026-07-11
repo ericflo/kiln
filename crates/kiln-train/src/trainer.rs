@@ -6383,7 +6383,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
              this config before any GPU work; reaching this point is a bug worth \
              reporting.)"
         );
-        let grads: GradSource = {
+        let (grads, policy_log_probs): (GradSource, Tensor) = {
             #[cfg(any(
                 feature = "cuda",
                 feature = "metal",
@@ -6405,7 +6405,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                     } else {
                         None
                     };
-                let (lv, env_ce, kt_grads) = if let Some(segs) = segments {
+                let (lv, env_ce, kt_grads, policy_log_probs) = if let Some(segs) = segments {
                     let step_started = Instant::now();
                     let out = checkpointed_grpo_forward_backward_tape_authoritative_kt(
                         backend,
@@ -6463,7 +6463,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 };
                 loss_val = lv;
                 comp_echo_env_ce = env_ce;
-                GradSource::Kt(kt_grads)
+                (GradSource::Kt(kt_grads), policy_log_probs)
             }
             #[cfg(not(any(
                 feature = "cuda",
@@ -6485,6 +6485,11 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 unreachable!("GRPO kt path requires a GPU backend feature");
             }
         };
+        anyhow::ensure!(
+            policy_log_probs.elem_count() == num_active,
+            "GRPO loss returned {} selected policy log-probabilities for {num_active} active tokens",
+            policy_log_probs.elem_count()
+        );
         if token_level {
             // Cross-completion grad accumulation into the kt `GradMap`
             // (keyed by `Parameter::tensor_id()`).
@@ -11044,12 +11049,17 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     mut timings: Option<&mut GrpoBenchmarkTimings>,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
     no_pg: bool,
-) -> Result<(f64, Option<f64>, kiln_autograd::GradStore)> {
+) -> Result<(
+    f64,
+    Option<f64>,
+    kiln_autograd::GradStore,
+    kiln_tensor::Tensor,
+)> {
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
     let step_started = Instant::now();
 
-    let ((loss_val, env_ce), _loss_kt, grads_by_candle_raw) =
+    let ((loss_val, env_ce, policy_log_probs), _loss_kt, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
             // Single policy forward through final RMSNorm, without materializing
             // `[1, T, V]` logits. The GRPO loss root chunks the frozen tied head
@@ -11081,7 +11091,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                     )
                     .context("GRPO tape-authoritative(kt) Vulkan fused scalar loss")
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
-                    .map(|l| (l, None))
+                    .map(|(loss, policy_log_probs)| (loss, None, policy_log_probs))
                 }
                 _ => None,
             };
@@ -11107,8 +11117,8 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
             }
 
-            let (loss, env_ce) = match loss_opt {
-                Some(pair) => pair,
+            let (loss, env_ce, policy_log_probs) = match loss_opt {
+                Some(values) => values,
                 None => {
                     return Err(kiln_kt_bridge::BridgeError::new(
                         "GRPO tape-authoritative(kt): try_tape_grpo_pg_loss_from_normed_hidden_kt \
@@ -11124,7 +11134,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                     kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) loss.to_scalar: {e}"))
                 })?
                 as f64;
-            Ok(((loss_val, env_ce), loss))
+            Ok(((loss_val, env_ce, policy_log_probs), loss))
         })
         .map_err(|e| anyhow::anyhow!("GRPO tape-authoritative(kt) backward: {e}"))?;
 
@@ -11191,7 +11201,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
         "GRPO step end (tape-authoritative kt)"
     );
 
-    Ok((loss_val, env_ce, grads))
+    Ok((loss_val, env_ce, grads, policy_log_probs))
 }
 
 #[cfg(any(
@@ -11215,7 +11225,12 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     device: &Device,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
     no_pg: bool,
-) -> Result<(f64, Option<f64>, kiln_autograd::GradStore)> {
+) -> Result<(
+    f64,
+    Option<f64>,
+    kiln_autograd::GradStore,
+    kiln_tensor::Tensor,
+)> {
     let num_segments = segments.len();
     anyhow::ensure!(
         num_segments > 0,
@@ -11289,8 +11304,8 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     };
     #[cfg(not(feature = "vulkan"))]
     let fused_vulkan_tail = None;
-    let (loss_kt, grad_normed, env_ce) = match fused_vulkan_tail {
-        Some((l, g)) => (l, g, None),
+    let (loss_kt, grad_normed, env_ce, policy_log_probs) = match fused_vulkan_tail {
+        Some((loss, grad, policy_log_probs)) => (loss, grad, None, policy_log_probs),
         None => crate::grpo_tape_shim::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
             &normed,
             &weights.embed_tokens_t,
@@ -11385,7 +11400,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
         }
     }
 
-    Ok((loss_val, env_ce, grads))
+    Ok((loss_val, env_ce, grads, policy_log_probs))
 }
 
 /// Bundled parameters for the GRPO surrogate / KL loss.
@@ -16109,7 +16124,7 @@ pub(crate) mod tests {
     /// (#1082) Only the engine-gated sft_train smokes use it now (CPU-only
     /// training dropped), so gate it to match and avoid a dead-code warning on
     /// the no-backend default build.
-    #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    #[cfg(feature = "cuda")]
     fn build_perf_regression_cpu_fixture() -> Result<(
         ModelConfig,
         GpuWeights,
@@ -16153,10 +16168,11 @@ pub(crate) mod tests {
     /// not the actual perf gate. That lives in the nightly A6000
     /// workflow (Tier 2).
     // (#1082) The candle-drop made SFT training (kt-tape checkpointed reverse)
-    // backend-gated — CPU-only (no engine) training is dropped. This smoke runs
-    // on any of the three engines; it must pass on at least one (CUDA today).
-    // The no-backend default build excludes it (CPU training is gone).
-    #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    // backend-gated — CPU-only (no engine) training is dropped. This fixture
+    // exercises the CUDA build's CPU-storage path. A Vulkan build treats CPU as
+    // its hybrid-runtime sentinel, whose non-resident training substrate is not
+    // implemented, so admitting Vulkan here was a stale and invalid test gate.
+    #[cfg(feature = "cuda")]
     #[test]
     fn perf_regression_sft_train_cpu_smoke_completes_under_30s() -> Result<()> {
         let (config, weights, tokenizer, examples) = build_perf_regression_cpu_fixture()?;
@@ -16230,9 +16246,9 @@ pub(crate) mod tests {
     ///      training-side `from_env` call at trainer.rs:3234 still get
     ///      caught.
     // (#1082) runs sft_train end-to-end → backend-gated post candle-drop (CPU-only
-    // training dropped). Gate to the three engines (CUDA today); excluded on the
-    // no-backend default build.
-    #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    // training dropped). This is the CUDA CPU-storage fixture; Vulkan training
+    // uses separate resident-device tests and must not enter through CPU.
+    #[cfg(feature = "cuda")]
     #[test]
     fn perf_regression_sft_train_emits_auto_tune_log_line() -> Result<()> {
         // RAII guard so the env override is scrubbed even if a later
@@ -16567,22 +16583,26 @@ pub(crate) mod tests {
         };
         let backend = backend::for_device_kt(&device);
         let segments = compute_segment_boundaries(config.num_layers, 2);
-        let (loss_val, grads) = checkpointed_grpo_forward_backward_tape_authoritative_kt(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &action_mask,
-            &ref_log_probs,
-            &ref_log_probs,
-            loss_params,
-            &segments,
-            &device,
-        )
-        .expect("checkpointed GRPO tape-authoritative step");
+        let (loss_val, _env_ce, grads, policy_log_probs) =
+            checkpointed_grpo_forward_backward_tape_authoritative_kt(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &action_mask,
+                &ref_log_probs,
+                &ref_log_probs,
+                loss_params,
+                &segments,
+                &device,
+                None,
+                false,
+            )
+            .expect("checkpointed GRPO tape-authoritative step");
 
         assert!(loss_val.is_finite(), "GRPO loss not finite: {loss_val}");
+        assert_eq!(policy_log_probs.elem_count(), num_active);
         assert!(
             !grads.is_empty(),
             "checkpointed GRPO produced no LoRA grads"
@@ -16861,29 +16881,31 @@ pub(crate) mod tests {
         };
 
         let backend = backend::for_device_kt(&device);
-        let (loss_val, _env_ce, grads) = grpo_step_forward_backward_tape_authoritative_kt(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &action_mask,
-            &ref_log_probs,
-            &ref_log_probs,
-            loss_params,
-            &device,
-            0,          // comp_idx
-            num_active, // num_active
-            0,          // comp_env_count
-            0,          // streaming_tile_tokens (no streaming)
-            0,          // checkpoint_segments (no checkpointing)
-            None,       // timings
-            None,       // echo_env
-            false,      // no_pg
-        )
-        .expect("grpo_step_forward_backward_tape_authoritative_kt (F32 Vulkan GRPO)");
+        let (loss_val, _env_ce, grads, policy_log_probs) =
+            grpo_step_forward_backward_tape_authoritative_kt(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &action_mask,
+                &ref_log_probs,
+                &ref_log_probs,
+                loss_params,
+                &device,
+                0,          // comp_idx
+                num_active, // num_active
+                0,          // comp_env_count
+                0,          // streaming_tile_tokens (no streaming)
+                0,          // checkpoint_segments (no checkpointing)
+                None,       // timings
+                None,       // echo_env
+                false,      // no_pg
+            )
+            .expect("grpo_step_forward_backward_tape_authoritative_kt (F32 Vulkan GRPO)");
 
         assert!(loss_val.is_finite(), "GRPO loss not finite: {loss_val}");
+        assert_eq!(policy_log_probs.elem_count(), num_active);
         let present = vk_report_grad_coverage("GRPO", &params, &grads);
         assert!(
             !grads.is_empty() && present > 0,
@@ -17098,29 +17120,31 @@ pub(crate) mod tests {
         };
 
         let backend = backend::for_device_kt(&device);
-        let (loss_val, _env_ce, grads) = grpo_step_forward_backward_tape_authoritative_kt(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &action_mask,
-            &ref_log_probs,
-            &ref_log_probs,
-            loss_params,
-            &device,
-            0,
-            num_active,
-            0,
-            0,
-            0,
-            None,
-            None,  // echo_env
-            false, // no_pg
-        )
-        .expect("grpo_step_forward_backward_tape_authoritative_kt (BF16 Vulkan GRPO)");
+        let (loss_val, _env_ce, grads, policy_log_probs) =
+            grpo_step_forward_backward_tape_authoritative_kt(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &action_mask,
+                &ref_log_probs,
+                &ref_log_probs,
+                loss_params,
+                &device,
+                0,
+                num_active,
+                0,
+                0,
+                0,
+                None,
+                None,  // echo_env
+                false, // no_pg
+            )
+            .expect("grpo_step_forward_backward_tape_authoritative_kt (BF16 Vulkan GRPO)");
 
         assert!(loss_val.is_finite(), "GRPO loss not finite: {loss_val}");
+        assert_eq!(policy_log_probs.elem_count(), num_active);
         let present = vk_report_grad_coverage("GRPO BF16", &params, &grads);
         for p in params.all_params() {
             if let Some(g) = grads.get(p.tensor_id()) {

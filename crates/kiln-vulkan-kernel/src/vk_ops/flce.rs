@@ -95,6 +95,7 @@ pub struct GrpoSavedState {
     labels: Vec<u32>,
     global_max: Arc<VulkanBuffer>,
     global_sumexp: Arc<VulkanBuffer>,
+    correct: Arc<VulkanBuffer>,
     coeff: Arc<VulkanBuffer>,
     num_active: usize,
     vocab: usize,
@@ -955,12 +956,40 @@ pub fn vk_grpo_loss_with_saved_state_ext(
             labels: labels.to_vec(),
             global_max,
             global_sumexp,
+            correct,
             coeff,
             num_active,
             vocab,
             hidden_dim,
             chunk_len,
         },
+    ))
+}
+
+/// Recover the selected policy log-probabilities from a GRPO forward without
+/// replaying the language-model head. The returned values use the exact
+/// max/sumexp and selected-logit buffers that produced the saved loss state.
+pub fn vk_grpo_selected_log_probs_from_saved_state(saved: &GrpoSavedState) -> Result<VkTensor> {
+    let dev = saved.weight.device();
+    let out = alloc_f32(dev, saved.num_active)?;
+    let push = [saved.num_active as u32];
+    dispatch_simple(
+        dev,
+        "vk_selected_logprob_f32",
+        &[
+            saved.global_max.handle(),
+            saved.global_sumexp.handle(),
+            saved.correct.handle(),
+            out.handle(),
+        ],
+        &push,
+        ((saved.num_active + 255) / 256) as u32,
+    )?;
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![saved.num_active],
+        VkDType::F32,
+        Arc::clone(dev),
     ))
 }
 
