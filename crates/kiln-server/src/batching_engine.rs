@@ -49,6 +49,12 @@ const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 /// rotation for every layer group.
 const SHORT_PREFILL_PRIORITY_INTERVAL: usize = 3;
 const SHORT_PREFILL_PRIORITY_MAX_CHUNKS: usize = 4;
+/// Waiting admission may pull at most this many short rows ahead of a long
+/// FIFO head before the head must be selected. The bounded lookahead keeps
+/// non-burst interactive admission responsive without turning the queue into
+/// an unbounded shortest-job-first scheduler.
+const SHORT_WAITING_PRIORITY_MAX_BURST: usize = 2;
+const SHORT_WAITING_PRIORITY_SCAN_LIMIT: usize = 8;
 
 /// Actor work above this wall time is material to the qualification stall
 /// gate and gets one bounded structured event after the phase completes.
@@ -335,6 +341,7 @@ pub struct BatchingEngineSnapshot {
     pub total_prefill_layers: u64,
     pub total_prefill_layer_yields: u64,
     pub total_short_prefill_priority_forwards: u64,
+    pub total_short_waiting_priority_selections: u64,
     pub total_decode_tokens: u64,
     pub total_prefill_tokens: u64,
     pub total_errors: u64,
@@ -1845,6 +1852,7 @@ struct BatchingEngineActor {
     max_prefill_layers_per_cycle: usize,
     next_prefill_index: usize,
     short_prefill_priority_cursor: usize,
+    short_waiting_priority_streak: usize,
     prefix_aware_admission: bool,
     max_prefill_admissions_per_cycle: usize,
     // #1082 CUDA concurrency regression: when true, admit_waiting refills the
@@ -1950,6 +1958,7 @@ impl BatchingEngineActor {
             max_prefill_layers_per_cycle,
             next_prefill_index: 0,
             short_prefill_priority_cursor: 0,
+            short_waiting_priority_streak: 0,
             prefix_aware_admission,
             max_prefill_admissions_per_cycle,
             burst_refill,
@@ -2543,20 +2552,7 @@ impl BatchingEngineActor {
             && !self.waiting.is_empty()
             && token_budget > 0
         {
-            // Count deferrals during the admission scan itself — when every
-            // waiting row is deferred, position() has already evaluated the
-            // predicate for all of them, so a second full filter pass would
-            // double the (prefix-cache-locking) work for the same answer.
-            let mut deferred_seen: u64 = 0;
-            let Some(waiting_idx) = self.waiting.iter().position(|queued| {
-                let defer = self.should_defer_for_active_prefix(queued);
-                deferred_seen += u64::from(defer);
-                !defer
-            }) else {
-                self.snapshot.prefix_admission_deferrals = self
-                    .snapshot
-                    .prefix_admission_deferrals
-                    .saturating_add(deferred_seen);
+            let Some(waiting_idx) = self.select_waiting_index(token_budget) else {
                 break;
             };
             let queued = self
@@ -2675,6 +2671,63 @@ impl BatchingEngineActor {
     fn admit_waiting(&mut self) -> bool {
         self.admit_waiting_with_budget(self.max_batch_tokens.min(self.max_prefill_tokens_per_cycle))
             .submitted_first_tokens
+    }
+
+    fn select_waiting_index(&mut self, token_budget: usize) -> Option<usize> {
+        // Find the FIFO-eligible row exactly as before. If all rows are
+        // prefix-deferred, count that one complete scan and leave the queue
+        // untouched.
+        let mut deferred_seen: u64 = 0;
+        let first_idx = self.waiting.iter().position(|queued| {
+            let defer = self.should_defer_for_active_prefix(queued);
+            deferred_seen += u64::from(defer);
+            !defer
+        });
+        let Some(first_idx) = first_idx else {
+            self.snapshot.prefix_admission_deferrals = self
+                .snapshot
+                .prefix_admission_deferrals
+                .saturating_add(deferred_seen);
+            return None;
+        };
+
+        let short_limit = self
+            .max_prefill_tokens_per_cycle
+            .saturating_mul(SHORT_PREFILL_PRIORITY_MAX_CHUNKS.saturating_add(1));
+        let first_work = self.waiting[first_idx].req.prompt_tokens.len();
+        if self.burst_refill
+            || first_work <= short_limit
+            || self.short_waiting_priority_streak >= SHORT_WAITING_PRIORITY_MAX_BURST
+        {
+            self.short_waiting_priority_streak = 0;
+            return Some(first_idx);
+        }
+
+        let resumable = self.forward.supports_resumable_prefill();
+        let priority = self
+            .waiting
+            .iter()
+            .enumerate()
+            .skip(first_idx.saturating_add(1))
+            .take(SHORT_WAITING_PRIORITY_SCAN_LIMIT)
+            .filter(|(_, queued)| !self.should_defer_for_active_prefix(queued))
+            .filter_map(|(idx, queued)| {
+                let work = queued.req.prompt_tokens.len();
+                (work <= short_limit && (resumable || work <= token_budget)).then_some((idx, work))
+            })
+            .min_by_key(|&(idx, work)| (work, idx))
+            .map(|(idx, _)| idx);
+        if let Some(priority) = priority {
+            self.short_waiting_priority_streak += 1;
+            self.snapshot.total_short_waiting_priority_selections = self
+                .snapshot
+                .total_short_waiting_priority_selections
+                .saturating_add(1);
+            Some(priority)
+        } else {
+            self.short_waiting_priority_streak = 0;
+            Some(first_idx)
+        }
     }
 
     fn select_prefill_index(&mut self, budget: usize) -> Option<(usize, bool)> {
@@ -6271,6 +6324,91 @@ mod tests {
         }
 
         actor.fail_all("test complete");
+    }
+
+    #[test]
+    fn short_waiting_priority_is_bounded_by_fifo_service() {
+        let forward = Arc::new(SyntheticPrefillForward::default());
+        let (_command_tx, command_rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let mut actor = test_actor(
+            command_rx,
+            forward,
+            4,
+            false,
+            4,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let mut receivers = Vec::new();
+        for tokens in [10_000, 320, 200, 100] {
+            let (response_tx, response_rx) = mpsc::channel(8);
+            queue_test_request(
+                &mut actor,
+                request_with_tokens(vec![tokens as TokenId; tokens], 1),
+                response_tx,
+            );
+            receivers.push(response_rx);
+        }
+
+        let first = actor.select_waiting_index(64).unwrap();
+        assert_eq!(actor.waiting[first].req.prompt_tokens.len(), 100);
+        let first = actor.waiting.remove(first).unwrap();
+        let second = actor.select_waiting_index(64).unwrap();
+        assert_eq!(actor.waiting[second].req.prompt_tokens.len(), 200);
+        let second = actor.waiting.remove(second).unwrap();
+        let third = actor.select_waiting_index(64).unwrap();
+        assert_eq!(
+            actor.waiting[third].req.prompt_tokens.len(),
+            10_000,
+            "two short overtakes must force service of the FIFO head"
+        );
+        assert_eq!(actor.snapshot.total_short_waiting_priority_selections, 2);
+        assert_eq!(actor.short_waiting_priority_streak, 0);
+
+        actor.waiting.push_back(first);
+        actor.waiting.push_back(second);
+        actor.fail_all("test complete");
+        drop(receivers);
+    }
+
+    #[test]
+    fn short_waiting_priority_preserves_non_resumable_and_burst_fifo() {
+        for (forward, burst_refill) in [
+            (
+                Arc::new(MockForward::default()) as Arc<dyn DecodeForward>,
+                false,
+            ),
+            (
+                Arc::new(SyntheticPrefillForward::default()) as Arc<dyn DecodeForward>,
+                true,
+            ),
+        ] {
+            let (_command_tx, command_rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+            let mut actor = test_actor(
+                command_rx,
+                forward,
+                2,
+                false,
+                2,
+                burst_refill,
+                ResponseDeliveryPolicy::default(),
+            );
+            let mut receivers = Vec::new();
+            for tokens in [10_000, 100] {
+                let (response_tx, response_rx) = mpsc::channel(8);
+                queue_test_request(
+                    &mut actor,
+                    request_with_tokens(vec![tokens as TokenId; tokens], 1),
+                    response_tx,
+                );
+                receivers.push(response_rx);
+            }
+
+            assert_eq!(actor.select_waiting_index(64), Some(0));
+            assert_eq!(actor.snapshot.total_short_waiting_priority_selections, 0);
+            actor.fail_all("test complete");
+            drop(receivers);
+        }
     }
 
     #[test]

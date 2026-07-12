@@ -900,14 +900,18 @@ quantum controls latency without multiplying full-model prompt passes as a
 smaller token chunk can. The actor charges a chunk's token width once, when it
 selects that chunk; later layer groups resume the same width without competing
 for a second new-token budget, shrinking the chunk, or replaying completed
-layers. Three of every four prefill dispatches remain round-robin. The fourth
+layers. Two of every three prefill dispatches remain round-robin. The third
 may accelerate the shortest remaining prompt tail only when it is no more than
 four token chunks and its admission-time prompt work is strictly smaller than
 another eligible active row's. Comparing immutable work classes keeps an
 all-equal cohort aligned instead of creating an artificial readiness staircase,
 while a genuinely shorter interactive request can receive the bounded extra
-service even on its ordinary turn; the round-robin lane retains 75% of dispatch
-capacity.
+service even on its ordinary turn; the round-robin lane retains two thirds of
+dispatch capacity. On non-burst backends, a long FIFO admission head may also
+yield to a short request found within the next eight waiting entries. At most
+two such overtakes are allowed before FIFO service is mandatory, and a short or
+equal-class head remains FIFO. CUDA burst-refill admission does not use this
+lookahead, preserving its large-batch fill path.
 Cancellation and
 shutdown release partial KV ownership
 only after the backend synchronization boundary; an unsettled device failure is
@@ -921,7 +925,9 @@ Prometheus exports the corresponding `kiln_batching_engine_active_prefill`,
 `kiln_batching_engine_last_prefill_tokens`, and
 `kiln_batching_engine_{last_prefill_layers,prefill_layers_total,prefill_layer_yields_total}`
 series. Bounded short-tail service is counted by
-`kiln_batching_engine_short_prefill_priority_forwards_total`. Admission,
+`kiln_batching_engine_short_prefill_priority_forwards_total`; bounded waiting
+lookahead is counted separately by
+`kiln_batching_engine_short_waiting_priority_selections_total`. Admission,
 bounded-prefill, and decode-forward wall time is also
 available as cumulative, process-maximum, and 100 ms slow-phase counters under
 `kiln_batching_engine_{admission,prefill_forward,decode_forward}_*`.
