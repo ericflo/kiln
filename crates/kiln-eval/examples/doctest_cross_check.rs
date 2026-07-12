@@ -13,18 +13,13 @@ use kiln_eval::scorers::{NoopJudgeRunner, Scorer, score_completion};
 use kiln_eval::suite::{EvalChatMessage, EvalExample};
 
 #[derive(serde::Deserialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
-#[derive(serde::Deserialize)]
 struct ScoredCompletion {
     text: String,
     reward: f64,
 }
 #[derive(serde::Deserialize)]
 struct GrpoGroup {
-    messages: Vec<ChatMessage>,
+    messages: Vec<EvalChatMessage>,
     completions: Vec<ScoredCompletion>,
 }
 
@@ -65,11 +60,7 @@ fn main() -> Result<()> {
             serde_json::from_str(&line).with_context(|| format!("parsing line {}", i + 1))?;
         let example = EvalExample {
             id: Some(format!("group_{i}")),
-            messages: g
-                .messages
-                .into_iter()
-                .map(|m| EvalChatMessage::new(m.role, m.content))
-                .collect(),
+            messages: g.messages,
             target: None,
             aliases: Vec::new(),
             tags: Vec::new(),

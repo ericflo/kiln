@@ -617,14 +617,8 @@ mod tests {
             parent_id: None,
             tool_manifest_sha: None,
             prompt_messages: vec![
-                ChatMessage {
-                    role: "system".into(),
-                    content: "You are pi.".into(),
-                },
-                ChatMessage {
-                    role: "user".into(),
-                    content: "Fix the flaky test".into(),
-                },
+                ChatMessage::new("system", "You are pi."),
+                ChatMessage::new("user", "Fix the flaky test"),
             ],
             trajectory: vec![
                 TurnSegment {

@@ -34,30 +34,10 @@ use serde::{Deserialize, Serialize};
 use crate::scorers::{NumericTolerance, Scorer, contains::ContainsMode};
 use crate::suite::{EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite};
 
-/// One SFT chat message — mirrors the shape of `kiln_train::ChatMessage` to
-/// keep this crate independent of the training crate. The loader accepts:
-/// - The plain `{role, content}` shape
-/// - The OpenAI agentic shape with `tool_calls: [{"function": {"name", "arguments"}}, …]`
-///   on assistant turns, and `name` / `tool_call_id` on tool replies
-///
-/// `tool_calls` is preserved so the synthesis pipeline can build proper
-/// tool-call evals (target = the tool call JSON, scored by `ToolCall`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SftMessage {
-    pub role: String,
-    #[serde(default)]
-    pub content: String,
-    /// OpenAI-style assistant tool calls. Each entry is typically
-    /// `{"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<serde_json::Value>>,
-    /// Function name on tool-role messages (some templates branch on it).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Identifies which assistant tool call this `tool`-role message answers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-}
+/// Canonical core chat message, re-exported under the synthesis-facing name.
+/// This keeps SFT dataset conversion byte-compatible while sharing the exact
+/// plain and agentic schema with training, eval, and inference tokenization.
+pub use kiln_core::tokenizer::ChatMessage as SftMessage;
 
 /// One SFT example (matches `kiln_train::SftExample` plus optional
 /// trajectory metadata the loader doesn't touch).
@@ -1178,16 +1158,7 @@ fn to_chat_messages(messages: &[SftMessage]) -> Vec<EvalChatMessage> {
     // its native XML form, so prompts that depend on prior tool exchanges
     // (the "next-action prediction" eval flow) get the same input the
     // model saw in production.
-    messages
-        .iter()
-        .map(|m| EvalChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-            tool_calls: m.tool_calls.clone(),
-            name: m.name.clone(),
-            tool_call_id: m.tool_call_id.clone(),
-        })
-        .collect()
+    messages.to_vec()
 }
 
 /// Pull a `tools` field out of the trajectory's extra metadata. Accepts

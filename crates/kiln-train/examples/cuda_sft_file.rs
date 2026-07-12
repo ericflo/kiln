@@ -286,15 +286,7 @@ fn load_tokenizer(model_path: &PathBuf) -> Result<KilnTokenizer> {
 
 #[cfg(feature = "cuda")]
 fn token_len(example: &SftExample, tokenizer: &KilnTokenizer) -> Result<usize> {
-    let messages = example
-        .messages
-        .iter()
-        .map(|message| kiln_core::tokenizer::ChatMessage {
-            role: message.role.clone(),
-            content: message.content.clone(),
-            ..Default::default()
-        })
-        .collect::<Vec<_>>();
+    let messages = example.messages.clone();
     let text = tokenizer
         .apply_chat_template(&messages)
         .map_err(|err| anyhow::anyhow!("{err}"))?;

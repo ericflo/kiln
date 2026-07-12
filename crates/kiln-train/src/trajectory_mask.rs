@@ -164,17 +164,11 @@ pub fn build_masks_from_trajectory_timed(
 ) -> Result<(MaskedRollout, MaskBuildTimings)> {
     // Step 1: assemble the full ChatMessage list — prompt scaffold first,
     // then every trajectory segment.
-    let mut full_messages: Vec<CoreChatMessage> = prompt_messages
-        .iter()
-        .map(|m| CoreChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-            ..Default::default()
-        })
-        .collect();
+    let mut full_messages: Vec<CoreChatMessage> = prompt_messages.to_vec();
     full_messages.extend(trajectory.iter().map(|seg| CoreChatMessage {
         role: seg.role.clone(),
         content: seg.content.clone(),
+        tool_call_id: seg.tool_call_id.clone(),
         ..Default::default()
     }));
 
@@ -456,14 +450,7 @@ fn prefix_tokenization_strategy(
 ) -> Result<()> {
     // Build the same prefix message list and walk it segment by segment,
     // capturing the token-count delta for each supervised segment.
-    let mut prefix_messages: Vec<CoreChatMessage> = prompt_messages
-        .iter()
-        .map(|m| CoreChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-            ..Default::default()
-        })
-        .collect();
+    let mut prefix_messages: Vec<CoreChatMessage> = prompt_messages.to_vec();
 
     let render = |msgs: &[CoreChatMessage]| -> Result<Vec<u32>> {
         if msgs.is_empty() {
@@ -480,6 +467,7 @@ fn prefix_tokenization_strategy(
         prefix_messages.push(CoreChatMessage {
             role: seg.role.clone(),
             content: seg.content.clone(),
+            tool_call_id: seg.tool_call_id.clone(),
             ..Default::default()
         });
         let after_ids = render(&prefix_messages)?;
@@ -627,6 +615,7 @@ mod tests {
             .map(|s| kiln_core::tokenizer::ChatMessage {
                 role: s.role.clone(),
                 content: s.content.clone(),
+                tool_call_id: s.tool_call_id.clone(),
                 ..Default::default()
             })
             .collect();
@@ -887,10 +876,7 @@ mod tests {
         // A realistic agentic trajectory: user asks → assistant tool_call
         // → tool result → assistant final.
         use crate::ChatMessage;
-        let prompt = vec![ChatMessage {
-            role: "user".into(),
-            content: "List files in /tmp".into(),
-        }];
+        let prompt = vec![ChatMessage::new("user", "List files in /tmp")];
         let warning_prefix = "WARNINGS:\n- harness warning\n";
         let observation = format!("{warning_prefix}file1.txt\nfile2.txt\n");
         let traj = vec![

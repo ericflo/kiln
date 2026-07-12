@@ -116,3 +116,47 @@ pub(crate) fn load_sft_jsonl_examples(path: &Path) -> Result<Vec<SftExample>> {
     }
     Ok(examples)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonl_loader_preserves_agentic_message_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentic.jsonl");
+        let row = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "calculate"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "calculator", "arguments": "{\"x\":1}"}
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "content": [{"type": "text", "text": "1"}],
+                    "name": "calculator",
+                    "tool_call_id": "call_1"
+                },
+                {"role": "assistant", "content": "done"}
+            ]
+        });
+        std::fs::write(&path, format!("{row}\n")).unwrap();
+
+        let examples = load_sft_jsonl_examples(&path).unwrap();
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].messages[1].content, "");
+        assert_eq!(examples[0].messages[1].tool_calls.as_ref().unwrap().len(), 1);
+        assert_eq!(examples[0].messages[2].content, "1");
+        assert_eq!(examples[0].messages[2].name.as_deref(), Some("calculator"));
+        assert_eq!(
+            examples[0].messages[2].tool_call_id.as_deref(),
+            Some("call_1")
+        );
+    }
+}

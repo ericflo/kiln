@@ -1168,10 +1168,10 @@ pub fn prepare_off_policy_distillation_dataset_with_identity(
 
         let prompt = if example.trajectory.is_empty() {
             let mut messages = example.messages.clone();
-            messages.push(ChatMessage {
-                role: "assistant".to_string(),
-                content: example.teacher_response.clone(),
-            });
+            messages.push(ChatMessage::new(
+                "assistant",
+                example.teacher_response.clone(),
+            ));
             OpdPrompt {
                 messages,
                 teacher_extra_messages: Vec::new(),
@@ -2750,14 +2750,7 @@ fn sample_student_rollout(
 fn chat_messages_without_trailing_assistant(
     messages: &[ChatMessage],
 ) -> Vec<kiln_core::tokenizer::ChatMessage> {
-    let mut rendered_messages: Vec<_> = messages
-        .iter()
-        .map(|message| kiln_core::tokenizer::ChatMessage {
-            role: message.role.clone(),
-            content: message.content.clone(),
-            ..Default::default()
-        })
-        .collect();
+    let mut rendered_messages = messages.to_vec();
     while rendered_messages
         .last()
         .map(|message| message.role.as_str())
@@ -5885,19 +5878,10 @@ mod tests {
     fn smoke_opd_prompt_with_teacher_context() -> OpdPrompt {
         OpdPrompt {
             messages: vec![
-                ChatMessage {
-                    role: "user".into(),
-                    content: "hi".into(),
-                },
-                ChatMessage {
-                    role: "assistant".into(),
-                    content: "ok".into(),
-                },
+                ChatMessage::new("user", "hi"),
+                ChatMessage::new("assistant", "ok"),
             ],
-            teacher_extra_messages: vec![ChatMessage {
-                role: "system".into(),
-                content: "result".into(),
-            }],
+            teacher_extra_messages: vec![ChatMessage::new("system", "result")],
             trajectory: Vec::new(),
         }
     }
@@ -6370,10 +6354,10 @@ mod tests {
     fn opd_request_round_trips_through_serde() {
         let req = OpdRequest {
             prompts: vec![OpdPrompt {
-                messages: vec![ChatMessage {
-                    role: "user".into(),
-                    content: "Evaluate ∫_0^∞ e^{-x^2} dx".into(),
-                }],
+                messages: vec![ChatMessage::new(
+                    "user",
+                    "Evaluate ∫_0^∞ e^{-x^2} dx",
+                )],
                 teacher_extra_messages: vec![],
                 trajectory: vec![],
             }],
@@ -6463,10 +6447,10 @@ mod tests {
         let mut examples = parse_off_policy_distillation_jsonl_str(jsonl)?;
         let tokenizer = off_policy_smoke_tokenizer()?;
         let mut messages = examples[0].messages.clone();
-        messages.push(ChatMessage {
-            role: "assistant".into(),
-            content: examples[0].teacher_response.clone(),
-        });
+        messages.push(ChatMessage::new(
+            "assistant",
+            examples[0].teacher_response.clone(),
+        ));
         let prompt = OpdPrompt {
             messages,
             teacher_extra_messages: Vec::new(),
@@ -6530,10 +6514,10 @@ mod tests {
         let tokenizer = off_policy_smoke_tokenizer()?;
         for (example_index, example) in examples.iter_mut().enumerate() {
             let mut messages = example.messages.clone();
-            messages.push(ChatMessage {
-                role: "assistant".into(),
-                content: example.teacher_response.clone(),
-            });
+            messages.push(ChatMessage::new(
+                "assistant",
+                example.teacher_response.clone(),
+            ));
             let tokenized = tokenize_opd_prompt_for_training(
                 &OpdPrompt {
                     messages,
@@ -6773,28 +6757,19 @@ mod tests {
         let tokenizer = off_policy_smoke_tokenizer()?;
         let prompts = vec![
             OpdPrompt {
-                messages: vec![ChatMessage {
-                    role: "user".into(),
-                    content: "filtered".into(),
-                }],
+                messages: vec![ChatMessage::new("user", "filtered")],
                 teacher_extra_messages: Vec::new(),
                 trajectory: Vec::new(),
             },
             OpdPrompt {
                 messages: vec![
-                    ChatMessage {
-                        role: "user".into(),
-                        content: "kept".into(),
-                    },
-                    ChatMessage {
-                        role: "assistant".into(),
-                        content: "answer".into(),
-                    },
+                    ChatMessage::new("user", "kept"),
+                    ChatMessage::new("assistant", "answer"),
                 ],
-                teacher_extra_messages: vec![ChatMessage {
-                    role: "system".into(),
-                    content: "teacher-only context".into(),
-                }],
+                teacher_extra_messages: vec![ChatMessage::new(
+                    "system",
+                    "teacher-only context",
+                )],
                 trajectory: Vec::new(),
             },
         ];
@@ -6979,14 +6954,8 @@ mod tests {
             .into_iter()
             .map(|answer| OpdPrompt {
                 messages: vec![
-                    ChatMessage {
-                        role: "user".into(),
-                        content: "hi".into(),
-                    },
-                    ChatMessage {
-                        role: "assistant".into(),
-                        content: answer.into(),
-                    },
+                    ChatMessage::new("user", "hi"),
+                    ChatMessage::new("assistant", answer),
                 ],
                 teacher_extra_messages: Vec::new(),
                 trajectory: Vec::new(),

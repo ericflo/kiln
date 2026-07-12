@@ -40,7 +40,7 @@ use kiln_eval::result::EvalOutcomeKind;
 #[cfg(feature = "cuda")]
 use kiln_eval::scorers::{NoopJudgeRunner, Scorer, score_completion};
 #[cfg(feature = "cuda")]
-use kiln_eval::suite::{EvalChatMessage, EvalExample};
+use kiln_eval::suite::EvalExample;
 #[cfg(feature = "cuda")]
 use kiln_model::forward::GpuWeights;
 #[cfg(feature = "cuda")]
@@ -210,15 +210,7 @@ fn load_groups(path: &PathBuf, limit: Option<usize>) -> Result<Vec<GrpoGroup>> {
 
 #[cfg(feature = "cuda")]
 fn prompt_text(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<String> {
-    let messages: Vec<kiln_core::tokenizer::ChatMessage> = group
-        .messages
-        .iter()
-        .map(|m: &ChatMessage| kiln_core::tokenizer::ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-            ..Default::default()
-        })
-        .collect();
+    let messages: Vec<kiln_core::tokenizer::ChatMessage> = group.messages.clone();
     tokenizer
         .apply_chat_template(&messages)
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -387,11 +379,7 @@ fn main() -> Result<()> {
         if let Some(scorer) = doctest_scorer.as_ref() {
             let example = EvalExample {
                 id: Some(format!("group_{prompt_idx}")),
-                messages: group
-                    .messages
-                    .iter()
-                    .map(|m| EvalChatMessage::new(m.role.clone(), m.content.clone()))
-                    .collect(),
+                messages: group.messages.clone(),
                 target: None,
                 aliases: Vec::new(),
                 tags: Vec::new(),

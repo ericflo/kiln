@@ -206,17 +206,11 @@ fn render_full_messages(
     trajectory: &[TurnSegment],
     tokenizer: &KilnTokenizer,
 ) -> Result<String> {
-    let mut messages: Vec<CoreChatMessage> = prompt_messages
-        .iter()
-        .map(|message| CoreChatMessage {
-            role: message.role.clone(),
-            content: message.content.clone(),
-            ..Default::default()
-        })
-        .collect();
+    let mut messages: Vec<CoreChatMessage> = prompt_messages.to_vec();
     messages.extend(trajectory.iter().map(|segment| CoreChatMessage {
         role: segment.role.clone(),
         content: segment.content.clone(),
+        tool_call_id: segment.tool_call_id.clone(),
         ..Default::default()
     }));
     tokenizer

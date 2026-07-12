@@ -646,13 +646,7 @@ fn build_lora_master_kt(
 
 /// Convert our ChatMessage to the core tokenizer's ChatMessage.
 fn to_core_messages(msgs: &[ChatMessage]) -> Vec<kiln_core::tokenizer::ChatMessage> {
-    msgs.iter()
-        .map(|m| kiln_core::tokenizer::ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-            ..Default::default()
-        })
-        .collect()
+    msgs.to_vec()
 }
 
 /// Which linear projections to train LoRA on.
@@ -16168,10 +16162,7 @@ pub(crate) mod tests {
 
     #[test]
     fn is_degenerate_group_detects_uniform_rewards() {
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: "test".to_string(),
-        }];
+        let messages = vec![ChatMessage::new("user", "test")];
         let mk = |rewards: &[f64]| GrpoGroup {
             messages: messages.clone(),
             completions: rewards
@@ -16217,10 +16208,7 @@ pub(crate) mod tests {
 
     fn dry_run_group(completions: Vec<crate::ScoredRollout>) -> GrpoGroup {
         GrpoGroup {
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: "a".to_string(),
-            }],
+            messages: vec![ChatMessage::new("user", "a")],
             completions,
         }
     }
@@ -17792,22 +17780,10 @@ pub(crate) mod tests {
         );
         let example = SftExample {
             messages: vec![
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: "a".to_string(),
-                },
-                ChatMessage {
-                    role: "assistant".to_string(),
-                    content: "bb".to_string(),
-                },
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: "a".to_string(),
-                },
-                ChatMessage {
-                    role: "assistant".to_string(),
-                    content: "b".to_string(),
-                },
+                ChatMessage::new("user", "a"),
+                ChatMessage::new("assistant", "bb"),
+                ChatMessage::new("user", "a"),
+                ChatMessage::new("assistant", "b"),
             ],
         };
 
@@ -17823,6 +17799,51 @@ pub(crate) mod tests {
                 &tokenizer,
             )?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn tokenize_for_training_preserves_agentic_message_fields() -> Result<()> {
+        let tokenizer = minimal_training_tokenizer(
+            "{% for message in messages %}\
+             {% if message.tool_calls %}a\
+             {% elif message.role == 'tool' and message.name == 'calculator' and message.tool_call_id == 'call_1' %}b\
+             {% else %}{{ message.content }}\
+             {% endif %}\
+             {% endfor %}",
+        );
+        let example = SftExample {
+            messages: vec![
+                ChatMessage::new("user", "1"),
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: String::new(),
+                    tool_calls: Some(vec![serde_json::json!({
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "calculator", "arguments": "{\"x\":1}"}
+                    })]),
+                    name: Some("calculator".into()),
+                    tool_call_id: None,
+                },
+                ChatMessage {
+                    role: "tool".into(),
+                    content: "2".into(),
+                    tool_calls: None,
+                    name: Some("calculator".into()),
+                    tool_call_id: Some("call_1".into()),
+                },
+                ChatMessage::new("assistant", "3"),
+            ],
+        };
+
+        let core_messages = to_core_messages(&example.messages);
+        assert_eq!(core_messages, example.messages);
+        assert_eq!(tokenizer.apply_chat_template(&core_messages)?, "1ab3");
+
+        let (input_ids, label_mask) = tokenize_for_training(&example, &tokenizer)?;
+        assert_eq!(input_ids, vec![2, 0, 1, 4]);
+        assert_eq!(label_mask, vec![false, true, false, true]);
         Ok(())
     }
 
@@ -17951,22 +17972,10 @@ pub(crate) mod tests {
         );
         let example = SftExample {
             messages: vec![
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: "a".to_string(),
-                },
-                ChatMessage {
-                    role: "assistant".to_string(),
-                    content: "bb".to_string(),
-                },
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: "a".to_string(),
-                },
-                ChatMessage {
-                    role: "assistant".to_string(),
-                    content: "b".to_string(),
-                },
+                ChatMessage::new("user", "a"),
+                ChatMessage::new("assistant", "bb"),
+                ChatMessage::new("user", "a"),
+                ChatMessage::new("assistant", "b"),
             ],
         };
 
@@ -20083,14 +20092,8 @@ pub(crate) mod tests {
         let examples: Vec<crate::SftExample> = (1..=3)
             .map(|index| crate::SftExample {
                 messages: vec![
-                    crate::ChatMessage {
-                        role: "user".to_string(),
-                        content: format!("a{index}"),
-                    },
-                    crate::ChatMessage {
-                        role: "assistant".to_string(),
-                        content: format!("b{index}"),
-                    },
+                    crate::ChatMessage::new("user", format!("a{index}")),
+                    crate::ChatMessage::new("assistant", format!("b{index}")),
                 ],
             })
             .collect();
@@ -20950,10 +20953,7 @@ pub(crate) mod tests {
             let adapter_root = tmp.path().join("adapters");
 
             let groups = vec![GrpoGroup {
-                messages: vec![ChatMessage {
-                    role: "user".to_string(),
-                    content: "ask".to_string(),
-                }],
+                messages: vec![ChatMessage::new("user", "ask")],
                 completions: vec![
                     ScoredRollout::from_trajectory(
                         vec![
@@ -21546,14 +21546,8 @@ pub(crate) mod tests {
         let examples = (0..4)
             .map(|i| crate::SftExample {
                 messages: vec![
-                    crate::ChatMessage {
-                        role: "user".to_string(),
-                        content: format!("a {i}"),
-                    },
-                    crate::ChatMessage {
-                        role: "assistant".to_string(),
-                        content: format!("b {i}"),
-                    },
+                    crate::ChatMessage::new("user", format!("a {i}")),
+                    crate::ChatMessage::new("assistant", format!("b {i}")),
                 ],
             })
             .collect();

@@ -551,10 +551,12 @@ kiln serve --config kiln.toml</code></pre>
           This correctness-first path requires real model weights, the batching engine, a
           content-addressed base-policy identity, and room for at least one sampled action. It bypasses
           text-only request/completion caches. Unsupported streaming, multiple-choice, mock, unverified,
-          tool-definition/tool-choice, or prior tool-call message paths return
+          or tool-definition/tool-choice paths return
           <code>rollout_provenance_unavailable</code>; malformed trace state fails generation instead of
-          returning a partial record. Use <code>kiln rollout-generate</code> to validate, score, and
-          atomically persist these records for <code>behavior_policy: "recorded"</code>.
+          returning a partial record. Prior assistant <code>tool_calls</code> and <code>role: "tool"</code>
+          responses are supported context; their names and call IDs are preserved and bound into the
+          prompt hash. Use <code>kiln rollout-generate</code> to validate, score, and atomically persist
+          these records for <code>behavior_policy: "recorded"</code>.
         </p>
         <h3 id="thinking-budgets" class="text-xl font-semibold mt-6 mb-3">Bound thinking without disabling it</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">

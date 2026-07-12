@@ -93,10 +93,7 @@ fn seed_trace_index(state: &AppState) {
         forked: false,
         parent_id: None,
         tool_manifest_sha: None,
-        prompt_messages: vec![kiln_train::ChatMessage {
-            role: "user".into(),
-            content: "Fix the failing test".into(),
-        }],
+        prompt_messages: vec![kiln_train::ChatMessage::new("user", "Fix the failing test")],
         trajectory: vec![kiln_train::trajectory::TurnSegment {
             role: "assistant".into(),
             content: "On it.".into(),

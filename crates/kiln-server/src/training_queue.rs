@@ -1610,20 +1610,18 @@ fn prepare_self_distill_prompts(
                         )
                     },
                 )?;
-                teacher_messages.push(ChatMessage {
-                    role: "system".into(),
-                    content: format!(
+                teacher_messages.push(ChatMessage::new(
+                    "system",
+                    format!(
                         "Privileged context (visible only to the teacher): the correct answer is: {answer}"
                     ),
-                });
+                ));
             }
             SelfDistillMode::Conciseness => {
-                teacher_messages.push(ChatMessage {
-                    role: "system".into(),
-                    content:
-                        "Privileged context (visible only to the teacher): respond with maximal concision; trim every unnecessary word; never explain reasoning unless explicitly asked."
-                            .into(),
-                });
+                teacher_messages.push(ChatMessage::new(
+                    "system",
+                    "Privileged context (visible only to the teacher): respond with maximal concision; trim every unnecessary word; never explain reasoning unless explicitly asked.",
+                ));
             }
             SelfDistillMode::DocumentAsPi => {
                 let document = documents
@@ -1631,12 +1629,12 @@ fn prepare_self_distill_prompts(
                     .ok_or_else(|| {
                         format!("distill_self DocumentAsPi: missing documents[{prompt_index}]")
                     })?;
-                teacher_messages.push(ChatMessage {
-                    role: "system".into(),
-                    content: format!(
+                teacher_messages.push(ChatMessage::new(
+                    "system",
+                    format!(
                         "Privileged context (visible only to the teacher) — use the following retrieved document to answer:\n\n{document}"
                     ),
-                });
+                ));
             }
             SelfDistillMode::ReverseTeacher => {
                 return Err(
@@ -2363,12 +2361,7 @@ fn derive_source_prompts(
             if let Some(messages) = ex.get("messages").and_then(|m| m.as_array()) {
                 let chat: Vec<kiln_train::ChatMessage> = messages
                     .iter()
-                    .filter_map(|m| {
-                        Some(kiln_train::ChatMessage {
-                            role: m.get("role")?.as_str()?.to_string(),
-                            content: m.get("content")?.as_str()?.to_string(),
-                        })
-                    })
+                    .filter_map(|message| serde_json::from_value(message.clone()).ok())
                     .collect();
                 if !chat.is_empty() {
                     out.push(kiln_train::opd::OpdPrompt {
@@ -2631,10 +2624,7 @@ fn canonical_domain_seed_prompts(
     Ok(prompts
         .iter()
         .map(|p| kiln_train::opd::OpdPrompt {
-            messages: vec![ChatMessage {
-                role: "user".into(),
-                content: (*p).into(),
-            }],
+            messages: vec![ChatMessage::new("user", *p)],
             teacher_extra_messages: vec![],
             trajectory: vec![],
         })
@@ -5061,15 +5051,12 @@ mod tests {
     }
 
     fn self_distill_test_prompt(with_assistant: bool) -> kiln_train::opd::OpdPrompt {
-        let mut messages = vec![kiln_train::ChatMessage {
-            role: "user".into(),
-            content: if with_assistant { "a" } else { "aa" }.into(),
-        }];
+        let mut messages = vec![kiln_train::ChatMessage::new(
+            "user",
+            if with_assistant { "a" } else { "aa" },
+        )];
         if with_assistant {
-            messages.push(kiln_train::ChatMessage {
-                role: "assistant".into(),
-                content: "bb".into(),
-            });
+            messages.push(kiln_train::ChatMessage::new("assistant", "bb"));
         }
         kiln_train::opd::OpdPrompt {
             messages,
@@ -5104,23 +5091,14 @@ mod tests {
         let prompts = vec![
             kiln_train::opd::OpdPrompt {
                 messages: vec![
-                    kiln_train::ChatMessage {
-                        role: "user".into(),
-                        content: "a".into(),
-                    },
-                    kiln_train::ChatMessage {
-                        role: "assistant".into(),
-                        content: "bb".into(),
-                    },
+                    kiln_train::ChatMessage::new("user", "a"),
+                    kiln_train::ChatMessage::new("assistant", "bb"),
                 ],
                 teacher_extra_messages: vec![],
                 trajectory: vec![],
             },
             kiln_train::opd::OpdPrompt {
-                messages: vec![kiln_train::ChatMessage {
-                    role: "user".into(),
-                    content: "aa".into(),
-                }],
+                messages: vec![kiln_train::ChatMessage::new("user", "aa")],
                 teacher_extra_messages: vec![],
                 trajectory: vec![],
             },
@@ -5145,10 +5123,7 @@ mod tests {
     fn teacher_prompt_tokenization_propagates_chat_template_failure() {
         let tokenizer = merge_teacher_test_tokenizer().with_chat_template("{% if".to_string());
         let prompts = vec![kiln_train::opd::OpdPrompt {
-            messages: vec![kiln_train::ChatMessage {
-                role: "assistant".into(),
-                content: "bb".into(),
-            }],
+            messages: vec![kiln_train::ChatMessage::new("assistant", "bb")],
             teacher_extra_messages: vec![],
             trajectory: vec![],
         }];

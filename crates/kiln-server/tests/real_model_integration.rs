@@ -3439,10 +3439,7 @@ async fn test_real_model_chat_completion_metal_bf16_fused() {
 
 #[cfg(feature = "metal")]
 fn metal_chat_msg(role: &str, content: &str) -> kiln_train::ChatMessage {
-    kiln_train::ChatMessage {
-        role: role.to_string(),
-        content: content.to_string(),
-    }
+    kiln_train::ChatMessage::new(role, content)
 }
 
 // The former `metal_gpu_guard()` process-global serialization mutex was

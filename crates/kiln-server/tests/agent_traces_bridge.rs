@@ -119,14 +119,8 @@ fn recent_successful_trace(id: &str) -> AgentTrace {
         parent_id: None,
         tool_manifest_sha: None,
         prompt_messages: vec![
-            ChatMessage {
-                role: "system".into(),
-                content: "You are pi.".into(),
-            },
-            ChatMessage {
-                role: "user".into(),
-                content: format!("Fix the flaky test in {id}"),
-            },
+            ChatMessage::new("system", "You are pi."),
+            ChatMessage::new("user", format!("Fix the flaky test in {id}")),
         ],
         trajectory: vec![
             TurnSegment {

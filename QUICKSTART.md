@@ -344,6 +344,19 @@ Create a training file `examples.jsonl` with chat-format examples:
 {"messages": [{"role": "user", "content": "Translate 'hello' to Spanish"}, {"role": "assistant", "content": "Hola"}]}
 ```
 
+SFT, GRPO, OPD, eval suites, uploaded datasets, and inference tokenization use
+the same message schema. In addition to `role` and `content`, an assistant
+message may carry OpenAI-shaped `tool_calls`; a `role: "tool"` response may
+carry `name` and `tool_call_id`. `content` may be a string, `null`/missing for a
+tool-call-only assistant turn, or an OpenAI text-part array. Kiln normalizes
+text parts to one string and preserves all tool metadata through inline
+requests, server-local JSONL, named datasets, rollout provenance, and chat
+template rendering. For example:
+
+```jsonl
+{"messages":[{"role":"user","content":"Look up order 42"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup_order","arguments":"{\"id\":42}"}}]},{"role":"tool","content":"shipped","name":"lookup_order","tool_call_id":"call_1"},{"role":"assistant","content":"Order 42 has shipped."}]}
+```
+
 Submit training via the CLI:
 
 ```bash

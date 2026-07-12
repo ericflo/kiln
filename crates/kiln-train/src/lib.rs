@@ -145,12 +145,9 @@ pub use trainer::CheckpointConfig;
 
 use serde::{Deserialize, Serialize};
 
-/// A chat message in a training example.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
-}
+/// The canonical chat message used by tokenization, inference, eval, and
+/// training. Agentic fields are preserved through SFT, GRPO, and OPD inputs.
+pub use kiln_core::tokenizer::ChatMessage;
 
 /// An SFT training example — a conversation with the correct assistant response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2020,6 +2017,45 @@ mod tests {
         let parsed_agentic: GrpoRequest = serde_json::from_str(body_agentic).unwrap();
         assert_eq!(parsed_legacy.groups.len(), 0);
         assert_eq!(parsed_agentic.groups.len(), 0);
+    }
+
+    #[test]
+    fn sft_request_round_trips_agentic_messages() {
+        let request: SftRequest = serde_json::from_value(serde_json::json!({
+            "examples": [{
+                "messages": [
+                    {"role": "user", "content": "calculate"},
+                    {
+                        "role": "assistant",
+                        "content": null,
+                        "name": "calculator",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "calculator", "arguments": "{\"x\":1}"}
+                        }]
+                    },
+                    {
+                        "role": "tool",
+                        "content": "1",
+                        "name": "calculator",
+                        "tool_call_id": "call_1"
+                    },
+                    {"role": "assistant", "content": "done"}
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let messages = &request.examples[0].messages;
+        assert_eq!(messages[1].content, "");
+        assert_eq!(messages[1].tool_calls.as_ref().unwrap().len(), 1);
+        assert_eq!(messages[2].name.as_deref(), Some("calculator"));
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_1"));
+
+        let round_trip: SftRequest =
+            serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+        assert_eq!(round_trip.examples[0].messages, *messages);
     }
 
     /// Capability authors ship `capability.config.json` files with a

@@ -447,6 +447,8 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
             .map(|seg| kiln_train::ChatMessage {
                 role: seg.role,
                 content: seg.content,
+                tool_call_id: seg.tool_call_id,
+                ..Default::default()
             })
             .collect();
         (prompt_messages, trajectory)

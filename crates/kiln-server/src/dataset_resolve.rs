@@ -181,14 +181,7 @@ pub fn resolve_registry_opd_prompts(
     })?;
     let prompts: Vec<OpdPrompt> = iter
         .map(|conv| OpdPrompt {
-            messages: conv
-                .messages
-                .into_iter()
-                .map(|m| ChatMessage {
-                    role: m.role,
-                    content: m.content,
-                })
-                .collect(),
+            messages: conv.messages,
             teacher_extra_messages: Vec::new(),
             trajectory: Vec::new(),
         })
@@ -332,26 +325,25 @@ fn judge_prompt(transcript: &[String], action: &TurnSegment) -> OpdPrompt {
     };
     OpdPrompt {
         messages: vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: "You are a strict turn judge for terminal coding agents. Score \
+            ChatMessage::new(
+                "system",
+                "You are a strict turn judge for terminal coding agents. Score \
                           the candidate assistant turn on five axes — tool_correctness, \
                           goal_progress, reasoning_quality, terseness, \
                           instruction_following — each 0-10, and respond with only a \
                           JSON object like {\"tool_correctness\": 7, \"goal_progress\": 5, \
                           \"reasoning_quality\": 6, \"terseness\": 8, \
                           \"instruction_following\": 9}. Judge only the candidate turn, \
-                          not the rest of the session."
-                    .to_string(),
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: format!(
+                          not the rest of the session.",
+            ),
+            ChatMessage::new(
+                "user",
+                format!(
                     "# Session context\n{context}\n\n# Candidate assistant turn\n{}\n\n\
                      Score the candidate turn now.",
                     truncate_middle(&action.content, JUDGE_TURN_CHAR_CAP)
                 ),
-            },
+            ),
         ],
         teacher_extra_messages: Vec::new(),
         trajectory: Vec::new(),
@@ -370,10 +362,7 @@ fn with_conciseness_pressure(mut prompt: OpdPrompt) -> OpdPrompt {
         }
         _ => prompt.messages.insert(
             0,
-            ChatMessage {
-                role: "system".to_string(),
-                content: PRESSURE.to_string(),
-            },
+            ChatMessage::new("system", PRESSURE),
         ),
     }
     prompt
@@ -397,10 +386,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn msg(role: &str, content: &str) -> ChatMessage {
-        ChatMessage {
-            role: role.to_string(),
-            content: content.to_string(),
-        }
+        ChatMessage::new(role, content)
     }
 
     fn seg(role: &str, kind: TurnKind, content: &str) -> TurnSegment {
@@ -581,17 +567,49 @@ mod tests {
     fn registry_resolution_reads_sft_datasets() {
         let dir = tempfile::tempdir().unwrap();
         let registry = crate::eval::DatasetRegistry::new(dir.path().join("datasets"));
+        let row = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"}
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "content": "world",
+                    "name": "lookup",
+                    "tool_call_id": "call_1"
+                },
+                {"role": "assistant", "content": "done"}
+            ]
+        });
+        let body = format!("{row}\n");
         registry
             .create(
                 "my-data",
                 crate::eval::DatasetFormat::SftChat,
                 None,
-                b"{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}\n",
+                body.as_bytes(),
             )
             .unwrap();
         let prompts = resolve_registry_opd_prompts(Some(&registry), "my-data").unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].messages[0].content, "hello");
+        assert_eq!(prompts[0].messages[1].content, "");
+        assert_eq!(prompts[0].messages[1].tool_calls.as_ref().unwrap().len(), 1);
+        assert_eq!(prompts[0].messages[2].name.as_deref(), Some("lookup"));
+        assert_eq!(
+            prompts[0].messages[2].tool_call_id.as_deref(),
+            Some("call_1")
+        );
+
+        let examples = resolve_registry_sft_examples(Some(&registry), "my-data").unwrap();
+        assert_eq!(examples[0].messages, prompts[0].messages);
 
         let err = resolve_registry_opd_prompts(Some(&registry), "nope").unwrap_err();
         assert!(err.contains("/v1/eval/datasets"), "{err}");

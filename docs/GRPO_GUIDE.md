@@ -68,8 +68,10 @@ coverage, and usage counts before invoking the scorer. Output publication is
 atomic: one missing or malformed record fails the command without replacing an
 existing dataset. This is the supported source for
 `behavior_policy: "recorded"`. Recorded tool-call rollouts remain unsupported:
-tool definitions, tool choice, and prior tool-call metadata fail admission until
-the scored training payload can represent them exactly.
+tool definitions and tool choice fail admission until generated tool actions can
+be represented in the scored completion. Prior assistant `tool_calls` and
+`role: "tool"` responses are supported context: their `name` and `tool_call_id`
+fields survive the output JSONL and are bound into the provenance prompt hash.
 
 **`POST /v1/completions/batch`** — issues `prompts.len() × n` text completions
 in one HTTP round-trip. It remains useful for fast online or explicitly

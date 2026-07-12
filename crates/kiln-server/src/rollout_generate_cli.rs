@@ -124,11 +124,7 @@ struct RolloutTask {
     value: Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct RolloutChatMessage {
-    role: String,
-    content: String,
-}
+type RolloutChatMessage = kiln_train::ChatMessage;
 
 #[derive(Debug)]
 struct AdapterSelection {
@@ -712,41 +708,10 @@ fn extract_messages_for_group(request: &Value) -> Result<Vec<RolloutChatMessage>
         .iter()
         .enumerate()
         .map(|(idx, message)| {
-            let obj = message
-                .as_object()
-                .ok_or_else(|| anyhow!("messages[{idx}] must be an object"))?;
-            let role = obj
-                .get("role")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("messages[{idx}].role must be a string"))?
-                .to_string();
-            let content = message_content_to_string(obj.get("content"))
-                .with_context(|| format!("messages[{idx}].content"))?;
-            Ok(RolloutChatMessage { role, content })
+            serde_json::from_value::<RolloutChatMessage>(message.clone())
+                .with_context(|| format!("messages[{idx}] must match the canonical chat schema"))
         })
         .collect()
-}
-
-fn message_content_to_string(value: Option<&Value>) -> Result<String> {
-    match value {
-        None | Some(Value::Null) => Ok(String::new()),
-        Some(Value::String(s)) => Ok(s.clone()),
-        Some(Value::Array(parts)) => {
-            let mut out = String::new();
-            for part in parts {
-                let Some(obj) = part.as_object() else {
-                    continue;
-                };
-                if obj.get("type").and_then(Value::as_str) == Some("text")
-                    && let Some(text) = obj.get("text").and_then(Value::as_str)
-                {
-                    out.push_str(text);
-                }
-            }
-            Ok(out)
-        }
-        Some(other) => anyhow::bail!("must be a string, null, or text-part array, got {other}"),
-    }
 }
 
 async fn post_chat_completion(client: &reqwest::Client, url: &str, body: &Value) -> Result<Value> {
@@ -824,14 +789,7 @@ fn validate_rollout_response(
         }
     }
 
-    let training_messages = expected_messages
-        .iter()
-        .map(|message| kiln_train::ChatMessage {
-            role: message.role.clone(),
-            content: message.content.clone(),
-        })
-        .collect::<Vec<_>>();
-    let prompt_messages_sha256 = kiln_train::rollout_prompt_messages_sha256(&training_messages)
+    let prompt_messages_sha256 = kiln_train::rollout_prompt_messages_sha256(expected_messages)
         .map_err(anyhow::Error::msg)?;
     anyhow::ensure!(
         provenance.prompt_messages_sha256 == prompt_messages_sha256,
@@ -1139,21 +1097,8 @@ mod tests {
     ) -> (kiln_train::RolloutProvenanceV1, usize) {
         let tokenizer = provenance_test_tokenizer();
         let messages = extract_messages_for_group(request).unwrap();
-        let training_messages = messages
-            .iter()
-            .map(|message| kiln_train::ChatMessage {
-                role: message.role.clone(),
-                content: message.content.clone(),
-            })
-            .collect::<Vec<_>>();
-        let core_messages = training_messages
-            .iter()
-            .map(|message| kiln_core::tokenizer::ChatMessage {
-                role: message.role.clone(),
-                content: message.content.clone(),
-                ..Default::default()
-            })
-            .collect::<Vec<_>>();
+        let training_messages = messages;
+        let core_messages = training_messages.clone();
         let template_kwargs = request
             .get("chat_template_kwargs")
             .and_then(Value::as_object)
@@ -1460,7 +1405,26 @@ mod tests {
     fn rollout_response_validation_binds_seed_prompt_content_adapter_and_usage() {
         let request = render_rollout_request(
             &json!({
-                "messages": [{"role": "user", "content": "say hi"}],
+                "messages": [
+                    {"role": "user", "content": "use the prior result"},
+                    {
+                        "role": "assistant",
+                        "content": null,
+                        "name": "lookup",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"}
+                        }]
+                    },
+                    {
+                        "role": "tool",
+                        "content": [{"type": "text", "text": "ready"}],
+                        "name": "lookup",
+                        "tool_call_id": "call_1"
+                    },
+                    {"role": "user", "content": "say hi"}
+                ],
                 "max_tokens": 1
             }),
             &json!({}),
@@ -1472,6 +1436,11 @@ mod tests {
         )
         .unwrap();
         let messages = extract_messages_for_group(&request).unwrap();
+        assert_eq!(messages[1].content, "");
+        assert_eq!(messages[1].tool_calls.as_ref().unwrap().len(), 1);
+        assert_eq!(messages[2].content, "ready");
+        assert_eq!(messages[2].name.as_deref(), Some("lookup"));
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_1"));
         let content = "cap answer 10";
         let (provenance, prompt_tokens) = provenance_for_test_response(&request, content);
         let mut response = json!({
@@ -1487,6 +1456,13 @@ mod tests {
             }
         });
         validate_rollout_response(&response, 10, Some("cap"), &messages).unwrap();
+
+        let mut wrong_messages = messages.clone();
+        wrong_messages[2].tool_call_id = Some("call_other".into());
+        let error = validate_rollout_response(&response, 10, Some("cap"), &wrong_messages)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("different prompt messages"), "{error}");
 
         response["choices"][0]["rollout_provenance"]["seed"] = json!(11);
         let error = validate_rollout_response(&response, 10, Some("cap"), &messages)

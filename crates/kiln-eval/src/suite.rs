@@ -90,53 +90,10 @@ impl Default for EvalGenerationParams {
     }
 }
 
-/// A single chat message (mirrors the API `Message` shape, kept here to
-/// keep `kiln-eval` independent of the server crate).
-///
-/// Carries the optional agentic fields (`tool_calls`, `tool_call_id`,
-/// `name`) so eval prompts can re-render multi-turn tool-use trajectories
-/// through Qwen3.5's chat template *exactly* as the model would have seen
-/// them in production. The fields are serialized only when set, so plain
-/// `{role, content}` JSON suites continue to round-trip unchanged.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EvalChatMessage {
-    pub role: String,
-    #[serde(default)]
-    pub content: String,
-    /// OpenAI-style assistant tool calls. Each entry is typically
-    /// `{"id": "…", "type": "function", "function": {"name": "…", "arguments": "…"}}`.
-    /// Forwarded into the chat template so the Qwen3.5 `<tool_call>` XML
-    /// renders on prior assistant turns.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<serde_json::Value>>,
-    /// Tool name on `tool`-role messages. Some templates branch on it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Which assistant tool-call this `tool`-role message answers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-}
-
-impl EvalChatMessage {
-    /// Construct a plain `{role, content}` message (back-compat with the
-    /// pre-tools shape). Tests and small fixtures use this everywhere; the
-    /// struct-literal form is preferred when any agentic field is set.
-    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
-        Self {
-            role: role.into(),
-            content: content.into(),
-            tool_calls: None,
-            name: None,
-            tool_call_id: None,
-        }
-    }
-}
-
-impl Default for EvalChatMessage {
-    fn default() -> Self {
-        Self::new("", "")
-    }
-}
+/// Canonical core chat message, re-exported under the eval-facing name for API
+/// compatibility. Plain and agentic conversations now share one wire schema
+/// across inference tokenization, eval, and training.
+pub use kiln_core::tokenizer::ChatMessage as EvalChatMessage;
 
 impl Default for EvalExample {
     fn default() -> Self {

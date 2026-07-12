@@ -37,17 +37,7 @@ fn fixture_tokenizer() -> KilnTokenizer {
 }
 
 fn eval_to_chat_messages(eval_msgs: &[EvalChatMessage]) -> Vec<ChatMessage> {
-    eval_msgs
-        .iter()
-        .map(|m| ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-            tool_calls: m.tool_calls.clone(),
-            name: m.name.clone(),
-            tool_call_id: m.tool_call_id.clone(),
-            ..Default::default()
-        })
-        .collect()
+    eval_msgs.to_vec()
 }
 
 #[test]

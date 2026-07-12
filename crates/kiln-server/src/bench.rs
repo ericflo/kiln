@@ -2465,15 +2465,15 @@ fn bench_training(
     let examples: Vec<SftExample> = (0..num_steps)
         .map(|i| SftExample {
             messages: vec![
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: format!(
+                ChatMessage::new(
+                    "user",
+                    format!(
                         "What is the capital of country number {i}? Please explain in detail."
                     ),
-                },
-                ChatMessage {
-                    role: "assistant".to_string(),
-                    content: format!(
+                ),
+                ChatMessage::new(
+                    "assistant",
+                    format!(
                         "The capital of country number {i} is City{i}. It is located in the \
                          central region and has a population of approximately {} million people. \
                          The city was founded in the {}th century and is known for its historic \
@@ -2481,7 +2481,7 @@ fn bench_training(
                         i * 3 + 1,
                         (i % 15) + 5
                     ),
-                },
+                ),
             ],
         })
         .collect();

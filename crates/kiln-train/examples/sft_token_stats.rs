@@ -5,14 +5,7 @@ use kiln_core::tokenizer::{ChatMessage as CoreChatMessage, KilnTokenizer};
 use kiln_train::SftExample;
 
 fn to_core_messages(messages: &[kiln_train::ChatMessage]) -> Vec<CoreChatMessage> {
-    messages
-        .iter()
-        .map(|message| CoreChatMessage {
-            role: message.role.clone(),
-            content: message.content.clone(),
-            ..Default::default()
-        })
-        .collect()
+    messages.to_vec()
 }
 
 fn tokenize_for_stats(example: &SftExample, tokenizer: &KilnTokenizer) -> Result<(usize, usize)> {

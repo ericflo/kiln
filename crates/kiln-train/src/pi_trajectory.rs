@@ -71,10 +71,7 @@ pub fn parse_pi_session_values(
                         warning_prefix_len: None,
                     });
                 } else {
-                    prompt_messages.push(ChatMessage {
-                        role: role.to_string(),
-                        content: text,
-                    });
+                    prompt_messages.push(ChatMessage::new(role, text));
                 }
             }
             "assistant" => {

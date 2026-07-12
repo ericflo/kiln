@@ -147,14 +147,8 @@ fn build_example(tokenizer: &KilnTokenizer, target_t: usize) -> Result<(SftExamp
 
     let example = SftExample {
         messages: vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: user,
-            },
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: assistant,
-            },
+            ChatMessage::new("user", user),
+            ChatMessage::new("assistant", assistant),
         ],
     };
 

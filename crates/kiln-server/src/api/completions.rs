@@ -4112,7 +4112,10 @@ pub struct AdapterRef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
-    #[serde(default, deserialize_with = "deserialize_optional_content")]
+    #[serde(
+        default,
+        deserialize_with = "kiln_core::tokenizer::deserialize_chat_content"
+    )]
     pub content: String,
     /// llama.cpp / DeepSeek-style chain-of-thought channel. Populated for
     /// reasoning models (Qwen3.5, DeepSeek R1, …) when the model emitted a
@@ -4154,47 +4157,6 @@ fn message_to_chat(m: &Message) -> ChatMessage {
             .cloned(),
         name: m.name.clone(),
         tool_call_id: m.tool_call_id.clone(),
-    }
-}
-
-/// Accept `content` as either a plain string, an OpenAI-style array of
-/// content parts (`[{"type": "text", "text": "..."}, ...]`), `null`, or
-/// missing. Text parts are concatenated in order; non-text parts are ignored
-/// since kiln is text-only. `null` and missing both yield an empty string —
-/// the assistant-tool-calls-only OpenAI shape (`{"role": "assistant",
-/// "content": null, "tool_calls": [...]}`) deserializes cleanly.
-fn deserialize_optional_content<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Content {
-        Text(String),
-        Parts(Vec<serde_json::Value>),
-    }
-
-    // `Option<T>` handles both the missing-key case (via `#[serde(default)]`
-    // on the field) and an explicit `null` value, falling through to the
-    // untagged enum for plain strings and arrays.
-    match Option::<Content>::deserialize(deserializer)? {
-        None => Ok(String::new()),
-        Some(Content::Text(s)) => Ok(s),
-        Some(Content::Parts(parts)) => {
-            let mut out = String::new();
-            for part in parts {
-                let Some(obj) = part.as_object() else {
-                    continue;
-                };
-                let ty = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                if ty == "text" {
-                    if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
-                        out.push_str(text);
-                    }
-                }
-            }
-            Ok(out)
-        }
     }
 }
 
@@ -5697,18 +5659,6 @@ fn validate_rollout_provenance_admission(
             "n must be exactly 1",
         ));
     }
-    if req.messages.iter().any(|message| {
-        message
-            .tool_calls
-            .as_ref()
-            .is_some_and(|calls| !calls.is_empty())
-            || message.name.is_some()
-            || message.tool_call_id.is_some()
-    }) {
-        return Err(ApiError::rollout_provenance_unavailable(
-            "prior message tool_calls, name, and tool_call_id fields cannot yet be represented by the training prompt schema",
-        ));
-    }
     if req.tools.as_ref().is_some_and(|tools| !tools.is_empty())
         || req
             .tool_choice
@@ -7066,10 +7016,7 @@ fn build_rollout_provenance(
         let prompt_messages = req
             .messages
             .iter()
-            .map(|message| kiln_train::ChatMessage {
-                role: message.role.clone(),
-                content: message.content.clone(),
-            })
+            .map(message_to_chat)
             .collect::<Vec<_>>();
         let prompt_messages_sha256 = kiln_train::rollout_prompt_messages_sha256(&prompt_messages)
             .map_err(anyhow::Error::msg)?;
@@ -11982,7 +11929,7 @@ mod tests {
             body["error"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("tool_calls")
+                .contains("mock backend")
         );
 
         let (status, body) = chat_post(

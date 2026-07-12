@@ -3707,10 +3707,7 @@ mod tests {
             source_format: "kiln_rollout_jsonl".to_string(),
             rollouts: vec![RolloutInspection {
                 index: 0,
-                prompt_messages: vec![kiln_train::ChatMessage {
-                    role: "user".to_string(),
-                    content: "run it".to_string(),
-                }],
+                prompt_messages: vec![kiln_train::ChatMessage::new("user", "run it")],
                 rendered_messages: "<|im_start|>assistant\ncall".to_string(),
                 segments: vec![SegmentInspection {
                     index: 0,

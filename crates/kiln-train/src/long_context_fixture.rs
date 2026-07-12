@@ -116,15 +116,14 @@ pub fn observed_long_context_seq_len(
 
 pub fn synthetic_long_context_prompt_messages() -> Vec<ChatMessage> {
     vec![
-        ChatMessage {
-            role: "system".to_string(),
-            content: "You are a concise agent compressing long terminal traces.".to_string(),
-        },
-        ChatMessage {
-            role: "user".to_string(),
-            content: "Inspect the synthetic trace and produce the final compact answer."
-                .to_string(),
-        },
+        ChatMessage::new(
+            "system",
+            "You are a concise agent compressing long terminal traces.",
+        ),
+        ChatMessage::new(
+            "user",
+            "Inspect the synthetic trace and produce the final compact answer.",
+        ),
     ]
 }
 

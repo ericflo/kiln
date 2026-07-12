@@ -799,14 +799,7 @@ fn approximate_tokens_for_messages(
     let char_estimate = (chars / 4) + envelope;
 
     if let Some(tok) = tokenizer {
-        let core: Vec<kiln_core::tokenizer::ChatMessage> = messages
-            .iter()
-            .map(|m| kiln_core::tokenizer::ChatMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-                ..Default::default()
-            })
-            .collect();
+        let core: Vec<kiln_core::tokenizer::ChatMessage> = messages.to_vec();
         if let Ok(text) = tok.apply_chat_template(&core) {
             if let Ok(ids) = tok.encode(&text) {
                 return ids.len();

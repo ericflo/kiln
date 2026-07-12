@@ -929,15 +929,9 @@ mod tests {
 
     #[test]
     fn rollout_provenance_payload_hashes_bind_prompt_and_content_but_not_reward() {
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: "question".to_string(),
-        }];
+        let messages = vec![ChatMessage::new("user", "question")];
         let prompt_hash = rollout_prompt_messages_sha256(&messages).unwrap();
-        let changed_prompt_hash = rollout_prompt_messages_sha256(&[ChatMessage {
-            role: "user".to_string(),
-            content: "other".to_string(),
-        }])
+        let changed_prompt_hash = rollout_prompt_messages_sha256(&[ChatMessage::new("user", "other")])
         .unwrap();
         assert_ne!(prompt_hash, changed_prompt_hash);
 

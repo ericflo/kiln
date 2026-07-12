@@ -293,14 +293,8 @@ impl CorrectionsStore {
             ids.push(row.request_id.clone());
             examples.push(kiln_train::SftExample {
                 messages: vec![
-                    kiln_train::ChatMessage {
-                        role: "user".to_string(),
-                        content: row.user.clone(),
-                    },
-                    kiln_train::ChatMessage {
-                        role: "assistant".to_string(),
-                        content: row.ideal.clone(),
-                    },
+                    kiln_train::ChatMessage::new("user", row.user.clone()),
+                    kiln_train::ChatMessage::new("assistant", row.ideal.clone()),
                 ],
             });
         }

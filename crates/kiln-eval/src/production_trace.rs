@@ -1017,13 +1017,7 @@ fn flatten_content_parts(parts: &[serde_json::Value]) -> Option<String> {
 }
 
 fn sft_to_chat_message(m: &crate::synthesis::SftMessage) -> EvalChatMessage {
-    EvalChatMessage {
-        role: m.role.clone(),
-        content: m.content.clone(),
-        tool_calls: m.tool_calls.clone(),
-        name: m.name.clone(),
-        tool_call_id: m.tool_call_id.clone(),
-    }
+    m.clone()
 }
 
 /// Outcome of extracting the eval target from a chosen assistant message.

@@ -1073,14 +1073,7 @@ async fn submit_sft(
         })?;
         req.examples = iter
             .map(|conv| kiln_train::SftExample {
-                messages: conv
-                    .messages
-                    .into_iter()
-                    .map(|m| kiln_train::ChatMessage {
-                        role: m.role,
-                        content: m.content,
-                    })
-                    .collect(),
+                messages: conv.messages,
             })
             .filter(|ex| !ex.messages.is_empty())
             .collect();
@@ -3829,10 +3822,7 @@ mod tests {
 
         request.config.training_mode = kiln_train::opd::OpdTrainingMode::OffPolicy;
         request.prompts = vec![OpdPrompt {
-            messages: vec![ChatMessage {
-                role: "user".into(),
-                content: "question".into(),
-            }],
+            messages: vec![ChatMessage::new("user", "question")],
             teacher_extra_messages: Vec::new(),
             trajectory: Vec::new(),
         }];
@@ -3884,10 +3874,7 @@ mod tests {
 
         request.mode = kiln_train::DistillPumpMode::Examples {
             examples: vec![OpdPrompt {
-                messages: vec![ChatMessage {
-                    role: "user".into(),
-                    content: "question".into(),
-                }],
+                messages: vec![ChatMessage::new("user", "question")],
                 teacher_extra_messages: Vec::new(),
                 trajectory: Vec::new(),
             }],
@@ -3942,10 +3929,7 @@ mod tests {
     #[test]
     fn self_distill_privileged_modes_require_one_nonempty_context_per_prompt() {
         let prompts = vec![OpdPrompt {
-            messages: vec![ChatMessage {
-                role: "user".into(),
-                content: "question".into(),
-            }],
+            messages: vec![ChatMessage::new("user", "question")],
             teacher_extra_messages: vec![],
             trajectory: vec![],
         }];
@@ -3978,10 +3962,7 @@ mod tests {
 
     fn grpo_group() -> GrpoGroup {
         GrpoGroup {
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: "prompt".to_string(),
-            }],
+            messages: vec![ChatMessage::new("user", "prompt")],
             completions: vec![ScoredCompletion {
                 text: "completion".to_string(),
                 reward: 1.0,
@@ -4260,10 +4241,7 @@ mod tests {
     fn opd_request_payload() -> OpdRequest {
         OpdRequest {
             prompts: vec![OpdPrompt {
-                messages: vec![ChatMessage {
-                    role: "user".into(),
-                    content: "Solve 5x + 7 = 22".into(),
-                }],
+                messages: vec![ChatMessage::new("user", "Solve 5x + 7 = 22")],
                 teacher_extra_messages: vec![],
                 trajectory: vec![],
             }],

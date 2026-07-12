@@ -16,6 +16,47 @@ pub enum TokenizerError {
     ChatTemplate(String),
 }
 
+/// Deserialize OpenAI-compatible chat content into Kiln's text-only message
+/// representation. Missing and `null` content become an empty string so an
+/// assistant turn containing only `tool_calls` is valid. Text content parts
+/// are concatenated in order; non-text parts are ignored.
+pub fn deserialize_chat_content<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Content {
+        Text(String),
+        Parts(Vec<serde_json::Value>),
+    }
+
+    let content = <Option<Content> as serde::Deserialize>::deserialize(deserializer)?;
+    match content {
+        None => Ok(String::new()),
+        Some(Content::Text(text)) => Ok(text),
+        Some(Content::Parts(parts)) => {
+            let mut text = String::new();
+            for part in parts {
+                if let Some(value) = part.as_str() {
+                    text.push_str(value);
+                    continue;
+                }
+                let Some(object) = part.as_object() else {
+                    continue;
+                };
+                let kind = object.get("type").and_then(serde_json::Value::as_str);
+                if matches!(kind, Some("text" | "input_text" | "output_text"))
+                    && let Some(value) = object.get("text").and_then(serde_json::Value::as_str)
+                {
+                    text.push_str(value);
+                }
+            }
+            Ok(text)
+        }
+    }
+}
+
 /// A chat message for template formatting.
 ///
 /// `tool_calls`, `name`, and `tool_call_id` are skipped on serialize when None
@@ -23,9 +64,10 @@ pub enum TokenizerError {
 /// When populated they let Qwen3.5-style chat templates render past assistant
 /// tool calls and `role: "tool"` responses correctly via `{% if message.tool_calls %}`
 /// branches.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ChatMessage {
     pub role: String,
+    #[serde(default, deserialize_with = "deserialize_chat_content")]
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
@@ -33,6 +75,17 @@ pub struct ChatMessage {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+}
+
+impl ChatMessage {
+    /// Construct a plain text message without agentic metadata.
+    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -680,6 +733,53 @@ fn deserialize_arguments_in_place(value: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_chat_message_keeps_minimal_wire_shape() {
+        let message = ChatMessage::new("user", "hello");
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            serde_json::json!({"role": "user", "content": "hello"})
+        );
+    }
+
+    #[test]
+    fn agentic_chat_message_accepts_openai_content_shapes() {
+        let messages: Vec<ChatMessage> = serde_json::from_value(serde_json::json!([
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "calculator", "arguments": "{\"x\":1}"}
+                }],
+                "name": "calculator"
+            },
+            {
+                "role": "tool",
+                "content": [
+                    {"type": "text", "text": "answer="},
+                    {"type": "input_text", "text": "1"},
+                    {"type": "image_url", "image_url": {"url": "ignored"}}
+                ],
+                "name": "calculator",
+                "tool_call_id": "call_1"
+            }
+        ]))
+        .unwrap();
+
+        assert_eq!(messages[0].content, "");
+        assert_eq!(messages[0].name.as_deref(), Some("calculator"));
+        assert_eq!(messages[0].tool_calls.as_ref().unwrap().len(), 1);
+        assert_eq!(messages[1].content, "answer=1");
+        assert_eq!(messages[1].name.as_deref(), Some("calculator"));
+        assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_1"));
+
+        let normalized = serde_json::to_value(&messages).unwrap();
+        let round_trip: Vec<ChatMessage> = serde_json::from_value(normalized).unwrap();
+        assert_eq!(round_trip, messages);
+    }
 
     /// Minimal valid tokenizer JSON for offline tests (BPE with tiny vocab).
     fn minimal_tokenizer() -> KilnTokenizer {
