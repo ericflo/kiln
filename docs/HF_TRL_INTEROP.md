@@ -8,11 +8,11 @@ adapters between those systems without discarding the identities needed to
 audit the handoff.
 
 The version-1 manifests, validation library, atomic SFT and GRPO library bundle
-writers, atomic import-envelope writer, pinned SFT reference runner, public SFT
-export/download CLI and API, and resident-validated PEFT import API and CLI are
-implemented. The public GRPO exporter and GRPO runner are not yet available. A
-PEFT directory installed through the generic adapter upload route has not
-passed this contract.
+writers, atomic import-envelope writer, task-aware pinned SFT/recorded-GRPO
+reference runner, public SFT export/download CLI and API, and
+resident-validated PEFT import API and CLI are implemented. The public GRPO
+exporter is not yet available. A PEFT directory installed through the generic
+adapter upload route has not passed this contract.
 
 ## Bundle Model
 
@@ -274,11 +274,14 @@ python ./support_run_01.kiln-hf/train.py ./support_run_01.kiln-hf \
   --base-model /absolute/path/to/the/hf-model
 ```
 
-## Pinned SFT Runner
+## Pinned Reference Runner
 
 `scripts/hf_trl/train_sft.py` is the exact standalone runner embedded in every
-public SFT export. `scripts/hf_trl/requirements-sft.lock` pins the public package
-versions it accepts:
+public SFT export and exposed by the GRPO library writer under a task-specific
+reference constant. Despite the historical filename, it dispatches from the
+self-verifying manifest task and supports both SFT and provenance-complete
+recorded GRPO. `scripts/hf_trl/requirements-sft.lock` pins the package versions
+it accepts:
 
 | Package | Version |
 | --- | --- |
@@ -306,10 +309,15 @@ python ./my-run.kiln-hf/train.py ./my-run.kiln-hf \
 
 `--base-model` is deliberately local and explicit. Before importing PyTorch,
 the runner verifies the export self-digest, closed schema, exact recursive
-file set, every artifact size and hash, complete SFT selection receipt,
-generation-span template, environment lock, local tokenizer bytes, and every
-base-weight shard byte. `--verify-only` performs this dependency-free
-preflight.
+file set, every artifact size and hash, environment lock, local tokenizer
+bytes, and every base-weight shard byte. SFT additionally verifies its complete
+selection receipt and generation-span template. GRPO streams and reconstructs
+the typed canonical corpus, then checks every prompt, scored payload,
+tokenizer, template, behavior policy, adapter revision, sampling control,
+thinking budget, token boundary, sampled/forced action, behavior log-probability,
+row count, and ordered corpus digest. It enforces the same 64 GiB dataset,
+256 MiB row, ten-million-group, and 2..=1024-completion bounds as the Rust
+verifier. `--verify-only` performs this dependency-free preflight.
 
 The default route uses TRL `SFTTrainer`, assistant-only generation masks,
 PEFT LoRA, no packing or dataset shuffle, AdamW, and a materialized seed. It
@@ -324,6 +332,32 @@ comma-separated subset and rejects unknown or duplicate modules; PEFT's
 projections Kiln cannot apply. A modified runner requires
 `--allow-custom-script` and remains distinguishable through
 `executed_train.py`.
+
+For GRPO, the runner does not ask Transformers or vLLM to generate replacement
+samples. It copies the verified JSONL into a private work snapshot, rechecks
+that snapshot at every epoch boundary, and supplies TRL the exact recorded
+prompt and suffix token IDs. Recorded sampled-token log-probabilities become
+TRL's `old_per_token_logps`; they alone define the PPO importance ratio.
+Forced thinking-budget close tokens and trajectory environment tokens remain
+in sequence context but receive `env_mask=0`, so they cannot become policy
+targets. Recorded rewards are forwarded unchanged to the reward function.
+The independently frozen initial adapter, or the base model for a new LoRA,
+supplies KL-reference probabilities. It is never substituted with recorded
+behavior probabilities.
+
+TRL 1.8.0 has one run-global `num_generations` and drops an incomplete unique
+prompt batch. The correctness runner therefore requires one uniform completion
+count across groups and requires `--batch-size` to divide the group count. It
+fixes `steps_per_generation=1`, `num_iterations=1`, disables dataset shuffle,
+vLLM generation, truncation masking, and KL bias correction, and fails instead
+of omitting corpus rows. GRPO defaults are DAPO token-level aggregation,
+unscaled group-relative rewards, token-level recorded-policy ratios, symmetric
+epsilon `0.2`, and beta `0.1`. TRL's independent KL term is the K3 estimator;
+the exact effective configuration records that fact. `--loss-type`,
+`--scale-rewards`, `--importance-sampling-level`, `--epsilon-high`, and
+`--beta` expose the bounded alternatives supported by this pinned route.
+`--max-length` is SFT-only because GRPO sequence boundaries are provenance,
+not a retokenization choice.
 
 The pinned v1 runner is deliberately a single-process correctness reference;
 it rejects `WORLD_SIZE != 1` instead of allowing multiple ranks to race result

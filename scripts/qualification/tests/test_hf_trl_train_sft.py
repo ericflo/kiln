@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -200,6 +201,10 @@ class BundleFixture:
                 self.bundle / "requirements.lock", "requirements.lock"
             ),
         }
+        base_manifest = manifest["model"]["base_weight_shard_manifest"]
+        base_manifest["aggregate_sha256"] = train_sft._base_weight_aggregate_sha256(
+            base_manifest["shards"]
+        )
         manifest["export_sha256"] = train_sft._canonical_sha256(manifest)
         self.manifest = manifest
         self.write_manifest()
@@ -208,6 +213,111 @@ class BundleFixture:
         (self.bundle / "kiln_hf_export.json").write_text(
             json.dumps(self.manifest, indent=2), encoding="utf-8"
         )
+
+
+class GrpoBundleFixture(BundleFixture):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        (self.bundle / "sft_ingestion.json").unlink()
+        messages = [{"role": "user", "content": "a"}]
+        prompt_sha256 = train_sft._rollout_prompt_sha256(messages)
+        behavior = {
+            "served_model_id": self.manifest["model"]["served_model_id"],
+            "base_model_sha256": self.manifest["model"][
+                "base_weight_shard_manifest"
+            ]["aggregate_sha256"],
+            "inference_config_sha256": "sha256:" + "4" * 64,
+            "implementation": "kiln-test/cpu",
+        }
+        tokenizer = {
+            "vocab_sha256": self.manifest["model"]["tokenizer_vocab_sha256"],
+            "config_sha256": self.manifest["model"]["tokenizer"]["sha256"],
+            "chat_template_sha256": self.manifest["model"]["chat_template"][
+                "sha256"
+            ],
+        }
+        sampling = {
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "top_k": 20,
+            "min_p": 0.0,
+            "max_tokens": 2,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "stop": [],
+            "thinking_budget": {
+                "max_tokens": 1,
+                "close_token_ids": [21],
+            },
+        }
+        specs = [
+            ("bad", 0.0, [10, 20, 21], [(1, 20, "sampled", -0.5), (2, 21, "forced", None)]),
+            ("good", 1.0, [10, 22], [(1, 22, "sampled", -0.25)]),
+        ]
+        completions = []
+        for seed, (text, reward, input_ids, actions) in enumerate(specs, 7):
+            provenance = {
+                "schema": train_sft.GRPO_PROVENANCE_SCHEMA,
+                "input_token_ids": input_ids,
+                "prompt_token_count": 1,
+                "prompt_messages_sha256": prompt_sha256,
+                "scored_payload_sha256": train_sft._scored_payload_sha256(
+                    text, []
+                ),
+                "action_tokens": [
+                    {
+                        "sequence_index": position,
+                        "token_id": token,
+                        "source": source,
+                        "behavior_logprob": logprob,
+                    }
+                    for position, token, source, logprob in actions
+                ],
+                "behavior_policy": copy.deepcopy(behavior),
+                "tokenizer": copy.deepcopy(tokenizer),
+                "sampling": copy.deepcopy(sampling),
+                "seed": seed,
+                "generation_backend": "cpu",
+            }
+            completions.append(
+                {"text": text, "reward": reward, "provenance": provenance}
+            )
+        self.group = {"messages": messages, "completions": completions}
+        self.write_groups([self.group])
+        self.manifest["task"] = "grpo"
+        self.manifest["data"] = {
+            "source_name": "rollouts",
+            "format": "grpo_groups_jsonl",
+            "row_count": 1,
+            "ordered_corpus_sha256": train_sft._ordered_grpo_corpus_sha256(
+                [train_sft._compact_json_bytes(self.group)]
+            ),
+            "dataset": identity(self.bundle / "train.jsonl", "train.jsonl"),
+            "rollout_provenance_schema": train_sft.GRPO_PROVENANCE_SCHEMA,
+        }
+        self.rehash_manifest()
+
+    def write_groups(self, groups: list[dict[str, object]]) -> None:
+        rows = [train_sft._compact_json_bytes(group) for group in groups]
+        write(self.bundle / "train.jsonl", b"\n".join(rows) + b"\n")
+
+    def rehash_manifest(self) -> None:
+        self.manifest["data"]["dataset"] = identity(
+            self.bundle / "train.jsonl", "train.jsonl"
+        )
+        rows = (self.bundle / "train.jsonl").read_bytes().splitlines()
+        self.manifest["data"]["ordered_corpus_sha256"] = (
+            train_sft._ordered_grpo_corpus_sha256(rows)
+        )
+        self.manifest["data"]["row_count"] = len(rows)
+        fields = {
+            key: value
+            for key, value in self.manifest.items()
+            if key != "export_sha256"
+        }
+        self.manifest["export_sha256"] = train_sft._canonical_sha256(fields)
+        self.write_manifest()
 
 
 class HfTrlSftReferenceTests(unittest.TestCase):
@@ -227,6 +337,21 @@ class HfTrlSftReferenceTests(unittest.TestCase):
         self.assertEqual(
             train_sft._canonical_sha256(value),
             "sha256:1a00ddf29092a9e9e9ecd4ea9faf9c48f69208e5439834c6674d1d6bfb45e258",
+        )
+        self.assertEqual(
+            train_sft._base_weight_aggregate_sha256(
+                [
+                    {
+                        "sha256": "sha256:" + "22" * 32,
+                        "size_bytes": 22,
+                    },
+                    {
+                        "sha256": "sha256:" + "11" * 32,
+                        "size_bytes": 11,
+                    },
+                ]
+            ),
+            "sha256:813979f1d3dd938e49874427651a97344cd1af5409e75aceaa741707616cd7a5",
         )
 
     def test_export_and_base_bytes_verify_then_tampering_fails(self) -> None:
@@ -272,6 +397,20 @@ class HfTrlSftReferenceTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(train_sft.ContractError, "wrong size|differs"):
             train_sft.verify_base_model_source(self.fixture.base_model, manifest)
+
+    def test_base_aggregate_is_recomputed_instead_of_trusted(self) -> None:
+        self.fixture.manifest["model"]["base_weight_shard_manifest"][
+            "aggregate_sha256"
+        ] = "sha256:" + "f" * 64
+        fields = {
+            key: value
+            for key, value in self.fixture.manifest.items()
+            if key != "export_sha256"
+        }
+        self.fixture.manifest["export_sha256"] = train_sft._canonical_sha256(fields)
+        self.fixture.write_manifest()
+        with self.assertRaisesRegex(train_sft.ContractError, "base-weight aggregate differs"):
+            train_sft.load_export_bundle(self.fixture.bundle)
 
     def test_result_is_published_last_and_is_self_verifying(self) -> None:
         root, manifest = train_sft.load_export_bundle(self.fixture.bundle)
@@ -359,6 +498,133 @@ class HfTrlSftReferenceTests(unittest.TestCase):
         write(root / train_sft.ADAPTER_CONFIG, b"unattributed")
         with self.assertRaisesRegex(train_sft.ContractError, "unattributed"):
             train_sft._recover_or_reject_result_state(root)
+
+
+class HfTrlGrpoReferenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.fixture = GrpoBundleFixture(Path(self.temporary.name))
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_grpo_bundle_and_base_verify_without_training_imports(self) -> None:
+        root, manifest = train_sft.load_export_bundle(self.fixture.bundle)
+        self.assertEqual(manifest["task"], "grpo")
+        self.assertEqual(
+            train_sft.verify_base_model_source(self.fixture.base_model, manifest),
+            self.fixture.base_model.resolve(),
+        )
+        summary = train_sft._scan_grpo_dataset(
+            root / "train.jsonl", manifest["model"], None
+        )
+        self.assertEqual(summary["completion_count"], 2)
+        self.assertEqual(summary["sampled_action_tokens"], 2)
+        self.assertEqual(summary["forced_action_tokens"], 1)
+        self.assertEqual(summary["num_generations"], 2)
+
+    def test_grpo_ordered_digest_matches_rust_cross_language_golden(self) -> None:
+        self.assertEqual(
+            train_sft._ordered_grpo_corpus_sha256([b'{"a":1}', b"[]"]),
+            "sha256:3f495e234c3946d423ff971d5ade7fc11e7139a5a24cd3ea35a36cba2c6bdeb3",
+        )
+
+    def test_noncanonical_row_fails_after_all_outer_hashes_are_updated(self) -> None:
+        write(
+            self.fixture.bundle / "train.jsonl",
+            (json.dumps(self.fixture.group) + "\n").encode("utf-8"),
+        )
+        self.fixture.rehash_manifest()
+        with self.assertRaisesRegex(train_sft.ContractError, "not canonical compact JSON"):
+            train_sft.load_export_bundle(self.fixture.bundle)
+
+    def test_scored_payload_drift_fails_after_dataset_and_manifest_rehash(self) -> None:
+        changed = copy.deepcopy(self.fixture.group)
+        changed["completions"][0]["text"] = "rescored bytes"
+        self.fixture.write_groups([changed])
+        self.fixture.rehash_manifest()
+        with self.assertRaisesRegex(train_sft.ContractError, "scored payload identity differs"):
+            train_sft.load_export_bundle(self.fixture.bundle)
+
+    def test_recorded_rollout_replays_exact_ids_logprobs_masks_and_rewards(self) -> None:
+        _, manifest = train_sft.load_export_bundle(self.fixture.bundle)
+        source = train_sft._RecordedRolloutSource(
+            self.fixture.bundle / "train.jsonl",
+            manifest["data"]["dataset"],
+            manifest["model"],
+            None,
+            2,
+        )
+        prompt = train_sft._compact_json_bytes(
+            self.fixture.group["messages"]
+        ).decode("utf-8")
+        output = source([prompt, prompt], object())
+        self.assertEqual(output["prompt_ids"], [[10], [10]])
+        self.assertEqual(output["completion_ids"], [[20, 21], [22]])
+        self.assertEqual(output["logprobs"], [[-0.5, 0.0], [-0.25]])
+        self.assertEqual(output["env_mask"], [[1, 0], [1]])
+        self.assertEqual(output["recorded_reward"], [0.0, 1.0])
+        self.assertEqual(
+            train_sft._recorded_reward(recorded_reward=[0.0, 1.0]),
+            [0.0, 1.0],
+        )
+        source([prompt, prompt], object())
+        self.assertEqual(source.groups_served, 2)
+        self.assertEqual(source.epochs_opened, 2)
+
+    def test_recorded_rollout_rejects_source_mutation_and_prompt_reordering(self) -> None:
+        _, manifest = train_sft.load_export_bundle(self.fixture.bundle)
+        source = train_sft._RecordedRolloutSource(
+            self.fixture.bundle / "train.jsonl",
+            manifest["data"]["dataset"],
+            manifest["model"],
+            None,
+            2,
+        )
+        with self.assertRaisesRegex(train_sft.ContractError, "prompt order or repetition"):
+            source(["wrong", "wrong"], object())
+
+        source = train_sft._RecordedRolloutSource(
+            self.fixture.bundle / "train.jsonl",
+            manifest["data"]["dataset"],
+            manifest["model"],
+            None,
+            2,
+        )
+        with (self.fixture.bundle / "train.jsonl").open("ab") as handle:
+            handle.write(b" ")
+        with self.assertRaisesRegex(train_sft.ContractError, "size changed"):
+            source(["unused", "unused"], object())
+
+    def test_heterogeneous_completion_counts_fail_instead_of_dropping_rows(self) -> None:
+        second = copy.deepcopy(self.fixture.group)
+        second["completions"].append(copy.deepcopy(second["completions"][1]))
+        self.fixture.write_groups([self.fixture.group, second])
+        self.fixture.rehash_manifest()
+        with self.assertRaisesRegex(train_sft.ContractError, "uniform completion count"):
+            train_sft.load_export_bundle(self.fixture.bundle)
+
+    def test_grpo_result_records_task_and_trainer_kind(self) -> None:
+        root, manifest = train_sft.load_export_bundle(self.fixture.bundle)
+        adapter = Path(self.temporary.name) / "adapter"
+        adapter.mkdir()
+        write(adapter / "adapter_config.json", b'{"peft_type":"LORA"}')
+        write(adapter / "adapter_model.safetensors", b"fake adapter tensors")
+        versions = dict(train_sft.PINNED_PACKAGES)
+        with mock.patch.object(
+            train_sft.importlib.metadata,
+            "version",
+            side_effect=lambda name: versions[name],
+        ):
+            train_sft._publish_result(
+                root,
+                manifest,
+                adapter,
+                {"behavior_policy": {"kind": "text", "value": "recorded"}},
+            )
+        result = train_sft._read_json(root / train_sft.RESULT_MANIFEST, bounded=True)
+        self.assertEqual(result["task"], "grpo")
+        self.assertEqual(result["trainer"]["kind"], "trl_grpo_trainer")
 
 
 if __name__ == "__main__":

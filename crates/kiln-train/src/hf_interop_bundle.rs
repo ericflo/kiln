@@ -63,8 +63,12 @@ pub const HF_TRL_SFT_REFERENCE_SCRIPT: &[u8] =
     include_bytes!("../../../scripts/hf_trl/train_sft.py");
 pub const HF_TRL_SFT_ENVIRONMENT_LOCK: &[u8] =
     include_bytes!("../../../scripts/hf_trl/requirements-sft.lock");
+/// Task-specific name for the shared, task-aware pinned reference runner.
+pub const HF_TRL_GRPO_REFERENCE_SCRIPT: &[u8] = HF_TRL_SFT_REFERENCE_SCRIPT;
+/// Task-specific name for the shared pinned HF/TRL/PEFT environment.
+pub const HF_TRL_GRPO_ENVIRONMENT_LOCK: &[u8] = HF_TRL_SFT_ENVIRONMENT_LOCK;
 
-/// Optional Kiln PEFT adapter to copy into an SFT handoff.
+/// Optional Kiln PEFT adapter to copy into an HF/TRL handoff.
 #[derive(Debug, Clone, Copy)]
 pub struct HfTrlInputAdapterSource<'a> {
     pub name: &'a str,
@@ -1167,11 +1171,16 @@ mod tests {
     };
 
     #[test]
-    fn embedded_sft_reference_assets_are_pinned_and_executable_text() {
+    fn embedded_reference_assets_are_pinned_task_aware_executable_text() {
         let script = std::str::from_utf8(HF_TRL_SFT_REFERENCE_SCRIPT).unwrap();
         let lock = std::str::from_utf8(HF_TRL_SFT_ENVIRONMENT_LOCK).unwrap();
+        assert_eq!(HF_TRL_GRPO_REFERENCE_SCRIPT, HF_TRL_SFT_REFERENCE_SCRIPT);
+        assert_eq!(HF_TRL_GRPO_ENVIRONMENT_LOCK, HF_TRL_SFT_ENVIRONMENT_LOCK);
         assert!(script.starts_with("#!/usr/bin/env python3\n"));
         assert!(script.contains("assistant_only_loss=True"));
+        assert!(script.contains("class _RecordedRolloutSource"));
+        assert!(script.contains("output[\"old_per_token_logps\"] = recorded.detach()"));
+        assert!(script.contains("\"env_mask\": env_mask"));
         assert!(script.contains("kiln.hf-trl-result.v1"));
         for package in [
             "torch==2.13.0",
