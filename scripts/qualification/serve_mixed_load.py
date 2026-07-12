@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CASE_ID = "mixed-load"
 RESULT_ENV = "KILN_QUALIFICATION_CASE_RESULT"
 VARIANT_ENV = "KILN_QUALIFICATION_VARIANT_ID"
+RUNNER_OWNED_KILN_ENVIRONMENT = frozenset({RESULT_ENV, VARIANT_ENV})
 MODEL_ID = "Qwen3.5-4B"
 BUILD_PACKAGE = "kiln-server"
 BUILD_BINARY = "kiln"
@@ -1340,6 +1341,17 @@ def sha256_file(path: Path) -> str:
 
 
 def sanitized_environment(source: dict[str, str]) -> dict[str, str]:
+    unexpected = sorted(
+        key
+        for key in source
+        if key.startswith("KILN_") and key not in RUNNER_OWNED_KILN_ENVIRONMENT
+    )
+    if unexpected:
+        raise QualificationError(
+            "mixed-load qualification rejects ambient Kiln controls not declared by "
+            "the committed workload variant: "
+            + ", ".join(unexpected)
+        )
     return {
         key: value
         for key, value in source.items()

@@ -39,6 +39,10 @@ python3 scripts/qualification/workload.py \
 The runner rejects a dirty worktree, an uncommitted workload, missing required
 variables, a missing required device, silent skips, and an existing receipt or
 raw-run directory. Do not bypass those checks.
+The ROCm mixed-load driver also rejects ambient `KILN_*` server controls before
+building. Configuration changes must be declared in a committed workload
+variant; inherited shell overrides are never silently ignored or accepted as
+source-bound evidence.
 
 ## Refresh The GRPO Reference Oracle
 

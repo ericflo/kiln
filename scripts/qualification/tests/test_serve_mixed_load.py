@@ -877,18 +877,31 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             )
         )
 
-    def test_environment_sanitizer_removes_all_kiln_and_log_overrides(self) -> None:
+    def test_environment_sanitizer_keeps_only_runner_owned_kiln_controls(self) -> None:
         sanitized = serve.sanitized_environment(
             {
                 "PATH": "/bin",
                 "HOME": "/tmp",
-                "KILN_MODEL_PATH": "wrong",
-                "KILN_ROCM_GRAPHS": "0",
-                "KILN_CONFIG": "wrong.toml",
+                serve.RESULT_ENV: "/tmp/result.json",
+                serve.VARIANT_ENV: "graphs-off",
                 "RUST_LOG": "trace",
             }
         )
         self.assertEqual(sanitized, {"PATH": "/bin", "HOME": "/tmp"})
+
+    def test_environment_sanitizer_rejects_ambient_server_controls(self) -> None:
+        with self.assertRaisesRegex(
+            serve.QualificationError,
+            "KILN_MAX_DECODE_BATCH, KILN_MODEL_PATH, KILN_ROCM_GRAPHS",
+        ):
+            serve.sanitized_environment(
+                {
+                    "PATH": "/bin",
+                    "KILN_MODEL_PATH": "wrong",
+                    "KILN_ROCM_GRAPHS": "0",
+                    "KILN_MAX_DECODE_BATCH": "12",
+                }
+            )
 
     def test_server_environment_uses_absence_for_defaults_and_zero_for_off(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
