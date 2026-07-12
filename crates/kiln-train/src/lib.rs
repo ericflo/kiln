@@ -97,9 +97,10 @@ pub use hf_interop_bundle::{
     HF_TRL_IMPORT_MAX_MANIFEST_BYTES, HF_TRL_IMPORT_MAX_SAFETENSORS_HEADER_BYTES,
     HF_TRL_IMPORT_MAX_SCRIPT_BYTES, HF_TRL_IMPORT_MAX_TAR_ZERO_PADDING_BYTES,
     HF_TRL_IMPORTED_ADAPTER_FILES, HF_TRL_SFT_ENVIRONMENT_LOCK, HF_TRL_SFT_REFERENCE_SCRIPT,
-    HfTrlInputAdapterSource, HfTrlSftBundleInput, hf_trl_import_envelope_files,
-    validate_hf_trl_import_name, verify_hf_trl_completed_bundle, verify_hf_trl_export_bundle,
-    verify_hf_trl_import_envelope, write_hf_trl_import_envelope, write_hf_trl_sft_bundle,
+    HfTrlGrpoBundleInput, HfTrlGrpoDatasetSource, HfTrlInputAdapterSource, HfTrlSftBundleInput,
+    hf_trl_import_envelope_files, validate_hf_trl_import_name, verify_hf_trl_completed_bundle,
+    verify_hf_trl_export_bundle, verify_hf_trl_import_envelope, write_hf_trl_grpo_bundle,
+    write_hf_trl_import_envelope, write_hf_trl_sft_bundle,
 };
 pub use logit_cache::{CacheEntry, CacheStats, CachedLogitSource, LogitCache, hash_prefix};
 pub use receipt::{

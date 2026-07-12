@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -20,7 +20,8 @@ use crate::{
     HF_TRL_RESULT_MANIFEST_FILENAME, HF_TRL_SFT_INGESTION_FILENAME, HF_TRL_SPLIT_MANIFEST_FILENAME,
     HF_TRL_TOKENIZER_FILENAME, HF_TRL_TRAINING_TEMPLATE_FILENAME, HfTrlDataExport,
     HfTrlDatasetFormat, HfTrlExportManifestV1, HfTrlFileIdentity, HfTrlInputAdapter,
-    HfTrlModelIdentity, HfTrlSftSelection, HfTrlTask, HfTrlTrainingResultV1, SftPreparedDataset,
+    HfTrlModelIdentity, HfTrlSftSelection, HfTrlTask, HfTrlTrainingResultV1,
+    ROLLOUT_PROVENANCE_SCHEMA_V1, SftPreparedDataset,
 };
 
 pub const HF_TRL_BUNDLE_SUFFIX: &str = ".kiln-hf";
@@ -86,6 +87,95 @@ pub struct HfTrlSftBundleInput<'a> {
     pub input_adapter: Option<HfTrlInputAdapterSource<'a>>,
 }
 
+/// Canonical GRPO groups to snapshot into an immutable handoff.
+#[derive(Debug, Clone, Copy)]
+pub enum HfTrlGrpoDatasetSource<'a> {
+    Groups {
+        source_name: &'a str,
+        groups: &'a [crate::GrpoGroup],
+    },
+    Jsonl {
+        source_name: &'a str,
+        path: &'a Path,
+    },
+}
+
+impl<'a> HfTrlGrpoDatasetSource<'a> {
+    fn source_name(self) -> &'a str {
+        match self {
+            Self::Groups { source_name, .. } | Self::Jsonl { source_name, .. } => source_name,
+        }
+    }
+}
+
+/// Exact resident identities and rollout source required to construct one
+/// immutable GRPO handoff.
+pub struct HfTrlGrpoBundleInput<'a> {
+    pub served_model_id: &'a str,
+    pub model_config: &'a kiln_core::config::ModelConfig,
+    pub tokenizer: &'a kiln_core::tokenizer::KilnTokenizer,
+    pub base_weight_shard_manifest: &'a kiln_core::model_provenance::BaseWeightShardManifest,
+    pub source_execution_provenance: &'a kiln_core::execution_provenance::ExecutionProvenanceV1,
+    pub dataset: HfTrlGrpoDatasetSource<'a>,
+    pub reference_script: &'a [u8],
+    pub environment_lock: &'a [u8],
+    pub split_manifest: Option<&'a [u8]>,
+    pub input_adapter: Option<HfTrlInputAdapterSource<'a>>,
+}
+
+#[derive(Clone, Copy)]
+struct HfTrlCommonBundleInput<'a> {
+    served_model_id: &'a str,
+    model_config: &'a kiln_core::config::ModelConfig,
+    tokenizer: &'a kiln_core::tokenizer::KilnTokenizer,
+    base_weight_shard_manifest: &'a kiln_core::model_provenance::BaseWeightShardManifest,
+    source_execution_provenance: &'a kiln_core::execution_provenance::ExecutionProvenanceV1,
+    reference_script: &'a [u8],
+    environment_lock: &'a [u8],
+    split_manifest: Option<&'a [u8]>,
+    input_adapter: Option<HfTrlInputAdapterSource<'a>>,
+}
+
+impl<'a> From<&HfTrlSftBundleInput<'a>> for HfTrlCommonBundleInput<'a> {
+    fn from(input: &HfTrlSftBundleInput<'a>) -> Self {
+        Self {
+            served_model_id: input.served_model_id,
+            model_config: input.model_config,
+            tokenizer: input.tokenizer,
+            base_weight_shard_manifest: input.base_weight_shard_manifest,
+            source_execution_provenance: input.source_execution_provenance,
+            reference_script: input.reference_script,
+            environment_lock: input.environment_lock,
+            split_manifest: input.split_manifest,
+            input_adapter: input.input_adapter,
+        }
+    }
+}
+
+impl<'a> From<&HfTrlGrpoBundleInput<'a>> for HfTrlCommonBundleInput<'a> {
+    fn from(input: &HfTrlGrpoBundleInput<'a>) -> Self {
+        Self {
+            served_model_id: input.served_model_id,
+            model_config: input.model_config,
+            tokenizer: input.tokenizer,
+            base_weight_shard_manifest: input.base_weight_shard_manifest,
+            source_execution_provenance: input.source_execution_provenance,
+            reference_script: input.reference_script,
+            environment_lock: input.environment_lock,
+            split_manifest: input.split_manifest,
+            input_adapter: input.input_adapter,
+        }
+    }
+}
+
+struct WrittenCommonArtifacts {
+    model: HfTrlModelIdentity,
+    reference_script: HfTrlFileIdentity,
+    environment_lock: HfTrlFileIdentity,
+    split_manifest: Option<HfTrlFileIdentity>,
+    input_adapter: Option<HfTrlInputAdapter>,
+}
+
 /// Build and atomically publish one immutable SFT handoff directory.
 ///
 /// `target` must end in `.kiln-hf` and must not already exist. The function
@@ -96,96 +186,18 @@ pub fn write_hf_trl_sft_bundle(
     input: HfTrlSftBundleInput<'_>,
 ) -> Result<HfTrlExportManifestV1> {
     let (parent, target, basename) = prepare_target(target)?;
-    validate_input(&input)?;
+    validate_sft_input(&input)?;
 
     let staging = parent.join(format!(".{basename}.incomplete-{}", Uuid::new_v4()));
     create_private_directory(&staging)
         .with_context(|| format!("create HF/TRL staging directory {}", staging.display()))?;
-    let mut guard = StagingGuard::new(staging.clone());
-
-    let model_config_value =
-        serde_json::to_value(input.model_config).context("serialize HF/TRL model config")?;
-    let model_config_bytes =
-        serde_json::to_vec(&model_config_value).context("encode canonical HF/TRL model config")?;
-    write_new_synced_file(
-        &staging.join(HF_TRL_MODEL_CONFIG_FILENAME),
-        &model_config_bytes,
-    )?;
-    let tokenizer_bytes = input
-        .tokenizer
-        .tokenizer_config_json()
-        .map_err(|error| anyhow::anyhow!("serialize HF/TRL tokenizer: {error}"))?;
-    write_new_synced_file(
-        &staging.join(HF_TRL_TOKENIZER_FILENAME),
-        tokenizer_bytes.as_bytes(),
-    )?;
-    write_new_synced_file(
-        &staging.join(HF_TRL_CHAT_TEMPLATE_FILENAME),
-        input
-            .tokenizer
-            .chat_template()
-            .context("HF/TRL SFT export requires a configured chat template")?
-            .as_bytes(),
-    )?;
-    write_new_synced_file(
-        &staging.join(HF_TRL_NATIVE_TRAINING_TEMPLATE_FILENAME),
-        input
-            .tokenizer
-            .training_chat_template()
-            .context("HF/TRL SFT export requires a native training template")?
-            .as_bytes(),
-    )?;
-    write_new_synced_file(
-        &staging.join(HF_TRL_TRAINING_TEMPLATE_FILENAME),
-        input
-            .tokenizer
-            .trl_training_chat_template()
-            .context("HF/TRL SFT export requires a TRL training template")?
-            .as_bytes(),
-    )?;
+    let guard = StagingGuard::new(staging.clone());
+    let common = write_common_artifacts(&staging, HfTrlCommonBundleInput::from(&input))?;
     write_sft_dataset(&staging.join(HF_TRL_DATASET_FILENAME), input.prepared)?;
     write_pretty_json(
         &staging.join(HF_TRL_SFT_INGESTION_FILENAME),
         &input.prepared.ingestion,
     )?;
-    write_new_synced_file(
-        &staging.join(HF_TRL_REFERENCE_SCRIPT_FILENAME),
-        input.reference_script,
-    )?;
-    write_new_synced_file(
-        &staging.join(HF_TRL_ENVIRONMENT_LOCK_FILENAME),
-        input.environment_lock,
-    )?;
-    let split_manifest = if let Some(bytes) = input.split_manifest {
-        write_new_synced_file(&staging.join(HF_TRL_SPLIT_MANIFEST_FILENAME), bytes)?;
-        Some(HfTrlFileIdentity::from_file(
-            &staging,
-            HF_TRL_SPLIT_MANIFEST_FILENAME,
-        )?)
-    } else {
-        None
-    };
-    let input_adapter = input
-        .input_adapter
-        .map(|source| copy_input_adapter(&staging, source))
-        .transpose()?;
-
-    let model = HfTrlModelIdentity {
-        served_model_id: input.served_model_id.to_string(),
-        base_weight_shard_manifest: input.base_weight_shard_manifest.clone(),
-        tokenizer_vocab_sha256: input.tokenizer.vocab_identity_sha256(),
-        model_config: HfTrlFileIdentity::from_file(&staging, HF_TRL_MODEL_CONFIG_FILENAME)?,
-        tokenizer: HfTrlFileIdentity::from_file(&staging, HF_TRL_TOKENIZER_FILENAME)?,
-        chat_template: HfTrlFileIdentity::from_file(&staging, HF_TRL_CHAT_TEMPLATE_FILENAME)?,
-        native_training_chat_template: HfTrlFileIdentity::from_file(
-            &staging,
-            HF_TRL_NATIVE_TRAINING_TEMPLATE_FILENAME,
-        )?,
-        trl_training_chat_template: HfTrlFileIdentity::from_file(
-            &staging,
-            HF_TRL_TRAINING_TEMPLATE_FILENAME,
-        )?,
-    };
     let selection = HfTrlSftSelection::from_ingestion(
         &input.prepared.ingestion,
         HfTrlFileIdentity::from_file(&staging, HF_TRL_SFT_INGESTION_FILENAME)?,
@@ -199,38 +211,56 @@ pub fn write_hf_trl_sft_bundle(
         dataset: HfTrlFileIdentity::from_file(&staging, HF_TRL_DATASET_FILENAME)?,
         sft_selection: Some(selection),
         rollout_provenance_schema: None,
-        split_manifest,
+        split_manifest: common.split_manifest,
     };
     let manifest = HfTrlExportManifestV1::new(
         HfTrlTask::Sft,
         input.source_execution_provenance.clone(),
-        model,
+        common.model,
         data,
-        HfTrlFileIdentity::from_file(&staging, HF_TRL_REFERENCE_SCRIPT_FILENAME)?,
-        HfTrlFileIdentity::from_file(&staging, HF_TRL_ENVIRONMENT_LOCK_FILENAME)?,
-        input_adapter,
+        common.reference_script,
+        common.environment_lock,
+        common.input_adapter,
     )?;
-    write_pretty_json(&staging.join(HF_TRL_EXPORT_MANIFEST_FILENAME), &manifest)?;
-    ensure_exact_file_set(&staging, &manifest)?;
-    manifest.verify_files(&staging)?;
-    let loaded = crate::read_hf_trl_export_manifest(&staging)?;
-    ensure!(
-        loaded == manifest,
-        "published HF/TRL manifest differs after serialization"
-    );
-    sync_directory_tree(&staging)?;
+    publish_verified_bundle(parent, target, staging, guard, manifest)
+}
 
-    kiln_resource::atomic_rename_noreplace(&staging, &target).with_context(|| {
-        format!(
-            "publish HF/TRL bundle {} -> {}",
-            staging.display(),
-            target.display()
-        )
-    })?;
-    sync_directory(&parent)?;
-    guard.disarm();
-    manifest.verify_files(&target)?;
-    Ok(manifest)
+/// Build and atomically publish one immutable, provenance-complete GRPO
+/// handoff. JSONL inputs must already use Kiln's canonical compact row
+/// encoding; in-memory groups are serialized into that encoding.
+pub fn write_hf_trl_grpo_bundle(
+    target: &Path,
+    input: HfTrlGrpoBundleInput<'_>,
+) -> Result<HfTrlExportManifestV1> {
+    let (parent, target, basename) = prepare_target(target)?;
+    validate_grpo_input(&input)?;
+
+    let staging = parent.join(format!(".{basename}.incomplete-{}", Uuid::new_v4()));
+    create_private_directory(&staging)
+        .with_context(|| format!("create HF/TRL staging directory {}", staging.display()))?;
+    let guard = StagingGuard::new(staging.clone());
+    let common = write_common_artifacts(&staging, HfTrlCommonBundleInput::from(&input))?;
+    let dataset = write_grpo_dataset(&staging.join(HF_TRL_DATASET_FILENAME), input.dataset)?;
+    let data = HfTrlDataExport {
+        source_name: input.dataset.source_name().to_string(),
+        format: HfTrlDatasetFormat::GrpoGroupsJsonl,
+        row_count: dataset.row_count,
+        ordered_corpus_sha256: dataset.ordered_corpus_sha256,
+        dataset: HfTrlFileIdentity::from_file(&staging, HF_TRL_DATASET_FILENAME)?,
+        sft_selection: None,
+        rollout_provenance_schema: Some(ROLLOUT_PROVENANCE_SCHEMA_V1.to_string()),
+        split_manifest: common.split_manifest,
+    };
+    let manifest = HfTrlExportManifestV1::new(
+        HfTrlTask::Grpo,
+        input.source_execution_provenance.clone(),
+        common.model,
+        data,
+        common.reference_script,
+        common.environment_lock,
+        common.input_adapter,
+    )?;
+    publish_verified_bundle(parent, target, staging, guard, manifest)
 }
 
 /// Validate a pristine Kiln-created export, including its exact recursive
@@ -333,7 +363,136 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
     builder.create(path)
 }
 
-fn validate_input(input: &HfTrlSftBundleInput<'_>) -> Result<()> {
+fn write_common_artifacts(
+    staging: &Path,
+    input: HfTrlCommonBundleInput<'_>,
+) -> Result<WrittenCommonArtifacts> {
+    let model_config_value =
+        serde_json::to_value(input.model_config).context("serialize HF/TRL model config")?;
+    let model_config_bytes =
+        serde_json::to_vec(&model_config_value).context("encode canonical HF/TRL model config")?;
+    write_new_synced_file(
+        &staging.join(HF_TRL_MODEL_CONFIG_FILENAME),
+        &model_config_bytes,
+    )?;
+    let tokenizer_bytes = input
+        .tokenizer
+        .tokenizer_config_json()
+        .map_err(|error| anyhow::anyhow!("serialize HF/TRL tokenizer: {error}"))?;
+    write_new_synced_file(
+        &staging.join(HF_TRL_TOKENIZER_FILENAME),
+        tokenizer_bytes.as_bytes(),
+    )?;
+    write_new_synced_file(
+        &staging.join(HF_TRL_CHAT_TEMPLATE_FILENAME),
+        input
+            .tokenizer
+            .chat_template()
+            .context("HF/TRL export requires a configured chat template")?
+            .as_bytes(),
+    )?;
+    write_new_synced_file(
+        &staging.join(HF_TRL_NATIVE_TRAINING_TEMPLATE_FILENAME),
+        input
+            .tokenizer
+            .training_chat_template()
+            .context("HF/TRL export requires a native training template")?
+            .as_bytes(),
+    )?;
+    write_new_synced_file(
+        &staging.join(HF_TRL_TRAINING_TEMPLATE_FILENAME),
+        input
+            .tokenizer
+            .trl_training_chat_template()
+            .context("HF/TRL export requires a TRL training template")?
+            .as_bytes(),
+    )?;
+    write_new_synced_file(
+        &staging.join(HF_TRL_REFERENCE_SCRIPT_FILENAME),
+        input.reference_script,
+    )?;
+    write_new_synced_file(
+        &staging.join(HF_TRL_ENVIRONMENT_LOCK_FILENAME),
+        input.environment_lock,
+    )?;
+    let split_manifest = if let Some(bytes) = input.split_manifest {
+        write_new_synced_file(&staging.join(HF_TRL_SPLIT_MANIFEST_FILENAME), bytes)?;
+        Some(HfTrlFileIdentity::from_file(
+            staging,
+            HF_TRL_SPLIT_MANIFEST_FILENAME,
+        )?)
+    } else {
+        None
+    };
+    let input_adapter = input
+        .input_adapter
+        .map(|source| copy_input_adapter(staging, source))
+        .transpose()?;
+    let model = HfTrlModelIdentity {
+        served_model_id: input.served_model_id.to_string(),
+        base_weight_shard_manifest: input.base_weight_shard_manifest.clone(),
+        tokenizer_vocab_sha256: input.tokenizer.vocab_identity_sha256(),
+        model_config: HfTrlFileIdentity::from_file(staging, HF_TRL_MODEL_CONFIG_FILENAME)?,
+        tokenizer: HfTrlFileIdentity::from_file(staging, HF_TRL_TOKENIZER_FILENAME)?,
+        chat_template: HfTrlFileIdentity::from_file(staging, HF_TRL_CHAT_TEMPLATE_FILENAME)?,
+        native_training_chat_template: HfTrlFileIdentity::from_file(
+            staging,
+            HF_TRL_NATIVE_TRAINING_TEMPLATE_FILENAME,
+        )?,
+        trl_training_chat_template: HfTrlFileIdentity::from_file(
+            staging,
+            HF_TRL_TRAINING_TEMPLATE_FILENAME,
+        )?,
+    };
+    Ok(WrittenCommonArtifacts {
+        model,
+        reference_script: HfTrlFileIdentity::from_file(staging, HF_TRL_REFERENCE_SCRIPT_FILENAME)?,
+        environment_lock: HfTrlFileIdentity::from_file(staging, HF_TRL_ENVIRONMENT_LOCK_FILENAME)?,
+        split_manifest,
+        input_adapter,
+    })
+}
+
+fn publish_verified_bundle(
+    parent: PathBuf,
+    target: PathBuf,
+    staging: PathBuf,
+    mut guard: StagingGuard,
+    manifest: HfTrlExportManifestV1,
+) -> Result<HfTrlExportManifestV1> {
+    write_pretty_json(&staging.join(HF_TRL_EXPORT_MANIFEST_FILENAME), &manifest)?;
+    ensure_exact_file_set(&staging, &manifest)?;
+    manifest.verify_files(&staging)?;
+    let loaded = crate::read_hf_trl_export_manifest(&staging)?;
+    ensure!(
+        loaded == manifest,
+        "published HF/TRL manifest differs after serialization"
+    );
+    sync_directory_tree(&staging)?;
+    kiln_resource::atomic_rename_noreplace(&staging, &target).with_context(|| {
+        format!(
+            "publish HF/TRL bundle {} -> {}",
+            staging.display(),
+            target.display()
+        )
+    })?;
+    sync_directory(&parent)?;
+    guard.disarm();
+    let published = verify_hf_trl_export_bundle(&target)?;
+    ensure!(
+        published == manifest,
+        "published HF/TRL bundle identity differs after rename"
+    );
+    Ok(manifest)
+}
+
+fn validate_common_input(input: HfTrlCommonBundleInput<'_>) -> Result<()> {
+    ensure!(
+        !input.served_model_id.is_empty()
+            && input.served_model_id.trim() == input.served_model_id
+            && !input.served_model_id.chars().any(char::is_control),
+        "HF/TRL served model ID must be non-empty, trimmed, and contain no control characters"
+    );
     input
         .base_weight_shard_manifest
         .validate()
@@ -343,20 +502,17 @@ fn validate_input(input: &HfTrlSftBundleInput<'_>) -> Result<()> {
         .validate()
         .context("validate HF/TRL source execution provenance")?;
     input
-        .prepared
-        .ingestion
-        .validate()
-        .context("validate HF/TRL SFT ingestion receipt")?;
-    let (max_seq_len, max_supervised_tokens) = crate::verify_prepared_sft_examples(
-        &input.prepared.examples,
-        input.tokenizer,
-        &input.prepared.ingestion,
-    )?;
-    ensure!(
-        max_seq_len == input.prepared.max_seq_len
-            && max_supervised_tokens == input.prepared.max_supervised_tokens,
-        "HF/TRL prepared SFT sizing differs from revalidation"
-    );
+        .tokenizer
+        .chat_template()
+        .context("HF/TRL export requires a configured chat template")?;
+    input
+        .tokenizer
+        .training_chat_template()
+        .context("HF/TRL export requires a native training template")?;
+    input
+        .tokenizer
+        .trl_training_chat_template()
+        .context("HF/TRL export requires a TRL training template")?;
     ensure!(
         !input.reference_script.is_empty(),
         "HF/TRL reference script must not be empty"
@@ -386,6 +542,34 @@ fn validate_input(input: &HfTrlSftBundleInput<'_>) -> Result<()> {
             "HF/TRL split manifest must be a JSON object"
         );
     }
+    if let Some(adapter) = input.input_adapter {
+        ensure!(
+            !adapter.name.is_empty()
+                && adapter.name.trim() == adapter.name
+                && !adapter.name.chars().any(char::is_control),
+            "HF/TRL input-adapter name must be non-empty, trimmed, and contain no control characters"
+        );
+    }
+    Ok(())
+}
+
+fn validate_sft_input(input: &HfTrlSftBundleInput<'_>) -> Result<()> {
+    validate_common_input(HfTrlCommonBundleInput::from(input))?;
+    input
+        .prepared
+        .ingestion
+        .validate()
+        .context("validate HF/TRL SFT ingestion receipt")?;
+    let (max_seq_len, max_supervised_tokens) = crate::verify_prepared_sft_examples(
+        &input.prepared.examples,
+        input.tokenizer,
+        &input.prepared.ingestion,
+    )?;
+    ensure!(
+        max_seq_len == input.prepared.max_seq_len
+            && max_supervised_tokens == input.prepared.max_supervised_tokens,
+        "HF/TRL prepared SFT sizing differs from revalidation"
+    );
     let trl_template = input
         .tokenizer
         .trl_training_chat_template()
@@ -395,6 +579,221 @@ fn validate_input(input: &HfTrlSftBundleInput<'_>) -> Result<()> {
         "HF/TRL SFT export requires generation/endgeneration spans in its TRL template"
     );
     Ok(())
+}
+
+fn validate_grpo_input(input: &HfTrlGrpoBundleInput<'_>) -> Result<()> {
+    validate_common_input(HfTrlCommonBundleInput::from(input))?;
+    let source_name = input.dataset.source_name();
+    ensure!(
+        !source_name.is_empty()
+            && source_name.len() <= 512
+            && source_name.trim() == source_name
+            && !source_name.chars().any(char::is_control),
+        "HF/TRL GRPO source name must be 1..=512 bytes, trimmed, and contain no control characters"
+    );
+    match input.dataset {
+        HfTrlGrpoDatasetSource::Groups { groups, .. } => ensure!(
+            !groups.is_empty()
+                && u64::try_from(groups.len()).ok().is_some_and(|count| {
+                    count <= crate::hf_grpo_interop::HF_TRL_GRPO_MAX_GROUPS
+                }),
+            "HF/TRL GRPO group source must contain 1..={} groups",
+            crate::hf_grpo_interop::HF_TRL_GRPO_MAX_GROUPS
+        ),
+        HfTrlGrpoDatasetSource::Jsonl { path, .. } => {
+            open_regular_grpo_source(path)?;
+        }
+    }
+    Ok(())
+}
+
+fn open_regular_grpo_source(path: &Path) -> Result<File> {
+    let before = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect HF/TRL GRPO source {}", path.display()))?;
+    ensure!(
+        before.file_type().is_file() && !before.file_type().is_symlink(),
+        "HF/TRL GRPO JSONL source must be a regular file"
+    );
+    let file =
+        File::open(path).with_context(|| format!("open HF/TRL GRPO source {}", path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspect opened HF/TRL GRPO source {}", path.display()))?;
+    ensure!(
+        opened.is_file(),
+        "opened HF/TRL GRPO JSONL source must be a regular file"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        ensure!(
+            before.dev() == opened.dev() && before.ino() == opened.ino(),
+            "HF/TRL GRPO JSONL source changed while being opened"
+        );
+    }
+    ensure!(
+        opened.len() > 0 && opened.len() <= crate::hf_grpo_interop::HF_TRL_GRPO_MAX_DATASET_BYTES,
+        "HF/TRL GRPO JSONL source must contain 1..={} bytes",
+        crate::hf_grpo_interop::HF_TRL_GRPO_MAX_DATASET_BYTES
+    );
+    Ok(file)
+}
+
+struct WrittenGrpoDataset {
+    row_count: u64,
+    ordered_corpus_sha256: String,
+}
+
+struct BoundedGrpoRow {
+    bytes: Vec<u8>,
+    max_bytes: u64,
+}
+
+impl BoundedGrpoRow {
+    fn new(max_bytes: u64) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_bytes,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for BoundedGrpoRow {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let next_len = u64::try_from(self.bytes.len())
+            .ok()
+            .and_then(|length| {
+                u64::try_from(bytes.len())
+                    .ok()
+                    .and_then(|add| length.checked_add(add))
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "HF/TRL GRPO row length overflow",
+                )
+            })?;
+        if next_len > self.max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "HF/TRL GRPO row exceeds {} bytes",
+                    self.max_bytes.saturating_add(1)
+                ),
+            ));
+        }
+        self.bytes
+            .try_reserve(bytes.len())
+            .map_err(|error| io::Error::other(format!("reserve HF/TRL GRPO row: {error}")))?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn write_grpo_dataset(
+    path: &Path,
+    source: HfTrlGrpoDatasetSource<'_>,
+) -> Result<WrittenGrpoDataset> {
+    let mut output = create_new_file(path)?;
+    let mut digest = crate::hf_grpo_interop::GrpoCorpusDigest::new();
+    let mut row_count = 0u64;
+    let mut written_bytes = 0u64;
+    match source {
+        HfTrlGrpoDatasetSource::Groups { groups, .. } => {
+            for group in groups {
+                let mut row =
+                    BoundedGrpoRow::new(crate::hf_grpo_interop::HF_TRL_GRPO_MAX_ROW_BYTES - 1);
+                serde_json::to_writer(&mut row, group)
+                    .with_context(|| format!("serialize HF/TRL GRPO row {}", row_count + 1))?;
+                let row = row.into_inner();
+                append_grpo_row(
+                    &mut output,
+                    &mut digest,
+                    &mut row_count,
+                    &mut written_bytes,
+                    &row,
+                )?;
+            }
+        }
+        HfTrlGrpoDatasetSource::Jsonl { path: source, .. } => {
+            let source_file = open_regular_grpo_source(source)?;
+            let mut reader = BufReader::with_capacity(256 * 1024, source_file);
+            let mut row = Vec::new();
+            while crate::hf_grpo_interop::read_canonical_grpo_row(
+                &mut reader,
+                row_count + 1,
+                &mut row,
+            )?
+            .is_some()
+            {
+                append_grpo_row(
+                    &mut output,
+                    &mut digest,
+                    &mut row_count,
+                    &mut written_bytes,
+                    &row,
+                )?;
+            }
+        }
+    }
+    ensure!(row_count > 0, "HF/TRL GRPO dataset contains no groups");
+    output
+        .sync_all()
+        .with_context(|| format!("sync HF/TRL GRPO dataset {}", path.display()))?;
+    Ok(WrittenGrpoDataset {
+        row_count,
+        ordered_corpus_sha256: digest.finish(),
+    })
+}
+
+fn append_grpo_row(
+    output: &mut File,
+    digest: &mut crate::hf_grpo_interop::GrpoCorpusDigest,
+    row_count: &mut u64,
+    written_bytes: &mut u64,
+    row: &[u8],
+) -> Result<()> {
+    let row_bytes = u64::try_from(row.len())
+        .context("HF/TRL GRPO row length exceeds u64")?
+        .checked_add(1)
+        .context("HF/TRL GRPO row length overflow")?;
+    ensure!(
+        row_bytes <= crate::hf_grpo_interop::HF_TRL_GRPO_MAX_ROW_BYTES,
+        "HF/TRL GRPO row {} exceeds {} bytes",
+        *row_count + 1,
+        crate::hf_grpo_interop::HF_TRL_GRPO_MAX_ROW_BYTES
+    );
+    *row_count = row_count
+        .checked_add(1)
+        .context("HF/TRL GRPO row-count overflow")?;
+    ensure!(
+        *row_count <= crate::hf_grpo_interop::HF_TRL_GRPO_MAX_GROUPS,
+        "HF/TRL GRPO dataset exceeds {} groups",
+        crate::hf_grpo_interop::HF_TRL_GRPO_MAX_GROUPS
+    );
+    *written_bytes = written_bytes
+        .checked_add(row_bytes)
+        .context("HF/TRL GRPO dataset-size overflow")?;
+    ensure!(
+        *written_bytes <= crate::hf_grpo_interop::HF_TRL_GRPO_MAX_DATASET_BYTES,
+        "HF/TRL GRPO dataset exceeds {} bytes",
+        crate::hf_grpo_interop::HF_TRL_GRPO_MAX_DATASET_BYTES
+    );
+    output
+        .write_all(row)
+        .context("write canonical HF/TRL GRPO row")?;
+    output
+        .write_all(b"\n")
+        .context("write HF/TRL GRPO row delimiter")?;
+    digest.observe(row)
 }
 
 fn contains_generation_tag(template: &str, end: bool) -> bool {
@@ -784,6 +1183,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn in_memory_grpo_row_serialization_is_bounded_before_growth() {
+        let mut row = BoundedGrpoRow::new(3);
+        row.write_all(b"abc").unwrap();
+        let error = row.write_all(b"d").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(row.into_inner(), b"abc");
+    }
+
     struct Fixture {
         model_config: ModelConfig,
         tokenizer: KilnTokenizer,
@@ -802,6 +1210,24 @@ mod tests {
                 source_execution_provenance: &self.provenance,
                 prepared: &self.prepared,
                 reference_script: b"print('train')\n",
+                environment_lock: b"transformers==5.13.1\ntrl==1.8.0\n",
+                split_manifest: Some(b"{\"schema\":\"test.split.v1\"}"),
+                input_adapter: None,
+            }
+        }
+
+        fn grpo_input<'a>(
+            &'a self,
+            dataset: HfTrlGrpoDatasetSource<'a>,
+        ) -> HfTrlGrpoBundleInput<'a> {
+            HfTrlGrpoBundleInput {
+                served_model_id: "test/qwen",
+                model_config: &self.model_config,
+                tokenizer: &self.tokenizer,
+                base_weight_shard_manifest: &self.base_weights,
+                source_execution_provenance: &self.provenance,
+                dataset,
+                reference_script: b"print('train-grpo')\n",
                 environment_lock: b"transformers==5.13.1\ntrl==1.8.0\n",
                 split_manifest: Some(b"{\"schema\":\"test.split.v1\"}"),
                 input_adapter: None,
@@ -897,6 +1323,68 @@ mod tests {
         }
     }
 
+    fn grpo_groups(fixture: &Fixture) -> Vec<crate::GrpoGroup> {
+        let messages = vec![ChatMessage::new("user", "a")];
+        let prompt_text = fixture.tokenizer.apply_chat_template(&messages).unwrap();
+        let prompt_ids = fixture.tokenizer.encode(&prompt_text).unwrap();
+        let completion_token = fixture.tokenizer.encode("b").unwrap()[0];
+        let prompt_sha256 = crate::rollout_prompt_messages_sha256(&messages).unwrap();
+        let behavior_policy = crate::RolloutBehaviorPolicyIdentityV1 {
+            served_model_id: "test/qwen".to_string(),
+            base_model_sha256: fixture.base_weights.aggregate_sha256.clone(),
+            adapter: None,
+            inference_config_sha256: kiln_core::config_hashes::sha256_bytes(b"inference-config"),
+            implementation: "kiln-test/rocm".to_string(),
+        };
+        let tokenizer = crate::RolloutTokenizerIdentityV1 {
+            vocab_sha256: fixture.tokenizer.vocab_identity_sha256(),
+            config_sha256: fixture.tokenizer.tokenizer_config_sha256().unwrap(),
+            chat_template_sha256: fixture.tokenizer.chat_template_sha256().unwrap(),
+        };
+        let completions = [(0.0, 7u64), (1.0, 8u64)]
+            .into_iter()
+            .map(|(reward, seed)| {
+                let rollout = crate::ScoredRollout::legacy("b".to_string(), reward);
+                let payload_sha256 = crate::scored_rollout_payload_sha256(&rollout).unwrap();
+                let mut input_token_ids = prompt_ids.clone();
+                input_token_ids.push(completion_token);
+                let provenance = crate::RolloutProvenanceV1::new(
+                    input_token_ids,
+                    prompt_ids.len(),
+                    prompt_sha256.clone(),
+                    payload_sha256,
+                    vec![crate::RolloutActionTokenV1::sampled(
+                        prompt_ids.len(),
+                        completion_token,
+                        -0.5,
+                    )],
+                    behavior_policy.clone(),
+                    tokenizer.clone(),
+                    crate::RolloutSamplingConfigV1 {
+                        temperature: 0.7,
+                        top_p: 0.95,
+                        top_k: 20,
+                        min_p: 0.0,
+                        max_tokens: 1,
+                        repetition_penalty: 1.0,
+                        presence_penalty: 0.0,
+                        frequency_penalty: 0.0,
+                        stop: Vec::new(),
+                        thinking_budget: None,
+                    },
+                    seed,
+                    "rocm",
+                )
+                .unwrap();
+                rollout.with_provenance(provenance)
+            })
+            .collect();
+        vec![crate::GrpoGroup {
+            messages,
+            completions,
+        }]
+    }
+
     fn add_completed_result(root: &Path, export: &HfTrlExportManifestV1) -> HfTrlTrainingResultV1 {
         fs::write(
             root.join(HF_TRL_EXECUTED_SCRIPT_FILENAME),
@@ -976,6 +1464,191 @@ mod tests {
         fs::write(target.join(HF_TRL_DATASET_FILENAME), b"tampered\n").unwrap();
         let error = manifest.verify_files(&target).unwrap_err();
         assert!(error.to_string().contains("differs"), "{error:#}");
+    }
+
+    #[test]
+    fn publishes_a_deeply_verified_immutable_grpo_bundle() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("grpo.kiln-hf");
+        let fixture = fixture();
+        let mut groups = grpo_groups(&fixture);
+        let expected_row = serde_json::to_vec(&groups[0]).unwrap();
+        let manifest = write_hf_trl_grpo_bundle(
+            &target,
+            fixture.grpo_input(HfTrlGrpoDatasetSource::Groups {
+                source_name: "rollouts",
+                groups: &groups,
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(manifest.task, HfTrlTask::Grpo);
+        assert_eq!(manifest.data.row_count, 1);
+        assert_eq!(
+            manifest.data.rollout_provenance_schema.as_deref(),
+            Some(ROLLOUT_PROVENANCE_SCHEMA_V1)
+        );
+        assert!(target.is_dir());
+        assert!(incomplete_entries(directory.path()).is_empty());
+        assert_eq!(verify_hf_trl_export_bundle(&target).unwrap(), manifest);
+        let summary = crate::hf_grpo_interop::verify_hf_trl_grpo_corpus(
+            &target,
+            &manifest.model,
+            &manifest.data,
+            manifest.input_adapter.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(summary.row_count, 1);
+        assert_eq!(summary.completion_count, 2);
+        assert_eq!(summary.sampled_action_tokens, 2);
+        assert_eq!(summary.forced_action_tokens, 0);
+
+        let mut expected_dataset = expected_row;
+        expected_dataset.push(b'\n');
+        assert_eq!(
+            fs::read(target.join(HF_TRL_DATASET_FILENAME)).unwrap(),
+            expected_dataset
+        );
+        groups[0].completions[0].reward = 0.25;
+        assert_eq!(
+            fs::read(target.join(HF_TRL_DATASET_FILENAME)).unwrap(),
+            expected_dataset
+        );
+
+        let error = write_hf_trl_grpo_bundle(
+            &target,
+            fixture.grpo_input(HfTrlGrpoDatasetSource::Groups {
+                source_name: "rollouts",
+                groups: &groups,
+            }),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("overwrite"), "{error:#}");
+        assert!(incomplete_entries(directory.path()).is_empty());
+
+        fs::write(target.join(HF_TRL_DATASET_FILENAME), b"tampered\n").unwrap();
+        let error = verify_hf_trl_export_bundle(&target).unwrap_err();
+        assert!(error.to_string().contains("differs"), "{error:#}");
+    }
+
+    #[test]
+    fn canonical_jsonl_and_in_memory_grpo_sources_have_identical_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = fixture();
+        let groups = grpo_groups(&fixture);
+        let memory_target = directory.path().join("memory.kiln-hf");
+        let memory_manifest = write_hf_trl_grpo_bundle(
+            &memory_target,
+            fixture.grpo_input(HfTrlGrpoDatasetSource::Groups {
+                source_name: "rollouts",
+                groups: &groups,
+            }),
+        )
+        .unwrap();
+        let dataset = fs::read(memory_target.join(HF_TRL_DATASET_FILENAME)).unwrap();
+        let source = directory.path().join("rollouts.jsonl");
+        fs::write(&source, &dataset).unwrap();
+
+        let jsonl_target = directory.path().join("jsonl.kiln-hf");
+        let jsonl_manifest = write_hf_trl_grpo_bundle(
+            &jsonl_target,
+            fixture.grpo_input(HfTrlGrpoDatasetSource::Jsonl {
+                source_name: "rollouts",
+                path: &source,
+            }),
+        )
+        .unwrap();
+        assert_eq!(jsonl_manifest, memory_manifest);
+        assert_eq!(
+            fs::read(jsonl_target.join(HF_TRL_DATASET_FILENAME)).unwrap(),
+            dataset
+        );
+
+        fs::write(&source, b"changed after publication\n").unwrap();
+        assert_eq!(
+            fs::read(jsonl_target.join(HF_TRL_DATASET_FILENAME)).unwrap(),
+            dataset
+        );
+        assert_eq!(
+            verify_hf_trl_export_bundle(&jsonl_target).unwrap(),
+            jsonl_manifest
+        );
+        assert!(incomplete_entries(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn invalid_grpo_sources_fail_closed_without_publication_debris() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = fixture();
+        let groups = grpo_groups(&fixture);
+        let canonical = serde_json::to_vec(&groups[0]).unwrap();
+        let cases = [
+            (
+                "noncanonical",
+                [canonical.as_slice(), b" \n"].concat(),
+                "not canonical compact JSON",
+            ),
+            ("missing-lf", canonical.clone(), "end every row with LF"),
+            (
+                "blank-row",
+                [canonical.as_slice(), b"\n\n"].concat(),
+                "blank row",
+            ),
+        ];
+        for (name, bytes, expected_error) in cases {
+            let source = directory.path().join(format!("{name}.jsonl"));
+            fs::write(&source, bytes).unwrap();
+            let target = directory.path().join(format!("{name}.kiln-hf"));
+            let error = write_hf_trl_grpo_bundle(
+                &target,
+                fixture.grpo_input(HfTrlGrpoDatasetSource::Jsonl {
+                    source_name: "rollouts",
+                    path: &source,
+                }),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(expected_error), "{error:#}");
+            assert!(!target.exists());
+            assert!(incomplete_entries(directory.path()).is_empty());
+        }
+
+        let mut invalid_groups = groups;
+        invalid_groups[0].completions[0].provenance = None;
+        let target = directory.path().join("invalid-group.kiln-hf");
+        let error = write_hf_trl_grpo_bundle(
+            &target,
+            fixture.grpo_input(HfTrlGrpoDatasetSource::Groups {
+                source_name: "rollouts",
+                groups: &invalid_groups,
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("missing exact rollout provenance"),
+            "{error:#}"
+        );
+        assert!(!target.exists());
+        assert!(incomplete_entries(directory.path()).is_empty());
+
+        #[cfg(unix)]
+        {
+            let source = directory.path().join("canonical.jsonl");
+            fs::write(&source, [canonical.as_slice(), b"\n"].concat()).unwrap();
+            let symlink = directory.path().join("rollouts-symlink.jsonl");
+            std::os::unix::fs::symlink(&source, &symlink).unwrap();
+            let target = directory.path().join("symlink.kiln-hf");
+            let error = write_hf_trl_grpo_bundle(
+                &target,
+                fixture.grpo_input(HfTrlGrpoDatasetSource::Jsonl {
+                    source_name: "rollouts",
+                    path: &symlink,
+                }),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("regular file"), "{error:#}");
+            assert!(!target.exists());
+            assert!(incomplete_entries(directory.path()).is_empty());
+        }
     }
 
     #[test]

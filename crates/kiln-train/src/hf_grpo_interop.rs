@@ -37,19 +37,19 @@ pub struct HfTrlGrpoCorpusSummary {
     pub behavior_policy: RolloutBehaviorPolicyIdentityV1,
 }
 
-struct CorpusDigest {
+pub(crate) struct GrpoCorpusDigest {
     digest: Sha256,
     rows: u64,
 }
 
-impl CorpusDigest {
-    fn new() -> Self {
+impl GrpoCorpusDigest {
+    pub(crate) fn new() -> Self {
         let mut digest = Sha256::new();
         digest.update(CORPUS_DIGEST_DOMAIN);
         Self { digest, rows: 0 }
     }
 
-    fn observe(&mut self, canonical_row: &[u8]) -> Result<()> {
+    pub(crate) fn observe(&mut self, canonical_row: &[u8]) -> Result<()> {
         let row_index = self.rows;
         self.rows = self
             .rows
@@ -62,7 +62,7 @@ impl CorpusDigest {
         Ok(())
     }
 
-    fn finish(mut self) -> String {
+    pub(crate) fn finish(mut self) -> String {
         self.digest.update(self.rows.to_le_bytes());
         prefixed_hex(&self.digest.finalize())
     }
@@ -71,11 +71,50 @@ impl CorpusDigest {
 /// Compute the domain-separated ordered identity of canonical compact JSON
 /// rows. The dataset file digest separately binds newline framing.
 pub fn ordered_grpo_corpus_sha256<'a>(rows: impl IntoIterator<Item = &'a [u8]>) -> Result<String> {
-    let mut digest = CorpusDigest::new();
+    let mut digest = GrpoCorpusDigest::new();
     for row in rows {
         digest.observe(row)?;
     }
     Ok(digest.finish())
+}
+
+pub(crate) fn read_canonical_grpo_row<R: BufRead>(
+    reader: &mut R,
+    row_position: u64,
+    row: &mut Vec<u8>,
+) -> Result<Option<GrpoGroup>> {
+    row.clear();
+    let mut limited = reader.by_ref().take(HF_TRL_GRPO_MAX_ROW_BYTES + 1);
+    let read = limited
+        .read_until(b'\n', row)
+        .with_context(|| format!("read HF/TRL GRPO row {row_position}"))?;
+    if read == 0 {
+        return Ok(None);
+    }
+    ensure!(
+        u64::try_from(read)
+            .ok()
+            .is_some_and(|read| read <= HF_TRL_GRPO_MAX_ROW_BYTES),
+        "HF/TRL GRPO row {row_position} exceeds {HF_TRL_GRPO_MAX_ROW_BYTES} bytes"
+    );
+    ensure!(
+        row.last() == Some(&b'\n'),
+        "HF/TRL GRPO dataset must end every row with LF, including the final row"
+    );
+    row.pop();
+    ensure!(
+        !row.is_empty(),
+        "HF/TRL GRPO dataset contains a blank row at position {row_position}"
+    );
+    let group: GrpoGroup = serde_json::from_slice(row)
+        .with_context(|| format!("parse canonical HF/TRL GRPO row {row_position}"))?;
+    let canonical = serde_json::to_vec(&group)
+        .with_context(|| format!("serialize canonical HF/TRL GRPO row {row_position}"))?;
+    ensure!(
+        canonical.as_slice() == row.as_slice(),
+        "HF/TRL GRPO row {row_position} is not canonical compact JSON or contains unknown/duplicate fields"
+    );
+    Ok(Some(group))
 }
 
 /// Verify the canonical GRPO JSONL corpus referenced by an already validated
@@ -156,7 +195,7 @@ pub(crate) fn verify_hf_trl_grpo_corpus(
         .with_context(|| format!("open HF/TRL GRPO dataset {}", dataset_path.display()))?;
     let mut reader = BufReader::with_capacity(256 * 1024, file);
     let mut row = Vec::new();
-    let mut corpus_digest = CorpusDigest::new();
+    let mut corpus_digest = GrpoCorpusDigest::new();
     let mut row_count = 0u64;
     let mut completion_count = 0u64;
     let mut sampled_action_tokens = 0u64;
@@ -165,31 +204,9 @@ pub(crate) fn verify_hf_trl_grpo_corpus(
     let mut behavior_policy: Option<RolloutBehaviorPolicyIdentityV1> = None;
 
     loop {
-        row.clear();
-        let mut limited = reader.by_ref().take(HF_TRL_GRPO_MAX_ROW_BYTES + 1);
-        let read = limited
-            .read_until(b'\n', &mut row)
-            .with_context(|| format!("read HF/TRL GRPO row {}", row_count + 1))?;
-        if read == 0 {
+        let Some(group) = read_canonical_grpo_row(&mut reader, row_count + 1, &mut row)? else {
             break;
-        }
-        ensure!(
-            u64::try_from(read)
-                .ok()
-                .is_some_and(|read| read <= HF_TRL_GRPO_MAX_ROW_BYTES),
-            "HF/TRL GRPO row {} exceeds {HF_TRL_GRPO_MAX_ROW_BYTES} bytes",
-            row_count + 1
-        );
-        ensure!(
-            row.last() == Some(&b'\n'),
-            "HF/TRL GRPO dataset must end every row with LF, including the final row"
-        );
-        row.pop();
-        ensure!(
-            !row.is_empty(),
-            "HF/TRL GRPO dataset contains a blank row at position {}",
-            row_count + 1
-        );
+        };
         row_count = row_count
             .checked_add(1)
             .context("GRPO row-count overflow")?;
@@ -197,16 +214,7 @@ pub(crate) fn verify_hf_trl_grpo_corpus(
             row_count <= HF_TRL_GRPO_MAX_GROUPS,
             "HF/TRL GRPO dataset exceeds {HF_TRL_GRPO_MAX_GROUPS} groups"
         );
-
-        let group: GrpoGroup = serde_json::from_slice(&row)
-            .with_context(|| format!("parse canonical HF/TRL GRPO row {row_count}"))?;
-        let canonical = serde_json::to_vec(&group)
-            .with_context(|| format!("serialize canonical HF/TRL GRPO row {row_count}"))?;
-        ensure!(
-            canonical == row,
-            "HF/TRL GRPO row {row_count} is not canonical compact JSON or contains unknown/duplicate fields"
-        );
-        corpus_digest.observe(&canonical)?;
+        corpus_digest.observe(&row)?;
 
         let group_summary = validate_group(
             &group,

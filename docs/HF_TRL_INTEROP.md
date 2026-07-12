@@ -7,11 +7,12 @@ Transformers, TRL, and PEFT. The interoperability route moves data and
 adapters between those systems without discarding the identities needed to
 audit the handoff.
 
-The version-1 manifests, validation library, atomic bundle/envelope writers,
-pinned SFT reference runner, public SFT export/download CLI and API, and
-resident-validated PEFT import API and CLI are implemented. The GRPO exporter
-and GRPO runner are not yet available. A PEFT directory installed through the
-generic adapter upload route has not passed this contract.
+The version-1 manifests, validation library, atomic SFT and GRPO library bundle
+writers, atomic import-envelope writer, pinned SFT reference runner, public SFT
+export/download CLI and API, and resident-validated PEFT import API and CLI are
+implemented. The public GRPO exporter and GRPO runner are not yet available. A
+PEFT directory installed through the generic adapter upload route has not
+passed this contract.
 
 ## Bundle Model
 
@@ -52,7 +53,7 @@ export manifest are cross-checked against the complete `sft_ingestion.json`
 receipt, including its source, row counts, invalid-row policy, ordered corpus
 digest, and internally validated per-row identities.
 
-### Strict GRPO corpus foundation
+### Strict GRPO corpus and atomic writer
 
 A GRPO manifest is not accepted merely because it names
 `kiln.rollout-provenance.v1`. Its `train.jsonl` must contain one canonical
@@ -73,9 +74,26 @@ tokenization and action/environment-mask path. Tokenizer bytes, vocabulary,
 template invocation, prompt boundary, complete token sequence, sampled versus
 forced action positions, and sampled behavior log-probabilities must agree.
 
-This is verifier foundation for the forthcoming GRPO bundle writer and pinned
-runner. There is no public GRPO export route or supported external GRPO command
-yet.
+The synchronous `write_hf_trl_grpo_bundle` library API accepts either borrowed
+`GrpoGroup` values or an existing canonical JSONL file. In-memory groups are
+serialized canonically. File sources must already use the exact compact,
+final-LF representation; links, special files, path replacement while opening,
+and noncanonical-but-parseable JSON fail closed instead of being silently
+normalized. Both source forms produce the same corpus and export identity for
+the same groups.
+
+The writer snapshots the same exact model, tokenizer, three templates, source
+execution provenance, optional split, optional input adapter, reference script,
+and environment lock as the SFT writer. It writes create-new files into a
+private sibling staging directory, fsyncs them, runs the complete recursive
+file-set and deep corpus verifier, and publishes with one kernel-enforced
+no-replace rename. It syncs the parent and verifies the published directory
+again. Failure cleans staging, existing targets are never replaced, and later
+source mutation cannot change the published bundle.
+
+This is a library API, not a public product route. There is no public GRPO
+export API/CLI or supported external GRPO command yet, and no pinned GRPO
+runner has been published.
 
 ## Template Identities
 
