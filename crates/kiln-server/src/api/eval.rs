@@ -1370,6 +1370,8 @@ mod tests {
         ])
         .unwrap();
         state.base_weight_shard_manifest = Some(std::sync::Arc::new(base_weights.clone()));
+        let execution_provenance = crate::execution_provenance::test_execution_provenance();
+        state.execution_provenance = Some(std::sync::Arc::new(execution_provenance.clone()));
         let router = routes().with_state(state.clone());
         let res = router
             .clone()
@@ -1429,6 +1431,39 @@ mod tests {
             resp["jobs"][0]["base_weight_shard_manifest"]["shards"][0]["filename"],
             "model.safetensors"
         );
+        assert_eq!(
+            resp["jobs"][0]["execution_provenance"]["provenance_sha256"],
+            execution_provenance.provenance_sha256
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_submit_rejects_tampered_execution_provenance_before_publication() {
+        let mut state = mk_state();
+        let mut provenance = crate::execution_provenance::test_execution_provenance();
+        provenance.backend.device = "tampered:0".to_string();
+        state.execution_provenance = Some(std::sync::Arc::new(provenance));
+        let router = routes().with_state(state.clone());
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/eval/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "inline_suite": mk_inline_suite()
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(state.eval_jobs.read().unwrap().is_empty());
+        assert!(state.eval_queue.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

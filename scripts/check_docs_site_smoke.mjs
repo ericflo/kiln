@@ -197,6 +197,7 @@ const expectedApiSections = [
   { label: 'training', terms: ['training'] },
   { label: 'exact SFT/GRPO/OPD resume', terms: ['latest exact sft/grpo/opd resume checkpoint', '/v1/train/opd', 'checkpoint_interval', 'resume_checkpoint', 'training_kind', 'data_source_kind', 'candidate cursor', 'teacher content revision', 'peft snapshots remain serving-only'] },
   { label: 'base-weight provenance', terms: ['kiln.base-weight-shards.v1', 'base-weight aggregate', 'complete base-weight shard manifest', 'legacy aggregate-only checkpoints'] },
+  { label: 'execution provenance', terms: ['kiln.execution-provenance.v1', 'execution-provenance record', 'admission-time base-weight and execution identities', 'validated execution-provenance record'] },
   { label: 'training data safety', terms: ['training data changes', 'adapter'] },
   { label: 'response shapes', terms: ['response shapes'] },
 ];

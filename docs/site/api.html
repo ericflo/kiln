@@ -777,8 +777,8 @@ curl -s http://localhost:8420/v1/train/opd \
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/eval/suites/{name}</code> &mdash; delete a suite.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/run</code> &mdash; queue an eval (registered suite or inline) against any adapter; optional top-level <code>seed</code> preserves the suite's other generation settings.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/compare</code> &mdash; run one suite across multiple adapters with one shared effective seed.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/jobs</code> &mdash; list eval jobs, headline accuracies, exact effective seeds, and admission-time base-weight identities.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/jobs/{id}</code> &mdash; fetch one eval job with its full base-weight shard manifest, decimal-string job/per-completion seeds, and outcomes.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/jobs</code> &mdash; list eval jobs, headline accuracies, exact effective seeds, and admission-time base-weight and execution identities.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/jobs/{id}</code> &mdash; fetch one eval job with its full base-weight shard manifest, validated execution-provenance record, decimal-string job/per-completion seeds, and outcomes.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/eval/jobs/{id}</code> &mdash; cancel a queued/running eval (partial outcomes kept), or delete a terminal job from tracking.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/jobs/{id}/rerun</code> &mdash; re-run only failures using the original effective seed unless explicitly replaced.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/datasets/upload</code> &mdash; multipart upload of an SFT or GRPO JSONL file.</div>

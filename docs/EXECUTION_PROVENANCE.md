@@ -124,6 +124,18 @@ binary.
   fields. Legacy exact checkpoints without the complete execution record are
   not exact-resumable.
 
+## Eval artifact surfaces
+
+- Eval admission copies the startup-owned record before queue publication.
+  Job list/detail responses and raw JSON expose the full typed record.
+- Terminal eval archives validate the record on save and restart load. A
+  tampered archive is rejected rather than presented as valid evidence.
+- Human CLI and dashboard views show backend, device, and the canonical digest;
+  JSON output retains the full record. Downloaded outcome JSONL repeats it on
+  each standalone row.
+- Legacy archives and synthetic/mock results may omit the optional field. New
+  production evals retain it alongside the exact base-weight shard manifest.
+
 The record proves integrity and equivalence of the declared execution
 envelope. It does not by itself prove that two executions produced the same
 outputs, that a driver is correct, or that a source digest built the running

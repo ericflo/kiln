@@ -118,6 +118,9 @@ pub struct EvalJobInfo {
     /// Immutable snapshot of the resident base-weight artifacts at admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_weight_shard_manifest: Option<kiln_core::model_provenance::BaseWeightShardManifest>,
+    /// Immutable snapshot of the startup-owned execution envelope at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_provenance: Option<kiln_core::execution_provenance::ExecutionProvenanceV1>,
     /// Immutable job seed. `None` is reserved for archives written before
     /// eval seed materialization was introduced.
     #[serde(
@@ -176,6 +179,7 @@ impl EvalJobInfo {
             adapters,
             submission_kind,
             base_weight_shard_manifest: None,
+            execution_provenance: None,
             effective_seed: Some(effective_seed),
             state: EvalJobState::Queued,
             progress: EvalProgress::default(),
@@ -200,6 +204,7 @@ impl EvalJobInfo {
             job_id: self.job_id.clone(),
             state: self.state,
             base_weight_shard_manifest: self.base_weight_shard_manifest.clone(),
+            execution_provenance: self.execution_provenance.clone(),
             effective_seed: self.effective_seed,
             seed_derivation: self
                 .effective_seed
@@ -360,10 +365,31 @@ mod tests {
         );
         let mut value = serde_json::to_value(info).unwrap();
         value.as_object_mut().unwrap().remove("effective_seed");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("execution_provenance");
         let decoded: EvalJobInfo = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.effective_seed, None);
+        assert_eq!(decoded.execution_provenance, None);
         let public = decoded.to_result();
         assert_eq!(public.effective_seed, None);
         assert_eq!(public.seed_derivation, None);
+        assert_eq!(public.execution_provenance, None);
+    }
+
+    #[test]
+    fn public_result_preserves_execution_provenance() {
+        let mut info = EvalJobInfo::queued(
+            "bound".into(),
+            "t".into(),
+            vec![None],
+            EvalSubmissionKind::OnDemand,
+            None,
+            17,
+        );
+        let provenance = crate::execution_provenance::test_execution_provenance();
+        info.execution_provenance = Some(provenance.clone());
+        assert_eq!(info.to_result().execution_provenance, Some(provenance));
     }
 }

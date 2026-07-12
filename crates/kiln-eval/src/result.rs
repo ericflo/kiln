@@ -713,6 +713,10 @@ pub struct EvalResult {
     /// only for mock/synthetic generators and legacy archived jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_weight_shard_manifest: Option<kiln_core::model_provenance::BaseWeightShardManifest>,
+    /// Startup-owned process/runtime envelope captured before queue publication.
+    /// Absent only for synthetic generators and legacy archived jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_provenance: Option<kiln_core::execution_provenance::ExecutionProvenanceV1>,
     /// One immutable seed materialized before the job enters the queue.
     /// Example/completion seeds are derived from it with `seed_derivation`.
     /// Both fields are absent only on legacy archived jobs.
@@ -1026,6 +1030,7 @@ mod tests {
             job_id: "j1".into(),
             state: EvalJobState::Completed,
             base_weight_shard_manifest: None,
+            execution_provenance: None,
             effective_seed: None,
             seed_derivation: None,
             runs: vec![baseline, candidate],
@@ -1047,6 +1052,7 @@ mod tests {
             job_id: "j2".into(),
             state: EvalJobState::Completed,
             base_weight_shard_manifest: None,
+            execution_provenance: None,
             effective_seed: None,
             seed_derivation: None,
             runs: vec![mk_run(

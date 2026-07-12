@@ -660,6 +660,44 @@ async function startServer({
       sha256: `sha256:${'42'.repeat(32)}`,
     }],
   };
+  const smokeExecutionProvenance = {
+    schema_version: 1,
+    provenance_type: 'kiln.execution-provenance.v1',
+    backend: {
+      name: 'rocm',
+      device: 'gfx1151',
+      numerical_runtime_sha256: `sha256:${'1'.repeat(64)}`,
+    },
+    build: {
+      package_version: '0.4.1',
+      target: 'x86_64-unknown-linux-gnu',
+      executable_sha256: `sha256:${'2'.repeat(64)}`,
+      git_commit: '6002d836',
+      source_tree_sha256: `sha256:${'3'.repeat(64)}`,
+      source_dirty: false,
+    },
+    model: {
+      model_config_sha256: `sha256:${'4'.repeat(64)}`,
+      tokenizer_vocab_sha256: `sha256:${'5'.repeat(64)}`,
+      tokenizer_config_sha256: `sha256:${'6'.repeat(64)}`,
+      chat_template_sha256: `sha256:${'7'.repeat(64)}`,
+    },
+    precision: {
+      inference_dtype: 'bf16',
+      training_policy: 'rocm_native_float',
+    },
+    kernels: {
+      contract_type: 'kiln.kernel-contract.v1',
+      versions: { 'kiln-model': '0.4.1' },
+      compiled_features: ['rocm'],
+      contract_sha256: `sha256:${'8'.repeat(64)}`,
+    },
+    configuration: {
+      effective_server_config_sha256: `sha256:${'9'.repeat(64)}`,
+      effective_environment_sha256: `sha256:${'a'.repeat(64)}`,
+    },
+    provenance_sha256: `sha256:${'b'.repeat(64)}`,
+  };
   const smokeEvalJobs = [
     {
       job_id: 'smoke-eval-full',
@@ -667,6 +705,7 @@ async function startServer({
       adapters: [null, 'smoke-tuned'],
       submission_kind: 'compare',
       base_weight_shard_manifest: smokeBaseWeightManifest,
+      execution_provenance: smokeExecutionProvenance,
       effective_seed: '18446744073709551615',
       state: 'completed',
       progress: { examples_completed: 3, examples_total: 3, running_accuracy: 2 / 3, running_mean_score: 2 / 3 },
@@ -1153,6 +1192,16 @@ async function startServer({
             config_hash: `sha256:${'3'.repeat(64)}`,
             base_weight_shard_manifest: smokeBaseWeightManifest,
           },
+          runtime: {
+            execution_provenance: smokeExecutionProvenance,
+            training_precision: {
+              parameter_dtype: 'bf16',
+              optimizer_state_dtype: 'f32',
+              activation_dtype: 'f32',
+              gradient_dtype: 'f32',
+              stochastic_rounding: { mode: 'round_to_nearest' },
+            },
+          },
           hyperparameters: {
             mode: 'grpo',
             seed: '18446744073709551614',
@@ -1277,6 +1326,7 @@ async function startServer({
         job_id: job.job_id,
         state: job.state,
         base_weight_shard_manifest: job.base_weight_shard_manifest,
+        execution_provenance: job.execution_provenance,
         effective_seed: job.effective_seed,
         seed_derivation: 'kiln.eval-seed.v1',
         runs: job.finished_runs,
@@ -2612,6 +2662,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       const got = await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName || 'none');
       fail(`Tab from the last tabbable should wrap to the first inside the eval drill, got activeElement=${got}`);
     }
+    await page.evaluate(() => document.querySelector('[data-smoke-first-tabbable]')?.focus());
     await page.keyboard.down('Shift');
     await page.keyboard.press('Tab');
     await page.keyboard.up('Shift');
@@ -3233,6 +3284,15 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       { timeout: 5000 },
     ).catch(() => fail('Training base-weight copy should preserve the complete aggregate digest'));
     await expectTrainingToast(page, 'Base-weight identity copied');
+    await waitForPanelText(page, '#train-drill-content', /Execution[\s\S]*rocm · gfx1151/, 'Training drill should show the persisted execution identity');
+    await waitForPanelText(page, '#train-drill-content', /Concrete precision[\s\S]*bf16 parameters[\s\S]*f32 optimizer[\s\S]*round_to_nearest/, 'Training drill should show the concrete precision contract');
+    await page.evaluate(() => { window.__copiedText = ''; });
+    await clickAndWait(page, '#train-drill-content [data-copy-execution]', 'Could not copy the training execution identity');
+    await page.waitForFunction(
+      () => window.__copiedText === `sha256:${'b'.repeat(64)}`,
+      { timeout: 5000 },
+    ).catch(() => fail('Training execution copy should preserve the complete canonical digest'));
+    await expectTrainingToast(page, 'Execution identity copied');
     await page.evaluate(() => { window.__copiedText = ''; });
     await clickAndWait(page, '[data-copy-resume-checkpoint]', 'Could not copy the GRPO resume checkpoint');
     await page.waitForFunction(
@@ -3880,6 +3940,14 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       { timeout: 5000 },
     ).catch(() => fail('Eval base-weight copy should preserve the complete aggregate digest'));
     await expectTrainingToast(page, 'Base-weight identity copied');
+    await waitForPanelText(page, '#drill-headline', /Execution[\s\S]*rocm · gfx1151/, 'Eval drill should show the admission-time execution identity');
+    await page.evaluate(() => { window.__copiedText = ''; });
+    await clickAndWait(page, '#drill-headline [data-copy-execution]', 'Could not copy the eval execution identity');
+    await page.waitForFunction(
+      () => window.__copiedText === `sha256:${'b'.repeat(64)}`,
+      { timeout: 5000 },
+    ).catch(() => fail('Eval execution copy should preserve the complete canonical digest'));
+    await expectTrainingToast(page, 'Execution identity copied');
     // The drill defaults to the first failure (ex-2), not the first outcome.
     await waitForPanelText(page, '#drill-detail', /seed 18446744073709551613/, 'Eval outcome detail should expose the exact derived decoder seed');
     await page.waitForSelector('#drill-detail [data-outcome-copy="seed"]', { timeout: 5000 })
@@ -3906,6 +3974,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     if (parsedRaw.job_id !== 'smoke-eval-full') fail(`Raw JSON should show the drilled job, got job_id ${JSON.stringify(parsedRaw.job_id)}`);
     if (parsedRaw.effective_seed !== '18446744073709551615') fail(`Raw JSON should preserve the exact decimal effective seed, got ${JSON.stringify(parsedRaw.effective_seed)}`);
     if (parsedRaw.base_weight_shard_manifest?.shards?.[0]?.filename !== 'model.safetensors') fail('Raw JSON should preserve the complete per-shard base-weight manifest');
+    if (parsedRaw.execution_provenance?.backend?.device !== 'gfx1151' || parsedRaw.execution_provenance?.provenance_sha256 !== `sha256:${'b'.repeat(64)}`) fail('Raw JSON should preserve the complete execution provenance record');
     if (!Array.isArray(parsedRaw.runs) || parsedRaw.runs.length !== 2) fail('Raw JSON should carry both runs of the compare job');
     if (!rawPayload.includes('\n  "runs"')) fail('Raw JSON should be pretty-printed with 2-space indentation');
     if (!rawPayload.includes('"detail": "expected 42, got 41"')) fail('Raw JSON should surface per-outcome fields like detail');
@@ -3966,6 +4035,9 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     }
     if (firstLine.base_weight_shard_manifest?.aggregate_sha256 !== 'sha256:c62f9f56234c61c943716ae3b8783c851fb41a2551e31f17d15f1b0c346339b5') {
       fail(`Outcomes JSONL should preserve exact base-weight provenance, got ${JSON.stringify(firstLine.base_weight_shard_manifest)}`);
+    }
+    if (firstLine.execution_provenance?.backend?.device !== 'gfx1151' || firstLine.execution_provenance?.provenance_sha256 !== `sha256:${'b'.repeat(64)}`) {
+      fail(`Outcomes JSONL should preserve exact execution provenance, got ${JSON.stringify(firstLine.execution_provenance)}`);
     }
     if (firstLine.generation_seed !== '18446744073709551614') fail(`Outcomes JSONL should preserve the exact per-completion seed, got ${JSON.stringify(firstLine.generation_seed)}`);
     if (!parsedLines.some((line) => line.adapter === 'smoke-tuned')) fail('Outcomes JSONL should include the second run, tagged with its adapter');

@@ -293,6 +293,8 @@ struct EvalResultPayload {
     state: String,
     #[serde(default)]
     base_weight_shard_manifest: Option<kiln_core::model_provenance::BaseWeightShardManifest>,
+    #[serde(default)]
+    execution_provenance: Option<kiln_core::execution_provenance::ExecutionProvenanceV1>,
     #[serde(default, with = "kiln_eval::result::optional_u64_decimal")]
     effective_seed: Option<u64>,
     #[serde(default)]
@@ -302,6 +304,22 @@ struct EvalResultPayload {
     error: Option<String>,
     #[serde(default)]
     progress: Option<kiln_eval::EvalProgress>,
+}
+
+impl EvalResultPayload {
+    fn validate_provenance(&self) -> Result<()> {
+        if let Some(manifest) = self.base_weight_shard_manifest.as_ref() {
+            manifest
+                .validate()
+                .context("eval result contains invalid base-weight provenance")?;
+        }
+        if let Some(provenance) = self.execution_provenance.as_ref() {
+            provenance
+                .validate()
+                .context("eval result contains invalid execution provenance")?;
+        }
+        Ok(())
+    }
 }
 
 #[tokio::main]
@@ -1299,6 +1317,7 @@ async fn poll_until_done(
             );
         }
         let payload: EvalResultPayload = resp.json().await?;
+        payload.validate_provenance()?;
         match payload.state.as_str() {
             "completed" | "failed" | "cancelled" => return Ok(payload),
             _ => {
@@ -1340,6 +1359,9 @@ fn print_human(result: &EvalResultPayload) {
         );
     }
     if let Some(line) = base_weight_provenance_line(result) {
+        println!("{line}");
+    }
+    if let Some(line) = execution_provenance_line(result) {
         println!("{line}");
     }
     for r in &result.runs {
@@ -1492,6 +1514,9 @@ fn print_compare(result: &EvalResultPayload) {
     if let Some(line) = base_weight_provenance_line(result) {
         println!("{line}");
     }
+    if let Some(line) = execution_provenance_line(result) {
+        println!("{line}");
+    }
     println!(
         "{:<24}  {:>10}  {:>10}  {:>10}",
         "adapter", "accuracy", "mean", "p50 ms"
@@ -1588,6 +1613,15 @@ fn base_weight_provenance_line(result: &EvalResultPayload) -> Option<String> {
     })
 }
 
+fn execution_provenance_line(result: &EvalResultPayload) -> Option<String> {
+    result.execution_provenance.as_ref().map(|provenance| {
+        format!(
+            "Execution: {} on {} ({})",
+            provenance.backend.name, provenance.backend.device, provenance.provenance_sha256
+        )
+    })
+}
+
 fn compute_flip_diff(result: &EvalResultPayload) -> Option<kiln_eval::FlipDiff> {
     // Reuse the canonical flip-diff logic by reshaping into the real
     // EvalResult type via a JSON round-trip. Cheap (the payload is
@@ -1596,6 +1630,7 @@ fn compute_flip_diff(result: &EvalResultPayload) -> Option<kiln_eval::FlipDiff> 
         job_id: result.job_id.clone(),
         state: kiln_eval::EvalJobState::Completed,
         base_weight_shard_manifest: result.base_weight_shard_manifest.clone(),
+        execution_provenance: result.execution_provenance.clone(),
         effective_seed: result.effective_seed,
         seed_derivation: result.seed_derivation.clone(),
         runs: result.runs.clone(),
@@ -1608,6 +1643,51 @@ fn compute_flip_diff(result: &EvalResultPayload) -> Option<kiln_eval::FlipDiff> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn execution_provenance() -> kiln_core::execution_provenance::ExecutionProvenanceV1 {
+        use kiln_core::execution_provenance::{
+            ExecutionBackendIdentity, ExecutionBuildIdentity, ExecutionConfigurationIdentity,
+            ExecutionKernelIdentity, ExecutionModelIdentity, ExecutionPrecisionIdentity,
+            ExecutionProvenanceV1,
+        };
+
+        let digest = format!("sha256:{}", "11".repeat(32));
+        ExecutionProvenanceV1::new(
+            ExecutionBackendIdentity {
+                name: "rocm".to_string(),
+                device: "gfx1151".to_string(),
+                numerical_runtime_sha256: digest.clone(),
+            },
+            ExecutionBuildIdentity {
+                package_version: "0.4.1".to_string(),
+                target: "x86_64-unknown-linux-gnu".to_string(),
+                executable_sha256: digest.clone(),
+                git_commit: Some("abc123".to_string()),
+                source_tree_sha256: Some(digest.clone()),
+                source_dirty: Some(false),
+            },
+            ExecutionModelIdentity {
+                model_config_sha256: digest.clone(),
+                tokenizer_vocab_sha256: digest.clone(),
+                tokenizer_config_sha256: digest.clone(),
+                chat_template_sha256: Some(digest.clone()),
+            },
+            ExecutionPrecisionIdentity {
+                inference_dtype: "bf16".to_string(),
+                training_policy: "rocm_native_float".to_string(),
+            },
+            ExecutionKernelIdentity::new(
+                std::collections::BTreeMap::from([("kiln-model".to_string(), "0.4.1".to_string())]),
+                vec!["rocm".to_string()],
+            )
+            .unwrap(),
+            ExecutionConfigurationIdentity {
+                effective_server_config_sha256: digest.clone(),
+                effective_environment_sha256: digest,
+            },
+        )
+        .unwrap()
+    }
 
     #[test]
     fn cli_default_server_uses_shared_runtime_default() {
@@ -1651,6 +1731,31 @@ mod tests {
             base_weight_provenance_line(&result).as_deref(),
             Some(expected.as_str())
         );
+    }
+
+    #[test]
+    fn eval_execution_line_reports_and_validates_exact_runtime_identity() {
+        let provenance = execution_provenance();
+        let mut result: EvalResultPayload = serde_json::from_value(serde_json::json!({
+            "job_id": "eval-1",
+            "state": "completed",
+            "execution_provenance": provenance,
+            "runs": [],
+        }))
+        .unwrap();
+
+        assert_eq!(
+            execution_provenance_line(&result).as_deref(),
+            Some(
+                format!(
+                    "Execution: rocm on gfx1151 ({})",
+                    provenance.provenance_sha256
+                )
+                .as_str()
+            )
+        );
+        result.execution_provenance.as_mut().unwrap().backend.device = "tampered:0".to_string();
+        assert!(result.validate_provenance().is_err());
     }
 
     #[test]

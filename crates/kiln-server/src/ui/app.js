@@ -7059,6 +7059,36 @@ function renderBaseWeightSummary(manifest) {
   </div>`;
 }
 
+function renderExecutionProvenanceSummary(provenance) {
+  if (!provenance || typeof provenance.provenance_sha256 !== 'string') return '';
+  const digest = provenance.provenance_sha256;
+  const shortDigest = digest.length > 28 ? `${digest.slice(0, 18)}…${digest.slice(-8)}` : digest;
+  const backend = provenance.backend?.name || 'unknown';
+  const device = provenance.backend?.device || 'unknown device';
+  return `<div class="hint" style="display:flex; align-items:center; gap:6px; min-width:0; flex-wrap:wrap; font-size:11px;">
+    <strong style="color:var(--text);">Execution</strong>
+    <span>${escapeHtml(`${backend} · ${device}`)}</span>
+    <code title="${escapeHtml(digest)}" style="overflow-wrap:anywhere;">${escapeHtml(shortDigest)}</code>
+    <button class="btn btn-sm btn-ghost" type="button" data-copy-execution="${escapeHtml(digest)}" title="Copy exact execution provenance digest" aria-label="Copy exact execution provenance digest"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg></button>
+  </div>`;
+}
+
+function renderTrainingPrecisionSummary(precision) {
+  if (!precision || typeof precision !== 'object') return '';
+  const parameter = precision.parameter_dtype || 'unknown';
+  const optimizer = precision.optimizer_state_dtype || 'unknown';
+  const activation = precision.activation_dtype || 'unknown';
+  const gradient = precision.gradient_dtype || 'unknown';
+  const rounding = precision.stochastic_rounding?.mode
+    || (typeof precision.stochastic_rounding?.enabled === 'boolean'
+      ? (precision.stochastic_rounding.enabled ? 'enabled' : 'disabled')
+      : 'declared');
+  return `<div class="hint" style="display:flex; align-items:center; gap:6px; min-width:0; flex-wrap:wrap; font-size:11px;">
+    <strong style="color:var(--text);">Concrete precision</strong>
+    <span>${escapeHtml(`${parameter} parameters · ${optimizer} optimizer · ${activation} activations · ${gradient} gradients · ${rounding}`)}</span>
+  </div>`;
+}
+
 function wireBaseWeightCopy(root) {
   root?.querySelectorAll('[data-copy-base-weight]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -7067,6 +7097,19 @@ function wireBaseWeightCopy(root) {
       copyText(value, btn).then(() => {
         if (Object.prototype.hasOwnProperty.call(window, '__copiedText')) window.__copiedText = value;
         toast('Base-weight identity copied', 'ok');
+      });
+    });
+  });
+}
+
+function wireExecutionProvenanceCopy(root) {
+  root?.querySelectorAll('[data-copy-execution]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const value = btn.dataset.copyExecution;
+      if (!value) return;
+      copyText(value, btn).then(() => {
+        if (Object.prototype.hasOwnProperty.call(window, '__copiedText')) window.__copiedText = value;
+        toast('Execution identity copied', 'ok');
       });
     });
   });
@@ -7317,8 +7360,10 @@ function renderDrillModal(preserveSelection) {
     headerEl.innerHTML = `
       <div class="hint">${j.state === 'queued' ? 'Job is queued. Will start shortly.' : (j.state === 'running' ? 'Job is running. Live progress streaming…' : 'No completed runs yet.')}</div>
       ${j.progress && j.progress.examples_total > 0 ? `<div style="flex:1;"><div class="progress-bar-wrap" style="height:8px;"><div class="progress-bar-fill" style="width:${(j.progress.examples_completed / j.progress.examples_total * 100).toFixed(1)}%;"></div></div><div class="hint" style="font-size:11px; margin-top:4px;">${j.progress.examples_completed}/${j.progress.examples_total} · running ${(j.progress.running_accuracy*100).toFixed(0)}%</div></div>` : ''}
-      ${renderBaseWeightSummary(j.base_weight_shard_manifest)}`;
+      ${renderBaseWeightSummary(j.base_weight_shard_manifest)}
+      ${renderExecutionProvenanceSummary(j.execution_provenance)}`;
     wireBaseWeightCopy(headerEl);
+    wireExecutionProvenanceCopy(headerEl);
     compareEl.hidden = true;
     tagsEl.hidden = true;
     document.getElementById('drill-outcomes').innerHTML = '<div class="eval-empty"><div class="eval-empty-body">Outcomes will appear here as they complete.</div></div>';
@@ -7344,8 +7389,10 @@ function renderDrillModal(preserveSelection) {
         ${m.total_completion_tokens ? `<div class="count-cell"><span class="count-num">${(m.total_completion_tokens/1000).toFixed(1)}k</span><span class="count-label">tok out</span></div>` : ''}
       </div>
     </div>
-    ${renderBaseWeightSummary(j.base_weight_shard_manifest)}`;
+    ${renderBaseWeightSummary(j.base_weight_shard_manifest)}
+    ${renderExecutionProvenanceSummary(j.execution_provenance)}`;
   wireBaseWeightCopy(headerEl);
+  wireExecutionProvenanceCopy(headerEl);
 
   // Compare matrix when multi-run
   if (isCompare && runs.length >= 2) {
@@ -7654,6 +7701,7 @@ function buildDrillOutcomesJsonl(j) {
       if (j.effective_seed != null) line.effective_seed = String(j.effective_seed);
       if (j.seed_derivation != null) line.seed_derivation = j.seed_derivation;
       if (j.base_weight_shard_manifest != null) line.base_weight_shard_manifest = j.base_weight_shard_manifest;
+      if (j.execution_provenance != null) line.execution_provenance = j.execution_provenance;
       if (o.generation_seed != null) line.generation_seed = String(o.generation_seed);
       if (o.detail != null) line.detail = o.detail;
       if (o.latency_ms != null) line.latency_ms = o.latency_ms;
@@ -9722,6 +9770,17 @@ function renderTrainDrillBody(j) {
     <h4>Base weights</h4>
     ${renderBaseWeightSummary(baseWeightManifest)}
   </div>`;
+  const executionProvenance = j.train_receipt?.runtime?.execution_provenance
+    || j.adapter_manifest?.execution_provenance
+    || null;
+  const trainingPrecision = j.train_receipt?.runtime?.training_precision
+    || j.adapter_manifest?.training_precision
+    || null;
+  const executionSection = executionProvenance == null && trainingPrecision == null ? '' : `<div class="detail-section">
+    <h4>Execution and precision</h4>
+    ${renderExecutionProvenanceSummary(executionProvenance)}
+    ${renderTrainingPrecisionSummary(trainingPrecision)}
+  </div>`;
   const html = `<div style="padding: var(--space-4) var(--space-5); border-bottom:1px solid var(--border);">
     <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
       <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing: var(--tracking-caps);">Progress</div>
@@ -9743,6 +9802,7 @@ function renderTrainDrillBody(j) {
   </div>
   ${seedSection}
   ${baseWeightSection}
+  ${executionSection}
   ${renderTrainMetadata(j)}
   ${renderTrainCheckpoint(j)}
   <div class="detail-section">
@@ -9760,6 +9820,7 @@ function renderTrainDrillBody(j) {
   // Defer wiring to after innerHTML set
   setTimeout(() => {
     wireBaseWeightCopy(document.getElementById('train-drill-content'));
+    wireExecutionProvenanceCopy(document.getElementById('train-drill-content'));
     document.querySelectorAll('[data-linked-eval]').forEach(b => {
       b.addEventListener('click', () => {
         closeTrainDrillModal();

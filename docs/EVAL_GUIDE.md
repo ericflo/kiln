@@ -584,11 +584,33 @@ Archive load validates the aggregate, each shard digest and size, total bytes,
 ordering, and schema. Corrupt new archives are skipped rather than reported as
 valid provenance. A missing field is accepted only for legacy archives or
 synthetic/mock generation; a newly admitted production job always receives the
-loader-owned manifest. This binds base weights only. Adapter revision,
-tokenizer/template, executable/source, backend/runtime, and generation settings
-remain separate replay inputs. See
+loader-owned manifest. This binds base weights only; the execution envelope is
+recorded separately. Adapter revision and generation settings remain additional
+replay inputs. See
 [Base-Weight Provenance](BASE_WEIGHT_PROVENANCE.md) for the canonical schema and
 content-identity rules.
+
+## Execution provenance
+
+Production eval admission snapshots the startup-owned
+`kiln.execution-provenance.v1` record before queue publication. The record binds
+the backend and device, bounded driver/runtime evidence, exact executable and
+optional source revision, model/tokenizer/template identities, inference and
+training precision policy, compiled kernel contract, and effective server
+configuration/environment digests. It is exposed as `execution_provenance` in
+job list/detail and raw result JSON, retained by terminal archives, printed as a
+backend/device/digest summary by `kiln-eval`, and shown with an exact-copy action
+in the dashboard. Downloaded outcome JSONL repeats the complete record on every
+standalone row.
+
+Archive save and restart load validate the self-verifying canonical digest;
+tampered records are rejected instead of being reported as evidence. Legacy
+archives and synthetic/mock generators may omit the field, but a newly admitted
+production job receives the same immutable record retained by `AppState`. The
+record proves the declared execution envelope's integrity, not output replay or
+driver correctness. Exact replay still requires matching inputs, adapter,
+effective seed, and generation state. See
+[Execution Provenance](EXECUTION_PROVENANCE.md).
 
 ## API reference
 

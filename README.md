@@ -514,8 +514,8 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET / DELETE | `/v1/eval/suites/{name}` | Fetch / delete one suite |
 | POST | `/v1/eval/run` | Submit an eval and materialize one effective seed (registered suite or inline) |
 | POST | `/v1/eval/compare` | Run a suite head-to-head with identical derived seeds across adapters |
-| GET | `/v1/eval/jobs` | List eval jobs, effective seeds, base-weight shard identities, and headline results |
-| GET / DELETE | `/v1/eval/jobs/{job_id}` | Per-job seed/base-weight identity/status/outcomes or cancel/delete |
+| GET | `/v1/eval/jobs` | List eval jobs, effective seeds, base-weight and execution identities, and headline results |
+| GET / DELETE | `/v1/eval/jobs/{job_id}` | Per-job seed/base-weight/execution identity, status, outcomes, or cancel/delete |
 | POST | `/v1/eval/jobs/{job_id}/rerun` | Re-run failures with the original effective seed by default |
 | POST | `/v1/eval/datasets/upload` | Multipart upload of an SFT/GRPO JSONL dataset |
 | GET / DELETE | `/v1/eval/datasets/{name}` | Dataset manifest / delete |

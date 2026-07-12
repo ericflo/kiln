@@ -101,6 +101,15 @@ pub(crate) fn validated_checkpoint_execution_provenance(
     Ok(provenance)
 }
 
+/// Validate the immutable model and process identities required by every new
+/// exact checkpoint. This is exposed for status/discovery surfaces that must
+/// not advertise a checkpoint as resumable before route-specific restore.
+pub fn validate_exact_checkpoint_artifact_provenance(auxiliary_state: &Value) -> Result<()> {
+    validated_checkpoint_base_weight_manifest(auxiliary_state)?;
+    validated_checkpoint_execution_provenance(auxiliary_state)?;
+    Ok(())
+}
+
 pub(crate) fn validate_checkpoint_execution_resume_binding(
     checkpoint_auxiliary_state: &Value,
     current_auxiliary_state: &Value,

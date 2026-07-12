@@ -136,6 +136,7 @@ async fn main() -> Result<()> {
         job_id: format!("trace-api-{}", uuid::Uuid::new_v4()),
         state: EvalJobState::Completed,
         base_weight_shard_manifest: None,
+        execution_provenance: None,
         effective_seed: Some(effective_seed),
         seed_derivation: Some(kiln_eval::EVAL_SEED_DERIVATION_V1.to_string()),
         runs,

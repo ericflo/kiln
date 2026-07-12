@@ -2694,6 +2694,23 @@ impl AppState {
         forced_effective_seed: Option<u64>,
     ) -> anyhow::Result<crate::eval::queue::EvalEnqueueReceipt> {
         self.ensure_inference_admission_allowed()?;
+        let real_backend = matches!(self.backend.as_ref(), ModelBackend::Real { .. });
+        if real_backend && self.base_weight_shard_manifest.is_none() {
+            anyhow::bail!("eval admission requires the resident base-weight shard manifest");
+        }
+        if real_backend && self.execution_provenance.is_none() {
+            anyhow::bail!("eval admission requires startup-owned execution provenance");
+        }
+        if let Some(manifest) = self.base_weight_shard_manifest.as_deref() {
+            manifest
+                .validate()
+                .map_err(|error| anyhow::anyhow!("invalid eval base-weight provenance: {error}"))?;
+        }
+        if let Some(provenance) = self.execution_provenance.as_deref() {
+            provenance
+                .validate()
+                .map_err(|error| anyhow::anyhow!("invalid eval execution provenance: {error}"))?;
+        }
         let job_id = uuid::Uuid::new_v4().to_string();
         let registered_suite_seed = |name: &str| {
             self.suite_registry
@@ -2737,6 +2754,7 @@ impl AppState {
             effective_seed,
         );
         info.base_weight_shard_manifest = self.base_weight_shard_manifest.as_deref().cloned();
+        info.execution_provenance = self.execution_provenance.as_deref().cloned();
         self.eval_jobs.write().unwrap().insert(job_id.clone(), info);
         self.eval_queue
             .lock()

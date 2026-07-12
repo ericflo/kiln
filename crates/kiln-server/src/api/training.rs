@@ -2710,6 +2710,18 @@ fn discover_latest_training_checkpoint(
         if manifest.training_kind != expected_kind {
             continue;
         }
+        if let Err(error) = kiln_train::checkpoint::validate_exact_checkpoint_artifact_provenance(
+            &manifest.auxiliary_state,
+        ) {
+            if errors.len() < MAX_REPORTED_ERRORS {
+                errors.push(format!(
+                    "{name}: invalid exact checkpoint artifact provenance: {error:#}"
+                ));
+            } else {
+                omitted_errors += 1;
+            }
+            continue;
+        }
         let teacher_id = manifest
             .auxiliary_state
             .pointer("/teacher_capabilities/teacher_id")
@@ -2790,16 +2802,6 @@ fn training_job_adapter_dir(
     adapter_root.join(adapter_name)
 }
 
-fn read_optional_json(path: &Path) -> Result<Option<serde_json::Value>, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|e| format!("parse {}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("read {}: {e}", path.display())),
-    }
-}
-
 fn summarize_replay_request(mut value: serde_json::Value) -> serde_json::Value {
     if let Some(body) = value
         .as_object_mut()
@@ -2860,10 +2862,17 @@ fn read_training_job_metadata(
     Option<String>,
 ) {
     let mut errors = Vec::new();
-    let train_receipt = match read_optional_json(&adapter_dir.join("train_receipt.json")) {
-        Ok(value) => value,
+    let train_receipt = match kiln_train::TrainReceipt::read_from_adapter_dir(adapter_dir) {
+        Ok(Some(receipt)) => match serde_json::to_value(receipt) {
+            Ok(value) => Some(value),
+            Err(err) => {
+                errors.push(format!("serialize validated train receipt: {err}"));
+                None
+            }
+        },
+        Ok(None) => None,
         Err(err) => {
-            errors.push(err);
+            errors.push(format!("read validated train receipt: {err:#}"));
             None
         }
     };
@@ -3034,15 +3043,35 @@ mod tests {
         let data_order = (global_step < total_steps)
             .then_some(vec![0])
             .unwrap_or_default();
-        let auxiliary_state = if training_kind == TrainingKind::Opd {
-            serde_json::json!({
-                "teacher_capabilities": {"teacher_id": "teacher-v1"},
-                "teacher_identity": discovery_teacher_identity(),
-                "teacher_content_revision": format!("sha256:{}", "22".repeat(32)),
-            })
-        } else {
-            serde_json::json!({})
-        };
+        let base_weight_manifest = kiln_core::model_provenance::BaseWeightShardManifest::new(vec![
+            kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                "model.safetensors",
+                11,
+                [0x42; 32],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let mut auxiliary_state = serde_json::json!({
+            "base_model_weights_sha256": base_weight_manifest.aggregate_sha256.clone(),
+            "base_weight_shard_manifest": base_weight_manifest,
+            "execution_provenance": crate::execution_provenance::test_execution_provenance(),
+        });
+        if training_kind == TrainingKind::Opd {
+            let object = auxiliary_state.as_object_mut().unwrap();
+            object.insert(
+                "teacher_capabilities".to_string(),
+                serde_json::json!({"teacher_id": "teacher-v1"}),
+            );
+            object.insert(
+                "teacher_identity".to_string(),
+                serde_json::to_value(discovery_teacher_identity()).unwrap(),
+            );
+            object.insert(
+                "teacher_content_revision".to_string(),
+                serde_json::json!(format!("sha256:{}", "22".repeat(32))),
+            );
+        }
         let manifest = TrainingCheckpointManifest::new(
             format!("checkpoint-{global_step}"),
             training_kind,
@@ -3242,6 +3271,87 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("invalid checkpoint teacher_identity")),
             "identity rejection must remain visible to the operator: {error:?}"
+        );
+    }
+
+    #[test]
+    fn checkpoint_discovery_rejects_tampered_execution_provenance() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory_name = "demo-checkpoint-step-00000002.kiln-checkpoint";
+        write_discovery_checkpoint(temp.path(), directory_name, "demo", TrainingKind::Sft, 2, 8);
+        let manifest_path = temp
+            .path()
+            .join(directory_name)
+            .join(kiln_train::checkpoint::TRAINING_CHECKPOINT_MANIFEST_FILENAME);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["auxiliary_state"]["execution_provenance"]["backend"]["device"] =
+            serde_json::json!("tampered:0");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let (latest, error) =
+            discover_latest_training_checkpoint(temp.path(), "demo", TrainingKind::Sft);
+        assert!(latest.is_none(), "tampered execution must not be resumable");
+        assert!(
+            error.as_deref().is_some_and(|error| {
+                error.contains("invalid exact checkpoint artifact provenance")
+                    && error.contains("execution provenance digest mismatch")
+            }),
+            "execution-provenance rejection must remain visible to the operator: {error:?}"
+        );
+    }
+
+    #[test]
+    fn training_metadata_rejects_tampered_receipt_execution_provenance() {
+        let temp = tempfile::tempdir().unwrap();
+        let tokenizer = kiln_core::tokenizer::KilnTokenizer::from_bytes(
+            br#"{
+                "version":"1.0",
+                "model":{"type":"BPE","vocab":{"a":0,"b":1},"merges":[]}
+            }"#,
+        )
+        .unwrap();
+        let mut receipt = kiln_train::TrainReceipt::new(
+            "demo",
+            "sft",
+            &kiln_core::config::ModelConfig::qwen3_5_4b(),
+            &tokenizer,
+            kiln_train::train_receipt::HyperparameterReceipt {
+                mode: "sft".to_string(),
+                rank: 8,
+                alpha: 16.0,
+                alpha_over_rank: Some(2.0),
+                learning_rate: 1e-4,
+                epochs: 1,
+                seed: Some(17),
+                shuffle: false,
+            },
+            serde_json::json!({}),
+        );
+        receipt.runtime.execution_provenance =
+            Some(crate::execution_provenance::test_execution_provenance());
+        let path = temp.path().join(kiln_train::TRAIN_RECEIPT_FILENAME);
+        std::fs::write(&path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+        let (loaded, _, error) = read_training_job_metadata(temp.path(), "job");
+        assert!(loaded.is_some());
+        assert_eq!(error, None);
+
+        let mut value = serde_json::to_value(receipt).unwrap();
+        value["runtime"]["execution_provenance"]["backend"]["device"] =
+            serde_json::json!("tampered:0");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let (loaded, _, error) = read_training_job_metadata(temp.path(), "job");
+        assert!(loaded.is_none());
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("execution provenance digest mismatch")),
+            "tampered receipt rejection must remain visible to the operator: {error:?}"
         );
     }
 
