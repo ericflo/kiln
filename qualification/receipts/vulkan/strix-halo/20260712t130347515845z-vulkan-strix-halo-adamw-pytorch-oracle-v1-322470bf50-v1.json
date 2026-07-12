@@ -1,0 +1,240 @@
+{
+  "artifacts": [
+    {
+      "bytes": 6320,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1/environment.json",
+      "sha256": "sha256:eca737bf34d63bef53a80f562e94a9a3b13767988520fec4ffd335612799e785"
+    },
+    {
+      "bytes": 0,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1/cases/001-fixture-contract-r001/stdout.log",
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 104,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1/cases/001-fixture-contract-r001/stderr.log",
+      "sha256": "sha256:62cfbeb2911bb226088bfb0918eb4b05008ea70b20bce854ee2ca8a564bd37a5"
+    },
+    {
+      "bytes": 646,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1/cases/001-fixture-contract-r001/case-result.json",
+      "sha256": "sha256:2c3063ec7a5897d2f378a250befa75c7c9649005f55f97a322e406e6622335d4"
+    },
+    {
+      "bytes": 189,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1/cases/002-portable-f32-r001/stdout.log",
+      "sha256": "sha256:5cc9b4e1c4f55c942bc7b6c1c27c51c9b9441ebc1e4c3ef2eb772c7b7e9f32cd"
+    },
+    {
+      "bytes": 2827,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1/cases/002-portable-f32-r001/stderr.log",
+      "sha256": "sha256:89398985b10b28391180447c59b7896028eef668bd916e21eff23c391498f47e"
+    },
+    {
+      "bytes": 640,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1/cases/002-portable-f32-r001/case-result.json",
+      "sha256": "sha256:c6b8d667c171699bda09187ed12e7589ccb72f6d71bbdf03aba26c9893e1d191"
+    },
+    {
+      "bytes": 263,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1/cases/003-native-backend-r001/stdout.log",
+      "sha256": "sha256:ce2bcb1173b8c473547c618c9d3d3fe1e48e9c555c6403e8e65f0f3670855044"
+    },
+    {
+      "bytes": 9804,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1/cases/003-native-backend-r001/stderr.log",
+      "sha256": "sha256:76c6b08064c4ae41cc56fe356357f17c5a1419e3d1025ca73a397a1da3b9c0ef"
+    },
+    {
+      "bytes": 643,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1/cases/003-native-backend-r001/case-result.json",
+      "sha256": "sha256:826788775626848d0a12b9bbabfd5ef82871d34ced8b8e91b52b832cc3337e40"
+    },
+    {
+      "bytes": 22034,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1/run-config.json",
+      "sha256": "sha256:a9475e476f4fc5f310eab71f8d66c593bff00ff80da1f1daf7ba41a767671720"
+    }
+  ],
+  "created_at_utc": "2026-07-12T13:03:48.088Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+      "shader": "2026.2"
+    },
+    "device": {
+      "architecture": "strix_halo",
+      "driver": "radv Mesa 26.1.3-arch1.2",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "driver": "Mesa 26.1.3-arch1.2",
+      "execution_environment_sha256": "sha256:8e1ad1077a8aaf2a76367b88fa4922090d5088a5a20893e0dce475cc4511c57b",
+      "vulkan_device": "1.4.348",
+      "vulkan_instance": "1.4.350"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "vulkan",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "qualification/workloads/adamw-pytorch-oracle-v1.json",
+      "--variant",
+      "vulkan",
+      "--host-id",
+      "strix-halo"
+    ],
+    "duration_seconds": 0.572336796001764,
+    "finished_at_utc": "2026-07-12T13:03:48.088Z",
+    "kind": "correctness",
+    "profile": "adamw-pytorch-oracle-v1",
+    "started_at_utc": "2026-07-12T13:03:47.515Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.060985440999502316,
+      "id": "fixture-contract",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.1010342719964683,
+      "id": "portable-f32",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.18126214898074977,
+      "id": "native-backend",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "c7fe0cbef9aa47e0876325db517b6dc9b6468bac",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:1ad4fd75f8089568dc8d613591e5d452f52f0988ba99afac46988cb1dedfb32c",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "adamw-pytorch-oracle-v1",
+    "parameters": {
+      "variant_id": "vulkan"
+    },
+    "seed": 0,
+    "sha256": "sha256:cff66ab6ac9c011f35cda6a9a9bd4044f6b394fcdbb3c80557557836bcba47fd"
+  }
+}
