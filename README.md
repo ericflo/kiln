@@ -602,6 +602,13 @@ gated debug endpoint exposes the complete record. See
 [Execution Provenance](docs/EXECUTION_PROVENANCE.md) for the schema, evidence
 sources, secret-redaction policy, and integrity scope.
 
+Exact native checkpoints require that complete record and compare its canonical
+digest before resume. Successful model-backed training receipts and adapter
+manifests persist it, together with the trainer's concrete parameter,
+optimizer-state, activation, gradient, and stochastic-rounding precision
+contract. Legacy serving artifacts remain readable, but a partial legacy
+runtime string is not accepted as evidence for exact continuation.
+
 The response is additionally capped at 65,536 candidate entries. Real scoring
 uses the runner's resident backend and inference recurrent-state policy, omits
 the unused final logits row, and takes exclusive GPU admission so it cannot

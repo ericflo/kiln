@@ -2839,6 +2839,10 @@ impl SftCheckpointDescriptor {
             &manifest.auxiliary_state,
             &self.auxiliary_state,
         )?;
+        crate::checkpoint::validate_checkpoint_execution_resume_binding(
+            &manifest.auxiliary_state,
+            &self.auxiliary_state,
+        )?;
         anyhow::ensure!(
             manifest.auxiliary_state == self.auxiliary_state,
             "resume checkpoint model/tokenizer/runtime identity differs from this run"
@@ -2892,6 +2896,7 @@ impl SftCheckpointDescriptor {
             "exact SFT checkpointing requires base-model weights loaded with a content identity"
         );
         crate::checkpoint::validated_checkpoint_base_weight_manifest(&self.auxiliary_state)?;
+        crate::checkpoint::validated_checkpoint_execution_provenance(&self.auxiliary_state)?;
         let progress = crate::checkpoint::TrainingCheckpointProgress {
             global_step: loop_state.global_step,
             total_steps: self.total_steps as u64,
@@ -3032,6 +3037,19 @@ pub(crate) fn training_checkpoint_precision(
     })
 }
 
+pub(crate) fn training_precision_for_receipt_best_effort(
+    params: &TrainableLoraParams,
+    opt_state: Option<&OptimizerState>,
+) -> Option<crate::checkpoint::TrainingCheckpointPrecision> {
+    match training_checkpoint_precision(params, opt_state) {
+        Ok(precision) => Some(precision),
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "could not record concrete training precision in receipt");
+            None
+        }
+    }
+}
+
 fn sft_checkpoint_effective_config(
     config: &SftConfig,
     learning_rate: f64,
@@ -3064,6 +3082,7 @@ fn sft_checkpoint_auxiliary_state(
     valid_indices: &[usize],
     base_model_weights_sha256: Option<&str>,
     base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
+    execution_provenance: Option<&kiln_core::execution_provenance::ExecutionProvenanceV1>,
     backend_runtime: &str,
     gradient_checkpoint_plan_sha256: &str,
 ) -> Result<serde_json::Value> {
@@ -3078,6 +3097,7 @@ fn sft_checkpoint_auxiliary_state(
         "chat_template_sha256": hashes.chat_template_hash,
         "base_model_weights_sha256": base_model_weights_sha256,
         "base_weight_shard_manifest": base_weight_shard_manifest,
+        "execution_provenance": execution_provenance,
         "backend_runtime": backend_runtime,
         "kiln_train_version": env!("CARGO_PKG_VERSION"),
         "gradient_checkpoint_plan_sha256": gradient_checkpoint_plan_sha256,
@@ -3094,7 +3114,7 @@ pub(crate) fn checkpoint_sha256_hex(prefixed: Option<&str>, label: &str) -> Resu
         .with_context(|| format!("{label} SHA-256 lacks sha256: prefix"))
 }
 
-pub(crate) fn validate_exact_base_weight_provenance(weights: &GpuWeights) -> Result<()> {
+pub(crate) fn validate_exact_training_provenance(weights: &GpuWeights) -> Result<()> {
     let aggregate = weights
         .source_content_sha256
         .as_deref()
@@ -3111,6 +3131,13 @@ pub(crate) fn validate_exact_base_weight_provenance(weights: &GpuWeights) -> Res
         "resident base-model aggregate {aggregate} differs from its shard manifest {}",
         manifest.aggregate_sha256
     );
+    let execution_provenance = weights
+        .execution_provenance
+        .as_ref()
+        .context("exact checkpointing requires a startup-owned execution provenance record")?;
+    execution_provenance
+        .validate()
+        .context("validate resident execution provenance")?;
     Ok(())
 }
 
@@ -3554,6 +3581,10 @@ impl GrpoCheckpointDescriptor {
             &manifest.auxiliary_state,
             &self.auxiliary_state,
         )?;
+        crate::checkpoint::validate_checkpoint_execution_resume_binding(
+            &manifest.auxiliary_state,
+            &self.auxiliary_state,
+        )?;
         anyhow::ensure!(
             manifest.auxiliary_state == self.auxiliary_state,
             "resume checkpoint model/tokenizer/runtime identity differs from this run"
@@ -3587,6 +3618,7 @@ impl GrpoCheckpointDescriptor {
             "exact GRPO checkpointing requires base-model weights loaded with a content identity"
         );
         crate::checkpoint::validated_checkpoint_base_weight_manifest(&self.auxiliary_state)?;
+        crate::checkpoint::validated_checkpoint_execution_provenance(&self.auxiliary_state)?;
         anyhow::ensure!(
             self.ema_refresh_every.is_some() == ema_ref_state.is_some(),
             "GRPO checkpoint EMA tensor state differs from its manifest contract"
@@ -3754,6 +3786,7 @@ fn grpo_checkpoint_auxiliary_state(
     precision_policy: TrainingPrecisionPolicy,
     base_model_weights_sha256: Option<&str>,
     base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
+    execution_provenance: Option<&kiln_core::execution_provenance::ExecutionProvenanceV1>,
     backend_runtime: &str,
     trainable_order_sha256: &str,
     gradient_checkpoint_plan_sha256: &str,
@@ -3768,6 +3801,7 @@ fn grpo_checkpoint_auxiliary_state(
         "chat_template_sha256": hashes.chat_template_hash,
         "base_model_weights_sha256": base_model_weights_sha256,
         "base_weight_shard_manifest": base_weight_shard_manifest,
+        "execution_provenance": execution_provenance,
         "backend_runtime": backend_runtime,
         "kiln_train_version": env!("CARGO_PKG_VERSION"),
         "trainable_order_sha256": trainable_order_sha256,
@@ -4372,6 +4406,8 @@ fn write_sft_train_receipt_best_effort(
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,
     base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
+    execution_provenance: Option<&kiln_core::execution_provenance::ExecutionProvenanceV1>,
+    training_precision: Option<crate::checkpoint::TrainingCheckpointPrecision>,
     config: &SftConfig,
     effective_seed: Option<u64>,
     alpha_over_rank: Option<f32>,
@@ -4394,6 +4430,8 @@ fn write_sft_train_receipt_best_effort(
         serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
     );
     receipt.model.base_weight_shard_manifest = base_weight_shard_manifest.cloned();
+    receipt.runtime.execution_provenance = execution_provenance.cloned();
+    receipt.runtime.training_precision = training_precision;
     receipt.training_data = crate::train_receipt::TrainingDataReceipt {
         source: "inline_sft_examples".to_string(),
         path: None,
@@ -4438,6 +4476,8 @@ fn build_grpo_train_receipt(
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,
     base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
+    execution_provenance: Option<&kiln_core::execution_provenance::ExecutionProvenanceV1>,
+    training_precision: Option<crate::checkpoint::TrainingCheckpointPrecision>,
     config: &GrpoConfig,
     effective_seed: Option<u64>,
     alpha_over_rank: Option<f32>,
@@ -4465,6 +4505,8 @@ fn build_grpo_train_receipt(
         serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
     );
     receipt.model.base_weight_shard_manifest = base_weight_shard_manifest.cloned();
+    receipt.runtime.execution_provenance = execution_provenance.cloned();
+    receipt.runtime.training_precision = training_precision;
     receipt.training_data = training_data;
     receipt.adapters.base = crate::train_receipt::adapter_file_receipt(base_adapter_dir);
     receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
@@ -4523,6 +4565,8 @@ fn write_grpo_train_receipt_best_effort(
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,
     base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
+    execution_provenance: Option<&kiln_core::execution_provenance::ExecutionProvenanceV1>,
+    training_precision: Option<crate::checkpoint::TrainingCheckpointPrecision>,
     config: &GrpoConfig,
     effective_seed: Option<u64>,
     alpha_over_rank: Option<f32>,
@@ -4571,6 +4615,8 @@ fn write_grpo_train_receipt_best_effort(
         model_config,
         tokenizer,
         base_weight_shard_manifest,
+        execution_provenance,
+        training_precision,
         config,
         effective_seed,
         alpha_over_rank,
@@ -5245,7 +5291,7 @@ pub fn sft_train_to_with_checkpoint_root(
         .transpose()
         .context("load SFT resume checkpoint")?;
     if config.checkpoint_interval.is_some() || resume_checkpoint.is_some() {
-        validate_exact_base_weight_provenance(weights)?;
+        validate_exact_training_provenance(weights)?;
     }
     let resume_init_seed = resume_checkpoint
         .as_ref()
@@ -5283,6 +5329,8 @@ pub fn sft_train_to_with_checkpoint_root(
                 model_config,
                 tokenizer,
                 weights.base_weight_shard_manifest.as_ref(),
+                weights.execution_provenance.as_ref(),
+                None,
                 config,
                 config.seed,
                 None,
@@ -5383,6 +5431,8 @@ pub fn sft_train_to_with_checkpoint_root(
                 model_config,
                 tokenizer,
                 weights.base_weight_shard_manifest.as_ref(),
+                weights.execution_provenance.as_ref(),
+                None,
                 config,
                 effective_seed,
                 Some(alpha_over_rank),
@@ -5603,6 +5653,7 @@ pub fn sft_train_to_with_checkpoint_root(
                 &valid_indices,
                 weights.source_content_sha256.as_deref(),
                 weights.base_weight_shard_manifest.as_ref(),
+                weights.execution_provenance.as_ref(),
                 BackendIdentity::runtime_name(backend.as_ref()),
                 &gradient_checkpoint_plan_sha256,
             )?,
@@ -6104,6 +6155,8 @@ pub fn sft_train_to_with_checkpoint_root(
         model_config,
         tokenizer,
         weights.base_weight_shard_manifest.as_ref(),
+        weights.execution_provenance.as_ref(),
+        training_precision_for_receipt_best_effort(&params, opt_state.as_ref()),
         config,
         effective_seed,
         Some(alpha_over_rank),
@@ -6301,7 +6354,7 @@ pub fn grpo_train_to_with_checkpoint_root(
         );
     }
     if config.checkpoint_interval.is_some() || resume_checkpoint.is_some() {
-        validate_exact_base_weight_provenance(weights)?;
+        validate_exact_training_provenance(weights)?;
     }
     let resume_init_seed = resume_checkpoint
         .as_ref()
@@ -6422,6 +6475,8 @@ pub fn grpo_train_to_with_checkpoint_root(
                 model_config,
                 tokenizer,
                 weights.base_weight_shard_manifest.as_ref(),
+                weights.execution_provenance.as_ref(),
+                None,
                 config,
                 config.seed,
                 None,
@@ -6510,6 +6565,8 @@ pub fn grpo_train_to_with_checkpoint_root(
                 model_config,
                 tokenizer,
                 weights.base_weight_shard_manifest.as_ref(),
+                weights.execution_provenance.as_ref(),
+                None,
                 config,
                 effective_seed,
                 Some(alpha_over_rank),
@@ -6883,6 +6940,7 @@ pub fn grpo_train_to_with_checkpoint_root(
                 training_precision_policy,
                 weights.source_content_sha256.as_deref(),
                 weights.base_weight_shard_manifest.as_ref(),
+                weights.execution_provenance.as_ref(),
                 BackendIdentity::runtime_name(backend.as_ref()),
                 &trainable_order_sha256,
                 &gradient_checkpoint_plan_sha256,
@@ -7309,6 +7367,8 @@ pub fn grpo_train_to_with_checkpoint_root(
         model_config,
         tokenizer,
         weights.base_weight_shard_manifest.as_ref(),
+        weights.execution_provenance.as_ref(),
+        training_precision_for_receipt_best_effort(&params, opt_state.as_ref()),
         config,
         effective_seed,
         Some(alpha_over_rank),
@@ -7552,6 +7612,8 @@ pub fn grpo_dry_run_jsonl(
         adapter_name,
         model_config,
         tokenizer,
+        None,
+        None,
         None,
         config,
         config.seed,
@@ -8124,7 +8186,7 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
         );
     }
     if config.checkpoint_interval.is_some() || resume_checkpoint.is_some() {
-        validate_exact_base_weight_provenance(weights)?;
+        validate_exact_training_provenance(weights)?;
     }
     let resume_init_seed = resume_checkpoint
         .as_ref()
@@ -8206,6 +8268,8 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
                 model_config,
                 tokenizer,
                 weights.base_weight_shard_manifest.as_ref(),
+                weights.execution_provenance.as_ref(),
+                None,
                 config,
                 Some(effective_seed_value),
                 None,
@@ -8255,6 +8319,8 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
                 model_config,
                 tokenizer,
                 weights.base_weight_shard_manifest.as_ref(),
+                weights.execution_provenance.as_ref(),
+                None,
                 config,
                 Some(effective_seed_value),
                 Some(alpha_over_rank),
@@ -8296,6 +8362,8 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
                 model_config,
                 tokenizer,
                 weights.base_weight_shard_manifest.as_ref(),
+                weights.execution_provenance.as_ref(),
+                None,
                 config,
                 Some(effective_seed_value),
                 Some(alpha_over_rank),
@@ -8495,6 +8563,7 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
                 training_precision_policy,
                 weights.source_content_sha256.as_deref(),
                 weights.base_weight_shard_manifest.as_ref(),
+                weights.execution_provenance.as_ref(),
                 BackendIdentity::runtime_name(backend.as_ref()),
                 &preflight.trainable_order_sha256,
                 &preflight.gradient_checkpoint_plan_sha256,
@@ -9064,6 +9133,8 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
         model_config,
         tokenizer,
         weights.base_weight_shard_manifest.as_ref(),
+        weights.execution_provenance.as_ref(),
+        training_precision_for_receipt_best_effort(&params, opt_state.as_ref()),
         config,
         effective_seed,
         Some(alpha_over_rank),
@@ -17006,6 +17077,8 @@ pub(crate) mod tests {
             &ModelConfig::qwen3_5_4b(),
             &tokenizer,
             None,
+            None,
+            None,
             &config,
             Some(7),
             Some(2.0),
@@ -19825,6 +19898,7 @@ pub(crate) mod tests {
                 "fixture": true,
                 "base_model_weights_sha256": base_weight_shard_manifest.aggregate_sha256,
                 "base_weight_shard_manifest": base_weight_shard_manifest,
+                "execution_provenance": crate::train_receipt::test_execution_provenance(),
             }),
             ema_refresh_every: Some(2),
         };

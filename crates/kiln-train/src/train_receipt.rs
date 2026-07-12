@@ -887,6 +887,14 @@ impl EchoActivityMetrics {
 pub struct RuntimeReceipt {
     pub wall_clock_ms: u64,
     pub peak_vram_mib: Option<u64>,
+    /// Complete process/backend envelope for the resident weights. Absent only
+    /// for legacy receipts and explicitly synthetic or dry-run paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_provenance: Option<kiln_core::execution_provenance::ExecutionProvenanceV1>,
+    /// Concrete dtypes actually captured from trainable parameters and
+    /// optimizer state after setup. Early preflight failures may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_precision: Option<crate::checkpoint::TrainingCheckpointPrecision>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1078,6 +1086,8 @@ impl TrainReceipt {
             runtime: RuntimeReceipt {
                 wall_clock_ms: 0,
                 peak_vram_mib: None,
+                execution_provenance: None,
+                training_precision: None,
             },
             config_hashes,
             lora_delta_norms: Vec::new(),
@@ -1109,6 +1119,16 @@ impl TrainReceipt {
             manifest
                 .validate()
                 .context("validate train-receipt base-weight shard manifest")?;
+        }
+        if let Some(provenance) = self.runtime.execution_provenance.as_ref() {
+            provenance
+                .validate()
+                .context("validate train-receipt execution provenance")?;
+        }
+        if let Some(precision) = self.runtime.training_precision.as_ref() {
+            precision
+                .validate()
+                .context("validate train-receipt precision")?;
         }
         std::fs::create_dir_all(adapter_dir).with_context(|| {
             format!(
@@ -1144,8 +1164,73 @@ impl TrainReceipt {
                 )
             })?;
         }
+        if let Some(provenance) = receipt.runtime.execution_provenance.as_ref() {
+            provenance.validate().with_context(|| {
+                format!(
+                    "validate execution provenance in train receipt {}",
+                    path.display()
+                )
+            })?;
+        }
+        if let Some(precision) = receipt.runtime.training_precision.as_ref() {
+            precision.validate().with_context(|| {
+                format!(
+                    "validate training precision in train receipt {}",
+                    path.display()
+                )
+            })?;
+        }
         Ok(Some(receipt))
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_execution_provenance() -> kiln_core::execution_provenance::ExecutionProvenanceV1
+{
+    use std::collections::BTreeMap;
+
+    use kiln_core::execution_provenance::{
+        ExecutionBackendIdentity, ExecutionBuildIdentity, ExecutionConfigurationIdentity,
+        ExecutionKernelIdentity, ExecutionModelIdentity, ExecutionPrecisionIdentity,
+        ExecutionProvenanceV1,
+    };
+
+    let hash = |byte: char| format!("sha256:{}", byte.to_string().repeat(64));
+    ExecutionProvenanceV1::new(
+        ExecutionBackendIdentity {
+            name: "test".into(),
+            device: "cpu".into(),
+            numerical_runtime_sha256: hash('1'),
+        },
+        ExecutionBuildIdentity {
+            package_version: env!("CARGO_PKG_VERSION").into(),
+            target: "linux-x86_64".into(),
+            executable_sha256: hash('2'),
+            git_commit: Some("test-commit".into()),
+            source_tree_sha256: Some(hash('3')),
+            source_dirty: Some(false),
+        },
+        ExecutionModelIdentity {
+            model_config_sha256: hash('4'),
+            tokenizer_vocab_sha256: hash('5'),
+            tokenizer_config_sha256: hash('6'),
+            chat_template_sha256: Some(hash('7')),
+        },
+        ExecutionPrecisionIdentity {
+            inference_dtype: "f32".into(),
+            training_policy: "cpu_f32_reference".into(),
+        },
+        ExecutionKernelIdentity::new(
+            BTreeMap::from([("kiln-train".into(), env!("CARGO_PKG_VERSION").into())]),
+            Vec::new(),
+        )
+        .unwrap(),
+        ExecutionConfigurationIdentity {
+            effective_server_config_sha256: hash('8'),
+            effective_environment_sha256: hash('9'),
+        },
+    )
+    .unwrap()
 }
 
 pub fn adapter_canary_status_from_train_receipt(
@@ -2589,6 +2674,15 @@ mod tests {
         );
         let base_weights = base_weight_manifest();
         receipt.model.base_weight_shard_manifest = Some(base_weights.clone());
+        let execution_provenance = test_execution_provenance();
+        receipt.runtime.execution_provenance = Some(execution_provenance.clone());
+        receipt.runtime.training_precision = Some(crate::checkpoint::TrainingCheckpointPrecision {
+            parameter_dtype: "f32".into(),
+            optimizer_state_dtype: "f32".into(),
+            activation_dtype: "f32".into(),
+            gradient_dtype: "f32".into(),
+            stochastic_rounding: serde_json::json!({"mode": "round_to_nearest"}),
+        });
         let path = receipt.write_to_adapter_dir(dir.path())?;
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
@@ -2602,6 +2696,22 @@ mod tests {
         assert_eq!(
             loaded.model.base_weight_shard_manifest.as_ref(),
             Some(&base_weights)
+        );
+        assert_eq!(
+            loaded
+                .runtime
+                .execution_provenance
+                .as_ref()
+                .map(|value| value.provenance_sha256.as_str()),
+            Some(execution_provenance.provenance_sha256.as_str())
+        );
+        assert_eq!(
+            loaded
+                .runtime
+                .training_precision
+                .as_ref()
+                .map(|value| value.parameter_dtype.as_str()),
+            Some("f32")
         );
         assert!(loaded.config_hashes.model_config_hash.is_some());
         assert_eq!(
@@ -2621,6 +2731,30 @@ mod tests {
         );
         assert!(loaded.lora_grad_norms.is_empty());
         assert!(loaded.adapter_smoke_test.is_none());
+
+        let mut tampered_precision = serde_json::to_value(&loaded)?;
+        tampered_precision["runtime"]["training_precision"]["parameter_dtype"] =
+            serde_json::json!("");
+        std::fs::write(
+            dir.path().join(TRAIN_RECEIPT_FILENAME),
+            serde_json::to_vec_pretty(&tampered_precision)?,
+        )?;
+        let error = TrainReceipt::read_from_adapter_dir(dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("validate training precision"));
+
+        let mut tampered_execution = serde_json::to_value(&loaded)?;
+        tampered_execution["runtime"]["execution_provenance"]["backend"]["device"] =
+            serde_json::json!("tampered");
+        std::fs::write(
+            dir.path().join(TRAIN_RECEIPT_FILENAME),
+            serde_json::to_vec_pretty(&tampered_execution)?,
+        )?;
+        let error = TrainReceipt::read_from_adapter_dir(dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("validate execution provenance"));
         Ok(())
     }
 

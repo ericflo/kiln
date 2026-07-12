@@ -105,6 +105,34 @@ reject internal tampering. See
 [Base-Weight Provenance](BASE_WEIGHT_PROVENANCE.md) for the strict JSON schema
 and aggregate algorithm.
 
+## Execution binding
+
+Every new exact SFT, GRPO, and OPD checkpoint also embeds the complete
+`kiln.execution-provenance.v1` record in
+`auxiliary_state.execution_provenance`. Capture validates the self-verifying
+record before publishing any checkpoint. It binds the exact running executable,
+optional source revision, backend/device and bounded driver/runtime evidence,
+model/tokenizer/template identity, inference and training precision policy,
+compiled kernel contract, and effective server configuration/environment.
+
+Resume validates both records before GPU ownership and requires their canonical
+`provenance_sha256` values to match. The checkpoint's existing concrete
+`precision_policy` separately records the parameter, optimizer-state,
+activation, gradient, and stochastic-rounding policy used by the trainer.
+Changing either the execution envelope or those concrete dtypes is not an exact
+continuation.
+
+Legacy exact checkpoints that contain only `backend_runtime`, package version,
+or other partial runtime strings fail closed because they cannot prove the
+complete envelope. They remain usable only as non-resumable serving or
+weights-only artifacts. Successful `train_receipt.json` files retain the full
+record under `runtime.execution_provenance` and the concrete dtypes under
+`runtime.training_precision`; `adapter_manifest.json` copies both. Readers
+validate these fields when present while continuing to read legacy non-resume
+artifacts that predate them. See
+[Execution Provenance](EXECUTION_PROVENANCE.md) for the canonical schema and
+evidence sources.
+
 ## Integration status
 
 Native SFT, inline and streamed-JSONL GRPO, and OPD support exact resume. A

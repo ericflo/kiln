@@ -47,11 +47,24 @@ Required top-level fields:
 - `phase_timings`: aggregate phase timings in milliseconds for tokenization,
   mask construction, reference forward, policy forward, backward, and optimizer
   work. Non-applicable phases are `0.0`.
-- `runtime`: wall-clock milliseconds and nullable peak VRAM.
+- `runtime`: wall-clock milliseconds, nullable peak VRAM, optional complete
+  `execution_provenance`, and optional concrete `training_precision`.
 - `lora_delta_norms`: per-module LoRA A/B norm and delta upper-bound summary.
 - `config`: full serialized effective trainer config.
 
 Hashes are lowercase hex SHA-256 strings prefixed with `sha256:`.
+
+New successful model-backed runs record a validated
+`kiln.execution-provenance.v1` object at `runtime.execution_provenance`. It
+binds the backend/device, bounded driver/runtime evidence, exact executable and
+optional source revision, model/tokenizer/template identity, resolved precision
+policy, compiled kernels, and effective server configuration/environment.
+`runtime.training_precision` separately records the actual parameter,
+optimizer-state, activation, and gradient dtypes plus stochastic-rounding
+policy. Early failures before optimizer setup, dry runs, synthetic callers, and
+legacy receipts may omit one or both fields. Receipt reads reject an internally
+tampered execution record or malformed concrete precision contract. See
+[Execution Provenance](EXECUTION_PROVENANCE.md).
 
 For OPD, `teacher_content_revision` identifies the exact numeric logit source.
 A live model-backed source uses the complete canonical teacher identity;

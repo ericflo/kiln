@@ -36,6 +36,10 @@ pub struct AdapterManifest {
     pub model_config_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_weight_shard_manifest: Option<kiln_core::model_provenance::BaseWeightShardManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_provenance: Option<kiln_core::execution_provenance::ExecutionProvenanceV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_precision: Option<crate::checkpoint::TrainingCheckpointPrecision>,
     pub kiln_commit: Option<String>,
     pub training_data_hash: Option<String>,
     pub training_data_source: Option<String>,
@@ -248,6 +252,16 @@ pub fn build_adapter_manifest_from_train_receipt(
     adapter_dir: &Path,
     receipt: &crate::train_receipt::TrainReceipt,
 ) -> Result<AdapterManifest> {
+    if let Some(provenance) = receipt.runtime.execution_provenance.as_ref() {
+        provenance
+            .validate()
+            .context("validate train-receipt execution provenance for adapter manifest")?;
+    }
+    if let Some(precision) = receipt.runtime.training_precision.as_ref() {
+        precision
+            .validate()
+            .context("validate train-receipt precision for adapter manifest")?;
+    }
     let resolved = validate_adapter_output_dir(adapter_dir)?;
     let adapter_model = resolved.join("adapter_model.safetensors");
     let adapter_config = resolved.join("adapter_config.json");
@@ -272,6 +286,8 @@ pub fn build_adapter_manifest_from_train_receipt(
             .clone()
             .or_else(|| receipt.config_hashes.model_config_hash.clone()),
         base_weight_shard_manifest: receipt.model.base_weight_shard_manifest.clone(),
+        execution_provenance: receipt.runtime.execution_provenance.clone(),
+        training_precision: receipt.runtime.training_precision.clone(),
         kiln_commit: receipt.kiln.git_commit.clone(),
         training_data_hash: receipt.training_data.sha256.clone(),
         training_data_source: Some(receipt.training_data.source.clone()),
@@ -294,6 +310,16 @@ pub fn read_adapter_manifest(path: &Path) -> Result<AdapterManifest> {
         base_weights
             .validate()
             .with_context(|| format!("validate base-weight provenance in {}", path.display()))?;
+    }
+    if let Some(provenance) = manifest.execution_provenance.as_ref() {
+        provenance
+            .validate()
+            .with_context(|| format!("validate execution provenance in {}", path.display()))?;
+    }
+    if let Some(precision) = manifest.training_precision.as_ref() {
+        precision
+            .validate()
+            .with_context(|| format!("validate training precision in {}", path.display()))?;
     }
     Ok(manifest)
 }
@@ -700,6 +726,15 @@ mod tests {
             ])
             .unwrap(),
         );
+        receipt.runtime.execution_provenance =
+            Some(crate::train_receipt::test_execution_provenance());
+        receipt.runtime.training_precision = Some(crate::checkpoint::TrainingCheckpointPrecision {
+            parameter_dtype: "f32".into(),
+            optimizer_state_dtype: "f32".into(),
+            activation_dtype: "f32".into(),
+            gradient_dtype: "f32".into(),
+            stochastic_rounding: serde_json::json!({"mode": "round_to_nearest"}),
+        });
         receipt.training_data = crate::train_receipt::TrainingDataReceipt {
             source: "jsonl_grpo_groups".to_string(),
             path: Some("/data/groups.jsonl".to_string()),
@@ -776,6 +811,14 @@ mod tests {
             receipt.model.base_weight_shard_manifest
         );
         assert_eq!(
+            manifest.execution_provenance,
+            receipt.runtime.execution_provenance
+        );
+        assert_eq!(
+            manifest.training_precision,
+            receipt.runtime.training_precision
+        );
+        assert_eq!(
             manifest.training_data_hash.as_deref(),
             Some("sha256:training-data")
         );
@@ -816,6 +859,48 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("validate base-weight provenance"));
+    }
+
+    #[test]
+    fn adapter_manifest_read_rejects_tampered_execution_provenance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let adapter = tmp.path().join("actual");
+        write_minimal_adapter(&adapter);
+        let receipt = manifest_test_receipt("actual");
+        write_train_receipt(&adapter, &receipt);
+        let manifest_path = write_adapter_manifest_from_train_receipt(&adapter, &receipt)
+            .unwrap()
+            .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        value["execution_provenance"]["backend"]["device"] = serde_json::json!("tampered");
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = read_adapter_manifest(&manifest_path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("validate execution provenance"));
+    }
+
+    #[test]
+    fn adapter_manifest_read_rejects_malformed_training_precision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let adapter = tmp.path().join("actual");
+        write_minimal_adapter(&adapter);
+        let receipt = manifest_test_receipt("actual");
+        write_train_receipt(&adapter, &receipt);
+        let manifest_path = write_adapter_manifest_from_train_receipt(&adapter, &receipt)
+            .unwrap()
+            .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        value["training_precision"]["stochastic_rounding"] = serde_json::Value::Null;
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = read_adapter_manifest(&manifest_path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("validate training precision"));
     }
 
     #[test]

@@ -39,7 +39,7 @@ The current type is `kiln.execution-provenance.v1` with schema version `1`:
   },
   "precision": {
     "inference_dtype": "bf16",
-    "training_policy": "rocm_native_bf16"
+    "training_policy": "rocm_native_float"
   },
   "kernels": {
     "contract_type": "kiln.kernel-contract.v1",
@@ -107,6 +107,22 @@ binary.
   `500` rather than publishing an internally inconsistent record.
 - Startup logs only the bounded overall, executable, runtime, and kernel
   digests together with backend and device names.
+
+## Training artifact surfaces
+
+- Exact SFT, GRPO, and OPD checkpoints store the full record at
+  `auxiliary_state.execution_provenance`. Capture requires it, and exact resume
+  requires the validated overall digest to match before GPU ownership.
+- Successful model-backed `train_receipt.json` files store it at
+  `runtime.execution_provenance`. `runtime.training_precision` separately
+  records the concrete parameter, optimizer-state, activation, gradient, and
+  stochastic-rounding contract observed after trainer setup.
+- `adapter_manifest.json` copies both receipt fields so an adapter remains
+  auditable without first interpreting the receipt. Manifest and receipt
+  readers reject a tampered execution record or malformed precision contract.
+- Legacy receipts and adapter manifests remain readable without these optional
+  fields. Legacy exact checkpoints without the complete execution record are
+  not exact-resumable.
 
 The record proves integrity and equivalence of the declared execution
 envelope. It does not by itself prove that two executions produced the same

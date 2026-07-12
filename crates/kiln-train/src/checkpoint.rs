@@ -25,6 +25,7 @@ pub const TRAINING_CHECKPOINT_MANIFEST_FILENAME: &str = "checkpoint_manifest.jso
 pub const TRAINING_CHECKPOINT_INCOMPLETE_SENTINEL: &str = ".incomplete";
 pub const TRAINING_CHECKPOINT_DIRECTORY_SUFFIX: &str = ".kiln-checkpoint";
 pub(crate) const BASE_WEIGHT_SHARD_MANIFEST_AUXILIARY_KEY: &str = "base_weight_shard_manifest";
+pub(crate) const EXECUTION_PROVENANCE_AUXILIARY_KEY: &str = "execution_provenance";
 
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ARTIFACTS: usize = 64;
@@ -75,6 +76,43 @@ pub(crate) fn validate_checkpoint_base_weight_resume_binding(
             .content_equivalent(&current)
             .context("compare checkpoint and current base-weight shard manifests")?,
         "resume checkpoint base-weight shard content differs from this run"
+    );
+    Ok(())
+}
+
+/// Parse and verify the complete process/backend envelope embedded in an exact
+/// checkpoint. Aggregate-only legacy runtime strings are not enough to prove
+/// the executable, driver, kernel, precision, and effective configuration.
+pub(crate) fn validated_checkpoint_execution_provenance(
+    auxiliary_state: &Value,
+) -> Result<kiln_core::execution_provenance::ExecutionProvenanceV1> {
+    let value = auxiliary_state
+        .get(EXECUTION_PROVENANCE_AUXILIARY_KEY)
+        .with_context(|| {
+            format!(
+                "checkpoint has no {EXECUTION_PROVENANCE_AUXILIARY_KEY}; exact resume requires complete execution provenance"
+            )
+        })?;
+    let provenance: kiln_core::execution_provenance::ExecutionProvenanceV1 =
+        serde_json::from_value(value.clone()).context("parse checkpoint execution provenance")?;
+    provenance
+        .validate()
+        .context("validate checkpoint execution provenance")?;
+    Ok(provenance)
+}
+
+pub(crate) fn validate_checkpoint_execution_resume_binding(
+    checkpoint_auxiliary_state: &Value,
+    current_auxiliary_state: &Value,
+) -> Result<()> {
+    let checkpoint = validated_checkpoint_execution_provenance(checkpoint_auxiliary_state)?;
+    let current = validated_checkpoint_execution_provenance(current_auxiliary_state)
+        .context("current run has no valid execution provenance")?;
+    ensure!(
+        checkpoint.provenance_sha256 == current.provenance_sha256,
+        "resume checkpoint execution provenance {} differs from this run {}",
+        checkpoint.provenance_sha256,
+        current.provenance_sha256
     );
     Ok(())
 }
@@ -177,7 +215,7 @@ pub struct TrainingCheckpointScheduler {
     pub state: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TrainingCheckpointPrecision {
     pub parameter_dtype: String,
@@ -185,6 +223,24 @@ pub struct TrainingCheckpointPrecision {
     pub activation_dtype: String,
     pub gradient_dtype: String,
     pub stochastic_rounding: Value,
+}
+
+impl TrainingCheckpointPrecision {
+    pub fn validate(&self) -> Result<()> {
+        for (field, value) in [
+            ("parameter_dtype", &self.parameter_dtype),
+            ("optimizer_state_dtype", &self.optimizer_state_dtype),
+            ("activation_dtype", &self.activation_dtype),
+            ("gradient_dtype", &self.gradient_dtype),
+        ] {
+            validate_nonempty(field, value)?;
+        }
+        ensure!(
+            self.stochastic_rounding.is_object(),
+            "training checkpoint stochastic_rounding must be a JSON object"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -361,21 +417,7 @@ impl TrainingCheckpointManifest {
                 validate_relative_artifact_path(path)?;
             }
         }
-        for (field, value) in [
-            ("parameter_dtype", &self.precision_policy.parameter_dtype),
-            (
-                "optimizer_state_dtype",
-                &self.precision_policy.optimizer_state_dtype,
-            ),
-            ("activation_dtype", &self.precision_policy.activation_dtype),
-            ("gradient_dtype", &self.precision_policy.gradient_dtype),
-        ] {
-            validate_nonempty(field, value)?;
-        }
-        ensure!(
-            self.precision_policy.stochastic_rounding.is_object(),
-            "training checkpoint stochastic_rounding must be a JSON object"
-        );
+        self.precision_policy.validate()?;
         ensure!(
             !self.files.is_empty(),
             "training checkpoint contains no files"
@@ -1179,6 +1221,59 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("shard content differs"));
+    }
+
+    #[test]
+    fn exact_resume_requires_matching_self_verified_execution_provenance() {
+        let provenance = crate::train_receipt::test_execution_provenance();
+        let state = serde_json::json!({
+            EXECUTION_PROVENANCE_AUXILIARY_KEY: provenance,
+        });
+        assert_eq!(
+            validated_checkpoint_execution_provenance(&state)
+                .unwrap()
+                .provenance_sha256,
+            provenance.provenance_sha256
+        );
+        validate_checkpoint_execution_resume_binding(&state, &state).unwrap();
+
+        let missing = serde_json::json!({"backend_runtime": "cpu"});
+        let error = validated_checkpoint_execution_provenance(&missing)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exact resume requires complete execution provenance"));
+
+        let mut tampered = state.clone();
+        tampered[EXECUTION_PROVENANCE_AUXILIARY_KEY]["backend"]["device"] =
+            Value::String("different".into());
+        let error = validated_checkpoint_execution_provenance(&tampered)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("validate checkpoint execution provenance"));
+
+        let other = crate::train_receipt::test_execution_provenance();
+        let mut other_value = serde_json::to_value(other).unwrap();
+        other_value["configuration"]["effective_server_config_sha256"] =
+            Value::String(format!("sha256:{}", "a".repeat(64)));
+        let mut other: kiln_core::execution_provenance::ExecutionProvenanceV1 =
+            serde_json::from_value(other_value).unwrap();
+        other = kiln_core::execution_provenance::ExecutionProvenanceV1::new(
+            other.backend,
+            other.build,
+            other.model,
+            other.precision,
+            other.kernels,
+            other.configuration,
+        )
+        .unwrap();
+        let other_state = serde_json::json!({
+            EXECUTION_PROVENANCE_AUXILIARY_KEY: other,
+        });
+        let error = validate_checkpoint_execution_resume_binding(&state, &other_state)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("execution provenance"));
+        assert!(error.contains("differs from this run"));
     }
 
     fn write_artifacts(root: &Path) -> Result<()> {

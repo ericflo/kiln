@@ -28,6 +28,11 @@ Optional provenance fields:
 - `model_config_hash`: model config hash from `train_receipt.json`.
 - `base_weight_shard_manifest`: strict `kiln.base-weight-shards.v1` identity
   copied from `train_receipt.json`, including every shard SHA-256 and byte size.
+- `execution_provenance`: strict `kiln.execution-provenance.v1` process,
+  backend, runtime, build, tokenizer/template, kernel, and configuration
+  identity copied from `train_receipt.json`.
+- `training_precision`: concrete parameter, optimizer-state, activation, and
+  gradient dtypes plus stochastic-rounding policy copied from the receipt.
 - `kiln_commit`: kiln git commit recorded by training.
 - `training_data_hash`: training data hash from `train_receipt.json`.
 - `training_data_source`: training data source label.
@@ -59,6 +64,47 @@ Example:
       }
     ]
   },
+  "execution_provenance": {
+    "schema_version": 1,
+    "provenance_type": "kiln.execution-provenance.v1",
+    "backend": {
+      "name": "rocm",
+      "device": "rocm:0",
+      "numerical_runtime_sha256": "sha256:..."
+    },
+    "build": {
+      "package_version": "0.4.1",
+      "target": "linux-x86_64",
+      "executable_sha256": "sha256:..."
+    },
+    "model": {
+      "model_config_sha256": "sha256:...",
+      "tokenizer_vocab_sha256": "sha256:...",
+      "tokenizer_config_sha256": "sha256:..."
+    },
+    "precision": {
+      "inference_dtype": "bf16",
+      "training_policy": "rocm_native_float"
+    },
+    "kernels": {
+      "contract_type": "kiln.kernel-contract.v1",
+      "versions": {"kiln-model": "0.4.1"},
+      "compiled_features": ["rocm"],
+      "contract_sha256": "sha256:..."
+    },
+    "configuration": {
+      "effective_server_config_sha256": "sha256:...",
+      "effective_environment_sha256": "sha256:..."
+    },
+    "provenance_sha256": "sha256:..."
+  },
+  "training_precision": {
+    "parameter_dtype": "bf16",
+    "optimizer_state_dtype": "f32",
+    "activation_dtype": "f32",
+    "gradient_dtype": "f32",
+    "stochastic_rounding": {"mode": "round_to_nearest"}
+  },
   "kiln_commit": "abc123",
   "training_data_hash": "sha256:...",
   "training_data_source": "jsonl_grpo_groups",
@@ -87,7 +133,9 @@ paths are not replaced unless `--overwrite` is passed.
 The restore command copies `adapter_config.json`, `adapter_model.safetensors`,
 `train_receipt.json` when listed, and `adapter_manifest.json`, then verifies the
 copied config, safetensors, and receipt hashes before reporting success.
-Manifest reads also validate the complete base-weight shard identity when
-present. Legacy adapter manifests may omit it. See
+Manifest reads validate the complete base-weight shard identity, execution
+record, and concrete precision contract when present. Legacy adapter manifests
+may omit them. See
 [Base-Weight Provenance](BASE_WEIGHT_PROVENANCE.md) for content-equivalence and
-exact-resume semantics.
+exact-resume semantics, and [Execution Provenance](EXECUTION_PROVENANCE.md) for
+the process/runtime envelope.
