@@ -43,9 +43,10 @@ pub use production_trace::{
     synthesize_production_trace_suite_from_lines,
 };
 pub use result::{
-    AggregateMetrics, EvalJobState, EvalOutcomeKind, EvalProgress, EvalResult, EvalThinkingBudget,
-    EvalThinkingBudgetOutcome, ExampleOutcome, FlipDiff, LatencyStats, PassRateConfidenceInterval,
-    ReasoningLengthStats, ScorerBreakdown, SuiteResult, TagBreakdown, ToolBreakdown,
+    AggregateMetrics, EVAL_SEED_DERIVATION_V1, EvalJobState, EvalOutcomeKind, EvalProgress,
+    EvalResult, EvalThinkingBudget, EvalThinkingBudgetOutcome, ExampleOutcome, FlipDiff,
+    LatencyStats, PassRateConfidenceInterval, ReasoningLengthStats, ScorerBreakdown, SuiteResult,
+    TagBreakdown, ToolBreakdown, derive_eval_completion_seed,
 };
 pub use scorers::{
     ArgsScoring, CodeStyle, NameMatch, NumericTolerance, Scorer, ScorerError, score_completion,

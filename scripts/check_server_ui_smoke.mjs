@@ -610,6 +610,7 @@ async function startServer({
   const smokeEvalOutcome = (exampleId, kind, text, detail) => ({
     example_id: exampleId,
     completion_index: 0,
+    generation_seed: exampleId === 'ex-1' ? '18446744073709551614' : exampleId === 'ex-2' ? '18446744073709551613' : '18446744073709551612',
     completion_text: text,
     kind,
     score: kind === 'pass' ? 1 : 0,
@@ -653,6 +654,7 @@ async function startServer({
       suite_name: 'smoke-suite',
       adapters: [null, 'smoke-tuned'],
       submission_kind: 'compare',
+      effective_seed: '18446744073709551615',
       state: 'completed',
       progress: { examples_completed: 3, examples_total: 3, running_accuracy: 2 / 3, running_mean_score: 2 / 3 },
       finished_runs: [
@@ -679,6 +681,7 @@ async function startServer({
       suite_name: 'smoke-suite',
       adapters: [null],
       submission_kind: 'on_demand',
+      effective_seed: '73',
       state: 'queued',
       progress: { examples_completed: 0, examples_total: 0, running_accuracy: 0, running_mean_score: 0 },
       finished_runs: [],
@@ -1093,6 +1096,7 @@ async function startServer({
       runningTrainingJob = {
         job_id: 'smoke-sft',
         job_type: 'sft',
+        effective_seed: '18446744073709551615',
         state: 'Running',
         progress: 0.42,
         current_loss: 1.234,
@@ -1107,7 +1111,7 @@ async function startServer({
         linked_eval_job_ids: [],
         auto_load: false,
       };
-      setTimeout(() => json(res, { message: 'SFT job submitted', job_id: 'smoke-sft' }), 75);
+      setTimeout(() => json(res, { message: 'SFT job submitted', job_id: 'smoke-sft', effective_seed: '18446744073709551615' }), 75);
       return;
     }
     if (url.pathname === '/v1/train/grpo') {
@@ -1125,6 +1129,7 @@ async function startServer({
       completedTrainingJobs.unshift({
         job_id: 'smoke-grpo',
         job_type: 'grpo',
+        effective_seed: '18446744073709551614',
         state: 'Completed',
         progress: 1,
         adapter_name: body.config.output_name,
@@ -1149,7 +1154,7 @@ async function startServer({
           created_at: '2026-07-10T12:00:00Z',
         },
       });
-      setTimeout(() => json(res, { message: 'GRPO job submitted', job_id: 'smoke-grpo' }), 75);
+      setTimeout(() => json(res, { message: 'GRPO job submitted', job_id: 'smoke-grpo', effective_seed: '18446744073709551614' }), 75);
       return;
     }
     if (url.pathname === '/v1/train/opd') {
@@ -1167,6 +1172,7 @@ async function startServer({
       completedTrainingJobs.unshift({
         job_id: 'smoke-opd',
         job_type: 'opd',
+        effective_seed: '18446744073709551613',
         state: 'Completed',
         progress: 1,
         adapter_name: body.config.output_name,
@@ -1190,7 +1196,7 @@ async function startServer({
           teacher_content_revision: smokeTeacherContentRevision,
         },
       });
-      setTimeout(() => json(res, { message: 'OPD job submitted', job_id: 'smoke-opd' }), 75);
+      setTimeout(() => json(res, { message: 'OPD job submitted', job_id: 'smoke-opd', effective_seed: '18446744073709551613' }), 75);
       return;
     }
     if (url.pathname === '/v1/models') {
@@ -1246,6 +1252,8 @@ async function startServer({
       json(res, {
         job_id: job.job_id,
         state: job.state,
+        effective_seed: job.effective_seed,
+        seed_derivation: 'kiln.eval-seed.v1',
         runs: job.finished_runs,
         ...(job.state === 'queued' || job.state === 'running' ? { progress: job.progress } : {}),
       });
@@ -3072,10 +3080,11 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#sft-adv-summary', /checkpoint every 2 · fresh run/, 'SFT advanced summary should expose checkpoint cadence');
     await clickAndWait(page, '#sft-form button[type="submit"]', 'Could not submit sample SFT payload');
     await expectDisabled(page, '#sft-form button[type="submit"]', true, 'SFT submit should disable while the job is submitting');
-    await expectTrainingToast(page, 'SFT job submitted');
+    await expectTrainingToast(page, 'SFT job submitted · seed 18446744073709551615');
     await expectActiveTrainingTab(page, 'queue', 'Submitting SFT should switch back to the training queue tab');
     await waitForPanelText(page, '#tab-queue', /smoke-sf/, 'Training queue should refresh after SFT submit');
     await waitForPanelText(page, '#tab-queue', /Adapter:\s*sft-adapter/, 'Training queue should show the submitted SFT adapter name');
+    await waitForPanelText(page, '#tab-queue', /seed 18446744073709551615/, 'Training queue should preserve and show the exact effective seed');
     await waitForPanelText(page, '#tab-queue', /running/, 'Training queue should show the SFT job as running');
     // The queue panel is no longer aria-live; the card's visually-hidden
     // status node must carry the start transition instead.
@@ -3099,6 +3108,17 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       },
       { timeout: 5000 },
     ).catch(() => fail('Train drill Stop should be enabled for a running job with title "Stop at the next training step"'));
+    await waitForPanelText(page, '#train-drill-content', /18446744073709551615/, 'Training drill should show the exact effective seed');
+    await page.evaluate(() => { window.__copiedText = ''; });
+    await clickAndWait(page, '#train-drill-content [data-copy-training-seed]', 'Could not copy the effective training seed');
+    await page.waitForFunction(
+      () => window.__copiedText === '18446744073709551615',
+      { timeout: 5000 },
+    ).catch(async () => {
+      const copiedText = await page.evaluate(() => window.__copiedText).catch(() => undefined);
+      fail(`Copy effective seed should preserve all u64 digits, got ${JSON.stringify(copiedText)}`);
+    });
+    await expectTrainingToast(page, 'Effective seed copied');
     // Copy loss CSV: the running SFT job carries three TrainingLossSample
     // rows (epoch/progress/loss/elapsed_secs — no step, no timestamps), so
     // the header button must be live and put exactly that CSV on the
@@ -3166,7 +3186,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#grpo-adv-summary', /checkpoint every 3 · fresh run/, 'GRPO advanced summary should expose checkpoint cadence');
     await clickAndWait(page, '#grpo-form button[type="submit"]', 'Could not submit sample GRPO payload');
     await expectDisabled(page, '#grpo-form button[type="submit"]', true, 'GRPO submit should disable while the job is submitting');
-    await expectTrainingToast(page, 'GRPO job submitted');
+    await expectTrainingToast(page, 'GRPO job submitted · seed 18446744073709551614');
     await expectActiveTrainingTab(page, 'queue', 'Submitting GRPO should switch back to the training queue tab');
     await waitForPanelText(page, '#tab-queue', /smoke-gr/, 'Training queue should refresh after GRPO submit');
     await waitForPanelText(page, '#tab-queue', /Adapter:\s*grpo-adapter/, 'Training queue should show the submitted GRPO adapter name');
@@ -3256,7 +3276,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     );
     await clickAndWait(page, '#opd-form button[type="submit"]', 'Could not submit the OPD sample payload');
     await opdSubmitRequest.catch(() => fail('OPD form did not POST /v1/train/opd'));
-    await expectTrainingToast(page, 'OPD job submitted');
+    await expectTrainingToast(page, 'OPD job submitted · seed 18446744073709551613');
     await expectActivePageAndHash(page, 'training', 'Submitting OPD should open the training queue', '#training/queue');
     await waitForPanelText(page, '#tab-queue', /smoke-op/, 'Training queue should refresh after OPD submit');
     await waitForPanelText(page, '#tab-queue', /Adapter:\s*opd-adapter/, 'Training queue should show the submitted OPD adapter name');
@@ -3811,12 +3831,28 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     // JSON line per outcome across every run of the job.
     await clickAndWait(page, '#evals-tab-jobs', 'Could not open the Jobs sub-tab');
     await waitForVisiblePanel(page, '#tab-evals-jobs', 'Jobs sub-tab did not activate');
+    await waitForPanelText(page, '#eval-jobs-list', /seed 18446744073709551615/, 'Eval job cards should show the exact decimal effective seed without JavaScript rounding');
     await clickAndWait(page, '[data-job-id="smoke-eval-full"]', 'Could not open the eval drill modal for the completed compare job');
     await page.waitForFunction(
       () => document.getElementById('eval-drill-modal')?.hidden === false
         && document.getElementById('drill-title')?.textContent === 'smoke-suite',
       { timeout: 5000 },
     ).catch(() => fail('Eval drill modal did not open on the completed compare job'));
+    await waitForPanelText(page, '#drill-meta', /seed 18446744073709551615/, 'Eval drill metadata should expose the exact effective seed');
+    // The drill defaults to the first failure (ex-2), not the first outcome.
+    await waitForPanelText(page, '#drill-detail', /seed 18446744073709551613/, 'Eval outcome detail should expose the exact derived decoder seed');
+    await page.waitForSelector('#drill-detail [data-outcome-copy="seed"]', { timeout: 5000 })
+      .catch(() => fail('Eval outcome detail should provide a copy-seed action'));
+    await page.evaluate(() => { window.__copiedText = ''; });
+    await clickAndWait(page, '#drill-detail [data-outcome-copy="seed"]', 'Could not copy the eval completion seed');
+    await page.waitForFunction(
+      () => window.__copiedText === '18446744073709551613',
+      { timeout: 5000 },
+    ).catch(async () => {
+      const copiedText = await page.evaluate(() => window.__copiedText).catch(() => undefined);
+      fail(`Eval copy-seed should preserve all u64 digits, got ${JSON.stringify(copiedText)}`);
+    });
+    await expectTrainingToast(page, 'Copied seed');
 
     // Raw JSON toggle: first click appends the pretty-printed cached job
     // payload, second click removes it.
@@ -3827,6 +3863,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     let parsedRaw = null;
     try { parsedRaw = JSON.parse(rawPayload); } catch { fail('Eval drill raw JSON block should contain valid JSON'); }
     if (parsedRaw.job_id !== 'smoke-eval-full') fail(`Raw JSON should show the drilled job, got job_id ${JSON.stringify(parsedRaw.job_id)}`);
+    if (parsedRaw.effective_seed !== '18446744073709551615') fail(`Raw JSON should preserve the exact decimal effective seed, got ${JSON.stringify(parsedRaw.effective_seed)}`);
     if (!Array.isArray(parsedRaw.runs) || parsedRaw.runs.length !== 2) fail('Raw JSON should carry both runs of the compare job');
     if (!rawPayload.includes('\n  "runs"')) fail('Raw JSON should be pretty-printed with 2-space indentation');
     if (!rawPayload.includes('"detail": "expected 42, got 41"')) fail('Raw JSON should surface per-outcome fields like detail');
@@ -3882,6 +3919,10 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     if (firstLine.example_id !== 'ex-1' || firstLine.example_index !== 0 || firstLine.kind !== 'pass' || firstLine.score !== 1 || firstLine.completion_text !== '4') {
       fail(`First JSONL line should carry the outcome verdict fields, got ${JSON.stringify(firstLine)}`);
     }
+    if (firstLine.effective_seed !== '18446744073709551615' || firstLine.seed_derivation !== 'kiln.eval-seed.v1') {
+      fail(`Outcomes JSONL should preserve job-level seed provenance, got ${JSON.stringify(firstLine)}`);
+    }
+    if (firstLine.generation_seed !== '18446744073709551614') fail(`Outcomes JSONL should preserve the exact per-completion seed, got ${JSON.stringify(firstLine.generation_seed)}`);
     if (!parsedLines.some((line) => line.adapter === 'smoke-tuned')) fail('Outcomes JSONL should include the second run, tagged with its adapter');
     const failLine = parsedLines.find((line) => line.adapter === 'base' && line.example_id === 'ex-2');
     if (!failLine || failLine.kind !== 'fail' || failLine.detail !== 'expected 42, got 41' || failLine.latency_ms !== 42) {

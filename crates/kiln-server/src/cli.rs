@@ -2328,6 +2328,12 @@ async fn submit_training_payload(
     if let Some(id) = job_id {
         println!("  {} {}", style("Job ID:").dim(), id);
     }
+    if let Some(seed) = response_body
+        .get("effective_seed")
+        .and_then(|value| value.as_str())
+    {
+        println!("  {} {}", style("Effective seed:").dim(), seed);
+    }
     match job_id {
         Some(id) => println!(
             "  {} kiln train status --job-id {id} --url {url}",
@@ -2755,6 +2761,9 @@ fn print_job_summary(job: &serde_json::Value) {
     );
     println!("  {} {}", style("State:").dim(), style_state(state));
     println!("  {} {}", style("Adapter:").dim(), style(adapter).white());
+    if let Some(seed) = job.get("effective_seed").and_then(|v| v.as_str()) {
+        println!("  {} {}", style("Effective seed:").dim(), seed);
+    }
     println!("  {} {}%", style("Progress:").dim(), progress_pct);
     if let Some(loss) = job.get("current_loss").and_then(|v| v.as_f64()) {
         println!("  {} {loss:.4}", style("Loss:").dim());
@@ -2813,11 +2822,17 @@ fn print_job_line(job: &serde_json::Value) {
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0)
         .round() as i64;
+    let seed = job
+        .get("effective_seed")
+        .and_then(|v| v.as_str())
+        .map(|seed| format!(" seed={seed}"))
+        .unwrap_or_default();
     println!(
-        "  {} [{}] adapter={} {}% ({}s)",
+        "  {} [{}] adapter={}{} {}% ({}s)",
         style(id).white().bold(),
         style_state(state),
         adapter,
+        seed,
         progress_pct,
         elapsed
     );

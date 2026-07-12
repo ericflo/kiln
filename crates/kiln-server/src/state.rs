@@ -322,6 +322,14 @@ pub struct TrainingJobInfo {
     pub job_id: String,
     pub adapter_name: String,
     pub job_type: TrainingJobType,
+    /// Immutable effective seed materialized before the job is published.
+    /// `None` is reserved for legacy archived jobs.
+    #[serde(
+        default,
+        with = "kiln_eval::result::optional_u64_decimal",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub effective_seed: Option<u64>,
     pub state: TrainingState,
     pub progress: f32,
     pub loss: Option<f64>,
@@ -2634,15 +2642,91 @@ impl AppState {
         kind: crate::eval::queue::EvalSubmissionKind,
         source_training_job_id: Option<String>,
         job: crate::eval::queue::QueuedEvalJob,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<crate::eval::queue::EvalEnqueueReceipt> {
+        self.enqueue_eval_inner(
+            suite_name,
+            adapters,
+            kind,
+            source_training_job_id,
+            job,
+            None,
+        )
+    }
+
+    /// Enqueue another member of a paired/grouped eval with an already
+    /// materialized seed. This is intentionally separate from ordinary
+    /// admission so independently submitted jobs cannot accidentally reuse a
+    /// seed, while post-training baseline/candidate jobs can stay paired.
+    pub fn enqueue_eval_with_effective_seed(
+        &self,
+        suite_name: String,
+        adapters: Vec<Option<String>>,
+        kind: crate::eval::queue::EvalSubmissionKind,
+        source_training_job_id: Option<String>,
+        job: crate::eval::queue::QueuedEvalJob,
+        effective_seed: u64,
+    ) -> anyhow::Result<crate::eval::queue::EvalEnqueueReceipt> {
+        self.enqueue_eval_inner(
+            suite_name,
+            adapters,
+            kind,
+            source_training_job_id,
+            job,
+            Some(effective_seed),
+        )
+    }
+
+    fn enqueue_eval_inner(
+        &self,
+        suite_name: String,
+        adapters: Vec<Option<String>>,
+        kind: crate::eval::queue::EvalSubmissionKind,
+        source_training_job_id: Option<String>,
+        job: crate::eval::queue::QueuedEvalJob,
+        forced_effective_seed: Option<u64>,
+    ) -> anyhow::Result<crate::eval::queue::EvalEnqueueReceipt> {
         self.ensure_inference_admission_allowed()?;
         let job_id = uuid::Uuid::new_v4().to_string();
+        let registered_suite_seed = |name: &str| {
+            self.suite_registry
+                .as_ref()
+                .and_then(|registry| registry.load(name).ok())
+                .and_then(|suite| suite.generation.seed)
+        };
+        let requested_seed = match &job {
+            crate::eval::queue::QueuedEvalJob::Registered {
+                suite_name,
+                generation_override,
+                ..
+            } => generation_override
+                .as_ref()
+                .and_then(|params| params.seed)
+                .or_else(|| registered_suite_seed(suite_name)),
+            crate::eval::queue::QueuedEvalJob::Inline {
+                suite,
+                generation_override,
+                ..
+            } => generation_override
+                .as_ref()
+                .and_then(|params| params.seed)
+                .or(suite.generation.seed),
+            crate::eval::queue::QueuedEvalJob::Compare(spec) => spec.seed.or_else(|| {
+                spec.generation
+                    .as_ref()
+                    .and_then(|params| params.seed)
+                    .or_else(|| registered_suite_seed(&spec.suite))
+            }),
+        };
+        let effective_seed = forced_effective_seed
+            .or(requested_seed)
+            .unwrap_or_else(rand::random);
         let info = crate::eval::queue::EvalJobInfo::queued(
             job_id.clone(),
             suite_name,
             adapters,
             kind,
             source_training_job_id,
+            effective_seed,
         );
         self.eval_jobs.write().unwrap().insert(job_id.clone(), info);
         self.eval_queue
@@ -2650,9 +2734,13 @@ impl AppState {
             .unwrap()
             .push(crate::eval::queue::EvalQueueEntry {
                 job_id: job_id.clone(),
+                effective_seed,
                 job,
             });
-        Ok(job_id)
+        Ok(crate::eval::queue::EvalEnqueueReceipt {
+            job_id,
+            effective_seed,
+        })
     }
 
     /// Logically invalidate every real prefix entry immediately. Unpinned

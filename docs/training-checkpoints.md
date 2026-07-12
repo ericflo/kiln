@@ -53,6 +53,35 @@ identity, and every named RNG stream. Objective-specific reference, EMA,
 reward-normalization, and sampler state is carried either in a checksummed
 state file or in the manifest's versioned auxiliary state.
 
+## Effective seed admission contract
+
+Every public SFT, GRPO, OPD, and OPD-backed distillation path resolves one
+effective seed before publishing either its tracking record or queue entry.
+This includes the dedicated endpoints, `/v1/train`, recipe steps, judge
+distillation, scheduled or manual self-improvement, and the distill
+refresh/merge/pump/self endpoints. A request-provided `config.seed` wins for a
+fresh run; otherwise the server draws one value exactly once and writes it back
+into the queued effective configuration.
+
+The one-job submission response contains `effective_seed`. Status, queue, job
+detail, and on-disk training history retain the same value. JSON-facing fields
+are decimal strings, not JSON numbers, so JavaScript clients preserve the full
+`u64` range. Composite recipe and self-improvement responses expose an
+`effective_seeds` object keyed by job ID. The CLI prints the value on submit
+and status, and the browser exposes it on every job card and as a copyable job
+detail field. Legacy archived jobs may omit it; new jobs may not.
+
+For resume, the checkpoint's `rng_states["lora-init"].seed` is authoritative.
+Admission copies it into the effective configuration when the caller omits a
+seed and rejects a conflicting explicit value before queue publication. The
+worker validates the same checkpoint and seed again before GPU ownership.
+
+The seed is one input to reproducibility, not a standalone replay guarantee.
+Same-seed runs can diverge when model weights, data/order, tokenizer/template,
+build, backend, device, driver/runtime, precision, kernels, or effective
+environment differ. Exact checkpoint continuation is guaranteed only inside
+the deterministic envelope recorded and validated by the checkpoint contract.
+
 ## Integration status
 
 Native SFT, inline and streamed-JSONL GRPO, and OPD support exact resume. A
@@ -178,6 +207,10 @@ kiln train opd \
   --teacher qwen35@vllm \
   --checkpoint-interval 25
 ```
+
+Each successful command prints the materialized effective seed alongside its
+job ID. `kiln train status` prints the same exact decimal value; use the job
+detail or dashboard copy action when recording a run manifest.
 
 The GRPO command treats `.jsonl` as the memory-bounded streamed route and a
 JSON request/batch containing `groups` as the inline route. The equivalent

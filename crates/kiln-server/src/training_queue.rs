@@ -465,6 +465,110 @@ fn normalize_opd_resume_checkpoint(
     )
 }
 
+pub(crate) fn materialize_sft_effective_seed(
+    config: &mut kiln_train::SftConfig,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+) -> Result<u64, String> {
+    normalize_sft_resume_checkpoint(config, adapter_dir, adapter_name)?;
+    materialize_training_effective_seed(
+        &mut config.seed,
+        config.resume_checkpoint.as_deref(),
+        "SFT",
+    )
+}
+
+pub(crate) fn materialize_grpo_effective_seed(
+    config: &mut kiln_train::GrpoConfig,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+) -> Result<u64, String> {
+    normalize_grpo_resume_checkpoint(config, adapter_dir, adapter_name)?;
+    materialize_training_effective_seed(
+        &mut config.seed,
+        config.resume_checkpoint.as_deref(),
+        "GRPO",
+    )
+}
+
+pub(crate) fn materialize_opd_effective_seed(
+    config: &mut kiln_train::OpdConfig,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+) -> Result<u64, String> {
+    normalize_opd_resume_checkpoint(config, adapter_dir, adapter_name)?;
+    materialize_training_effective_seed(
+        &mut config.seed,
+        config.resume_checkpoint.as_deref(),
+        "OPD",
+    )
+}
+
+fn materialize_training_effective_seed(
+    requested_seed: &mut Option<u64>,
+    resume_checkpoint: Option<&str>,
+    training_label: &str,
+) -> Result<u64, String> {
+    let effective_seed = if let Some(path) = resume_checkpoint {
+        let checkpoint = kiln_train::checkpoint::load_training_checkpoint(std::path::Path::new(
+            path,
+        ))
+        .map_err(|error| format!("read {training_label} resume seed from checkpoint: {error:#}"))?;
+        let checkpoint_seed = checkpoint
+            .manifest
+            .rng_states
+            .get("lora-init")
+            .ok_or_else(|| {
+                format!(
+                    "{training_label} resume checkpoint is missing the authoritative lora-init RNG state"
+                )
+            })?
+            .seed;
+        if let Some(requested_seed) = *requested_seed
+            && requested_seed != checkpoint_seed
+        {
+            return Err(format!(
+                "{training_label} seed {requested_seed} does not match resume checkpoint seed {checkpoint_seed}; omit seed or use the checkpoint value"
+            ));
+        }
+        checkpoint_seed
+    } else {
+        requested_seed.unwrap_or_else(rand::random)
+    };
+    *requested_seed = Some(effective_seed);
+    Ok(effective_seed)
+}
+
+pub(crate) fn materialize_queued_job_effective_seed(
+    job: &mut QueuedJob,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+) -> Result<u64, String> {
+    match job {
+        QueuedJob::Sft(request) => {
+            materialize_sft_effective_seed(&mut request.config, adapter_dir, adapter_name)
+        }
+        QueuedJob::Grpo(request) => {
+            materialize_grpo_effective_seed(&mut request.config, adapter_dir, adapter_name)
+        }
+        QueuedJob::Opd(kiln_train::OpdRequest {
+            config: request, ..
+        })
+        | QueuedJob::DistillRefresh(kiln_train::DistillRefreshRequest {
+            config: request, ..
+        })
+        | QueuedJob::DistillMerge(kiln_train::DistillMergeRequest {
+            config: request, ..
+        })
+        | QueuedJob::DistillPump(kiln_train::DistillPumpRequest {
+            config: request, ..
+        })
+        | QueuedJob::DistillSelf(kiln_train::DistillSelfRequest {
+            config: request, ..
+        }) => materialize_opd_effective_seed(request, adapter_dir, adapter_name),
+    }
+}
+
 fn normalize_training_resume_checkpoint(
     resume_checkpoint: &mut Option<String>,
     expected_kind: kiln_train::checkpoint::TrainingKind,
@@ -481,7 +585,7 @@ fn normalize_training_resume_checkpoint(
         ));
     }
     let supplied = std::path::Path::new(raw);
-    let candidate = if supplied.is_absolute() {
+    let candidate = if supplied.is_absolute() || supplied.parent() == Some(adapter_dir) {
         supplied.to_path_buf()
     } else {
         let mut components = supplied.components();
@@ -3178,29 +3282,9 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
         let job = jobs.get(&job_id).unwrap();
         (job.auto_load, job.adapter_name.clone(), job.job_type)
     };
-    let resume_admission = match &mut entry.job {
-        QueuedJob::Sft(request) => {
-            normalize_sft_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
-        }
-        QueuedJob::Grpo(request) => {
-            normalize_grpo_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
-        }
-        QueuedJob::Opd(request) => {
-            normalize_opd_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
-        }
-        QueuedJob::DistillRefresh(request) => {
-            normalize_opd_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
-        }
-        QueuedJob::DistillMerge(request) => {
-            normalize_opd_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
-        }
-        QueuedJob::DistillPump(request) => {
-            normalize_opd_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
-        }
-        QueuedJob::DistillSelf(request) => {
-            normalize_opd_resume_checkpoint(&mut request.config, &state.adapter_dir, &adapter_name)
-        }
-    };
+    let resume_admission =
+        materialize_queued_job_effective_seed(&mut entry.job, &state.adapter_dir, &adapter_name)
+            .map(|_| ());
     if let Err(error) = resume_admission {
         reject_queued_training_job(&state, &job_id, error, "invalid_resume_checkpoint");
         return;
@@ -3782,20 +3866,33 @@ pub fn enqueue_post_training_eval(
             state.max_queued_eval_jobs
         ));
     }
+    let paired_seed = std::cell::Cell::new(None::<u64>);
     let push = |adapter: Option<String>| -> Result<String, String> {
-        state
-            .enqueue_eval(
+        let job = crate::eval::queue::QueuedEvalJob::Registered {
+            suite_name: cfg.suite.clone(),
+            adapter: adapter.clone(),
+            generation_override: cfg.generation.clone(),
+        };
+        let admitted = match paired_seed.get() {
+            Some(seed) => state.enqueue_eval_with_effective_seed(
                 cfg.suite.clone(),
-                vec![adapter.clone()],
+                vec![adapter],
                 crate::eval::queue::EvalSubmissionKind::PostTraining,
                 Some(training_job_id.to_string()),
-                crate::eval::queue::QueuedEvalJob::Registered {
-                    suite_name: cfg.suite.clone(),
-                    adapter,
-                    generation_override: cfg.generation.clone(),
-                },
-            )
-            .map_err(|error| format!("post-training eval admission failed: {error:#}"))
+                job,
+                seed,
+            ),
+            None => state.enqueue_eval(
+                cfg.suite.clone(),
+                vec![adapter],
+                crate::eval::queue::EvalSubmissionKind::PostTraining,
+                Some(training_job_id.to_string()),
+                job,
+            ),
+        }
+        .map_err(|error| format!("post-training eval admission failed: {error:#}"))?;
+        paired_seed.set(Some(admitted.effective_seed));
+        Ok(admitted.job_id)
     };
 
     let mut linked_ids: Vec<String> = Vec::new();
@@ -3820,8 +3917,14 @@ pub fn enqueue_post_training_eval(
     };
     let adapter_eval_id = if cfg.min_accuracy.is_some() {
         let baseline_slot = baseline_for_gate.clone().unwrap_or_default();
-        state
-            .enqueue_eval(
+        let job = crate::eval::queue::QueuedEvalJob::Compare(kiln_eval::EvalCompareSpec {
+            suite: cfg.suite.clone(),
+            adapters: vec![baseline_slot.clone(), adapter_name.to_string()],
+            seed: paired_seed.get(),
+            generation: cfg.generation.clone(),
+        });
+        let admitted = match paired_seed.get() {
+            Some(seed) => state.enqueue_eval_with_effective_seed(
                 cfg.suite.clone(),
                 vec![
                     Some(baseline_slot.clone()).filter(|s| !s.is_empty()),
@@ -3829,13 +3932,23 @@ pub fn enqueue_post_training_eval(
                 ],
                 crate::eval::queue::EvalSubmissionKind::PostTraining,
                 Some(training_job_id.to_string()),
-                crate::eval::queue::QueuedEvalJob::Compare(kiln_eval::EvalCompareSpec {
-                    suite: cfg.suite.clone(),
-                    adapters: vec![baseline_slot, adapter_name.to_string()],
-                    generation: cfg.generation.clone(),
-                }),
-            )
-            .map_err(|error| format!("post-training eval admission failed: {error:#}"))?
+                job,
+                seed,
+            ),
+            None => state.enqueue_eval(
+                cfg.suite.clone(),
+                vec![
+                    Some(baseline_slot).filter(|s| !s.is_empty()),
+                    Some(adapter_name.to_string()),
+                ],
+                crate::eval::queue::EvalSubmissionKind::PostTraining,
+                Some(training_job_id.to_string()),
+                job,
+            ),
+        }
+        .map_err(|error| format!("post-training eval admission failed: {error:#}"))?;
+        paired_seed.set(Some(admitted.effective_seed));
+        admitted.job_id
     } else {
         push(Some(adapter_name.to_string()))?
     };
@@ -3934,8 +4047,8 @@ mod tests {
     use kiln_train::checkpoint::{
         CheckpointArtifact, CheckpointFileRole, TrainingCheckpointData, TrainingCheckpointManifest,
         TrainingCheckpointOptimizer, TrainingCheckpointPrecision, TrainingCheckpointProgress,
-        TrainingCheckpointScheduler, TrainingCheckpointStateFiles, TrainingKind,
-        write_training_checkpoint_atomic,
+        TrainingCheckpointRngState, TrainingCheckpointScheduler, TrainingCheckpointStateFiles,
+        TrainingKind, write_training_checkpoint_atomic,
     };
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -3973,7 +4086,15 @@ mod tests {
                 content_sha256: "22".repeat(32),
                 item_count: 1,
             },
-            Default::default(),
+            std::collections::BTreeMap::from([(
+                "lora-init".to_string(),
+                TrainingCheckpointRngState {
+                    algorithm: "seeded-initialization".into(),
+                    seed: 73,
+                    position: 0,
+                    state_file: None,
+                },
+            )]),
             TrainingCheckpointOptimizer {
                 kind: "sgd".into(),
                 step: 1,
@@ -4026,6 +4147,114 @@ mod tests {
             config.resume_checkpoint.as_deref(),
             temp.path().join(name).to_str()
         );
+
+        materialize_sft_effective_seed(&mut config, temp.path(), "target").unwrap();
+        assert_eq!(config.seed, Some(73));
+        assert_eq!(
+            config.resume_checkpoint.as_deref(),
+            temp.path().join(name).to_str(),
+            "normalization must be idempotent when admission and the worker both validate"
+        );
+    }
+
+    #[test]
+    fn training_seed_materialization_preserves_explicit_values_and_resolves_omissions() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let mut implicit_sft = kiln_train::SftConfig::default();
+        let sft_seed =
+            materialize_sft_effective_seed(&mut implicit_sft, temp.path(), "sft").unwrap();
+        assert_eq!(implicit_sft.seed, Some(sft_seed));
+
+        let mut explicit_grpo = kiln_train::GrpoConfig {
+            seed: Some(u64::MAX),
+            ..Default::default()
+        };
+        assert_eq!(
+            materialize_grpo_effective_seed(&mut explicit_grpo, temp.path(), "grpo").unwrap(),
+            u64::MAX
+        );
+        assert_eq!(explicit_grpo.seed, Some(u64::MAX));
+
+        let mut implicit_opd = kiln_train::OpdConfig::default();
+        let opd_seed =
+            materialize_opd_effective_seed(&mut implicit_opd, temp.path(), "opd").unwrap();
+        assert_eq!(implicit_opd.seed, Some(opd_seed));
+    }
+
+    #[test]
+    fn resume_seed_is_authoritative_and_mismatches_fail_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let name = "target-checkpoint-step-00000001.kiln-checkpoint";
+        write_resume_checkpoint_fixture(temp.path(), name, "target", TrainingKind::Grpo);
+
+        let mut inherited = kiln_train::GrpoConfig {
+            resume_checkpoint: Some(name.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            materialize_grpo_effective_seed(&mut inherited, temp.path(), "target").unwrap(),
+            73
+        );
+        assert_eq!(inherited.seed, Some(73));
+
+        let mut mismatched = kiln_train::GrpoConfig {
+            seed: Some(72),
+            resume_checkpoint: Some(name.into()),
+            ..Default::default()
+        };
+        let error =
+            materialize_grpo_effective_seed(&mut mismatched, temp.path(), "target").unwrap_err();
+        assert!(
+            error.contains("does not match resume checkpoint seed 73"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn resume_checkpoint_without_authoritative_init_seed_fails_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let name = "target-checkpoint-step-00000001.kiln-checkpoint";
+        write_resume_checkpoint_fixture(temp.path(), name, "target", TrainingKind::Sft);
+        let manifest_path = temp
+            .path()
+            .join(name)
+            .join(kiln_train::checkpoint::TRAINING_CHECKPOINT_MANIFEST_FILENAME);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["rng_states"] = serde_json::json!({});
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let mut config = kiln_train::SftConfig {
+            resume_checkpoint: Some(name.into()),
+            ..Default::default()
+        };
+
+        let error = materialize_sft_effective_seed(&mut config, temp.path(), "target").unwrap_err();
+        assert!(
+            error.contains("missing the authoritative lora-init RNG state"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn already_normalized_relative_resume_path_remains_valid() {
+        let current = std::env::current_dir().unwrap();
+        let temp = tempfile::tempdir_in(&current).unwrap();
+        let relative_root = temp.path().strip_prefix(&current).unwrap();
+        let name = "target-checkpoint-step-00000001.kiln-checkpoint";
+        write_resume_checkpoint_fixture(relative_root, name, "target", TrainingKind::Opd);
+        let mut config = kiln_train::OpdConfig {
+            resume_checkpoint: Some(name.into()),
+            ..Default::default()
+        };
+
+        materialize_opd_effective_seed(&mut config, relative_root, "target").unwrap();
+        materialize_opd_effective_seed(&mut config, relative_root, "target").unwrap();
+        assert_eq!(config.seed, Some(73));
     }
 
     #[test]
@@ -5118,6 +5347,7 @@ mod tests {
             job_id: job_id.to_string(),
             adapter_name: adapter.to_string(),
             job_type: TrainingJobType::Sft,
+            effective_seed: Some(17),
             state: TrainingState::Running,
             progress: 0.5,
             loss: None,
@@ -5467,7 +5697,17 @@ mod tests {
         };
         enqueue_post_training_eval(&state, "train-job-2", "trained-adapter", &cfg, false).unwrap();
         assert_eq!(state.eval_queue.lock().unwrap().len(), 2);
-        assert_eq!(state.eval_jobs.read().unwrap().len(), 2);
+        let jobs = state.eval_jobs.read().unwrap();
+        assert_eq!(jobs.len(), 2);
+        let seeds = jobs
+            .values()
+            .map(|job| job.effective_seed.expect("new eval job must have a seed"))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            seeds.len(),
+            1,
+            "post-training baseline and candidate jobs must share one paired seed"
+        );
     }
 
     #[test]

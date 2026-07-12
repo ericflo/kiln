@@ -1246,6 +1246,10 @@ pub struct TrainingStatus {
     pub progress: f32,
     pub current_loss: Option<f64>,
     pub adapter_name: Option<String>,
+    /// Exact seed materialized before queue publication. Decimal string keeps
+    /// the full `u64` value intact in browser clients; absent on legacy jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_seed: Option<String>,
     pub started_at: String,
     pub elapsed_secs: f64,
     /// Wall-clock submit time as Unix milliseconds — survives server restarts
@@ -1293,6 +1297,8 @@ pub enum TrainingState {
 pub struct TrainingResponse {
     pub job_id: String,
     pub state: TrainingState,
+    /// Exact decimal seed that the queued run will use.
+    pub effective_seed: String,
     pub message: String,
 }
 
@@ -1316,6 +1322,7 @@ mod tests {
         });
         let status: TrainingStatus = serde_json::from_value(legacy).unwrap();
         assert!(status.error.is_none());
+        assert!(status.effective_seed.is_none());
 
         let none_wire = serde_json::to_value(&status).unwrap();
         assert!(none_wire.get("error").is_none(), "None must be omitted");

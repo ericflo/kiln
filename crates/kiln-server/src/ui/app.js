@@ -1245,7 +1245,7 @@ async function trainFromCorrections() {
     // per-optimizer default (Muon and AdamW want very different bands).
     const body = { dataset: 'corrections:active', config: { output_name: name, auto_load: true, epochs: 3, lora_rank: 8, lora_alpha: loraAlphaFor(8) } };
     const res = await api('/v1/train/sft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    toast(res.message || `Training ${name} from ${trainable.length} correction${trainable.length === 1 ? '' : 's'} — it will hot-swap in when done`, 'ok');
+    toastTrainingSubmission(res, `Training ${name} from ${trainable.length} correction${trainable.length === 1 ? '' : 's'} — it will hot-swap in when done`);
     // Clear the submitted rows from the LOCAL view only. The durable rows
     // stay active server-side until the job completes; if it fails,
     // watchCorrectionsJob pulls them straight back into the basket.
@@ -3427,6 +3427,7 @@ function matchTraining(j) {
   return [
     j.job_id || '',
     j.adapter_name || '',
+    j.effective_seed || '',
     (j.job_type || '').toString(),
     (j.state || '').toString(),
   ].join(' ').toLowerCase().includes(q);
@@ -3614,6 +3615,7 @@ function renderTrainingCard(j, state) {
       <span class="training-card-name"><span class="hint" style="font-weight:400;margin-right:4px;">Adapter:</span>${adapterLabel}</span>
       <span class="training-card-type ${escapeHtml(jobType)}">${escapeHtml(jobType)}</span>
       <span class="hint" style="font-family:var(--font-mono); font-size:11px;">${escapeHtml(shortId(j.job_id))}</span>
+      ${j.effective_seed == null ? '' : `<span class="hint tabular-nums" style="font-family:var(--font-mono); font-size:11px;" title="Immutable effective training seed">seed ${escapeHtml(String(j.effective_seed))}</span>`}
       ${timeBadge}
       ${cancelBtn}
     </div>
@@ -4285,6 +4287,12 @@ function setTrainingSubmitBusy(form, busy, pendingLabel) {
   }
 }
 
+function toastTrainingSubmission(res, fallback) {
+  const seed = res?.effective_seed;
+  const suffix = seed == null ? '' : ` · seed ${String(seed)}`;
+  toast(`${res?.message || fallback}${suffix}`, 'ok');
+}
+
 // --- SFT Form ---
 document.getElementById('sft-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -4332,7 +4340,7 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
     if (postEval) body.post_eval = postEval;
     setTrainingSubmitBusy(form, true, 'Submitting SFT…');
     const res = await api('/v1/train/sft', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast(res.message || 'SFT job submitted');
+    toastTrainingSubmission(res, 'SFT job submitted');
     // Switch to queue tab
     document.querySelector('[data-tab="queue"]').click();
     pollTraining();
@@ -4384,7 +4392,7 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
     if (postEval) body.post_eval = postEval;
     setTrainingSubmitBusy(form, true, 'Submitting GRPO…');
     const res = await api('/v1/train/grpo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast(res.message || 'GRPO job submitted');
+    toastTrainingSubmission(res, 'GRPO job submitted');
     document.querySelector('[data-tab="queue"]').click();
     pollTraining();
   } catch (e) { toast(e.message, 'err'); }
@@ -6753,7 +6761,7 @@ async function refreshSuites() {
               method: 'POST', headers: {'Content-Type':'application/json'},
               body: JSON.stringify({ suite, adapter: evalActiveAdapter || '' }),
             });
-            toast('Queued eval ' + res.job_id.slice(0, 8), 'ok');
+            toast(`Queued eval ${res.job_id.slice(0, 8)} · seed ${res.effective_seed}`, 'ok');
             document.getElementById('evals-tab-jobs')?.click();
             refreshEvalJobs();
           } else if (action === 'compare') {
@@ -6761,7 +6769,7 @@ async function refreshSuites() {
               method: 'POST', headers:{'Content-Type':'application/json'},
               body: JSON.stringify({ suite, adapters: ['', evalActiveAdapter || ''] }),
             });
-            toast('Queued compare ' + res.job_id.slice(0, 8), 'ok');
+            toast(`Queued compare ${res.job_id.slice(0, 8)} · seed ${res.effective_seed}`, 'ok');
             document.getElementById('evals-tab-jobs')?.click();
             refreshEvalJobs();
           } else if (action === 'preview') {
@@ -6940,7 +6948,7 @@ async function refreshEvalJobs() {
       evalJobsFilter.query, evalJobsFilter.state,
       filtered.map(j => [
         j.job_id, j.state, j.suite_name, j.adapters, j.submission_kind,
-        j.headline_accuracy, j.progress, j.error,
+        j.effective_seed, j.headline_accuracy, j.progress, j.error,
         (j.finished_runs || []).map(r => [r.adapter, r.metrics]),
       ]),
     ]);
@@ -7044,6 +7052,7 @@ function renderJobCard(j) {
   const progress = j.progress || {};
   const progFrac = progress.examples_total > 0 ? progress.examples_completed / progress.examples_total : 0;
   const isRunning = stateClass === 'running' || stateClass === 'queued';
+  const seed = j.effective_seed == null ? '' : String(j.effective_seed);
 
   // Compact tag bars for the most-recent finished run (max 3)
   let tagSummary = '';
@@ -7089,6 +7098,7 @@ function renderJobCard(j) {
         <span class="job-state-pill ${stateClass}">${escapeHtml(j.state || '')}</span>
         <span>${adapters}</span>
         <span class="hint">${escapeHtml(j.submission_kind)}</span>
+        ${seed ? `<span class="hint" style="font-family:var(--font-mono);" title="Immutable effective eval seed">seed ${escapeHtml(seed)}</span>` : ''}
         <span class="hint" style="font-family:var(--font-mono);">${escapeHtml(j.job_id.slice(0, 8))}</span>
       </div>
       ${progressOrCounts}
@@ -7236,6 +7246,7 @@ function renderDrillModal(preserveSelection) {
   document.getElementById('drill-title').textContent = j.suite_name || 'Eval results';
   document.getElementById('drill-meta').innerHTML = `
     <span class="job-state-pill ${j.state}">${escapeHtml(j.state)}</span>
+    ${j.effective_seed == null ? '' : `<span class="hint" style="margin-left:8px; font-family:var(--font-mono);" title="${escapeHtml(j.seed_derivation || 'kiln.eval-seed.v1')}">seed ${escapeHtml(String(j.effective_seed))}</span>`}
     <span class="hint" style="margin-left:8px; font-family:var(--font-mono);">${escapeHtml(j.job_id)}</span>`;
   // Cancel / Delete: same DELETE endpoint, different copy. Active jobs
   // get cancelled; terminal jobs get deleted from memory + archive.
@@ -7503,6 +7514,7 @@ function renderOutcomeDetail(o) {
   const actionsHtml = `<div class="outcome-actions" style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px;">
     <button type="button" class="btn btn-sm" data-outcome-copy="completion" title="Copy the model's output"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg> Copy output</button>
     ${promptForReplay ? `<button type="button" class="btn btn-sm" data-outcome-copy="prompt" title="Copy the full prompt as role-prefixed text"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg> Copy prompt</button>` : ''}
+    ${o.generation_seed == null ? '' : `<button type="button" class="btn btn-sm" data-outcome-copy="seed" title="Copy the exact per-completion decoder seed"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg> Copy seed</button>`}
     ${userMsg ? `<button type="button" class="btn btn-sm" data-outcome-replay="1" title="Drop the last user message into the playground so you can iterate"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-chat"></use></svg> Replay in playground</button>` : ''}
     ${(o.kind === 'fail' || o.kind === 'invalid') && userMsg ? `<button type="button" class="btn btn-sm" data-outcome-correct="1" title="Capture this failing example into the corrections basket — write the ideal answer, then train"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-pencil"></use></svg> Add to corrections</button>` : ''}
   </div>`;
@@ -7514,6 +7526,7 @@ function renderOutcomeDetail(o) {
         ${o.completion_index > 0 ? `<span class="hint">completion #${o.completion_index}</span>` : ''}
         ${o.latency_ms != null ? `<span class="tabular-nums hint" style="font-size:11px;">${o.latency_ms.toFixed(0)}ms</span>` : ''}
         ${o.prompt_tokens != null ? `<span class="tabular-nums hint" style="font-size:11px;">${o.prompt_tokens}→${o.completion_tokens || 0} tok</span>` : ''}
+        ${o.generation_seed == null ? '' : `<span class="tabular-nums hint" style="font-size:11px;" title="Derived per-completion decoder seed">seed ${escapeHtml(String(o.generation_seed))}</span>`}
       </div>
       ${actionsHtml}
       <div>${tags}</div>
@@ -7526,8 +7539,13 @@ function renderOutcomeDetail(o) {
   detail.querySelectorAll('[data-outcome-copy]').forEach(btn => {
     btn.addEventListener('click', () => {
       const key = btn.dataset.outcomeCopy;
-      const text = key === 'completion' ? (o.completion_text || '') : promptForReplay;
-      navigator.clipboard.writeText(text).then(() => toast(`Copied ${key}`, 'ok'), () => toast('Copy failed', 'err'));
+      const text = key === 'completion'
+        ? (o.completion_text || '')
+        : key === 'seed' ? String(o.generation_seed) : promptForReplay;
+      copyText(text, btn).then(() => {
+        if (Object.prototype.hasOwnProperty.call(window, '__copiedText')) window.__copiedText = text;
+        toast(`Copied ${key}`, 'ok');
+      });
     });
   });
   detail.querySelectorAll('[data-outcome-correct]').forEach(btn => {
@@ -7601,6 +7619,9 @@ function buildDrillOutcomesJsonl(j) {
         kind: o.kind,
         score: o.score,
       };
+      if (j.effective_seed != null) line.effective_seed = String(j.effective_seed);
+      if (j.seed_derivation != null) line.seed_derivation = j.seed_derivation;
+      if (o.generation_seed != null) line.generation_seed = String(o.generation_seed);
       if (o.detail != null) line.detail = o.detail;
       if (o.latency_ms != null) line.latency_ms = o.latency_ms;
       if (o.prompt_tokens != null) line.prompt_tokens = o.prompt_tokens;
@@ -7608,6 +7629,9 @@ function buildDrillOutcomesJsonl(j) {
       if (o.tags && o.tags.length) line.tags = o.tags;
       if (o.metadata != null) line.metadata = o.metadata;
       if (o.reasoning_text != null) line.reasoning_text = o.reasoning_text;
+      if (o.raw_completion_text != null) line.raw_completion_text = o.raw_completion_text;
+      if (o.thinking_budget != null) line.thinking_budget = o.thinking_budget;
+      if (o.unclosed_thinking === true) line.unclosed_thinking = true;
       line.completion_text = o.completion_text || '';
       lines.push(JSON.stringify(line));
     });
@@ -8246,7 +8270,7 @@ function buildCmdkIndex() {
       action: async () => {
         try {
           const res = await api('/v1/eval/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ suite: name, adapter: evalActiveAdapter || '' }) });
-          toast('Queued eval ' + res.job_id.slice(0, 8), 'ok');
+          toast(`Queued eval ${res.job_id.slice(0, 8)} · seed ${res.effective_seed}`, 'ok');
           selectPage('evals');
           document.getElementById('evals-tab-jobs')?.click();
           refreshEvalJobs();
@@ -9197,6 +9221,7 @@ async function submitAdapterEval(compare) {
     const res = compare
       ? await api('/v1/eval/compare', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ suite, adapters: ['', name] }) })
       : await api('/v1/eval/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ suite, adapter: name }) });
+    toast(`Queued ${compare ? 'compare' : 'eval'} ${res.job_id.slice(0, 8)} · seed ${res.effective_seed}`, 'ok');
     closeAdapterEvalModal();
     selectPage('evals');
     document.getElementById('evals-tab-jobs')?.click();
@@ -9304,7 +9329,8 @@ async function fetchTrainDrill() {
     document.getElementById('train-drill-meta').innerHTML =
       `<span class="job-state-pill ${stateLow}">${escapeHtml(stateLow)}</span>
        <span class="training-card-type ${(j.job_type||'').toString().toLowerCase()}" style="margin-left:8px;">${escapeHtml((j.job_type||'').toString())}</span>
-       <span class="hint" style="margin-left:8px; font-family:var(--font-mono);">${escapeHtml(j.job_id)}</span>`;
+       <span class="hint" style="margin-left:8px; font-family:var(--font-mono);">${escapeHtml(j.job_id)}</span>
+       ${j.effective_seed == null ? '' : `<span class="hint tabular-nums" style="margin-left:8px; font-family:var(--font-mono);">seed ${escapeHtml(String(j.effective_seed))}</span>`}`;
 
     const stopBtn = document.getElementById('train-drill-stop');
     const deleteBtn = document.getElementById('train-drill-delete');
@@ -9648,6 +9674,14 @@ function renderTrainDrillBody(j) {
         ${j.finished_unix_ms ? ` · finished ${escapeHtml(fmtSmartTime(j.finished_unix_ms))}` : ''}
       </div>`
     : '';
+  const seedSection = j.effective_seed == null ? '' : `<div class="detail-section">
+    <h4>Effective seed</h4>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <code style="background:var(--surface); padding:4px 8px; border-radius:4px; border:1px solid var(--border);">${escapeHtml(String(j.effective_seed))}</code>
+      <button class="btn btn-sm btn-ghost" type="button" data-copy-training-seed="${escapeHtml(String(j.effective_seed))}" title="Copy exact effective seed" aria-label="Copy exact effective seed"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg></button>
+      <span class="hint">Materialized before queue publication</span>
+    </div>
+  </div>`;
   const html = `<div style="padding: var(--space-4) var(--space-5); border-bottom:1px solid var(--border);">
     <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
       <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing: var(--tracking-caps);">Progress</div>
@@ -9667,6 +9701,7 @@ function renderTrainDrillBody(j) {
     <h4>Loss curve</h4>
     <div id="train-drill-curve-host"></div>
   </div>
+  ${seedSection}
   ${renderTrainMetadata(j)}
   ${renderTrainCheckpoint(j)}
   <div class="detail-section">
@@ -9705,6 +9740,24 @@ function renderTrainDrillBody(j) {
           })
           .catch(() => {
             try { fallbackCopyText(value); toast('Resume checkpoint copied', 'ok'); }
+            catch { toast('Copy failed', 'err'); }
+          });
+      });
+    });
+    document.querySelectorAll('[data-copy-training-seed]').forEach(b => {
+      b.addEventListener('click', () => {
+        const value = b.dataset.copyTrainingSeed;
+        if (!value) return;
+        const writeText = navigator.clipboard?.writeText
+          ? navigator.clipboard.writeText.bind(navigator.clipboard)
+          : (text) => { fallbackCopyText(text); return Promise.resolve(); };
+        writeText(value)
+          .then(() => {
+            if (Object.prototype.hasOwnProperty.call(window, '__copiedText')) window.__copiedText = value;
+            toast('Effective seed copied', 'ok');
+          })
+          .catch(() => {
+            try { fallbackCopyText(value); toast('Effective seed copied', 'ok'); }
             catch { toast('Copy failed', 'err'); }
           });
       });
@@ -10560,7 +10613,8 @@ document.addEventListener('click', async (ev) => {
   try {
     btn.disabled = true; btn.textContent = 'Queuing…';
     const res = await api('/v1/recipes/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ recipe: name }) });
-    toast(res.message || `Queued recipe ${name}`);
+    const seedCount = Object.keys(res.effective_seeds || {}).length;
+    toast(`${res.message || `Queued recipe ${name}`}${seedCount ? ` · ${seedCount} effective seed${seedCount === 1 ? '' : 's'} recorded` : ''}`, 'ok');
   } catch (e) { toast('Run failed: ' + e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = 'Run'; }
 });
@@ -10639,7 +10693,7 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
     if (resumeCheckpoint !== null) body.config.resume_checkpoint = resumeCheckpoint;
     setTrainingSubmitBusy(form, true, 'Submitting OPD…');
     const res = await api('/v1/train/opd', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast(res.message || 'Distillation job queued');
+    toastTrainingSubmission(res, 'Distillation job queued');
     selectPage('training');
     document.getElementById('training-tab-queue')?.click();
     pollTraining();
@@ -10668,7 +10722,7 @@ document.getElementById('distill-refresh-form')?.addEventListener('submit', asyn
     if (form.if_eval_suite.value.trim()) body.if_eval_suite = form.if_eval_suite.value.trim();
     if (form.new_knowledge_eval_suite.value.trim()) body.new_knowledge_eval_suite = form.new_knowledge_eval_suite.value.trim();
     const res = await api('/v1/distill/refresh', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast(res.message || 'Refresh queued');
+    toastTrainingSubmission(res, 'Refresh queued');
     selectPage('training');
   } catch (err) { toast(err.message, 'err'); }
 });
@@ -10708,7 +10762,7 @@ document.getElementById('distill-pump-form')?.addEventListener('submit', async (
       use_cache: form.use_cache.checked,
     };
     const res = await api('/v1/distill/pump', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast(res.message || 'Boost job queued');
+    toastTrainingSubmission(res, 'Boost job queued');
     selectPage('training');
   } catch (err) { toast(err.message, 'err'); }
 });
@@ -10728,7 +10782,7 @@ document.getElementById('distill-merge-form')?.addEventListener('submit', async 
       config: { training_mode: 'off_policy' },
     };
     const res = await api('/v1/adapters/distill_merge', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast(res.message || 'Merge queued');
+    toastTrainingSubmission(res, 'Merge queued');
     selectPage('training');
   } catch (err) { toast(err.message, 'err'); }
 });
@@ -10774,7 +10828,7 @@ document.getElementById('distill-self-form')?.addEventListener('submit', async (
     const docs = document.getElementById('self-documents')?.value?.trim();
     if (docs) body.documents = JSON.parse(docs);
     const res = await api('/v1/distill/self', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast(res.message || 'Self-improvement job queued');
+    toastTrainingSubmission(res, 'Self-improvement job queued');
     selectPage('training');
   } catch (err) { toast(err.message, 'err'); }
 });

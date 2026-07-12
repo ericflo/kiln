@@ -94,6 +94,7 @@ fn fill_tracked(
                 job_id,
                 adapter_name: format!("syn-adapter-{i}"),
                 job_type: TrainingJobType::Sft,
+                effective_seed: Some(17),
                 state: job_state,
                 progress: if matches!(job_state, TrainingState::Completed) {
                     1.0
@@ -260,6 +261,7 @@ fn gc_evicts_terminal_entries_past_ttl() {
                 job_id: "live-queued".to_string(),
                 adapter_name: "live".to_string(),
                 job_type: TrainingJobType::Sft,
+                effective_seed: Some(17),
                 state: TrainingState::Queued,
                 progress: 0.0,
                 loss: None,
@@ -285,6 +287,7 @@ fn gc_evicts_terminal_entries_past_ttl() {
                 job_id: "live-running".to_string(),
                 adapter_name: "running".to_string(),
                 job_type: TrainingJobType::Sft,
+                effective_seed: Some(17),
                 state: TrainingState::Running,
                 progress: 0.5,
                 loss: None,

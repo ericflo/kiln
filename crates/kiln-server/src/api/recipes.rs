@@ -164,6 +164,8 @@ pub enum RecipeRunRequest {
 pub struct RecipeRunResponse {
     pub recipe: String,
     pub job_ids: Vec<String>,
+    /// Exact decimal seed for every queued training step, keyed by job ID.
+    pub effective_seeds: BTreeMap<String, String>,
     pub message: String,
 }
 
@@ -359,6 +361,7 @@ async fn run_recipe(
         .map(|(job_id, adapter_name, queued)| prepare_step_job(&job_id, &adapter_name, queued))
         .collect();
     super::training::admit_training_jobs(&state, pending)?;
+    let effective_seeds = super::training::admitted_training_seeds(&state, &job_ids)?;
 
     Ok(Json(RecipeRunResponse {
         recipe: recipe_name.clone(),
@@ -372,6 +375,7 @@ async fn run_recipe(
                 .unwrap_or_default()
         ),
         job_ids,
+        effective_seeds,
     }))
 }
 
@@ -604,6 +608,7 @@ fn prepare_step_job(
         job_id: job_id.to_string(),
         adapter_name: adapter_name.to_string(),
         job_type: TrainingJobType::Opd,
+        effective_seed: None,
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,

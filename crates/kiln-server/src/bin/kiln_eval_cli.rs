@@ -92,6 +92,9 @@ struct RunArgs {
     /// Override the suite-wide max_tokens.
     #[arg(long)]
     max_tokens: Option<usize>,
+    /// Effective job seed. Omit to let the server materialize and return one.
+    #[arg(long)]
+    seed: Option<u64>,
     /// Thinking token budget: omit to inherit, use 0 to close immediately, or `unlimited` for no limit.
     #[arg(long, value_name = "TOKENS|unlimited")]
     thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
@@ -114,6 +117,9 @@ struct CompareArgs {
     /// Adapters to compare. Pass `""` for the base model. Repeat the flag.
     #[arg(long = "adapter", required = true)]
     adapters: Vec<String>,
+    /// Shared effective seed for every adapter in the comparison.
+    #[arg(long)]
+    seed: Option<u64>,
     /// Wait for the job to finish.
     #[arg(long)]
     watch: bool,
@@ -139,6 +145,9 @@ struct ProbeArgs {
     max_tokens: usize,
     #[arg(long, default_value_t = 0.0)]
     temperature: f32,
+    /// Effective job seed. Omit to let the server materialize and return one.
+    #[arg(long)]
+    seed: Option<u64>,
     /// Thinking token budget: omit to inherit, use 0 to close immediately, or `unlimited` for no limit.
     #[arg(long, value_name = "TOKENS|unlimited")]
     thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
@@ -272,6 +281,8 @@ fn parse_trace_format(s: &str) -> std::result::Result<ProductionTraceFormat, Str
 struct EvalRunResponse {
     job_id: String,
     state: String,
+    #[serde(with = "kiln_eval::result::u64_decimal")]
+    effective_seed: u64,
     #[allow(dead_code)]
     message: String,
 }
@@ -280,6 +291,10 @@ struct EvalRunResponse {
 struct EvalResultPayload {
     job_id: String,
     state: String,
+    #[serde(default, with = "kiln_eval::result::optional_u64_decimal")]
+    effective_seed: Option<u64>,
+    #[serde(default)]
+    seed_derivation: Option<String>,
     runs: Vec<SuiteResult>,
     #[serde(default)]
     error: Option<String>,
@@ -1075,6 +1090,9 @@ async fn cmd_run(client: &reqwest::Client, server: &str, args: RunArgs) -> Resul
     if let Some(adapter) = args.adapter {
         body.insert("adapter".into(), serde_json::json!(adapter));
     }
+    if let Some(seed) = args.seed {
+        body.insert("seed".into(), serde_json::json!(seed));
+    }
     if let Some(generation) = generation_override_json(
         args.temperature,
         args.max_tokens,
@@ -1094,7 +1112,10 @@ async fn cmd_run(client: &reqwest::Client, server: &str, args: RunArgs) -> Resul
         bail!("run failed ({status}): {text}");
     }
     let parsed: EvalRunResponse = serde_json::from_str(&text)?;
-    eprintln!("queued eval {} (state={})", parsed.job_id, parsed.state);
+    eprintln!(
+        "queued eval {} (state={}, effective_seed={})",
+        parsed.job_id, parsed.state, parsed.effective_seed
+    );
     if !args.watch {
         println!("{text}");
         return Ok(());
@@ -1152,6 +1173,7 @@ async fn cmd_compare(client: &reqwest::Client, server: &str, args: CompareArgs) 
     let body = EvalCompareSpec {
         suite: args.suite,
         adapters: args.adapters,
+        seed: args.seed,
         generation: None,
     };
     let resp = client
@@ -1165,7 +1187,10 @@ async fn cmd_compare(client: &reqwest::Client, server: &str, args: CompareArgs) 
         bail!("compare failed ({status}): {text}");
     }
     let parsed: EvalRunResponse = serde_json::from_str(&text)?;
-    eprintln!("queued compare {} (state={})", parsed.job_id, parsed.state);
+    eprintln!(
+        "queued compare {} (state={}, effective_seed={})",
+        parsed.job_id, parsed.state, parsed.effective_seed
+    );
     if !args.watch {
         println!("{text}");
         return Ok(());
@@ -1223,6 +1248,7 @@ async fn cmd_probe(client: &reqwest::Client, server: &str, args: ProbeArgs) -> R
     let body = serde_json::json!({
         "inline_suite": suite,
         "adapter": args.adapter,
+        "seed": args.seed,
     });
     let resp = client
         .post(format!("{server}/v1/eval/run"))
@@ -1235,6 +1261,10 @@ async fn cmd_probe(client: &reqwest::Client, server: &str, args: ProbeArgs) -> R
         bail!("probe failed ({status}): {text}");
     }
     let parsed: EvalRunResponse = serde_json::from_str(&text)?;
+    eprintln!(
+        "queued probe {} (effective_seed={})",
+        parsed.job_id, parsed.effective_seed
+    );
     let result = poll_until_done(client, server, &parsed.job_id).await?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -1297,6 +1327,15 @@ fn print_human(result: &EvalResultPayload) {
         if let Some(e) = result.error.as_ref() {
             eprintln!("  error: {e}");
         }
+    }
+    if let Some(seed) = result.effective_seed {
+        println!(
+            "Effective seed: {seed} ({})",
+            result
+                .seed_derivation
+                .as_deref()
+                .unwrap_or(kiln_eval::EVAL_SEED_DERIVATION_V1)
+        );
     }
     for r in &result.runs {
         let adapter_label = r
@@ -1442,6 +1481,9 @@ fn print_compare(result: &EvalResultPayload) {
         eprintln!("no runs in compare result");
         return;
     }
+    if let Some(seed) = result.effective_seed {
+        println!("Effective seed: {seed}");
+    }
     println!(
         "{:<24}  {:>10}  {:>10}  {:>10}",
         "adapter", "accuracy", "mean", "p50 ms"
@@ -1533,6 +1575,8 @@ fn compute_flip_diff(result: &EvalResultPayload) -> Option<kiln_eval::FlipDiff> 
     let synthetic = kiln_eval::EvalResult {
         job_id: result.job_id.clone(),
         state: kiln_eval::EvalJobState::Completed,
+        effective_seed: result.effective_seed,
+        seed_derivation: result.seed_derivation.clone(),
         runs: result.runs.clone(),
         progress: None,
         error: None,

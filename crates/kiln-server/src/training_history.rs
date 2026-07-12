@@ -135,6 +135,7 @@ mod tests {
             job_id: id.into(),
             adapter_name: format!("adapter-{id}"),
             job_type: TrainingJobType::Sft,
+            effective_seed: Some(17),
             state,
             progress: 1.0,
             loss: Some(0.5),

@@ -387,6 +387,7 @@
               <li><code>behavior_policy</code> selects recorded rollout probabilities or an explicit fixed-one ratio; <code>kl_reference_policy</code> independently selects the frozen KL anchor.</li>
               <li><code>lora_rank</code> and <code>lora_alpha</code> control adapter capacity.</li>
               <li><code>base_adapter</code> continues from an existing adapter.</li>
+              <li><code>seed</code> selects the run seed; when omitted, admission materializes one before queue publication and returns it as an exact decimal string.</li>
               <li><code>output_name</code> names the saved adapter.</li>
               <li><code>auto_load</code> defaults to <code>true</code>.</li>
               <li><code>checkpoint_interval</code> publishes exact state every N committed optimizer groups.</li>
@@ -417,6 +418,9 @@ kiln train grpo \
   --resume-checkpoint math-correctness-checkpoint-step-00000025.kiln-checkpoint</code></pre>
           <p class="text-sm mt-3" style="color: var(--fg-dim);">
             A <code>.jsonl</code> file uses the memory-bounded streamed route; JSON containing <code>groups</code> uses the inline route. Resume requires the identical source bytes, route, adapter, and effective configuration. Kiln validates and restores adapter, optimizer, reference/EMA, cursor/RNG, loss, and diagnostic state before GPU setup. Cancellation publishes at the next settled group boundary; a crash can lose the in-flight group but not the newest committed checkpoint. The browser job drill can copy the basename or prepare the matching form, and the full fail-closed contract is in <a href="https://github.com/ericflo/kiln/blob/main/docs/training-checkpoints.md">Native Training Checkpoints</a>.
+          </p>
+          <p class="text-sm mt-3" style="color: var(--fg-dim);">
+            Submission and status report the immutable <code>effective_seed</code> as a decimal string. Exact resume inherits the checkpoint&rsquo;s original LoRA-initialization seed and rejects a conflicting request. Same-seed fresh runs are comparable only with the same weights, data, tokenizer, build, backend, runtime, and precision environment.
           </p>
         </section>
       </article>

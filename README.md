@@ -382,6 +382,17 @@ curl http://localhost:8420/v1/train/sft \
 curl http://localhost:8420/v1/train/status
 ```
 
+Every accepted SFT, GRPO, OPD, or distillation submission materializes one
+immutable effective seed before the job becomes visible in the queue. The
+submit response, status/detail APIs, CLI, and dashboard report it as an exact
+decimal string so all 64 bits survive browser clients. Set `config.seed` to
+choose it; when omitted, Kiln chooses and persists it. An exact-resume request
+inherits the checkpoint's original LoRA-initialization seed and rejects a
+conflicting caller value. A seed makes a run repeatable only inside the rest of
+the declared deterministic environment; it is not a promise of byte-identical
+output across different builds, drivers, devices, precision policies, or
+backends.
+
 **Optional: use Kiln as pi's local agent model.** With the server running on `localhost:8420`, `kiln pi-setup` adds a `kiln-local` provider to pi without deleting your other providers or settings. Existing files are backed up first as `models.json.bak-<timestamp>` and `settings.json.bak-<timestamp>`.
 
 ```bash
@@ -458,19 +469,19 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets and opt-in exact single-choice `rollout_provenance` |
 | POST | `/v1/completions` | vLLM-shaped prompt-logprob subset with a canonical base-teacher identity fingerprint |
 | POST | `/v1/completions/batch` | Text-only batch generation (up to 64 prompts per request), with the same thinking-budget controls but no recorded behavior-policy probabilities |
-| POST | `/v1/train/sft` | Submit SFT training examples under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`) |
-| POST | `/v1/train/grpo` | Submit GRPO scored completions under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
+| POST | `/v1/train/sft` | Submit SFT training examples and return the exact effective seed under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`) |
+| POST | `/v1/train/grpo` | Submit GRPO scored completions and return the exact effective seed under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — same handler, semantically-honest name for multi-turn rollouts |
-| POST | `/v1/train/opd` | Submit on-policy or off-policy distillation against a registered, identity-bound teacher; exact checkpoints default to every 25 committed optimizer steps |
-| GET | `/v1/train/status` | Training queue and job status |
-| GET | `/v1/train/status/{job_id}` | Inspect one training job |
-| GET | `/v1/train/jobs/{job_id}` | Rich training job detail (loss curve, linked evals, and latest exact SFT/GRPO/OPD checkpoint metadata) |
+| POST | `/v1/train/opd` | Submit on-policy or off-policy distillation against a registered, identity-bound teacher, return the exact effective seed, and default exact checkpoints to every 25 committed optimizer steps |
+| GET | `/v1/train/status` | Training queue, job status, and exact effective seeds |
+| GET | `/v1/train/status/{job_id}` | Inspect one training job and its exact effective seed |
+| GET | `/v1/train/jobs/{job_id}` | Rich training job detail (effective seed, loss curve, linked evals, and latest exact SFT/GRPO/OPD checkpoint metadata) |
 | GET | `/v1/train/queue` | List queued training jobs |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a job (queued: dequeued; running: stops at the next step boundary) |
 | GET | `/v1/stats/mtp-acceptance` | Per-adapter MTP draft acceptance (live alpha) |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
-| POST | `/v1/distill/refresh` | Continual-learning distillation refresh job |
-| POST | `/v1/distill/pump` | Continual-learning distillation pump job |
+| POST | `/v1/distill/refresh` | Continual-learning distillation refresh job with an exact effective seed |
+| POST | `/v1/distill/pump` | Continual-learning distillation pump job with an exact effective seed |
 | GET / POST | `/v1/corrections` | Durable corrections store — the basket survives the browser; pi can file corrections |
 | DELETE | `/v1/corrections/{request_id}` | Remove a correction |
 | POST | `/v1/corrections/mark_trained` | Mark correction rows as trained into an adapter (kept as history) |
@@ -480,8 +491,8 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET | `/v1/cache/export` | Stream a deterministic validated export (16 GiB source / 1M-file limit); concurrent scans and archive import are rejected |
 | POST | `/v1/agent/traces/discover` | Index pi/agent session traces for training |
 | GET | `/v1/agent/traces` | List discovered agent session traces |
-| POST | `/v1/agent/self_improve` | One-call agentic self-improvement (traces → OPD + judge distill) |
-| POST | `/v1/agent/judge_distill` | Distill a judge LoRA from agent traces |
+| POST | `/v1/agent/self_improve` | One-call agentic self-improvement (traces → OPD + judge distill), returning effective seeds keyed by job ID |
+| POST | `/v1/agent/judge_distill` | Distill a judge LoRA from agent traces and return its exact effective seed |
 | GET / POST | `/v1/agent/runs` | Embedded pi runs — the server spawns `pi --mode rpc`, streams the trajectory, auto-indexes the session as a trace |
 | GET | `/v1/agent/runs/status` | Embedded-run gate state, pi availability, capacity |
 | GET | `/v1/agent/runs/{id}` | One run record (status, counters, session link) |
@@ -497,14 +508,15 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/adapters/upload` | Stage and atomically publish a multipart tar.gz adapter import |
 | GET  | `/v1/adapters/{name}/download` | Stream adapter as tar.gz (export) |
 | POST | `/v1/adapters/merge` | Stage and atomically publish an adapter merge (weighted_average, TIES, or concatenation modes) |
-| POST | `/v1/adapters/distill_merge` | Behaviour-space adapter merge |
+| POST | `/v1/adapters/distill_merge` | Behaviour-space adapter merge with an exact effective seed |
+| POST | `/v1/recipes/run` | Queue a typed training recipe and return effective seeds keyed by job ID |
 | GET / POST | `/v1/eval/suites` | List or register eval suites (body = `EvalSuite`) |
 | GET / DELETE | `/v1/eval/suites/{name}` | Fetch / delete one suite |
-| POST | `/v1/eval/run` | Submit an eval (registered suite or inline) |
-| POST | `/v1/eval/compare` | Run a suite across multiple adapters head-to-head |
-| GET | `/v1/eval/jobs` | List all eval jobs |
-| GET / DELETE | `/v1/eval/jobs/{job_id}` | Per-job status + outcomes / cancel |
-| POST | `/v1/eval/jobs/{job_id}/rerun` | Re-run only the failing examples from a completed job |
+| POST | `/v1/eval/run` | Submit an eval and materialize one effective seed (registered suite or inline) |
+| POST | `/v1/eval/compare` | Run a suite head-to-head with identical derived seeds across adapters |
+| GET | `/v1/eval/jobs` | List eval jobs, effective seeds, and headline results |
+| GET / DELETE | `/v1/eval/jobs/{job_id}` | Per-job seed/status/outcomes or cancel/delete |
+| POST | `/v1/eval/jobs/{job_id}/rerun` | Re-run failures with the original effective seed by default |
 | POST | `/v1/eval/datasets/upload` | Multipart upload of an SFT/GRPO JSONL dataset |
 | GET / DELETE | `/v1/eval/datasets/{name}` | Dataset manifest / delete |
 | GET | `/v1/eval/datasets/{name}/rows` | Stream first N rows (used by the SFT submit form's dataset picker) |

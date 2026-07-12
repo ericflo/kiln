@@ -35,6 +35,7 @@ pub async fn run_suite_against_adapter(
     suite: &EvalSuite,
     adapter: Option<&str>,
     generation_override: Option<&EvalGenerationParams>,
+    effective_seed: u64,
     generator: Arc<dyn EvalGenerator>,
     progress: Option<ProgressCallback>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -46,8 +47,12 @@ pub async fn run_suite_against_adapter(
     // validated exactly once per run.
     let (prepared_examples, resolved_budgets) =
         prepare_and_preflight_examples(suite, generation_override, generator.as_ref()).await?;
-    let effective_generation_hash =
-        hash_effective_generation(suite, generation_override, &resolved_budgets);
+    let effective_generation_hash = hash_effective_generation(
+        suite,
+        generation_override,
+        effective_seed,
+        &resolved_budgets,
+    );
 
     // Hoist the adapter swap out of the per-example loop. The previous
     // active adapter is restored at the end via the same call so a suite
@@ -62,6 +67,7 @@ pub async fn run_suite_against_adapter(
         suite,
         adapter,
         generation_override,
+        effective_seed,
         prepared_examples,
         resolved_budgets,
         effective_generation_hash,
@@ -104,6 +110,7 @@ async fn run_suite_inner(
     suite: &EvalSuite,
     adapter: Option<&str>,
     generation_override: Option<&EvalGenerationParams>,
+    effective_seed: u64,
     prepared_examples: Vec<Result<PreparedPrompt, String>>,
     resolved_budgets: Vec<EvalThinkingBudget>,
     effective_generation_hash: String,
@@ -160,6 +167,7 @@ async fn run_suite_inner(
         }
         let (gen_params, _) = effective_generation(example, suite, generation_override);
         let gen_params = gen_params.clone();
+        let example_seed = gen_params.seed.unwrap_or(effective_seed);
         let resolved_budget = &resolved_budgets[outcomes_example_index];
 
         // Prompts were rendered before the adapter swap so all active budget
@@ -172,6 +180,11 @@ async fn run_suite_inner(
                 let outcome = ExampleOutcome {
                     example_id: example_id.clone(),
                     completion_index: 0,
+                    generation_seed: Some(kiln_eval::derive_eval_completion_seed(
+                        example_seed,
+                        &example_id,
+                        0,
+                    )),
                     completion_text: String::new(),
                     raw_completion_text: None,
                     thinking_budget: None,
@@ -197,10 +210,14 @@ async fn run_suite_inner(
             if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
+            let generation_seed =
+                kiln_eval::derive_eval_completion_seed(example_seed, &example_id, completion_idx);
+            let mut completion_params = gen_params.clone();
+            completion_params.seed = Some(generation_seed);
             let result = generator
                 .run(
                     &prepared,
-                    &gen_params,
+                    &completion_params,
                     resolved_budget,
                     completion_idx,
                     adapter,
@@ -277,6 +294,7 @@ async fn run_suite_inner(
                         ExampleOutcome {
                             example_id: example_id.clone(),
                             completion_index: completion_idx,
+                            generation_seed: Some(generation_seed),
                             completion_text: completion.text.clone(),
                             raw_completion_text: Some(completion.raw_text.clone()),
                             thinking_budget: Some(completion.thinking_budget.clone()),
@@ -307,6 +325,7 @@ async fn run_suite_inner(
                             Err(e) => ExampleOutcome {
                                 example_id: example_id.clone(),
                                 completion_index: completion_idx,
+                                generation_seed: Some(generation_seed),
                                 completion_text: completion.text.clone(),
                                 raw_completion_text: Some(completion.raw_text.clone()),
                                 thinking_budget: Some(completion.thinking_budget.clone()),
@@ -323,6 +342,7 @@ async fn run_suite_inner(
                             },
                         };
                         o.completion_index = completion_idx;
+                        o.generation_seed = Some(generation_seed);
                         o.prompt_tokens = Some(completion.prompt_tokens);
                         o.completion_tokens = Some(completion.completion_tokens);
                         o.latency_ms = Some(completion.latency_ms);
@@ -340,6 +360,7 @@ async fn run_suite_inner(
                 Err(err) => ExampleOutcome {
                     example_id: example_id.clone(),
                     completion_index: completion_idx,
+                    generation_seed: Some(generation_seed),
                     completion_text: String::new(),
                     raw_completion_text: None,
                     thinking_budget: None,
@@ -454,6 +475,7 @@ async fn run_suite_inner(
                 match result {
                     Ok(mut o) => {
                         o.completion_index = item.completion_idx;
+                        o.generation_seed = slot.generation_seed;
                         o.prompt_tokens = Some(item.prompt_tokens);
                         o.completion_tokens = Some(item.completion_tokens);
                         o.latency_ms = Some(item.latency_ms);
@@ -586,9 +608,12 @@ async fn prepare_and_preflight_examples(
 fn hash_effective_generation(
     suite: &EvalSuite,
     generation_override: Option<&EvalGenerationParams>,
+    effective_seed: u64,
     resolved_budgets: &[EvalThinkingBudget],
 ) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(kiln_eval::EVAL_SEED_DERIVATION_V1.as_bytes());
+    hasher.update(effective_seed.to_le_bytes());
     if let Ok(bytes) = serde_json::to_vec(suite) {
         hasher.update(bytes);
     }
@@ -661,6 +686,7 @@ mod tests {
         starts_in_reasoning: bool,
         preflight_calls: AtomicUsize,
         adapter_calls: AtomicUsize,
+        seeds: std::sync::Mutex<Vec<u64>>,
     }
 
     impl EvalGenerator for PreflightProbeGenerator {
@@ -726,7 +752,7 @@ mod tests {
         fn run(
             &self,
             _prepared: &PreparedPrompt,
-            _params: &EvalGenerationParams,
+            params: &EvalGenerationParams,
             thinking_budget: &EvalThinkingBudget,
             _completion_index: usize,
             adapter_label: Option<&str>,
@@ -738,6 +764,11 @@ mod tests {
                     + '_,
             >,
         > {
+            self.seeds.lock().unwrap().push(
+                params
+                    .seed
+                    .expect("executor must materialize a decoder seed"),
+            );
             let thinking_budget = thinking_budget.clone();
             let adapter = adapter_label.map(str::to_string);
             Box::pin(async move {
@@ -763,11 +794,13 @@ mod tests {
             starts_in_reasoning: false,
             preflight_calls: AtomicUsize::new(0),
             adapter_calls: AtomicUsize::new(0),
+            seeds: std::sync::Mutex::new(Vec::new()),
         });
         let result = run_suite_against_adapter(
             &suite,
             None,
             None,
+            17,
             inert.clone(),
             None,
             Arc::new(AtomicBool::new(false)),
@@ -795,11 +828,13 @@ mod tests {
             starts_in_reasoning: true,
             preflight_calls: AtomicUsize::new(0),
             adapter_calls: AtomicUsize::new(0),
+            seeds: std::sync::Mutex::new(Vec::new()),
         });
         let error = run_suite_against_adapter(
             &suite,
             None,
             None,
+            17,
             active.clone(),
             None,
             Arc::new(AtomicBool::new(false)),
@@ -817,6 +852,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn job_seed_derives_stable_distinct_per_example_completion_seeds() {
+        let mut suite = suite_with_numeric_answer();
+        suite.generation.n = 2;
+        let probe = Arc::new(PreflightProbeGenerator {
+            starts_in_reasoning: false,
+            preflight_calls: AtomicUsize::new(0),
+            adapter_calls: AtomicUsize::new(0),
+            seeds: std::sync::Mutex::new(Vec::new()),
+        });
+        let result = run_suite_against_adapter(
+            &suite,
+            Some("candidate"),
+            None,
+            42,
+            probe.clone(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            noop_judge_runner(),
+        )
+        .await
+        .unwrap();
+
+        let expected = ["e1", "e2"]
+            .into_iter()
+            .flat_map(|id| {
+                (0..2).map(move |idx| kiln_eval::derive_eval_completion_seed(42, id, idx))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(*probe.seeds.lock().unwrap(), expected);
+        assert_eq!(
+            result
+                .outcomes
+                .iter()
+                .map(|outcome| outcome.generation_seed.unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            expected
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            expected.len(),
+            "every stable example/completion identity needs an independent seed"
+        );
+
+        let repeat = Arc::new(PreflightProbeGenerator {
+            starts_in_reasoning: false,
+            preflight_calls: AtomicUsize::new(0),
+            adapter_calls: AtomicUsize::new(0),
+            seeds: std::sync::Mutex::new(Vec::new()),
+        });
+        run_suite_against_adapter(
+            &suite,
+            Some("baseline"),
+            None,
+            42,
+            repeat.clone(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            noop_judge_runner(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *repeat.seeds.lock().unwrap(),
+            expected,
+            "paired adapter runs must consume identical decoder seeds"
+        );
+    }
+
+    #[tokio::test]
     async fn full_pass_when_mock_replies_with_target() {
         let gen_ = Arc::new(MockEvalGenerator::new().with_force_reply("the answer is 2"))
             as Arc<dyn EvalGenerator>;
@@ -830,6 +938,7 @@ mod tests {
             &suite,
             None,
             None,
+            17,
             gen_,
             None,
             Arc::new(AtomicBool::new(false)),
@@ -874,6 +983,7 @@ mod tests {
             &suite,
             None,
             None,
+            17,
             gen_,
             None,
             Arc::new(AtomicBool::new(false)),
@@ -959,6 +1069,7 @@ mod tests {
             &judge_suite(),
             Some("eval-adapter"),
             None,
+            17,
             gen_,
             None,
             Arc::new(AtomicBool::new(false)),
@@ -1005,6 +1116,7 @@ mod tests {
             &judge_suite(),
             None,
             None,
+            17,
             gen_,
             None,
             Arc::new(AtomicBool::new(false)),
@@ -1025,10 +1137,18 @@ mod tests {
             Arc::new(MockEvalGenerator::new().with_force_reply("2")) as Arc<dyn EvalGenerator>;
         let suite = suite_with_numeric_answer();
         let flag = Arc::new(AtomicBool::new(true));
-        let result =
-            run_suite_against_adapter(&suite, None, None, gen_, None, flag, noop_judge_runner())
-                .await
-                .unwrap();
+        let result = run_suite_against_adapter(
+            &suite,
+            None,
+            None,
+            17,
+            gen_,
+            None,
+            flag,
+            noop_judge_runner(),
+        )
+        .await
+        .unwrap();
         assert_eq!(result.outcomes.len(), 0);
     }
 
@@ -1046,6 +1166,7 @@ mod tests {
             &suite,
             None,
             None,
+            17,
             gen_,
             Some(cb),
             Arc::new(AtomicBool::new(false)),
@@ -1068,6 +1189,7 @@ mod tests {
             &suite,
             Some("alpha"),
             None,
+            17,
             gen_.clone(),
             None,
             Arc::new(AtomicBool::new(false)),
@@ -1079,6 +1201,7 @@ mod tests {
             &suite,
             Some("beta"),
             None,
+            17,
             gen_,
             None,
             Arc::new(AtomicBool::new(false)),

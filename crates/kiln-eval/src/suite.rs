@@ -38,8 +38,9 @@ pub struct EvalGenerationParams {
     pub n: usize,
     #[serde(default)]
     pub stop: Vec<String>,
-    /// Optional fixed seed for deterministic decoding. When `None` the server
-    /// picks one per request (and records it in the result for replayability).
+    /// Optional base seed for deterministic decoding. When `None`, execution
+    /// inherits the immutable job seed. Every example/completion derives and
+    /// records its own decoder seed from that base.
     #[serde(default)]
     pub seed: Option<u64>,
     /// Maximum reasoning tokens before forced `</think>` closure. Omitted
@@ -359,7 +360,7 @@ impl EvalSuite {
         }
     }
 
-    fn validate(&self) -> Result<(), SuiteLoadError> {
+    pub fn validate(&self) -> Result<(), SuiteLoadError> {
         if self.name.trim().is_empty() {
             return Err(SuiteLoadError::Parse(
                 "suite name must be non-empty".to_string(),
@@ -377,7 +378,19 @@ impl EvalSuite {
             ));
         }
         validate_tools_schema(self.tools.as_deref(), "suite-level tools")?;
+        let mut resolved_ids = std::collections::BTreeSet::new();
         for (idx, ex) in self.examples.iter().enumerate() {
+            if ex.id.as_deref().is_some_and(|id| id.trim().is_empty()) {
+                return Err(SuiteLoadError::Parse(format!(
+                    "example {idx} has an empty explicit id"
+                )));
+            }
+            let resolved_id = ex.resolved_id();
+            if !resolved_ids.insert(resolved_id.clone()) {
+                return Err(SuiteLoadError::Parse(format!(
+                    "example {idx} has duplicate resolved id {resolved_id:?}; assign unique explicit ids"
+                )));
+            }
             if ex.messages.is_empty() {
                 return Err(SuiteLoadError::Parse(format!(
                     "example {idx} has empty messages"
@@ -467,6 +480,10 @@ pub struct EvalCompareSpec {
     /// Adapter names to compare. An empty string means the base model
     /// (no adapter). Order is preserved in the result.
     pub adapters: Vec<String>,
+    /// Optional job-level seed. This materializes one paired seed without
+    /// replacing the suite's other generation settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
     /// Optional generation override applied to every adapter run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<EvalGenerationParams>,
@@ -529,6 +546,29 @@ mod tests {
         let mut e2 = e.clone();
         e2.id = Some("custom-id".to_string());
         assert_eq!(e2.resolved_id(), "custom-id");
+    }
+
+    #[test]
+    fn suite_validation_rejects_duplicate_or_empty_example_identities() {
+        let example = EvalExample {
+            messages: vec![EvalChatMessage::new("user", "same")],
+            ..Default::default()
+        };
+        let mut suite = mk_suite(
+            "identity-test",
+            Scorer::ExactMatch {
+                case_sensitive: false,
+                strip_whitespace: true,
+            },
+            vec![example.clone(), example],
+        );
+        let error = suite.validate().unwrap_err().to_string();
+        assert!(error.contains("duplicate resolved id"), "{error}");
+
+        suite.examples.truncate(1);
+        suite.examples[0].id = Some(" ".into());
+        let error = suite.validate().unwrap_err().to_string();
+        assert!(error.contains("empty explicit id"), "{error}");
     }
 
     #[test]

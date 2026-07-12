@@ -6,6 +6,99 @@ use std::collections::BTreeMap;
 pub use kiln_core::thinking_budget::ThinkingBudgetOutcome as EvalThinkingBudgetOutcome;
 pub use kiln_core::thinking_budget::ThinkingBudgetRecord as EvalThinkingBudget;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Serde adapter for exact `u64` values on JSON-facing provenance fields.
+/// JavaScript cannot represent every `u64` as a number, so new result fields
+/// serialize as decimal strings while deserialization accepts either form.
+pub mod u64_decimal {
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Decimal(String),
+        Number(u64),
+    }
+
+    pub fn serialize<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Wire::deserialize(deserializer)? {
+            Wire::Decimal(value) => value.parse().map_err(de::Error::custom),
+            Wire::Number(value) => Ok(value),
+        }
+    }
+}
+
+pub mod optional_u64_decimal {
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Decimal(String),
+        Number(u64),
+    }
+
+    pub fn serialize<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(value) => serializer.serialize_some(&value.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<Wire>::deserialize(deserializer)? {
+            Some(Wire::Decimal(value)) => value.parse().map(Some).map_err(de::Error::custom),
+            Some(Wire::Number(value)) => Ok(Some(value)),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Version tag for the deterministic eval seed derivation contract.
+pub const EVAL_SEED_DERIVATION_V1: &str = "kiln.eval-seed.v1";
+
+/// Derive one stable decoder seed from a job/example/completion identity.
+///
+/// The example ID, rather than its ordinal or suite name, keeps a filtered
+/// re-run on the same seed as the original job. Callers must persist both the
+/// job seed and this derived value so the contract remains auditable if a
+/// future schema changes the derivation.
+pub fn derive_eval_completion_seed(
+    effective_seed: u64,
+    example_id: &str,
+    completion_index: usize,
+) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(EVAL_SEED_DERIVATION_V1.as_bytes());
+    hasher.update([0]);
+    hasher.update(effective_seed.to_le_bytes());
+    hasher.update((example_id.len() as u64).to_le_bytes());
+    hasher.update(example_id.as_bytes());
+    hasher.update((completion_index as u64).to_le_bytes());
+    let digest = hasher.finalize();
+    u64::from_le_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix is eight bytes"),
+    )
+}
 
 /// Lifecycle of an eval job (mirrors the training-job state machine so
 /// dashboards can render both with one code path).
@@ -42,6 +135,14 @@ pub enum EvalOutcomeKind {
 pub struct ExampleOutcome {
     pub example_id: String,
     pub completion_index: usize,
+    /// Exact decoder seed derived for this example/completion. Absent only on
+    /// legacy results written before eval seeds were materialized at enqueue.
+    #[serde(
+        default,
+        with = "optional_u64_decimal",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub generation_seed: Option<u64>,
     pub completion_text: String,
     /// Exact decoder text before eval-only normalization. In particular, a
     /// prompt prefilled with `<think>` does not make the decoder repeat that
@@ -608,6 +709,17 @@ pub struct SuiteResult {
 pub struct EvalResult {
     pub job_id: String,
     pub state: EvalJobState,
+    /// One immutable seed materialized before the job enters the queue.
+    /// Example/completion seeds are derived from it with `seed_derivation`.
+    /// Both fields are absent only on legacy archived jobs.
+    #[serde(
+        default,
+        with = "optional_u64_decimal",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub effective_seed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_derivation: Option<String>,
     /// One entry per adapter requested. Single-adapter runs have len == 1.
     pub runs: Vec<SuiteResult>,
     /// Live progress for the currently-running adapter (cleared once the
@@ -751,6 +863,7 @@ mod tests {
         ExampleOutcome {
             example_id: id.into(),
             completion_index: idx,
+            generation_seed: None,
             completion_text: format!("c-{id}-{idx}"),
             raw_completion_text: None,
             thinking_budget: None,
@@ -776,6 +889,22 @@ mod tests {
         assert_eq!(lat.max_ms, 50.0);
     }
 
+    #[test]
+    fn eval_seed_derivation_has_a_pinned_v1_golden() {
+        assert_eq!(
+            derive_eval_completion_seed(42, "example-7", 3),
+            1_961_911_680_962_343_893
+        );
+        assert_ne!(
+            derive_eval_completion_seed(42, "example-7", 3),
+            derive_eval_completion_seed(42, "example-7", 4)
+        );
+        assert_ne!(
+            derive_eval_completion_seed(42, "example-7", 3),
+            derive_eval_completion_seed(43, "example-7", 3)
+        );
+    }
+
     fn mk_run(adapter: &str, outcomes: Vec<ExampleOutcome>) -> SuiteResult {
         SuiteResult {
             suite_name: "test".into(),
@@ -792,6 +921,7 @@ mod tests {
     #[test]
     fn outcome_serializes_raw_text_and_thinking_budget_provenance() {
         let mut outcome = mk("a", 0, EvalOutcomeKind::Pass, 1.0, 2.0);
+        outcome.generation_seed = Some(73);
         outcome.raw_completion_text = Some("decoder continuation".into());
         outcome.thinking_budget = Some(EvalThinkingBudget {
             configured: true,
@@ -809,6 +939,7 @@ mod tests {
         });
 
         let json = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(json["generation_seed"], "73");
         assert_eq!(json["raw_completion_text"], "decoder continuation");
         assert_eq!(json["thinking_budget"]["max_tokens"], 12);
         assert_eq!(json["thinking_budget"]["trigger"], "tokens");
@@ -824,6 +955,18 @@ mod tests {
         let decoded: ExampleOutcome = serde_json::from_value(legacy).unwrap();
         assert!(decoded.raw_completion_text.is_none());
         assert!(decoded.thinking_budget.is_none());
+        assert!(decoded.generation_seed.is_none());
+
+        for wire_seed in [
+            serde_json::json!(u64::MAX),
+            serde_json::json!(u64::MAX.to_string()),
+        ] {
+            let mut value =
+                serde_json::to_value(mk("seeded", 0, EvalOutcomeKind::Pass, 1.0, 1.0)).unwrap();
+            value["generation_seed"] = wire_seed;
+            let decoded: ExampleOutcome = serde_json::from_value(value).unwrap();
+            assert_eq!(decoded.generation_seed, Some(u64::MAX));
+        }
     }
 
     #[test]
@@ -878,6 +1021,8 @@ mod tests {
         let result = EvalResult {
             job_id: "j1".into(),
             state: EvalJobState::Completed,
+            effective_seed: None,
+            seed_derivation: None,
             runs: vec![baseline, candidate],
             progress: None,
             error: None,
@@ -896,6 +1041,8 @@ mod tests {
         let result = EvalResult {
             job_id: "j2".into(),
             state: EvalJobState::Completed,
+            effective_seed: None,
+            seed_derivation: None,
             runs: vec![mk_run(
                 "v0",
                 vec![mk("a", 0, EvalOutcomeKind::Pass, 1.0, 1.0)],

@@ -60,6 +60,9 @@ struct Args {
     /// Override max_tokens for every example.
     #[arg(long)]
     max_tokens: Option<usize>,
+    /// Effective job seed. Omit to materialize a random seed once and print it.
+    #[arg(long)]
+    seed: Option<u64>,
     /// Evaluate at most this many suite examples.
     #[arg(long)]
     limit: Option<usize>,
@@ -104,6 +107,14 @@ async fn main() -> Result<()> {
         .connect_timeout(Duration::from_secs(10))
         .build()?;
     let started_at = chrono::Utc::now();
+    let effective_seed = args
+        .seed
+        .or(suite.generation.seed)
+        .unwrap_or_else(rand::random);
+    eprintln!(
+        "effective_seed={effective_seed} derivation={}",
+        kiln_eval::EVAL_SEED_DERIVATION_V1
+    );
 
     let mut runs = Vec::new();
     for model in &args.models {
@@ -112,6 +123,7 @@ async fn main() -> Result<()> {
                 &client,
                 &suite,
                 model,
+                effective_seed,
                 &args,
                 api_key.as_deref(),
                 extra_body.as_ref(),
@@ -123,6 +135,8 @@ async fn main() -> Result<()> {
     let result = EvalResult {
         job_id: format!("trace-api-{}", uuid::Uuid::new_v4()),
         state: EvalJobState::Completed,
+        effective_seed: Some(effective_seed),
+        seed_derivation: Some(kiln_eval::EVAL_SEED_DERIVATION_V1.to_string()),
         runs,
         progress: None,
         error: None,
@@ -144,6 +158,7 @@ async fn run_model(
     client: &reqwest::Client,
     suite: &EvalSuite,
     model: &str,
+    effective_seed: u64,
     args: &Args,
     api_key: Option<&str>,
     extra_body: Option<&Value>,
@@ -181,15 +196,21 @@ async fn run_model(
         }
 
         let gen_params = effective_generation(suite, example, args);
+        let example_seed = gen_params.seed.unwrap_or(effective_seed);
         let n = gen_params.n.max(1);
         for completion_idx in 0..n {
+            let generation_seed =
+                kiln_eval::derive_eval_completion_seed(example_seed, &example_id, completion_idx);
+            let mut completion_params = gen_params.clone();
+            completion_params.seed = Some(generation_seed);
             jobs.push(EvalJob {
                 ordinal: jobs.len(),
                 example,
                 example_id: example_id.clone(),
                 scorer,
                 completion_idx,
-                gen_params: gen_params.clone(),
+                generation_seed,
+                gen_params: completion_params,
             });
         }
     }
@@ -262,6 +283,7 @@ struct EvalJob<'a> {
     example_id: String,
     scorer: &'a Scorer,
     completion_idx: usize,
+    generation_seed: u64,
     gen_params: EvalGenerationParams,
 }
 
@@ -294,7 +316,7 @@ async fn run_api_job(
     )
     .await;
     let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
-    let (outcome, predicted_tool, schema_violation) = match response {
+    let (mut outcome, predicted_tool, schema_violation) = match response {
         Ok(resp) => score_api_response(
             job.scorer,
             job.example,
@@ -307,6 +329,7 @@ async fn run_api_job(
             ExampleOutcome {
                 example_id: job.example_id.clone(),
                 completion_index: job.completion_idx,
+                generation_seed: Some(job.generation_seed),
                 completion_text: String::new(),
                 raw_completion_text: None,
                 thinking_budget: None,
@@ -325,6 +348,7 @@ async fn run_api_job(
             None,
         ),
     };
+    outcome.generation_seed = Some(job.generation_seed);
     Ok(ScoredCompletion {
         ordinal: job.ordinal,
         outcome,

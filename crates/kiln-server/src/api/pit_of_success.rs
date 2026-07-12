@@ -182,6 +182,12 @@ async fn submit_front_door(
     super::adapters::validate_adapter_name(&adapter_name)?;
     super::training::validate_lora_scale_at_submit(lora_scale.0, lora_scale.1, lora_scale.2)?;
     let top_k_adjustment = super::training::normalize_queued_opd_top_k(&state, &mut queued)?;
+    let effective_seed = crate::training_queue::materialize_queued_job_effective_seed(
+        &mut queued,
+        &state.adapter_dir,
+        &adapter_name,
+    )
+    .map_err(ApiError::training_invalid_request)?;
     super::training::enforce_queue_caps(&state)?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
@@ -189,6 +195,7 @@ async fn submit_front_door(
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
         job_type,
+        effective_seed: Some(effective_seed),
         state: kiln_train::TrainingState::Queued,
         progress: 0.0,
         loss: None,
@@ -225,6 +232,7 @@ async fn submit_front_door(
         training: TrainingResponse {
             job_id,
             state: kiln_train::TrainingState::Queued,
+            effective_seed: effective_seed.to_string(),
             message: format!(
                 "§8.2 front-door dispatched to {pipeline}.{}",
                 top_k_adjustment.map_or_else(String::new, |(requested, effective)| {

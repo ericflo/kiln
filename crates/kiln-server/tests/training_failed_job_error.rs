@@ -85,6 +85,7 @@ fn enqueue_sft_job(state: &AppState, job_id: &str) {
         job_id: job_id.to_string(),
         adapter_name: "test-adapter".to_string(),
         job_type: TrainingJobType::Sft,
+        effective_seed: Some(17),
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,

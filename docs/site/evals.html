@@ -377,7 +377,7 @@
         <div class="label mb-3">Run a suite</div>
         <h2 id="run-suite" class="text-2xl font-semibold mb-4">Grade an adapter against a registered or inline suite</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          <code>POST /v1/eval/run</code> queues the job and returns immediately with a <code>job_id</code>. The eval worker resolves the suite from disk (or uses an inline copy), drives the in-process inference path through the requested adapter, and writes per-example outcomes plus a headline accuracy as it goes. Drill into <code>/ui</code> &rsaquo; Evals to watch progress live.
+          <code>POST /v1/eval/run</code> queues the job and returns immediately with a <code>job_id</code> and exact <code>effective_seed</code>. The eval worker resolves the suite from disk (or uses an inline copy), drives the in-process inference path through the requested adapter, and writes per-example outcomes plus a headline accuracy as it goes. Drill into <code>/ui</code> &rsaquo; Evals to watch progress and copy the job or per-completion seeds.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">Run a registered suite against an adapter</h3>
@@ -385,7 +385,8 @@
   -H "Content-Type: application/json" \
   -d '{
     "suite": "trajectories-suite",
-    "adapter": "my-coder-v3"
+    "adapter": "my-coder-v3",
+    "seed": 42
   }' \
   | python3 -m json.tool</code></pre>
         </section>
@@ -394,7 +395,7 @@
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/jobs/$JOB_ID | python3 -m json.tool</code></pre>
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
-          Re-run only failures from a completed job with <code>POST /v1/eval/jobs/{id}/rerun</code> &mdash; useful for iterating on a scorer or prompt template without re-grading the whole suite.
+          Re-run only failures from a completed job with <code>POST /v1/eval/jobs/{id}/rerun</code>. The re-run retains the original effective seed by default; send <code>{"seed": 73}</code> only when changing it deliberately.
         </p>
       </article>
 
@@ -402,7 +403,7 @@
         <div class="label mb-3">Compare</div>
         <h2 id="compare" class="text-2xl font-semibold mb-4">Head-to-head adapter comparison</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          <code>POST /v1/eval/compare</code> runs one suite across N adapters serially on the same prompts and seeds, so the per-example diffs in the drill-in modal are apples to apples. Pass an empty string for one of the entries to compare against the no-adapter baseline.
+          <code>POST /v1/eval/compare</code> materializes one job seed, derives stable seeds from each <code>example_id</code> and completion index, and runs every adapter on those same sampling inputs. Empty or duplicate resolved example IDs are rejected so seeds and aggregate rows cannot alias. Pass an empty string for one adapter entry to compare against the no-adapter baseline. Omit <code>seed</code> for a recorded random value or set it at the top level without replacing the suite's other generation settings.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">Compare three adapters + baseline</h3>
@@ -411,10 +412,14 @@
   -d '{
     "suite": "trajectories-suite",
     "adapters": ["", "my-coder-v2", "my-coder-v3", "my-coder-v4"],
-    "generation": { "temperature": 0.0, "max_tokens": 256, "seed": 42 }
+    "seed": 42,
+    "generation": { "temperature": 0.0, "max_tokens": 256 }
   }' \
   | python3 -m json.tool</code></pre>
         </section>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          Results encode <code>effective_seed</code> and each outcome's <code>generation_seed</code> as decimal strings so browser clients preserve all 64 bits. <code>seed_derivation: "kiln.eval-seed.v1"</code> versions the mapping. Seeded inputs support same-environment comparison and audit; they do not imply byte-identical output across different model revisions, binaries, drivers, devices, kernels, or precision policies.
+        </p>
       </article>
 
       <article class="card p-6">

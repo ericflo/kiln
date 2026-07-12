@@ -25,8 +25,8 @@ pub use judgments::{
     JudgmentWinner, build_validation_suite, compile_judgments_to_sft, format_judge_prompt,
 };
 pub use queue::{
-    EvalJobInfo, EvalJobs, EvalQueue, EvalQueueEntry, EvalSubmissionKind, QueuedEvalJob,
-    SharedEvalQueue, new_shared_eval_queue,
+    EvalEnqueueReceipt, EvalJobInfo, EvalJobs, EvalQueue, EvalQueueEntry, EvalSubmissionKind,
+    QueuedEvalJob, SharedEvalQueue, new_shared_eval_queue,
 };
 pub use registry::{SuiteRegistry, SuiteRegistryError};
 pub use rerun::rerun_filtered_suite;

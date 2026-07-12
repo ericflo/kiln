@@ -595,6 +595,9 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">
           For interruptible SFT, GRPO, or OPD, add <code>--checkpoint-interval N</code>; OPD defaults to 25. Job status reports the newest immutable <code>.kiln-checkpoint</code> basename. Continue with the identical source, route, adapter, and options plus <code>--resume-checkpoint BASENAME</code>; OPD also requires the exact registered teacher revision. This restores exact optimizer and loop state, not just adapter weights.
         </p>
+        <p class="text-sm mt-3" style="color: var(--fg-mute);">
+          Every accepted training submission also prints and persists one exact effective seed before it enters the queue. Record that decimal string with the job ID; the dashboard keeps it visible and copyable. A resume uses the checkpoint&rsquo;s original seed and rejects a mismatch. Reusing a seed is meaningful only with the same weights, data, tokenizer/template, build, backend, device/runtime, precision, kernels, and effective environment.
+        </p>
       </div>
       <div class="card p-5 mb-4" style="background: rgba(249, 115, 22, 0.08); border-color: rgba(249, 115, 22, 0.22);">
         <h3 class="font-semibold mb-2">Prove the adapter is better &mdash; evals are a peer of training</h3>

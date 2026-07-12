@@ -61,7 +61,18 @@ pub enum EvalSubmissionKind {
 /// only carries the routing info the worker needs to start work.
 pub struct EvalQueueEntry {
     pub job_id: String,
+    /// Immutable seed resolved before this entry becomes visible to the
+    /// worker. Kept beside the payload so execution cannot observe a mutable
+    /// tracking-map value.
+    pub effective_seed: u64,
     pub job: QueuedEvalJob,
+}
+
+/// Immutable identifiers returned by the central eval admission path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalEnqueueReceipt {
+    pub job_id: String,
+    pub effective_seed: u64,
 }
 
 fn now_instant_default() -> std::time::Instant {
@@ -104,6 +115,14 @@ pub struct EvalJobInfo {
     pub suite_name: String,
     pub adapters: Vec<Option<String>>,
     pub submission_kind: EvalSubmissionKind,
+    /// Immutable job seed. `None` is reserved for archives written before
+    /// eval seed materialization was introduced.
+    #[serde(
+        default,
+        with = "kiln_eval::result::optional_u64_decimal",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub effective_seed: Option<u64>,
     pub state: EvalJobState,
     pub progress: EvalProgress,
     /// One per finished adapter (compare-mode jobs accumulate as they go).
@@ -146,12 +165,14 @@ impl EvalJobInfo {
         adapters: Vec<Option<String>>,
         submission_kind: EvalSubmissionKind,
         source_training_job_id: Option<String>,
+        effective_seed: u64,
     ) -> Self {
         Self {
             job_id,
             suite_name,
             adapters,
             submission_kind,
+            effective_seed: Some(effective_seed),
             state: EvalJobState::Queued,
             progress: EvalProgress::default(),
             finished_runs: Vec::new(),
@@ -174,6 +195,10 @@ impl EvalJobInfo {
         EvalResult {
             job_id: self.job_id.clone(),
             state: self.state,
+            effective_seed: self.effective_seed,
+            seed_derivation: self
+                .effective_seed
+                .map(|_| kiln_eval::EVAL_SEED_DERIVATION_V1.to_string()),
             runs: self.finished_runs.clone(),
             progress: if matches!(self.state, EvalJobState::Running | EvalJobState::Queued) {
                 Some(self.progress.clone())
@@ -256,6 +281,7 @@ mod tests {
         let mut q = EvalQueue::new();
         q.push(EvalQueueEntry {
             job_id: "a".into(),
+            effective_seed: 1,
             job: QueuedEvalJob::Inline {
                 suite: Box::new(dummy_suite()),
                 adapter: None,
@@ -264,6 +290,7 @@ mod tests {
         });
         q.push(EvalQueueEntry {
             job_id: "b".into(),
+            effective_seed: 2,
             job: QueuedEvalJob::Inline {
                 suite: Box::new(dummy_suite()),
                 adapter: None,
@@ -281,6 +308,7 @@ mod tests {
         let mut q = EvalQueue::new();
         q.push(EvalQueueEntry {
             job_id: "a".into(),
+            effective_seed: 1,
             job: QueuedEvalJob::Inline {
                 suite: Box::new(dummy_suite()),
                 adapter: None,
@@ -309,8 +337,28 @@ mod tests {
         let cmp = QueuedEvalJob::Compare(EvalCompareSpec {
             suite: "cmp".into(),
             adapters: vec!["a".into(), "b".into()],
+            seed: None,
             generation: None,
         });
         assert_eq!(cmp.suite_name(), "cmp");
+    }
+
+    #[test]
+    fn legacy_archived_job_without_seed_remains_readable_and_honest() {
+        let info = EvalJobInfo::queued(
+            "legacy".into(),
+            "t".into(),
+            vec![None],
+            EvalSubmissionKind::OnDemand,
+            None,
+            17,
+        );
+        let mut value = serde_json::to_value(info).unwrap();
+        value.as_object_mut().unwrap().remove("effective_seed");
+        let decoded: EvalJobInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.effective_seed, None);
+        let public = decoded.to_result();
+        assert_eq!(public.effective_seed, None);
+        assert_eq!(public.seed_derivation, None);
     }
 }

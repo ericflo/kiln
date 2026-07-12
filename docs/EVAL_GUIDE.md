@@ -70,12 +70,13 @@ documented here.
 3. **Run it.**
 
    ```bash
-   kiln-eval run --suite math-smoke --adapter my-trained-adapter --watch
+   kiln-eval run --suite math-smoke --adapter my-trained-adapter --seed 42 --watch
    ```
 
    The CLI prints a per-suite summary when the job lands:
 
    ```
+   Effective seed: 42 (kiln.eval-seed.v1)
    Suite: math-smoke | Adapter: my-trained-adapter
      accuracy:  66.7%  |  mean: 0.667  |  weighted: 0.667
      pass:2  fail:1  invalid:0  error:0  (n=3)
@@ -541,6 +542,33 @@ For a reasoning eval that still guarantees time for a final answer:
 An omitted budget inherits the server default. Explicit `null` makes that
 dimension unlimited for the example, and `0` closes thinking immediately.
 
+## Seed contract
+
+Every eval job materializes one immutable `effective_seed` before it enters
+the queue. Supply the top-level `seed` on `/v1/eval/run` or
+`/v1/eval/compare` when you need a chosen value without replacing the suite's
+other generation settings. Otherwise Kiln uses the selected run-level
+`generation.seed`, then the suite-level `generation.seed`, and finally a
+random value. The submission response, job list/detail, on-disk job archive,
+CLI, and dashboard all expose the resolved value.
+
+Execution uses the versioned `kiln.eval-seed.v1` derivation over the selected
+base seed, stable `example_id`, and `completion_index`. Each outcome persists
+the resulting `generation_seed`; compare-mode adapters therefore receive the
+same per-example/per-completion seeds. A filtered failure re-run reuses the
+original job seed unless its request body supplies a replacement `seed`.
+Suite registration and inline submission reject empty or duplicate resolved
+example IDs, including identical id-less examples, because identity aliasing
+would also alias seeds and aggregate rows. Assign explicit unique IDs when two
+otherwise-identical cases are intentionally distinct.
+Seed provenance is encoded as decimal JSON strings in results so browsers do
+not round values above JavaScript's safe-integer limit. Request fields accept
+ordinary JSON integers.
+
+This contract makes sampling inputs inspectable and paired. It is not, by
+itself, a claim that outputs are byte-identical across different binaries,
+drivers, devices, kernels, precision policies, or model revisions.
+
 ## API reference
 
 ### `POST /v1/eval/suites`
@@ -558,13 +586,15 @@ Remove a registered suite.
 ### `POST /v1/eval/run`
 Submit an eval job. Exactly one of `suite` (registered name) or
 `inline_suite` must be set. Optional fields: `adapter` (empty string = base
-model), `generation` (override).
+model), `seed` (job-level seed), and `generation` (full override). The queued
+response includes `job_id`, `state`, and the exact decimal-string
+`effective_seed`.
 
 ### `POST /v1/eval/compare`
 Run a suite against multiple adapters in one job. Body:
 
 ```json
-{ "suite": "math-smoke", "adapters": ["", "v1", "v2"] }
+{ "suite": "math-smoke", "adapters": ["", "v1", "v2"], "seed": 42 }
 ```
 
 The job's `runs` array carries one `SuiteResult` per adapter in the order
@@ -576,7 +606,13 @@ List all tracked eval jobs (queued / running / terminal).
 ### `GET /v1/eval/jobs/{job_id}`
 Per-job status. While running, the response includes a `progress` object
 with `examples_completed`, `examples_total`, `running_accuracy`, and
-`running_mean_score`.
+`running_mean_score`. Every new job also reports decimal-string
+`effective_seed` and `seed_derivation`.
+
+### `POST /v1/eval/jobs/{job_id}/rerun`
+
+Re-run selected failing outcomes. Omit `seed` to retain the original job's
+effective seed, or provide a replacement seed deliberately.
 
 ### `DELETE /v1/eval/jobs/{job_id}`
 Cancel a queued or running job.
@@ -612,10 +648,10 @@ to point at a non-local server.
 ```bash
 kiln-eval list
 kiln-eval register --file smoke.json [--force]
-kiln-eval run --suite math-smoke --adapter v1 --watch
+kiln-eval run --suite math-smoke --adapter v1 --seed 42 --watch
 kiln-eval run --file smoke.json --adapter v1 --watch --json
-kiln-eval compare --suite math-smoke --adapter v1 --adapter v2 --watch
-kiln-eval probe --prompt "1+1?" --target 2 --scorer numeric --adapter v1
+kiln-eval compare --suite math-smoke --adapter v1 --adapter v2 --seed 42 --watch
+kiln-eval probe --prompt "1+1?" --target 2 --scorer numeric --adapter v1 --seed 42
 ```
 
 `probe` is a one-off helper that wraps a single example as an inline
@@ -651,13 +687,15 @@ Two layouts are supported:
 
 Each run also carries two audit hashes. `suite_hash` changes only when the
 suite content changes. `effective_generation_hash` additionally includes the
-run-level generation override and every example's resolved thinking-budget
-limits and provenance, so a run that inherits different server defaults has a
-different identity even when its suite file is unchanged.
+job seed and derivation schema, run-level generation override, and every
+example's resolved thinking-budget limits and provenance, so a run that
+inherits different defaults has a different identity even when its suite file
+is unchanged.
 
 Every example record (`outcomes[]`) carries:
 
-- `example_id`, `completion_index`, `completion_text`
+- `example_id`, `completion_index`, decimal-string `generation_seed`, and
+  `completion_text`
 - `raw_completion_text` — the exact decoder continuation. `completion_text`
   is the scoring form and may restore a prompt-prefilled `<think>` opener that
   the decoder itself did not repeat.

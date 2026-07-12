@@ -68,6 +68,7 @@ impl SuiteRegistry {
     /// Save a suite to disk. `force` overwrites an existing suite.
     pub fn save(&self, suite: &EvalSuite, force: bool) -> Result<PathBuf, SuiteRegistryError> {
         Self::validate_name(&suite.name)?;
+        suite.validate()?;
         let dir = self.root.join(&suite.name);
         if dir.exists() {
             if !force {

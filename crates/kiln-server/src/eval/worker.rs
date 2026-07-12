@@ -136,6 +136,7 @@ async fn run_one_job_with_generator(
             run_job(
                 &state,
                 &entry.job,
+                entry.effective_seed,
                 generator,
                 judge_runner,
                 Some(progress_cb),
@@ -537,6 +538,7 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
 async fn run_job(
     state: &AppState,
     job: &QueuedEvalJob,
+    effective_seed: u64,
     generator: Arc<dyn crate::eval::generator::EvalGenerator>,
     judge_runner: Arc<dyn JudgeRunner>,
     progress: Option<crate::eval::executor::ProgressCallback>,
@@ -558,6 +560,7 @@ async fn run_job(
                 &suite,
                 adapter.as_deref(),
                 generation_override.as_ref(),
+                effective_seed,
                 generator,
                 progress,
                 cancel_flag,
@@ -576,6 +579,7 @@ async fn run_job(
                 suite,
                 adapter.as_deref(),
                 generation_override.as_ref(),
+                effective_seed,
                 generator,
                 progress,
                 cancel_flag,
@@ -614,6 +618,7 @@ async fn run_job(
                     &suite,
                     adapter_opt,
                     spec.generation.as_ref(),
+                    effective_seed,
                     generator.clone(),
                     progress_slot.take(),
                     cancel_flag.clone(),
@@ -824,10 +829,12 @@ mod tests {
                 vec![None],
                 EvalSubmissionKind::OnDemand,
                 None,
+                17,
             ),
         );
         let entry = EvalQueueEntry {
             job_id: job_id.clone(),
+            effective_seed: 17,
             job: QueuedEvalJob::Inline {
                 suite: Box::new(suite),
                 adapter: None,
@@ -856,6 +863,7 @@ mod tests {
                 job_id: job_id.to_string(),
                 adapter_name: adapter.to_string(),
                 job_type: crate::state::TrainingJobType::Sft,
+                effective_seed: Some(17),
                 state: kiln_train::TrainingState::Completed,
                 progress: 1.0,
                 loss: None,
@@ -914,6 +922,7 @@ mod tests {
             vec![Some(gate.adapter_name.clone())],
             EvalSubmissionKind::PostTraining,
             Some(gate.training_job_id.clone()),
+            17,
         );
         info.post_eval_gate = Some(gate.clone());
         state
@@ -923,6 +932,7 @@ mod tests {
             .insert(job_id.clone(), info);
         let entry = EvalQueueEntry {
             job_id,
+            effective_seed: 17,
             job: QueuedEvalJob::Inline {
                 suite: Box::new(suite),
                 adapter: Some(gate.adapter_name.clone()),
@@ -1059,6 +1069,7 @@ mod tests {
             vec![Some("unmeasured".into())],
             EvalSubmissionKind::PostTraining,
             Some("train-3".into()),
+            17,
         );
         info.post_eval_gate = Some(crate::eval::queue::PostEvalGate {
             min_accuracy: 0.5,
@@ -1075,6 +1086,7 @@ mod tests {
             .insert(job_id.clone(), info);
         let entry = EvalQueueEntry {
             job_id,
+            effective_seed: 17,
             job: QueuedEvalJob::Registered {
                 suite_name: "missing-suite".into(),
                 adapter: Some("unmeasured".into()),
@@ -1200,10 +1212,12 @@ mod tests {
                 vec![None],
                 EvalSubmissionKind::OnDemand,
                 None,
+                17,
             ),
         );
         let entry = EvalQueueEntry {
             job_id: job_id.clone(),
+            effective_seed: 17,
             job: QueuedEvalJob::Inline {
                 suite: Box::new(big_suite(total_examples)),
                 adapter: None,

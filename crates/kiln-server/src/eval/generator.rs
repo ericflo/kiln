@@ -259,7 +259,7 @@ impl EvalGenerator for LiveEvalGenerator {
             if !starts_in_reasoning || !resolved.configured || params.max_tokens == 0 {
                 return Ok(resolved);
             }
-            let sampling = build_sampling(&params, 0);
+            let sampling = build_sampling(&params);
             if sampling
                 .stop
                 .iter()
@@ -422,7 +422,7 @@ impl EvalGenerator for LiveEvalGenerator {
         prepared: &PreparedPrompt,
         params: &EvalGenerationParams,
         thinking_budget: &EvalThinkingBudget,
-        completion_index: usize,
+        _completion_index: usize,
         adapter_label: Option<&str>,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<EvalCompletion, String>> + Send + '_>,
@@ -437,7 +437,9 @@ impl EvalGenerator for LiveEvalGenerator {
             state
                 .ensure_inference_admission_allowed()
                 .map_err(|error| format!("eval generation rejected: {error:#}"))?;
-            let mut sampling = build_sampling(&params, completion_index);
+            // The executor materializes a distinct seed for every stable
+            // example/completion identity before calling the generator.
+            let mut sampling = build_sampling(&params);
             if starts_in_reasoning && sampling.max_tokens > 0 && thinking_budget_record.configured {
                 if sampling
                     .stop
@@ -584,8 +586,7 @@ impl EvalGenerator for LiveEvalGenerator {
     }
 }
 
-fn build_sampling(params: &EvalGenerationParams, completion_index: usize) -> SamplingParams {
-    let seed = params.seed.map(|s| s.wrapping_add(completion_index as u64));
+fn build_sampling(params: &EvalGenerationParams) -> SamplingParams {
     // When the suite/example author didn't set explicit stop strings,
     // default to Qwen3.5's assistant turn terminators. Without this an
     // eval can run past `<|im_end|>` into a second `assistant\n<think>`
@@ -608,7 +609,7 @@ fn build_sampling(params: &EvalGenerationParams, completion_index: usize) -> Sam
         top_k: params.top_k,
         max_tokens: params.max_tokens,
         stop,
-        seed,
+        seed: params.seed,
         ..SamplingParams::greedy()
     }
 }

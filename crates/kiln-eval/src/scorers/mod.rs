@@ -274,6 +274,7 @@ pub fn score_completion(
                 let outcome = ExampleOutcome {
                     example_id,
                     completion_index: 0,
+                    generation_seed: None,
                     completion_text: completion_text.to_string(),
                     raw_completion_text: None,
                     thinking_budget: None,
@@ -477,6 +478,7 @@ pub fn score_completion(
     Ok(ExampleOutcome {
         example_id,
         completion_index: 0,
+        generation_seed: None,
         completion_text: completion_text.to_string(),
         raw_completion_text: None,
         thinking_budget: None,

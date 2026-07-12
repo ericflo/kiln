@@ -29,6 +29,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use kiln_train::{DistillPumpMode, DistillPumpRequest, OpdConfig, OpdRequest, TrainingResponse};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
 use crate::error::ApiError;
@@ -75,6 +76,7 @@ fn default_judge_config() -> OpdConfig {
 struct JudgeDistillResponse {
     job_id: String,
     state: TrainingState,
+    effective_seed: String,
     message: String,
 }
 
@@ -118,12 +120,17 @@ async fn judge_distill(
         &state,
         vec![prepare_agent_job(&job_id, &req.name, queued)],
     )?;
+    let effective_seed =
+        super::training::admitted_training_seeds(&state, std::slice::from_ref(&job_id))?
+            .remove(&job_id)
+            .expect("admission seed helper returned the requested job");
     let top_k_note = top_k_adjustment.map_or_else(String::new, |(requested, effective)| {
         format!(" Effective top_k was resolved from {requested} to {effective}.")
     });
     Ok(Json(JudgeDistillResponse {
         job_id,
         state: TrainingState::Queued,
+        effective_seed,
         message: format!(
             "Queued judge distillation for '{}' on {num_pairs} (turn, context) pairs \
              from your indexed pi sessions. Per §10.6.1 this is the one-time \
@@ -176,6 +183,8 @@ fn default_crisp_enabled() -> bool {
 #[derive(Debug, Serialize)]
 pub struct SelfImproveResponse {
     pub job_ids: Vec<String>,
+    /// Exact decimal seed for every queued phase, keyed by job ID.
+    pub effective_seeds: BTreeMap<String, String>,
     pub state: TrainingState,
     pub message: String,
 }
@@ -259,6 +268,7 @@ pub fn submit_self_improve(
         job_ids.push(crisp_job);
     }
     super::training::admit_training_jobs(state, pending)?;
+    let effective_seeds = super::training::admitted_training_seeds(state, &job_ids)?;
 
     let mut top_k_notes = Vec::new();
     if let Some((requested, effective)) = opd_top_k_adjustment {
@@ -273,6 +283,7 @@ pub fn submit_self_improve(
 
     Ok(SelfImproveResponse {
         job_ids,
+        effective_seeds,
         state: TrainingState::Queued,
         message: format!(
             "§10.6.2 self_improve queued on {num_tasks} task(s) from this week's pi \
@@ -485,6 +496,7 @@ fn prepare_agent_job(
         job_id: job_id.to_string(),
         adapter_name: adapter_name.to_string(),
         job_type: TrainingJobType::Opd,
+        effective_seed: None,
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,

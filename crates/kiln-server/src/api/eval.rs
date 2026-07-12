@@ -51,6 +51,10 @@ pub struct EvalRunRequest {
     /// "base model (no adapter)".
     #[serde(default)]
     pub adapter: Option<String>,
+    /// Optional job-level seed. Unlike a full generation override, this does
+    /// not replace the suite's temperature/top-p/max-token settings.
+    #[serde(default)]
+    pub seed: Option<u64>,
     /// Suite-wide generation override. Per-example overrides on the suite
     /// itself still win over this.
     #[serde(default)]
@@ -61,6 +65,8 @@ pub struct EvalRunRequest {
 pub struct EvalRunResponse {
     pub job_id: String,
     pub state: EvalJobState,
+    #[serde(with = "kiln_eval::result::u64_decimal")]
+    pub effective_seed: u64,
     pub message: String,
 }
 
@@ -188,6 +194,7 @@ async fn submit_eval(
     }
 
     // Normalize the adapter selection: empty string means base model.
+    let requested_job_seed = req.seed;
     let adapter = req
         .adapter
         .and_then(|s| if s.is_empty() { None } else { Some(s) });
@@ -215,6 +222,9 @@ async fn submit_eval(
         let suite = req
             .inline_suite
             .ok_or_else(|| ApiError::eval_invalid_request("inline_suite missing"))?;
+        suite.validate().map_err(|error| {
+            ApiError::eval_invalid_request(format!("invalid inline suite: {error}"))
+        })?;
         let suite_name = suite.name.clone();
         let queued = QueuedEvalJob::Inline {
             suite: Box::new(suite),
@@ -224,19 +234,34 @@ async fn submit_eval(
         (suite_name, queued)
     };
 
-    let job_id = state
-        .enqueue_eval(
+    let enqueued = match requested_job_seed {
+        Some(seed) => state.enqueue_eval_with_effective_seed(
+            suite_name.clone(),
+            adapters.clone(),
+            EvalSubmissionKind::OnDemand,
+            None,
+            queued_job,
+            seed,
+        ),
+        None => state.enqueue_eval(
             suite_name.clone(),
             adapters,
             EvalSubmissionKind::OnDemand,
             None,
             queued_job,
-        )
-        .map_err(|error| map_eval_enqueue_error(&state, error))?;
-    tracing::info!(job_id = %job_id, suite = %suite_name, "eval job queued");
+        ),
+    }
+    .map_err(|error| map_eval_enqueue_error(&state, error))?;
+    tracing::info!(
+        job_id = %enqueued.job_id,
+        effective_seed = enqueued.effective_seed,
+        suite = %suite_name,
+        "eval job queued"
+    );
     Ok(Json(EvalRunResponse {
-        job_id,
+        job_id: enqueued.job_id,
         state: EvalJobState::Queued,
+        effective_seed: enqueued.effective_seed,
         message: format!("Queued eval against suite `{suite_name}`"),
     }))
 }
@@ -283,7 +308,7 @@ async fn submit_compare(
         .map(|a| if a.is_empty() { None } else { Some(a.clone()) })
         .collect();
     let suite_name = spec.suite.clone();
-    let job_id = state
+    let enqueued = state
         .enqueue_eval(
             suite_name.clone(),
             adapters,
@@ -293,8 +318,9 @@ async fn submit_compare(
         )
         .map_err(|error| map_eval_enqueue_error(&state, error))?;
     Ok(Json(EvalRunResponse {
-        job_id,
+        job_id: enqueued.job_id,
         state: EvalJobState::Queued,
+        effective_seed: enqueued.effective_seed,
         message: format!("Queued compare-mode eval against suite `{suite_name}`"),
     }))
 }
@@ -335,6 +361,9 @@ struct RerunBody {
     /// whole point of this endpoint is debugging failures.
     #[serde(default)]
     include_pass: bool,
+    /// Override the original job seed. Omitted reuses it exactly.
+    #[serde(default)]
+    seed: Option<u64>,
 }
 
 async fn rerun_job(
@@ -346,7 +375,7 @@ async fn rerun_job(
         .suite_registry
         .as_ref()
         .ok_or_else(ApiError::eval_registry_unavailable)?;
-    let (suite_name, adapter, example_ids) = {
+    let (suite_name, adapter, example_ids, original_effective_seed) = {
         let jobs = state.eval_jobs.read().unwrap();
         let job = jobs
             .get(&job_id)
@@ -379,14 +408,19 @@ async fn rerun_job(
             .adapter
             .clone()
             .or_else(|| job.adapters.first().and_then(|a| a.clone()));
-        (suite_name, adapter, ids.into_iter().collect::<Vec<_>>())
+        (
+            suite_name,
+            adapter,
+            ids.into_iter().collect::<Vec<_>>(),
+            job.effective_seed,
+        )
     };
     if example_ids.is_empty() {
         return Err(ApiError::eval_invalid_request(
             "no matching outcomes to re-run",
         ));
     }
-    let inline = crate::eval::rerun_filtered_suite(suites, &suite_name, &example_ids).map_err(
+    let mut inline = crate::eval::rerun_filtered_suite(suites, &suite_name, &example_ids).map_err(
         |e| match e {
             crate::eval::rerun::RerunError::Registry(
                 crate::eval::SuiteRegistryError::NotFound(_),
@@ -394,8 +428,11 @@ async fn rerun_job(
             other => ApiError::eval_invalid_request(format!("{other}")),
         },
     )?;
+    if let Some(seed) = body.seed.or(original_effective_seed) {
+        inline.generation.seed = Some(seed);
+    }
     let suite_label = inline.name.clone();
-    let new_job_id = state
+    let enqueued = state
         .enqueue_eval(
             suite_label.clone(),
             vec![adapter.clone()],
@@ -409,8 +446,9 @@ async fn rerun_job(
         )
         .map_err(|error| map_eval_enqueue_error(&state, error))?;
     Ok(Json(EvalRunResponse {
-        job_id: new_job_id,
+        job_id: enqueued.job_id,
         state: EvalJobState::Queued,
+        effective_seed: enqueued.effective_seed,
         message: format!(
             "Queued re-run of {} example(s) from `{suite_name}`",
             example_ids.len()
@@ -774,6 +812,7 @@ async fn synthesize_dataset(
                         generation_override: None,
                     },
                 )
+                .map(|enqueued| enqueued.job_id)
                 .map_err(|error| map_eval_enqueue_error(&state, error))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1032,7 +1071,7 @@ async fn validate_judgment_adapter(
         }
     }
     let suite_name = suite.name.clone();
-    let job_id = state
+    let enqueued = state
         .enqueue_eval(
             suite_name,
             vec![Some(body.adapter.clone())],
@@ -1047,7 +1086,8 @@ async fn validate_judgment_adapter(
         .map_err(|error| map_eval_enqueue_error(&state, error))?;
     Ok(Json(serde_json::json!({
         "status": "queued",
-        "eval_job_id": job_id,
+        "eval_job_id": enqueued.job_id,
+        "effective_seed": enqueued.effective_seed.to_string(),
         "validation_suite": format!("judge-validate-{name}"),
         "warnings": warnings,
     })))
@@ -1333,7 +1373,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = serde_json::json!({"inline_suite": mk_inline_suite()});
-        let _ = router
+        let submitted = router
             .clone()
             .oneshot(
                 Request::builder()
@@ -1345,6 +1385,14 @@ mod tests {
             )
             .await
             .unwrap();
+        let submitted = axum::body::to_bytes(submitted.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let submitted: serde_json::Value = serde_json::from_slice(&submitted).unwrap();
+        let effective_seed = submitted["effective_seed"]
+            .as_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("submission must materialize an effective seed");
         let res = router
             .oneshot(
                 Request::builder()
@@ -1359,6 +1407,195 @@ mod tests {
             .unwrap();
         let resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(resp["jobs"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            resp["jobs"][0]["effective_seed"],
+            effective_seed.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_eval_seed_is_immutable_across_response_tracking_and_queue() {
+        let state = mk_state();
+        let router = routes().with_state(state.clone());
+        let body = serde_json::json!({
+            "inline_suite": mk_inline_suite(),
+            "seed": u64::MAX,
+        });
+        let res = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/eval/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["effective_seed"], u64::MAX.to_string());
+        let job_id = response["job_id"].as_str().unwrap();
+        assert_eq!(
+            state
+                .eval_jobs
+                .read()
+                .unwrap()
+                .get(job_id)
+                .unwrap()
+                .effective_seed,
+            Some(u64::MAX)
+        );
+        let entry = state.eval_queue.lock().unwrap().pop().unwrap();
+        assert_eq!(entry.job_id, job_id);
+        assert_eq!(entry.effective_seed, u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn compare_inherits_suite_seed_and_accepts_job_only_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = mk_state_with_registry(temp.path());
+        let mut suite = mk_inline_suite();
+        suite.generation.seed = Some(444);
+        state
+            .suite_registry
+            .as_ref()
+            .unwrap()
+            .save(&suite, false)
+            .unwrap();
+        let router = routes().with_state(state.clone());
+
+        for (body, expected) in [
+            (
+                serde_json::json!({
+                    "suite": suite.name.clone(),
+                    "adapters": ["", "candidate"]
+                }),
+                444u64,
+            ),
+            (
+                serde_json::json!({
+                    "suite": suite.name.clone(),
+                    "adapters": ["", "candidate"],
+                    "generation": {
+                        "temperature": 0.25,
+                        "top_p": 0.9,
+                        "top_k": 20,
+                        "max_tokens": 32,
+                        "n": 1
+                    }
+                }),
+                444u64,
+            ),
+            (
+                serde_json::json!({
+                    "suite": suite.name.clone(),
+                    "adapters": ["", "candidate"],
+                    "seed": 555u64
+                }),
+                555u64,
+            ),
+        ] {
+            let res = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/eval/compare")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(res.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response["effective_seed"], expected.to_string());
+        }
+        let queue = &mut state.eval_queue.lock().unwrap();
+        assert_eq!(queue.pop().unwrap().effective_seed, 444);
+        assert_eq!(queue.pop().unwrap().effective_seed, 444);
+        assert_eq!(queue.pop().unwrap().effective_seed, 555);
+    }
+
+    #[tokio::test]
+    async fn filtered_rerun_reuses_the_original_effective_seed() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = mk_state_with_registry(temp.path());
+        let suite = mk_inline_suite();
+        state
+            .suite_registry
+            .as_ref()
+            .unwrap()
+            .save(&suite, false)
+            .unwrap();
+        let mut outcome = kiln_eval::score_completion(
+            &suite.default_scorer,
+            &suite.examples[0],
+            "3",
+            &kiln_eval::scorers::NoopJudgeRunner,
+        )
+        .unwrap();
+        outcome.generation_seed = Some(kiln_eval::derive_eval_completion_seed(777, "e1", 0));
+        let mut original = EvalJobInfo::queued(
+            "original".into(),
+            suite.name.clone(),
+            vec![None],
+            EvalSubmissionKind::OnDemand,
+            None,
+            777,
+        );
+        original.state = EvalJobState::Completed;
+        original.finished_runs.push(kiln_eval::SuiteResult {
+            suite_name: suite.name.clone(),
+            adapter: None,
+            metrics: kiln_eval::AggregateMetrics::default(),
+            outcomes: vec![outcome],
+            started_at: "2026-07-10T00:00:00Z".into(),
+            finished_at: "2026-07-10T00:00:01Z".into(),
+            suite_hash: "suite".into(),
+            effective_generation_hash: "generation".into(),
+        });
+        state
+            .eval_jobs
+            .write()
+            .unwrap()
+            .insert("original".into(), original);
+
+        let res = routes()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/eval/jobs/original/rerun")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["effective_seed"], "777");
+        assert_eq!(
+            state
+                .eval_queue
+                .lock()
+                .unwrap()
+                .pop()
+                .unwrap()
+                .effective_seed,
+            777
+        );
     }
 
     #[tokio::test]

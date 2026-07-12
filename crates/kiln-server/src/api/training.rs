@@ -1141,6 +1141,12 @@ async fn submit_sft(
         .clone()
         .unwrap_or_else(|| format!("sft-{}", &job_id[..8]));
     let auto_load = req.config.auto_load;
+    let effective_seed = crate::training_queue::materialize_sft_effective_seed(
+        &mut req.config,
+        &state.adapter_dir,
+        &adapter_name,
+    )
+    .map_err(ApiError::training_invalid_request)?;
 
     // Verify we have real model weights
     if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
@@ -1186,6 +1192,7 @@ async fn submit_sft(
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
         job_type: TrainingJobType::Sft,
+        effective_seed: Some(effective_seed),
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,
@@ -1221,6 +1228,7 @@ async fn submit_sft(
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
+        effective_seed: effective_seed.to_string(),
         message: format!(
             "Queued SFT training with {num_examples} examples (position {queue_position} in queue)"
         ),
@@ -1320,6 +1328,12 @@ async fn submit_grpo(
         .clone()
         .unwrap_or_else(|| format!("grpo-{}", &job_id[..8]));
     let auto_load = req.config.auto_load;
+    let effective_seed = crate::training_queue::materialize_grpo_effective_seed(
+        &mut req.config,
+        &state.adapter_dir,
+        &adapter_name,
+    )
+    .map_err(ApiError::training_invalid_request)?;
 
     if stats.streaming_dataset {
         tracing::info!(
@@ -1368,6 +1382,7 @@ async fn submit_grpo(
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
         job_type: TrainingJobType::Grpo,
+        effective_seed: Some(effective_seed),
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,
@@ -1403,6 +1418,7 @@ async fn submit_grpo(
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
+        effective_seed: effective_seed.to_string(),
         message: if stats.streaming_dataset {
             format!(
                 "Queued streamed GRPO training from dataset_path (position {queue_position} in queue)"
@@ -1548,6 +1564,12 @@ async fn submit_opd(
         .clone()
         .unwrap_or_else(|| format!("opd-{}", &job_id[..8]));
     let auto_load = req.config.auto_load;
+    let effective_seed = crate::training_queue::materialize_opd_effective_seed(
+        &mut req.config,
+        &state.adapter_dir,
+        &adapter_name,
+    )
+    .map_err(ApiError::training_invalid_request)?;
 
     tracing::info!(
         num_prompts = req.prompts.len(),
@@ -1599,6 +1621,7 @@ async fn submit_opd(
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
         job_type: TrainingJobType::Opd,
+        effective_seed: Some(effective_seed),
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,
@@ -1633,6 +1656,7 @@ async fn submit_opd(
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
+        effective_seed: effective_seed.to_string(),
         message: format!(
             "Queued OPD training (position {queue_position} in queue).{}",
             top_k_adjustment_suffix(top_k_adjustment)
@@ -1706,6 +1730,12 @@ async fn submit_distill_refresh(
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = format!("{}@refresh-{}", req.name, &job_id[..8]);
     let auto_load = req.config.auto_load;
+    let effective_seed = crate::training_queue::materialize_opd_effective_seed(
+        &mut req.config,
+        &state.adapter_dir,
+        &adapter_name,
+    )
+    .map_err(ApiError::training_invalid_request)?;
 
     tracing::info!(
         name = %req.name,
@@ -1739,6 +1769,7 @@ async fn submit_distill_refresh(
         // Reuse the Opd job type — refresh is structurally an OPD run
         // with extra orchestration. Dashboards group both as OPD-class.
         job_type: TrainingJobType::Opd,
+        effective_seed: Some(effective_seed),
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,
@@ -1773,6 +1804,7 @@ async fn submit_distill_refresh(
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
+        effective_seed: effective_seed.to_string(),
         message: format!(
             "Queued distill/refresh (position {queue_position} in queue).{}",
             top_k_adjustment_suffix(top_k_adjustment)
@@ -1826,17 +1858,25 @@ async fn submit_distill_merge(
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
     let auto_load = req.config.auto_load;
+    let effective_seed = crate::training_queue::materialize_opd_effective_seed(
+        &mut req.config,
+        &state.adapter_dir,
+        &adapter_name,
+    )
+    .map_err(ApiError::training_invalid_request)?;
     register_and_enqueue_distill(
         &state,
         &job_id,
         &adapter_name,
         auto_load,
+        effective_seed,
         reserved_bytes,
         QueuedJob::DistillMerge(req),
     )?;
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
+        effective_seed: effective_seed.to_string(),
         message: format!(
             "Queued distill_merge.{}",
             top_k_adjustment_suffix(top_k_adjustment)
@@ -1893,17 +1933,25 @@ async fn submit_distill_pump(
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
     let auto_load = req.config.auto_load;
+    let effective_seed = crate::training_queue::materialize_opd_effective_seed(
+        &mut req.config,
+        &state.adapter_dir,
+        &adapter_name,
+    )
+    .map_err(ApiError::training_invalid_request)?;
     register_and_enqueue_distill(
         &state,
         &job_id,
         &adapter_name,
         auto_load,
+        effective_seed,
         reserved_bytes,
         QueuedJob::DistillPump(req),
     )?;
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
+        effective_seed: effective_seed.to_string(),
         message: format!(
             "Queued distill/pump.{}",
             top_k_adjustment_suffix(top_k_adjustment)
@@ -1949,17 +1997,25 @@ async fn submit_distill_self(
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
     let auto_load = req.config.auto_load;
+    let effective_seed = crate::training_queue::materialize_opd_effective_seed(
+        &mut req.config,
+        &state.adapter_dir,
+        &adapter_name,
+    )
+    .map_err(ApiError::training_invalid_request)?;
     register_and_enqueue_distill(
         &state,
         &job_id,
         &adapter_name,
         auto_load,
+        effective_seed,
         reserved_bytes,
         QueuedJob::DistillSelf(req),
     )?;
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
+        effective_seed: effective_seed.to_string(),
         message: format!(
             "Queued distill/self.{}",
             top_k_adjustment_suffix(top_k_adjustment)
@@ -2150,6 +2206,22 @@ pub(crate) fn admit_training_jobs(
     mut pending: Vec<(TrainingJobInfo, QueueEntry)>,
 ) -> Result<usize, ApiError> {
     ensure_training_backend_admission(state)?;
+    for (info, entry) in &mut pending {
+        let effective_seed = crate::training_queue::materialize_queued_job_effective_seed(
+            &mut entry.job,
+            &state.adapter_dir,
+            &info.adapter_name,
+        )
+        .map_err(ApiError::training_invalid_request)?;
+        if let Some(recorded) = info.effective_seed
+            && recorded != effective_seed
+        {
+            return Err(ApiError::training_invalid_request(format!(
+                "training job seed {recorded} does not match materialized request seed {effective_seed}"
+            )));
+        }
+        info.effective_seed = Some(effective_seed);
+    }
     pin_registered_teachers(state, &mut pending)?;
     admit_training_jobs_into(
         &state.training_jobs,
@@ -2159,6 +2231,30 @@ pub(crate) fn admit_training_jobs(
         !matches!(state.backend.as_ref(), ModelBackend::Mock { .. }),
         pending,
     )
+}
+
+/// Return exact decimal seeds for a just-admitted group of jobs. Composite
+/// entry points use this so the initial response carries the same immutable
+/// provenance as the dedicated one-job endpoints.
+pub(crate) fn admitted_training_seeds(
+    state: &AppState,
+    job_ids: &[String],
+) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+    let jobs = state.training_jobs.read().unwrap();
+    job_ids
+        .iter()
+        .map(|job_id| {
+            let seed = jobs
+                .get(job_id)
+                .and_then(|job| job.effective_seed)
+                .ok_or_else(|| {
+                    ApiError::internal(format!(
+                        "admitted training job {job_id} is missing its effective seed"
+                    ))
+                })?;
+            Ok((job_id.clone(), seed.to_string()))
+        })
+        .collect()
 }
 
 /// Working-set preflight for distill-family jobs: longest inline prompt
@@ -2200,6 +2296,7 @@ fn register_and_enqueue_distill(
     job_id: &str,
     adapter_name: &str,
     auto_load: bool,
+    effective_seed: u64,
     reserved_bytes: u64,
     job: QueuedJob,
 ) -> Result<usize, ApiError> {
@@ -2207,6 +2304,7 @@ fn register_and_enqueue_distill(
         job_id: job_id.to_string(),
         adapter_name: adapter_name.to_string(),
         job_type: TrainingJobType::Opd,
+        effective_seed: Some(effective_seed),
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,
@@ -2246,6 +2344,7 @@ fn training_status_from_info(j: &crate::state::TrainingJobInfo) -> TrainingStatu
         progress: j.progress,
         current_loss: j.loss,
         adapter_name: Some(j.adapter_name.clone()),
+        effective_seed: j.effective_seed.map(|seed| seed.to_string()),
         started_at: format!("{}s ago", j.submitted_at.elapsed().as_secs()),
         elapsed_secs: j.submitted_at.elapsed().as_secs_f64(),
         submitted_unix_ms: Some(j.submitted_unix_ms),
@@ -3152,6 +3251,7 @@ mod tests {
             job_id: job_id.clone(),
             adapter_name: format!("adapter-{job_id}"),
             job_type: TrainingJobType::Sft,
+            effective_seed: None,
             state: TrainingState::Queued,
             progress: 0.0,
             loss: None,
@@ -3186,6 +3286,30 @@ mod tests {
                 job: QueuedJob::Sft(request),
             },
         )
+    }
+
+    #[test]
+    fn training_seed_status_and_composite_receipts_preserve_all_u64_bits() {
+        let state = teacher_binding_test_state();
+        let (mut info, _) = pending_sft_job("seeded");
+        info.effective_seed = Some(u64::MAX);
+        let status = training_status_from_info(&info);
+        assert_eq!(
+            serde_json::to_value(status).unwrap()["effective_seed"],
+            u64::MAX.to_string()
+        );
+        state
+            .training_jobs
+            .write()
+            .unwrap()
+            .insert(info.job_id.clone(), info);
+        assert_eq!(
+            admitted_training_seeds(&state, &["seeded".into()])
+                .unwrap()
+                .get("seeded")
+                .map(String::as_str),
+            Some("18446744073709551615")
+        );
     }
 
     fn teacher_binding_test_state() -> AppState {
