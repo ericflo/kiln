@@ -7,10 +7,11 @@ Transformers, TRL, and PEFT. The interoperability route moves data and
 adapters between those systems without discarding the identities needed to
 audit the handoff.
 
-The version-1 manifest, validation library, atomic SFT bundle writer, and
-pinned SFT reference runner are implemented. The public export/import API and
-GRPO runner are not yet available; until those surfaces ship, Kiln does not
-claim that manually assembled PEFT output has passed this contract.
+The version-1 manifest, validation library, atomic SFT bundle writer, pinned
+SFT reference runner, and public SFT export/download API are implemented. The
+CLI transport, validated import API, GRPO exporter, and GRPO runner are not yet
+available; until import ships, Kiln does not claim that manually assembled
+PEFT output has passed this contract.
 
 ## Bundle Model
 
@@ -98,10 +99,67 @@ removes staging, and an existing final target is never replaced. Optional
 input-adapter files reject symlinks and are copied while the caller holds its
 adapter revision stable.
 
+## Public SFT Export API
+
+Create one server-owned immutable export with `POST
+/v1/train/hf/sft/exports`:
+
+```bash
+curl -s http://localhost:8420/v1/train/hf/sft/exports \
+  -H 'content-type: application/json' \
+  -d '{
+    "name": "support_run_01",
+    "dataset_path": "/data/support-sft.jsonl",
+    "invalid_row_policy": "fail",
+    "input_adapter": "support-base",
+    "split_manifest": {"schema": "example.split.v1", "train": [0, 1]}
+  }'
+
+curl -s http://localhost:8420/v1/train/hf/exports/support_run_01/download \
+  -o support_run_01.kiln-hf.tar.gz
+```
+
+The request accepts exactly one of inline `examples`, a server-local
+`dataset_path`, or an uploaded eval-dataset `dataset` name. The special
+`corrections:active` name snapshots currently trainable corrections without
+marking them trained. `invalid_row_policy` has the same `fail`/`skip` behavior
+and canonical row identities as native SFT. `input_adapter` and the
+object-valued `split_manifest` are optional.
+
+Export names are 1 to 128 ASCII bytes, start with an alphanumeric character,
+and contain only alphanumerics, `-`, or `_`. They are immutable identities:
+creation never replaces an existing name. Inline request bodies are limited
+to 256 MiB; use `dataset_path` for larger local corpora. The private registry
+holds at most 256 published exports. Dataset admission and hashing run on a
+blocking worker rather than an HTTP reactor thread.
+
+The remaining management routes are:
+
+- `GET /v1/train/hf/exports` lists validated manifest summaries without
+  rehashing every potentially large artifact.
+- `GET /v1/train/hf/exports/{name}` revalidates the exact file set and all
+  bytes before returning the complete manifest.
+- `GET /v1/train/hf/exports/{name}/download` performs the same full validation
+  and streams a gzip-compressed tar whose top directory is
+  `{name}.kiln-hf`; it is never buffered as one archive in memory.
+- `DELETE /v1/train/hf/exports/{name}` durably renames and removes an export.
+  Download first when the bundle must be retained. Explicit deletion validates
+  the registry target shape rather than requiring intact artifact bytes, so an
+  operator can remove a damaged export that cannot be listed or downloaded.
+
+The registry is private (`0700` on Unix). Export creation, download, and
+deletion share a dedicated lock; an optional adapter snapshot additionally
+holds the adapter revision barrier for the exact copy. A download retains its
+registry owner until the stream ends, so deletion cannot race the archive.
+Crash-left staging and deletion directories are removed on the next creation,
+but unexpected symlinks or special entries fail closed. Download responses use
+`Cache-Control: private, no-store` because a deliberately deleted name may be
+reused for different bytes.
+
 ## Pinned SFT Runner
 
-`scripts/hf_trl/train_sft.py` is the exact standalone runner embedded in SFT
-exports. `scripts/hf_trl/requirements-sft.lock` pins the public package
+`scripts/hf_trl/train_sft.py` is the exact standalone runner embedded in every
+public SFT export. `scripts/hf_trl/requirements-sft.lock` pins the public package
 versions it accepts:
 
 | Package | Version |

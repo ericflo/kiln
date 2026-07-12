@@ -465,6 +465,66 @@ impl ApiError {
         }
     }
 
+    pub fn hf_trl_invalid_request(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "hf_trl_invalid_request",
+            message: format!("Invalid HF/TRL handoff request: {detail}"),
+            hint: "Use one SFT source, a path-safe export name, an optional existing adapter, and an object-valued split manifest.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn hf_trl_unavailable(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "hf_trl_unavailable",
+            message: format!("HF/TRL handoff is unavailable: {detail}"),
+            hint: "Use a real-model server whose startup retained complete base-weight and execution provenance.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn hf_trl_export_exists(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "hf_trl_export_exists",
+            message: format!("HF/TRL export '{name}' already exists"),
+            hint: "Choose a new export name or explicitly delete the existing immutable export first.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn hf_trl_export_capacity(max: usize) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "hf_trl_export_capacity",
+            message: format!("HF/TRL export registry has reached its {max}-export limit"),
+            hint: "Download and delete exports that are no longer needed, then retry.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn hf_trl_export_not_found(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "hf_trl_export_not_found",
+            message: format!("HF/TRL export '{name}' was not found"),
+            hint: "List server-owned exports with GET /v1/train/hf/exports.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn hf_trl_export_failed(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "hf_trl_export_failed",
+            message: format!("HF/TRL export operation failed: {detail}"),
+            hint: "Check server logs and the adapter registry filesystem, then retry with a fresh export name.",
+            retry_after_seconds: None,
+        }
+    }
+
     // ── Teacher registry ───────────────────────────────────────────
 
     pub fn teacher_registration_invalid(detail: impl std::fmt::Display) -> Self {

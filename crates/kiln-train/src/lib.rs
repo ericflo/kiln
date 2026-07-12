@@ -84,7 +84,8 @@ pub use hf_interop::{
 };
 pub use hf_interop_bundle::{
     HF_TRL_BUNDLE_SUFFIX, HF_TRL_SFT_ENVIRONMENT_LOCK, HF_TRL_SFT_REFERENCE_SCRIPT,
-    HfTrlInputAdapterSource, HfTrlSftBundleInput, write_hf_trl_sft_bundle,
+    HfTrlInputAdapterSource, HfTrlSftBundleInput, verify_hf_trl_export_bundle,
+    write_hf_trl_sft_bundle,
 };
 pub use logit_cache::{CacheEntry, CacheStats, CachedLogitSource, LogitCache, hash_prefix};
 pub use receipt::{

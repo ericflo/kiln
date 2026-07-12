@@ -5,6 +5,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::os::unix::fs::DirBuilderExt;
+
 use anyhow::{Context, Result, bail, ensure};
 use uuid::Uuid;
 
@@ -61,7 +64,7 @@ pub fn write_hf_trl_sft_bundle(
     validate_input(&input)?;
 
     let staging = parent.join(format!(".{basename}.incomplete-{}", Uuid::new_v4()));
-    fs::create_dir(&staging)
+    create_private_directory(&staging)
         .with_context(|| format!("create HF/TRL staging directory {}", staging.display()))?;
     let mut guard = StagingGuard::new(staging.clone());
 
@@ -193,6 +196,23 @@ pub fn write_hf_trl_sft_bundle(
     guard.disarm();
     manifest.verify_files(&target)?;
     Ok(manifest)
+}
+
+/// Validate a pristine Kiln-created export, including its exact recursive
+/// file set. External training copies add result artifacts and therefore do
+/// not satisfy this pre-training bundle check.
+pub fn verify_hf_trl_export_bundle(root: &Path) -> Result<HfTrlExportManifestV1> {
+    let manifest = crate::read_hf_trl_export_manifest(root)?;
+    ensure_exact_file_set(root, &manifest)?;
+    manifest.verify_files(root)?;
+    Ok(manifest)
+}
+
+fn create_private_directory(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(path)
 }
 
 fn validate_input(input: &HfTrlSftBundleInput<'_>) -> Result<()> {
@@ -833,5 +853,18 @@ mod tests {
             assert!(!target.exists());
             assert!(incomplete_entries(directory.path()).is_empty());
         }
+    }
+
+    #[test]
+    fn pristine_verifier_rejects_undeclared_files() {
+        let fixture = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("verified.kiln-hf");
+        write_hf_trl_sft_bundle(&target, fixture.input()).unwrap();
+        verify_hf_trl_export_bundle(&target).unwrap();
+
+        fs::write(target.join("undeclared.txt"), b"not in the manifest").unwrap();
+        let error = verify_hf_trl_export_bundle(&target).unwrap_err();
+        assert!(error.to_string().contains("file set differs"), "{error:#}");
     }
 }

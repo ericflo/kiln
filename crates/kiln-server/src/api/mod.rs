@@ -14,6 +14,7 @@ pub mod corrections;
 mod debug_model_state;
 mod eval;
 mod health;
+mod hf_trl;
 pub(crate) mod library;
 mod metrics;
 mod models;
@@ -85,6 +86,7 @@ pub fn router(state: AppState) -> Router {
         .merge(self_improve::routes())
         .merge(pit_of_success::routes())
         .merge(training::routes())
+        .merge(hf_trl::routes())
         .merge(eval::routes())
         .merge(config::routes())
         .merge(debug_model_state::routes())

@@ -2376,6 +2376,10 @@ pub struct AppState {
     /// keeps mutable adapter directories, the server default, and the exact
     /// weights published by the runner from racing one another.
     pub adapter_mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes HF/TRL export publication, download snapshots, and deletion
+    /// without holding the unrelated adapter mutation barrier for every
+    /// archive transfer.
+    pub hf_trl_export_lock: Arc<tokio::sync::Mutex<()>>,
     /// Tracked training jobs (job_id → info).
     pub training_jobs: TrainingJobs,
     /// GPU memory budget for coordinating inference and training.
@@ -2885,6 +2889,7 @@ impl AppState {
             ))),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
             adapter_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hf_trl_export_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 0, 0, 1.0, None)),
             kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState::unavailable("mock_backend"),
@@ -3670,6 +3675,7 @@ impl AppState {
             self_improve_scheduler: Arc::new(std::sync::RwLock::new(None)),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
             adapter_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hf_trl_export_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(memory_budget),
             kv_autoscaler,
