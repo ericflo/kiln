@@ -8,10 +8,10 @@
 //! "most workloads are 100% inference, but training dynamically takes VRAM and
 //! gives it back — never OOM" real.
 //!
-//! The actual resize runs on the batching-engine actor at its between-steps
-//! barrier (via `BatchingEngineHandle::resize_kv_blocking`), which takes
-//! exclusive GPU access so no decode/training kernel races the pool swap. This
-//! thread only decides the target and rate-limits.
+//! The actual resize runs on the batching-engine actor after active requests
+//! drain (via `BatchingEngineHandle::resize_kv_blocking`), which takes exclusive
+//! GPU access so no decode/training kernel races the pool swap. This thread only
+//! decides the target, reserves replacement headroom, and rate-limits.
 //!
 //! Conservative by design — a control loop that thrashes would stall decode
 //! (each resize briefly blocks the GPU). Hysteresis (distinct shrink/grow
@@ -70,6 +70,10 @@ const TICK: Duration = Duration::from_secs(2);
 /// Minimum spacing between two resizes — a resize blocks the GPU briefly, so we
 /// never react faster than this even if pressure swings.
 const COOLDOWN: Duration = Duration::from_secs(8);
+/// Allocation or headroom failures increase the next retry delay up to this
+/// bound. A memory-change notification still wakes the thread, but cannot turn
+/// a persistent failure into a two-second allocation loop.
+const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(128);
 /// Target free-VRAM headroom the policy steers toward, as a multiple of one
 /// block's bytes. Below `SHRINK` we free KV; above `GROW` (and below the
 /// startup size) we reclaim it. The gap is the anti-thrash dead-band.
@@ -85,6 +89,61 @@ struct Bounds {
     max_blocks: usize,
     /// Never shrink below this (keeps inference viable even under pressure).
     min_blocks: usize,
+}
+
+/// A replacement pool that is known to fit in currently available staging
+/// memory. Physical resize keeps the complete old pool alive until commit, so
+/// `replacement_bytes` is the full target size, not a grow delta.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct KvResizeStagingPlan {
+    pub target_blocks: usize,
+    pub replacement_bytes: u64,
+}
+
+/// Fit a requested replacement into staging headroom without crossing the
+/// caller's minimum acceptable target. For shrink, the caller controls how much
+/// deeper than the policy request this transaction may go; for grow, it passes
+/// `current_blocks + 1` so a partial but useful grow is allowed.
+pub(crate) fn plan_resize_with_staging_headroom(
+    current_blocks: usize,
+    requested_blocks: usize,
+    minimum_target_blocks: usize,
+    staging_available_bytes: u64,
+    bytes_per_block: u64,
+) -> Option<KvResizeStagingPlan> {
+    if bytes_per_block == 0 || requested_blocks == 0 || requested_blocks == current_blocks {
+        return None;
+    }
+    let max_staged_blocks =
+        usize::try_from(staging_available_bytes / bytes_per_block).unwrap_or(usize::MAX);
+    let target_blocks = requested_blocks.min(max_staged_blocks);
+    if target_blocks < minimum_target_blocks || target_blocks == current_blocks {
+        return None;
+    }
+    if requested_blocks < current_blocks && target_blocks >= current_blocks {
+        return None;
+    }
+    if requested_blocks > current_blocks && target_blocks <= current_blocks {
+        return None;
+    }
+    Some(KvResizeStagingPlan {
+        target_blocks,
+        replacement_bytes: (target_blocks as u64).saturating_mul(bytes_per_block),
+    })
+}
+
+fn next_retry_backoff(current: Duration) -> Duration {
+    current.saturating_mul(2).min(MAX_RETRY_BACKOFF)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ResizeMemorySnapshot {
+    /// Conservative policy input: respect both the process-wide budget and the
+    /// backend allocator heap.
+    policy_available_bytes: u64,
+    /// Actual replacement-allocation input. ROCm includes reusable HIP-pool
+    /// spare here, which the OS-wide snapshot reports as unavailable.
+    staging_available_bytes: u64,
 }
 
 fn is_disabled() -> bool {
@@ -155,7 +214,8 @@ fn run(
     bounds: Bounds,
 ) {
     let gov = MemoryGovernor::global();
-    let mut last_resize = Instant::now() - COOLDOWN;
+    let mut next_attempt = Instant::now();
+    let mut retry_backoff = COOLDOWN;
 
     // Verification/debug knob: KILN_KV_FORCE_BLOCKS=N performs ONE resize to N
     // blocks at startup (then normal policy resumes). Lets an operator confirm
@@ -166,27 +226,67 @@ fn run(
     {
         let requested = target;
         let cur = paged_cache.num_blocks();
-        let avail = live_safe_available_bytes(gpu_allocator_memory_probe_policy, gov, &paged_cache);
-        let target = cap_grow_target_by_available(cur, requested, avail, bytes_per_block);
-        if target < requested {
-            tracing::warn!(
-                requested,
-                capped = target,
-                cur,
-                avail_mb = avail / (1024 * 1024),
-                "KV autoscaler forced grow capped by live allocator memory"
-            );
-        }
-        match engine.resize_kv_blocking(target) {
-            Ok(achieved) => {
-                last_resize = Instant::now();
-                tracing::info!(
-                    requested = target,
-                    achieved,
-                    "KV autoscaler FORCED resize (KILN_KV_FORCE_BLOCKS)"
+        let memory =
+            live_resize_memory_snapshot(gpu_allocator_memory_probe_policy, gov, &paged_cache);
+        // Forced shrink is exact: silently shrinking below an operator's target
+        // would be surprising. Forced grow retains the prior partial-grow
+        // behavior, now capped by the full replacement size rather than delta.
+        let minimum_target = if requested < cur {
+            requested
+        } else {
+            cur.saturating_add(1)
+        };
+        if let Some(plan) = plan_resize_with_staging_headroom(
+            cur,
+            requested,
+            minimum_target,
+            memory.staging_available_bytes,
+            bytes_per_block,
+        ) {
+            if plan.target_blocks < requested {
+                tracing::warn!(
+                    requested,
+                    capped = plan.target_blocks,
+                    cur,
+                    staging_available_mb = memory.staging_available_bytes / (1024 * 1024),
+                    replacement_mb = plan.replacement_bytes / (1024 * 1024),
+                    "KV autoscaler forced grow capped by replacement-pool staging headroom"
                 );
             }
-            Err(err) => tracing::warn!(error = %err, "KV autoscaler forced resize failed"),
+            let _staging_reservation = gov.reserve(plan.replacement_bytes);
+            match engine.resize_kv_blocking(plan.target_blocks) {
+                Ok(achieved) => {
+                    next_attempt = Instant::now() + COOLDOWN;
+                    retry_backoff = COOLDOWN;
+                    tracing::info!(
+                        requested,
+                        planned = plan.target_blocks,
+                        achieved,
+                        replacement_mb = plan.replacement_bytes / (1024 * 1024),
+                        "KV autoscaler FORCED resize (KILN_KV_FORCE_BLOCKS)"
+                    );
+                }
+                Err(err) => {
+                    next_attempt = Instant::now() + retry_backoff;
+                    retry_backoff = next_retry_backoff(retry_backoff);
+                    tracing::warn!(
+                        error = %err,
+                        requested,
+                        planned = plan.target_blocks,
+                        "KV autoscaler forced resize failed"
+                    );
+                }
+            }
+        } else if requested != cur {
+            next_attempt = Instant::now() + retry_backoff;
+            retry_backoff = next_retry_backoff(retry_backoff);
+            tracing::warn!(
+                requested,
+                cur,
+                staging_available_mb = memory.staging_available_bytes / (1024 * 1024),
+                bytes_per_block,
+                "KV autoscaler forced resize skipped: full replacement pool lacks staging headroom"
+            );
         }
     }
 
@@ -197,43 +297,118 @@ fn run(
         // timeout still backstops EXTERNAL changes (a coexisting process) that
         // only the periodic probe sees.
         gov.wait_for_change(TICK);
-        if last_resize.elapsed() < COOLDOWN {
+        if Instant::now() < next_attempt {
             continue;
         }
         let cur = paged_cache.num_blocks();
-        let avail = live_safe_available_bytes(gpu_allocator_memory_probe_policy, gov, &paged_cache);
+        let memory =
+            live_resize_memory_snapshot(gpu_allocator_memory_probe_policy, gov, &paged_cache);
         let pressure = gov.pressure();
 
-        let target = decide_target(cur, avail, bytes_per_block, pressure, bounds);
-        let Some(target) = target else { continue };
+        let requested = decide_target(
+            cur,
+            memory.policy_available_bytes,
+            bytes_per_block,
+            pressure,
+            bounds,
+        );
+        let Some(requested) = requested else {
+            retry_backoff = COOLDOWN;
+            continue;
+        };
+        let minimum_target = if requested < cur {
+            cur.saturating_sub(max_step_blocks(cur))
+                .max(bounds.min_blocks)
+        } else {
+            cur.saturating_add(1)
+        };
+        let Some(plan) = plan_resize_with_staging_headroom(
+            cur,
+            requested,
+            minimum_target,
+            memory.staging_available_bytes,
+            bytes_per_block,
+        ) else {
+            let applied_backoff = retry_backoff;
+            next_attempt = Instant::now() + applied_backoff;
+            retry_backoff = next_retry_backoff(retry_backoff);
+            tracing::warn!(
+                from = cur,
+                requested,
+                minimum_target,
+                pressure = ?pressure,
+                policy_available_mb = memory.policy_available_bytes / (1024 * 1024),
+                staging_available_mb = memory.staging_available_bytes / (1024 * 1024),
+                retry_after_ms = applied_backoff.as_millis() as u64,
+                "KV autoscaler resize skipped: full replacement pool lacks staging headroom"
+            );
+            continue;
+        };
+        if plan.target_blocks != requested {
+            tracing::info!(
+                from = cur,
+                requested,
+                planned = plan.target_blocks,
+                minimum_target,
+                staging_available_mb = memory.staging_available_bytes / (1024 * 1024),
+                replacement_mb = plan.replacement_bytes / (1024 * 1024),
+                "KV autoscaler adjusted target to fit transactional staging headroom"
+            );
+        }
 
-        match engine.resize_kv_blocking(target) {
+        let _staging_reservation = gov.reserve(plan.replacement_bytes);
+        match engine.resize_kv_blocking(plan.target_blocks) {
             Ok(achieved) => {
-                last_resize = Instant::now();
+                next_attempt = Instant::now() + COOLDOWN;
+                retry_backoff = COOLDOWN;
                 if achieved != cur {
                     tracing::info!(
                         from = cur,
                         to = achieved,
-                        requested = target,
+                        requested,
+                        planned = plan.target_blocks,
                         pressure = ?pressure,
-                        avail_mb = avail / (1024 * 1024),
+                        policy_available_mb = memory.policy_available_bytes / (1024 * 1024),
+                        staging_available_mb = memory.staging_available_bytes / (1024 * 1024),
+                        replacement_mb = plan.replacement_bytes / (1024 * 1024),
                         "KV autoscaler resized cache"
+                    );
+                } else {
+                    let applied_backoff = retry_backoff;
+                    next_attempt = Instant::now() + applied_backoff;
+                    retry_backoff = next_retry_backoff(retry_backoff);
+                    tracing::warn!(
+                        from = cur,
+                        requested,
+                        planned = plan.target_blocks,
+                        retry_after_ms = applied_backoff.as_millis() as u64,
+                        "KV autoscaler resize produced no capacity change; backing off"
                     );
                 }
             }
             Err(err) => {
-                tracing::warn!(error = %err, "KV autoscaler resize failed");
-                last_resize = Instant::now(); // back off on error too
+                let applied_backoff = retry_backoff;
+                next_attempt = Instant::now() + applied_backoff;
+                retry_backoff = next_retry_backoff(retry_backoff);
+                tracing::warn!(
+                    error = %err,
+                    from = cur,
+                    requested,
+                    planned = plan.target_blocks,
+                    replacement_mb = plan.replacement_bytes / (1024 * 1024),
+                    retry_after_ms = applied_backoff.as_millis() as u64,
+                    "KV autoscaler resize failed"
+                );
             }
         }
     }
 }
 
-fn live_safe_available_bytes(
+fn live_resize_memory_snapshot(
     gpu_allocator_memory_probe_policy: GpuAllocatorMemoryProbePolicy,
     gov: &MemoryGovernor,
     paged_cache: &PagedKvCacheKt,
-) -> u64 {
+) -> ResizeMemorySnapshot {
     // available_bytes is the governor's all-process free-VRAM estimate minus
     // soft reservations. CUDA/ROCm also expose the allocator heap the KV tensors
     // actually grow from; use the stricter signal when present so an optimistic
@@ -246,22 +421,16 @@ fn live_safe_available_bytes(
             &device,
         )
     });
-    allocator_avail
-        .map(|allocator| governor_avail.min(allocator))
-        .unwrap_or(governor_avail)
+    ResizeMemorySnapshot {
+        policy_available_bytes: allocator_avail
+            .map(|allocator| governor_avail.min(allocator))
+            .unwrap_or(governor_avail),
+        staging_available_bytes: allocator_avail.unwrap_or(governor_avail),
+    }
 }
 
-fn cap_grow_target_by_available(
-    cur: usize,
-    target: usize,
-    avail: u64,
-    bytes_per_block: u64,
-) -> usize {
-    if target <= cur || bytes_per_block == 0 {
-        return target;
-    }
-    let grow_blocks = (avail / bytes_per_block) as usize;
-    target.min(cur.saturating_add(grow_blocks))
+fn max_step_blocks(current_blocks: usize) -> usize {
+    ((current_blocks as f64) * MAX_STEP_FRACTION).ceil() as usize
 }
 
 /// Pure policy: given the current block count, available VRAM, per-block bytes,
@@ -275,7 +444,7 @@ fn decide_target(
     bounds: Bounds,
 ) -> Option<usize> {
     let avail_blocks = avail / bytes_per_block;
-    let max_step = ((cur as f64) * MAX_STEP_FRACTION).ceil() as usize;
+    let max_step = max_step_blocks(cur);
 
     // SHRINK: pressure is high OR free headroom has fallen below the low mark.
     let tight = matches!(pressure, MemoryPressure::Tight | MemoryPressure::Critical)
@@ -359,8 +528,68 @@ mod tests {
     }
 
     #[test]
-    fn forced_grow_target_is_capped_by_available_blocks() {
-        assert_eq!(cap_grow_target_by_available(500, 900, 120 * BPB, BPB), 620);
-        assert_eq!(cap_grow_target_by_available(500, 450, 0, BPB), 450);
+    fn grow_requires_the_full_replacement_pool_not_only_the_delta() {
+        assert_eq!(
+            plan_resize_with_staging_headroom(500, 900, 501, 120 * BPB, BPB),
+            None,
+            "120 blocks of free memory cannot stage any grow from 500 blocks"
+        );
+        assert_eq!(
+            plan_resize_with_staging_headroom(500, 900, 501, 700 * BPB, BPB),
+            Some(KvResizeStagingPlan {
+                target_blocks: 700,
+                replacement_bytes: 700 * BPB,
+            })
+        );
+    }
+
+    #[test]
+    fn shrink_can_deepen_within_the_explicit_step_bound_to_fit_staging() {
+        assert_eq!(
+            plan_resize_with_staging_headroom(1000, 900, 650, 800 * BPB, BPB),
+            Some(KvResizeStagingPlan {
+                target_blocks: 800,
+                replacement_bytes: 800 * BPB,
+            })
+        );
+        assert_eq!(
+            plan_resize_with_staging_headroom(1000, 900, 650, 600 * BPB, BPB),
+            None,
+            "staging must not force a shrink beyond the caller's step bound"
+        );
+    }
+
+    #[test]
+    fn exact_shrink_refuses_to_silently_cross_the_requested_target() {
+        assert_eq!(
+            plan_resize_with_staging_headroom(1000, 900, 900, 800 * BPB, BPB),
+            None
+        );
+    }
+
+    #[test]
+    fn staging_plan_rejects_zero_geometry_and_no_op_targets() {
+        assert_eq!(
+            plan_resize_with_staging_headroom(500, 500, 1, 1000 * BPB, BPB),
+            None
+        );
+        assert_eq!(
+            plan_resize_with_staging_headroom(500, 400, 1, 1000 * BPB, 0),
+            None
+        );
+        assert_eq!(
+            plan_resize_with_staging_headroom(500, 0, 0, 1000 * BPB, BPB),
+            None
+        );
+    }
+
+    #[test]
+    fn resize_retry_backoff_is_exponential_and_bounded() {
+        let mut delay = COOLDOWN;
+        assert_eq!(delay, Duration::from_secs(8));
+        for expected in [16, 32, 64, 128, 128] {
+            delay = next_retry_backoff(delay);
+            assert_eq!(delay, Duration::from_secs(expected));
+        }
     }
 }

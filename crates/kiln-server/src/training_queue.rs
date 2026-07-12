@@ -2890,6 +2890,28 @@ fn current_training_safe_bytes(
     live.max(allocator)
 }
 
+fn current_kv_staging_available_bytes(
+    runtime: &TrainingMemoryRuntime,
+    current_reservation_bytes: u64,
+) -> u64 {
+    let governor = kiln_memory::MemoryGovernor::global();
+    let other_reserved = governor
+        .soft_reserved_bytes()
+        .saturating_sub(current_reservation_bytes);
+    let governor_available = governor
+        .refresh()
+        .free_bytes
+        .saturating_sub(governor.config().floor_bytes)
+        .saturating_sub(other_reserved);
+    crate::device_memory::allocator_safe_available_bytes_with_soft_reserved(
+        runtime.allocator_policy,
+        &runtime.device,
+        governor.config().floor_bytes,
+        other_reserved,
+    )
+    .unwrap_or(governor_available)
+}
+
 fn kv_shrink_target_for_training(
     current_blocks: usize,
     bytes_per_block: u64,
@@ -2907,43 +2929,73 @@ fn kv_shrink_target_for_training(
     (target < current_blocks).then_some(target)
 }
 
-fn prepare_training_memory_for_job(state: &AppState, reserved_bytes: u64) -> Result<(), String> {
+fn prepare_training_memory_for_job(
+    state: &AppState,
+    required_bytes: u64,
+    current_reservation_bytes: u64,
+) -> Result<(), String> {
     state
         .ensure_backend_healthy()
         .map_err(|error| format!("{error:#}"))?;
-    if reserved_bytes == 0 {
+    if required_bytes == 0 {
         return Ok(());
     }
     let runtime = training_memory_runtime(state);
-    let before = current_training_safe_bytes(runtime.as_ref(), reserved_bytes);
-    if before < reserved_bytes {
+    let before = current_training_safe_bytes(runtime.as_ref(), current_reservation_bytes);
+    if before < required_bytes {
         if let Some(runtime) = runtime.as_ref() {
             let current_blocks = runtime.paged_cache.num_blocks();
             let bytes_per_block = runtime.paged_cache.bytes_per_block() as u64;
             if runtime.kv_cache_reclaimable
-                && let Some(target_blocks) = kv_shrink_target_for_training(
+                && let Some(requested_target_blocks) = kv_shrink_target_for_training(
                     current_blocks,
                     bytes_per_block,
-                    reserved_bytes,
+                    required_bytes,
                     before,
                 )
                 && let Some(engine) = runtime.batching_engine.as_ref()
             {
-                state.clear_real_prefix_cache();
-                match engine.resize_kv_blocking(target_blocks) {
-                    Ok(achieved) => tracing::info!(
+                let staging_available =
+                    current_kv_staging_available_bytes(runtime, current_reservation_bytes);
+                if let Some(plan) = crate::kv_autoscaler::plan_resize_with_staging_headroom(
+                    current_blocks,
+                    requested_target_blocks,
+                    1,
+                    staging_available,
+                    bytes_per_block,
+                ) {
+                    state.clear_real_prefix_cache();
+                    let _staging_reservation =
+                        kiln_memory::MemoryGovernor::global().reserve(plan.replacement_bytes);
+                    match engine.resize_kv_blocking(plan.target_blocks) {
+                        Ok(achieved) => tracing::info!(
+                            from_blocks = current_blocks,
+                            requested_target_blocks,
+                            planned_target_blocks = plan.target_blocks,
+                            achieved_blocks = achieved,
+                            replacement_mb = plan.replacement_bytes / (1024 * 1024),
+                            staging_available_mb = staging_available / (1024 * 1024),
+                            required_gb = required_bytes as f64 / 1e9,
+                            reserved_gb = current_reservation_bytes as f64 / 1e9,
+                            available_before_gb = before as f64 / 1e9,
+                            "training worker shrank KV cache before allocation"
+                        ),
+                        Err(err) => tracing::warn!(
+                            error = %format!("{err:#}"),
+                            requested_target_blocks,
+                            planned_target_blocks = plan.target_blocks,
+                            replacement_mb = plan.replacement_bytes / (1024 * 1024),
+                            "training worker failed to shrink KV cache before allocation"
+                        ),
+                    }
+                } else {
+                    tracing::warn!(
                         from_blocks = current_blocks,
-                        target_blocks,
-                        achieved_blocks = achieved,
-                        reserved_gb = reserved_bytes as f64 / 1e9,
-                        available_before_gb = before as f64 / 1e9,
-                        "training worker shrank KV cache before allocation"
-                    ),
-                    Err(err) => tracing::warn!(
-                        error = %format!("{err:#}"),
-                        target_blocks,
-                        "training worker failed to shrink KV cache before allocation"
-                    ),
+                        requested_target_blocks,
+                        staging_available_mb = staging_available / (1024 * 1024),
+                        bytes_per_block,
+                        "training worker skipped KV shrink: full replacement pool lacks staging headroom"
+                    );
                 }
             }
         }
@@ -2956,11 +3008,11 @@ fn prepare_training_memory_for_job(state: &AppState, reserved_bytes: u64) -> Res
         }
     }
 
-    let after = current_training_safe_bytes(runtime.as_ref(), reserved_bytes);
-    if after < reserved_bytes {
+    let after = current_training_safe_bytes(runtime.as_ref(), current_reservation_bytes);
+    if after < required_bytes {
         return Err(format!(
             "training memory could not be dynamically reclaimed: estimated step needs {:.2} GB but only {:.2} GB is available after cache/allocator reclamation",
-            reserved_bytes as f64 / 1e9,
+            required_bytes as f64 / 1e9,
             after as f64 / 1e9,
         ));
     }
@@ -3458,11 +3510,18 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
         kiln_memory::MemoryGovernor::global().reserve(bytes)
     });
 
+    let held_reservation_bytes = _mem_reservation.as_ref().map_or(0, |guard| guard.bytes());
     let memory_ready = if binding_is_valid {
         state
             .ensure_backend_healthy()
             .map_err(|error| format!("{error:#}"))
-            .and_then(|()| prepare_training_memory_for_job(&state, entry.reserved_bytes))
+            .and_then(|()| {
+                prepare_training_memory_for_job(
+                    &state,
+                    entry.reserved_bytes,
+                    held_reservation_bytes,
+                )
+            })
     } else {
         Ok(())
     };
@@ -5333,6 +5392,21 @@ mod tests {
         assert_eq!(
             kv_shrink_target_for_training(16, gb, 12 * gb, 8 * gb),
             Some(12)
+        );
+    }
+
+    #[test]
+    fn training_kv_shrink_deepens_only_as_needed_to_stage_atomic_replacement() {
+        let gb = 1024 * 1024 * 1024;
+        let requested = kv_shrink_target_for_training(16, gb, 12 * gb, 8 * gb)
+            .expect("training needs KV reclamation");
+        assert_eq!(requested, 12);
+        assert_eq!(
+            crate::kv_autoscaler::plan_resize_with_staging_headroom(16, requested, 1, 8 * gb, gb,),
+            Some(crate::kv_autoscaler::KvResizeStagingPlan {
+                target_blocks: 8,
+                replacement_bytes: 8 * gb,
+            })
         );
     }
 
