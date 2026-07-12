@@ -1,0 +1,240 @@
+{
+  "artifacts": [
+    {
+      "bytes": 18221,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1/environment.json",
+      "sha256": "sha256:af7c5e9283d95427434dea6328e80fd434b8538b6f04c5dd88e685bbb688c639"
+    },
+    {
+      "bytes": 0,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1/cases/001-fixture-contract-r001/stdout.log",
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 104,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1/cases/001-fixture-contract-r001/stderr.log",
+      "sha256": "sha256:62cfbeb2911bb226088bfb0918eb4b05008ea70b20bce854ee2ca8a564bd37a5"
+    },
+    {
+      "bytes": 646,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1/cases/001-fixture-contract-r001/case-result.json",
+      "sha256": "sha256:ac1661fd74f04258d6e8a258497f8008ad5dd6c48d12df3e871478481bb12dec"
+    },
+    {
+      "bytes": 189,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1/cases/002-portable-f32-r001/stdout.log",
+      "sha256": "sha256:5cc9b4e1c4f55c942bc7b6c1c27c51c9b9441ebc1e4c3ef2eb772c7b7e9f32cd"
+    },
+    {
+      "bytes": 2827,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1/cases/002-portable-f32-r001/stderr.log",
+      "sha256": "sha256:7bd2fe099e092cc41699d6667592cead4ddc35303c09ebe3cc2b4be05abca8c4"
+    },
+    {
+      "bytes": 641,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1/cases/002-portable-f32-r001/case-result.json",
+      "sha256": "sha256:0f50d90004371e14cffac0ce97dd0afc21a3485c3394154db77c814a9c605d47"
+    },
+    {
+      "bytes": 306,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1/cases/003-native-backend-r001/stdout.log",
+      "sha256": "sha256:6128783a1265cea90c9798dd986190f12dc5c2dc927219245a6850042edc374f"
+    },
+    {
+      "bytes": 10707,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1/cases/003-native-backend-r001/stderr.log",
+      "sha256": "sha256:1b7d24a43624ae76656eed8697d193de9220748750e4b2c0e2a18e80129e9837"
+    },
+    {
+      "bytes": 643,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1/cases/003-native-backend-r001/case-result.json",
+      "sha256": "sha256:c3c3971a5c8fd69dc90ed402b8299ecfa410639950ccca9653b3d923fba64dfb"
+    },
+    {
+      "bytes": 22083,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1/run-config.json",
+      "sha256": "sha256:1a388476e1617e0129b4d8e0f82e800475c2cf603731d7156074c911d2054284"
+    }
+  ],
+  "created_at_utc": "2026-07-12T13:02:03.200Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)"
+    },
+    "device": {
+      "architecture": "gfx1151",
+      "driver": "amdgpu kernel 7.0.14-arch1-1",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "execution_environment_sha256": "sha256:8e1ad1077a8aaf2a76367b88fa4922090d5088a5a20893e0dce475cc4511c57b",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "hsa": "1.18",
+      "rocm": "7.2.4"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "rocm",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "qualification/workloads/adamw-pytorch-oracle-v1.json",
+      "--variant",
+      "rocm",
+      "--host-id",
+      "strix-halo"
+    ],
+    "duration_seconds": 0.7733703450066969,
+    "finished_at_utc": "2026-07-12T13:02:03.200Z",
+    "kind": "correctness",
+    "profile": "adamw-pytorch-oracle-v1",
+    "started_at_utc": "2026-07-12T13:02:02.426Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.060861046018544585,
+      "id": "fixture-contract",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.10092771399649791,
+      "id": "portable-f32",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.22132664400851354,
+      "id": "native-backend",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "aa8851403ce30b306105ac1f02430b6114833de9",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:1ad4fd75f8089568dc8d613591e5d452f52f0988ba99afac46988cb1dedfb32c",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "adamw-pytorch-oracle-v1",
+    "parameters": {
+      "variant_id": "rocm"
+    },
+    "seed": 0,
+    "sha256": "sha256:cff66ab6ac9c011f35cda6a9a9bd4044f6b394fcdbb3c80557557836bcba47fd"
+  }
+}
