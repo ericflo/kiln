@@ -4125,13 +4125,26 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     let server_memory_reclaim_call_site_section = source_between(
         &server_state_source,
         "static GOVERNOR_WIRED: std::sync::OnceLock<()>",
-        "let post_load_used_vram_info = runtime_used_vram_for_policy(",
+        "let kv_autoscaler = if",
     );
+    let compact_server_memory_reclaim_call_site_section =
+        compact_body(server_memory_reclaim_call_site_section);
     assert!(
         server_memory_reclaim_call_site_section.contains("gpu_memory_reclaim_policy")
-            && server_memory_reclaim_call_site_section
-                .contains("register_backend_memory_reclaimer(gpu_memory_reclaim_policy"),
-        "kiln-server memory-governor startup should consume StorageCapabilities.gpu_memory_reclaim_policy"
+            && compact_server_memory_reclaim_call_site_section.contains(
+                "register_backend_memory_reclaimer(gpu_memory_reclaim_policy,device_kt,gpu_lock.clone(),backend_health.clone(),batching_engine.clone(),)"
+            ),
+        "kiln-server memory-governor startup should consume the backend reclaim policy and the shared GPU/actor coordination surfaces"
+    );
+    let batching_engine_start = server_state_source
+        .find("let batching_engine =")
+        .expect("kiln-server state should construct the batching engine");
+    let governor_wiring_start = server_state_source
+        .find("static GOVERNOR_WIRED: std::sync::OnceLock<()>")
+        .expect("kiln-server state should wire the memory governor");
+    assert!(
+        governor_wiring_start > batching_engine_start,
+        "automatic allocator reclaim must be wired only after batching actor coordination exists"
     );
     for forbidden in [
         "Device::Cuda",
