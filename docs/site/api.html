@@ -317,7 +317,7 @@
         <div class="label mb-3">Run and observe</div>
         <h2 id="server-status" class="text-2xl font-semibold mb-4">Server status, metrics, UI, and config</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
-          <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics, including a bounded base-weight aggregate/count/byte summary.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics, including bounded base-weight aggregate and execution-identity summaries. A real backend without valid execution provenance is not ready.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/health</code> &mdash; /v1 compatibility alias for the same health and diagnostics response.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, training progress, and bounded thinking-budget provenance/outcomes.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/ui</code> &mdash; embedded dashboard for status, adapters, training, and chat.</div>
@@ -325,7 +325,7 @@
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history with effective thinking-budget provenance and outcomes for the dashboard's request panel.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return the current server configuration and effective generation defaults.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest and execution-provenance record.</div>
         </div>
         <div class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Check runtime configuration</h3>
@@ -338,6 +338,9 @@
         </div>
         <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-dim);">
           The loader hashes every immutable startup-snapshot shard once and retains a strict <code>kiln.base-weight-shards.v1</code> manifest. Health returns only its aggregate, algorithm, count, and total bytes; the gated debug endpoint returns filenames, exact sizes, and complete per-shard SHA-256 values. Training and eval artifacts reuse this in-memory identity without reading model files mid-inference. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/BASE_WEIGHT_PROVENANCE.md">base-weight provenance contract</a>.
+        </p>
+        <p class="mt-4 text-sm leading-relaxed" style="color:var(--fg-dim)">
+          Production startup also constructs a strict <code>kiln.execution-provenance.v1</code> record over the backend/device, numerical runtime, exact executable, optional source revision, model/tokenizer/template, precision, compiled kernel contract, and effective configuration/environment digests. Health exposes only the bounded identity summary and fails readiness if a real backend lacks a valid record; the gated debug endpoint returns the complete record. Secret-bearing <code>KILN_*</code> values contribute redacted presence markers rather than secret material. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/EXECUTION_PROVENANCE.md">execution provenance contract</a>.
         </p>
       </article>
 

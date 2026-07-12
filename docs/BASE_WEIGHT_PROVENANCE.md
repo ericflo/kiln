@@ -87,6 +87,8 @@ claimed. Legacy train/eval archives may deserialize without the optional full
 manifest, but all newly admitted production jobs include one.
 
 The manifest proves loaded base-weight bytes, not the entire replay envelope.
-Tokenizer/template identity, adapter revision, data, seed, executable/source,
-backend, device, driver/runtime, precision, and kernels remain separate
-provenance inputs.
+Tokenizer/template identity, adapter revision, data, and seed remain separate
+provenance inputs. The process-level executable/source, backend, device,
+driver/runtime, precision, kernel, and effective-configuration identity is
+defined by the separate [Execution Provenance](EXECUTION_PROVENANCE.md)
+contract.

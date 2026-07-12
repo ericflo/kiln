@@ -18273,6 +18273,7 @@ pub(crate) mod tests {
         Ok(GpuWeights {
             source_content_sha256: Some(format!("sha256:{}", "33".repeat(32))),
             base_weight_shard_manifest: None,
+            execution_provenance: None,
             embed_tokens,
             embed_tokens_t,
             layers,
@@ -18428,6 +18429,7 @@ pub(crate) mod tests {
         Ok(GpuWeights {
             source_content_sha256: f32_weights.source_content_sha256.clone(),
             base_weight_shard_manifest: f32_weights.base_weight_shard_manifest.clone(),
+            execution_provenance: f32_weights.execution_provenance.clone(),
             embed_tokens: to_bf16_contig(&f32_weights.embed_tokens)?,
             embed_tokens_t: to_bf16_contig(&f32_weights.embed_tokens_t)?,
             layers,

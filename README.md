@@ -531,11 +531,11 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/judgments/render_prompt` | Render the canonical pairwise judging prompt (debug aid) |
 | GET | `/v1/models` | List available models |
 | GET | `/v1/config` | Current server configuration, serving-profile source, and every effective profile policy |
-| GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of the complete base-weight shard manifest, active model/adapters, config hashes, env flags, batching, thinking defaults, and cache counts; enabled only with `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
+| GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of the complete base-weight shard manifest and execution-provenance record, active model/adapters, config hashes, env flags, batching, thinking defaults, and cache counts; enabled only with `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
 | GET | `/ui/` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
 | GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history, including effective thinking-budget provenance and outcomes, for the dashboard's request panel |
-| GET | `/health` | Server readiness and diagnostics, including the bounded base-weight aggregate/count/byte summary; maintenance intentionally returns 503 |
+| GET | `/health` | Server readiness and diagnostics, including bounded base-weight and execution-identity summaries; maintenance or missing/invalid real-backend execution provenance returns 503 |
 | GET | `/v1/health` | `/v1` compatibility alias for readiness and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 
@@ -592,6 +592,15 @@ checkpoints, training receipts, adapter manifests, and eval results persist the
 same identity without re-reading weights during inference. See
 [Base-Weight Provenance](docs/BASE_WEIGHT_PROVENANCE.md) for the schema,
 aggregate algorithm, legacy behavior, and exact-resume rules.
+
+After backend initialization, Kiln also binds the resident runner to a strict
+self-verifying execution envelope: backend/device, numerical runtime,
+executable and optional source identity, tokenizer/template, precision, kernel
+contract, and effective configuration/environment digests. Health exposes a
+bounded summary and requires a valid record for real-backend readiness; the
+gated debug endpoint exposes the complete record. See
+[Execution Provenance](docs/EXECUTION_PROVENANCE.md) for the schema, evidence
+sources, secret-redaction policy, and integrity scope.
 
 The response is additionally capped at 65,536 candidate entries. Real scoring
 uses the runner's resident backend and inference recurrent-state policy, omits

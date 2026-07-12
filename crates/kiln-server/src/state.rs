@@ -2340,6 +2340,9 @@ pub struct AppState {
     /// base model. Production startup sets this once; mock and synthetic test
     /// states may leave it absent.
     pub base_weight_shard_manifest: Option<Arc<BaseWeightShardManifest>>,
+    /// Immutable process/backend/build/configuration identity. Production
+    /// startup sets this once; mock and synthetic test states may omit it.
+    pub execution_provenance: Option<Arc<kiln_core::execution_provenance::ExecutionProvenanceV1>>,
     pub backend: Arc<ModelBackend>,
     pub tokenizer: Arc<KilnTokenizer>,
     /// Directory where LoRA adapter weights are stored on disk.
@@ -2848,6 +2851,7 @@ impl AppState {
             model_path: None,
             base_teacher_identity: None,
             base_weight_shard_manifest: None,
+            execution_provenance: None,
             backend: Arc::new(ModelBackend::Mock {
                 scheduler: Arc::new(Mutex::new(scheduler)),
                 engine,
@@ -3016,6 +3020,7 @@ impl AppState {
             .base_weight_shard_manifest
             .clone()
             .map(Arc::new);
+        let execution_provenance = runner.weights.execution_provenance.clone().map(Arc::new);
         let block_size = DEFAULT_BLOCK_SIZE;
         // §3.2 teacher registry — loaded from `adapter_dir/teachers.json`
         // if present. Clone-able Arc so the AppState field below can
@@ -3626,6 +3631,7 @@ impl AppState {
             model_path: None,
             base_teacher_identity,
             base_weight_shard_manifest,
+            execution_provenance,
             backend: Arc::new(ModelBackend::Real {
                 runner,
                 backend_health,

@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use kiln_core::config_hashes::ConfigHashes;
+use kiln_core::execution_provenance::ExecutionProvenanceV1;
 use kiln_core::model_provenance::BaseWeightShardManifest;
 use kiln_scheduler::PrefixCacheStats;
 use serde::Serialize;
@@ -48,6 +49,7 @@ struct ModelDebugState {
     num_kv_heads: usize,
     max_position_embeddings: usize,
     base_weight_shard_manifest: Option<BaseWeightShardManifest>,
+    execution_provenance: Option<ExecutionProvenanceV1>,
     backend_runtime: BackendRuntimeDebugState,
 }
 
@@ -233,6 +235,19 @@ async fn model_state(State(state): State<AppState>) -> Response {
             .into_response();
     }
 
+    if let Some(provenance) = state.execution_provenance.as_deref()
+        && let Err(error) = provenance.validate()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "invalid execution provenance",
+                "detail": error.to_string(),
+            })),
+        )
+            .into_response();
+    }
+
     Json(build_model_state_response(&state).await).into_response()
 }
 
@@ -301,6 +316,7 @@ fn model_debug_state(state: &AppState) -> ModelDebugState {
         num_kv_heads: state.model_config.num_kv_heads,
         max_position_embeddings: state.model_config.max_position_embeddings,
         base_weight_shard_manifest: state.base_weight_shard_manifest.as_deref().cloned(),
+        execution_provenance: state.execution_provenance.as_deref().cloned(),
         backend_runtime,
     }
 }
@@ -692,6 +708,8 @@ mod tests {
         ])
         .unwrap();
         state.base_weight_shard_manifest = Some(Arc::new(shard_manifest.clone()));
+        let execution_provenance = crate::execution_provenance::test_execution_provenance();
+        state.execution_provenance = Some(Arc::new(execution_provenance.clone()));
         *state.active_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
         *state.loaded_adapter.write().unwrap() = Some(crate::state::LoadedAdapterIdentity {
             name: "eval-adapter".to_string(),
@@ -742,6 +760,14 @@ mod tests {
         assert_eq!(
             json["model"]["base_weight_shard_manifest"]["shards"][0]["size_bytes"],
             456
+        );
+        assert_eq!(
+            json["model"]["execution_provenance"]["provenance_sha256"],
+            execution_provenance.provenance_sha256
+        );
+        assert_eq!(
+            json["model"]["execution_provenance"]["backend"]["device"],
+            "cpu"
         );
         assert_eq!(json["adapters"]["active_adapter"], "eval-adapter");
         assert_eq!(json["adapters"]["loaded_adapter"], "eval-adapter");
@@ -797,6 +823,32 @@ mod tests {
         assert!(!serialized.contains("secret prompt"));
         assert!(!serialized.contains("full secret prompt"));
         assert!(!serialized.contains("secret completion"));
+    }
+
+    #[tokio::test]
+    async fn debug_model_state_rejects_tampered_execution_provenance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = make_test_state(tmp.path().to_path_buf());
+        state.eval_mode = true;
+        let mut provenance = crate::execution_provenance::test_execution_provenance();
+        provenance.backend.device = "tampered".into();
+        state.execution_provenance = Some(Arc::new(provenance));
+
+        let response = routes()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/debug/model-state")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid execution provenance");
     }
 
     #[test]

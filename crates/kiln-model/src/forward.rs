@@ -5,6 +5,7 @@
 //! `Tensor` objects and are composed into the full transformer forward pass.
 
 use anyhow::{Context, Result};
+use kiln_core::execution_provenance::ExecutionProvenanceV1;
 use kiln_core::model_provenance::BaseWeightShardManifest;
 // (#1082) Candle import surface for forward.rs after the candle-autograd
 // CustomOp islands were removed (the kt tape is the sole grad producer).
@@ -3610,6 +3611,9 @@ pub struct GpuWeights {
     /// Canonical per-shard provenance retained from the same loader hash pass
     /// that produced `source_content_sha256`.
     pub base_weight_shard_manifest: Option<BaseWeightShardManifest>,
+    /// Process-lifetime execution envelope stamped after backend startup.
+    /// Synthetic weights may leave it absent.
+    pub execution_provenance: Option<ExecutionProvenanceV1>,
     /// Token embedding table: [vocab_size, hidden_size]
     pub embed_tokens: Tensor,
     /// Pre-transposed token embedding table for tied LM head: [hidden_size, vocab_size], contiguous.
@@ -7133,6 +7137,7 @@ impl GpuWeights {
         Ok(GpuWeights {
             source_content_sha256: self.source_content_sha256.clone(),
             base_weight_shard_manifest: self.base_weight_shard_manifest.clone(),
+            execution_provenance: self.execution_provenance.clone(),
             embed_tokens: mv(&self.embed_tokens)?,
             embed_tokens_t: mv(&self.embed_tokens_t)?,
             layers,
@@ -7716,6 +7721,7 @@ impl GpuWeights {
         Ok(Self {
             source_content_sha256: weights.source_content_sha256.clone(),
             base_weight_shard_manifest: weights.base_weight_shard_manifest().cloned(),
+            execution_provenance: None,
             embed_tokens,
             embed_tokens_t,
             lm_head_w8,
@@ -33884,6 +33890,7 @@ mod tests {
         Ok(GpuWeights {
             source_content_sha256: None,
             base_weight_shard_manifest: None,
+            execution_provenance: None,
             embed_tokens,
             embed_tokens_t,
             lm_head_w8: None,
@@ -34074,6 +34081,7 @@ mod tests {
         Ok(GpuWeights {
             source_content_sha256: None,
             base_weight_shard_manifest: None,
+            execution_provenance: None,
             embed_tokens,
             embed_tokens_t,
             lm_head_w8: None,
@@ -36552,6 +36560,7 @@ mod tests {
         Ok(GpuWeights {
             source_content_sha256: None,
             base_weight_shard_manifest: None,
+            execution_provenance: None,
             embed_tokens,
             embed_tokens_t,
             lm_head_w8: None,
@@ -37037,6 +37046,7 @@ mod tests {
         Ok(GpuWeights {
             source_content_sha256: None,
             base_weight_shard_manifest: None,
+            execution_provenance: None,
             embed_tokens,
             embed_tokens_t,
             lm_head_w8: None,

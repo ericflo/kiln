@@ -4,6 +4,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use kiln_core::config_hashes::ConfigHashes;
+use kiln_core::execution_provenance::ExecutionProvenanceV1;
 use kiln_core::model_provenance::BaseWeightShardManifest;
 use kiln_scheduler::PrefixCacheStats;
 use serde::Serialize;
@@ -35,6 +36,7 @@ struct HealthResponse {
     fold_reasoning_into_content: bool,
     config_hashes: ConfigHashes,
     base_weight_identity: Option<BaseWeightIdentitySummary>,
+    execution_identity: Option<ExecutionIdentitySummary>,
     active_adapter: Option<String>,
     loaded_adapter: Option<String>,
     loaded_adapter_revision: Option<String>,
@@ -81,6 +83,45 @@ impl From<&BaseWeightShardManifest> for BaseWeightIdentitySummary {
             aggregate_sha256: manifest.aggregate_sha256.clone(),
             shard_count: manifest.shards.len(),
             total_size_bytes: manifest.total_size_bytes,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ExecutionIdentitySummary {
+    provenance_type: String,
+    provenance_sha256: String,
+    backend: String,
+    device: String,
+    executable_sha256: String,
+    numerical_runtime_sha256: String,
+    kernel_contract_sha256: String,
+    inference_dtype: String,
+    training_policy: String,
+    effective_server_config_sha256: String,
+    effective_environment_sha256: String,
+}
+
+impl From<&ExecutionProvenanceV1> for ExecutionIdentitySummary {
+    fn from(provenance: &ExecutionProvenanceV1) -> Self {
+        Self {
+            provenance_type: provenance.provenance_type.clone(),
+            provenance_sha256: provenance.provenance_sha256.clone(),
+            backend: provenance.backend.name.clone(),
+            device: provenance.backend.device.clone(),
+            executable_sha256: provenance.build.executable_sha256.clone(),
+            numerical_runtime_sha256: provenance.backend.numerical_runtime_sha256.clone(),
+            kernel_contract_sha256: provenance.kernels.contract_sha256.clone(),
+            inference_dtype: provenance.precision.inference_dtype.clone(),
+            training_policy: provenance.precision.training_policy.clone(),
+            effective_server_config_sha256: provenance
+                .configuration
+                .effective_server_config_sha256
+                .clone(),
+            effective_environment_sha256: provenance
+                .configuration
+                .effective_environment_sha256
+                .clone(),
         }
     }
 }
@@ -427,6 +468,9 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let uptime_seconds = state.started_at.elapsed().as_secs();
     let serving_profile = state.serving_profile.diagnostics();
     let serving_policy = serving_profile.effective_policy;
+    let real_backend = matches!(state.backend.as_ref(), ModelBackend::Real { .. });
+    let execution_provenance_ready =
+        execution_provenance_ready(real_backend, state.execution_provenance.as_deref());
 
     // Adapter info
     let active_adapter = state.active_adapter_name.read().unwrap().clone();
@@ -650,12 +694,17 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             name: "inference_prewarm_complete",
             pass: inference_prewarm_complete,
         },
+        HealthCheck {
+            name: "execution_provenance_valid",
+            pass: execution_provenance_ready,
+        },
     ];
 
     let serving_ready = model_loaded
         && scheduler_responsive
         && backend_runtime.healthy
-        && serving_policy.inference_admission;
+        && serving_policy.inference_admission
+        && execution_provenance_ready;
     let status = if !serving_policy.inference_admission {
         "maintenance"
     } else if serving_ready {
@@ -694,6 +743,11 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             .base_weight_shard_manifest
             .as_deref()
             .map(BaseWeightIdentitySummary::from),
+        execution_identity: state
+            .execution_provenance
+            .as_deref()
+            .filter(|provenance| provenance.validate().is_ok())
+            .map(ExecutionIdentitySummary::from),
         active_adapter,
         loaded_adapter,
         loaded_adapter_revision,
@@ -717,6 +771,13 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, Json(response)).into_response()
     }
+}
+
+fn execution_provenance_ready(
+    real_backend: bool,
+    provenance: Option<&ExecutionProvenanceV1>,
+) -> bool {
+    !real_backend || provenance.is_some_and(|provenance| provenance.validate().is_ok())
 }
 
 fn count_adapter_dirs(dir: &std::path::Path) -> usize {
@@ -1131,6 +1192,8 @@ mod tests {
         ])
         .unwrap();
         state.base_weight_shard_manifest = Some(Arc::new(shard_manifest.clone()));
+        let execution_provenance = crate::execution_provenance::test_execution_provenance();
+        state.execution_provenance = Some(Arc::new(execution_provenance.clone()));
         let app = routes().with_state(state);
 
         let resp = app
@@ -1229,6 +1292,20 @@ mod tests {
         );
         assert_eq!(json["base_weight_identity"]["shard_count"], 1);
         assert_eq!(json["base_weight_identity"]["total_size_bytes"], 123);
+        assert_eq!(
+            json["execution_identity"]["provenance_type"],
+            "kiln.execution-provenance.v1"
+        );
+        assert_eq!(
+            json["execution_identity"]["provenance_sha256"],
+            execution_provenance.provenance_sha256
+        );
+        assert_eq!(json["execution_identity"]["backend"], "test");
+        assert_eq!(json["execution_identity"]["device"], "cpu");
+        assert_eq!(
+            json["execution_identity"]["training_policy"],
+            "cpu_f32_reference"
+        );
         assert!(json["active_adapter"].is_null());
         assert!(json["loaded_adapter"].is_null());
         assert!(json["loaded_adapter_revision"].is_null());
@@ -1302,6 +1379,18 @@ mod tests {
         assert!(json["checks"].is_array());
         let checks = json["checks"].as_array().unwrap();
         assert!(checks.iter().all(|c| c["pass"] == true));
+    }
+
+    #[test]
+    fn real_backend_requires_valid_execution_provenance_for_readiness() {
+        let valid = crate::execution_provenance::test_execution_provenance();
+        assert!(execution_provenance_ready(true, Some(&valid)));
+        assert!(!execution_provenance_ready(true, None));
+
+        let mut tampered = valid;
+        tampered.backend.device = "different".into();
+        assert!(!execution_provenance_ready(true, Some(&tampered)));
+        assert!(execution_provenance_ready(false, Some(&tampered)));
     }
 
     #[tokio::test]

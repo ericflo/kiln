@@ -605,7 +605,7 @@ async fn main() -> Result<()> {
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message("initializing inference runtime");
         }
-        let runner = ModelRunner::new_with_runtime_options(
+        let mut runner = ModelRunner::new_with_runtime_options(
             gpu_weights,
             tokenizer.clone(),
             model_config.clone(),
@@ -615,6 +615,30 @@ async fn main() -> Result<()> {
             .context("failed to fingerprint the running server executable")?;
         let numerical_runtime_sha256 =
             kiln_server::teacher_identity::numerical_runtime_sha256(device_kt);
+        let execution_provenance = kiln_server::execution_provenance::build_execution_provenance(
+            &config,
+            &model_config,
+            &tokenizer,
+            runner.backend_name(),
+            device_kt,
+            &executable_sha256,
+            &numerical_runtime_sha256,
+            runner.training_precision_policy(),
+        )
+        .context("failed to construct immutable execution provenance")?;
+        execution_provenance
+            .validate()
+            .context("failed to validate immutable execution provenance")?;
+        tracing::info!(
+            provenance_sha256 = %execution_provenance.provenance_sha256,
+            backend = %execution_provenance.backend.name,
+            device = %execution_provenance.backend.device,
+            executable_sha256 = %execution_provenance.build.executable_sha256,
+            runtime_sha256 = %execution_provenance.backend.numerical_runtime_sha256,
+            kernel_contract_sha256 = %execution_provenance.kernels.contract_sha256,
+            "execution provenance initialized"
+        );
+        runner.weights.execution_provenance = Some(execution_provenance);
         let base_teacher_identity = Arc::new(
             kiln_server::teacher_identity::build_base_teacher_identity(
                 &served_model_id,
