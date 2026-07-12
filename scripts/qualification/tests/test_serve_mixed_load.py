@@ -590,6 +590,46 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertFalse(serve.token_timing_matches_usage("stop", 0, 1))
         self.assertFalse(serve.token_timing_matches_usage(None, 3, 3))
 
+    def test_actor_performance_parser_is_strict_and_bounded_by_ttft(self) -> None:
+        performance = {
+            "prompt_tokens": 12,
+            "completion_tokens": 3,
+            "ttft_ms": 40.0,
+            "prefill_ms": 10.0,
+            "actor_queue_ms": 12.0,
+            "actor_admission_ms": 3.0,
+            "actor_prefill_wall_ms": 20.0,
+            "decode_ms": 8.0,
+            "total_latency_ms": 60.0,
+            "decode_tokens_per_sec": 375.0,
+            "adapter_used": "base",
+            "thinking_mode": "non_reasoning",
+            "finish_reason": "length",
+        }
+        value = {"metadata": {"performance": performance}}
+        self.assertEqual(
+            serve.parse_actor_performance(value),
+            (12.0, 3.0, 20.0),
+        )
+        self.assertIsNone(serve.parse_actor_performance({"choices": []}))
+
+        malformed = dict(performance)
+        malformed["unexpected"] = 1
+        with self.assertRaisesRegex(serve.QualificationError, "unexpected shape"):
+            serve.parse_actor_performance({"metadata": {"performance": malformed}})
+
+        impossible = dict(performance)
+        impossible["actor_prefill_wall_ms"] = 30.0
+        with self.assertRaisesRegex(serve.QualificationError, "exceed TTFT"):
+            serve.parse_actor_performance({"metadata": {"performance": impossible}})
+
+        impossible = dict(performance)
+        impossible["prefill_ms"] = 24.0
+        impossible["actor_admission_ms"] = 1.0
+        impossible["actor_prefill_wall_ms"] = 20.0
+        with self.assertRaisesRegex(serve.QualificationError, "prefill time exceeds"):
+            serve.parse_actor_performance({"metadata": {"performance": impossible}})
+
     def test_percentile_uses_r7_linear_interpolation(self) -> None:
         self.assertEqual(serve.percentile_r7([], 0.99), 0.0)
         self.assertEqual(serve.percentile_r7([1, 2, 3, 4], 0.5), 2.5)
@@ -780,6 +820,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 done=True,
                 cancelled=False,
                 error=None,
+                actor_queue_ms=100.0,
+                actor_admission_ms=10.0,
+                actor_prefill_wall_ms=200.0,
             )
 
         self.assertFalse(
@@ -798,6 +841,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertAlmostEqual(
             timing["pressure_peer_first_ready_after_dispatch_ms"], 400.0
         )
+        self.assertEqual(timing["pressure_peer_actor_queue_ms"], 100.0)
+        self.assertEqual(timing["pressure_peer_actor_admission_ms"], 10.0)
+        self.assertEqual(timing["pressure_peer_actor_prefill_wall_ms"], 200.0)
         self.assertEqual(timing["pressure_peer_ready_after_count"], 1)
         self.assertEqual(timing["pressure_peer_ready_before_count"], 1)
         self.assertEqual(timing["pressure_peer_ready_inside_count"], 1)

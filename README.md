@@ -607,6 +607,20 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET | `/v1/health` | `/v1` compatibility alias for readiness and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 
+### Performance timing
+
+Set `include_performance: true` on `POST /v1/chat/completions` to receive
+`metadata.performance`. Batching-engine responses separate `actor_queue_ms`
+(API enqueue to admission start), `actor_admission_ms` (slot preparation),
+and `actor_prefill_wall_ms` (admission completion to first sampled-token
+readiness) from accumulated model `prefill_ms`, `decode_ms`, TTFT, and total
+latency. The three actor fields are `null` on paths that do not use the batching
+actor. Batching-engine streams publish the same object once on the terminal
+chat chunk; an explicit request opt-in also emits the existing
+`kiln.token_timing` object before each model token, with actor-ready,
+handler-received, and delivery queue timing. Omission follows the server
+metadata default but never opts a stream into custom per-token events.
+
 ### Prompt logprobs
 
 `POST /v1/completions` is a deliberately bounded vLLM-shaped scoring subset:
@@ -925,6 +939,10 @@ series. Bounded short-tail service is counted by
 bounded-prefill, and decode-forward wall time is also
 available as cumulative, process-maximum, and 100 ms slow-phase counters under
 `kiln_batching_engine_{admission,prefill_forward,decode_forward}_*`.
+Request-scoped opt-in performance metadata additionally partitions first-token
+wall time into actor queue, slot admission, and admitted-prefill phases, so a
+high TTFT can be attributed without inferring per-request behavior from process
+aggregates.
 The same values appear in health and debug snapshots. A phase crossing 100 ms
 emits one structured `slow_batching_actor_phase` event with the bounded phase
 name and work size, which lets qualification correlate a token gap without

@@ -161,6 +161,13 @@ other two may accelerate the shortest tail of at most four token chunks.
 The receipt records this bounded-priority count and fails when the mixed
 workload does not exercise it. Any ITL outlier remains a failure even when its
 phase is explained.
+The pressure peer also requires terminal request-scoped performance metadata.
+Its actor queue, slot-admission, and admission-to-first-ready wall durations are
+recorded separately and must fit inside TTFT; accumulated model prefill must fit
+inside admission plus admitted-prefill wall time. Missing, duplicate,
+nonnumeric, or internally impossible phase evidence fails the run. These fields
+distinguish active-set saturation from slow admitted prefill before any
+scheduler policy is changed.
 
 For the historical dynamic-runtime A/B, run each of `default`,
 `autoscale-off`, `graphs-off`, and `both-off` separately. These four arms now

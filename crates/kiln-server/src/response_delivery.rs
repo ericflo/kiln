@@ -987,6 +987,9 @@ mod tests {
             action_tokens: None,
             prefill_duration: Duration::from_millis(2),
             decode_duration: Duration::from_millis(3),
+            actor_queue_duration: Duration::from_millis(4),
+            actor_admission_duration: Duration::from_millis(1),
+            actor_prefill_wall_duration: Some(Duration::from_millis(5)),
         }
     }
 

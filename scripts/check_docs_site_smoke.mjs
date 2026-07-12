@@ -198,6 +198,7 @@ const expectedApiSections = [
   { label: 'copy-paste first requests', terms: ['copy-paste first requests'] },
   { label: 'power-user requests', terms: ['power-user requests'] },
   { label: 'OpenAI-compatible generation', terms: ['openai-compatible generation'] },
+  { label: 'first-token performance attribution', terms: ['attribute first-token latency', 'include_performance', 'actor_queue_ms', 'actor_admission_ms', 'actor_prefill_wall_ms', 'kiln.token_timing'] },
   { label: 'adapter lifecycle', terms: ['lora lifecycle'] },
   { label: 'training', terms: ['training'] },
   { label: 'exact SFT/GRPO/OPD resume', terms: ['latest exact sft/grpo/opd resume checkpoint', '/v1/train/opd', 'checkpoint_interval', 'resume_checkpoint', 'training_kind', 'data_source_kind', 'candidate cursor', 'teacher content revision', 'peft snapshots remain serving-only'] },

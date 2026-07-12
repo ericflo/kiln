@@ -573,6 +573,9 @@ fn attach_chat_performance_metadata(
         completion_tokens: resp.usage.completion_tokens,
         ttft_ms: ttft.map(duration_ms_f64),
         prefill_ms: prefill_duration.map(duration_ms_f64),
+        actor_queue_ms: None,
+        actor_admission_ms: None,
+        actor_prefill_wall_ms: None,
         decode_ms: decode_duration.map(duration_ms_f64),
         total_latency_ms: duration_ms_f64(total_latency),
         decode_tokens_per_sec: decode_tokens_per_sec_for_performance_metadata(
@@ -585,6 +588,20 @@ fn attach_chat_performance_metadata(
         thinking_mode: resp.metadata.thinking_mode.clone(),
         finish_reason,
     });
+}
+
+fn attach_batched_actor_performance_metadata(
+    resp: &mut ChatCompletionResponse,
+    actor_queue_duration: std::time::Duration,
+    actor_admission_duration: std::time::Duration,
+    actor_prefill_wall_duration: Option<std::time::Duration>,
+) {
+    let Some(performance) = resp.metadata.performance.as_mut() else {
+        return;
+    };
+    performance.actor_queue_ms = Some(duration_ms_f64(actor_queue_duration));
+    performance.actor_admission_ms = Some(duration_ms_f64(actor_admission_duration));
+    performance.actor_prefill_wall_ms = actor_prefill_wall_duration.map(duration_ms_f64);
 }
 
 struct TimedGenerationOutput {
@@ -1169,13 +1186,19 @@ fn finalized_thinking_budget_status(
 fn streaming_finish_chunk_json(
     chunk: &ChatCompletionChunk,
     thinking_budget: &ThinkingBudgetMetadata,
+    performance: Option<&ChatCompletionPerformanceMetadata>,
 ) -> String {
     let mut value = serde_json::to_value(chunk).expect("chat completion chunk must serialize");
     if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "metadata".to_string(),
-            serde_json::json!({"thinking_budget": thinking_budget}),
-        );
+        let mut metadata = serde_json::json!({"thinking_budget": thinking_budget});
+        if let (Some(performance), Some(metadata)) = (performance, metadata.as_object_mut()) {
+            metadata.insert(
+                "performance".to_string(),
+                serde_json::to_value(performance)
+                    .expect("chat performance metadata must serialize"),
+            );
+        }
+        object.insert("metadata".to_string(), metadata);
     }
     serde_json::to_string(&value).expect("chat completion chunk JSON must serialize")
 }
@@ -3574,6 +3597,7 @@ fn streaming_response_from_cached_completion(
     events.push(Event::default().data(streaming_finish_chunk_json(
         &done_chunk,
         &thinking_budget_metadata,
+        None,
     )));
     events.push(Event::default().data("[DONE]"));
 
@@ -4288,6 +4312,9 @@ pub struct ChatCompletionPerformanceMetadata {
     pub completion_tokens: usize,
     pub ttft_ms: Option<f64>,
     pub prefill_ms: Option<f64>,
+    pub actor_queue_ms: Option<f64>,
+    pub actor_admission_ms: Option<f64>,
+    pub actor_prefill_wall_ms: Option<f64>,
     pub decode_ms: Option<f64>,
     pub total_latency_ms: f64,
     pub decode_tokens_per_sec: Option<f64>,
@@ -7115,8 +7142,8 @@ async fn generate_real_batched(
     let collect = async {
         loop {
             match events.recv().await {
-                Some(EngineEvent::Token { .. }) => {
-                    first_token_at.get_or_insert_with(std::time::Instant::now);
+                Some(EngineEvent::Token { ready_at, .. }) => {
+                    first_token_at.get_or_insert(ready_at);
                 }
                 Some(EngineEvent::Done { output }) => break Ok(output),
                 Some(EngineEvent::Error(err)) => break Err(anyhow::anyhow!(err)),
@@ -7148,6 +7175,9 @@ async fn generate_real_batched(
         .observe_decode_duration(output.decode_duration.as_secs_f64());
     observe_post_prefill_vram(&state.memory_budget);
 
+    let actor_queue_duration = output.actor_queue_duration;
+    let actor_admission_duration = output.actor_admission_duration;
+    let actor_prefill_wall_duration = output.actor_prefill_wall_duration;
     let finish_reason = match &output.finish_reason {
         kiln_model::FinishReason::Eos => "stop",
         kiln_model::FinishReason::MaxTokens => "length",
@@ -7252,6 +7282,12 @@ async fn generate_real_batched(
         Some(output.prefill_duration),
         Some(output.decode_duration),
     );
+    attach_batched_actor_performance_metadata(
+        &mut response,
+        actor_queue_duration,
+        actor_admission_duration,
+        actor_prefill_wall_duration,
+    );
     Ok(response)
 }
 
@@ -7313,6 +7349,8 @@ async fn generate_real_batched_streaming(
     let mut tool_gate = ToolCallGate::new(buffer_tool_content);
     let include_usage = req.stream_options.as_ref().is_some_and(|o| o.include_usage);
     let include_token_timing = streaming_token_timing_enabled(req);
+    let include_performance = chat_performance_metadata_enabled(state, req);
+    let performance_adapter_used = adapter_used_for_performance_metadata(state);
     let batching_engine = batching_engine.clone();
     let stop_sequences = sampling.stop.clone();
     let thinking_budget = sampling.thinking_budget.clone();
@@ -7333,6 +7371,7 @@ async fn generate_real_batched_streaming(
             let mut content_buf = String::new();
             let mut completion_token_count: u32 = 0;
             let mut generated_tokens: Vec<TokenId> = Vec::new();
+            let mut first_token_ready_at: Option<std::time::Instant> = None;
             // Server-side emit gates for the engine path (the engine emits
             // raw token ids; the server decodes): incremental detokenizer
             // (no U+FFFD on multi-byte chars, bounded decode window instead
@@ -7457,6 +7496,7 @@ async fn generate_real_batched_streaming(
                         match event {
                             Some(EngineEvent::Token { token, ready_at }) => {
                                 let handler_received_at = std::time::Instant::now();
+                                first_token_ready_at.get_or_insert(ready_at);
                                 generated_tokens.push(token);
                                 completion_token_count = completion_token_count.saturating_add(1);
                                 metrics.add_tokens(1);
@@ -7726,6 +7766,38 @@ async fn generate_real_batched_streaming(
                                 }
                                 let finish = assistant_output.finish_reason.clone();
                                 let record_completion = assistant_output.preview_source().to_string();
+                                let total_latency = request_start.elapsed();
+                                let ttft = first_token_ready_at
+                                    .map(|ready_at| ready_at.saturating_duration_since(request_start));
+                                let performance = include_performance.then(|| {
+                                    ChatCompletionPerformanceMetadata {
+                                        prompt_tokens: prompt_token_count,
+                                        completion_tokens: output.completion_tokens,
+                                        ttft_ms: ttft.map(duration_ms_f64),
+                                        prefill_ms: Some(duration_ms_f64(output.prefill_duration)),
+                                        actor_queue_ms: Some(duration_ms_f64(
+                                            output.actor_queue_duration,
+                                        )),
+                                        actor_admission_ms: Some(duration_ms_f64(
+                                            output.actor_admission_duration,
+                                        )),
+                                        actor_prefill_wall_ms: output
+                                            .actor_prefill_wall_duration
+                                            .map(duration_ms_f64),
+                                        decode_ms: Some(duration_ms_f64(output.decode_duration)),
+                                        total_latency_ms: duration_ms_f64(total_latency),
+                                        decode_tokens_per_sec:
+                                            decode_tokens_per_sec_for_performance_metadata(
+                                                output.completion_tokens,
+                                                total_latency,
+                                                ttft,
+                                                Some(output.decode_duration),
+                                            ),
+                                        adapter_used: performance_adapter_used.clone(),
+                                        thinking_mode: thinking_mode.clone(),
+                                        finish_reason: finish.clone(),
+                                    }
+                                });
                                 let mut thinking_budget_metadata =
                                     stream_thinking_budget_metadata.clone();
                                 if let Some(status) = finalized_thinking_budget_status(
@@ -7760,6 +7832,7 @@ async fn generate_real_batched_streaming(
                                     Event::default().data(streaming_finish_chunk_json(
                                         &chunk,
                                         &thinking_budget_metadata,
+                                        performance.as_ref(),
                                     )),
                                 );
                                 if include_usage {
@@ -9249,7 +9322,7 @@ async fn generate_real_streaming(
                         drop(terminal_tx);
                         let mut terminal_events = drain_terminal_event_buffer(terminal_rx);
                         terminal_events.push_back(Event::default().data(
-                            streaming_finish_chunk_json(&chunk, &thinking_budget_metadata),
+                            streaming_finish_chunk_json(&chunk, &thinking_budget_metadata, None),
                         ));
                         if include_usage {
                             terminal_events.push_back(Event::default().data(usage_chunk_json(
@@ -12324,9 +12397,41 @@ mod tests {
             },
         );
         let natural: serde_json::Value =
-            serde_json::from_str(&streaming_finish_chunk_json(&chunk, &metadata)).unwrap();
+            serde_json::from_str(&streaming_finish_chunk_json(&chunk, &metadata, None)).unwrap();
         assert_eq!(natural["metadata"]["thinking_budget"]["triggered"], false);
         assert_eq!(natural["metadata"]["thinking_budget"]["closed"], true);
+
+        let performance = ChatCompletionPerformanceMetadata {
+            prompt_tokens: 12,
+            completion_tokens: 3,
+            ttft_ms: Some(40.0),
+            prefill_ms: Some(10.0),
+            actor_queue_ms: Some(12.0),
+            actor_admission_ms: Some(3.0),
+            actor_prefill_wall_ms: Some(20.0),
+            decode_ms: Some(8.0),
+            total_latency_ms: 60.0,
+            decode_tokens_per_sec: Some(375.0),
+            adapter_used: "base".to_string(),
+            thinking_mode: "non_reasoning".to_string(),
+            finish_reason: "length".to_string(),
+        };
+        let timed: serde_json::Value = serde_json::from_str(&streaming_finish_chunk_json(
+            &chunk,
+            &metadata,
+            Some(&performance),
+        ))
+        .unwrap();
+        assert_eq!(timed["metadata"]["performance"]["actor_queue_ms"], 12.0);
+        assert_eq!(timed["metadata"]["performance"]["actor_admission_ms"], 3.0);
+        assert_eq!(
+            timed["metadata"]["performance"]["actor_prefill_wall_ms"],
+            20.0
+        );
+        assert_eq!(
+            timed["metadata"]["thinking_budget"]["thinking_tokens"],
+            natural["metadata"]["thinking_budget"]["thinking_tokens"]
+        );
 
         apply_thinking_budget_status_to_metadata(
             &mut metadata,
@@ -12338,7 +12443,7 @@ mod tests {
             },
         );
         let unclosed: serde_json::Value =
-            serde_json::from_str(&streaming_finish_chunk_json(&chunk, &metadata)).unwrap();
+            serde_json::from_str(&streaming_finish_chunk_json(&chunk, &metadata, None)).unwrap();
         assert_eq!(unclosed["metadata"]["thinking_budget"]["closed"], false);
     }
 
@@ -15971,6 +16076,9 @@ mod tests {
         assert_eq!(perf["completion_tokens"], 0);
         assert_eq!(perf["ttft_ms"], 0.0);
         assert_eq!(perf["prefill_ms"], 0.0);
+        assert!(perf["actor_queue_ms"].is_null());
+        assert!(perf["actor_admission_ms"].is_null());
+        assert!(perf["actor_prefill_wall_ms"].is_null());
         assert_eq!(perf["decode_ms"], 0.0);
         assert!(perf["total_latency_ms"].as_f64().unwrap() >= 0.0);
         assert_eq!(perf["decode_tokens_per_sec"], 0.0);

@@ -273,6 +273,12 @@ pub struct BatchedGenerationOutput {
     pub action_tokens: Option<Vec<EngineActionToken>>,
     pub prefill_duration: Duration,
     pub decode_duration: Duration,
+    /// Time from API enqueue through the actor's waiting queue to slot admission.
+    pub actor_queue_duration: Duration,
+    /// Time spent preparing the request for its active slot.
+    pub actor_admission_duration: Duration,
+    /// Wall time from slot admission until the first sampled token became ready.
+    pub actor_prefill_wall_duration: Option<Duration>,
 }
 
 fn completion_usage_tokens(visible_token_count: usize, finish_reason: &FinishReason) -> usize {
@@ -1541,8 +1547,13 @@ impl BatchingEngineHandle {
 
     pub async fn enqueue(&self, req: EngineRequest) -> Result<mpsc::Receiver<EngineEvent>> {
         let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
+        let enqueued_at = Instant::now();
         self.tx
-            .send(EngineCommand::Enqueue { req, response_tx })
+            .send(EngineCommand::Enqueue {
+                req,
+                response_tx,
+                enqueued_at,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
         Ok(response_rx)
@@ -1555,8 +1566,13 @@ impl BatchingEngineHandle {
         capacity: usize,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
         let (response_tx, response_rx) = mpsc::channel(capacity);
+        let enqueued_at = Instant::now();
         self.tx
-            .send(EngineCommand::Enqueue { req, response_tx })
+            .send(EngineCommand::Enqueue {
+                req,
+                response_tx,
+                enqueued_at,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
         Ok(response_rx)
@@ -1738,6 +1754,7 @@ enum EngineCommand {
     Enqueue {
         req: EngineRequest,
         response_tx: mpsc::Sender<EngineEvent>,
+        enqueued_at: Instant,
     },
     Cancel {
         request_id: Uuid,
@@ -1776,6 +1793,7 @@ struct PendingAdapterSwap {
 struct QueuedRequest {
     req: EngineRequest,
     delivery_key: DeliveryKey,
+    enqueued_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1793,6 +1811,10 @@ struct ActiveRequest {
     /// This is immutable so the short-prefill lane compares request classes,
     /// not mutable progress that would split an equal-work cohort.
     initial_prefill_work_tokens: Option<usize>,
+    actor_queue_duration: Duration,
+    actor_admission_duration: Duration,
+    admitted_at: Instant,
+    first_token_ready_after_admission: Option<Duration>,
     action_tokens: Option<Vec<EngineActionToken>>,
     slot: DecodeSlot,
 }
@@ -2381,7 +2403,11 @@ impl BatchingEngineActor {
 
     fn handle_command(&mut self, cmd: EngineCommand) {
         match cmd {
-            EngineCommand::Enqueue { req, response_tx } => {
+            EngineCommand::Enqueue {
+                req,
+                response_tx,
+                enqueued_at,
+            } => {
                 let Some(delivery_key) = self.register_delivery(req.request_id, response_tx) else {
                     req.cancel.cancel();
                     self.accepting = false;
@@ -2393,7 +2419,11 @@ impl BatchingEngineActor {
                     return;
                 };
                 if self.accepting {
-                    self.waiting.push_back(QueuedRequest { req, delivery_key });
+                    self.waiting.push_back(QueuedRequest {
+                        req,
+                        delivery_key,
+                        enqueued_at,
+                    });
                     self.refresh_snapshot();
                 } else {
                     req.cancel.cancel();
@@ -2569,12 +2599,13 @@ impl BatchingEngineActor {
                 self.waiting.insert(waiting_idx, queued);
                 break;
             }
-            let started = Instant::now();
+            let admission_started_at = Instant::now();
             let preparation = self
                 .forward
                 .prepare_request_chunked(&queued.req, token_budget);
+            let actor_admission_duration = admission_started_at.elapsed();
             self.record_admission_duration(
-                started.elapsed(),
+                actor_admission_duration,
                 queued.req.request_id,
                 queued.req.prompt_tokens.len(),
                 token_budget,
@@ -2614,6 +2645,9 @@ impl BatchingEngineActor {
                     token_budget -= tokens_scheduled;
                     admitted += 1;
                     let active_idx = self.active.len();
+                    let admitted_at = Instant::now();
+                    let actor_queue_duration =
+                        admission_started_at.saturating_duration_since(queued.enqueued_at);
                     let initial_prefill_work_tokens = if ready {
                         None
                     } else {
@@ -2626,6 +2660,10 @@ impl BatchingEngineActor {
                         delivery_state: ActiveDeliveryState::Ready,
                         next_delivery_sequence: 0,
                         initial_prefill_work_tokens,
+                        actor_queue_duration,
+                        actor_admission_duration,
+                        admitted_at,
+                        first_token_ready_after_admission: None,
                         action_tokens,
                         slot,
                     });
@@ -2777,6 +2815,10 @@ impl BatchingEngineActor {
                 delivery_state,
                 next_delivery_sequence,
                 initial_prefill_work_tokens,
+                actor_queue_duration,
+                actor_admission_duration,
+                admitted_at,
+                first_token_ready_after_admission,
                 action_tokens,
                 slot,
             } = self.active.remove(idx);
@@ -2902,6 +2944,10 @@ impl BatchingEngineActor {
                         delivery_state,
                         next_delivery_sequence,
                         initial_prefill_work_tokens,
+                        actor_queue_duration,
+                        actor_admission_duration,
+                        admitted_at,
+                        first_token_ready_after_admission,
                         action_tokens,
                         slot,
                     },
@@ -2925,6 +2971,10 @@ impl BatchingEngineActor {
                     delivery_state,
                     next_delivery_sequence,
                     initial_prefill_work_tokens,
+                    actor_queue_duration,
+                    actor_admission_duration,
+                    admitted_at,
+                    first_token_ready_after_admission,
                     action_tokens,
                     slot,
                 },
@@ -2989,6 +3039,10 @@ impl BatchingEngineActor {
             return;
         }
         let generated_index = self.generated_tokens_for(idx).len();
+        if generated_index == 0 && self.active[idx].first_token_ready_after_admission.is_none() {
+            self.active[idx].first_token_ready_after_admission =
+                Some(ready_at.saturating_duration_since(self.active[idx].admitted_at));
+        }
         let decision = {
             let generated_tokens = self.generated_tokens_for(idx);
             self.active[idx]
@@ -3318,6 +3372,9 @@ impl BatchingEngineActor {
                     action_tokens: active.action_tokens,
                     prefill_duration: output.prefill_duration,
                     decode_duration: output.decode_duration,
+                    actor_queue_duration: active.actor_queue_duration,
+                    actor_admission_duration: active.actor_admission_duration,
+                    actor_prefill_wall_duration: active.first_token_ready_after_admission,
                 })
             }
             Err(err) => {
@@ -4030,7 +4087,11 @@ mod tests {
         let delivery_key = actor
             .register_delivery(req.request_id, response_tx)
             .expect("test delivery lane registers");
-        actor.waiting.push_back(QueuedRequest { req, delivery_key });
+        actor.waiting.push_back(QueuedRequest {
+            req,
+            delivery_key,
+            enqueued_at: Instant::now(),
+        });
     }
 
     fn push_test_active(
@@ -4050,6 +4111,10 @@ mod tests {
             delivery_state: ActiveDeliveryState::Ready,
             next_delivery_sequence: 0,
             initial_prefill_work_tokens,
+            actor_queue_duration: Duration::ZERO,
+            actor_admission_duration: Duration::ZERO,
+            admitted_at: Instant::now(),
+            first_token_ready_after_admission: None,
             action_tokens,
             slot,
         });
@@ -4290,6 +4355,61 @@ mod tests {
                 None => panic!("engine closed before completion"),
             }
         }
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn actor_queue_timing_includes_command_wait_behind_inflight_forward() {
+        let events: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let (forward, release) = GatedForward::new(events);
+        let handle = BatchingEngineHandle::start_with_options(Arc::new(forward), 1);
+        let mut first = handle.enqueue(request(100, 1)).await.unwrap();
+
+        let blocked_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = handle.cached_snapshot();
+            if snapshot.current_batch_size == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < blocked_deadline,
+                "first request did not enter the gated forward: {snapshot:?}"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        let mut second = handle.enqueue(request(200, 1)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        release.send(()).unwrap();
+        release.send(()).unwrap();
+
+        let first_output = loop {
+            match first.recv().await {
+                Some(EngineEvent::Done { output }) => break output,
+                Some(EngineEvent::Token { .. }) => {}
+                Some(EngineEvent::Error(error)) => panic!("first generation failed: {error}"),
+                None => panic!("first generation closed before completion"),
+            }
+        };
+        let second_output = loop {
+            match second.recv().await {
+                Some(EngineEvent::Done { output }) => break output,
+                Some(EngineEvent::Token { .. }) => {}
+                Some(EngineEvent::Error(error)) => panic!("second generation failed: {error}"),
+                None => panic!("second generation closed before completion"),
+            }
+        };
+
+        assert!(
+            second_output.actor_queue_duration >= Duration::from_millis(20),
+            "enqueue-to-admission timing must include actor command wait: first={:?} second={:?}",
+            first_output.actor_queue_duration,
+            second_output.actor_queue_duration
+        );
+        assert!(
+            second_output.actor_prefill_wall_duration.is_some(),
+            "the first sampled token must close admitted-prefill wall timing"
+        );
         handle.stop().await.unwrap();
     }
 
@@ -4568,19 +4688,19 @@ mod tests {
         assert_eq!(snapshot.response_delivery_pending_terminal, 1);
 
         assert_token_event(response.recv().await, 111);
-        assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(1), response.recv())
-                .await
-                .expect("Done must follow after the final-token slot is released"),
-            Some(EngineEvent::Done {
-                output: BatchedGenerationOutput {
-                    token_ids,
-                    completion_tokens: 1,
-                    finish_reason: FinishReason::MaxTokens,
-                    ..
-                }
-            }) if token_ids == vec![111]
-        ));
+        let terminal = tokio::time::timeout(Duration::from_secs(1), response.recv())
+            .await
+            .expect("Done must follow after the final-token slot is released");
+        let Some(EngineEvent::Done { output }) = terminal else {
+            panic!("expected terminal generation output, got {terminal:?}");
+        };
+        assert_eq!(output.token_ids, vec![111]);
+        assert_eq!(output.completion_tokens, 1);
+        assert_eq!(output.finish_reason, FinishReason::MaxTokens);
+        assert!(
+            output.actor_prefill_wall_duration.is_some(),
+            "the first sampled token must close actor prefill wall timing"
+        );
 
         let settled = handle.snapshot().await.unwrap();
         assert_eq!(settled.response_delivery_pending_terminal, 0, "{settled:?}");
@@ -5740,6 +5860,7 @@ mod tests {
         actor.handle_command(EngineCommand::Enqueue {
             req: request_with_tokens(vec![1, 2], 32),
             response_tx: root_tx,
+            enqueued_at: Instant::now(),
         });
         actor.admit_waiting();
         assert_eq!(actor.active.len(), 1);
@@ -5752,6 +5873,7 @@ mod tests {
             actor.handle_command(EngineCommand::Enqueue {
                 req: request_with_tokens(vec![1, 2, 3], 1),
                 response_tx: tx,
+                enqueued_at: Instant::now(),
             });
             keep_rx.push(rx);
         }

@@ -276,6 +276,9 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "memory_reclaim_event_count": ("count", "sum", True),
     "output_token_throughput_per_second": ("tokens/s", "rate", False),
     "peak_gpu_memory_used_bytes": ("bytes", "max", True),
+    "pressure_peer_actor_admission_ms": ("ms", "exact", True),
+    "pressure_peer_actor_prefill_wall_ms": ("ms", "exact", True),
+    "pressure_peer_actor_queue_ms": ("ms", "exact", True),
     "pressure_peer_first_ready_after_dispatch_ms": ("ms", "exact", True),
     "pressure_peer_ready_after_count": ("count", "sum", False),
     "pressure_peer_ready_before_count": ("count", "sum", False),
@@ -459,6 +462,68 @@ def parse_token_timing(
     return numbers["ready_ms"], numbers["queue_delay_ms"]
 
 
+PERFORMANCE_METADATA_FIELDS = {
+    "prompt_tokens",
+    "completion_tokens",
+    "ttft_ms",
+    "prefill_ms",
+    "actor_queue_ms",
+    "actor_admission_ms",
+    "actor_prefill_wall_ms",
+    "decode_ms",
+    "total_latency_ms",
+    "decode_tokens_per_sec",
+    "adapter_used",
+    "thinking_mode",
+    "finish_reason",
+}
+
+
+def parse_actor_performance(value: Any) -> tuple[float, float, float] | None:
+    if not isinstance(value, dict):
+        return None
+    metadata = value.get("metadata")
+    if not isinstance(metadata, dict) or "performance" not in metadata:
+        return None
+    performance = metadata["performance"]
+    if not isinstance(performance, dict) or set(performance) != PERFORMANCE_METADATA_FIELDS:
+        raise QualificationError("performance metadata has an unexpected shape")
+    numbers: dict[str, float] = {}
+    for field in (
+        "ttft_ms",
+        "prefill_ms",
+        "actor_queue_ms",
+        "actor_admission_ms",
+        "actor_prefill_wall_ms",
+    ):
+        raw = performance[field]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise QualificationError(f"performance metadata {field} is not numeric")
+        number = float(raw)
+        if not math.isfinite(number) or number < 0:
+            raise QualificationError(
+                f"performance metadata {field} is not finite and nonnegative"
+            )
+        numbers[field] = number
+    actor_total = (
+        numbers["actor_queue_ms"]
+        + numbers["actor_admission_ms"]
+        + numbers["actor_prefill_wall_ms"]
+    )
+    if actor_total > numbers["ttft_ms"] + 1.0:
+        raise QualificationError("actor timing phases exceed TTFT")
+    if (
+        numbers["prefill_ms"]
+        > numbers["actor_admission_ms"] + numbers["actor_prefill_wall_ms"] + 1.0
+    ):
+        raise QualificationError("model prefill time exceeds its actor wall-time envelope")
+    return (
+        numbers["actor_queue_ms"],
+        numbers["actor_admission_ms"],
+        numbers["actor_prefill_wall_ms"],
+    )
+
+
 def token_timing_matches_usage(
     finish_reason: str | None, timing_count: int, completion_tokens: int
 ) -> bool:
@@ -493,6 +558,9 @@ class StreamResult:
     done: bool
     cancelled: bool
     error: str | None
+    actor_queue_ms: float | None = None
+    actor_admission_ms: float | None = None
+    actor_prefill_wall_ms: float | None = None
 
     @property
     def success(self) -> bool:
@@ -706,6 +774,9 @@ def run_stream(
     prompt_tokens = 0
     completion_tokens = 0
     usage_records = 0
+    actor_queue_ms: float | None = None
+    actor_admission_ms: float | None = None
+    actor_prefill_wall_ms: float | None = None
     reasons: list[str] = []
     done = False
     cancelled = False
@@ -758,6 +829,17 @@ def run_stream(
                     done = True
                     break
                 value = json.loads(data)
+                actor_performance = parse_actor_performance(value)
+                if actor_performance is not None:
+                    if actor_queue_ms is not None:
+                        raise QualificationError(
+                            f"{name} emitted multiple actor performance records"
+                        )
+                    (
+                        actor_queue_ms,
+                        actor_admission_ms,
+                        actor_prefill_wall_ms,
+                    ) = actor_performance
                 timing = parse_token_timing(
                     value,
                     len(token_ready_times) + 1,
@@ -858,6 +940,9 @@ def run_stream(
         done=done,
         cancelled=cancelled,
         error=error,
+        actor_queue_ms=actor_queue_ms,
+        actor_admission_ms=actor_admission_ms,
+        actor_prefill_wall_ms=actor_prefill_wall_ms,
     )
 
 
@@ -1157,6 +1242,9 @@ def pressure_peer_timing_values(
 ) -> dict[str, float | int]:
     first_ready = min(result.token_ready_times, default=None)
     values: dict[str, float | int] = {
+        "pressure_peer_actor_admission_ms": result.actor_admission_ms or 0.0,
+        "pressure_peer_actor_prefill_wall_ms": result.actor_prefill_wall_ms or 0.0,
+        "pressure_peer_actor_queue_ms": result.actor_queue_ms or 0.0,
         "pressure_peer_first_ready_after_dispatch_ms": (
             (first_ready - result.started) * 1000.0 if first_ready is not None else 0.0
         ),
@@ -2761,6 +2849,20 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 f"{values['pressure_window_duration_ms']:.3f} ms; first ready at "
                 f"{values['pressure_peer_first_ready_after_dispatch_ms']:.3f} ms)"
             )
+        missing_actor_timing = [
+            name
+            for name, value in (
+                ("actor_queue_ms", pressure_peer.actor_queue_ms),
+                ("actor_admission_ms", pressure_peer.actor_admission_ms),
+                ("actor_prefill_wall_ms", pressure_peer.actor_prefill_wall_ms),
+            )
+            if value is None
+        ]
+        if missing_actor_timing:
+            status_failures.append(
+                "pressure peer omitted terminal actor timing fields: "
+                + ", ".join(missing_actor_timing)
+            )
         if not delivery_pressure_observed:
             status_failures.append(
                 "slow consumer did not produce request-attributed backpressure and stall eviction"
@@ -2804,6 +2906,9 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 error=result.error,
                 finish_reason=result.finish_reason,
                 name=result.name,
+                actor_admission_ms=result.actor_admission_ms,
+                actor_prefill_wall_ms=result.actor_prefill_wall_ms,
+                actor_queue_ms=result.actor_queue_ms,
                 prompt_tokens=result.prompt_tokens,
                 semantic_events=len(result.semantic_times),
                 ttft_ms=result.ttft_ms,
