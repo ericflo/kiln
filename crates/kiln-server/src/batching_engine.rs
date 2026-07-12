@@ -352,6 +352,7 @@ pub struct BatchingEngineSnapshot {
     pub total_prefill_layers: u64,
     pub total_prefill_layer_yields: u64,
     pub total_short_prefill_priority_forwards: u64,
+    pub total_prefill_staging_priority_forwards: u64,
     pub total_prefill_staging_admissions: u64,
     pub total_decode_tokens: u64,
     pub total_prefill_tokens: u64,
@@ -1888,6 +1889,7 @@ struct BatchingEngineActor {
     max_active_requests: usize,
     next_prefill_index: usize,
     short_prefill_priority_cursor: usize,
+    next_staged_prefill_generation: u64,
     next_decode_generation: u64,
     prefix_aware_admission: bool,
     max_prefill_admissions_per_cycle: usize,
@@ -2011,6 +2013,7 @@ impl BatchingEngineActor {
             max_active_requests,
             next_prefill_index: 0,
             short_prefill_priority_cursor: 0,
+            next_staged_prefill_generation: 0,
             next_decode_generation: 0,
             prefix_aware_admission,
             max_prefill_admissions_per_cycle,
@@ -2815,6 +2818,37 @@ impl BatchingEngineActor {
         let short_tail_limit = self
             .max_prefill_tokens_per_cycle
             .saturating_mul(SHORT_PREFILL_PRIORITY_MAX_CHUNKS);
+        // Staged rows already passed the bounded prompt-size gate at admission.
+        // Rotate them on priority turns; the forced global turn above still
+        // advances ordinary rows under a continuously full staging lane.
+        let mut staged: Vec<(usize, u64)> = (0..active_len)
+            .filter(|&idx| {
+                eligible(idx)
+                    && self.active[idx].admission_lane == ActiveAdmissionLane::PrefillStaging
+                    && self
+                        .forward
+                        .remaining_prefill_tokens(&self.active[idx].slot)
+                        .is_some_and(|remaining| remaining <= short_tail_limit)
+            })
+            .map(|idx| (idx, self.active[idx].delivery_key.generation))
+            .collect();
+        staged.sort_unstable_by_key(|&(_, generation)| generation);
+        if !staged.is_empty() {
+            let start = staged.partition_point(|&(_, generation)| {
+                generation < self.next_staged_prefill_generation
+            });
+            let (priority, generation) = staged[start % staged.len()];
+            self.next_staged_prefill_generation = generation.checked_add(1).unwrap_or(0);
+            self.snapshot.total_short_prefill_priority_forwards = self
+                .snapshot
+                .total_short_prefill_priority_forwards
+                .saturating_add(1);
+            self.snapshot.total_prefill_staging_priority_forwards = self
+                .snapshot
+                .total_prefill_staging_priority_forwards
+                .saturating_add(1);
+            return Some((priority, true));
+        }
         let Some(largest_initial_work) = (0..active_len)
             .filter(|&idx| eligible(idx))
             .filter_map(|idx| self.active[idx].initial_prefill_work_tokens)
@@ -5737,6 +5771,79 @@ mod tests {
             &[vec![1, 2], vec![3, 4]]
         );
         assert_eq!(actor.snapshot.max_observed_batch_size, 2);
+
+        actor.fail_all("test complete");
+        drop(receivers);
+    }
+
+    #[test]
+    fn staged_prefills_rotate_on_priority_turns_without_hiding_ordinary_rows() {
+        const LONG_A: TokenId = 60_001;
+        const LONG_B: TokenId = 60_002;
+        const LONG_C: TokenId = 60_003;
+        const STAGED_A: TokenId = 61_001;
+        const STAGED_B: TokenId = 61_002;
+        const STAGED_C: TokenId = 61_003;
+
+        let forward = Arc::new(SyntheticPrefillForward {
+            layers_per_chunk: 8,
+            ..SyntheticPrefillForward::default()
+        });
+        let (_command_tx, command_rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let mut actor = test_actor(
+            command_rx,
+            forward.clone(),
+            3,
+            false,
+            3,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let mut receivers = Vec::new();
+        for (key, tokens, lane) in [
+            (LONG_A, 1_024, ActiveAdmissionLane::Ordinary),
+            (LONG_B, 1_024, ActiveAdmissionLane::Ordinary),
+            (LONG_C, 1_024, ActiveAdmissionLane::Ordinary),
+            (STAGED_A, 128, ActiveAdmissionLane::PrefillStaging),
+            (STAGED_B, 128, ActiveAdmissionLane::PrefillStaging),
+            (STAGED_C, 128, ActiveAdmissionLane::PrefillStaging),
+        ] {
+            let req = request_with_tokens(vec![key; tokens], 1);
+            let RequestPreparation::Prefilling { slot, .. } = forward
+                .prepare_request_chunked(&req, 64)
+                .expect("initialize synthetic staged prefill")
+            else {
+                panic!("synthetic prompt unexpectedly became ready")
+            };
+            let (response_tx, response_rx) = mpsc::channel(8);
+            push_test_active(&mut actor, req, response_tx, slot);
+            actor.active.last_mut().unwrap().admission_lane = lane;
+            receivers.push(response_rx);
+        }
+
+        for _ in 0..9 {
+            assert!(actor.run_prefill_budget(64));
+        }
+
+        let layer_order: Vec<TokenId> = forward
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                SchedulingEvent::PrefillLayers { key, .. } => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            layer_order,
+            vec![
+                STAGED_A, STAGED_B, LONG_A, STAGED_C, STAGED_A, LONG_B, STAGED_B, STAGED_C, LONG_C,
+            ]
+        );
+        assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 6);
+        assert_eq!(actor.snapshot.total_prefill_staging_priority_forwards, 6);
+        assert_eq!(actor.snapshot.total_errors, 0);
 
         actor.fail_all("test complete");
         drop(receivers);

@@ -1178,6 +1178,20 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_prefill_staging_priority_forwards_total Priority opportunities assigned to rotating staged prefills.\n");
+        out.push_str(
+            "# TYPE kiln_batching_engine_prefill_staging_priority_forwards_total counter\n",
+        );
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefill_staging_priority_forwards_total {}",
+                gauges
+                    .batching_engine
+                    .total_prefill_staging_priority_forwards
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_prefill_staging_admissions_total Requests admitted through the bounded short-prefill staging lane.\n");
         out.push_str("# TYPE kiln_batching_engine_prefill_staging_admissions_total counter\n");
         push_line(
@@ -1999,6 +2013,7 @@ mod tests {
                 total_prefill_layers: 48,
                 total_prefill_layer_yields: 36,
                 total_short_prefill_priority_forwards: 9,
+                total_prefill_staging_priority_forwards: 3,
                 total_prefill_staging_admissions: 4,
                 total_errors: 1,
                 response_delivery_in_flight: 3,
@@ -2105,6 +2120,7 @@ mod tests {
         assert!(output.contains("kiln_decode_batcher_runner_call_budget_per_token 2"));
         assert!(output.contains("kiln_decode_batcher_runner_call_budget_exceeded 0"));
         assert!(output.contains("kiln_batching_engine_prefill_admission_cycles_total 6"));
+        assert!(output.contains("kiln_batching_engine_prefill_staging_priority_forwards_total 3"));
         assert!(output.contains("kiln_batching_engine_prefill_staging_admissions_total 4"));
         assert!(output.contains("kiln_batching_engine_prefill_forwards_total 12"));
         assert!(output.contains("kiln_batching_engine_decode_tokens_total 128"));

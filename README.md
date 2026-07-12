@@ -915,9 +915,11 @@ smaller token chunk can. The actor charges a chunk's token width once, when it
 selects that chunk; later layer groups resume the same width without competing
 for a second new-token budget, shrinking the chunk, or replaying completed
 layers. Every third prefill dispatch remains round-robin. The other two may
-accelerate the shortest remaining prompt tail only when it is no more than four
-token chunks and its admission-time prompt work is strictly smaller than another
-eligible active row's. Comparing immutable work classes keeps an
+first rotate eligible staging-lane prefills by request generation. When no
+staged prefill is eligible, they may accelerate the shortest remaining prompt
+tail only when it is no more than four token chunks and its admission-time
+prompt work is strictly smaller than another eligible active row's. Comparing
+immutable work classes keeps an
 all-equal cohort aligned instead of creating an artificial readiness staircase,
 while a genuinely shorter interactive request can receive the bounded extra
 service even on its ordinary turn; the round-robin lane retains one third of
@@ -926,10 +928,12 @@ Latency-oriented actors also keep a separate staging lane of at most four
 short prefills beyond the decode-width ordinary slots. A request is staging
 eligible only when its prompt can enter the four-chunk short-tail class after
 one prefill quantum. Ordinary FIFO capacity is counted independently, so staged
-arrivals cannot take a long prompt's ordinary slot; when staged rows become
-decode-ready, request-generation round robin prevents a decode-width cohort
-from hiding them. Staging is disabled for deterministic width one and for
-CUDA's throughput-oriented burst-refill policy.
+arrivals cannot take a long prompt's ordinary slot. Staged prefills rotate on
+the two priority turns while the global round-robin turn preserves ordinary
+progress; once staged rows become decode-ready, a separate request-generation
+rotation prevents a decode-width cohort from hiding them. Staging is disabled
+for deterministic width one and for CUDA's throughput-oriented burst-refill
+policy.
 Cancellation and
 shutdown release partial KV ownership
 only after the backend synchronization boundary; an unsettled device failure is
@@ -945,7 +949,7 @@ Prometheus exports the corresponding `kiln_batching_engine_active_prefill`,
 series. Bounded short-tail service is counted by
 `kiln_batching_engine_short_prefill_priority_forwards_total`; staging capacity,
 occupancy, observed active width, and admissions use the
-`kiln_batching_engine_{prefill_staging_slots,max_active_requests,active_staged_requests,max_observed_active_requests,prefill_staging_admissions_total}`
+`kiln_batching_engine_{prefill_staging_slots,max_active_requests,active_staged_requests,max_observed_active_requests,prefill_staging_admissions_total,prefill_staging_priority_forwards_total}`
 series. Admission,
 bounded-prefill, and decode-forward wall time is also
 available as cumulative, process-maximum, and 100 ms slow-phase counters under
