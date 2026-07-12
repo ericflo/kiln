@@ -1425,20 +1425,19 @@ impl DecodeForward for RealDecodeForward {
         })?;
         runner.ensure_backend_healthy()?;
         runner.invalidate_decode_graphs_for_kv_pool_change()?;
+        let mut block_manager = self.block_manager_guard()?;
+        let mut staged_block_manager = block_manager.clone();
         if target_blocks < cur {
-            // SHRINK. Logical first: lower the ceiling + retire free high blocks.
-            // We can only physically drop to the live high-water mark right now;
-            // if requests still hold high blocks the shrink stops there, and a
-            // later resize finishes it once they drain.
-            let achievable = {
-                let mut bm = self.block_manager_guard()?;
-                bm.set_target_usable(target_blocks);
-                let achievable = target_blocks.max(bm.physical_floor());
-                bm.physical_truncate(achievable)
-                    .map_err(|e| anyhow::anyhow!("kv shrink truncate to {achievable}: {e}"))?;
-                achievable
-            };
+            // Prepare the logical shrink on a private copy. The drained actor
+            // barrier should make the live floor zero, but retaining the floor
+            // calculation keeps this path correct for direct test callers.
+            staged_block_manager.set_target_usable(target_blocks);
+            let achievable = target_blocks.max(staged_block_manager.physical_floor());
+            staged_block_manager
+                .physical_truncate(achievable)
+                .map_err(|e| anyhow::anyhow!("kv shrink truncate to {achievable}: {e}"))?;
             self.paged_cache.physical_resize_to(achievable, device)?;
+            *block_manager = staged_block_manager;
             tracing::info!(
                 from = cur,
                 to = achievable,
@@ -1447,14 +1446,12 @@ impl DecodeForward for RealDecodeForward {
             );
             Ok(achievable)
         } else {
-            // GROW. Physical first (alloc bigger, copy existing KV), then publish
-            // the new blocks to the manager and raise the ceiling.
+            // Prepare the logical grow privately, replace the physical pools,
+            // then publish the infallible BlockManager assignment.
+            staged_block_manager.physical_grow(target_blocks);
+            staged_block_manager.set_target_usable(target_blocks);
             self.paged_cache.physical_resize_to(target_blocks, device)?;
-            {
-                let mut bm = self.block_manager_guard()?;
-                bm.physical_grow(target_blocks);
-                bm.set_target_usable(target_blocks);
-            }
+            *block_manager = staged_block_manager;
             tracing::info!(from = cur, to = target_blocks, "KV cache physically grown");
             Ok(target_blocks)
         }
@@ -1794,7 +1791,8 @@ enum EngineCommand {
         reply: oneshot::Sender<std::result::Result<BatchingEngineSnapshot, String>>,
     },
     /// Physically resize the KV cache to `target_blocks` usable blocks (#26).
-    /// Handled at the between-steps barrier so no forward is in flight.
+    /// Queued at the between-requests barrier so no active request retains a
+    /// graph, recurrent state, or block-table reference to the old pool.
     ResizeKv {
         target_blocks: usize,
         reply: oneshot::Sender<std::result::Result<usize, String>>,
@@ -1808,10 +1806,17 @@ enum EngineCommand {
     },
 }
 
-/// A queued adapter swap waiting for the active batch to drain.
-struct PendingAdapterSwap {
-    swap: AdapterSwapClosure,
-    reply: oneshot::Sender<std::result::Result<(), String>>,
+/// FIFO-exclusive GPU/model mutation waiting for the active batch to drain.
+/// Keeping resize and adapter work in one queue preserves command ordering.
+enum PendingExclusiveMutation {
+    ResizeKv {
+        target_blocks: usize,
+        reply: oneshot::Sender<std::result::Result<usize, String>>,
+    },
+    SwapAdapter {
+        swap: AdapterSwapClosure,
+        reply: oneshot::Sender<std::result::Result<(), String>>,
+    },
 }
 
 struct QueuedRequest {
@@ -1924,10 +1929,9 @@ struct BatchingEngineActor {
     delivery_outbox: Vec<(DeliveryKey, DeliveryBatch)>,
     defer_delivery_flush: bool,
     stop_replies: Vec<oneshot::Sender<()>>,
-    /// Adapter swaps waiting for the active batch to drain. While any swap
-    /// is pending, admission pauses (waiting requests stay queued) so the
-    /// barrier is reached promptly; swaps then run FIFO on this thread.
-    pending_swaps: VecDeque<PendingAdapterSwap>,
+    /// KV resizes and adapter swaps waiting for the active batch to drain.
+    /// Admission pauses until these ordered mutations finish.
+    pending_exclusive_mutations: VecDeque<PendingExclusiveMutation>,
     snapshot: BatchingEngineSnapshot,
     published_snapshot: SharedBatchingEngineSnapshot,
 }
@@ -2047,7 +2051,7 @@ impl BatchingEngineActor {
             delivery_outbox: Vec::new(),
             defer_delivery_flush: false,
             stop_replies: Vec::new(),
-            pending_swaps: VecDeque::new(),
+            pending_exclusive_mutations: VecDeque::new(),
             snapshot,
             published_snapshot,
         }
@@ -2059,19 +2063,21 @@ impl BatchingEngineActor {
             if self.stopped {
                 break;
             }
-            // Between-requests barrier: with no decode step in flight and
-            // the active batch drained, queued adapter swaps execute now —
-            // before blocking on the channel, so a swap queued behind a
-            // just-finished batch doesn't wait for the next command.
-            self.run_pending_swaps_at_barrier();
+            // Between-requests barrier: with no decode step in flight and the
+            // active batch drained, queued pool/weight mutations execute before
+            // blocking on the channel.
+            self.run_pending_exclusive_mutations_at_barrier();
 
-            if self.active.is_empty() && self.waiting.is_empty() && self.pending_swaps.is_empty() {
+            if self.active.is_empty()
+                && self.waiting.is_empty()
+                && self.pending_exclusive_mutations.is_empty()
+            {
                 match self.rx.blocking_recv() {
                     Some(cmd) => self.handle_command(cmd),
                     None => break,
                 }
-                // A swap that arrived while idle executes immediately.
-                self.run_pending_swaps_at_barrier();
+                // A mutation that arrived while idle executes immediately.
+                self.run_pending_exclusive_mutations_at_barrier();
                 if self.stopped {
                     break;
                 }
@@ -2535,37 +2541,41 @@ impl BatchingEngineActor {
                 target_blocks,
                 reply,
             } => {
-                // Runs at the barrier (drain_commands, between decode steps): the
-                // previous step's `run_decode_batch` has returned, so no forward
-                // is in flight in THIS actor. `resize_kv` additionally takes the
-                // GPU write lock to exclude the other decode actor / training.
-                let result = self
-                    .forward
-                    .resize_kv(target_blocks)
-                    .map_err(|e| format!("{e:#}"));
-                let _ = reply.send(result);
+                self.pending_exclusive_mutations
+                    .push_back(PendingExclusiveMutation::ResizeKv {
+                        target_blocks,
+                        reply,
+                    });
             }
             EngineCommand::SwapAdapter { swap, reply } => {
-                // Unlike ResizeKv, a weight swap must also wait for the
-                // active batch to DRAIN (KV computed under the old weights
-                // can't continue under new ones), so it queues here and the
-                // run loop executes it at the between-requests barrier.
-                self.pending_swaps
-                    .push_back(PendingAdapterSwap { swap, reply });
+                self.pending_exclusive_mutations
+                    .push_back(PendingExclusiveMutation::SwapAdapter { swap, reply });
             }
         }
     }
 
-    /// Execute queued adapter swaps when the active batch has drained. The
-    /// run loop calls this between decode steps; while swaps are pending,
-    /// `admit_waiting` pauses admission so the barrier is reached promptly.
-    fn run_pending_swaps_at_barrier(&mut self) {
-        if self.pending_swaps.is_empty() || !self.active.is_empty() {
+    /// Execute ordered pool/weight mutations only after the active batch has
+    /// drained. Admission remains paused until the queue is empty.
+    fn run_pending_exclusive_mutations_at_barrier(&mut self) {
+        if self.pending_exclusive_mutations.is_empty() || !self.active.is_empty() {
             return;
         }
-        while let Some(pending) = self.pending_swaps.pop_front() {
-            let result = (pending.swap)();
-            let _ = pending.reply.send(result);
+        while let Some(pending) = self.pending_exclusive_mutations.pop_front() {
+            match pending {
+                PendingExclusiveMutation::ResizeKv {
+                    target_blocks,
+                    reply,
+                } => {
+                    let result = self
+                        .forward
+                        .resize_kv(target_blocks)
+                        .map_err(|error| format!("{error:#}"));
+                    let _ = reply.send(result);
+                }
+                PendingExclusiveMutation::SwapAdapter { swap, reply } => {
+                    let _ = reply.send(swap());
+                }
+            }
         }
     }
 
@@ -2629,11 +2639,9 @@ impl BatchingEngineActor {
     /// Admit queued requests and report whether this cycle submitted one or
     /// more prefill-produced first tokens to the delivery worker.
     fn admit_waiting_with_budget(&mut self, mut token_budget: usize) -> AdmissionOutcome {
-        // A pending adapter swap needs the active batch to drain — admitting
-        // new requests now would (a) delay the swap arbitrarily and (b) run
-        // them under weights the caller is replacing. They stay queued and
-        // resume right after the swap executes.
-        if !self.pending_swaps.is_empty() {
+        // Pending pool/weight mutations need the active batch to drain. Keep
+        // new requests queued until the ordered mutation queue completes.
+        if !self.pending_exclusive_mutations.is_empty() {
             return AdmissionOutcome::default();
         }
         let initial_token_budget = token_budget;
@@ -3625,8 +3633,15 @@ impl BatchingEngineActor {
         self.defer_delivery_flush = false;
         self.delivery_backpressured.clear();
         self.delivery_pending_terminal.clear();
-        while let Some(pending) = self.pending_swaps.pop_front() {
-            let _ = pending.reply.send(Err(error.to_string()));
+        while let Some(pending) = self.pending_exclusive_mutations.pop_front() {
+            match pending {
+                PendingExclusiveMutation::ResizeKv { reply, .. } => {
+                    let _ = reply.send(Err(error.to_string()));
+                }
+                PendingExclusiveMutation::SwapAdapter { reply, .. } => {
+                    let _ = reply.send(Err(error.to_string()));
+                }
+            }
         }
         self.refresh_snapshot();
     }
@@ -4469,6 +4484,14 @@ mod tests {
                 decode_duration: Duration::ZERO,
             })
         }
+
+        fn resize_kv(&self, target_blocks: usize) -> Result<usize> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("resize:{target_blocks}"));
+            Ok(target_blocks)
+        }
     }
 
     #[tokio::test]
@@ -4664,6 +4687,72 @@ mod tests {
         assert_eq!(
             decodes_before_swap, 2,
             "both of A's decode steps precede the swap: {log:?}"
+        );
+
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kv_resize_waits_for_active_request_and_pauses_admission() {
+        let events: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let (forward, release) = GatedForward::new(events.clone());
+        let handle = BatchingEngineHandle::start_with_options(Arc::new(forward), 8);
+
+        let mut active = handle.enqueue(request(100, 2)).await.unwrap();
+        release.send(()).unwrap();
+        assert!(matches!(
+            active.recv().await,
+            Some(EngineEvent::Token { .. })
+        ));
+
+        let resize_task = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.resize_kv(17).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut waiting = handle.enqueue(request(200, 1)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(!resize_task.is_finished(), "resize ran before active drain");
+        let before_drain = events.lock().unwrap().clone();
+        assert!(!before_drain.iter().any(|event| event == "resize:17"));
+        assert!(!before_drain.iter().any(|event| event == "prepare:200"));
+
+        release.send(()).unwrap();
+        release.send(()).unwrap();
+        assert_eq!(resize_task.await.unwrap().unwrap(), 17);
+
+        for response in [&mut active, &mut waiting] {
+            loop {
+                match response.recv().await {
+                    Some(EngineEvent::Done { .. }) => break,
+                    Some(EngineEvent::Token { .. }) => {}
+                    Some(EngineEvent::Error(error)) => panic!("request failed: {error}"),
+                    None => panic!("request channel closed before completion"),
+                }
+            }
+        }
+
+        let log = events.lock().unwrap().clone();
+        let resize_idx = log
+            .iter()
+            .position(|event| event == "resize:17")
+            .expect("resize ran");
+        let waiting_prepare_idx = log
+            .iter()
+            .position(|event| event == "prepare:200")
+            .expect("waiting request admitted");
+        assert!(
+            resize_idx < waiting_prepare_idx,
+            "resize must precede admission: {log:?}"
+        );
+        assert_eq!(
+            log[..resize_idx]
+                .iter()
+                .filter(|event| event.as_str() == "decode")
+                .count(),
+            2,
+            "the active request must finish before resize: {log:?}"
         );
 
         handle.stop().await.unwrap();
