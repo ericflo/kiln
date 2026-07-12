@@ -2467,9 +2467,7 @@ fn bench_training(
             messages: vec![
                 ChatMessage::new(
                     "user",
-                    format!(
-                        "What is the capital of country number {i}? Please explain in detail."
-                    ),
+                    format!("What is the capital of country number {i}? Please explain in detail."),
                 ),
                 ChatMessage::new(
                     "assistant",

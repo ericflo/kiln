@@ -360,10 +360,9 @@ fn with_conciseness_pressure(mut prompt: OpdPrompt) -> OpdPrompt {
         Some(first) if first.role == "system" => {
             first.content = format!("{}\n\n{PRESSURE}", first.content);
         }
-        _ => prompt.messages.insert(
-            0,
-            ChatMessage::new("system", PRESSURE),
-        ),
+        _ => prompt
+            .messages
+            .insert(0, ChatMessage::new("system", PRESSURE)),
     }
     prompt
 }

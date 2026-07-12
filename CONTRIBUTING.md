@@ -16,12 +16,19 @@ A note on scope: Kiln is deliberately a scalpel, not a framework. The scheduler,
 
 ## Development setup
 
-Install the stable Rust toolchain:
+Install the repository-pinned Rust toolchain. Rustup reads
+[`rust-toolchain.toml`](rust-toolchain.toml) automatically, including the exact
+`rustfmt` component used by CI:
 
 ```bash
-rustup toolchain install stable
-rustup default stable
+rustc --version
+rustup show active-toolchain
+cargo fmt --version
 ```
+
+Do not override the repository toolchain with a floating `stable` toolchain.
+Toolchain upgrades are explicit changes to `rust-toolchain.toml` so formatting,
+local builds, release builds, and CI move together.
 
 Build the default (no-GPU) configuration. This works on any host and is the fastest way to iterate on non-kernel code:
 
@@ -85,7 +92,7 @@ See [`QUICKSTART.md`](QUICKSTART.md) for the full zero-to-running walkthrough â€
 
 ## Code style
 
-- Run `cargo fmt --all` before committing. CI enforces `cargo fmt --all --check` for the Rust workspace.
+- Run `cargo fmt --all` before committing. CI enforces `cargo fmt --all --check` with the exact toolchain pinned in `rust-toolchain.toml`.
 - **Avoid adding dependencies casually.** Kiln deliberately keeps the dep tree small; every new crate is a build-time cost, an attack-surface increase, and a maintenance burden. Justify new deps in the PR body.
 - **No new `unwrap()` in the request path.** Prefer `?` with helpful errors. The error-message style added in PR #545 is a good reference: say what failed, why, and what to try next, instead of bubbling up a bare `io::Error`.
 - Keep comments short and load-bearing. Explain *why*, not *what* â€” the code already shows what.

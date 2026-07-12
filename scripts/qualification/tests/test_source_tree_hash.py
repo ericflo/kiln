@@ -23,6 +23,7 @@ class SourceTreeHashTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
         self._write("Cargo.toml", "[workspace]\n")
+        self._write("rust-toolchain.toml", "[toolchain]\nchannel = \"1.96.1\"\n")
         self._write("crates/demo/src/lib.rs", "pub fn value() -> u32 { 1 }\n")
         self._write("scripts/qualification/tool.py", "VALUE = 1\n")
         self._write("contracts/thinking-budget-v1.schema.json", "{}\n")
@@ -60,6 +61,7 @@ class SourceTreeHashTests(unittest.TestCase):
             "scripts/qualification/tool.py",
             "qualification/schema/receipt.json",
             "qualification/workloads/smoke.json",
+            "rust-toolchain.toml",
         ):
             with self.subTest(relative=relative):
                 before = self._hash()

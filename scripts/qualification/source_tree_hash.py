@@ -29,6 +29,7 @@ INCLUDED_FILES = {
     "desktop/tauri.conf.json",
     "deny.toml",
     "kiln.example.toml",
+    "rust-toolchain.toml",
 }
 INCLUDED_PREFIXES = (
     "contracts/",

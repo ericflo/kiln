@@ -6354,10 +6354,7 @@ mod tests {
     fn opd_request_round_trips_through_serde() {
         let req = OpdRequest {
             prompts: vec![OpdPrompt {
-                messages: vec![ChatMessage::new(
-                    "user",
-                    "Evaluate ∫_0^∞ e^{-x^2} dx",
-                )],
+                messages: vec![ChatMessage::new("user", "Evaluate ∫_0^∞ e^{-x^2} dx")],
                 teacher_extra_messages: vec![],
                 trajectory: vec![],
             }],
@@ -6766,10 +6763,7 @@ mod tests {
                     ChatMessage::new("user", "kept"),
                     ChatMessage::new("assistant", "answer"),
                 ],
-                teacher_extra_messages: vec![ChatMessage::new(
-                    "system",
-                    "teacher-only context",
-                )],
+                teacher_extra_messages: vec![ChatMessage::new("system", "teacher-only context")],
                 trajectory: Vec::new(),
             },
         ];

@@ -151,7 +151,10 @@ mod tests {
         let examples = load_sft_jsonl_examples(&path).unwrap();
         assert_eq!(examples.len(), 1);
         assert_eq!(examples[0].messages[1].content, "");
-        assert_eq!(examples[0].messages[1].tool_calls.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            examples[0].messages[1].tool_calls.as_ref().unwrap().len(),
+            1
+        );
         assert_eq!(examples[0].messages[2].content, "1");
         assert_eq!(examples[0].messages[2].name.as_deref(), Some("calculator"));
         assert_eq!(

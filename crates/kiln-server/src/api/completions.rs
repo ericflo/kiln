@@ -7013,11 +7013,7 @@ fn build_rollout_provenance(
                 req.chat_template_kwargs.as_ref(),
             ),
         };
-        let prompt_messages = req
-            .messages
-            .iter()
-            .map(message_to_chat)
-            .collect::<Vec<_>>();
+        let prompt_messages = req.messages.iter().map(message_to_chat).collect::<Vec<_>>();
         let prompt_messages_sha256 = kiln_train::rollout_prompt_messages_sha256(&prompt_messages)
             .map_err(anyhow::Error::msg)?;
         let scored_payload = kiln_train::ScoredRollout::legacy(scored_text.to_string(), 0.0);
