@@ -43,11 +43,11 @@ const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
 const DEFAULT_PREFILL_ADMISSION_QUANTUM: usize = 4;
 const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
-/// Preserve three round-robin dispatches for every opportunity to accelerate
+/// Preserve two round-robin dispatches for every opportunity to accelerate
 /// a short prompt tail. This bounds long-prompt slowdown under continuous
 /// short arrivals without making interactive prompts wait a full active-set
 /// rotation for every layer group.
-const SHORT_PREFILL_PRIORITY_INTERVAL: usize = 4;
+const SHORT_PREFILL_PRIORITY_INTERVAL: usize = 3;
 const SHORT_PREFILL_PRIORITY_MAX_CHUNKS: usize = 4;
 
 /// Actor work above this wall time is material to the qualification stall
@@ -6220,29 +6220,51 @@ mod tests {
             push_test_active(&mut actor, req, response_tx, slot);
         }
 
-        for _ in 0..12 {
+        for _ in 0..9 {
             assert!(actor.run_prefill_budget(64));
         }
 
-        let layer_order: Vec<TokenId> = forward
-            .events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|event| match event {
-                SchedulingEvent::PrefillLayers { key, .. } => Some(*key),
-                _ => None,
-            })
-            .collect();
+        let layer_order = || -> Vec<TokenId> {
+            forward
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|event| match event {
+                    SchedulingEvent::PrefillLayers { key, .. } => Some(*key),
+                    _ => None,
+                })
+                .collect()
+        };
         assert_eq!(
-            layer_order,
+            layer_order(),
             vec![
-                LONG_A, LONG_B, LONG_C, SHORT, LONG_D, SHORT, LONG_A, SHORT, LONG_B, LONG_C,
-                LONG_D, SHORT,
+                LONG_A, LONG_B, SHORT, LONG_C, LONG_D, SHORT, SHORT, LONG_A, SHORT,
             ]
         );
         assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 3);
         assert_eq!(actor.snapshot.total_errors, 0);
+        assert!(
+            !forward.is_prefilling(&actor.active[4].slot),
+            "the short row must become decode-ready within nine bounded dispatches"
+        );
+        assert!(
+            actor.active[..4]
+                .iter()
+                .all(|active| forward.is_prefilling(&active.slot)),
+            "every long row must retain ordinary round-robin progress"
+        );
+
+        for _ in 0..3 {
+            assert!(actor.run_prefill_budget(64));
+        }
+        assert_eq!(
+            layer_order(),
+            vec![
+                LONG_A, LONG_B, SHORT, LONG_C, LONG_D, SHORT, SHORT, LONG_A, SHORT, LONG_B, LONG_C,
+                LONG_D,
+            ]
+        );
         assert!(!forward.is_prefilling(&actor.active[4].slot));
         for active in &actor.active[..4] {
             assert!(forward.is_prefilling(&active.slot));
