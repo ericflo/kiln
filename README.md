@@ -706,6 +706,12 @@ just PEFT weights; admission validates the complete bundle and exact data route
 before GPU work. See [Native Training Checkpoints](docs/training-checkpoints.md)
 for API, CLI, browser, cancellation, teacher-identity, and resume semantics.
 
+The historically named `replay.jsonl`, `lineage.json`, and `kiln-replay`
+surfaces are narrower: `kiln-replay verify` recomputes request-lineage hashes
+only. It does not load a model, retrain, compare tensors or outputs, or prove
+reproducibility. Use `.kiln-checkpoint` for exact continuation and see
+[Request-Lineage Integrity](docs/REPLAY_INTEGRITY.md) for the precise boundary.
+
 ## Architecture
 
 ```
@@ -811,7 +817,8 @@ cross-backend bitwise determinism: it removes concurrent decode-shape variation
 and exposes one immutable selector to tensor/kernel implementations. It does not
 automatically set CUDA library controls such as `CUBLAS_WORKSPACE_CONFIG`, and
 not every tolerance-bounded backward kernel consumes that selector yet. Treat
-exact training replay and cross-device equality as separate qualification gates.
+same-environment repeated training and cross-device equality as separate
+qualification gates.
 
 Real-model serving initializes paged prefill ownership without running an
 unbounded prompt forward. Each actor cycle reserves one token for every ready

@@ -1,8 +1,8 @@
 //! Adapter Library endpoints (grand plan §3.10).
 //!
-//! Public, opt-in distribution of pre-trained kiln adapters. Each
-//! adapter ships with its §8.11 reproducibility receipt; install
-//! verifies the receipt and writes the adapter under the local
+//! Public, opt-in distribution of pre-trained kiln adapters. A publishable
+//! adapter carries its §8.11 audit receipt; install verifies the receipt and
+//! writes the adapter under the local
 //! `adapter_dir`. Publish bundles the local adapter + receipt + any
 //! eval scores into a tarball POSTed to the registry.
 //!
@@ -103,8 +103,8 @@ async fn publish_to_library(
     AxumPath(name): AxumPath<String>,
     Json(payload): Json<PublishPayload>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Validate the local adapter has a §8.11 receipt — that's the
-    // §3.10 trust gate. Without it, refuse to publish.
+    // Validate the local adapter has a §8.11 audit receipt — that's the
+    // §3.10 provenance gate. Without it, refuse to publish.
     let adapter_dir = state.adapter_dir.join(&name);
     if !adapter_dir.exists() {
         return Err(ApiError::adapter_not_found(&name));
@@ -113,8 +113,8 @@ async fn publish_to_library(
         .map_err(|e| ApiError::internal(format!("read receipt: {e:#}")))?
         .ok_or_else(|| {
             ApiError::training_invalid_request(format!(
-                "adapter {name:?} has no reproducibility receipt; refusing to publish \
-                 (per §3.10 the library only accepts adapters with §8.11 receipts)"
+                "adapter {name:?} has no audit receipt; refusing to publish \
+                 (per §3.10 the library only accepts adapters with §8.11 audit records)"
             ))
         })?;
 

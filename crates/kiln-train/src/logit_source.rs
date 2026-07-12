@@ -31,7 +31,7 @@ use thiserror::Error;
 pub struct LogitSourceCaps {
     /// Stable identifier for the teacher this source serves
     /// (e.g. `"qwen3.6-27b@local"`, `"qwen/qwen-3.6-27b@openrouter"`).
-    /// Used in cache keys (§3.3) and reproducibility receipts (§8.11).
+    /// Used in cache keys (§3.3) and legacy adapter audit receipts (§8.11).
     pub teacher_id: String,
 
     /// Full vocabulary size of the teacher. Provided so the trainer can

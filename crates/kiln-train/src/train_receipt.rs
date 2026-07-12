@@ -1,7 +1,7 @@
 //! Stable training receipts for GRPO/SFT adapter runs.
 //!
 //! This is intentionally separate from `receipt.json`: `receipt.json` is the
-//! older high-level reproducibility artifact used by distillation recipes,
+//! older high-level audit artifact used by distillation recipes,
 //! while `train_receipt.json` is the machine-readable forensic record that cap
 //! scripts can parse without scraping logs.
 
@@ -191,8 +191,8 @@ pub struct HyperparameterReceipt {
     pub epochs: usize,
     pub seed: Option<u64>,
     /// True when example order was shuffled per epoch (SFT). Recorded so a
-    /// receipt fully describes the data order a run saw; `seed` makes it
-    /// reproducible.
+    /// receipt records the shuffle selector. Reconstructing the exact order
+    /// also requires identical input data and ordering code.
     #[serde(default)]
     pub shuffle: bool,
 }

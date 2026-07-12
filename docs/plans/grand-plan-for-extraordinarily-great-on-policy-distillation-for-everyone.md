@@ -120,7 +120,7 @@ Designing for one user, even an idealised one, would be a mistake. Kiln has to l
 
 - **Can** do anything DeepSeek-V4 did. They have the compute and they have the data privacy requirements that make hosted APIs a non-starter.
 - **Wants:** a reliable pipeline to train N domain specialists and consolidate them into one unified 4B that beats their current generic 70B at every internal task. Reproducibility, governance, audit trails.
-- **Solution shape:** OPD with **multi-teacher full-vocabulary** mode, **FP4 QAT** on MoE-style adapter stacks, **deterministic kernel paths** (kiln already targets bitwise reproducibility per the recent FLCE work), and the full DeepSeek-V4 specialist-then-consolidate recipe templated as a one-shot job.
+- **Solution shape:** OPD with **multi-teacher full-vocabulary** mode, **FP4 QAT** on MoE-style adapter stacks, deterministic kernel modes with same-environment repeatability evidence (not a cross-backend bitwise promise), and the full DeepSeek-V4 specialist-then-consolidate recipe templated as a one-shot job.
 
 **The same code path serves all three.** The teacher abstraction (§3.2) is what differs. The training loop (§3.1) does not.
 
@@ -507,7 +507,9 @@ Two layered network artefacts.
 
 - The provenance trail (which teachers, which prompts, which hyperparameters).
 - Eval suite results (kiln eval format).
-- A reproducibility receipt: `kiln distill reproduce <adapter>` reconstructs it from the same teacher + same seed + same hyperparameters. When the source teacher is reachable (cached, hosted, or local), the receipt is *verifiable*.
+- An audit receipt binding declared teacher, prompt, seed, hyperparameter, and
+  execution identities. This supports integrity checks and drift diagnosis;
+  it does not reconstruct an adapter or execute a replay.
 
 **Future Logit-Cache CDN** — see §3.3. This is product research, not a shipped
 surface. Kiln currently refuses cache imports because a third-party archive
@@ -563,7 +565,7 @@ The complete list of new endpoints, in keeping with kiln's `POST /v1/<verb>/<nou
 | `POST` | `/v1/teachers` | Register a fixture, served-model local teacher, or explicit vLLM source |
 | `GET`  | `/v1/library` | Browse the public Adapter Library (§3.10) |
 | `POST` | `/v1/library/install/{adapter_id}` | Download and register a public adapter |
-| `POST` | `/v1/library/publish/{adapter_name}` | Publish an adapter to the library (with reproducibility receipt) |
+| `POST` | `/v1/library/publish/{adapter_name}` | Publish an adapter to the library (with its legacy audit receipt) |
 | `GET`  | `/v1/cache/stats` | Validated v3 entry count, bytes, and per-identity distribution |
 | `GET`  | `/v1/cache/export` | Export validated identity-bound v3 entries for backup/audit; import is unavailable |
 
@@ -635,14 +637,14 @@ The minimum that makes "OPD with a local teacher" work end-to-end.
 - `POST /v1/distill/pump` with all three modes (targeted / wide / auto-domain).
 - Adapter Library hosting (initially a kiln-managed S3 bucket with a CDN; longer term, a federated index).
 - `/v1/library/{install,publish}` flows.
-- Reproducibility receipts.
+- Adapter audit receipts.
 
 ### Phase 4 — Multi-teacher full-vocab + corporate features (8 weeks)
 
 - `full_vocab` loss path with the DeepSeek-V4 efficient-teacher-scheduling design (cache last-layer hidden states; one prediction head loaded at a time). _Loss-granularity enum + per-position teacher pre-compute (`build_local_teacher_fixture`) implemented; full multi-teacher hidden-state caching is the corporate-tier optimisation and stays a non-goal for this branch — needs a dedicated 8×H200 box to validate._
 - `POST /v1/adapters/distill_merge` extended to many-teacher (>2) consolidation. _The endpoint already accepts an unbounded `sources` list; the multi-tenant LoRA-as-teacher pre-compute now runs for real (§3.4). The DeepSeek-V4-style per-source-weight loss aggregation is a follow-up._
 - FP4 QAT path through kiln-marlin-gemm and the Vulkan kernel. **Non-goal for this branch** — Vulkan/Metal kernels are scoped out per the user's explicit instruction, and FP4 QAT requires the Vulkan path. CUDA-side FP4 lands when kiln-marlin-gemm gains it.
-- Deterministic kernel paths for reproducibility. _CUDA Phase B kernel is deterministic by construction (one-block-per-token, fixed reduction order). Vulkan/Metal determinism rides their respective kernels._
+- Deterministic kernel modes with per-backend same-environment repeatability tests. _CUDA Phase B uses one block per token and a fixed reduction order; no cross-driver or cross-backend byte-identity claim follows from that implementation property._
 - Corporate-tier templates: "DeepSeek-V4-style specialist-then-consolidate", "FP4 deployment ready". _`corporate-tier` defaults exist in §8.13 tier_defaults; the FP4 template waits on FP4 QAT (above)._
 
 ### Phase 5 — Network effects (continuous after Phase 3)
@@ -825,7 +827,7 @@ Every one is a real failure mode reported in the corpus or seen in production. E
 | 4 | Over-eager merger | Tries to merge 10 unrelated-domain LoRAs into one rank-32 adapter | Single LoRA can't store all; result is mediocre across all domains | Pre-merge compatibility scoring (§3.4 coverage report) flags the over-stuff; suggests narrower merge OR higher rank with concrete bits-required-vs-available number |
 | 5 | Forgetting fine-tuner | Continues training adapter on new data with raw SFT | IF-eval crashes (Lu's mid-train regression curve); model becomes useless on chat | The `/v1/distill/refresh` endpoint is the *default* path for any "add new knowledge" intent; raw SFT-on-instruct-adapter requires explicit acknowledgement of the regression risk |
 | 6 | Cost-surprised user | Forgets budget cap; runs an expensive remote teacher overnight | Wakes to a $400 bill | Mandatory dry-run on first use of any `LogitSource`; hard cost cap at $25 default; pause on cap; cache fall-through option |
-| 7 | Reproducibility-broken user | Trains a great adapter; tries to recreate it three months later | Cache pruned, teacher API updated, hyperparameters ad-hoc — unreproducible | Reproducibility receipt (§8.11) on every adapter; `kiln distill verify <adapter>` re-runs and bit-checks; teacher snapshots pinned by version-hash, not name |
+| 7 | Reproducibility-broken user | Trains a great adapter; tries to recreate it three months later | Cache pruned, teacher API updated, hyperparameters ad-hoc — unreproducible | Audit receipts bind declared inputs and exact checkpoints support same-envelope continuation; no receipt-to-output replay command is implemented, so mutable teachers and missing data remain explicit limits |
 | 8 | Diagnostics-blind user | Never opens the dashboard; doesn't see warnings | Bad runs ship to production | Notifications push to desktop tray, email, and webhook; high-severity alerts (collapse imminent, cost cap reached, eval regression) interrupt the user's normal channels |
 
 ### 8.2. The single front door — `POST /v1/train`
@@ -951,9 +953,11 @@ Documented in §3.5.4. Surfaced here because the UX win is structural: the floor
 
 Documented in §3.1. Surfaced here because it is the single most common silent failure of naive OPD: running reverse-KL when the student has near-zero probability mass on tokens the teacher prefers. The fix is forward-KL SFT first (Lu's [^support] footnote made operational by Li et al.'s phenomenology paper). Kiln auto-injects this when the initial-overlap probe demands it. **The user sees one progress bar, not two.**
 
-### 8.11. The reproducibility receipt — every adapter is rebuildable
+### 8.11. The adapter audit receipt — integrity, not reconstruction
 
-Every adapter shipped from kiln carries a JSON receipt:
+Kiln-owned training paths carry machine-readable receipts. Distillation paths
+that use the legacy §8.11 adapter-audit schema write this shape; ordinary
+SFT/GRPO use `train_receipt.json`:
 
 ```json
 {
@@ -984,7 +988,14 @@ Every adapter shipped from kiln carries a JSON receipt:
 }
 ```
 
-`kiln distill verify <adapter>` re-runs the recipe against the same teacher snapshot and reports either "bit-identical" (deterministic kernel paths, same hardware), "evaluations equivalent within 1%" (same recipe, hardware drift), or "diverged" (something in the receipt has changed). **Any kiln adapter can be rebuilt from its receipt** — given access to the same teacher (locally, via cache, or via the same paid provider). This is the foundation for the Adapter Library's trust model (§3.10).
+The originally proposed `kiln distill verify <adapter>` command was not
+implemented. The current receipt supports integrity and drift auditing; it does
+not contain enough state to rebuild an adapter or compare repeated outputs.
+Exact SFT, GRPO, and OPD continuation uses a validated `.kiln-checkpoint`
+inside its declared deterministic envelope. A future replay-to-output feature
+would need to bind and execute the complete model, tokenizer/template, data,
+teacher, build/runtime, precision, optimizer/RNG, and evaluation procedure.
+See [Request-Lineage Integrity](../REPLAY_INTEGRITY.md) for the shipped contract.
 
 ### 8.12. The four desktop notifications kiln will send unprompted
 
@@ -1113,13 +1124,17 @@ When the teacher is an HTTP API, the bottleneck is request overhead and rate lim
 
 4. **Speculative-style prefetching** (survey §6.3 SKD inspiration). Trainer issues teacher requests for the next batch's prompts in the background while the current batch's gradient compute runs.
 
-### 9.6. Loss-kernel determinism and reproducibility
+### 9.6. Loss-kernel determinism and repeatability
 
-Reproducibility receipts (§8.11) require bit-exact reproduction. Kiln's existing batch-invariance work (in `kiln-server`) is the foundation. The OPD-loss kernel inherits this design:
+Audit receipts (§8.11) record the selected mode and execution envelope; they do
+not require or prove bit-exact reproduction. Same-environment repeatability is
+a separate test obligation. The OPD-loss kernel supports that work as follows:
 
 - All reductions use a fixed accumulation order (no atomic adds).
 - All sampling uses a per-rollout PRNG seeded from `(global_seed, prompt_hash, rollout_idx)` — rollouts are reproducible regardless of ordering.
-- A "fast mode" (opt-in, default off) allows non-deterministic atomics for ~10–15% speedup; receipts mark such adapters as "evaluations equivalent within 1%" rather than "bit-identical".
+- Any future nondeterministic fast mode must be explicit in execution
+  provenance. Evaluation equivalence must come from a named paired eval, not a
+  label inferred from the receipt.
 
 ### 9.7. Per-engine performance targets — two columns, with the trajectory
 
@@ -1266,7 +1281,8 @@ These aren't perfect signals but they're cheap and they prefilter the inbox.
 - All processing local by default. Nothing leaves the box.
 - Sharing requires explicit opt-in *per session*. Pi's existing `pi-share-hf` flow is the upstream model.
 - Redaction layer between local store and any outbound: scrubs paths, env vars, stdout matching secret patterns (AWS keys, API keys, .env contents, etc.). Default-on; configurable.
-- Reproducibility receipts (§8.11) for adapters trained on private agent traces include only hashes of trace IDs, never content.
+- Adapter audit receipts (§8.11) for private agent traces include only hashes
+  of trace IDs, never content.
 
 ### 10.4. The agentic OPD training loop — three additions on top of §3.1
 
@@ -1521,7 +1537,8 @@ The killer continuous loop, end-to-end:
 
 ### 10.11. Tool-schema versioning — adapters bound to a tool manifest
 
-Every agentic adapter records its tool-manifest fingerprint in its reproducibility receipt (§8.11). Three protections:
+Every agentic adapter records its tool-manifest fingerprint in its adapter
+audit receipt (§8.11). Three protections:
 
 - **Mismatch warning** — when an adapter is loaded for a session whose tool manifest differs (different MCP servers, modified pi extensions), kiln warns: *"adapter trained against tool manifest v2.4; current session is v2.7 — 3 new tools, 1 renamed. May need refresh."*
 - **Schema-aware retraining** — when the user adds new tools, kiln offers to spin up a brief OPD pass that introduces the new tool definitions to the adapter without losing existing capabilities. The same SFT-cold-start logic (§3.1) applies: the model needs forward-KL exposure to new tool tokens before reverse-KL OPD can refine usage.
@@ -1612,7 +1629,11 @@ Three compounding loops kiln unlocks once Phase 3 ships.
 
 **The cache loop.** First user to OPD against (Qwen3.6-27B, prompt P) pays the API call. Their cache contribution makes the next thousand users pay nothing. The marginal cost of frontier-quality OPD trends to zero with the size of the community.
 
-**The library loop.** Adapters published with reproducibility receipts can be re-built from the cache. Adapters in the library get more downloads when their eval scores are good. Kiln becomes the place to get trustworthy, reproducible 4B specialists for any domain. The library acts as a discovery surface for the cache: popular adapters mean popular prompts mean populated cache.
+**The library loop.** Adapters published with audit receipts can expose their
+declared provenance and independently bound eval results. The cache cannot
+rebuild an adapter and is not a replay authority. Adapters in the library get
+more downloads when their eval scores are good, while popular prompts can
+still inform future opt-in cache work.
 
 **The judge loop.** The existing kiln judgment flywheel turns A/B picks into a local judge LoRA. Combined with OPD: the judge LoRA can serve as an *implicit reward model* in OPD-augmented RLHF (the AlignDistil idea from the survey). Now every kiln user is producing both a personal assistant *and* a personal judge — and the judge can be the basis for further OPD on the assistant. **This is the closest thing to a personal RLHF that anyone has shipped.**
 
@@ -1662,7 +1683,10 @@ Kiln is the right place for the field to advance because we control the full sta
 3. **Per-position teacher reliability calibration.** Li et al. show teacher signal degrades past 7K tokens. We can publish the full calibration curve and a method that *learns* per-position trust weights from cheap probe rollouts.
 4. **Adapter compatibility prediction.** Given (rank, source domain, target domain), predict the overlap-ratio convergence point of a `distill_merge` run *before* spending the rollouts. Save users the merge that won't work. This is a regression problem on the data kiln itself generates.
 5. **OPD + GRPO hybrid for verifiable tasks.** Combine per-token reverse KL (dense, from teacher) with sequence-level GRPO advantage (sparse, from a verifier) into a single update. The corpus calls for this; we are uniquely positioned to ship it as `POST /v1/train/grpo+opd`.
-6. **Cross-tier reproducibility at scale.** Publish a benchmark showing that `(seed, teacher, prompts, hyperparameters)` reproduce the same adapter on a MacBook M4 Max, a 4090, and an H200 cluster. Open-source ML has no such benchmark today. Kiln deserves to own it.
+6. **Cross-tier parity at scale.** Publish same-environment adapter-hash
+   repeatability per machine, then compare named quality and numerical metrics
+   across a MacBook M4 Max, a 4090, and an H200 cluster without claiming the
+   adapter bytes must match across backends.
 
 Each of these is a publishable paper, with reproducible artefacts users can re-run for $5.
 
@@ -1674,11 +1698,11 @@ Today, AI personalisation looks like this: pay a hyperscaler $X/month, hand them
 
 Tomorrow — with kiln + OPD shipped well — it looks like this:
 
-> Alice opens kiln on her MacBook. She drops in a folder of her writing. She picks `frontier-pump` against `qwen3.6-27b@best-cached-source`. Six hours and four dollars later she has a 200 MB LoRA that writes like her, runs entirely on her laptop, never phones home, and got verifiably better than the same run yesterday because of a quiet improvement to the teacher cache. She can publish it (with a reproducibility receipt — anyone can rebuild it from the same teacher and same data), sell it, gift it, version it, *or merge it with three more LoRAs from her colleagues into a team-wide adapter* with one button.
+> Alice opens kiln on her MacBook. She drops in a folder of her writing. She picks `frontier-pump` against `qwen3.6-27b@best-cached-source`. Six hours and four dollars later she has a 200 MB LoRA that writes like her, runs entirely on her laptop, never phones home, and got verifiably better than the same run yesterday because of a quiet improvement to the teacher cache. She can publish it with an audit receipt that exposes the declared inputs and evidence, sell it, gift it, version it, *or merge it with three more LoRAs from her colleagues into a team-wide adapter* with one button.
 >
 > Bob's startup has a 4090 in the back office. Every developer's terminal runs [pi](https://github.com/earendil-works/pi) pointed at the office kiln server — one Qwen3.5-4B with hot-swappable LoRAs serves the whole team. They paid $5 once to distil a 27B-quality turn-judge into a small judge LoRA (§10.6.1). Each Saturday morning, kiln auto-runs `kiln self-improve`: scores the week's pi sessions with the local judge, runs GRPO using those scores as advantages, compresses successful trajectories via CRISP, and publishes a new adapter behind an A/B gate the team approves Monday morning in the Trajectory Studio. The judge refreshes against 27B once a quarter when drift detection fires — another $5. **Their agent gets better every week from their own work, and they have not called a frontier API since Tuesday.** Their cost is electricity.
 >
-> Carol's bank has a rack of H200s. They run kiln in `full_vocab` mode with eight domain specialists each trained on a separate compliance vertical. The unified adapter, consolidated by `distill_merge`, beats their previous Qwen3.6-27B-based generic deployment on every internal eval at 1/7th the inference cost. The data never leaves the building. The auditor gets a reproducibility receipt for every model in production.
+> Carol's bank has a rack of H200s. They run kiln in `full_vocab` mode with eight domain specialists each trained on a separate compliance vertical. The unified adapter, consolidated by `distill_merge`, beats their previous Qwen3.6-27B-based generic deployment on every internal eval at 1/7th the inference cost. The data never leaves the building. The auditor gets an integrity-scoped audit receipt for every model in production.
 
 That world is not far away. The papers are written. The hardware exists. The base model exists. **Kiln is the missing piece — and it is 80% built.**
 

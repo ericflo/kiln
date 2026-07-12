@@ -1846,8 +1846,8 @@ async fn adapter_detail(
     }))
 }
 
-/// `GET /v1/adapters/{name}/receipt` — return the §8.11 reproducibility
-/// receipt for the adapter, or 404 when no receipt is on disk.
+/// `GET /v1/adapters/{name}/receipt` — return the legacy §8.11 audit receipt
+/// for the adapter, or 404 when no receipt is on disk.
 async fn adapter_receipt(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,

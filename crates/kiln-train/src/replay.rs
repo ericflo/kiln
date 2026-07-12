@@ -1,28 +1,34 @@
-//! Deterministic replay storage for LoRA adapters.
+//! Request-lineage integrity storage for LoRA adapters.
 //!
-//! Every adapter directory written by SFT or GRPO carries enough state to be
-//! re-trained from scratch:
+//! SFT and GRPO adapter directories may carry an append-only audit trail of
+//! submitted requests and their reported outcomes:
 //!
-//! - `replay.jsonl`: one record per accepted training request, atomically
-//!   appended *before* the optimizer step runs. A second `outcome` record is
-//!   appended after the step completes (or fails). The two-record split means
-//!   a crash mid-step still leaves a recoverable trail of what was attempted.
+//! - `replay.jsonl`: one record per accepted training request, appended and
+//!   synchronized *before* the optimizer step runs. A second `outcome` record
+//!   is appended after the step completes (or fails). Once request persistence
+//!   returns successfully, a crash during the step still leaves what was
+//!   attempted on disk.
 //! - `lineage.json`: parent-LoRA pointer, base-model identity, kiln commit,
 //!   and a content-addressed `replay_hash` derived from the parent hash plus
 //!   every request record in this adapter's `replay.jsonl`.
 //!
-//! Together these let `kiln-replay` walk the parent chain, re-apply each
-//! recorded request against the base model, and verify reproducibility.
+//! Together these let the historically named `kiln-replay` command walk the
+//! parent chain and verify that the recorded request lineage has not changed.
+//! It does not load a model, execute training or inference, compare tensors or
+//! outputs, or prove reproducibility. The log is not a resumable checkpoint:
+//! it does not bind all model shards, tokenizer/template bytes, runtime/build,
+//! optimizer state, RNG streams, dataset-path contents, or external teachers.
+//! Use a validated `.kiln-checkpoint` for exact continuation inside its
+//! declared deterministic envelope.
 //!
-//! ## Atomic append guarantee
+//! ## Durability and writer ownership
 //!
-//! `ReplayLog::append_request` opens `replay.jsonl` with `O_APPEND` (the
-//! POSIX guarantee that small writes are atomic when smaller than `PIPE_BUF`,
-//! typically 4 KiB) and calls `sync_data` before returning. Larger records
-//! still serialize fine but lose the strict atomicity-under-concurrent-write
-//! guarantee — for our use case there is only one writer (the GPU write lock
-//! serializes training jobs), so even a multi-page request record is durable
-//! before the optimizer step runs.
+//! `ReplayLog::append_request` opens `replay.jsonl` with `O_APPEND`, writes one
+//! JSON line, and calls `sync_data` before returning. `PIPE_BUF` atomicity
+//! applies to pipes, not regular files, so this format does not claim crash- or
+//! multi-writer-atomic records. Kiln relies on one training writer per adapter;
+//! an interrupted partial line is rejected as invalid rather than silently
+//! ignored. Exact crash-atomic state belongs in `.kiln-checkpoint`.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -118,7 +124,8 @@ pub struct RequestRecord {
     /// Verbatim request body as deserialized from the HTTP submission.
     pub request_body: serde_json::Value,
     /// Effective seed for this request. Always populated, even when the user
-    /// did not supply one (we generate and record one so replay is exact).
+    /// did not supply one. This preserves seed provenance but does not by
+    /// itself make training or output replay exact.
     pub seed: u64,
     /// kiln crate version (or build-stamped commit).
     pub kiln_commit: String,
@@ -165,8 +172,10 @@ impl ReplayLog {
         self.dir.join(REPLAY_LOG_FILE)
     }
 
-    /// Append a record line atomically (single `write_all` of one line ending
-    /// in `\n`) and `fsync(data)` before returning.
+    /// Append one record line and `sync_data` before returning.
+    ///
+    /// The caller must enforce single-writer ownership. A failed or interrupted
+    /// write is not presented as an atomic record by this JSONL format.
     fn append_line(&self, line: &str) -> Result<()> {
         let path = self.log_path();
         let mut file = OpenOptions::new()
@@ -277,8 +286,9 @@ pub fn read_lineage(adapter_dir: &Path) -> Result<Lineage> {
 /// 5. JSON-canonicalized bytes of every `RequestRecord` in chronological
 ///    order (one per line), joined with `\n`.
 ///
-/// Outcome records are intentionally excluded so that a successful re-run
-/// produces the same hash as the original (failures don't change identity).
+/// Outcome records are intentionally excluded so operational status does not
+/// change request-lineage identity. Consequently this hash cannot prove that a
+/// later execution reproduced the original loss, tensors, or outputs.
 pub fn compute_replay_hash(
     parent_replay_hash: Option<&str>,
     base: &BaseModel,
@@ -451,6 +461,16 @@ mod tests {
             ReplayRecord::Request(r) => assert_eq!(r, &req),
             _ => panic!("expected request record"),
         }
+    }
+
+    #[test]
+    fn partial_record_fails_closed() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(REPLAY_LOG_FILE);
+        std::fs::write(path, b"{\"type\":\"request\"").unwrap();
+
+        let error = read_replay_log(tmp.path()).unwrap_err().to_string();
+        assert!(error.contains("parsing replay log line 1"), "{error}");
     }
 
     #[test]

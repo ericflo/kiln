@@ -434,6 +434,12 @@ kiln train status --job-id train_123
 kiln train status --url http://gpu-box:8420</code></pre>
           <p class="text-sm mt-4" style="color: var(--fg-mute);">Use the dashboard when you want visual progress, recent job history, or a fail-closed resume handoff. The same <code>--url</code> flag works for SFT, GRPO, OPD, and status commands.</p>
         </div>
+        <div class="card p-5">
+          <h3 class="font-semibold mb-2">Request-lineage integrity</h3>
+<pre class="text-sm"><code>kiln-replay verify ./adapters/support-bot
+kiln-replay show ./adapters/support-bot</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>kiln-replay</code> is a historical command name. It recomputes request-lineage hashes only; it does not load a model, execute training or inference, compare outputs, or prove reproducibility. Use a validated <code>.kiln-checkpoint</code> for exact continuation. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/REPLAY_INTEGRITY.md" class="link">integrity contract</a>.</p>
+        </div>
       </div>
     </div>
   </section>

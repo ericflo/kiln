@@ -608,7 +608,8 @@ tampered records are rejected instead of being reported as evidence. Legacy
 archives and synthetic/mock generators may omit the field, but a newly admitted
 production job receives the same immutable record retained by `AppState`. The
 record proves the declared execution envelope's integrity, not output replay or
-driver correctness. Exact replay still requires matching inputs, adapter,
+driver correctness. Kiln does not expose an eval replay-to-output command;
+reproducing an output would additionally require matching inputs, adapter,
 effective seed, and generation state. See
 [Execution Provenance](EXECUTION_PROVENANCE.md).
 

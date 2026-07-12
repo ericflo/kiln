@@ -384,9 +384,9 @@ pub struct SftConfig {
     /// None means the trainer should auto-tune from the workload shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grad_checkpoint_segments: Option<usize>,
-    /// Deterministic seed for LoRA init and any RNG-dependent steps. If
-    /// `None`, the trainer generates one and records it in `replay.jsonl`
-    /// so the run is still exactly reproducible.
+    /// Seed selected for LoRA initialization and RNG-dependent steps. If
+    /// `None`, the trainer generates one and records the concrete value in
+    /// `replay.jsonl` for audit. The seed alone is not a replay guarantee.
     #[serde(default)]
     pub seed: Option<u64>,
     /// Optimizer selection. Defaults to Muon (momentum-orthogonalized SGD
@@ -819,9 +819,9 @@ pub struct GrpoConfig {
     /// None means the trainer should auto-tune from the workload shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grad_checkpoint_segments: Option<usize>,
-    /// Deterministic seed for LoRA init and any RNG-dependent steps. If
-    /// `None`, the trainer generates one and records it in `replay.jsonl`
-    /// so the run is still exactly reproducible.
+    /// Seed selected for LoRA initialization and RNG-dependent steps. If
+    /// `None`, the trainer generates one and records the concrete value in
+    /// `replay.jsonl` for audit. The seed alone is not a replay guarantee.
     #[serde(default)]
     pub seed: Option<u64>,
     /// Optimizer selection — see `SftConfig::optimizer`.

@@ -111,8 +111,8 @@ use crate::{
     TurnKind,
 };
 
-/// Per-job context the HTTP layer hands the trainer so the training run can
-/// be replayed exactly from its on-disk artifacts.
+/// Per-job context the HTTP layer hands the trainer so the accepted request
+/// and its parent lineage can be audited from the on-disk artifacts.
 ///
 /// `request_id` is the same UUID the queue uses for the job; `request_body`
 /// is the verbatim deserialized request the HTTP handler accepted. The
@@ -132,8 +132,8 @@ pub struct ReplayContext {
 /// Build a default `BaseModel` description for the only model kiln supports.
 ///
 /// `id` is fixed to `Qwen/Qwen3.5-4B`; `revision` is left unset; the config
-/// digest is a SHA-256 of the JSON-serialized `ModelConfig` so replay can
-/// detect mismatched architectures even when `id` matches.
+/// digest is a SHA-256 of the JSON-serialized `ModelConfig` so lineage
+/// verification can detect mismatched architectures even when `id` matches.
 pub fn default_base_model(config: &ModelConfig) -> BaseModel {
     let digest = serde_json::to_string(config).ok().map(|s| {
         use sha2::{Digest, Sha256};

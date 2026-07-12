@@ -1,7 +1,7 @@
-//! Reproducibility receipts (grand plan §8.11).
+//! Adapter audit receipts (historical grand-plan §8.11 schema).
 //!
-//! Every adapter kiln produces ships with a JSON receipt that records
-//! exactly enough information to rebuild it:
+//! Distillation paths use this legacy receipt to record selected declared
+//! inputs and outcome summaries:
 //!
 //! ```json
 //! {
@@ -31,22 +31,22 @@
 //! }
 //! ```
 //!
-//! Written to `<adapter_dir>/receipt.json` whenever a training job
-//! completes. The CLI subcommand `kiln distill verify <adapter>`
-//! re-runs the recipe and bit-checks (deterministic kernel paths,
-//! same hardware) or evaluations-equivalent-within-1% (same recipe,
-//! hardware drift).
+//! Written to `<adapter_dir>/receipt.json` by the distillation paths that use
+//! this schema. Despite its historical "reproducibility receipt" name, it
+//! does not contain enough information to reconstruct an adapter and Kiln
+//! does not expose a receipt-to-output replay command. It can support audit
+//! and drift detection only. Exact continuation uses a validated
+//! `.kiln-checkpoint`; see `docs/REPLAY_INTEGRITY.md` for the boundary.
 //!
 //! # Why this module lives in kiln-train, not kiln-server
 //!
 //! Receipts are produced at the moment the adapter is finalised —
 //! which is the trainer's job. The server's role is to expose them
-//! at `GET /v1/adapters/{name}/receipt` (and consume them at
-//! `kiln distill verify`); the trainer is what _writes_ them.
+//! at `GET /v1/adapters/{name}/receipt`; the trainer is what _writes_ them.
 //!
-//! Schema versioning: `schema_version` starts at 1. Every additive
-//! change keeps it; any breaking change bumps it and the CLI verify
-//! command knows how to read older versions.
+//! Schema versioning: `schema_version` starts at 1. Additive changes keep it;
+//! a future breaking change must bump it and preserve an explicit legacy-read
+//! policy in every API consumer.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 /// changes; additive fields are accepted at the older version.
 pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
 
-/// Top-level reproducibility receipt for an adapter.
+/// Top-level legacy audit receipt for an adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdapterReceipt {
     /// Schema version. `1` at first release.
@@ -132,8 +132,8 @@ pub struct PromptSourceDescriptor {
     /// `user-uploaded:<job_id>`, `pi-share-hf:<adapter_id>`, etc.
     pub source: String,
     /// SHA256 hash of the prompt-manifest file. The manifest itself
-    /// lives at `<adapter_dir>/prompts.jsonl` for in-repo
-    /// reproducibility; the hash here lets us detect drift.
+    /// lives at `<adapter_dir>/prompts.jsonl` when retained; the hash here
+    /// detects drift but does not make the recipe replayable by itself.
     pub manifest_hash: String,
     /// Number of prompts in the source.
     pub count: usize,

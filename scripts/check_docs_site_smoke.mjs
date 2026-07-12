@@ -227,6 +227,7 @@ const expectedCliSections = [
   { label: 'GRPO payload shape', terms: ['grpo accepts either one json request/batch', 'streamed jsonl with one group per line', 'groups', 'messages', 'candidate completions', 'text', 'reward scores'] },
   { label: 'OPD payload shape', terms: ['opd reads one', '/v1/train/opd', 'json prompt array', '--teacher', 'exact content revision'] },
   { label: 'exact training resume', terms: ['checkpoint-interval', 'resume-checkpoint', 'exact resume requires the identical file, route, adapter, and options', 'opd defaults to an exact checkpoint every 25 committed optimizer steps'] },
+  { label: 'request-lineage integrity', terms: ['kiln-replay verify', 'recomputes request-lineage hashes only', 'does not load a model', 'prove reproducibility', '.kiln-checkpoint'] },
   { label: 'adapter lifecycle path', terms: ['manage lora adapters', 'kiln adapters list', 'kiln adapters load', 'kiln adapters unload'] },
   { label: 'config validation path', terms: ['validate config', 'kiln config --file'] },
   { label: 'help and verbosity flags', terms: ['--help', '--verbose', '--quiet', '-vv'] },

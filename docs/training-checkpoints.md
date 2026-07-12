@@ -355,6 +355,11 @@ Status discovery validates the bounded strict manifest without rehashing large
 state files on every poll. Resume admission performs the full file-set, size,
 and checksum validation before GPU work.
 
+The older `replay.jsonl` and `lineage.json` audit trail is not a checkpoint.
+`kiln-replay verify` checks only request-lineage hash integrity; it does not
+execute training or compare losses, tensors, or outputs. See
+[Request-Lineage Integrity](REPLAY_INTEGRITY.md).
+
 Resume with the identical dataset, route, and training configuration:
 
 ```bash

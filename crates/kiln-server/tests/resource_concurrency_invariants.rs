@@ -25,6 +25,152 @@ fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> 
 }
 
 #[test]
+fn request_lineage_surfaces_claim_integrity_not_output_replay() {
+    let replay = read("crates/kiln-train/src/replay.rs");
+    let cli = read("crates/kiln-train/src/bin/kiln-replay.rs");
+    let train_api = read("crates/kiln-train/src/lib.rs");
+    let trainer = read("crates/kiln-train/src/trainer.rs");
+    let adapter_receipt = read("crates/kiln-train/src/receipt.rs");
+    let readme = read("README.md");
+    let contract = read("docs/REPLAY_INTEGRITY.md");
+    let checkpoint_docs = read("docs/training-checkpoints.md");
+    let eval_guide = read("docs/EVAL_GUIDE.md");
+    let vignettes = read("docs/VIGNETTES.md");
+    let cli_site = read("docs/site/cli.html");
+    let library_api = read("crates/kiln-server/src/api/library.rs");
+    let server_ui = read("crates/kiln-server/src/ui/index.html");
+    let grand_plan = read(
+        "docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md",
+    );
+
+    for (surface, source, required) in [
+        (
+            "replay module",
+            replay.as_str(),
+            "It does not load a model, execute training or inference",
+        ),
+        (
+            "kiln-replay CLI",
+            cli.as_str(),
+            "no training or output replay was performed",
+        ),
+        (
+            "README",
+            readme.as_str(),
+            "recomputes request-lineage hashes",
+        ),
+        (
+            "replay integrity contract",
+            contract.as_str(),
+            "It is not a replay-to-output or retraining command",
+        ),
+        (
+            "training config API",
+            train_api.as_str(),
+            "The seed alone is not a replay guarantee",
+        ),
+        (
+            "trainer context",
+            trainer.as_str(),
+            "parent lineage can be audited",
+        ),
+        (
+            "legacy adapter receipt",
+            adapter_receipt.as_str(),
+            "does not contain enough information to reconstruct an adapter",
+        ),
+        (
+            "checkpoint docs",
+            checkpoint_docs.as_str(),
+            "checks only request-lineage hash integrity",
+        ),
+        (
+            "eval guide",
+            eval_guide.as_str(),
+            "does not expose an eval replay-to-output command",
+        ),
+        (
+            "workflow vignettes",
+            vignettes.as_str(),
+            "does not claim byte-identical outputs",
+        ),
+        (
+            "CLI site",
+            cli_site.as_str(),
+            "recomputes request-lineage hashes only",
+        ),
+        (
+            "adapter library API",
+            library_api.as_str(),
+            "has no audit receipt",
+        ),
+        (
+            "adapter library UI",
+            server_ui.as_str(),
+            "must have an audit receipt",
+        ),
+        (
+            "OPD grand plan",
+            grand_plan.as_str(),
+            "The originally proposed `kiln distill verify <adapter>` command was not",
+        ),
+    ] {
+        assert!(
+            source.contains(required),
+            "{surface} must preserve the integrity-only scope: {required}"
+        );
+    }
+
+    for forbidden in [
+        "re-trained from scratch",
+        "verify reproducibility",
+        "replay is exact",
+        "re-apply each recorded request",
+        "exact training replay",
+        "so the run is still exactly reproducible",
+        "be replayed exactly from its on-disk artifacts",
+        "exactly enough information to rebuild it",
+        "re-runs the recipe and bit-checks",
+        "rebuilds the same adapter",
+        "Any kiln adapter can be rebuilt from its receipt",
+        "`kiln distill verify <adapter>` re-runs",
+        "kiln distill reproduce <adapter>",
+        "every adapter is rebuildable",
+        "require bit-exact reproduction",
+        "can be re-built from the cache",
+        "anyone can rebuild it",
+        "These run on every PR",
+        "PIPE_BUF` atomicity guarantee",
+        "POSIX guarantee that small writes are atomic",
+        "must have a reproducibility receipt",
+        "has no reproducibility receipt",
+    ] {
+        assert!(
+            !replay.contains(forbidden)
+                && !cli.contains(forbidden)
+                && !train_api.contains(forbidden)
+                && !trainer.contains(forbidden)
+                && !adapter_receipt.contains(forbidden)
+                && !readme.contains(forbidden)
+                && !contract.contains(forbidden)
+                && !checkpoint_docs.contains(forbidden)
+                && !eval_guide.contains(forbidden)
+                && !vignettes.contains(forbidden)
+                && !cli_site.contains(forbidden)
+                && !library_api.contains(forbidden)
+                && !server_ui.contains(forbidden)
+                && !grand_plan.contains(forbidden),
+            "request-lineage surfaces must not promise unsupported output replay: {forbidden}"
+        );
+    }
+
+    assert!(
+        !grand_plan.contains("reproducibility receipt"),
+        "the active OPD plan must use integrity-scoped audit-receipt language"
+    );
+}
+
+#[test]
 fn grpo_uses_settled_group_boundaries_instead_of_a_job_long_gpu_writer() {
     let queue = read("crates/kiln-server/src/training_queue.rs");
     let branch = source_between(

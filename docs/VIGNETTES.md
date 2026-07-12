@@ -1,6 +1,6 @@
 # §15 Closing-Vignette Reproduction Scripts
 
-The grand-plan's closing vision (`docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md` §15) sketches three users — Alice, Bob, Carol. Each vignette must be *reproducible from this branch on real hardware*. This document lays out the exact sequence of `kiln` CLI commands and HTTP requests that reproduces each vignette, with citations to the §3-§10 pillars each step exercises.
+The grand-plan's closing vision (`docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md` §15) sketches three users — Alice, Bob, Carol. Each vignette must be runnable from this branch on real hardware. This document lays out the exact sequence of `kiln` CLI commands and HTTP requests that executes each workflow, with citations to the §3-§10 pillars each step exercises. It does not claim byte-identical outputs from repeated runs.
 
 Pod-level reproduction (acquiring hardware, downloading the model, running the experiment to convergence) is out of scope for this document — that's the §13 success-criterion validation pass and runs against a leased CUDA pod. This document is the recipe; §13 is the validation.
 
@@ -67,8 +67,8 @@ curl -X POST localhost:8420/v1/recipes/run -d '{
 }'
 
 # 6. When the run finishes, publish to the Adapter Library (§3.10)
-#    with the reproducibility receipt (§8.11). Anyone with the same
-#    teacher + same prompts + same seed rebuilds the same adapter.
+#    with the integrity receipt (§8.11). The receipt records the run's
+#    declared inputs; it does not promise an identical rebuilt adapter.
 curl -X POST localhost:8420/v1/library/publish/alice-writes-like-her
 ```
 
@@ -82,11 +82,12 @@ curl -X POST localhost:8420/v1/library/publish/alice-writes-like-her
 - §6 paper-cited defaults (top-K=32, top-p=0.9, temp=1.0).
 - Remote vLLM transport is self-hosted and has no Kiln-side billing meter;
   `max_cost_usd` is rejected until a metered provider adapter exists.
-- §8.11 reproducibility receipt — `AdapterReceipt::write_to_adapter_dir` runs at the end of every training job.
+- §8.11 integrity receipt — the distillation path writes `AdapterReceipt` when
+  it finalizes this adapter; ordinary SFT/GRPO rely on `train_receipt.json`.
 - §8.13 tier-aware defaults (rank 16/32/128 per laptop/prosumer/corporate tier).
 - §11 12-trigger guardrail cascade (`LengthInflationGuardrail`).
 
-**Reproducibility receipt format:** `<adapter_dir>/.kiln-receipt.json` (schema v1, `kiln_train::AdapterReceipt`) plus `train_receipt.json`. The teacher descriptor and OPD receipt retain the complete canonical identity and its content revision, not only the alias and model id.
+**Integrity receipt format:** `<adapter_dir>/.kiln-receipt.json` (schema v1, `kiln_train::AdapterReceipt`) plus `train_receipt.json`. The teacher descriptor and OPD receipt retain the complete canonical identity and its content revision, not only the alias and model id. This supports auditing; it is not a replay-to-output guarantee.
 
 ---
 
@@ -208,7 +209,7 @@ curl -X POST localhost:8420/v1/adapters/distill_merge -d '{
   }
 }'
 
-# 3. The auditor gets a reproducibility receipt for every adapter.
+# 3. The auditor gets an integrity receipt for every adapter.
 curl localhost:8420/v1/adapters/carol-unified-2026-q2/receipt
 ```
 
@@ -218,7 +219,7 @@ curl localhost:8420/v1/adapters/carol-unified-2026-q2/receipt
 - §3.5 Targeted-domain knowledge pump.
 - Supported `teacher_top_k` loss with K=16 for stock-vLLM pumps and K=32
   for local per-source merge fixtures.
-- §8.11 Reproducibility receipt (the auditor's hook).
+- §8.11 Integrity receipt (the auditor's hook).
 - §8.13 Corporate-tier defaults (LoRA rank 128–256).
 
 ---
@@ -227,8 +228,8 @@ curl localhost:8420/v1/adapters/carol-unified-2026-q2/receipt
 
 The §13 phase-success criteria fall into three buckets:
 
-1. **Validated by the test suite + the §9.9 bench gate** — CUDA kernel parity, throughput within 5% of baseline, recipe round-trips, receipt generation, all 12 guardrail triggers. These run on every PR.
+1. **Validated by inexpensive automatic checks** — portable contracts, recipe round-trips, receipt generation, and guardrail logic run without accelerator claims. CUDA kernel parity and throughput are local/manual hardware qualifications, not automatic PR evidence.
 2. **Validatable on a single-pod budget but not in CI** — Phase 0 IF-eval recovery, Phase 1 ≥10pt merge delta. These are GPU-hour experiments against real datasets (IFEval, MMLU-Pro, etc.). The pod-validation script `scripts/opd_phase0_pod_validation.sh` covers the build + kernel + recipe-round-trip half; the eval-suite scoring half needs the dataset registry + the eval queue to be wired (the registry exists; per-suite scoring pre-installed).
-3. **Human-in-the-loop or community-scale studies** — Phase 2 cross-tier reproduction (3 different rigs), Phase 2 pit-of-success controlled study (20 users), Phase 2 pi-week A/B (a developer using pi for a week), Phase 3+ leaderboard / library traction. These are non-CI by construction and are explicitly annotated as non-goals for this branch in §5 / §13.
+3. **Human-in-the-loop or community-scale studies** — Phase 2 cross-tier execution (3 different rigs), Phase 2 pit-of-success controlled study (20 users), Phase 2 pi-week A/B (a developer using pi for a week), Phase 3+ leaderboard / library traction. These are non-CI by construction and are explicitly annotated as non-goals for this branch in §5 / §13.
 
 The branch ships every primitive these studies sit on top of.

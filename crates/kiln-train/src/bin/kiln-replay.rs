@@ -1,9 +1,10 @@
-//! `kiln-replay` — verify and inspect deterministic LoRA replay artifacts.
+//! `kiln-replay` — verify and inspect LoRA request-lineage artifacts.
 //!
 //! Mode 1 (no GPU): walk the parent chain from a LoRA adapter directory,
 //! recompute every `replay_hash` from `replay.jsonl` + parent, and confirm
-//! the chain matches what `lineage.json` records. This is the fast-path
-//! integrity check — it does not retrain anything and never touches the GPU.
+//! the chain matches what `lineage.json` records. This is an integrity check:
+//! it does not load a model, execute training or inference, compare outputs,
+//! or prove reproducibility.
 //!
 //! Usage:
 //!   kiln-replay verify <adapter-dir>          # verify a single chain
@@ -17,10 +18,10 @@ use std::process::ExitCode;
 
 use kiln_train::replay;
 
+const USAGE: &str = "usage:\n  kiln-replay verify <adapter-dir>\n  kiln-replay show   <adapter-dir>\nscope: verifies recorded request-lineage hashes only; performs no training or output replay";
+
 fn print_usage() {
-    eprintln!("usage:");
-    eprintln!("  kiln-replay verify <adapter-dir>");
-    eprintln!("  kiln-replay show   <adapter-dir>");
+    eprintln!("{USAGE}");
 }
 
 fn resolve_adapter_root(adapter_dir: &Path) -> PathBuf {
@@ -34,15 +35,22 @@ fn cmd_verify(adapter_dir: &Path) -> anyhow::Result<()> {
     let adapter_root = resolve_adapter_root(adapter_dir);
     let resolver = |name: &str| adapter_root.join(name);
     replay::verify_chain_integrity(adapter_dir, resolver)?;
-    println!("OK: replay chain at {} verifies", adapter_dir.display());
+    println!("{}", verification_success_message(adapter_dir));
     Ok(())
+}
+
+fn verification_success_message(adapter_dir: &Path) -> String {
+    format!(
+        "OK: request-lineage integrity at {} verifies; no training or output replay was performed",
+        adapter_dir.display()
+    )
 }
 
 fn cmd_show(adapter_dir: &Path) -> anyhow::Result<()> {
     let adapter_root = resolve_adapter_root(adapter_dir);
     let resolver = |name: &str| adapter_root.join(name);
     let chain = replay::walk_parent_chain(adapter_dir, resolver)?;
-    println!("chain length: {}", chain.len());
+    println!("request-lineage chain length: {}", chain.len());
     for (i, (dir, lineage)) in chain.iter().enumerate() {
         let parent = lineage
             .parent_lora
@@ -70,6 +78,14 @@ fn run() -> anyhow::Result<()> {
             anyhow::bail!("missing command");
         }
     };
+    if matches!(cmd.as_str(), "help" | "-h" | "--help") {
+        if args.next().is_some() {
+            print_usage();
+            anyhow::bail!("unexpected extra arguments");
+        }
+        println!("{USAGE}");
+        return Ok(());
+    }
     let adapter_dir = match args.next() {
         Some(p) => PathBuf::from(p),
         None => {
@@ -97,4 +113,17 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verification_success_is_explicitly_integrity_only() {
+        let message = verification_success_message(Path::new("adapter"));
+        assert!(message.contains("request-lineage integrity"));
+        assert!(message.contains("no training or output replay was performed"));
+        assert!(USAGE.contains("verifies recorded request-lineage hashes only"));
+    }
 }

@@ -1256,7 +1256,7 @@ fn run_opd(
             .map_err(|error| format!("persist OPD dataset provenance receipt: {error:#}"))?;
     }
 
-    // §8.11 reproducibility receipt — every adapter ships with one.
+    // §8.11 legacy audit receipt for this OPD adapter.
     let seed = resolved_opd_seed(&output_dir, adapter_name)?;
     let hyperparameters = serde_json::to_value(&req.config)
         .map_err(|error| format!("serialize OPD receipt hyperparameters: {error}"))?;
