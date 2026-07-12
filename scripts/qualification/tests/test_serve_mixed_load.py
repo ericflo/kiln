@@ -461,9 +461,9 @@ class ServeMixedLoadTests(unittest.TestCase):
                 )
 
         self.assertEqual(
-            serve.source_bound_build_command(),
+            serve.source_bound_build_command("/toolchain/bin/cargo"),
             [
-                "cargo",
+                "/toolchain/bin/cargo",
                 "build",
                 "--quiet",
                 "--release",
@@ -495,6 +495,25 @@ class ServeMixedLoadTests(unittest.TestCase):
                 if variant_id not in {"default", "stable"}
             },
         )
+
+    def test_cargo_resolution_uses_rustup_home_when_path_omits_cargo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cargo = Path(temp_dir) / ".cargo" / "bin" / "cargo"
+            cargo.parent.mkdir(parents=True)
+            cargo.write_text("#!/bin/sh\n")
+            cargo.chmod(0o755)
+
+            resolved = serve.resolve_cargo_executable(
+                {"HOME": temp_dir, "PATH": "/usr/bin"}
+            )
+
+        self.assertEqual(resolved, str(cargo))
+
+    def test_cargo_resolution_rejects_invalid_explicit_override(self) -> None:
+        with self.assertRaisesRegex(serve.QualificationError, "CARGO=.*executable"):
+            serve.resolve_cargo_executable(
+                {"CARGO": "/missing/cargo", "HOME": "/missing", "PATH": ""}
+            )
 
     def test_sse_parser_handles_fragmentation_crlf_comments_and_multiline_data(self) -> None:
         parser = serve.SSEParser()

@@ -1214,9 +1214,44 @@ def sanitized_environment(source: dict[str, str]) -> dict[str, str]:
     }
 
 
-def source_bound_build_command() -> list[str]:
+def resolve_cargo_executable(environment: dict[str, str]) -> str:
+    requested = environment.get("CARGO")
+    if requested:
+        found = shutil.which(requested, path=environment.get("PATH"))
+        if found:
+            return found
+        candidate = Path(requested).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+        raise QualificationError(
+            f"CARGO={requested!r} does not name an executable cargo binary"
+        )
+
+    found = shutil.which("cargo", path=environment.get("PATH"))
+    if found:
+        return found
+
+    fallback_roots: list[Path] = []
+    if cargo_home := environment.get("CARGO_HOME"):
+        fallback_roots.append(Path(cargo_home).expanduser())
+    if home := environment.get("HOME"):
+        fallback_roots.append(Path(home).expanduser() / ".cargo")
+    else:
+        fallback_roots.append(Path.home() / ".cargo")
+    for root in fallback_roots:
+        candidate = root / "bin" / "cargo"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    raise QualificationError(
+        "cargo executable not found in PATH, CARGO_HOME/bin, or HOME/.cargo/bin; "
+        "set CARGO to an executable path"
+    )
+
+
+def source_bound_build_command(cargo_executable: str) -> list[str]:
     return [
-        "cargo",
+        cargo_executable,
         "build",
         "--quiet",
         f"--{BUILD_PROFILE}",
@@ -1242,7 +1277,7 @@ def build_binary(absolute_deadline: float) -> tuple[Path, str, float]:
             "ROCM_PATH": BUILD_ROCM_PATH,
         }
     )
-    command = source_bound_build_command()
+    command = source_bound_build_command(resolve_cargo_executable(environment))
     completed = subprocess.run(
         command,
         cwd=ROOT,
