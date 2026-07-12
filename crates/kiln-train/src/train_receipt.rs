@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 // NOTE(#1082 Wave E4): the `cd_types` facade now resolves bare
 // `Tensor` / `DType` to **kt** (matching the workspace post-flip
 // convention). The candle `tensor_l2_norm(&candle_core::Tensor)` helper
@@ -159,6 +159,8 @@ pub struct TokenizerReceipt {
     pub tokenizer_config_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_chat_template_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1041,6 +1043,7 @@ impl TrainReceipt {
         hyperparameters: HyperparameterReceipt,
         config: serde_json::Value,
     ) -> Self {
+        let mode = mode.into();
         let config_hashes = ConfigHashes::from_model_tokenizer(
             model_config,
             tokenizer,
@@ -1064,13 +1067,16 @@ impl TrainReceipt {
                 config_hash: tokenizer.config_sha256().ok(),
                 tokenizer_config_hash: config_hashes.tokenizer_config_hash.clone(),
                 chat_template_hash: config_hashes.chat_template_hash.clone(),
+                training_chat_template_hash: (mode == "sft")
+                    .then(|| config_hashes.training_chat_template_hash.clone())
+                    .flatten(),
             },
             adapters: AdapterReceiptSet {
                 base: AdapterFileReceipt::none(),
                 output: AdapterFileReceipt::none(),
             },
             training_data: TrainingDataReceipt {
-                source: mode.into(),
+                source: mode,
                 path: None,
                 sha256: None,
             },
@@ -1115,6 +1121,8 @@ impl TrainReceipt {
     }
 
     pub fn write_to_adapter_dir(&self, adapter_dir: &Path) -> Result<PathBuf> {
+        self.validate_training_chat_template_identity()
+            .context("validate train-receipt training chat template identity")?;
         if let Some(manifest) = self.model.base_weight_shard_manifest.as_ref() {
             manifest
                 .validate()
@@ -1156,6 +1164,14 @@ impl TrainReceipt {
             .with_context(|| format!("read train receipt {}", path.display()))?;
         let receipt: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("deserialize train receipt {}", path.display()))?;
+        receipt
+            .validate_training_chat_template_identity()
+            .with_context(|| {
+                format!(
+                    "validate training chat template identity in train receipt {}",
+                    path.display()
+                )
+            })?;
         if let Some(manifest) = receipt.model.base_weight_shard_manifest.as_ref() {
             manifest.validate().with_context(|| {
                 format!(
@@ -1181,6 +1197,56 @@ impl TrainReceipt {
             })?;
         }
         Ok(Some(receipt))
+    }
+
+    fn validate_training_chat_template_identity(&self) -> Result<()> {
+        let direct = self.tokenizer.training_chat_template_hash.as_deref();
+        let config = self.config_hashes.training_chat_template_hash.as_deref();
+        let execution = self
+            .runtime
+            .execution_provenance
+            .as_ref()
+            .and_then(|provenance| provenance.model.training_chat_template_sha256.as_deref());
+
+        for (field, value) in [
+            ("tokenizer.training_chat_template_hash", direct),
+            ("config_hashes.training_chat_template_hash", config),
+            (
+                "runtime.execution_provenance.model.training_chat_template_sha256",
+                execution,
+            ),
+        ] {
+            if let Some(value) = value {
+                validate_prefixed_sha256(field, value)?;
+            }
+        }
+        for (left_name, left, right_name, right) in [
+            (
+                "tokenizer.training_chat_template_hash",
+                direct,
+                "config_hashes.training_chat_template_hash",
+                config,
+            ),
+            (
+                "tokenizer.training_chat_template_hash",
+                direct,
+                "runtime.execution_provenance.model.training_chat_template_sha256",
+                execution,
+            ),
+            (
+                "config_hashes.training_chat_template_hash",
+                config,
+                "runtime.execution_provenance.model.training_chat_template_sha256",
+                execution,
+            ),
+        ] {
+            if let (Some(left), Some(right)) = (left, right)
+                && left != right
+            {
+                bail!("{left_name} ({left}) differs from {right_name} ({right})");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1215,6 +1281,7 @@ pub(crate) fn test_execution_provenance() -> kiln_core::execution_provenance::Ex
             tokenizer_vocab_sha256: hash('5'),
             tokenizer_config_sha256: hash('6'),
             chat_template_sha256: Some(hash('7')),
+            training_chat_template_sha256: Some(hash('8')),
         },
         ExecutionPrecisionIdentity {
             inference_dtype: "f32".into(),
@@ -1830,6 +1897,20 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         h.update(&buf[..n]);
     }
     Ok(format!("sha256:{}", hex_digest(h.finalize().as_slice())))
+}
+
+pub(crate) fn validate_prefixed_sha256(field: &str, value: &str) -> Result<()> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        bail!("{field} must use the sha256:<64 lowercase hex> format");
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("{field} must use the sha256:<64 lowercase hex> format");
+    }
+    Ok(())
 }
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {
@@ -2755,6 +2836,55 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("validate execution provenance"));
+        Ok(())
+    }
+
+    #[test]
+    fn sft_receipt_records_and_validates_effective_training_template_identity() -> Result<()> {
+        let model = ModelConfig::qwen3_5_4b();
+        let tokenizer = minimal_tokenizer()?.with_chat_template(
+            "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
+        );
+        let hyperparameters = HyperparameterReceipt {
+            mode: "sft".to_string(),
+            rank: 2,
+            alpha: 4.0,
+            alpha_over_rank: Some(2.0),
+            learning_rate: 1e-4,
+            epochs: 1,
+            seed: Some(7),
+            shuffle: false,
+        };
+        let mut sft = TrainReceipt::new(
+            "adapter-sft",
+            "sft",
+            &model,
+            &tokenizer,
+            hyperparameters.clone(),
+            serde_json::json!({}),
+        );
+        assert_eq!(
+            sft.tokenizer.training_chat_template_hash,
+            sft.config_hashes.training_chat_template_hash
+        );
+        assert!(sft.tokenizer.training_chat_template_hash.is_some());
+
+        let grpo = TrainReceipt::new(
+            "adapter-grpo",
+            "grpo",
+            &model,
+            &tokenizer,
+            hyperparameters,
+            serde_json::json!({}),
+        );
+        assert!(grpo.tokenizer.training_chat_template_hash.is_none());
+        assert!(grpo.config_hashes.training_chat_template_hash.is_some());
+
+        sft.tokenizer.training_chat_template_hash = Some(format!("sha256:{}", "0".repeat(64)));
+        let dir = tempdir()?;
+        let error = format!("{:#}", sft.write_to_adapter_dir(dir.path()).unwrap_err());
+        assert!(error.contains("differs from config_hashes.training_chat_template_hash"));
+        assert!(!dir.path().join(TRAIN_RECEIPT_FILENAME).exists());
         Ok(())
     }
 

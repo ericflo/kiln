@@ -13,6 +13,8 @@ pub struct ConfigHashes {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_chat_template_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_config_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kiln_env_config_hash: Option<String>,
@@ -27,6 +29,7 @@ impl ConfigHashes {
         Self {
             tokenizer_config_hash: tokenizer.tokenizer_config_sha256().ok(),
             chat_template_hash: tokenizer.chat_template_sha256(),
+            training_chat_template_hash: tokenizer.training_chat_template_sha256(),
             model_config_hash: sha256_json_serializable(model_config),
             kiln_env_config_hash,
         }

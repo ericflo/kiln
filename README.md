@@ -393,6 +393,13 @@ the declared deterministic environment; it is not a promise of byte-identical
 output across different builds, drivers, devices, precision policies, or
 backends.
 
+Native SFT uses a source-pinned Qwen/Hugging Face token-and-label oracle. It
+renders with `add_generation_prompt=false` and supervises complete assistant
+turn bodies plus their terminator while masking assistant role headers and all
+system, user, and tool-response turns. See
+[SFT Tokenization and Assistant-Only Loss](docs/sft-tokenization.md) for the
+exact assistant mask and local reproduction command.
+
 **Optional: use Kiln as pi's local agent model.** With the server running on `localhost:8420`, `kiln pi-setup` adds a `kiln-local` provider to pi without deleting your other providers or settings. Existing files are backed up first as `models.json.bak-<timestamp>` and `settings.json.bak-<timestamp>`.
 
 ```bash
@@ -1001,8 +1008,8 @@ Adapters are easy to revert if a bad training run lands. `POST /v1/adapters/unlo
 
 Completed training runs also write `adapter_manifest.json` beside the adapter
 weights. The manifest records adapter/config/receipt hashes, parent adapter,
-model config hash, the exact base-weight shard manifest, kiln commit, and
-training data hash. Use
+model config hash, the effective SFT training-template hash, the exact
+base-weight shard manifest, kiln commit, and training data hash. Use
 `kiln adapters restore <path>/adapter_manifest.json --adapter-dir <registry>`
 to copy an adapter into a registry and verify hashes after copy. See
 [`docs/ADAPTER_MANIFEST.md`](docs/ADAPTER_MANIFEST.md) for the schema.

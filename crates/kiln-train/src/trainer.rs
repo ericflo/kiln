@@ -3089,6 +3089,7 @@ fn sft_checkpoint_auxiliary_state(
         "model_config_sha256": hashes.model_config_hash,
         "tokenizer_config_sha256": hashes.tokenizer_config_hash,
         "chat_template_sha256": hashes.chat_template_hash,
+        "training_chat_template_sha256": hashes.training_chat_template_hash,
         "base_model_weights_sha256": base_model_weights_sha256,
         "base_weight_shard_manifest": base_weight_shard_manifest,
         "execution_provenance": execution_provenance,
@@ -11600,8 +11601,8 @@ pub fn tokenize_for_training(
     let core_messages = to_core_messages(&example.messages);
 
     // Build the full conversation text using the chat template
-    let full_text = tokenizer
-        .apply_chat_template(&core_messages)
+    let (full_text, template_assistant_spans) = tokenizer
+        .apply_chat_template_for_training_with_spans(&core_messages)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let (input_ids, offsets) = tokenizer
         .encode_with_offsets(&full_text)
@@ -11615,13 +11616,26 @@ pub fn tokenize_for_training(
         .iter()
         .filter(|message| message.role == "assistant")
         .count();
-    let mut label_mask = label_mask_from_rendered_assistant_spans(
-        &full_text,
-        &offsets,
-        input_ids.len(),
-        assistant_count,
-    )
-    .unwrap_or_else(|| vec![false; input_ids.len()]);
+    let mut label_mask = if let Some(spans) = template_assistant_spans {
+        anyhow::ensure!(
+            spans.len() == assistant_count,
+            "training template returned {} assistant spans for {assistant_count} assistant messages",
+            spans.len()
+        );
+        let mut mask = vec![false; input_ids.len()];
+        for (start, end) in spans {
+            mark_offsets_overlapping_span(&mut mask, &offsets, start, end);
+        }
+        mask
+    } else {
+        label_mask_from_rendered_assistant_spans(
+            &full_text,
+            &offsets,
+            input_ids.len(),
+            assistant_count,
+        )
+        .unwrap_or_else(|| vec![false; input_ids.len()])
+    };
     // ChatML/Qwen-style templates are handled directly from the single rendered
     // full example. This avoids prefix renders that are not stable when
     // templates append generation prompts or rewrite post-tool turns.
@@ -11633,13 +11647,13 @@ pub fn tokenize_for_training(
                     String::new()
                 } else {
                     tokenizer
-                        .apply_chat_template(&prefix_messages)
+                        .apply_chat_template_for_training(&prefix_messages)
                         .map_err(|e| anyhow::anyhow!("{e}"))?
                 };
 
                 prefix_messages.push(msg.clone());
                 let prefix_text = tokenizer
-                    .apply_chat_template(&prefix_messages)
+                    .apply_chat_template_for_training(&prefix_messages)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
                 if !full_text.starts_with(&prefix_text) || before_text.len() > prefix_text.len() {
@@ -11706,7 +11720,9 @@ fn label_mask_from_rendered_assistant_spans(
             end += 1;
         }
 
-        mark_offsets_overlapping_span(&mut label_mask, offsets, start, end);
+        // TRL's Qwen3.5 training template opens its generation span after the
+        // assistant role header and closes it after the message terminator.
+        mark_offsets_overlapping_span(&mut label_mask, offsets, content_start, end);
         found += 1;
         search_from = end;
     }
@@ -11741,7 +11757,7 @@ fn label_mask_by_prefix_tokenization(
         prefix_messages.push(msg.clone());
         if msg.role == "assistant" {
             let prefix_text = tokenizer
-                .apply_chat_template(&prefix_messages)
+                .apply_chat_template_for_training(&prefix_messages)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let prefix_ids = tokenizer
                 .encode(&prefix_text)
@@ -11752,7 +11768,7 @@ fn label_mask_by_prefix_tokenization(
                 String::new()
             } else {
                 tokenizer
-                    .apply_chat_template(&before_messages)
+                    .apply_chat_template_for_training(&before_messages)
                     .map_err(|e| anyhow::anyhow!("{e}"))?
             };
             let before_ids = if before_text.is_empty() {
@@ -17993,7 +18009,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn rendered_assistant_span_mask_excludes_trailing_generation_prompt() {
+    fn rendered_assistant_span_mask_matches_trl_header_and_terminator_contract() {
         let full_text = concat!(
             "<|im_start|>user\n",
             "a",
@@ -18009,6 +18025,7 @@ pub(crate) mod tests {
             label_mask_from_rendered_assistant_spans(full_text, &offsets, offsets.len(), 1)
                 .expect("one closed assistant span should be found");
         let start = full_text.find("<|im_start|>assistant\n").unwrap();
+        let content_start = start + "<|im_start|>assistant\n".len();
         let closed_end = start
             + full_text[start..]
                 .find("<|im_end|>\n")
@@ -18016,9 +18033,17 @@ pub(crate) mod tests {
             + "<|im_end|>\n".len();
         let generation_prompt_start = closed_end;
 
-        assert!(label_mask[start]);
+        assert!(
+            label_mask[start..content_start]
+                .iter()
+                .all(|&marked| !marked)
+        );
         assert!(label_mask[closed_end - 1]);
-        assert!(label_mask[start..closed_end].iter().all(|&marked| marked));
+        assert!(
+            label_mask[content_start..closed_end]
+                .iter()
+                .all(|&marked| marked)
+        );
         assert!(
             label_mask[generation_prompt_start..]
                 .iter()

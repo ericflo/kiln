@@ -710,7 +710,15 @@ pub fn approximate_max_seq_len_sft(
 ) -> usize {
     examples
         .iter()
-        .map(|ex| approximate_tokens_for_messages(&ex.messages, tokenizer))
+        .map(|example| {
+            tokenizer
+                .and_then(|tokenizer| {
+                    kiln_train::trainer::tokenize_for_training(example, tokenizer)
+                        .ok()
+                        .map(|(input_ids, _)| input_ids.len())
+                })
+                .unwrap_or_else(|| approximate_tokens_for_messages(&example.messages, tokenizer))
+        })
         .max()
         .unwrap_or(0)
 }
@@ -721,12 +729,23 @@ pub fn approximate_max_supervised_tokens_sft(
 ) -> usize {
     examples
         .iter()
-        .map(|ex| {
-            ex.messages
-                .iter()
-                .filter(|message| message.role == "assistant")
-                .map(|message| approximate_tokens_for_text(&message.content, tokenizer))
-                .sum::<usize>()
+        .map(|example| {
+            tokenizer
+                .and_then(|tokenizer| {
+                    kiln_train::trainer::tokenize_for_training(example, tokenizer)
+                        .ok()
+                        .map(|(_, label_mask)| {
+                            label_mask.into_iter().filter(|active| *active).count()
+                        })
+                })
+                .unwrap_or_else(|| {
+                    example
+                        .messages
+                        .iter()
+                        .filter(|message| message.role == "assistant")
+                        .map(|message| approximate_tokens_for_text(&message.content, tokenizer))
+                        .sum::<usize>()
+                })
         })
         .max()
         .unwrap_or(0)
@@ -794,7 +813,17 @@ fn approximate_tokens_for_messages(
 ) -> usize {
     // Sum every message's content in chars, plus a 16-token-per-message
     // tag for chat-template envelope overhead.
-    let chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
+    let chars: usize = messages
+        .iter()
+        .map(|message| {
+            message.content.chars().count()
+                + message
+                    .tool_calls
+                    .as_ref()
+                    .and_then(|tool_calls| serde_json::to_string(tool_calls).ok())
+                    .map_or(0, |value| value.chars().count())
+        })
+        .sum();
     let envelope = messages.len() * 16;
     let char_estimate = (chars / 4) + envelope;
 
@@ -876,6 +905,42 @@ mod tests {
 
     fn qwen_4b() -> ModelConfig {
         ModelConfig::qwen3_5_4b()
+    }
+
+    #[test]
+    fn sft_preflight_uses_training_render_and_exact_assistant_mask() {
+        let tokenizer = KilnTokenizer::from_bytes(
+            br#"{
+                "version": "1.0",
+                "model": {
+                    "type": "BPE",
+                    "vocab": {"a": 0, "b": 1, "x": 2},
+                    "merges": []
+                }
+            }"#,
+        )
+        .unwrap()
+        .with_chat_template(
+            "{% for message in messages %}{{ message.content }}{% endfor %}\
+             {% if add_generation_prompt %}x{% endif %}"
+                .to_string(),
+        );
+        let examples = [SftExample {
+            messages: vec![
+                kiln_train::ChatMessage::new("user", "a"),
+                kiln_train::ChatMessage::new("assistant", "b"),
+            ],
+        }];
+
+        assert_eq!(approximate_max_seq_len_sft(&examples, Some(&tokenizer)), 2);
+        assert_eq!(
+            approximate_max_supervised_tokens_sft(&examples, Some(&tokenizer)),
+            1
+        );
+        assert_eq!(
+            approximate_tokens_for_messages(&examples[0].messages, Some(&tokenizer)),
+            3
+        );
     }
 
     #[test]

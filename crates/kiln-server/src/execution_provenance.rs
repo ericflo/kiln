@@ -64,6 +64,7 @@ pub fn build_execution_provenance(
             tokenizer_vocab_sha256: tokenizer.vocab_identity_sha256(),
             tokenizer_config_sha256,
             chat_template_sha256: hashes.chat_template_hash,
+            training_chat_template_sha256: hashes.training_chat_template_hash,
         },
         ExecutionPrecisionIdentity {
             inference_dtype: match model_config.dtype {
@@ -237,6 +238,7 @@ pub(crate) fn test_execution_provenance() -> ExecutionProvenanceV1 {
             tokenizer_vocab_sha256: hash('5'),
             tokenizer_config_sha256: hash('6'),
             chat_template_sha256: Some(hash('7')),
+            training_chat_template_sha256: Some(hash('8')),
         },
         ExecutionPrecisionIdentity {
             inference_dtype: "f32".into(),

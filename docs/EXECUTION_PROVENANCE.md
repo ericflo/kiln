@@ -35,7 +35,8 @@ The current type is `kiln.execution-provenance.v1` with schema version `1`:
     "model_config_sha256": "sha256:<64 lowercase hex digits>",
     "tokenizer_vocab_sha256": "sha256:<64 lowercase hex digits>",
     "tokenizer_config_sha256": "sha256:<64 lowercase hex digits>",
-    "chat_template_sha256": "sha256:<optional 64 lowercase hex digits>"
+    "chat_template_sha256": "sha256:<optional 64 lowercase hex digits>",
+    "training_chat_template_sha256": "sha256:<optional 64 lowercase hex digits>"
   },
   "precision": {
     "inference_dtype": "bf16",
@@ -76,6 +77,11 @@ digest covers its type, version map, and ordered compiled-feature list.
   distinct inputs. Probe output is never published directly.
 - Model and tokenizer fields are computed from the resident model
   configuration and tokenizer/template objects used by the runner.
+  `chat_template_sha256` identifies the inference template. The distinct
+  `training_chat_template_sha256` identifies the effective supervised-training
+  template after any source-pinned training substitution; for the qualified
+  Qwen3.5 path this is TRL's prefix-preserving assistant-mask template rather
+  than the model's inference template.
 - Precision records the loaded inference dtype and the backend's resolved
   training-precision policy.
 - Kernel identity records the compiled backend features and the versions of
@@ -117,9 +123,11 @@ binary.
   `runtime.execution_provenance`. `runtime.training_precision` separately
   records the concrete parameter, optimizer-state, activation, gradient, and
   stochastic-rounding contract observed after trainer setup.
-- `adapter_manifest.json` copies both receipt fields so an adapter remains
-  auditable without first interpreting the receipt. Manifest and receipt
-  readers reject a tampered execution record or malformed precision contract.
+- SFT receipts also expose the effective training-template digest directly at
+  `tokenizer.training_chat_template_hash`; `adapter_manifest.json` copies it
+  alongside the execution and precision records so an adapter remains
+  auditable without first interpreting the receipt. Readers reject a malformed
+  digest or one that disagrees with the execution record.
 - Legacy receipts and adapter manifests remain readable without these optional
   fields. Legacy exact checkpoints without the complete execution record are
   not exact-resumable.

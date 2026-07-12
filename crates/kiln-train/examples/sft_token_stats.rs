@@ -1,35 +1,15 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use kiln_core::tokenizer::{ChatMessage as CoreChatMessage, KilnTokenizer};
-use kiln_train::SftExample;
-
-fn to_core_messages(messages: &[kiln_train::ChatMessage]) -> Vec<CoreChatMessage> {
-    messages.to_vec()
-}
+use kiln_core::tokenizer::KilnTokenizer;
+use kiln_train::{SftExample, trainer::tokenize_for_training};
 
 fn tokenize_for_stats(example: &SftExample, tokenizer: &KilnTokenizer) -> Result<(usize, usize)> {
-    let core_messages = to_core_messages(&example.messages);
-    let full_text = tokenizer
-        .apply_chat_template(&core_messages)
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
-    let input_ids = tokenizer
-        .encode(&full_text)
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
-    anyhow::ensure!(!input_ids.is_empty(), "empty tokenization result");
-
-    let assistant_content_tokens = example
-        .messages
-        .iter()
-        .filter(|message| message.role == "assistant")
-        .map(|message| {
-            tokenizer
-                .encode(&message.content)
-                .map(|ids| ids.len())
-                .map_err(|err| anyhow::anyhow!("{err}"))
-        })
-        .sum::<Result<usize>>()?;
-    Ok((input_ids.len(), assistant_content_tokens))
+    let (input_ids, label_mask) = tokenize_for_training(example, tokenizer)?;
+    Ok((
+        input_ids.len(),
+        label_mask.iter().filter(|active| **active).count(),
+    ))
 }
 
 fn load_tokenizer(model_dir: &str) -> Result<KilnTokenizer> {
@@ -70,7 +50,7 @@ fn main() -> Result<()> {
 
     let raw = std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?;
     let mut token_counts = Vec::new();
-    let mut assistant_content_counts = Vec::new();
+    let mut assistant_label_counts = Vec::new();
     let mut no_label = 0usize;
 
     for (line_idx, line) in raw.lines().enumerate() {
@@ -85,13 +65,13 @@ fn main() -> Result<()> {
             no_label += 1;
         }
         token_counts.push(tokens);
-        assistant_content_counts.push(supervised);
+        assistant_label_counts.push(supervised);
     }
 
     token_counts.sort_unstable();
-    assistant_content_counts.sort_unstable();
+    assistant_label_counts.sort_unstable();
     let total_tokens: usize = token_counts.iter().sum();
-    let total_assistant_content: usize = assistant_content_counts.iter().sum();
+    let total_assistant_labels: usize = assistant_label_counts.iter().sum();
 
     println!("examples={}", token_counts.len());
     println!("no_label_examples={no_label}");
@@ -105,13 +85,13 @@ fn main() -> Result<()> {
         total_tokens
     );
     println!(
-        "assistant_content_tokens_estimate min={} p50={} p90={} p99={} max={} total={}",
-        assistant_content_counts.first().copied().unwrap_or(0),
-        percentile(&assistant_content_counts, 0.50),
-        percentile(&assistant_content_counts, 0.90),
-        percentile(&assistant_content_counts, 0.99),
-        assistant_content_counts.last().copied().unwrap_or(0),
-        total_assistant_content
+        "assistant_label_tokens min={} p50={} p90={} p99={} max={} total={}",
+        assistant_label_counts.first().copied().unwrap_or(0),
+        percentile(&assistant_label_counts, 0.50),
+        percentile(&assistant_label_counts, 0.90),
+        percentile(&assistant_label_counts, 0.99),
+        assistant_label_counts.last().copied().unwrap_or(0),
+        total_assistant_labels
     );
 
     Ok(())

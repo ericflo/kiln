@@ -596,6 +596,9 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
           Every route uses the same chat message schema. Assistant turns may carry OpenAI-shaped <code>tool_calls</code>; <code>role: "tool"</code> responses may carry <code>name</code> and <code>tool_call_id</code>. String, null/missing, and text-part-array <code>content</code> are accepted. Inline requests, local JSONL, named datasets, rollout provenance, eval, and chat-template rendering preserve these fields instead of flattening the conversation to role and text.
         </p>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">
+          SFT does not append the inference generation prompt. It supervises each assistant thinking, answer, or tool-call body plus the message terminator and trailing newline; assistant role headers plus system, user, and tool-response tokens are ignored. The exact Hugging Face and TRL token/label goldens are documented in <a href="https://github.com/ericflo/kiln/blob/main/docs/sft-tokenization.md">SFT Tokenization and Assistant-Only Loss</a>.
+        </p>
+        <p class="text-sm mt-3" style="color: var(--fg-mute);">
           For interruptible SFT, GRPO, or OPD, add <code>--checkpoint-interval N</code>; OPD defaults to 25. Job status reports the newest immutable <code>.kiln-checkpoint</code> basename. Continue with the identical source, route, adapter, and options plus <code>--resume-checkpoint BASENAME</code>; OPD also requires the exact registered teacher revision. This restores exact optimizer and loop state, not just adapter weights.
         </p>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">

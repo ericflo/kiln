@@ -1671,6 +1671,7 @@ mod tests {
                 tokenizer_vocab_sha256: digest.clone(),
                 tokenizer_config_sha256: digest.clone(),
                 chat_template_sha256: Some(digest.clone()),
+                training_chat_template_sha256: Some(digest.clone()),
             },
             ExecutionPrecisionIdentity {
                 inference_dtype: "bf16".to_string(),

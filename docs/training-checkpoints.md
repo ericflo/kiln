@@ -112,8 +112,11 @@ Every new exact SFT, GRPO, and OPD checkpoint also embeds the complete
 `auxiliary_state.execution_provenance`. Capture validates the self-verifying
 record before publishing any checkpoint. It binds the exact running executable,
 optional source revision, backend/device and bounded driver/runtime evidence,
-model/tokenizer/template identity, inference and training precision policy,
-compiled kernel contract, and effective server configuration/environment.
+model/tokenizer/inference-template identity, the effective supervised-training
+template identity, inference and training precision policy, compiled kernel
+contract, and effective server configuration/environment. SFT checkpoint
+auxiliary state repeats `training_chat_template_sha256` explicitly so an exact
+resume comparison cannot silently cross assistant-label contracts.
 
 Resume validates both records before GPU ownership and requires their canonical
 `provenance_sha256` values to match. The checkpoint's existing concrete
@@ -129,7 +132,9 @@ weights-only artifacts. Successful `train_receipt.json` files retain the full
 record under `runtime.execution_provenance` and the concrete dtypes under
 `runtime.training_precision`; `adapter_manifest.json` copies both. Readers
 validate these fields when present while continuing to read legacy non-resume
-artifacts that predate them. See
+artifacts that predate them. SFT receipts additionally record
+`tokenizer.training_chat_template_hash`, and adapter manifests copy it; readers
+reject malformed values or disagreement with the execution record. See
 [Execution Provenance](EXECUTION_PROVENANCE.md) for the canonical schema and
 evidence sources.
 

@@ -26,6 +26,9 @@ Optional provenance fields:
 - `parent_adapter`: base/parent adapter name or path when training continued
   from an adapter.
 - `model_config_hash`: model config hash from `train_receipt.json`.
+- `training_chat_template_hash`: effective SFT template SHA-256 from
+  `train_receipt.json`; for the qualified Qwen3.5 path this identifies TRL's
+  prefix-preserving assistant-mask template, not the inference template.
 - `base_weight_shard_manifest`: strict `kiln.base-weight-shards.v1` identity
   copied from `train_receipt.json`, including every shard SHA-256 and byte size.
 - `execution_provenance`: strict `kiln.execution-provenance.v1` process,
@@ -50,6 +53,7 @@ Example:
   "receipt_hash": "sha256:...",
   "parent_adapter": "support-bot-v2",
   "model_config_hash": "sha256:...",
+  "training_chat_template_hash": "sha256:...",
   "base_weight_shard_manifest": {
     "schema_version": 1,
     "manifest_type": "kiln.base-weight-shards.v1",
@@ -80,7 +84,9 @@ Example:
     "model": {
       "model_config_sha256": "sha256:...",
       "tokenizer_vocab_sha256": "sha256:...",
-      "tokenizer_config_sha256": "sha256:..."
+      "tokenizer_config_sha256": "sha256:...",
+      "chat_template_sha256": "sha256:...",
+      "training_chat_template_sha256": "sha256:..."
     },
     "precision": {
       "inference_dtype": "bf16",
@@ -134,8 +140,10 @@ The restore command copies `adapter_config.json`, `adapter_model.safetensors`,
 `train_receipt.json` when listed, and `adapter_manifest.json`, then verifies the
 copied config, safetensors, and receipt hashes before reporting success.
 Manifest reads validate the complete base-weight shard identity, execution
-record, and concrete precision contract when present. Legacy adapter manifests
-may omit them. See
+record, effective training-template digest, and concrete precision contract
+when present. A direct training-template digest must agree with the copy inside
+the execution record. Legacy adapter manifests may omit these optional fields.
+See
 [Base-Weight Provenance](BASE_WEIGHT_PROVENANCE.md) for content-equivalence and
 exact-resume semantics, and [Execution Provenance](EXECUTION_PROVENANCE.md) for
 the process/runtime envelope.

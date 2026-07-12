@@ -58,6 +58,8 @@ pub struct ExecutionModelIdentity {
     pub tokenizer_config_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_chat_template_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -248,6 +250,9 @@ impl ExecutionProvenanceV1 {
         if let Some(hash) = self.model.chat_template_sha256.as_deref() {
             validate_sha256("model.chat_template_sha256", hash)?;
         }
+        if let Some(hash) = self.model.training_chat_template_sha256.as_deref() {
+            validate_sha256("model.training_chat_template_sha256", hash)?;
+        }
         self.kernels.validate()?;
         Ok(())
     }
@@ -392,6 +397,7 @@ mod tests {
                 tokenizer_vocab_sha256: hash('5'),
                 tokenizer_config_sha256: hash('6'),
                 chat_template_sha256: Some(hash('7')),
+                training_chat_template_sha256: Some(hash('8')),
             },
             ExecutionPrecisionIdentity {
                 inference_dtype: "bf16".into(),
@@ -436,6 +442,12 @@ mod tests {
             .versions
             .insert("extra".into(), "1".into());
         assert!(changed_kernels.validate().is_err());
+
+        let mut changed_training_template = provenance();
+        changed_training_template
+            .model
+            .training_chat_template_sha256 = Some(hash('a'));
+        assert!(changed_training_template.validate().is_err());
 
         let encoded = serde_json::to_string(&provenance()).unwrap();
         assert!(

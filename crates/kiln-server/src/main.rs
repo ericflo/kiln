@@ -791,6 +791,7 @@ async fn main() -> Result<()> {
         model_config_hash = ?state.config_hashes.model_config_hash,
         tokenizer_config_hash = ?state.config_hashes.tokenizer_config_hash,
         chat_template_hash = ?state.config_hashes.chat_template_hash,
+        training_chat_template_hash = ?state.config_hashes.training_chat_template_hash,
         kiln_env_config_hash = ?state.config_hashes.kiln_env_config_hash,
         "config hashes initialized"
     );

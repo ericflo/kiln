@@ -35,6 +35,8 @@ pub struct AdapterManifest {
     pub parent_adapter: Option<String>,
     pub model_config_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_chat_template_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_weight_shard_manifest: Option<kiln_core::model_provenance::BaseWeightShardManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_provenance: Option<kiln_core::execution_provenance::ExecutionProvenanceV1>,
@@ -252,6 +254,15 @@ pub fn build_adapter_manifest_from_train_receipt(
     adapter_dir: &Path,
     receipt: &crate::train_receipt::TrainReceipt,
 ) -> Result<AdapterManifest> {
+    validate_training_chat_template_identity(
+        receipt.tokenizer.training_chat_template_hash.as_deref(),
+        receipt
+            .runtime
+            .execution_provenance
+            .as_ref()
+            .and_then(|provenance| provenance.model.training_chat_template_sha256.as_deref()),
+    )
+    .context("validate train-receipt training chat template identity for adapter manifest")?;
     if let Some(provenance) = receipt.runtime.execution_provenance.as_ref() {
         provenance
             .validate()
@@ -285,6 +296,7 @@ pub fn build_adapter_manifest_from_train_receipt(
             .config_hash
             .clone()
             .or_else(|| receipt.config_hashes.model_config_hash.clone()),
+        training_chat_template_hash: receipt.tokenizer.training_chat_template_hash.clone(),
         base_weight_shard_manifest: receipt.model.base_weight_shard_manifest.clone(),
         execution_provenance: receipt.runtime.execution_provenance.clone(),
         training_precision: receipt.runtime.training_precision.clone(),
@@ -306,6 +318,19 @@ pub fn read_adapter_manifest(path: &Path) -> Result<AdapterManifest> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let manifest: AdapterManifest =
         serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    validate_training_chat_template_identity(
+        manifest.training_chat_template_hash.as_deref(),
+        manifest
+            .execution_provenance
+            .as_ref()
+            .and_then(|provenance| provenance.model.training_chat_template_sha256.as_deref()),
+    )
+    .with_context(|| {
+        format!(
+            "validate training chat template identity in {}",
+            path.display()
+        )
+    })?;
     if let Some(base_weights) = manifest.base_weight_shard_manifest.as_ref() {
         base_weights
             .validate()
@@ -322,6 +347,23 @@ pub fn read_adapter_manifest(path: &Path) -> Result<AdapterManifest> {
             .with_context(|| format!("validate training precision in {}", path.display()))?;
     }
     Ok(manifest)
+}
+
+fn validate_training_chat_template_identity(
+    direct: Option<&str>,
+    execution: Option<&str>,
+) -> Result<()> {
+    if let Some(hash) = direct {
+        crate::train_receipt::validate_prefixed_sha256("training_chat_template_hash", hash)?;
+    }
+    if let (Some(direct), Some(execution)) = (direct, execution)
+        && direct != execution
+    {
+        bail!(
+            "training_chat_template_hash ({direct}) differs from execution provenance ({execution})"
+        );
+    }
+    Ok(())
 }
 
 pub fn read_adapter_manifest_from_adapter_dir(
@@ -728,6 +770,11 @@ mod tests {
         );
         receipt.runtime.execution_provenance =
             Some(crate::train_receipt::test_execution_provenance());
+        receipt.tokenizer.training_chat_template_hash = receipt
+            .runtime
+            .execution_provenance
+            .as_ref()
+            .and_then(|provenance| provenance.model.training_chat_template_sha256.clone());
         receipt.runtime.training_precision = Some(crate::checkpoint::TrainingCheckpointPrecision {
             parameter_dtype: "f32".into(),
             optimizer_state_dtype: "f32".into(),
@@ -815,6 +862,10 @@ mod tests {
             receipt.runtime.execution_provenance
         );
         assert_eq!(
+            manifest.training_chat_template_hash,
+            receipt.tokenizer.training_chat_template_hash
+        );
+        assert_eq!(
             manifest.training_precision,
             receipt.runtime.training_precision
         );
@@ -880,6 +931,26 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("validate execution provenance"));
+    }
+
+    #[test]
+    fn adapter_manifest_read_rejects_training_template_identity_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let adapter = tmp.path().join("actual");
+        write_minimal_adapter(&adapter);
+        let receipt = manifest_test_receipt("actual");
+        write_train_receipt(&adapter, &receipt);
+        let manifest_path = write_adapter_manifest_from_train_receipt(&adapter, &receipt)
+            .unwrap()
+            .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        value["training_chat_template_hash"] =
+            serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = format!("{:#}", read_adapter_manifest(&manifest_path).unwrap_err());
+        assert!(error.contains("differs from execution provenance"));
     }
 
     #[test]

@@ -286,14 +286,8 @@ fn load_tokenizer(model_path: &PathBuf) -> Result<KilnTokenizer> {
 
 #[cfg(feature = "cuda")]
 fn token_len(example: &SftExample, tokenizer: &KilnTokenizer) -> Result<usize> {
-    let messages = example.messages.clone();
-    let text = tokenizer
-        .apply_chat_template(&messages)
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
-    tokenizer
-        .encode(&text)
-        .map(|ids| ids.len())
-        .map_err(|err| anyhow::anyhow!("{err}"))
+    kiln_train::trainer::tokenize_for_training(example, tokenizer)
+        .map(|(input_ids, _)| input_ids.len())
 }
 
 #[cfg(feature = "cuda")]

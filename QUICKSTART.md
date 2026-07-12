@@ -357,6 +357,13 @@ template rendering. For example:
 {"messages":[{"role":"user","content":"Look up order 42"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup_order","arguments":"{\"id\":42}"}}]},{"role":"tool","content":"shipped","name":"lookup_order","tool_call_id":"call_1"},{"role":"assistant","content":"Order 42 has shipped."}]}
 ```
 
+SFT renders complete conversations without an inference generation prompt and
+computes loss only on serialized assistant turns. The assistant role header,
+system, user, and tool-response turns are masked. The thinking/answer/tool-call
+body, `<|im_end|>`, and trailing newline are supervised. The exact
+HF/TRL-matched token and label contract is in
+[SFT Tokenization and Assistant-Only Loss](docs/sft-tokenization.md).
+
 Submit training via the CLI:
 
 ```bash

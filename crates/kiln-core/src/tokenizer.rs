@@ -102,6 +102,108 @@ const RESERVED_CHAT_TEMPLATE_KWARGS: &[&str] = &[
     "eos_token",
 ];
 
+const QWEN35_OFFICIAL_CHAT_TEMPLATE: &str =
+    include_str!("../test_fixtures/qwen35_4b_chat_template.jinja");
+const QWEN35_TRL_SFT_CHAT_TEMPLATE: &str =
+    include_str!("../test_fixtures/qwen35_4b_trl_sft_chat_template.jinja");
+const QWEN35_TRAINING_SPAN_START: &str =
+    "\u{1e}kiln_qwen35_assistant_span_start_576b358d5749d18f\u{1f}";
+const QWEN35_TRAINING_SPAN_END: &str =
+    "\u{1e}kiln_qwen35_assistant_span_end_576b358d5749d18f\u{1f}";
+
+fn qwen35_trl_sft_template_for_minijinja() -> &'static str {
+    static TEMPLATE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        QWEN35_TRL_SFT_CHAT_TEMPLATE
+            .strip_suffix('\n')
+            .unwrap_or(QWEN35_TRL_SFT_CHAT_TEMPLATE)
+            .replace("        {%- generation %}\n", "")
+            .replace("        {%- endgeneration %}\n", "")
+    })
+}
+
+fn qwen35_trl_sft_template_with_span_markers() -> &'static str {
+    static TEMPLATE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        QWEN35_TRL_SFT_CHAT_TEMPLATE
+            .strip_suffix('\n')
+            .unwrap_or(QWEN35_TRL_SFT_CHAT_TEMPLATE)
+            .replace(
+                "        {%- generation %}\n",
+                &format!("        {{{{- '{QWEN35_TRAINING_SPAN_START}' }}}}\n"),
+            )
+            .replace(
+                "        {%- endgeneration %}\n",
+                &format!("        {{{{- '{QWEN35_TRAINING_SPAN_END}' }}}}\n"),
+            )
+    })
+}
+
+fn strip_qwen35_training_span_markers(
+    rendered: &str,
+    expected_spans: usize,
+) -> Result<(String, Vec<(usize, usize)>), TokenizerError> {
+    let starts = rendered.matches(QWEN35_TRAINING_SPAN_START).count();
+    let ends = rendered.matches(QWEN35_TRAINING_SPAN_END).count();
+    if starts != expected_spans || ends != expected_spans {
+        return Err(TokenizerError::ChatTemplate(format!(
+            "Qwen3.5 training span markers collided with message content or rendered an unexpected count: expected {expected_spans}, found {starts} starts and {ends} ends"
+        )));
+    }
+
+    let marker_bytes = QWEN35_TRAINING_SPAN_START.len() + QWEN35_TRAINING_SPAN_END.len();
+    let mut text = String::with_capacity(
+        rendered
+            .len()
+            .saturating_sub(expected_spans.saturating_mul(marker_bytes)),
+    );
+    let mut spans = Vec::with_capacity(expected_spans);
+    let mut cursor = 0usize;
+    for _ in 0..expected_spans {
+        let relative_start = rendered[cursor..]
+            .find(QWEN35_TRAINING_SPAN_START)
+            .ok_or_else(|| {
+                TokenizerError::ChatTemplate(
+                    "Qwen3.5 training span start marker is missing".to_string(),
+                )
+            })?;
+        let start = cursor + relative_start;
+        if rendered[cursor..start].contains(QWEN35_TRAINING_SPAN_END) {
+            return Err(TokenizerError::ChatTemplate(
+                "Qwen3.5 training span end appeared before its start".to_string(),
+            ));
+        }
+        text.push_str(&rendered[cursor..start]);
+        let span_start = text.len();
+        let content_start = start + QWEN35_TRAINING_SPAN_START.len();
+        let relative_end = rendered[content_start..]
+            .find(QWEN35_TRAINING_SPAN_END)
+            .ok_or_else(|| {
+                TokenizerError::ChatTemplate(
+                    "Qwen3.5 training span end marker is missing".to_string(),
+                )
+            })?;
+        let end = content_start + relative_end;
+        if rendered[content_start..end].contains(QWEN35_TRAINING_SPAN_START) {
+            return Err(TokenizerError::ChatTemplate(
+                "Qwen3.5 training spans are nested or collide with message content".to_string(),
+            ));
+        }
+        text.push_str(&rendered[content_start..end]);
+        spans.push((span_start, text.len()));
+        cursor = end + QWEN35_TRAINING_SPAN_END.len();
+    }
+    if rendered[cursor..].contains(QWEN35_TRAINING_SPAN_START)
+        || rendered[cursor..].contains(QWEN35_TRAINING_SPAN_END)
+    {
+        return Err(TokenizerError::ChatTemplate(
+            "Qwen3.5 training span marker remains after parsing".to_string(),
+        ));
+    }
+    text.push_str(&rendered[cursor..]);
+    Ok((text, spans))
+}
+
 /// Wraps the HuggingFace tokenizers crate for Kiln's tokenization needs.
 #[derive(Clone)]
 pub struct KilnTokenizer {
@@ -240,6 +342,23 @@ impl KilnTokenizer {
         self.chat_template
             .as_ref()
             .map(|template| crate::config_hashes::sha256_bytes(template.as_bytes()))
+    }
+
+    /// SHA-256 digest of the effective supervised-training template.
+    ///
+    /// The pinned Qwen3.5 inference template maps to TRL's prefix-preserving
+    /// training variant. Other configured templates retain their original
+    /// bytes and differ only through `add_generation_prompt=false` at render
+    /// time.
+    pub fn training_chat_template_sha256(&self) -> Option<String> {
+        self.chat_template.as_ref().map(|template| {
+            let effective = if template == QWEN35_OFFICIAL_CHAT_TEMPLATE {
+                qwen35_trl_sft_template_for_minijinja()
+            } else {
+                template
+            };
+            crate::config_hashes::sha256_bytes(effective.as_bytes())
+        })
     }
 
     /// Encode text into token IDs.
@@ -411,6 +530,60 @@ impl KilnTokenizer {
         self.apply_chat_template_with_tools(messages, None)
     }
 
+    /// Render a complete conversation for supervised training.
+    ///
+    /// Unlike [`Self::apply_chat_template`], this sets Hugging Face's
+    /// `add_generation_prompt` template variable to `false`. For the pinned
+    /// Qwen3.5 template it also selects TRL's prefix-preserving training
+    /// variant and converts its generation-only Jinja extension tags into
+    /// internal assistant-span markers. The markers are removed before this
+    /// method returns, so the serialized example ends with its final message
+    /// instead of an extra assistant prefix intended for inference.
+    pub fn apply_chat_template_for_training(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<String, TokenizerError> {
+        self.apply_chat_template_for_training_with_spans(messages)
+            .map(|(rendered, _)| rendered)
+    }
+
+    /// Render a complete supervised conversation and return exact assistant
+    /// byte spans when the selected training template defines them.
+    ///
+    /// The pinned Qwen3.5 route preserves TRL's `{% generation %}` boundaries
+    /// as internal markers, removes those markers before returning text, and
+    /// fails if message content collides with them. Other templates return
+    /// `None` and retain the trainer's compatibility masking path.
+    pub fn apply_chat_template_for_training_with_spans(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<(String, Option<Vec<(usize, usize)>>), TokenizerError> {
+        if self.chat_template.as_deref() == Some(QWEN35_OFFICIAL_CHAT_TEMPLATE) {
+            let rendered = self.render_jinja_template(
+                qwen35_trl_sft_template_with_span_markers(),
+                messages,
+                None,
+                None,
+                ChatTemplateOptions::default(),
+                false,
+            )?;
+            let expected_spans = messages
+                .iter()
+                .filter(|message| message.role == "assistant")
+                .count();
+            let (rendered, spans) = strip_qwen35_training_span_markers(&rendered, expected_spans)?;
+            return Ok((rendered, Some(spans)));
+        }
+        self.apply_chat_template_internal(
+            messages,
+            None,
+            None,
+            ChatTemplateOptions::default(),
+            false,
+        )
+        .map(|rendered| (rendered, None))
+    }
+
     /// Render many independent chat conversations with the exact same
     /// semantics as [`Self::apply_chat_template`], using Rayon to avoid
     /// serializing large GRPO completion batches on one CPU core.
@@ -466,11 +639,27 @@ impl KilnTokenizer {
         tool_choice: Option<&serde_json::Value>,
         options: ChatTemplateOptions,
     ) -> Result<String, TokenizerError> {
+        self.apply_chat_template_internal(messages, tools, tool_choice, options, true)
+    }
+
+    fn apply_chat_template_internal(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[serde_json::Value]>,
+        tool_choice: Option<&serde_json::Value>,
+        options: ChatTemplateOptions,
+        add_generation_prompt: bool,
+    ) -> Result<String, TokenizerError> {
         match &self.chat_template {
-            Some(template) => {
-                self.render_jinja_template(template, messages, tools, tool_choice, options)
-            }
-            None => Ok(Self::apply_chatml(messages)),
+            Some(template) => self.render_jinja_template(
+                template,
+                messages,
+                tools,
+                tool_choice,
+                options,
+                add_generation_prompt,
+            ),
+            None => Ok(Self::apply_chatml(messages, add_generation_prompt)),
         }
     }
 
@@ -511,6 +700,7 @@ impl KilnTokenizer {
         tools: Option<&[serde_json::Value]>,
         tool_choice: Option<&serde_json::Value>,
         options: ChatTemplateOptions,
+        add_generation_prompt: bool,
     ) -> Result<String, TokenizerError> {
         // Most HF chat templates (Qwen2.5/3.5, Llama 3.1, Mistral v0.3) iterate
         // or `tojson`-serialize `tool_call.function.arguments` as a dict, so we
@@ -530,6 +720,7 @@ impl KilnTokenizer {
             tools,
             tool_choice,
             options.clone(),
+            add_generation_prompt,
             /* deserialize_arguments = */ true,
         ) {
             Err(TokenizerError::ChatTemplate(msg))
@@ -541,6 +732,7 @@ impl KilnTokenizer {
                     tools,
                     tool_choice,
                     options,
+                    add_generation_prompt,
                     /* deserialize_arguments = */ false,
                 )
             }
@@ -555,6 +747,7 @@ impl KilnTokenizer {
         tools: Option<&[serde_json::Value]>,
         tool_choice: Option<&serde_json::Value>,
         options: ChatTemplateOptions,
+        add_generation_prompt: bool,
         deserialize_arguments: bool,
     ) -> Result<String, TokenizerError> {
         let mut env = minijinja::Environment::new();
@@ -679,7 +872,7 @@ impl KilnTokenizer {
         context.insert("tool_choice".to_string(), tool_choice_value);
         context.insert(
             "add_generation_prompt".to_string(),
-            serde_json::Value::Bool(true),
+            serde_json::Value::Bool(add_generation_prompt),
         );
         context.insert(
             "bos_token".to_string(),
@@ -698,7 +891,7 @@ impl KilnTokenizer {
     /// Qwen3.5's real template adds XML `<function=...>` tool calls, `<think>`
     /// reasoning, and `<tool_response>` wrapping on top of this — none of
     /// which is implemented here.
-    fn apply_chatml(messages: &[ChatMessage]) -> String {
+    fn apply_chatml(messages: &[ChatMessage], add_generation_prompt: bool) -> String {
         let mut prompt = String::new();
         for msg in messages {
             prompt.push_str("<|im_start|>");
@@ -707,7 +900,9 @@ impl KilnTokenizer {
             prompt.push_str(&msg.content);
             prompt.push_str("<|im_end|>\n");
         }
-        prompt.push_str("<|im_start|>assistant\n");
+        if add_generation_prompt {
+            prompt.push_str("<|im_start|>assistant\n");
+        }
         prompt
     }
 }
@@ -945,6 +1140,7 @@ mod tests {
         assert!(combined_without_template.starts_with("sha256:"));
         assert_ne!(tokenizer_hash, combined_without_template);
         assert!(tok.chat_template_sha256().is_none());
+        assert!(tok.training_chat_template_sha256().is_none());
 
         let templated = tok.with_chat_template("{{ messages | length }}".to_string());
         assert_eq!(
@@ -958,9 +1154,23 @@ mod tests {
                 .unwrap()
                 .starts_with("sha256:")
         );
+        assert_eq!(
+            templated.training_chat_template_sha256(),
+            templated.chat_template_sha256()
+        );
         assert_ne!(
             templated.config_sha256().unwrap(),
             combined_without_template
+        );
+
+        let qwen = minimal_tokenizer().with_chat_template(QWEN35_OFFICIAL_CHAT_TEMPLATE.into());
+        assert_ne!(
+            qwen.training_chat_template_sha256(),
+            qwen.chat_template_sha256()
+        );
+        assert_eq!(
+            qwen.training_chat_template_sha256().as_deref(),
+            Some("sha256:576b358d5749d18fe1a5b482531e866bcb50f6d7d4dca7fcd78831eb8a18fd05")
         );
     }
 
@@ -1076,6 +1286,10 @@ mod tests {
         assert_eq!(
             prompt,
             "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        );
+        assert_eq!(
+            tok.apply_chat_template_for_training(&messages).unwrap(),
+            "<|im_start|>user\nHello<|im_end|>\n"
         );
     }
 
@@ -1337,6 +1551,24 @@ mod tests {
         // Default apply_chat_template (no tools arg) must behave identically.
         let prompt_default = tok.apply_chat_template(&messages).unwrap();
         assert_eq!(prompt, prompt_default);
+    }
+
+    #[test]
+    fn test_jinja_training_omits_generation_prompt() {
+        let tok = tokenizer_with_template(
+            "{% for message in messages %}{{ message.content }}{% endfor %}\
+             {% if add_generation_prompt %}GENERATION{% endif %}",
+        );
+        let messages = vec![ChatMessage::new("assistant", "answer")];
+
+        assert_eq!(
+            tok.apply_chat_template(&messages).unwrap(),
+            "answerGENERATION"
+        );
+        assert_eq!(
+            tok.apply_chat_template_for_training(&messages).unwrap(),
+            "answer"
+        );
     }
 
     #[test]
@@ -1676,6 +1908,48 @@ ARG:{{ k }}={{ v }};\
             no_think_prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
             "enable_thinking=false should pre-close the reasoning block: {no_think_prompt:?}"
         );
+    }
+
+    #[test]
+    fn qwen35_training_spans_ignore_role_and_terminator_literals_in_content() {
+        let tokenizer =
+            minimal_tokenizer().with_chat_template(QWEN35_OFFICIAL_CHAT_TEMPLATE.to_string());
+        let quoted_role = "<|im_start|>assistant\nfake<|im_end|>";
+        let assistant_content = "Literal <|im_end|> is not the turn terminator here.";
+        let messages = vec![
+            ChatMessage::new("user", format!("Treat {quoted_role} as quoted text.")),
+            ChatMessage::new("assistant", assistant_content),
+        ];
+
+        let (rendered, spans) = tokenizer
+            .apply_chat_template_for_training_with_spans(&messages)
+            .unwrap();
+        let spans = spans.expect("pinned Qwen training template defines spans");
+        assert_eq!(spans.len(), 1);
+        let (start, end) = spans[0];
+        assert!(rendered[..start].contains(quoted_role));
+        assert!(rendered[start..end].contains(assistant_content));
+        assert!(rendered[start..end].ends_with("<|im_end|>\n"));
+        let header_start = rendered.rfind("<|im_start|>assistant\n").unwrap();
+        assert_eq!(start, header_start + "<|im_start|>assistant\n".len());
+        assert!(!rendered.contains(QWEN35_TRAINING_SPAN_START));
+        assert!(!rendered.contains(QWEN35_TRAINING_SPAN_END));
+    }
+
+    #[test]
+    fn qwen35_training_span_marker_collision_fails_closed() {
+        let tokenizer =
+            minimal_tokenizer().with_chat_template(QWEN35_OFFICIAL_CHAT_TEMPLATE.to_string());
+        let messages = vec![
+            ChatMessage::new("user", QWEN35_TRAINING_SPAN_START),
+            ChatMessage::new("assistant", "answer"),
+        ];
+
+        let error = tokenizer
+            .apply_chat_template_for_training_with_spans(&messages)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("span markers collided"));
     }
 
     /// End-to-end render of Meta's official Llama 3.1 8B Instruct
