@@ -7,10 +7,10 @@ Transformers, TRL, and PEFT. The interoperability route moves data and
 adapters between those systems without discarding the identities needed to
 audit the handoff.
 
-The version-1 manifest and validation library are implemented. The public
-export/import API and reference training scripts are not yet available; until
-those surfaces ship, Kiln does not claim that manually assembled PEFT output
-has passed this contract.
+The version-1 manifest, validation library, and atomic SFT bundle writer are
+implemented. The public export/import API and reference training scripts are
+not yet available; until those surfaces ship, Kiln does not claim that
+manually assembled PEFT output has passed this contract.
 
 ## Bundle Model
 
@@ -81,6 +81,22 @@ valid but different Rust and Python floating-point JSON spellings.
 The result's executed script is preserved as `executed_train.py`. Import can
 therefore report whether it is byte-identical to the exported `train.py`
 without preventing deliberate custom training code.
+
+## Atomic SFT Bundles
+
+Library-created export directories end in `.kiln-hf` and are immutable. The
+writer revalidates every prepared example against the server-owned ingestion
+receipt and tokenizer before writing. It then snapshots only the declared
+model, tokenizer, template, dataset, receipt, script, environment, split, and
+optional adapter artifacts into a new sibling staging directory.
+
+Every file is created without overwrite and synced before its identity enters
+the manifest. The complete file set, manifest self-digest, cross-record
+identities, and artifact hashes are validated in staging. Publication is one
+directory rename followed by a parent-directory sync; in-process failure
+removes staging, and an existing final target is never replaced. Optional
+input-adapter files reject symlinks and are copied while the caller holds its
+adapter revision stable.
 
 ## Validation Boundary
 

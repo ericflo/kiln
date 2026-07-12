@@ -39,6 +39,7 @@ pub mod diagnostics;
 // SFT loss root) and `opd_tape_shim::try_tape_opd_scalar_mean_cuda` (OPD).
 pub mod grpo_tape_shim;
 pub mod hf_interop;
+pub mod hf_interop_bundle;
 pub mod logit_cache;
 pub mod logit_source;
 pub mod long_context_fixture;
@@ -80,6 +81,9 @@ pub use hf_interop::{
     HfTrlFileIdentity, HfTrlInputAdapter, HfTrlModelIdentity, HfTrlOutputAdapter,
     HfTrlSftLabelPolicy, HfTrlSftSelection, HfTrlTask, HfTrlTrainerIdentity, HfTrlTrainerKind,
     HfTrlTrainingResultV1, read_hf_trl_export_manifest, read_hf_trl_training_result,
+};
+pub use hf_interop_bundle::{
+    HF_TRL_BUNDLE_SUFFIX, HfTrlInputAdapterSource, HfTrlSftBundleInput, write_hf_trl_sft_bundle,
 };
 pub use logit_cache::{CacheEntry, CacheStats, CachedLogitSource, LogitCache, hash_prefix};
 pub use receipt::{
