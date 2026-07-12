@@ -49,6 +49,10 @@ use std::collections::HashMap;
 use kiln_tensor::Backend;
 use kiln_tensor::{Device, Tensor};
 
+#[cfg(all(test, feature = "rocm"))]
+static ROCM_TEST_NATIVE_REPLAY_LAUNCHES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Whether ROCm HIP-graph decode is requested via `KILN_ROCM_GRAPHS` (default
 /// ON). This is the primary runtime gate; `KILN_ROCM_GRAPH_CAPTURE` is the
 /// narrower capture opt-out described below.
@@ -260,6 +264,8 @@ impl ReplayPlan for RocmDecodeReplayPlan<'_> {
 
     fn replay(&mut self, inputs: ReplayInputs<'_>) -> Result<ReplayOutputs, CaptureError> {
         self.validate_inputs(inputs)?;
+        #[cfg(test)]
+        ROCM_TEST_NATIVE_REPLAY_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.captured
             .exec
             .launch(&self.captured.capture_stream)
@@ -2367,6 +2373,128 @@ impl RocmGraphRunner {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "rocm")]
+    fn stale_generation_test_fixture(device: &Device) -> (ModelConfig, GpuWeights) {
+        use crate::forward::{
+            GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
+        };
+
+        let config = ModelConfig {
+            hidden_size: 64,
+            num_layers: 1,
+            num_attention_heads: 1,
+            num_kv_heads: 1,
+            head_dim: 64,
+            intermediate_size: 128,
+            vocab_size: 32,
+            max_position_embeddings: 128,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: 0,
+            linear_key_head_dim: 0,
+            linear_num_value_heads: 0,
+            linear_value_head_dim: 0,
+            linear_conv_kernel_dim: 0,
+            partial_rotary_factor: 1.0,
+        };
+        let random_bf16 = |shape: Vec<usize>| {
+            Tensor::randn(0.0_f32, 0.02, shape, device)
+                .expect("random ROCm graph fixture tensor")
+                .to_dtype(kiln_tensor::DType::BF16)
+                .expect("cast ROCm graph fixture tensor")
+        };
+        let transposed = |tensor: &Tensor| {
+            tensor
+                .t()
+                .expect("transpose ROCm graph fixture tensor")
+                .contiguous()
+                .expect("materialize ROCm graph fixture transpose")
+        };
+
+        let embed_tokens = random_bf16(vec![config.vocab_size, config.hidden_size]);
+        let q_proj = random_bf16(vec![config.head_dim, config.hidden_size]);
+        let k_proj = random_bf16(vec![config.head_dim, config.hidden_size]);
+        let v_proj = random_bf16(vec![config.head_dim, config.hidden_size]);
+        let o_proj = random_bf16(vec![config.hidden_size, config.head_dim]);
+        let gate_proj = random_bf16(vec![config.intermediate_size, config.hidden_size]);
+        let up_proj = random_bf16(vec![config.intermediate_size, config.hidden_size]);
+        let down_proj = random_bf16(vec![config.hidden_size, config.intermediate_size]);
+        let layer = GpuLayerWeights {
+            input_layernorm: Tensor::ones(config.hidden_size, kiln_tensor::DType::BF16, device)
+                .expect("input norm"),
+            post_attention_layernorm: Tensor::ones(
+                config.hidden_size,
+                kiln_tensor::DType::BF16,
+                device,
+            )
+            .expect("post-attention norm"),
+            attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                q_proj_t: transposed(&q_proj),
+                k_proj_t: transposed(&k_proj),
+                v_proj_t: transposed(&v_proj),
+                o_proj_t: transposed(&o_proj),
+                q_proj,
+                k_proj,
+                v_proj,
+                o_proj,
+                q_norm: Tensor::ones(config.head_dim, kiln_tensor::DType::BF16, device)
+                    .expect("q norm"),
+                k_norm: Tensor::ones(config.head_dim, kiln_tensor::DType::BF16, device)
+                    .expect("k norm"),
+                qkv_proj_t: None,
+                qkv_proj_w8: None,
+                o_proj_w8: None,
+                q_proj_marlin: None,
+            }),
+            mlp: GpuFfnWeights {
+                gate_proj_t: transposed(&gate_proj),
+                up_proj_t: transposed(&up_proj),
+                down_proj_t: transposed(&down_proj),
+                gate_proj,
+                up_proj,
+                down_proj,
+                gate_up_proj_t: None,
+                gate_proj_marlin: None,
+                up_proj_marlin: None,
+                down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
+            },
+        };
+        let rotary_inv_freq =
+            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
+                .expect("rotary frequencies");
+        let weights = GpuWeights {
+            source_content_sha256: None,
+            base_weight_shard_manifest: None,
+            execution_provenance: None,
+            embed_tokens_t: transposed(&embed_tokens),
+            embed_tokens,
+            layers: vec![layer],
+            final_norm: Tensor::ones(config.hidden_size, kiln_tensor::DType::BF16, device)
+                .expect("final norm"),
+            rotary_inv_freq,
+            lm_head_w8: None,
+            mtp: None,
+        };
+        (config, weights)
+    }
+
+    #[cfg(feature = "rocm")]
+    fn hidden_f32(tensor: &Tensor) -> Vec<f32> {
+        tensor
+            .to_device(Device::Cpu)
+            .expect("copy hidden to CPU")
+            .to_dtype(kiln_tensor::DType::F32)
+            .expect("cast hidden to f32")
+            .to_vec()
+            .expect("read hidden")
+    }
+
     #[test]
     fn disabled_off_device() {
         let mut r = RocmGraphRunner::new(&Device::Cpu, true);
@@ -2457,6 +2585,146 @@ mod tests {
 
         runner.release_decode_row(42);
         assert!(!runner.prepare_owner_decode(second, &recycled_table, 67));
+    }
+
+    /// Deliberately corrupt only the generation retained by a live graph. The
+    /// physical allocation remains valid, so a missing guard would safely but
+    /// observably reach `hipGraphLaunch` via the unit-build launch probe.
+    #[cfg(feature = "rocm")]
+    #[test]
+    #[ignore = "requires an explicit real-ROCm qualification run"]
+    fn stale_pool_generation_refuses_native_replay_and_falls_back_eager() {
+        assert_eq!(
+            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
+            Some("1"),
+            "set KILN_QUALIFICATION=1 for the explicit hardware run"
+        );
+        assert!(
+            kiln_tensor::rocm_is_available(),
+            "ROCm qualification requested but no ROCm device is available"
+        );
+
+        let device = Device::Rocm(0);
+        let backend = crate::backend::for_device_kt(&device);
+        let (config, weights) = stale_generation_test_fixture(&device);
+        let graph_cache = PagedKvCacheKt::new(
+            1,
+            64,
+            16,
+            config.num_kv_heads,
+            config.head_dim,
+            kiln_tensor::DType::BF16,
+            device,
+        )
+        .expect("graph paged cache");
+        let table = BlockTable {
+            blocks: vec![0, 1, 2, 3],
+        };
+        let mut graph_state =
+            LinearAttentionState::new_for_inference(&config, &device).expect("graph linear state");
+        let mut graph_runner = RocmGraphRunner::new(&device, true);
+        assert!(graph_runner.stats().capture_enabled);
+
+        let row_id = 77;
+        let mut next_seq_len = 1usize;
+        while graph_runner.stats().replay_successes == 0 && next_seq_len < 24 {
+            let token_id = (next_seq_len % config.vocab_size) as u32;
+            graph_runner
+                .decode_step_paged_hidden(
+                    backend.as_ref(),
+                    token_id,
+                    &weights,
+                    &config,
+                    &graph_cache,
+                    &table,
+                    next_seq_len,
+                    &mut graph_state,
+                    None,
+                    row_id,
+                )
+                .expect("graph warmup/capture/replay hidden");
+            next_seq_len += 1;
+        }
+
+        let before = graph_runner.stats();
+        assert!(
+            before.capture_successes > 0,
+            "native capture never succeeded"
+        );
+        assert!(before.replay_successes > 0, "native replay never succeeded");
+        assert_eq!(before.failures, 0);
+        assert_eq!(before.captured_graph_count, 1);
+
+        // Compute the fallback oracle on this same cache before corrupting only
+        // the graph's retained identity. Repeating a full-attention step is
+        // idempotent: it overwrites the same slot with the same token-derived
+        // KV and reads the same prefix.
+        let token_id = (next_seq_len % config.vocab_size) as u32;
+        let mut reference_state = LinearAttentionState::new_for_inference(&config, &device)
+            .expect("reference linear state");
+        let eager_hidden = RocmGraphRunner::eager_forward_hidden(
+            backend.as_ref(),
+            token_id,
+            &weights,
+            &config,
+            &graph_cache,
+            &table,
+            next_seq_len,
+            &mut reference_state,
+            None,
+        )
+        .expect("same-cache eager mismatch-step control");
+
+        let live_identity = graph_cache.pool_identity();
+        for captured in graph_runner.captured.values_mut() {
+            assert_eq!(captured.kv_pool_identity, live_identity);
+            captured.kv_pool_identity.generation = live_identity
+                .generation
+                .checked_add(1)
+                .expect("test generation increment");
+        }
+
+        let native_launches_before =
+            ROCM_TEST_NATIVE_REPLAY_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed);
+        let guarded_hidden = graph_runner
+            .decode_step_paged_hidden(
+                backend.as_ref(),
+                token_id,
+                &weights,
+                &config,
+                &graph_cache,
+                &table,
+                next_seq_len,
+                &mut graph_state,
+                None,
+                row_id,
+            )
+            .expect("identity mismatch must take eager fallback");
+        assert_eq!(hidden_f32(&guarded_hidden), hidden_f32(&eager_hidden));
+
+        let after = graph_runner.stats();
+        let native_launches_after =
+            ROCM_TEST_NATIVE_REPLAY_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(after.replay_attempts, before.replay_attempts + 1);
+        assert_eq!(after.replay_successes, before.replay_successes);
+        assert_eq!(after.replay_failures, before.replay_failures + 1);
+        assert_eq!(after.failures, before.failures + 1);
+        assert_eq!(native_launches_after, native_launches_before);
+        assert!(
+            !after.enabled,
+            "mismatch must trip the graph circuit breaker"
+        );
+        assert_eq!(after.captured_graph_count, 0);
+        assert_eq!(graph_cache.pool_identity(), live_identity);
+        eprintln!(
+            "[rocm-stale-generation] replay_attempts={} -> {}; replay_failures={} -> {}; native_launches={} -> {}",
+            before.replay_attempts,
+            after.replay_attempts,
+            before.replay_failures,
+            after.replay_failures,
+            native_launches_before,
+            native_launches_after,
+        );
     }
 
     #[test]
