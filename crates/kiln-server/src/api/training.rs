@@ -6,7 +6,7 @@
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path as AxumPath, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, State, rejection::JsonRejection},
     routing::{delete, get, post},
 };
 
@@ -37,6 +37,15 @@ struct GrpoSubmissionStats {
     total_completions: Option<usize>,
     max_seq_len: usize,
     streaming_dataset: bool,
+}
+
+pub(crate) fn parse_training_json<T>(
+    payload: Result<Json<T>, JsonRejection>,
+    surface: &str,
+) -> Result<T, ApiError> {
+    payload.map(|Json(value)| value).map_err(|error| {
+        ApiError::training_invalid_request(format!("invalid {surface} JSON: {}", error.body_text()))
+    })
 }
 
 struct SftSubmissionStats {
@@ -622,6 +631,12 @@ pub(crate) fn validate_lora_scale_at_submit(
         .map_err(|e| ApiError::training_invalid_request(format!("{e:#}")))
 }
 
+fn validate_sft_config_at_submit(config: &kiln_train::SftConfig) -> Result<(), ApiError> {
+    config
+        .validate_native_contract()
+        .map_err(|error| ApiError::training_invalid_request(format!("{error:#}")))
+}
+
 fn validate_opd_loss_at_submit(loss: kiln_train::OpdLossGranularity) -> Result<(), ApiError> {
     if matches!(loss, kiln_train::OpdLossGranularity::FullVocab) {
         return Err(ApiError::training_invalid_request(
@@ -1019,8 +1034,16 @@ pub(crate) fn normalize_queued_opd_top_k(
 
 async fn submit_sft(
     State(state): State<AppState>,
-    Json(mut req): Json<SftRequest>,
+    payload: Result<Json<SftRequest>, JsonRejection>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    let req = parse_training_json(payload, "SFT request")?;
+    Ok(Json(admit_sft_request(state, req).await?))
+}
+
+pub(crate) async fn admit_sft_request(
+    state: AppState,
+    mut req: SftRequest,
+) -> Result<TrainingResponse, ApiError> {
     ensure_training_backend_admission(&state)?;
     // Reject new jobs during shutdown
     if state.shutdown.load(Ordering::Relaxed) {
@@ -1072,6 +1095,10 @@ async fn submit_sft(
             "SFT request needs examples, dataset_path, or dataset",
         ));
     }
+    if let Some(name) = req.config.output_name.as_deref() {
+        super::adapters::validate_adapter_name(name)?;
+    }
+    validate_sft_config_at_submit(&req.config)?;
 
     if req.dataset.as_deref() == Some("corrections:active") {
         req.dataset = None;
@@ -1122,19 +1149,6 @@ async fn submit_sft(
     };
 
     let job_id = uuid::Uuid::new_v4().to_string();
-    if let Some(name) = req.config.output_name.as_deref() {
-        super::adapters::validate_adapter_name(name)?;
-    }
-    validate_lora_scale_at_submit(
-        req.config.lora_rank,
-        req.config.lora_alpha,
-        req.config.allow_high_lora_scale,
-    )?;
-    if req.config.checkpoint_interval == Some(0) {
-        return Err(ApiError::training_invalid_request(
-            "SFT checkpoint_interval must be greater than zero",
-        ));
-    }
     let adapter_name = req
         .config
         .output_name
@@ -1214,6 +1228,7 @@ async fn submit_sft(
     req.ingestion = Some(prepared.ingestion);
     let num_examples = stats.num_examples;
     let invalid_row_policy = req.config.invalid_row_policy;
+    let training_profile = req.config.training_profile;
 
     // Working-set preflight: refuse jobs that won't fit in the
     // corrected memory budget. Better than OOM-killing the server
@@ -1241,6 +1256,7 @@ async fn submit_sft(
 
     tracing::info!(
         num_examples,
+        training_profile = %training_profile,
         rows_read = stats.rows_read,
         rows_rejected = stats.rows_rejected,
         invalid_row_policy = %invalid_row_policy,
@@ -1290,16 +1306,16 @@ async fn submit_sft(
         )],
     )?;
 
-    Ok(Json(TrainingResponse {
+    Ok(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
         effective_seed: effective_seed.to_string(),
         message: format!(
-            "Queued SFT training with {num_examples} kept examples and {} rejected rows \
+            "Queued {} SFT with {num_examples} kept examples and {} rejected rows \
              under {} policy (position {queue_position} in queue)",
-            stats.rows_rejected, invalid_row_policy,
+            training_profile, stats.rows_rejected, invalid_row_policy,
         ),
-    }))
+    })
 }
 
 async fn submit_grpo(
@@ -2274,6 +2290,9 @@ pub(crate) fn admit_training_jobs(
 ) -> Result<usize, ApiError> {
     ensure_training_backend_admission(state)?;
     for (info, entry) in &mut pending {
+        if let QueuedJob::Sft(req) = &entry.job {
+            validate_sft_config_at_submit(&req.config)?;
+        }
         let effective_seed = crate::training_queue::materialize_queued_job_effective_seed(
             &mut entry.job,
             &state.adapter_dir,
@@ -3507,6 +3526,22 @@ mod tests {
                 job: QueuedJob::Sft(request),
             },
         )
+    }
+
+    #[test]
+    fn central_admission_rejects_invalid_native_sft_without_publication() {
+        let state = teacher_binding_test_state();
+        let (info, mut entry) = pending_sft_job("invalid-sft-profile");
+        let QueuedJob::Sft(request) = &mut entry.job else {
+            unreachable!("pending_sft_job must construct SFT")
+        };
+        request.config.epochs = 0;
+
+        let error = admit_training_jobs(&state, vec![(info, entry)]).unwrap_err();
+        assert_eq!(error.code, "training_invalid_request");
+        assert!(error.message.contains("epochs"), "{error:?}");
+        assert!(state.training_jobs.read().unwrap().is_empty());
+        assert_eq!(state.training_queue.lock().unwrap().len(), 0);
     }
 
     #[test]

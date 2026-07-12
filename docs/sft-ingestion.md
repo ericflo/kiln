@@ -6,6 +6,9 @@ queue publication or GPU ownership. Inline `examples`, server-local
 steps, and direct Rust training select rows with the same parser, structural
 checks, chat template, tokenizer, and assistant-only label validation.
 
+The admitted rows are consumed by the fixed
+[`native_online_lora_v1` update contract](NATIVE_SFT_PROFILE.md).
+
 ## Invalid-row policy
 
 `config.invalid_row_policy` accepts exactly two values:
@@ -31,6 +34,7 @@ The API form is:
 {
   "dataset_path": "/data/corrections.jsonl",
   "config": {
+    "training_profile": "native_online_lora_v1",
     "output_name": "support-bot",
     "invalid_row_policy": "skip"
   }

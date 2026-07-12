@@ -120,6 +120,8 @@ Prefer http://127.0.0.1:8420/ui/ for guided submission and status. See docs/GRPO
 
 const TRAIN_SFT_OVERVIEW: &str = r#"Train from SFT JSONL: one chat correction example per line with a messages array.
 
+Native SFT uses the fixed native_online_lora_v1 online-LoRA profile: one conversation and one optimizer update at a time, constant learning rate, and no accumulation, warmup, decay, or gradient clipping. Use HF/TRL directly for general trainer configuration; Kiln's first-class export/import route is not shipped yet.
+
 Rows fail closed by default. Use --invalid-row-policy skip only when you intend to review the stable kept/rejected row hashes in train_receipt.json.
 
 Use --adapter-smoke-test to compare base vs trained adapter logits and short greedy outputs before running a full eval.
@@ -720,7 +722,7 @@ pub enum TrainCommands {
         adapter: String,
 
         /// Learning rate. Omit to let the server pick the per-optimizer
-        /// default (Muon 2e-2, AdamW/SGD 1e-4).
+        /// default (Muon 1e-3, AdamW/SGD 1e-4 for native SFT).
         #[arg(long)]
         lr: Option<f64>,
 
@@ -2393,6 +2395,7 @@ fn build_sft_jsonl_training_payload(
         .ok_or_else(|| anyhow::anyhow!("SFT JSONL path is not valid UTF-8: {file}"))?
         .to_string();
     let mut config = serde_json::json!({
+        "training_profile": "native_online_lora_v1",
         "output_name": adapter,
         "epochs": epochs,
         "invalid_row_policy": invalid_row_policy,
@@ -2465,6 +2468,7 @@ fn build_sft_training_payload(
     resume_checkpoint: Option<&str>,
 ) -> serde_json::Value {
     let mut config = serde_json::json!({
+        "training_profile": "native_online_lora_v1",
         "output_name": adapter,
         "epochs": epochs,
         "invalid_row_policy": invalid_row_policy,
@@ -3915,6 +3919,7 @@ mod tests {
         );
 
         assert_eq!(body["config"]["output_name"], "sft-adapter");
+        assert_eq!(body["config"]["training_profile"], "native_online_lora_v1");
         assert_eq!(body["config"]["learning_rate"], 2e-4);
         assert_eq!(body["config"]["epochs"], 3);
         assert_eq!(body["config"]["lora_rank"], 8);
@@ -3937,6 +3942,7 @@ mod tests {
         );
 
         assert_eq!(body["config"]["output_name"], "sft-adapter");
+        assert_eq!(body["config"]["training_profile"], "native_online_lora_v1");
         assert!(body["config"].get("lora_rank").is_none());
         assert!(body["config"].get("adapter_smoke_test").is_none());
     }
@@ -4087,6 +4093,34 @@ mod tests {
             body["config"]["resume_checkpoint"],
             "grpo-jsonl-checkpoint-step-00000002.kiln-checkpoint"
         );
+        assert!(body["dataset_path"].as_str().unwrap().ends_with(".jsonl"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn build_sft_jsonl_training_payload_uses_explicit_native_profile() {
+        let path =
+            std::env::temp_dir().join(format!("kiln-cli-sft-jsonl-{}.jsonl", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"ok"}]}"#,
+        )
+        .unwrap();
+
+        let body = build_sft_jsonl_training_payload(
+            path.to_str().unwrap(),
+            "sft-jsonl",
+            None,
+            2,
+            Some(8),
+            "fail",
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(body["config"]["training_profile"], "native_online_lora_v1");
+        assert_eq!(body["config"]["invalid_row_policy"], "fail");
         assert!(body["dataset_path"].as_str().unwrap().ends_with(".jsonl"));
         let _ = std::fs::remove_file(path);
     }

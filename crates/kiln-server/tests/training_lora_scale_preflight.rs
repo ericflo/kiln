@@ -110,6 +110,12 @@ fn sft_body(config: Value) -> Value {
     })
 }
 
+fn front_door_sft_body(config: Value) -> Value {
+    let mut body = sft_body(config);
+    body["kind"] = json!("sft");
+    body
+}
+
 fn grpo_body(config: Value) -> Value {
     json!({
         "groups": [{
@@ -228,6 +234,172 @@ async fn allow_high_lora_scale_opts_out() {
         "allow_high_lora_scale must bypass the gate: {response}"
     );
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+}
+
+#[tokio::test]
+async fn sft_native_profile_rejects_general_trainer_knobs_as_structured_errors() {
+    let state = make_state();
+    let app = api::router(state.clone());
+    for (field, value) in [
+        ("gradient_accumulation_steps", json!(4)),
+        ("per_device_train_batch_size", json!(8)),
+        ("warmup_steps", json!(10)),
+        ("max_grad_norm", json!(1.0)),
+    ] {
+        let mut config = serde_json::Map::new();
+        config.insert("output_name".to_string(), json!("profile-test"));
+        config.insert("lora_alpha".to_string(), json!(16.0));
+        config.insert(field.to_string(), value);
+        let (status, response) = post(&app, "/v1/train/sft", sft_body(config.into())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {response}");
+        assert_eq!(
+            response["error"]["code"], "training_invalid_request",
+            "{field}: {response}"
+        );
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(field) && message.contains("unknown field")),
+            "{field}: {response}"
+        );
+    }
+    let (status, response) = post(
+        &app,
+        "/v1/train/sft",
+        json!({
+            "examples": sft_body(json!({}))["examples"],
+            "gradient_accumulation_steps": 4
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"]["code"], "training_invalid_request");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("gradient_accumulation_steps")),
+        "{response}"
+    );
+    assert_no_jobs(&state, "unsupported native SFT knobs");
+}
+
+#[tokio::test]
+async fn front_door_sft_uses_canonical_validation_and_atomic_admission() {
+    let state = make_state();
+    let app = api::router(state.clone());
+
+    let (status, response) = post(
+        &app,
+        "/v1/train",
+        front_door_sft_body(json!({
+            "output_name": "profile-test",
+            "lora_alpha": 16.0,
+            "gradient_accumulation_steps": 4
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"]["code"], "training_invalid_request");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("gradient_accumulation_steps")),
+        "{response}"
+    );
+
+    assert_unsafe_scale(
+        &app,
+        "/v1/train",
+        front_door_sft_body(json!({
+            "output_name": "profile-test",
+            "lora_rank": 8
+        })),
+    )
+    .await;
+    assert_no_jobs(&state, "front-door SFT validation");
+}
+
+#[tokio::test]
+async fn sft_native_profile_rejects_unknown_version_and_invalid_values_before_mock_mode() {
+    let state = make_state();
+    let app = api::router(state.clone());
+    for (config, expected) in [
+        (
+            json!({
+                "output_name": "profile-test",
+                "lora_alpha": 16.0,
+                "training_profile": "general_sft"
+            }),
+            "general_sft",
+        ),
+        (
+            json!({"output_name": "profile-test", "lora_alpha": 16.0, "epochs": 0}),
+            "epochs",
+        ),
+        (
+            json!({"output_name": "profile-test", "lora_alpha": 16.0, "learning_rate": 0.0}),
+            "learning_rate",
+        ),
+        (
+            json!({"output_name": "profile-test", "lora_alpha": 16.0, "learning_rate": 1e39}),
+            "represented as f32",
+        ),
+        (
+            json!({"output_name": "profile-test", "lora_rank": 0, "lora_alpha": 16.0}),
+            "rank",
+        ),
+        (
+            json!({"output_name": "profile-test", "lora_alpha": -1.0}),
+            "LoRA alpha",
+        ),
+        (
+            json!({"output_name": "profile-test", "lora_alpha": 16.0, "checkpoint_interval": 0}),
+            "checkpoint_interval",
+        ),
+        (
+            json!({
+                "output_name": "profile-test",
+                "lora_alpha": 16.0,
+                "optimizer": {"kind": "adam_w", "beta1": 1.0}
+            }),
+            "beta1",
+        ),
+        (
+            json!({
+                "output_name": "profile-test",
+                "lora_alpha": 16.0,
+                "optimizer": {"kind": "adam_w", "amsgrad": true}
+            }),
+            "amsgrad",
+        ),
+    ] {
+        let (status, response) = post(&app, "/v1/train/sft", sft_body(config)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{expected}: {response}");
+        assert_eq!(
+            response["error"]["code"], "training_invalid_request",
+            "{expected}: {response}"
+        );
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(expected)),
+            "{expected}: {response}"
+        );
+    }
+    assert_no_jobs(&state, "invalid native SFT profile");
+
+    let (status, response) = post(
+        &app,
+        "/v1/train/sft",
+        sft_body(json!({
+            "output_name": "profile-test",
+            "lora_alpha": 16.0,
+            "training_profile": "native_online_lora_v1"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+    assert_ne!(response["error"]["code"], "training_invalid_request");
 }
 
 #[tokio::test]

@@ -174,6 +174,7 @@ function validateSftPayload(body) {
   const messages = body.examples[0]?.messages;
   if (!Array.isArray(messages) || messages.length !== 2) return 'SFT sample example should include user and assistant messages';
   if (messages[0]?.role !== 'user' || messages[1]?.role !== 'assistant') return 'SFT sample messages should preserve chat roles';
+  if (body?.config?.training_profile !== 'native_online_lora_v1') return 'SFT should submit the explicit native_online_lora_v1 profile';
   if (body?.config?.output_name !== 'sft-adapter') return 'SFT output_name should be nested under config';
   if (body?.config?.auto_load !== true) return 'SFT auto_load should be true by default';
   if ('learning_rate' in (body?.config || {})) return 'SFT learning_rate should be omitted when the field is blank (server resolves the per-optimizer default)';

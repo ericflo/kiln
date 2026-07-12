@@ -215,6 +215,8 @@ fn run_one(
         "rmsnorm-off"
     };
     let config = SftConfig {
+        training_profile: kiln_train::SftTrainingProfile::NativeOnlineLoraV1,
+        invalid_row_policy: kiln_train::SftInvalidRowPolicy::Fail,
         epochs: 1,
         learning_rate: None,
         lora_rank: 8,

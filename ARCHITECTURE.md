@@ -427,16 +427,22 @@ Submit training examples via `POST /v1/train/sft`:
 
 ```json
 {
-  "adapter_name": "my-adapter",
   "examples": [
     {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
   ],
-  "num_epochs": 3,
-  "rank": 8
+  "config": {
+    "training_profile": "native_online_lora_v1",
+    "output_name": "my-adapter",
+    "epochs": 3,
+    "lora_rank": 8,
+    "lora_alpha": 16.0
+  }
 }
 ```
 
-The training loop (`crates/kiln-train/src/trainer.rs`):
+Native SFT is the bounded
+[`native_online_lora_v1` profile](docs/NATIVE_SFT_PROFILE.md), not a general
+trainer. Its main loop (`crates/kiln-train/src/trainer.rs`):
 
 1. Initialize fresh LoRA parameters (Kaiming uniform for A, zero for B)
 2. Tokenize examples with chat template, extract assistant-only label mask
@@ -444,9 +450,13 @@ The training loop (`crates/kiln-train/src/trainer.rs`):
    - Forward pass through all 32 layers with LoRA applied
    - Compute cross-entropy loss **only on assistant tokens** (label masking)
    - Backward pass computes gradients for LoRA A and B matrices only
-   - SGD step: `param -= learning_rate * gradient`
+   - One configured optimizer update at a constant learning rate
 4. Save adapter in PEFT format
 5. Optionally auto-load the trained adapter for immediate use
+
+One conversation is one microbatch and one update. There is no gradient
+accumulation, warmup, decay, or gradient clipping. Unknown general-trainer
+fields are rejected rather than ignored.
 
 ### GRPO (Group Relative Policy Optimization)
 

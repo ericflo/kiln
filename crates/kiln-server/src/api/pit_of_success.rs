@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::{Query, State};
+use axum::extract::{Query, State, rejection::JsonRejection};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use kiln_train::{
@@ -73,11 +73,23 @@ pub struct FrontDoorResponse {
 
 async fn submit_front_door(
     State(state): State<AppState>,
-    Json(req): Json<FrontDoorRequest>,
+    payload: Result<Json<FrontDoorRequest>, JsonRejection>,
 ) -> Result<Json<FrontDoorResponse>, ApiError> {
     use crate::state::{TrainingJobInfo, TrainingJobType};
     use crate::training_queue::{QueueEntry, QueuedJob};
     use std::sync::atomic::Ordering;
+
+    let req = super::training::parse_training_json(payload, "training request")?;
+    let req = match req {
+        FrontDoorRequest::Sft(request) => {
+            let training = super::training::admit_sft_request(state, request).await?;
+            return Ok(Json(FrontDoorResponse {
+                picked: "sft",
+                training,
+            }));
+        }
+        request => request,
+    };
 
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
@@ -160,21 +172,7 @@ async fn submit_front_door(
             ),
             QueuedJob::Grpo(r),
         ),
-        FrontDoorRequest::Sft(r) => (
-            "sft",
-            TrainingJobType::Sft,
-            r.config
-                .output_name
-                .clone()
-                .unwrap_or_else(|| format!("sft-{}", uuid::Uuid::new_v4())),
-            r.config.auto_load,
-            (
-                r.config.lora_rank,
-                r.config.lora_alpha,
-                r.config.allow_high_lora_scale,
-            ),
-            QueuedJob::Sft(r),
-        ),
+        FrontDoorRequest::Sft(_) => unreachable!("SFT returned through canonical admission"),
     };
 
     // The resolved name (explicit, derived, or generated) becomes a

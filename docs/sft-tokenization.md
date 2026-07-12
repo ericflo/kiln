@@ -4,6 +4,9 @@ Kiln native SFT has one Qwen3.5-4B tokenization and label contract. Inline
 examples, server-local JSONL, and named datasets all reach this same path after
 message-schema validation.
 
+This token/label contract is one part of the fixed
+[`native_online_lora_v1` update contract](NATIVE_SFT_PROFILE.md).
+
 Row admission is fail-closed by default and uses the same tokenization check
 through every transport. The optional explicit skip policy and stable
 kept/rejected row hashes are specified in

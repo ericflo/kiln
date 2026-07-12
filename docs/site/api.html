@@ -372,7 +372,7 @@
       {"role": "user", "content": "Hi"},
       {"role": "assistant", "content": "Hey there!"}
     ]}],
-    "config": {"output_name": "default", "epochs": 3, "invalid_row_policy": "fail"}
+    "config": {"training_profile": "native_online_lora_v1", "output_name": "default", "epochs": 3, "invalid_row_policy": "fail"}
   }' \
   | python3 -m json.tool</code></pre>
           </section>
@@ -683,6 +683,9 @@ KILN_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           Native SFT renders TRL&rsquo;s prefix-preserving Qwen3.5 training template with <code>add_generation_prompt=false</code>. Loss covers the thinking/answer/tool-call body, <code>&lt;|im_end|&gt;</code>, and trailing newline; assistant role headers plus system, user, and tool-response turns use the <code>-100</code> ignore label. Exact rendered text, token IDs, and labels are checked against source-pinned Hugging Face and TRL sources for plain, thinking, tool-call, tool-response, and multi-turn examples. See <a href="https://github.com/ericflo/kiln/blob/main/docs/sft-tokenization.md">SFT Tokenization and Assistant-Only Loss</a> for the normative contract and reproduction command.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          Native SFT accepts one fixed profile: <code>native_online_lora_v1</code>. One conversation is one optimizer update at a constant learning rate; accumulation is 1, with no warmup, decay, or gradient clipping. Unknown profile names and general-trainer fields return structured <code>training_invalid_request</code> errors. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/NATIVE_SFT_PROFILE.md">Native SFT Profile</a> for update, precision, optimizer-state, checkpoint, and MTP semantics. Use HF/TRL directly for broader training; Kiln&rsquo;s first-class export/import handoff is not shipped yet.
+        </p>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           Every SFT source uses one row-admission contract. <code>config.invalid_row_policy</code> is <code>fail</code> by default; explicit <code>skip</code> queues only valid rows and records ordered kept/rejected SHA-256 identities under <code>train_receipt.json</code> &rarr; <code>data.sft_ingestion</code>. Server-local JSONL is revalidated against its submit-time manifest before GPU ownership. See <a href="https://github.com/ericflo/kiln/blob/main/docs/sft-ingestion.md">SFT Ingestion, Invalid Rows, and Row Identity</a>.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
@@ -697,12 +700,12 @@ curl -s -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json
         <div class="code-block mt-4"><pre><code># Start exact SFT checkpoints every 25 committed steps
 curl -s http://localhost:8420/v1/train/sft \
   -H 'content-type: application/json' \
-  -d '{"dataset_path":"/data/corrections.jsonl","config":{"output_name":"support-bot","epochs":3,"checkpoint_interval":25}}'
+  -d '{"dataset_path":"/data/corrections.jsonl","config":{"training_profile":"native_online_lora_v1","output_name":"support-bot","epochs":3,"checkpoint_interval":25}}'
 
 # Continue with identical data/config and the basename reported by job detail
 curl -s http://localhost:8420/v1/train/sft \
   -H 'content-type: application/json' \
-  -d '{"dataset_path":"/data/corrections.jsonl","config":{"output_name":"support-bot","epochs":3,"checkpoint_interval":25,"resume_checkpoint":"support-bot-checkpoint-step-00000025.kiln-checkpoint"}}'
+  -d '{"dataset_path":"/data/corrections.jsonl","config":{"training_profile":"native_online_lora_v1","output_name":"support-bot","epochs":3,"checkpoint_interval":25,"resume_checkpoint":"support-bot-checkpoint-step-00000025.kiln-checkpoint"}}'
 
 # The same exact contract applies to streamed GRPO optimizer groups
 curl -s http://localhost:8420/v1/train/grpo \

@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{State, rejection::JsonRejection};
 use axum::routing::{get, post};
 use kiln_train::{
     DistillMergeRequest, DistillMergeSource, DistillPumpMode, DistillPumpRequest,
@@ -297,8 +297,9 @@ fn validate_recipe_structure_and_names(
 
 async fn run_recipe(
     State(state): State<AppState>,
-    Json(req): Json<RecipeRunRequest>,
+    payload: Result<Json<RecipeRunRequest>, JsonRejection>,
 ) -> Result<Json<RecipeRunResponse>, ApiError> {
+    let req = super::training::parse_training_json(payload, "recipe request")?;
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
@@ -438,11 +439,23 @@ fn step_to_queued_job(
             examples_from,
             config,
         } => {
+            let mut sft_config = config.clone();
+            if sft_config.base_adapter.is_none() {
+                sft_config.base_adapter = base_adapter
+                    .clone()
+                    .or_else(|| previous_adapter.map(|s| s.to_string()));
+            }
+            sft_config.output_name = Some(name.clone());
+            sft_config.validate_native_contract().map_err(|error| {
+                ApiError::training_invalid_request(format!(
+                    "SFT recipe step {name:?} has an invalid native profile: {error:#}"
+                ))
+            })?;
             let prepared = match examples_from {
                 ExamplesSource::Inline { examples } => kiln_train::prepare_sft_examples(
                     examples.clone(),
                     state.tokenizer.as_ref(),
-                    config.invalid_row_policy,
+                    sft_config.invalid_row_policy,
                     "recipe",
                     Some(name.clone()),
                 )
@@ -467,7 +480,7 @@ fn step_to_queued_job(
                     crate::sft_dataset::prepare_sft_jsonl(
                         &data_path,
                         state.tokenizer.as_ref(),
-                        config.invalid_row_policy,
+                        sft_config.invalid_row_policy,
                         "named_dataset",
                         Some(dataset.clone()),
                     )
@@ -478,13 +491,6 @@ fn step_to_queued_job(
                     })?
                 }
             };
-            let mut sft_config = config.clone();
-            if sft_config.base_adapter.is_none() {
-                sft_config.base_adapter = base_adapter
-                    .clone()
-                    .or_else(|| previous_adapter.map(|s| s.to_string()));
-            }
-            sft_config.output_name = Some(name.clone());
             Ok((
                 name.clone(),
                 QueuedJob::Sft(SftRequest {

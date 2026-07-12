@@ -350,6 +350,8 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&layout.adapter_dir)
         .with_context(|| format!("creating {}", layout.adapter_dir.display()))?;
     let config = SftConfig {
+        training_profile: kiln_train::SftTrainingProfile::NativeOnlineLoraV1,
+        invalid_row_policy: kiln_train::SftInvalidRowPolicy::Fail,
         epochs: args.epochs,
         learning_rate: Some(args.learning_rate),
         lora_rank: args.lora_rank,

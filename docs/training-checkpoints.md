@@ -144,6 +144,10 @@ Native SFT, inline and streamed-JSONL GRPO, and OPD support exact resume. A
 legacy PEFT snapshot from any training mode remains serving-only and is never
 accepted as an exact checkpoint.
 
+SFT checkpoint scheduler state additionally binds the fixed
+`native_online_lora_v1` microbatch, accumulation, warmup, and clipping values.
+See [Native SFT Profile](NATIVE_SFT_PROFILE.md).
+
 ### Repeatability qualification
 
 The opt-in real-hardware qualification runs each public SFT, inline GRPO,

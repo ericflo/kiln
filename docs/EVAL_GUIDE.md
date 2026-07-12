@@ -671,7 +671,7 @@ curl -X POST http://localhost:8420/v1/train/sft \
   -H 'content-type: application/json' \
   -d '{
         "examples": [...],
-        "config": {"epochs": 3, "output_name": "math-v1"},
+        "config": {"training_profile": "native_online_lora_v1", "epochs": 3, "output_name": "math-v1"},
         "post_eval": {
           "suite": "math-smoke",
           "include_baseline": true

@@ -4308,6 +4308,7 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
     const resumeCheckpoint = parseResumeCheckpointField(form.resume_checkpoint.value, 'SFT resume checkpoint');
     const invalidRowPolicy = form.invalid_row_policy.value === 'skip' ? 'skip' : 'fail';
     const config = {
+      training_profile: 'native_online_lora_v1',
       output_name: outputName,
       auto_load: form.auto_load.checked,
       epochs,

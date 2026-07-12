@@ -1,8 +1,9 @@
-//! Training for Kiln — pure Rust, in-process LoRA SFT and GRPO.
+//! Bounded in-process LoRA training for Kiln.
 //!
-//! This crate defines the training API types AND implements the actual training
-//! loop using candle autograd. Training runs in the same process as inference,
-//! operating on the already-loaded model weights. No Python sidecar needed.
+//! Native SFT is the versioned `native_online_lora_v1` microtrainer: it runs
+//! one admitted conversation and one optimizer update at a time against the
+//! already-loaded model. It is not a general distributed training framework.
+//! GRPO and OPD have their own explicitly versioned contracts in this crate.
 
 pub mod adapter_output;
 pub mod adapter_shape;
@@ -164,6 +165,7 @@ pub struct SftExample {
 
 /// Request to run SFT training on submitted examples.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SftRequest {
     #[serde(default)]
     pub examples: Vec<SftExample>,
@@ -186,10 +188,10 @@ pub struct SftRequest {
     pub dataset: Option<String>,
     #[serde(default)]
     pub config: SftConfig,
-    /// Server-owned ingestion evidence. HTTP request deserialization ignores
-    /// this field; admission creates it after parsing and tokenization, then
-    /// the worker verifies it before training.
-    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    /// Server-owned ingestion evidence. It is not part of the public request
+    /// wire; admission creates it after parsing and tokenization, then the
+    /// worker verifies it before training.
+    #[serde(skip)]
     pub ingestion: Option<SftIngestionReceipt>,
     /// Optional auto-eval hook: when set, the training queue worker enqueues
     /// an eval against the produced adapter once training completes. Lets
@@ -209,9 +211,8 @@ pub struct SftRequest {
 /// shape-independent. Dispatched on-device via `dispatch_muon_step`
 /// (fused per-matrix Newton-Schulz kernels — CUDA / ROCm / Vulkan /
 /// Metal) when operands are resident; otherwise the `kiln_optim::Muon`
-/// CPU reference. Muon converges LoRA fine-tunes in fewer steps than
-/// AdamW at roughly half the optimizer state (one momentum buffer vs
-/// Adam's m+v).
+/// CPU reference. It uses one momentum buffer per parameter, while AdamW
+/// uses first- and second-moment buffers.
 ///
 /// `AdamW` is decoupled-weight-decay Adam (Loshchilov & Hutter 2019);
 /// dispatched on-device via `dispatch_adamw_step` when the backend
@@ -224,7 +225,7 @@ pub struct SftRequest {
 /// dispatched on-device via `dispatch_sgd_step` when the backend
 /// supports residency. Select with `{"optimizer": {"kind": "sgd"}}`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum Optimizer {
     Sgd,
     AdamW {
@@ -261,6 +262,60 @@ impl Default for Optimizer {
             ns_iters: default_muon_ns_iters(),
             weight_decay: default_muon_weight_decay(),
         }
+    }
+}
+
+impl Optimizer {
+    /// Fail closed on optimizer values that would make an update undefined or
+    /// silently non-finite. Public admission calls this before queueing work;
+    /// trainer entry points repeat it for direct Rust callers.
+    pub fn validate_hyperparameters(&self) -> anyhow::Result<()> {
+        match *self {
+            Self::Sgd => {}
+            Self::AdamW {
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+            } => {
+                anyhow::ensure!(
+                    beta1.is_finite() && (0.0..1.0).contains(&beta1),
+                    "AdamW beta1 must be finite and in [0, 1), got {beta1}"
+                );
+                anyhow::ensure!(
+                    beta2.is_finite() && (0.0..1.0).contains(&beta2),
+                    "AdamW beta2 must be finite and in [0, 1), got {beta2}"
+                );
+                anyhow::ensure!(
+                    eps.is_finite() && eps > 0.0,
+                    "AdamW eps must be finite and greater than zero, got {eps}"
+                );
+                anyhow::ensure!(
+                    weight_decay.is_finite() && weight_decay >= 0.0,
+                    "AdamW weight_decay must be finite and non-negative, got {weight_decay}"
+                );
+            }
+            Self::Muon {
+                momentum,
+                ns_iters,
+                weight_decay,
+                ..
+            } => {
+                anyhow::ensure!(
+                    momentum.is_finite() && (0.0..1.0).contains(&momentum),
+                    "Muon momentum must be finite and in [0, 1), got {momentum}"
+                );
+                anyhow::ensure!(
+                    (1..=20).contains(&ns_iters),
+                    "Muon ns_iters must be in 1..=20, got {ns_iters}"
+                );
+                anyhow::ensure!(
+                    weight_decay.is_finite() && weight_decay >= 0.0,
+                    "Muon weight_decay must be finite and non-negative, got {weight_decay}"
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -342,8 +397,36 @@ pub fn learning_rate_band_warning(explicit: f64, resolved_default: f64) -> Optio
     }
 }
 
+pub const NATIVE_SFT_PROFILE_V1: &str = "native_online_lora_v1";
+
+/// The only training-shape contract implemented by native SFT.
+///
+/// One admitted conversation is one microbatch and one optimizer step. The
+/// learning rate is constant from the first step, without accumulation,
+/// warmup, decay, or gradient clipping. Use HF/TRL directly for configurable
+/// or batched training rather than expecting this API to approximate it.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SftTrainingProfile {
+    #[default]
+    #[serde(rename = "native_online_lora_v1")]
+    NativeOnlineLoraV1,
+}
+
+impl std::fmt::Display for SftTrainingProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NativeOnlineLoraV1 => f.write_str(NATIVE_SFT_PROFILE_V1),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SftConfig {
+    /// Versioned native training-shape contract. There is intentionally only
+    /// one native profile; use HF/TRL for general trainer configuration.
+    #[serde(default)]
+    pub training_profile: SftTrainingProfile,
     /// How SFT ingestion handles malformed, structurally invalid, or
     /// untokenizable rows. `fail` is the default and rejects the entire
     /// submission. `skip` trains only accepted rows and records stable hashes
@@ -436,11 +519,49 @@ impl SftConfig {
         self.learning_rate
             .unwrap_or_else(|| resolve_learning_rate(&self.optimizer, TrainMode::Sft))
     }
+
+    /// Validate the complete bounded native-SFT contract before expensive
+    /// tokenization, queue publication, or GPU ownership.
+    pub fn validate_native_contract(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.epochs > 0, "SFT epochs must be greater than zero");
+        let learning_rate = self.effective_learning_rate();
+        anyhow::ensure!(
+            learning_rate.is_finite() && learning_rate > 0.0,
+            "SFT learning_rate must be finite and greater than zero, got {learning_rate}"
+        );
+        let optimizer_learning_rate = learning_rate as f32;
+        anyhow::ensure!(
+            optimizer_learning_rate.is_finite() && optimizer_learning_rate > 0.0,
+            "SFT learning_rate must remain finite and greater than zero when represented as f32, got {learning_rate}"
+        );
+        validate_lora_scaling(self.lora_rank, self.lora_alpha, self.allow_high_lora_scale)?;
+        self.optimizer.validate_hyperparameters()?;
+        anyhow::ensure!(
+            self.checkpoint_interval != Some(0),
+            "SFT checkpoint_interval must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.grad_checkpoint_segments != Some(0),
+            "SFT grad_checkpoint_segments must be greater than zero"
+        );
+        for (field, value) in [
+            ("base_adapter", self.base_adapter.as_deref()),
+            ("output_name", self.output_name.as_deref()),
+            ("resume_checkpoint", self.resume_checkpoint.as_deref()),
+        ] {
+            anyhow::ensure!(
+                value.is_none_or(|value| !value.trim().is_empty()),
+                "SFT {field} must not be blank"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Default for SftConfig {
     fn default() -> Self {
         Self {
+            training_profile: SftTrainingProfile::default(),
             invalid_row_policy: SftInvalidRowPolicy::default(),
             epochs: default_epochs(),
             learning_rate: None,
@@ -1581,21 +1702,129 @@ mod tests {
         let config = SftConfig::default();
         assert!(config.checkpoint_interval.is_none());
         assert!(config.resume_checkpoint.is_none());
+        assert_eq!(
+            config.training_profile,
+            SftTrainingProfile::NativeOnlineLoraV1
+        );
         assert_eq!(config.invalid_row_policy, SftInvalidRowPolicy::Fail);
+        assert_eq!(
+            serde_json::to_value(config).unwrap()["training_profile"],
+            NATIVE_SFT_PROFILE_V1
+        );
     }
 
     #[test]
-    fn sft_invalid_row_policy_is_strict_and_server_ingestion_is_not_client_owned() {
+    fn native_sft_profile_rejects_unknown_general_trainer_knobs() {
+        for (field, value) in [
+            ("per_device_train_batch_size", serde_json::json!(8)),
+            ("gradient_accumulation_steps", serde_json::json!(4)),
+            ("lr_scheduler_type", serde_json::json!("cosine")),
+            ("warmup_steps", serde_json::json!(10)),
+            ("max_grad_norm", serde_json::json!(1.0)),
+        ] {
+            let mut config = serde_json::Map::new();
+            config.insert(field.to_string(), value);
+            let error = serde_json::from_value::<SftConfig>(config.into()).unwrap_err();
+            assert!(
+                error.to_string().contains("unknown field"),
+                "{field}: {error}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<SftConfig>(serde_json::json!({
+                "training_profile": "general_sft"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SftConfig>(serde_json::json!({
+                "optimizer": {"kind": "adam_w", "amsgrad": true}
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SftRequest>(serde_json::json!({
+                "examples": [],
+                "gradient_accumulation_steps": 4
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_sft_profile_validates_every_numeric_contract() {
+        SftConfig::default().validate_native_contract().unwrap();
+
+        let invalid = [
+            SftConfig {
+                epochs: 0,
+                ..Default::default()
+            },
+            SftConfig {
+                learning_rate: Some(0.0),
+                ..Default::default()
+            },
+            SftConfig {
+                learning_rate: Some(f64::MAX),
+                ..Default::default()
+            },
+            SftConfig {
+                learning_rate: Some(f64::MIN_POSITIVE),
+                ..Default::default()
+            },
+            SftConfig {
+                lora_alpha: f32::NAN,
+                ..Default::default()
+            },
+            SftConfig {
+                checkpoint_interval: Some(0),
+                ..Default::default()
+            },
+            SftConfig {
+                grad_checkpoint_segments: Some(0),
+                ..Default::default()
+            },
+            SftConfig {
+                optimizer: Optimizer::AdamW {
+                    beta1: 1.0,
+                    beta2: 0.999,
+                    eps: 1e-8,
+                    weight_decay: 0.0,
+                },
+                ..Default::default()
+            },
+            SftConfig {
+                optimizer: Optimizer::Muon {
+                    momentum: 0.95,
+                    nesterov: true,
+                    ns_iters: 0,
+                    weight_decay: 0.0,
+                },
+                ..Default::default()
+            },
+            SftConfig {
+                output_name: Some("  ".to_string()),
+                ..Default::default()
+            },
+        ];
+        for config in invalid {
+            assert!(config.validate_native_contract().is_err(), "{config:?}");
+        }
+    }
+
+    #[test]
+    fn sft_invalid_row_policy_and_server_owned_ingestion_are_strict() {
         let config: SftConfig = serde_json::from_str(r#"{"invalid_row_policy":"skip"}"#).unwrap();
         assert_eq!(config.invalid_row_policy, SftInvalidRowPolicy::Skip);
         assert!(serde_json::from_str::<SftConfig>(r#"{"invalid_row_policy":"drop"}"#).is_err());
 
-        let request: SftRequest = serde_json::from_value(serde_json::json!({
-            "examples": [{"messages": []}],
-            "ingestion": {"forged": true}
-        }))
-        .unwrap();
-        assert!(request.ingestion.is_none());
+        assert!(
+            serde_json::from_value::<SftRequest>(serde_json::json!({
+                "examples": [{"messages": []}],
+                "ingestion": {"forged": true}
+            }))
+            .is_err()
+        );
     }
 
     #[test]

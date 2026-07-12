@@ -49,7 +49,8 @@ curl http://localhost:8420/v1/train/sft \
         {"role": "user", "content": "Summarize this contract clause..."},
         {"role": "assistant", "content": "The clause establishes..."}
       ]}
-    ]
+    ],
+    "config": {"training_profile": "native_online_lora_v1"}
   }'
 
 # The next request already uses the updated weights
@@ -74,7 +75,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **OpenAI-compatible API** — drop in as a local replacement. SSE streaming, chat completions, tool use formatting, and first-class thinking budgets by token count or decode time.
 - **pi integration** — `kiln pi-setup` backs up and merges `~/.pi/agent/models.json` + `settings.json`, then points pi at Kiln as an OpenAI-compatible tool-calling backend.
 - **Embedded agent runs** — the server drives pi itself (`POST /v1/agent/runs`): spawns `pi --mode rpc` against its own model, streams the trajectory live with steer/abort, and auto-indexes finished sessions into the trace layer the self-improvement flywheel trains on.
-- **SFT training** over HTTP — submit examples in `experimental` or drained `maintenance`; publication is atomic.
+- **Bounded online-LoRA SFT** over HTTP — one conversation per optimizer update under the fixed `native_online_lora_v1` profile; submit in `experimental` or drained `maintenance`, with atomic publication.
 - **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function; GPU ownership follows the selected serving profile.
 - **On-policy distillation (OPD)** over HTTP — train against an identity-bound local or vLLM teacher, with exact candidate-boundary checkpoints and resume.
 - **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes. Auto-detect picks the right scorer per example (`numeric_tolerance`, `multiple_choice`, `json_validity`, `regex`, `contains`, `tool_call`, `code`, `llm_judge`, `all`/`any` composites).
@@ -82,7 +83,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **Judgment flywheel** — A/B-judge two adapters in `/ui/`, save your picks into a judgment dataset, compile to SFT, train a *local* judge LoRA, validate it on a held-out slice. The dashboard ships a streaming side-by-side viewer with `A`/`B`/`Tie`/`Skip` keyboard shortcuts.
 - **Post-training auto-eval** — in `experimental`, attach `post_eval` to any SFT/GRPO/OPD request and the produced adapter is graded immediately, with results back-linked to the training job.
 - **Adapter smoke tests** — pass `--adapter-smoke-test` on SFT/GRPO CLI submissions to record base-vs-adapter canary metrics in `train_receipt.json` before a full eval.
-- **Muon optimizer (default)** — momentum-orthogonalized SGD with fused on-device Newton-Schulz kernels for every backend (CUDA, ROCm, Vulkan, Metal). Converges LoRA fine-tunes in fewer steps than AdamW at roughly half the optimizer state (one momentum buffer vs Adam's two moments). AdamW and SGD remain selectable per-request via `{"optimizer": {"kind": "adam_w"}}` / `{"kind": "sgd"}`. Omit `learning_rate` and the server picks the per-optimizer default (Muon ~2e-2 vs AdamW ~1e-4 for SFT LoRA).
+- **Muon optimizer (default)** — momentum-orthogonalized SGD with fused on-device Newton-Schulz kernels for every backend (CUDA, ROCm, Vulkan, Metal). Muon keeps one momentum buffer per parameter; AdamW keeps first and second moments. AdamW and SGD remain selectable per request via `{"optimizer": {"kind": "adam_w"}}` / `{"kind": "sgd"}`. Omit `learning_rate` and native SFT resolves `1e-3` for Muon or `1e-4` for AdamW/SGD.
 - **Atomic LoRA transitions** — `experimental` supports live hot-swap; `maintenance` supports drained activation; `stable` rejects real weight transitions before GPU ownership changes.
 - **Continuous batching** with token-budgeted prefill — long prompts yield after every bounded quantum so ready decode rows keep advancing.
 - **128K+ context** on 24GB — Qwen3.5-4B's hybrid architecture (24 linear attention + 8 full attention layers) means KV cache is 4x smaller than a pure transformer.
@@ -376,7 +377,7 @@ it and restart the same binary/model command with
 # Train
 curl http://localhost:8420/v1/train/sft \
   -H "Content-Type: application/json" \
-  -d '{"examples": [{"messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hey there!"}]}]}'
+  -d '{"examples": [{"messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hey there!"}]}], "config": {"training_profile": "native_online_lora_v1"}}'
 
 # Check training
 curl http://localhost:8420/v1/train/status
@@ -399,6 +400,13 @@ turn bodies plus their terminator while masking assistant role headers and all
 system, user, and tool-response turns. See
 [SFT Tokenization and Assistant-Only Loss](docs/sft-tokenization.md) for the
 exact assistant mask and local reproduction command.
+
+Native SFT is deliberately the fixed
+[`native_online_lora_v1` microtrainer profile](docs/NATIVE_SFT_PROFILE.md): one
+conversation and one optimizer update at a time, constant learning rate, no
+gradient accumulation, warmup, decay, or clipping. Unsupported general-trainer
+fields fail closed. Use HF/TRL directly for broader training today; Kiln's
+first-class export/import handoff is not shipped yet.
 
 SFT row admission is also identical across inline examples, server-local
 JSONL, named datasets, corrections, recipes, and direct Rust calls. The default
@@ -484,7 +492,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets and opt-in exact single-choice `rollout_provenance` |
 | POST | `/v1/completions` | vLLM-shaped prompt-logprob subset with a canonical base-teacher identity fingerprint |
 | POST | `/v1/completions/batch` | Text-only batch generation (up to 64 prompts per request), with the same thinking-budget controls but no recorded behavior-policy probabilities |
-| POST | `/v1/train/sft` | Submit SFT training examples and return the exact effective seed under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`) |
+| POST | `/v1/train/sft` | Submit bounded `native_online_lora_v1` SFT examples and return the exact effective seed under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`) |
 | POST | `/v1/train/grpo` | Submit GRPO scored completions and return the exact effective seed under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — same handler, semantically-honest name for multi-turn rollouts |
 | POST | `/v1/train/opd` | Submit on-policy or off-policy distillation against a registered, identity-bound teacher, return the exact effective seed, and default exact checkpoints to every 25 committed optimizer steps |
@@ -763,7 +771,7 @@ crates/
   kiln-model/            Model loading, forward pass, LoRA, sampling
   kiln-scheduler/        Continuous batching scheduler with chunked prefill
   kiln-server/           HTTP server, CLI, training queue, eval queue, metrics, config
-  kiln-train/            SFT, GRPO, and OPD training loops with gradient checkpointing
+  kiln-train/            Bounded single-GPU LoRA loops for SFT, GRPO, and OPD
   kiln-eval/             Suites, scorers, results, dataset → eval synthesis (pure CPU, no GPU dep)
   kiln-nvtx/             Thin NVTX range wrapper for nsys attribution (no-op when off)
   kiln-flce-kernel/      Fused Linear Cross-Entropy (chunked CE without [T, V] logits)

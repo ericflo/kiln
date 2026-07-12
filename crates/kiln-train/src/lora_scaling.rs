@@ -9,6 +9,9 @@ pub fn alpha_over_rank(rank: usize, alpha: f32) -> Result<f32> {
     if rank == 0 {
         bail!("LoRA rank must be greater than zero");
     }
+    if !alpha.is_finite() || alpha <= 0.0 {
+        bail!("LoRA alpha must be finite and greater than zero, got {alpha}");
+    }
     Ok(alpha / rank as f32)
 }
 
@@ -51,5 +54,13 @@ mod tests {
         let ratio = validate_lora_scaling(4, 12.0, true)?;
         assert_eq!(ratio, 3.0);
         Ok(())
+    }
+
+    #[test]
+    fn lora_scaling_rejects_non_positive_and_non_finite_alpha() {
+        for alpha in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let error = validate_lora_scaling(8, alpha, true).unwrap_err();
+            assert!(error.to_string().contains("LoRA alpha"), "{error:#}");
+        }
     }
 }

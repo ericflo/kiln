@@ -1,0 +1,152 @@
+# Native SFT Profile
+
+Kiln native SFT is a bounded, single-GPU online LoRA microtrainer. It is not a
+general replacement for Transformers, TRL, Accelerate, or a distributed
+trainer. This document is the normative contract for its only training-shape
+profile:
+
+```json
+{
+  "config": {
+    "training_profile": "native_online_lora_v1"
+  }
+}
+```
+
+The field may be omitted for compatibility with older clients; omission
+selects `native_online_lora_v1`. Kiln's CLI and browser UI send it explicitly,
+and the effective configuration in train receipts and exact checkpoints
+records it. Unknown profile names, unknown SFT config fields, unknown optimizer
+fields, and invalid numeric values fail before queue publication or GPU work.
+
+## Update contract
+
+For the main-model LoRA phase:
+
+- One admitted conversation is one microbatch.
+- One microbatch produces one optimizer update. Gradient accumulation is 1.
+- An epoch visits every admitted row exactly once. Total main-phase optimizer
+  steps are `epochs * rows_kept`.
+- Each epoch uses a deterministic seed-derived permutation. Exact checkpoints
+  retain the epoch, permutation, and next row cursor.
+- The loss is the mean next-token cross-entropy over supervised assistant
+  targets in that conversation. Rows are not combined into a token-weighted or
+  conversation-weighted batch reduction.
+- The assistant label mask is defined separately in
+  [SFT Tokenization and Assistant-Only Loss](sft-tokenization.md).
+- The configured learning rate is constant from the first update through the
+  last. There is no warmup, decay, scheduler transition, or per-row scaling.
+- There is no gradient clipping. A non-finite loss or optimizer failure stops
+  the run; Kiln does not silently skip the update.
+- Gradient checkpointing may recompute model segments to reduce memory. It
+  does not change the microbatch, loss, update count, or accumulation contract.
+
+The exact-checkpoint scheduler record makes these fixed values inspectable:
+
+```json
+{
+  "kind": "constant",
+  "state": {
+    "training_profile": "native_online_lora_v1",
+    "microbatch_conversations": 1,
+    "gradient_accumulation_steps": 1,
+    "warmup_steps": 0,
+    "gradient_clipping": "none"
+  }
+}
+```
+
+Requests containing general-trainer knobs such as
+`per_device_train_batch_size`, `gradient_accumulation_steps`,
+`lr_scheduler_type`, `warmup_steps`, or `max_grad_norm` are rejected rather
+than ignored or approximately emulated.
+
+## Optimizers and learning rate
+
+The profile supports Muon, AdamW, and plain SGD. Muon is the default. If
+`learning_rate` is omitted, native SFT resolves these constants:
+
+| Optimizer | SFT learning rate |
+| --- | ---: |
+| Muon | `1e-3` |
+| AdamW | `1e-4` |
+| SGD | `1e-4` |
+
+Explicit learning rates must remain finite and greater than zero after the
+optimizer's F32 conversion. LoRA alpha must be finite and positive. AdamW beta
+values must be in `[0, 1)`, epsilon must be positive, and weight decay must be
+non-negative. Muon momentum must be in `[0, 1)`, Newton-Schulz iterations must
+be in `1..=20`, and weight decay must be non-negative.
+
+## Precision and optimizer state
+
+For the canonical BF16 Qwen3.5-4B weights, the runtime contract is:
+
+| Backend | LoRA parameters | Activations | Gradients | Resident optimizer state | Loss accumulation |
+| --- | --- | --- | --- | --- | --- |
+| CUDA | BF16 | BF16 | BF16 | BF16 | F32 |
+| ROCm | BF16 | BF16 | BF16 | BF16 | F32 |
+| Metal | BF16 | BF16 | BF16 | BF16 | F32 |
+| Vulkan | F32 | F32 | F32 | F32 | F32 |
+| CPU reference | F32 | F32 | F32 | F32 | F32 |
+
+The BF16 paths do not keep a separate F32 master parameter. AdamW uses first-
+and second-moment buffers; Muon uses one momentum buffer; SGD is stateless.
+Resident state uses the table's runtime dtype. Exact checkpoints serialize
+optimizer arrays as F32 safetensors plus per-parameter step counters, then
+restore them into the declared runtime dtype. That portable serialization is
+not an F32 master copy used by ordinary updates.
+
+Round-to-nearest is the default BF16 write policy. The legacy
+`KILN_BF16_STOCHASTIC_ROUND` environment switch is not a portable profile knob:
+it selects the host reference behavior and the Metal fallback behavior, but
+callers must not assume identical support on every native optimizer kernel.
+The concrete parameter, optimizer-state, activation, gradient, and rounding
+record for a completed run is stored under
+`train_receipt.json -> runtime.training_precision` and copied to the adapter
+manifest.
+
+## Optional MTP alignment
+
+When the base checkpoint contains native `mtp.*` weights, `train_mtp: null`
+(the default) runs a separate post-SFT draft-block LoRA alignment pass;
+`train_mtp: false` disables it and `true` requests it explicitly. This pass:
+
+- trains only the MTP block's LoRA parameters;
+- visits each admitted conversation at most once, independently of `epochs`;
+- uses the run's optimizer and constant learning rate with fresh optimizer
+  state;
+- is outside the main-phase step count and exact-resume cursor; and
+- is skipped when the base model has no MTP weights.
+
+The main adapter remains usable if automatic MTP alignment fails; Kiln logs the
+failure and omits the MTP LoRA tensors. This auxiliary phase therefore must not
+be interpreted as part of the exact main-phase continuation guarantee.
+
+## Artifacts and resume
+
+`train_receipt.json -> config` contains the full effective profile, resolved
+learning rate, optimizer settings, seed, LoRA shape, row policy, and checkpoint
+settings. `runtime.training_precision` records the concrete dtype contract.
+Exact `.kiln-checkpoint` manifests additionally bind the fixed scheduler state,
+optimizer state, data order/cursor, RNG state, admitted-corpus identity, model
+artifacts, tokenizer/template, and execution provenance.
+
+An ordinary PEFT adapter is a serving artifact, not an exact training
+checkpoint. See [Exact Training Checkpoints](training-checkpoints.md) and
+[Train Receipt Schema](TRAIN_RECEIPT_SCHEMA.md).
+
+SFT checkpoints created before the versioned profile and fixed scheduler fields
+cannot prove this contract and are not accepted for exact continuation. Their
+PEFT adapter snapshots remain serving artifacts and may be selected as a new
+run's `base_adapter` subject to the ordinary shape and provenance checks.
+
+## General training boundary
+
+Use HF/TRL directly when a run needs batching, gradient accumulation,
+schedulers or warmup, clipping, packing, full-parameter training, alternate
+PEFT methods, distributed execution, or broad model-family support. Kiln's
+first-class dataset/provenance export and validated adapter import workflow is
+not shipped yet; it remains a separate interoperability deliverable. Until it
+lands, do not assume a raw external training command preserves Kiln's row,
+template, split, or artifact-identity contracts automatically.

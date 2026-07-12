@@ -168,6 +168,8 @@ fn run_one(
     eprintln!("  Tokenized length: {actual_t} tokens (target {target_t})");
 
     let config = SftConfig {
+        training_profile: kiln_train::SftTrainingProfile::NativeOnlineLoraV1,
+        invalid_row_policy: kiln_train::SftInvalidRowPolicy::Fail,
         epochs: 1,
         learning_rate: None,
         lora_rank: 8,

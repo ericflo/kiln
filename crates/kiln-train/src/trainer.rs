@@ -2721,7 +2721,14 @@ impl SftCheckpointDescriptor {
         crate::checkpoint::TrainingCheckpointScheduler {
             kind: "constant".to_string(),
             step,
-            state: serde_json::json!({"learning_rate": self.learning_rate}),
+            state: serde_json::json!({
+                "training_profile": crate::NATIVE_SFT_PROFILE_V1,
+                "learning_rate": self.learning_rate,
+                "microbatch_conversations": 1,
+                "gradient_accumulation_steps": 1,
+                "warmup_steps": 0,
+                "gradient_clipping": "none",
+            }),
         }
     }
 
@@ -5230,6 +5237,9 @@ pub fn sft_train_to_with_checkpoint_root(
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    config
+        .validate_native_contract()
+        .context("validate native SFT profile before row admission")?;
     let prepared = crate::sft_ingestion::prepare_sft_examples(
         examples.iter().cloned(),
         tokenizer,
@@ -5272,6 +5282,9 @@ pub fn sft_train_to_with_checkpoint_root_and_ingestion(
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    config
+        .validate_native_contract()
+        .context("validate native SFT profile")?;
     anyhow::ensure!(
         ingestion.invalid_row_policy == config.invalid_row_policy,
         "SFT ingestion policy {} differs from trainer config {}",
@@ -5360,6 +5373,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
 
     tracing::info!(
         num_examples = examples.len(),
+        training_profile = %config.training_profile,
         epochs = config.epochs,
         lr = learning_rate,
         rank = config.lora_rank,
@@ -5677,7 +5691,10 @@ fn sft_train_prepared_to_with_checkpoint_root(
             "SFT gradient checkpointing will resolve per example"
         );
 
-        let total_steps = config.epochs * valid_indices.len();
+        let total_steps = config
+            .epochs
+            .checked_mul(valid_indices.len())
+            .context("SFT optimizer-step count overflow")?;
         let shuffle_seed = match resume_checkpoint.as_ref() {
             Some(checkpoint) => {
                 let state = checkpoint
@@ -15894,6 +15911,53 @@ pub(crate) mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[cfg(feature = "cuda")]
     pub(crate) static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn native_sft_profile_binds_effective_config_and_scheduler_state() -> Result<()> {
+        let config = crate::SftConfig::default();
+        let effective = sft_checkpoint_effective_config(&config, 1e-3, 17)?;
+        assert_eq!(effective["training_profile"], crate::NATIVE_SFT_PROFILE_V1);
+        assert_eq!(effective["learning_rate"], 1e-3);
+        assert_eq!(effective["seed"], 17);
+
+        let descriptor = SftCheckpointDescriptor {
+            adapter_name: "profile-test".to_string(),
+            effective_config: effective,
+            precision_policy: crate::checkpoint::TrainingCheckpointPrecision {
+                parameter_dtype: "f32".to_string(),
+                optimizer_state_dtype: "none".to_string(),
+                activation_dtype: "f32".to_string(),
+                gradient_dtype: "f32".to_string(),
+                stochastic_rounding: serde_json::json!({"mode": "round_to_nearest"}),
+            },
+            data: crate::checkpoint::TrainingCheckpointData {
+                source_kind: "test".to_string(),
+                content_sha256: "0".repeat(64),
+                item_count: 1,
+            },
+            init_seed: 17,
+            shuffle_seed: 17,
+            optimizer: Optimizer::Sgd,
+            learning_rate: 1e-3,
+            total_steps: 1,
+            base_model_weights_sha256: None,
+            auxiliary_state: serde_json::json!({}),
+        };
+        let scheduler = descriptor.scheduler_manifest(0);
+        assert_eq!(scheduler.kind, "constant");
+        assert_eq!(
+            scheduler.state,
+            serde_json::json!({
+                "training_profile": crate::NATIVE_SFT_PROFILE_V1,
+                "learning_rate": 1e-3,
+                "microbatch_conversations": 1,
+                "gradient_accumulation_steps": 1,
+                "warmup_steps": 0,
+                "gradient_clipping": "none",
+            })
+        );
+        Ok(())
+    }
 
     #[test]
     fn staged_base_resolution_never_uses_the_output_being_rewritten() {

@@ -54,6 +54,10 @@ Required top-level fields:
 - `lora_delta_norms`: per-module LoRA A/B norm and delta upper-bound summary.
 - `config`: full serialized effective trainer config.
 
+For SFT, `config.training_profile` is `native_online_lora_v1` and binds the
+fixed microbatch, accumulation, scheduler, clipping, and update semantics in
+[Native SFT Profile](NATIVE_SFT_PROFILE.md).
+
 Hashes are lowercase hex SHA-256 strings prefixed with `sha256:`.
 
 For SFT, `training_data.sha256` is the transport-independent ordered

@@ -2056,6 +2056,7 @@ fn run_distill_refresh(
 
     let midtrain_name = format!("{adapter_name}-midtrain");
     let midtrain_config = kiln_train::SftConfig {
+        training_profile: kiln_train::SftTrainingProfile::NativeOnlineLoraV1,
         invalid_row_policy: kiln_train::SftInvalidRowPolicy::Fail,
         epochs: 1,
         // Resolved per optimizer at run start (the request's optimizer is

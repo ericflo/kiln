@@ -258,6 +258,8 @@ fn run_one(
 
     let tag = if use_flce { "flce-on" } else { "flce-off" };
     let config = SftConfig {
+        training_profile: kiln_train::SftTrainingProfile::NativeOnlineLoraV1,
+        invalid_row_policy: kiln_train::SftInvalidRowPolicy::Fail,
         epochs: 1,
         learning_rate: None,
         lora_rank: 8,
