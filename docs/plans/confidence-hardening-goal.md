@@ -512,12 +512,12 @@ desktop configuration with identical effective semantics and provenance.
   provenance, and eval split manifests into documented HF/TRL-compatible forms.
 - [x] Import resulting PEFT adapters with full base/tokenizer/template hash
   validation.
-- [ ] Provide pinned reference scripts for SFT and GRPO that reproduce the
+- [x] Provide pinned reference scripts for SFT and GRPO that reproduce the
   oracle fixtures.
 - [x] Document native Kiln training as bounded single-GPU online LoRA and
   HF/TRL as the path for distributed, broad-method, and highly configurable
   training.
-- [ ] Add round-trip tests: Kiln export -> pinned HF/TRL step -> Kiln import ->
+- [x] Add round-trip tests: Kiln export -> pinned HF/TRL step -> Kiln import ->
   inference/eval.
   - Progress: a strict `kiln.hf-trl-export.v1` /
     `kiln.hf-trl-result.v1` contract now binds the complete base-shard,
@@ -647,8 +647,17 @@ desktop configuration with identical effective semantics and provenance.
     canonical JSONL path plus optional split and matching behavior adapter. A
     real TCP loopback covers GRPO creation, streamed download, local manifest
     verification, publication, server cleanup, and source retention.
-  - Remaining: run the actual external SFT and GRPO training/inference round
-    trips before checking the pinned oracle-script and broader Phase 3.5 items.
+  - Completed: the pinned scalar/tensor SFT and GRPO oracles, task-aware
+    embedded runner, and exact package lock now feed one committed offline
+    production-model workload. On Strix Halo ROCm it started and drained the
+    real server twice, generated provenance-complete scored GRPO data, exported
+    both tasks, released the GPU, ran one BF16 HF/TRL/PEFT update per task,
+    imported both results, and passed offline/server adapter verification plus
+    hash-bound paired eval. The strict receipt records two imports, two eval
+    pairs, 16 nonzero tensors per adapter, zero HTTP errors, stable execution
+    provenance across restart, no unsupported cases, and clean shutdown. The
+    workload has a separate Vulkan variant and exact cross-backend comparison
+    policy; that receipt remains required before claiming Vulkan coverage.
 
 **Acceptance:** The oracle ladder covers tokenization/masks, scalar losses,
 tiny-model logits/log-probs, one-step gradients/updates, 10-step trajectories,
@@ -891,7 +900,7 @@ All gates are required:
 - [ ] Thinking-budget semantics and provenance are transport/UI consistent.
 - [ ] Performance claims are backed by comparable receipts; vLLM is recommended
   wherever it remains materially better.
-- [ ] Native training scope and HF/TRL interoperability are explicit and tested.
+- [x] Native training scope and HF/TRL interoperability are explicit and tested.
 - [ ] Automatic GitHub-hosted work is inexpensive and is not represented as
   hardware qualification.
 - [ ] Final receipts cover ROCm, Vulkan, both CUDA machines, and Metal on one
@@ -1135,6 +1144,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-10 | Verified first-party HF/TRL GRPO CLI handoff | `sha256:7c0b44814c92` | this commit | portable; Strix Halo ROCm/Vulkan compile gates | 905 server tests; focused nested-command parser coverage; real TCP SFT regression plus GRPO create/download/verify/publish/conditional-delete loopback; default/ROCm gfx1151/Vulkan server all-target checks; Chrome 148 docs smoke; release/runtime-default/thinking-budget/local-link guards; formatting and diff hygiene | passed | `kiln train hf export-grpo` accepts one server-local canonical recorded-rollout JSONL path, a path-safe immutable name, optional behavior adapter/split, optional no-clobber output, and explicit server-copy retention. SFT and GRPO now share one redirect-free client, creation ETag validation, bounded idle download, compressed/expanded/archive-entry limits, safe single-root extraction, complete bundle verification, atomic local publication, identity-conditional default cleanup, and retry guidance. Before local publication the downloaded manifest must agree with the creation summary's task, source, row count, ordered corpus identity, and input adapter, closing a response-consistency gap for both task routes. The real router loopback proves GRPO task identity, archive publication, source retention, and exact server cleanup while retaining the existing SFT regression. CLI help, README, API/CLI sites, and the permanent interoperability contract now describe both routes, so the general native-training scope and first-class export/documentation checklist items are closed. Actual external SFT/GRPO optimizer, import, and inference/eval round trips remain open. |
 | 2026-07-10 | Canonical rollout-generator to HF/TRL export composition | `sha256:ab764f189da9` | this commit | portable + Strix Halo ROCm production-model reproduction | 905 server tests; loopback generation followed by strict HF/TRL JSONL admission; default/ROCm gfx1151/Vulkan server all-target checks; release/local-link guard; formatting and diff hygiene | passed | The first real production-model route composition exposed that `kiln rollout-generate` added diagnostic `metadata` fields which native GRPO silently ignored but the closed HF/TRL schema and pinned Python runner correctly rejected. Generated JSONL now serializes the canonical typed `GrpoGroup` directly and therefore contains only prompt messages, scored completions, optional trajectory, and exact provenance. Usage, latency, seed, server performance, and raw scorer output remain in the separate summary rather than contaminating training data. The loopback regression now requires byte equality with typed reserialization and immediate strict export admission, preventing the generator and exporter from drifting independently again. The actual external optimizer, import, and inference/eval round trips remain open. |
 | 2026-07-10 | Semantic local-tokenizer binding for pinned HF/TRL preflight | `sha256:962d1f625c4a` | this commit | portable + Strix Halo ROCm production-model bundles | 20 focused runner tests; 276 qualification tests; 480 train tests with one documented ignore; 905 server tests; both real SFT and GRPO exports verified against local Qwen3.5-4B; default/ROCm gfx1151/Vulkan server all-target checks; Python compilation and diff hygiene | passed | The first embedded-runner preflight against the real model exposed an impossible raw-byte check: Kiln exports Tokenizers' canonical serialization, while the official local model uses the semantically equivalent legacy string form for BPE merge pairs. Python Tokenizers reproduced the exported 10,078,828 bytes and digest exactly from the 12,807,982-byte local file, proving that the mismatch was framing rather than tokenizer drift. The dependency-free preflight now parses bounded duplicate-free JSON and normalizes only string-pair versus two-token-array merge representation before comparing the complete tokenizer object. Vocabulary, merge content/order, normalizer, pre-tokenizer, post-processor, decoder, added tokens, malformed pairs, oversized files, and every other structural change still fail. Focused tests cover equivalent framing, changed merges, malformed merges, and full-preflight mutation rejection. Existing pre-fix bundles were not trained because a successful result must retain the corrected embedded script; fresh exports remain required before the external optimizer round trips. |
+| 2026-07-12 | Production HF/TRL SFT and recorded-GRPO round trip | `sha256:b00acd14ba42` | `57472c4e` | Strix Halo ROCm/gfx1151 + Torch ROCm 7.2 | `qualification/receipts/rocm/strix-halo/20260712t123220110075z-rocm-strix-halo-hf-trl-production-roundt-0be7b6a1e5-v1.json` | passed | The committed loopback-only workload exported canonical SFT plus two real provenance-complete GRPO completions, stopped Kiln before external GPU ownership, ran one pinned BF16 rank-1 `q_proj` HF/TRL/PEFT update per task, restarted the same binary with identical execution provenance, imported both self-verifying results, and passed structural/nonzero/server adapter verification plus hash-bound paired eval. The receipt binds the clean source tree, workload, two exact Qwen shards, binary, ROCm environment, Torch 2.13.0+rocm7.2, Transformers 5.13.1, TRL 1.8.0, every export/result/import/weight identity, two imports, two eval pairs, 16 nonzero tensors per adapter, zero HTTP errors, a drained scheduler, and no unsupported cases. The harness also passed 285 qualification tests and a separate real dry run; Vulkan remains an explicit paired rerun. |
 
 ## Known Starting Defects
 
