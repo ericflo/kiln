@@ -247,6 +247,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "batching_prefill_layer_count": ("layers", "sum", True),
     "batching_prefill_layer_yield_count": ("count", "sum", True),
     "batching_prefill_staging_admission_count": ("count", "sum", False),
+    "batching_prefill_staging_priority_forward_count": ("count", "sum", False),
     "batching_prefill_staging_slot_count": ("slots", "exact", False),
     "batching_short_prefill_priority_forward_count": ("count", "sum", False),
     "batching_slow_admission_count": ("count", "sum", True),
@@ -1937,6 +1938,7 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int]:
         "total_prefill_layer_yields",
         "total_short_prefill_priority_forwards",
         "total_prefill_staging_admissions",
+        "total_prefill_staging_priority_forwards",
         "total_admission_calls",
         "slow_admission_count",
         "slow_prefill_forward_count",
@@ -2423,6 +2425,11 @@ def metric_values(
         "batching_prefill_staging_admission_count": counter_delta(
             batching_start, batching_end, "total_prefill_staging_admissions"
         ),
+        "batching_prefill_staging_priority_forward_count": counter_delta(
+            batching_start,
+            batching_end,
+            "total_prefill_staging_priority_forwards",
+        ),
         "batching_prefill_staging_slot_count": batching_end[
             "max_prefill_staging_slots"
         ],
@@ -2532,6 +2539,22 @@ def batching_staging_contract_failures(
         or admissions < 1
     ):
         failures.append("measured load admitted no request through prefill staging")
+    staged_priority = values.get("batching_prefill_staging_priority_forward_count")
+    short_priority = values.get("batching_short_prefill_priority_forward_count")
+    if (
+        not isinstance(staged_priority, (int, float))
+        or isinstance(staged_priority, bool)
+        or staged_priority < 1
+    ):
+        failures.append("measured load assigned no priority forward to staged prefills")
+    elif (
+        not isinstance(short_priority, (int, float))
+        or isinstance(short_priority, bool)
+        or staged_priority > short_priority
+    ):
+        failures.append(
+            "staged-prefill priority forwards are not a subset of short-prefill priority"
+        )
     observed = values.get("batching_max_observed_active_requests")
     if not isinstance(observed, (int, float)) or isinstance(observed, bool):
         failures.append("measured maximum active-request width is not numeric")

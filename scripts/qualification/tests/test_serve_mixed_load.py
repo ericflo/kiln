@@ -127,6 +127,7 @@ def health_fixture(
                 "total_prefill_layer_yields": 0,
                 "total_short_prefill_priority_forwards": 0,
                 "total_prefill_staging_admissions": 0,
+                "total_prefill_staging_priority_forwards": 0,
                 "total_prefill_forward_ms": 0.0,
                 "max_prefill_forward_ms": 0.0,
                 "slow_prefill_forward_count": 0,
@@ -1379,6 +1380,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "response_stall_evictions": 2,
                 "total_short_prefill_priority_forwards": 2,
                 "total_prefill_staging_admissions": 1,
+                "total_prefill_staging_priority_forwards": 1,
                 "max_observed_active_requests": serve.MAX_DECODE_BATCH,
             }
         )
@@ -1434,6 +1436,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "response_stall_evictions": 3,
                 "total_short_prefill_priority_forwards": 7,
                 "total_prefill_staging_admissions": 4,
+                "total_prefill_staging_priority_forwards": 5,
                 "max_observed_active_requests": serve.MAX_ACTIVE_REQUESTS - 1,
             }
         )
@@ -1489,6 +1492,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         )
         self.assertEqual(values["batching_prefill_staging_admission_count"], 3)
         self.assertEqual(
+            values["batching_prefill_staging_priority_forward_count"], 4
+        )
+        self.assertEqual(
             values["batching_max_prefill_tokens_per_cycle"],
             serve.MAX_PREFILL_TOKENS_PER_CYCLE,
         )
@@ -1530,6 +1536,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "batching_max_active_requests": serve.MAX_ACTIVE_REQUESTS,
             "batching_max_observed_active_requests": serve.MAX_DECODE_BATCH + 1,
             "batching_prefill_staging_admission_count": 1,
+            "batching_prefill_staging_priority_forward_count": 1,
+            "batching_short_prefill_priority_forward_count": 2,
         }
         self.assertEqual(serve.batching_staging_contract_failures(good), [])
 
@@ -1539,6 +1547,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "batching_max_active_requests": serve.MAX_ACTIVE_REQUESTS + 1,
             "batching_max_observed_active_requests": serve.MAX_DECODE_BATCH,
             "batching_prefill_staging_admission_count": 0,
+            "batching_prefill_staging_priority_forward_count": 0,
         }
         for name, value in mutations.items():
             with self.subTest(name=name):
@@ -1552,6 +1561,12 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "batching_max_observed_active_requests": serve.MAX_ACTIVE_REQUESTS + 1,
         }
         self.assertTrue(serve.batching_staging_contract_failures(too_wide))
+        invalid_subset = {
+            **good,
+            "batching_prefill_staging_priority_forward_count": 3,
+            "batching_short_prefill_priority_forward_count": 2,
+        }
+        self.assertTrue(serve.batching_staging_contract_failures(invalid_subset))
 
     def test_metric_contract_is_sorted_closed_and_finite(self) -> None:
         metrics = serve.zero_metrics()
