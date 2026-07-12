@@ -2326,6 +2326,18 @@ impl ModelRunner {
         self.eos_token_ids.contains(&token)
     }
 
+    fn should_stop_on_eos(&self, params: &SamplingParams, token: TokenId) -> bool {
+        !params.ignore_eos && self.eos_token_ids.contains(&token)
+    }
+
+    fn eos_token_ids_for<'a>(&'a self, params: &SamplingParams) -> &'a [TokenId] {
+        if params.ignore_eos {
+            &[]
+        } else {
+            &self.eos_token_ids
+        }
+    }
+
     pub fn stop_sequence_match(
         &self,
         generated_tokens: &[TokenId],
@@ -2843,7 +2855,7 @@ impl ModelRunner {
 
             next_token = params.apply_thinking_budget(&generated_tokens, next_token);
             // Check for EOS
-            if self.eos_token_ids.contains(&next_token) {
+            if self.should_stop_on_eos(params, next_token) {
                 finish_reason = FinishReason::Eos;
                 break;
             }
@@ -2952,7 +2964,7 @@ impl ModelRunner {
 
             next_token = params.apply_thinking_budget(&generated_tokens, next_token);
             // Check for EOS
-            if self.eos_token_ids.contains(&next_token) {
+            if self.should_stop_on_eos(params, next_token) {
                 return Ok(GenerationOutput {
                     text: String::new(),
                     token_ids: generated_tokens,
@@ -5217,7 +5229,7 @@ impl ModelRunner {
                 }
 
                 next_token = params.apply_thinking_budget(&generated_tokens, next_token);
-                if self.eos_token_ids.contains(&next_token) {
+                if self.should_stop_on_eos(params, next_token) {
                     return Ok(GenerationOutput {
                         text: String::new(),
                         token_ids: generated_tokens,
@@ -6801,7 +6813,7 @@ impl ModelRunner {
                 }
 
                 next_token = params.apply_thinking_budget(&generated_tokens, next_token);
-                if self.eos_token_ids.contains(&next_token) {
+                if self.should_stop_on_eos(params, next_token) {
                     return Ok(GenerationOutput {
                         text: String::new(),
                         token_ids: generated_tokens,
@@ -6974,7 +6986,7 @@ impl ModelRunner {
             }
 
             next_token = params.apply_thinking_budget(&generated_tokens, next_token);
-            if self.eos_token_ids.contains(&next_token) {
+            if self.should_stop_on_eos(params, next_token) {
                 return Ok(GenerationOutput {
                     text: String::new(),
                     token_ids: generated_tokens,
@@ -7147,7 +7159,7 @@ impl ModelRunner {
                 });
             }
 
-            if self.eos_token_ids.contains(&last_token) {
+            if self.should_stop_on_eos(params, last_token) {
                 return Ok(GenerationOutput {
                     text: String::new(),
                     token_ids: generated_tokens,
@@ -7203,7 +7215,7 @@ impl ModelRunner {
                     &mut draft_linear_state,
                     &effective_config,
                     params,
-                    &self.eos_token_ids,
+                    self.eos_token_ids_for(params),
                     self.active_lora.as_ref(),
                 )
                 .context("paged skip-layer speculative decode step failed")?
@@ -7364,7 +7376,7 @@ impl ModelRunner {
 
             next_token = params.apply_thinking_budget(&generated_tokens, next_token);
             // Check for EOS
-            if self.eos_token_ids.contains(&next_token) {
+            if self.should_stop_on_eos(params, next_token) {
                 return Ok(GenerationOutput {
                     text: String::new(),
                     token_ids: generated_tokens,
@@ -7567,7 +7579,7 @@ impl ModelRunner {
             }
 
             // Check for EOS
-            if self.eos_token_ids.contains(&last_token) {
+            if self.should_stop_on_eos(params, last_token) {
                 return Ok(GenerationOutput {
                     text: String::new(),
                     token_ids: generated_tokens,
@@ -7615,7 +7627,7 @@ impl ModelRunner {
                 &mut draft_linear_state,
                 &effective_config,
                 params,
-                &self.eos_token_ids,
+                self.eos_token_ids_for(params),
                 &mut rng,
                 self.active_lora.as_ref(),
             )
@@ -7874,7 +7886,7 @@ impl ModelRunner {
                 });
             }
 
-            if self.eos_token_ids.contains(&last_token) {
+            if self.should_stop_on_eos(params, last_token) {
                 return Ok(MtpGenerationOutput {
                     text: String::new(),
                     token_ids: generated_tokens,
@@ -7937,7 +7949,7 @@ impl ModelRunner {
                 &mtp_block_table,
                 mtp_pos,
                 params,
-                &self.eos_token_ids,
+                self.eos_token_ids_for(params),
                 &mut rng,
                 self.active_lora.as_ref(),
             );
@@ -8093,7 +8105,7 @@ impl ModelRunner {
                 break;
             }
 
-            if self.eos_token_ids.contains(&last_token) {
+            if self.should_stop_on_eos(params, last_token) {
                 finish_reason = FinishReason::Eos;
                 break;
             }
@@ -8139,7 +8151,7 @@ impl ModelRunner {
                 &mut draft_linear_state,
                 &effective_config,
                 params,
-                &self.eos_token_ids,
+                self.eos_token_ids_for(params),
                 &mut rng,
                 self.active_lora.as_ref(),
             )
@@ -8333,7 +8345,7 @@ impl ModelRunner {
                 break;
             }
 
-            if self.eos_token_ids.contains(&last_token) {
+            if self.should_stop_on_eos(params, last_token) {
                 finish_reason = FinishReason::Eos;
                 break;
             }
@@ -8381,7 +8393,7 @@ impl ModelRunner {
                 &mtp_block_table,
                 mtp_pos,
                 params,
-                &self.eos_token_ids,
+                self.eos_token_ids_for(params),
                 &mut rng,
                 self.active_lora.as_ref(),
             );
@@ -9595,7 +9607,7 @@ impl ModelRunner {
             }
 
             next_token = params.apply_thinking_budget(&generated_tokens, next_token);
-            if self.eos_token_ids.contains(&next_token) {
+            if self.should_stop_on_eos(params, next_token) {
                 finish_reason = FinishReason::Eos;
                 break;
             }
@@ -9729,7 +9741,7 @@ impl ModelRunner {
                 break;
             }
 
-            if self.eos_token_ids.contains(&last_token) {
+            if self.should_stop_on_eos(params, last_token) {
                 finish_reason = FinishReason::Eos;
                 break;
             }
@@ -9773,7 +9785,7 @@ impl ModelRunner {
                     &mut draft_linear_state,
                     &effective_config,
                     params,
-                    &self.eos_token_ids,
+                    self.eos_token_ids_for(params),
                     self.active_lora.as_ref(),
                 )
                 .context("streaming paged skip-layer speculative decode step failed")?
@@ -9971,7 +9983,7 @@ impl ModelRunner {
                     }
 
                     next_token = params.apply_thinking_budget(&generated_tokens, next_token);
-                    if self.eos_token_ids.contains(&next_token) {
+                    if self.should_stop_on_eos(params, next_token) {
                         finish_reason = FinishReason::Eos;
                         break;
                     }

@@ -434,6 +434,14 @@
               This high-throughput endpoint does not emit per-token behavior probabilities; use
               <code>behavior_policy: "no_importance_correction"</code> for its outputs.
             </p>
+            <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+              Chat and batch requests accept <code>ignore_eos: true</code> for bounded fixed-length
+              generation. EOS ids are treated as ordinary generated tokens, explicit
+              <code>stop</code> sequences still apply, and the effective <code>max_tokens</code>
+              remains a hard bound. The flag is cache-keyed and cannot be combined with
+              <code>rollout_provenance: true</code> until that provenance schema can represent the
+              altered EOS policy.
+            </p>
           </section>
           <section class="endpoint">
             <h3 class="font-semibold mb-2">Download and upload an adapter archive</h3>

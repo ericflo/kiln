@@ -419,6 +419,7 @@ class ServeMixedLoadTests(unittest.TestCase):
             "max_warmup_requests": serve.MAX_WARMUP_REQUESTS,
             "measured_expected_completion_tokens": serve.MEASURED_EXPECTED_COMPLETION_TOKENS,
             "measured_finish_reason": "length",
+            "measured_ignore_eos": True,
             "memory_poll_interval_ms": int(serve.MEMORY_POLL_INTERVAL_SECONDS * 1000),
             "normal_max_tokens": serve.NORMAL_MAX_TOKENS,
             "normal_requests": serve.NORMAL_REQUESTS,
@@ -1403,6 +1404,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(body["temperature"], 0.0)
         self.assertEqual(body["seed"], 7)
         self.assertEqual(body["max_tokens"], 12)
+        self.assertTrue(body["ignore_eos"])
         self.assertTrue(body["stream_options"]["include_usage"])
         self.assertFalse(body["chat_template_kwargs"]["enable_thinking"])
 

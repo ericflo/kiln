@@ -2321,6 +2321,7 @@ fn deterministic_completion_cache_key_for_adapter(
         prompt_tokens: prompt_tokens.to_vec(),
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        ignore_eos: normalized_ignore_eos_for_cache(sampling),
         thinking_budget_tokens: sampling
             .thinking_budget
             .as_ref()
@@ -2366,6 +2367,8 @@ struct DeterministicChatRequestCacheKey<'a> {
     fold_reasoning_into_content: bool,
     temperature_bits: u32,
     max_tokens: usize,
+    #[serde(skip_serializing_if = "is_false")]
+    ignore_eos: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking_budget_tokens: Option<usize>,
     stop: Vec<String>,
@@ -2392,6 +2395,8 @@ struct DeterministicChatChoicesCacheKey<'a> {
     n: usize,
     temperature_bits: u32,
     max_tokens: usize,
+    #[serde(skip_serializing_if = "is_false")]
+    ignore_eos: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking_budget_tokens: Option<usize>,
     stop: Vec<String>,
@@ -2483,6 +2488,7 @@ fn deterministic_chat_request_cache_key_with_vocab_size_and_fold(
         fold_reasoning_into_content,
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        ignore_eos: normalized_ignore_eos_for_cache(sampling),
         thinking_budget_tokens,
         stop,
         top_p_bits,
@@ -2524,6 +2530,7 @@ fn batch_request_sampling_for_cache_key(
         top_k: requested_or_default_top_k(req.top_k),
         min_p: requested_or_default_min_p(req.min_p),
         max_tokens: batch_request_max_tokens(req),
+        ignore_eos: req.ignore_eos,
         repetition_penalty: requested_or_default_repetition_penalty(req.repetition_penalty),
         presence_penalty: requested_or_default_presence_penalty(req.presence_penalty),
         frequency_penalty: requested_or_default_frequency_penalty(req.frequency_penalty),
@@ -2581,6 +2588,7 @@ fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size_and_fol
         fold_reasoning_into_content,
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        ignore_eos: normalized_ignore_eos_for_cache(&sampling),
         thinking_budget_tokens: request_token_budget_without_server_default(req),
         stop,
         top_p_bits,
@@ -2665,6 +2673,7 @@ fn deterministic_chat_choices_cache_key_with_vocab_size_and_fold(
         n: n_per,
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        ignore_eos: normalized_ignore_eos_for_cache(sampling),
         thinking_budget_tokens,
         stop,
         top_p_bits,
@@ -2745,6 +2754,7 @@ fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size_and_fo
         n: n_per,
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        ignore_eos: normalized_ignore_eos_for_cache(&sampling),
         thinking_budget_tokens: batch_token_budget_without_server_default(req),
         stop,
         top_p_bits,
@@ -2814,6 +2824,7 @@ fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size_and_fo
         fold_reasoning_into_content,
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        ignore_eos: normalized_ignore_eos_for_cache(&sampling),
         thinking_budget_tokens: batch_token_budget_without_server_default(req),
         stop,
         top_p_bits,
@@ -2905,6 +2916,10 @@ fn normalized_min_p_bits_for_cache(min_p: f32) -> u32 {
     } else {
         min_p.to_bits()
     }
+}
+
+fn normalized_ignore_eos_for_cache(sampling: &SamplingParams) -> bool {
+    sampling.max_tokens != 0 && sampling.ignore_eos
 }
 
 /// Fold alternate spellings of a penalty's no-op value (`-0.0` for the
@@ -4020,6 +4035,11 @@ pub struct ChatCompletionRequest {
     /// are present to preserve existing request behavior.
     #[serde(default)]
     pub max_completion_tokens: Option<usize>,
+    /// Kiln/vLLM-compatible extension: treat tokenizer EOS ids as ordinary
+    /// generated tokens. Generation remains bounded by `max_tokens`, and
+    /// explicit stop sequences still apply.
+    #[serde(default)]
+    pub ignore_eos: bool,
     /// Kiln extension: maximum reasoning tokens before the server forces the
     /// tokenizer's `</think>` sequence into the model context. Omitted
     /// inherits the server default; `null` disables the token limit; `0`
@@ -5648,6 +5668,11 @@ fn validate_rollout_provenance_admission(
 ) -> Result<(), ApiError> {
     if !req.rollout_provenance {
         return Ok(());
+    }
+    if req.ignore_eos {
+        return Err(ApiError::rollout_provenance_unavailable(
+            "ignore_eos=true is not represented by the current behavior-policy provenance schema",
+        ));
     }
     if req.stream {
         return Err(ApiError::rollout_provenance_unavailable(
@@ -9671,6 +9696,9 @@ pub struct BatchCompletionRequest {
     /// are present to preserve existing request behavior.
     #[serde(default)]
     pub max_completion_tokens: Option<usize>,
+    /// See [`ChatCompletionRequest::ignore_eos`].
+    #[serde(default)]
+    pub ignore_eos: bool,
     /// Shared thinking token budget for every completion in the batch. Uses
     /// the same omitted/null/number semantics as the chat endpoint.
     #[serde(default)]
@@ -9779,6 +9807,8 @@ struct DeterministicBatchCacheKeyWire<'a> {
     n: usize,
     temperature_bits: u32,
     max_tokens: usize,
+    #[serde(skip_serializing_if = "is_false")]
+    ignore_eos: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking_budget_tokens: Option<usize>,
     stop: Vec<String>,
@@ -9930,6 +9960,7 @@ fn deterministic_batch_cache_key_with_vocab_size_and_fold(
         n: req.n.unwrap_or(1),
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        ignore_eos: normalized_ignore_eos_for_cache(&sampling),
         thinking_budget_tokens,
         stop,
         top_p_bits,
@@ -10908,6 +10939,7 @@ async fn batch_completions_inner(
         let max_completion_tokens = req.max_completion_tokens;
         let thinking_budget_tokens = req.thinking_budget_tokens;
         let thinking_budget_ms = req.thinking_budget_ms;
+        let ignore_eos = req.ignore_eos;
         let seed = req.seed;
         let tools = normalized_tools_option_for_synthetic_request(req.tools.as_deref());
         let tool_choice = normalized_tool_choice_option_for_synthetic_request(
@@ -10964,6 +10996,7 @@ async fn batch_completions_inner(
                         sampling_preset: sampling_preset.clone(),
                         max_tokens,
                         max_completion_tokens,
+                        ignore_eos,
                         thinking_budget_tokens,
                         thinking_budget_ms,
                         stream: false,
@@ -11223,6 +11256,7 @@ async fn generate_multi_chat_response(
             sampling_preset: req.sampling_preset.clone(),
             max_tokens: req.max_tokens,
             max_completion_tokens: req.max_completion_tokens,
+            ignore_eos: req.ignore_eos,
             thinking_budget_tokens: req.thinking_budget_tokens,
             thinking_budget_ms: req.thinking_budget_ms,
             stream: false,
@@ -11353,6 +11387,7 @@ fn sampling_params_for_chat_request(req: &ChatCompletionRequest) -> SamplingPara
         base.repetition_penalty = rp;
     }
     base.max_tokens = chat_request_max_tokens(req);
+    base.ignore_eos = req.ignore_eos;
     base.stop = stop_sequences_for_chat_generation(req);
     base.seed = req.seed;
     base
@@ -11888,6 +11923,19 @@ mod tests {
 
     #[tokio::test]
     async fn rollout_provenance_rejects_unsupported_paths_before_generation() {
+        let (status, body) = chat_post(
+            make_batch_test_state(),
+            r#"{"messages":[{"role":"user","content":"hi"}],"rollout_provenance":true,"ignore_eos":true}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::NOT_IMPLEMENTED);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ignore_eos=true")
+        );
+
         let (status, body) = chat_post(
             make_batch_test_state(),
             r#"{"messages":[{"role":"user","content":"hi"}],"rollout_provenance":true}"#,
@@ -16783,6 +16831,34 @@ mod tests {
             deterministic_chat_request_cache_key(&streaming, &sampling).unwrap(),
             "streaming and non-streaming deterministic chat requests share the same cached payload"
         );
+    }
+
+    #[test]
+    fn ignore_eos_is_typed_forwarded_and_cache_keyed() {
+        let ordinary = parse_request(
+            r#"{"messages":[{"role":"user","content":"same eos policy"}],"temperature":0.0,"max_tokens":4}"#,
+        );
+        let ignored = parse_request(
+            r#"{"messages":[{"role":"user","content":"same eos policy"}],"temperature":0.0,"max_tokens":4,"ignore_eos":true}"#,
+        );
+        let ordinary_sampling = sampling_params_for_chat_request(&ordinary);
+        let ignored_sampling = sampling_params_for_chat_request(&ignored);
+        assert!(!ordinary.ignore_eos);
+        assert!(!ordinary_sampling.ignore_eos);
+        assert!(ignored.ignore_eos);
+        assert!(ignored_sampling.ignore_eos);
+        assert_ne!(
+            deterministic_chat_request_cache_key(&ordinary, &ordinary_sampling).unwrap(),
+            deterministic_chat_request_cache_key(&ignored, &ignored_sampling).unwrap(),
+            "different EOS policies must not share deterministic completions"
+        );
+
+        let batch: BatchCompletionRequest = serde_json::from_str(
+            r#"{"prompts":[[{"role":"user","content":"batch eos policy"}]],"max_tokens":4,"ignore_eos":true}"#,
+        )
+        .unwrap();
+        assert!(batch.ignore_eos);
+        assert!(batch_request_sampling_for_cache_key(&batch, None).ignore_eos);
     }
 
     #[test]

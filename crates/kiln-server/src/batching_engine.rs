@@ -3012,23 +3012,25 @@ impl BatchingEngineActor {
                     ThinkingBudgetTokenSource::Forced => None,
                 },
             });
-        match self.forward.is_eos_token(token) {
-            Ok(true) => {
-                if let Some(action) = action {
-                    self.active[idx]
-                        .action_tokens
-                        .as_mut()
-                        .expect("action trace disappeared while recording terminal EOS")
-                        .push(action);
+        if !self.active[idx].req.sampling.ignore_eos {
+            match self.forward.is_eos_token(token) {
+                Ok(true) => {
+                    if let Some(action) = action {
+                        self.active[idx]
+                            .action_tokens
+                            .as_mut()
+                            .expect("action trace disappeared while recording terminal EOS")
+                            .push(action);
+                    }
+                    self.snapshot.total_decode_tokens += 1;
+                    self.finish_active(idx, FinishReason::Eos, None);
+                    return;
                 }
-                self.snapshot.total_decode_tokens += 1;
-                self.finish_active(idx, FinishReason::Eos, None);
-                return;
-            }
-            Ok(false) => {}
-            Err(err) => {
-                self.finish_one_with_error(idx, format!("{err:#}"), None);
-                return;
+                Ok(false) => {}
+                Err(err) => {
+                    self.finish_one_with_error(idx, format!("{err:#}"), None);
+                    return;
+                }
             }
         }
 
@@ -6366,6 +6368,34 @@ mod tests {
 
         let calls = forward.calls.lock().unwrap().clone();
         assert_eq!(calls, vec![vec![0]]);
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ignore_eos_treats_eos_as_an_ordinary_token_until_max_tokens() {
+        let forward = Arc::new(MockForward::default());
+        let handle = BatchingEngineHandle::start_with_options(forward.clone(), 8);
+        let mut req = request(0, 2);
+        req.sampling.ignore_eos = true;
+
+        let mut rx = handle.enqueue(req).await.unwrap();
+
+        assert_token_event(rx.recv().await, 10);
+        assert_token_event(rx.recv().await, 20);
+        assert!(matches!(
+            rx.recv().await,
+            Some(EngineEvent::Done {
+                output: BatchedGenerationOutput {
+                    completion_tokens: 2,
+                    token_ids,
+                    finish_reason: FinishReason::MaxTokens,
+                    ..
+                }
+            }) if token_ids == vec![10, 20]
+        ));
+
+        let calls = forward.calls.lock().unwrap().clone();
+        assert_eq!(calls, vec![vec![0], vec![10]]);
         handle.stop().await.unwrap();
     }
 

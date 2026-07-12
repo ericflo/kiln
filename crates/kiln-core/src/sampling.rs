@@ -439,6 +439,12 @@ pub struct SamplingParams {
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
 
+    /// Treat tokenizer EOS ids as ordinary generated tokens. Generation
+    /// remains bounded by `max_tokens`, and explicit stop sequences still
+    /// apply. This is off by default.
+    #[serde(default)]
+    pub ignore_eos: bool,
+
     /// Repetition penalty (1.0 = no penalty). HuggingFace-style:
     /// previously-emitted token logits are divided by `repetition_penalty`
     /// when positive, multiplied when negative. Default 1.0 = no-op.
@@ -506,6 +512,7 @@ impl SamplingParams {
             top_k: 0,
             min_p: 0.0,
             max_tokens: default_max_tokens(),
+            ignore_eos: false,
             repetition_penalty: 1.0,
             presence_penalty: 0.0,
             frequency_penalty: 0.0,
@@ -525,6 +532,7 @@ impl SamplingParams {
             top_k: 20,
             min_p: 0.0,
             max_tokens: default_max_tokens(),
+            ignore_eos: false,
             repetition_penalty: 1.0,
             presence_penalty: 1.5,
             frequency_penalty: 0.0,
@@ -544,6 +552,7 @@ impl SamplingParams {
             top_k: 20,
             min_p: 0.0,
             max_tokens: default_max_tokens(),
+            ignore_eos: false,
             repetition_penalty: 1.0,
             presence_penalty: 0.0,
             frequency_penalty: 0.0,
@@ -562,6 +571,7 @@ impl SamplingParams {
             top_k: 20,
             min_p: 0.0,
             max_tokens: default_max_tokens(),
+            ignore_eos: false,
             repetition_penalty: 1.0,
             presence_penalty: 1.5,
             frequency_penalty: 0.0,
@@ -580,6 +590,7 @@ impl SamplingParams {
             top_k: 20,
             min_p: 0.0,
             max_tokens: default_max_tokens(),
+            ignore_eos: false,
             repetition_penalty: 1.0,
             presence_penalty: 1.5,
             frequency_penalty: 0.0,
@@ -650,6 +661,7 @@ mod tests {
         assert_eq!(d.presence_penalty, 1.5);
         assert_eq!(d.repetition_penalty, 1.0);
         assert_eq!(d.frequency_penalty, 0.0);
+        assert!(!d.ignore_eos);
     }
 
     #[test]
@@ -657,6 +669,7 @@ mod tests {
         let g = SamplingParams::greedy();
         assert!(g.is_effectively_greedy());
         assert_eq!(g.temperature, 0.0);
+        assert!(!g.ignore_eos);
     }
 
     #[test]

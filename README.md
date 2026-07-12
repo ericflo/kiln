@@ -527,9 +527,9 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets and opt-in exact single-choice `rollout_provenance` |
+| POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets, bounded `ignore_eos`, and opt-in exact single-choice `rollout_provenance` |
 | POST | `/v1/completions` | vLLM-shaped prompt-logprob subset with a canonical base-teacher identity fingerprint |
-| POST | `/v1/completions/batch` | Text-only batch generation (up to 64 prompts per request), with the same thinking-budget controls but no recorded behavior-policy probabilities |
+| POST | `/v1/completions/batch` | Text-only batch generation (up to 64 prompts per request), with the same thinking-budget and bounded `ignore_eos` controls but no recorded behavior-policy probabilities |
 | POST | `/v1/train/sft` | Submit bounded `native_online_lora_v1` SFT examples and return the exact effective seed under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`) |
 | POST | `/v1/train/hf/sft/exports` | Atomically publish an immutable, identity-bound SFT bundle with the pinned HF/TRL runner |
 | POST | `/v1/train/hf/grpo/exports` | Atomically publish an immutable recorded-GRPO bundle from inline groups or server-local canonical JSONL |
@@ -950,6 +950,15 @@ instead of long `reasoning_content`. Operators can also set
 
 The normative wire schema and executable cross-runtime vectors are in the
 [Thinking Budget Contract](docs/THINKING_BUDGET_CONTRACT.md).
+
+Chat and batch requests also accept the vLLM-compatible `ignore_eos` boolean.
+It defaults to `false`. When `true`, tokenizer EOS ids are treated as ordinary
+generated tokens, while explicit `stop` sequences still apply and the effective
+`max_tokens` remains a hard bound. The flag is part of deterministic cache
+identity. It cannot be combined with `rollout_provenance=true` because the
+current behavior-policy provenance schema does not encode the altered EOS
+policy; Kiln rejects that combination instead of recording incomplete policy
+identity.
 
 Thinking can also be bounded without disabling it. Set
 `thinking_budget_tokens` and/or `thinking_budget_ms` on
