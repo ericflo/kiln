@@ -7,11 +7,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Phase 6.5 of #1082. The CPU AdamW reference path lands in this PR;
-# per-backend GPU impls (kiln-blas / kiln-mps / kiln-vulkan-blas) plug
-# in via the same OptimStep trait in subsequent PRs.
-#
-# Internal-only — no semver commitment until Phase 7 ships.
+# Internal crate; no independent semver commitment.
 
 [dependencies]
 kiln-tensor = { workspace = true }
@@ -30,3 +26,5 @@ kiln-autograd = { workspace = true }
 # Byte-cast for the tied-weight integration test that reads a CPU
 # gradient back as Vec<f32>. Matches the kiln-tensor pin.
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
+serde = { workspace = true }
+serde_json = { workspace = true }

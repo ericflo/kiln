@@ -1561,6 +1561,8 @@ dependencies = [
  "kiln-autograd",
  "kiln-param",
  "kiln-tensor",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

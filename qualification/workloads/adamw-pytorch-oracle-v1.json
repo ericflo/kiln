@@ -1,0 +1,347 @@
+{
+  "schema_version": 1,
+  "workload_id": "adamw-pytorch-oracle-v1",
+  "kind": "correctness",
+  "description": "Compare ordinary and epsilon-dominated ten-step native AdamW parameter and moment trajectories with a source-pinned PyTorch 2.13.0 oracle at each backend's declared F32 or BF16 storage precision.",
+  "determinism": {
+    "seed": 0,
+    "seed_delivery": "fixed_fixture",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "rocm",
+      "description": "Require the pinned fixture contract, portable F32 reference, and real ROCm BF16 parameter/moment kernel trajectory.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "fixture-contract",
+          "description": "Validate canonical source pins, input identity, finite trajectories, low-gradient coverage, and F32/BF16 no-master precision declarations without importing Torch.",
+          "required": true,
+          "command": [
+            "python3",
+            "-m",
+            "unittest",
+            "scripts.qualification.tests.test_adamw_pytorch_oracle"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 60,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "Ran 6 tests"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "FAILED"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "portable-f32",
+          "description": "Compare every parameter and F32 first/second moment after ten ordinary and ten low-gradient updates with the pinned PyTorch trajectory.",
+          "required": true,
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-optim",
+            "--test",
+            "adamw_pytorch_oracle",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true"
+          },
+          "timeout_seconds": 600,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "portable_f32_adamw_matches_pytorch_low_and_ordinary_trajectories \\.\\.\\. ok"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "test result: FAILED"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "native-backend",
+          "description": "Require the ROCm BF16 fused kernel to execute all 20 updates and stay within the declared PyTorch parameter and moment ULP envelopes without a silent skip.",
+          "required": true,
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-model",
+            "--no-default-features",
+            "--features",
+            "rocm",
+            "--test",
+            "adamw_pytorch_oracle",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1",
+            "KILN_ROCM_ARCHS": "gfx1151",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[ADAMW PYTORCH ORACLE PASS\\] backend=rocm dtype=bfloat16 cases=2 steps=20"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip .*AdamW PyTorch oracle|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "vulkan",
+      "description": "Require the same pinned fixture and portable reference plus the real Vulkan F32 parameter/moment kernel trajectory.",
+      "backend": "vulkan",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "fixture-contract",
+          "description": "Validate canonical source pins, input identity, finite trajectories, low-gradient coverage, and F32/BF16 no-master precision declarations without importing Torch.",
+          "required": true,
+          "command": [
+            "python3",
+            "-m",
+            "unittest",
+            "scripts.qualification.tests.test_adamw_pytorch_oracle"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 60,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "Ran 6 tests"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "FAILED"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "portable-f32",
+          "description": "Compare every parameter and F32 first/second moment after ten ordinary and ten low-gradient updates with the pinned PyTorch trajectory.",
+          "required": true,
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-optim",
+            "--test",
+            "adamw_pytorch_oracle",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true"
+          },
+          "timeout_seconds": 600,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "portable_f32_adamw_matches_pytorch_low_and_ordinary_trajectories \\.\\.\\. ok"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "test result: FAILED"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "native-backend",
+          "description": "Require the Vulkan F32 fused kernel to execute all 20 updates and stay within the declared PyTorch mixed tolerance without a silent skip.",
+          "required": true,
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-model",
+            "--no-default-features",
+            "--features",
+            "vulkan",
+            "--test",
+            "adamw_pytorch_oracle",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[ADAMW PYTORCH ORACLE PASS\\] backend=vulkan dtype=float32 cases=2 steps=20"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip .*AdamW PyTorch oracle|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "cross_backend_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [
+      {
+        "backend_a": "rocm",
+        "variant_a_id": "rocm",
+        "backend_b": "vulkan",
+        "variant_b_id": "vulkan",
+        "allowed_environment_differences": [
+          "compiler.hipcc",
+          "compiler.shader",
+          "device.architecture",
+          "device.driver",
+          "device.name",
+          "runtime.driver",
+          "runtime.hipcc",
+          "runtime.hsa",
+          "runtime.rocm",
+          "runtime.vulkan_device",
+          "runtime.vulkan_instance"
+        ]
+      }
+    ],
+    "metric_rules": [
+      {
+        "scope": "result",
+        "result_id": "fixture-contract",
+        "metric": "case_pass",
+        "metric_class": "correctness",
+        "unit": "bool",
+        "aggregation": "exact",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "native-backend",
+        "metric": "case_pass",
+        "metric_class": "correctness",
+        "unit": "bool",
+        "aggregation": "exact",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "portable-f32",
+        "metric": "case_pass",
+        "metric_class": "correctness",
+        "unit": "bool",
+        "aggregation": "exact",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      }
+    ]
+  }
+}

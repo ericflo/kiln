@@ -3,22 +3,19 @@
 //! Standard AdamW with decoupled weight decay (Loshchilov & Hutter
 //! 2017). Runs on `Parameter::backward_storage` (the master copy).
 //!
-//! # Phase 6.5 scope
+//! # Backend boundary
 //!
-//! This PR ships the CPU reference path. Per-backend (CUDA / Metal /
-//! Vulkan) impls plug into the same [`OptimStep`] trait in
-//! subsequent PRs. The CUDA impl will be the migration target for
-//! `crates/kiln-train/src/trainer.rs:555,592` (30
-//! `candle_core::TensorId` references in the existing AdamW
-//! `HashMap<TensorId, AdamWMoments>`).
+//! This type is the portable CPU reference and host checkpoint-state path.
+//! Production accelerator updates use the backend `OptimizerBackend` fused
+//! kernels and the precision contract in `docs/NATIVE_SFT_PROFILE.md`.
 //!
 //! # Determinism
 //!
-//! Constructive when forward storage is F32; `tolerance-bounded` (1
-//! ULP at BF16) when master is BF16. The 1-ULP variance is the bf16
-//! round-trip at the master-update step; stochastic-rounding policy
-//! (Phase 6.5 issue bullet) preserves the in-expectation update at
-//! the cost of additional state per parameter.
+//! CPU arithmetic is deterministic for fixed inputs. Parameters, gradients,
+//! and moments are promoted to F32 for the update, then the master parameter is
+//! written according to the configured rounding policy. Production fused
+//! kernels are qualified independently against the committed source-pinned
+//! PyTorch trajectories.
 
 use std::collections::HashMap;
 
