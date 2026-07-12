@@ -900,14 +900,14 @@ quantum controls latency without multiplying full-model prompt passes as a
 smaller token chunk can. The actor charges a chunk's token width once, when it
 selects that chunk; later layer groups resume the same width without competing
 for a second new-token budget, shrinking the chunk, or replaying completed
-layers. Two of every three prefill dispatches remain round-robin. The third
-may accelerate the shortest remaining prompt tail only when it is no more than
-four token chunks and its admission-time prompt work is strictly smaller than
-another eligible active row's. Comparing immutable work classes keeps an
+layers. Every third prefill dispatch remains round-robin. The other two may
+accelerate the shortest remaining prompt tail only when it is no more than four
+token chunks and its admission-time prompt work is strictly smaller than another
+eligible active row's. Comparing immutable work classes keeps an
 all-equal cohort aligned instead of creating an artificial readiness staircase,
 while a genuinely shorter interactive request can receive the bounded extra
-service even on its ordinary turn; the round-robin lane retains two thirds of
-dispatch capacity.
+service even on its ordinary turn; the round-robin lane retains one third of
+dispatch capacity while shorter work is continuously eligible.
 Cancellation and
 shutdown release partial KV ownership
 only after the backend synchronization boundary; an unsettled device failure is

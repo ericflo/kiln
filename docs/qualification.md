@@ -156,8 +156,8 @@ groups without replaying completed layers. The receipt records both effective
 values, processed-layer and layer-yield counts, plus cumulative/max actor-phase
 times; a run that exercises no inter-layer yield fails. A chunk is charged to
 the new-token ceiling exactly once when selected, not again when its retained
-final layer completes. Two of three prefill dispatches remain round-robin;
-every third may accelerate the shortest tail of at most four token chunks.
+final layer completes. Every third prefill dispatch remains round-robin; the
+other two may accelerate the shortest tail of at most four token chunks.
 The receipt records this bounded-priority count and fails when the mixed
 workload does not exercise it. Any ITL outlier remains a failure even when its
 phase is explained.
