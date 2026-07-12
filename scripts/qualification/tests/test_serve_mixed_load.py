@@ -792,6 +792,19 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 result("pressure-peer", 1.5, 4.5, [1.9, 3.0, 4.1]), pressure
             )
         )
+        timing = serve.pressure_peer_timing_values(
+            result("pressure-peer", 1.5, 4.5, [1.9, 3.0, 4.1]), pressure
+        )
+        self.assertAlmostEqual(
+            timing["pressure_peer_first_ready_after_dispatch_ms"], 400.0
+        )
+        self.assertEqual(timing["pressure_peer_ready_after_count"], 1)
+        self.assertEqual(timing["pressure_peer_ready_before_count"], 1)
+        self.assertEqual(timing["pressure_peer_ready_inside_count"], 1)
+        self.assertAlmostEqual(timing["pressure_window_duration_ms"], 2000.0)
+        self.assertAlmostEqual(
+            timing["pressure_window_start_after_peer_dispatch_ms"], 500.0
+        )
         self.assertFalse(
             serve.healthy_peer_overlaps_pressure(
                 result("actor-wide-pause", 1.5, 4.5, [1.9, 4.1]), pressure
@@ -1339,6 +1352,13 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             long_prefill=result,
             cancellation_confirmed=True,
             slow_peer_success=1,
+            pressure_peer=result,
+            pressure_window=serve.DeliveryPressureWindow(
+                request_id="slow-id",
+                client="qualification-slow-marker",
+                started=1.15,
+                timed_out=1.18,
+            ),
             peak_memory=123,
             health_after_warmup=before,
             health_measurement_start=measurement_start,
@@ -1348,6 +1368,16 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(values["client_backpressure_event_count"], 2)
         self.assertEqual(values["client_backpressure_wait_ms"], 750)
         self.assertEqual(values["client_stall_eviction_count"], 1)
+        self.assertAlmostEqual(
+            values["pressure_peer_first_ready_after_dispatch_ms"], 100.0
+        )
+        self.assertEqual(values["pressure_peer_ready_before_count"], 1)
+        self.assertEqual(values["pressure_peer_ready_inside_count"], 0)
+        self.assertEqual(values["pressure_peer_ready_after_count"], 1)
+        self.assertAlmostEqual(values["pressure_window_duration_ms"], 30.0)
+        self.assertAlmostEqual(
+            values["pressure_window_start_after_peer_dispatch_ms"], 150.0
+        )
         self.assertEqual(values["batching_total_errors"], 1)
         self.assertEqual(values["batching_decode_forward_count"], 5)
         self.assertEqual(values["batching_batched_decode_forward_count"], 4)

@@ -276,6 +276,12 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "memory_reclaim_event_count": ("count", "sum", True),
     "output_token_throughput_per_second": ("tokens/s", "rate", False),
     "peak_gpu_memory_used_bytes": ("bytes", "max", True),
+    "pressure_peer_first_ready_after_dispatch_ms": ("ms", "exact", True),
+    "pressure_peer_ready_after_count": ("count", "sum", False),
+    "pressure_peer_ready_before_count": ("count", "sum", False),
+    "pressure_peer_ready_inside_count": ("count", "sum", False),
+    "pressure_window_duration_ms": ("ms", "exact", True),
+    "pressure_window_start_after_peer_dispatch_ms": ("ms", "exact", True),
     "prompt_token_count": ("tokens", "sum", False),
     "request_count": ("count", "sum", False),
     "request_failure_count": ("count", "sum", True),
@@ -1133,19 +1139,58 @@ def attributed_delivery_pressure_window(
 def healthy_peer_overlaps_pressure(
     result: StreamResult, pressure: DeliveryPressureWindow | None
 ) -> bool:
+    timing = pressure_peer_timing_values(result, pressure)
     if pressure is None:
         return False
     return (
         result.success
         and result.started <= pressure.timed_out
         and result.finished >= pressure.started
-        and any(ready < pressure.started for ready in result.token_ready_times)
-        and any(
-            pressure.started <= ready <= pressure.timed_out
-            for ready in result.token_ready_times
-        )
-        and any(ready > pressure.timed_out for ready in result.token_ready_times)
+        and timing["pressure_peer_ready_before_count"] > 0
+        and timing["pressure_peer_ready_inside_count"] > 0
+        and timing["pressure_peer_ready_after_count"] > 0
     )
+
+
+def pressure_peer_timing_values(
+    result: StreamResult, pressure: DeliveryPressureWindow | None
+) -> dict[str, float | int]:
+    first_ready = min(result.token_ready_times, default=None)
+    values: dict[str, float | int] = {
+        "pressure_peer_first_ready_after_dispatch_ms": (
+            (first_ready - result.started) * 1000.0 if first_ready is not None else 0.0
+        ),
+        "pressure_peer_ready_after_count": 0,
+        "pressure_peer_ready_before_count": 0,
+        "pressure_peer_ready_inside_count": 0,
+        "pressure_window_duration_ms": 0.0,
+        "pressure_window_start_after_peer_dispatch_ms": 0.0,
+    }
+    if pressure is None:
+        return values
+    values.update(
+        {
+            "pressure_peer_ready_after_count": sum(
+                ready > pressure.timed_out for ready in result.token_ready_times
+            ),
+            "pressure_peer_ready_before_count": sum(
+                ready < pressure.started for ready in result.token_ready_times
+            ),
+            "pressure_peer_ready_inside_count": sum(
+                pressure.started <= ready <= pressure.timed_out
+                for ready in result.token_ready_times
+            ),
+            "pressure_window_duration_ms": (
+                pressure.timed_out - pressure.started
+            )
+            * 1000.0,
+            "pressure_window_start_after_peer_dispatch_ms": (
+                pressure.started - result.started
+            )
+            * 1000.0,
+        }
+    )
+    return values
 
 
 class ServerLog:
@@ -2139,6 +2184,8 @@ def metric_values(
     long_prefill: StreamResult,
     cancellation_confirmed: bool,
     slow_peer_success: int,
+    pressure_peer: StreamResult,
+    pressure_window: DeliveryPressureWindow | None,
     peak_memory: int,
     health_after_warmup: dict[str, Any],
     health_measurement_start: dict[str, Any],
@@ -2305,6 +2352,7 @@ def metric_values(
         "zero_token_response_count": zero_tokens,
     }
     values.update(external_yield_sync)
+    values.update(pressure_peer_timing_values(pressure_peer, pressure_window))
     return values
 
 
@@ -2631,6 +2679,8 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             long_prefill=long_prefill,
             cancellation_confirmed=cancellation_confirmed,
             slow_peer_success=slow_peer_success,
+            pressure_peer=pressure_peer,
+            pressure_window=pressure_window,
             peak_memory=max(sampler.samples, default=0),
             health_after_warmup=health_measurement_start,
             health_measurement_start=health_measurement_start,
@@ -2701,7 +2751,15 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         if slow_peer_success < 1:
             status_failures.append(
                 "the dedicated pressure peer did not emit actor-ready tokens before, "
-                "inside, and after the attributed slow-consumer pressure window"
+                "inside, and after the attributed slow-consumer pressure window "
+                f"(ready before/inside/after="
+                f"{values['pressure_peer_ready_before_count']}/"
+                f"{values['pressure_peer_ready_inside_count']}/"
+                f"{values['pressure_peer_ready_after_count']}; pressure started "
+                f"{values['pressure_window_start_after_peer_dispatch_ms']:.3f} ms "
+                f"after peer dispatch and lasted "
+                f"{values['pressure_window_duration_ms']:.3f} ms; first ready at "
+                f"{values['pressure_peer_first_ready_after_dispatch_ms']:.3f} ms)"
             )
         if not delivery_pressure_observed:
             status_failures.append(
