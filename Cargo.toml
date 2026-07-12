@@ -98,7 +98,7 @@ axum = { version = "0.8", features = ["json", "multipart", "ws"] }
 socket2 = "0.6.4"
 portable-pty = "0.9"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
