@@ -1,0 +1,949 @@
+//! Verified CLI transport for immutable Hugging Face TRL/PEFT exports.
+
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader};
+use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail, ensure};
+use console::style;
+use flate2::bufread::GzDecoder;
+use kiln_train::{HF_TRL_BUNDLE_SUFFIX, HfTrlExportManifestV1, HfTrlTask};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
+
+const MAX_JSON_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 4096;
+const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_EXPANDED_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const HTTP_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Clone)]
+pub struct ExportSftOptions {
+    pub url: String,
+    pub file: Option<String>,
+    pub dataset: Option<String>,
+    pub name: String,
+    pub output: Option<PathBuf>,
+    pub invalid_row_policy: String,
+    pub input_adapter: Option<String>,
+    pub split_manifest: Option<PathBuf>,
+    pub keep_server_copy: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ExportSummary {
+    name: String,
+    task: HfTrlTask,
+    export_sha256: String,
+    source_name: String,
+    row_count: u64,
+    ordered_corpus_sha256: String,
+    input_adapter: Option<String>,
+    bundle_filename: String,
+    download_url: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ExportList {
+    data: Vec<ExportSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteExportResponse {
+    status: String,
+    name: String,
+}
+
+struct DownloadedBundle {
+    manifest: HfTrlExportManifestV1,
+    archive_sha256: String,
+    archive_bytes: u64,
+}
+
+fn build_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(HTTP_READ_IDLE_TIMEOUT)
+        .build()
+        .context("building HF/TRL export HTTP client")
+}
+
+fn endpoint(base_url: &str, path: &str) -> Result<reqwest::Url> {
+    let base_url = base_url.trim();
+    ensure!(!base_url.is_empty(), "server URL must not be empty");
+    let parsed = reqwest::Url::parse(base_url).context("parsing server URL")?;
+    ensure!(
+        matches!(parsed.scheme(), "http" | "https"),
+        "server URL must use http or https"
+    );
+    ensure!(
+        parsed.query().is_none() && parsed.fragment().is_none(),
+        "server URL must not contain a query or fragment"
+    );
+    ensure!(
+        parsed.username().is_empty() && parsed.password().is_none(),
+        "server URL must not contain embedded credentials"
+    );
+    reqwest::Url::parse(&format!("{}{path}", base_url.trim_end_matches('/')))
+        .context("building HF/TRL export endpoint URL")
+}
+
+fn validate_export_name(name: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty()
+            && name.len() <= 128
+            && name.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'-' | b'_'))
+            }),
+        "export name must be 1..=128 ASCII bytes, start with an alphanumeric character, and contain only alphanumerics, '-' or '_'"
+    );
+    Ok(())
+}
+
+fn validate_export_sha256(digest: &str) -> Result<()> {
+    ensure!(
+        digest.len() == "sha256:".len() + 64
+            && digest.starts_with("sha256:")
+            && digest["sha256:".len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "export identity must be lowercase sha256:<64-hex>"
+    );
+    Ok(())
+}
+
+fn validate_export_etag(
+    headers: &reqwest::header::HeaderMap,
+    expected_export_sha256: &str,
+) -> Result<()> {
+    let mut values = headers.get_all(reqwest::header::ETAG).iter();
+    let value = values
+        .next()
+        .context("HF/TRL export response is missing its ETag identity")?;
+    ensure!(
+        values.next().is_none(),
+        "HF/TRL export response contains multiple ETag identities"
+    );
+    let value = value
+        .to_str()
+        .context("HF/TRL export ETag must be visible ASCII")?;
+    ensure!(
+        value == format!("\"{expected_export_sha256}\""),
+        "HF/TRL export ETag {value:?} differs from identity {expected_export_sha256}"
+    );
+    Ok(())
+}
+
+fn destination_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn ensure_available_destination(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => bail!(
+            "refusing to overwrite existing HF/TRL export output {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("inspecting {}", path.display())),
+    }
+    let parent = destination_parent(path);
+    let metadata = fs::metadata(parent)
+        .with_context(|| format!("inspecting output directory {}", parent.display()))?;
+    ensure!(
+        metadata.is_dir(),
+        "output parent is not a directory: {}",
+        parent.display()
+    );
+    Ok(())
+}
+
+fn read_split_manifest(path: &Path) -> Result<serde_json::Value> {
+    let bytes =
+        fs::read(path).with_context(|| format!("reading split manifest {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing split manifest {} as JSON", path.display()))?;
+    ensure!(
+        value.is_object(),
+        "split manifest must be a JSON object: {}",
+        path.display()
+    );
+    Ok(value)
+}
+
+async fn read_bounded_body(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("reading HTTP response body")?
+    {
+        ensure!(
+            body.len().saturating_add(chunk.len()) <= limit,
+            "HTTP response body exceeds {limit} bytes"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn render_api_error(status: reqwest::StatusCode, body: &[u8]) -> String {
+    let parsed = serde_json::from_slice::<serde_json::Value>(body).ok();
+    if let Some(error) = parsed
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(serde_json::Value::as_object)
+    {
+        let message = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("request failed");
+        let code = error
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown_error");
+        let hint = error
+            .get("hint")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        return if hint.is_empty() {
+            format!("{message} ({code}; HTTP {status})")
+        } else {
+            format!("{message} ({code}; HTTP {status})\n  hint: {hint}")
+        };
+    }
+    let text = String::from_utf8_lossy(body).trim().to_string();
+    if text.is_empty() {
+        format!("HTTP {status}")
+    } else {
+        format!("HTTP {status}: {text}")
+    }
+}
+
+async fn decode_json_response<T: DeserializeOwned>(response: reqwest::Response) -> Result<T> {
+    let status = response.status();
+    let body = read_bounded_body(response, MAX_JSON_RESPONSE_BYTES).await?;
+    if !status.is_success() {
+        bail!("{}", render_api_error(status, &body));
+    }
+    serde_json::from_slice(&body).context("decoding HF/TRL export server response")
+}
+
+fn validate_archive_path(path: &Path, expected_root: &OsStr) -> Result<()> {
+    let mut components = path.components();
+    ensure!(
+        matches!(components.next(), Some(Component::Normal(root)) if root == expected_root),
+        "archive entry must be rooted at {}: {}",
+        expected_root.to_string_lossy(),
+        path.display()
+    );
+    ensure!(
+        components.all(|component| matches!(component, Component::Normal(_))),
+        "archive entry contains an unsafe path component: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn validate_archive_path_bytes(bytes: &[u8], expected_root: &str) -> Result<String> {
+    ensure!(
+        bytes.is_ascii(),
+        "archive entry path must contain only ASCII bytes"
+    );
+    let bytes = bytes.strip_suffix(b"/").unwrap_or(bytes);
+    let mut components = bytes.split(|byte| *byte == b'/');
+    ensure!(
+        components.next() == Some(expected_root.as_bytes()),
+        "archive entry must use the exact root {expected_root}"
+    );
+    for component in components {
+        ensure!(
+            !component.is_empty() && component != b"." && component != b"..",
+            "archive entry contains an empty or relative path component"
+        );
+        ensure!(
+            !component.contains(&b'\\'),
+            "archive entry contains a platform-dependent backslash"
+        );
+    }
+    Ok(String::from_utf8(bytes.to_ascii_lowercase())
+        .expect("ASCII archive path has a UTF-8 lowercase representation"))
+}
+
+pub(crate) fn verify_downloaded_archive(
+    archive_path: &Path,
+    output_parent: &Path,
+    name: &str,
+    expected_export_sha256: &str,
+) -> Result<HfTrlExportManifestV1> {
+    let extraction = tempfile::Builder::new()
+        .prefix(".kiln-hf-verify-")
+        .tempdir_in(output_parent)
+        .with_context(|| {
+            format!(
+                "creating archive verification directory in {}",
+                output_parent.display()
+            )
+        })?;
+    let file = File::open(archive_path)
+        .with_context(|| format!("opening staged archive {}", archive_path.display()))?;
+    let decoder = GzDecoder::new(BufReader::new(file));
+    let mut archive = tar::Archive::new(decoder);
+    let expected_root = format!("{name}{HF_TRL_BUNDLE_SUFFIX}");
+    let mut seen = BTreeSet::new();
+    let mut portable_seen = BTreeSet::new();
+    let mut entry_count = 0usize;
+    let mut expanded_bytes = 0u64;
+    let mut regular_files = 0usize;
+
+    for entry in archive.entries().context("reading gzip tar entries")? {
+        let mut entry = entry.context("reading gzip tar entry")?;
+        entry_count = entry_count.saturating_add(1);
+        ensure!(
+            entry_count <= MAX_ARCHIVE_ENTRIES,
+            "archive exceeds {MAX_ARCHIVE_ENTRIES} entries"
+        );
+        let portable_path = validate_archive_path_bytes(&entry.path_bytes(), &expected_root)?;
+        let path = entry
+            .path()
+            .context("reading archive entry path")?
+            .into_owned();
+        validate_archive_path(&path, OsStr::new(&expected_root))?;
+        ensure!(
+            seen.insert(path.clone()),
+            "archive contains a duplicate entry: {}",
+            path.display()
+        );
+        ensure!(
+            portable_seen.insert(portable_path),
+            "archive contains a case-insensitive or platform path alias: {}",
+            path.display()
+        );
+
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_file() {
+            regular_files = regular_files.saturating_add(1);
+            expanded_bytes = expanded_bytes
+                .checked_add(
+                    entry
+                        .header()
+                        .size()
+                        .context("reading archive entry size")?,
+                )
+                .context("archive expanded-size overflow")?;
+            ensure!(
+                expanded_bytes <= MAX_EXPANDED_ARCHIVE_BYTES,
+                "archive expands beyond {} bytes",
+                MAX_EXPANDED_ARCHIVE_BYTES
+            );
+        } else {
+            ensure!(
+                entry_type.is_dir(),
+                "archive contains a link or special entry at {}",
+                path.display()
+            );
+        }
+        ensure!(
+            entry
+                .unpack_in(extraction.path())
+                .with_context(|| format!("extracting archive entry {}", path.display()))?,
+            "archive entry escaped the verification directory: {}",
+            path.display()
+        );
+    }
+    ensure!(regular_files > 0, "archive contains no regular files");
+
+    // tar stops at its end marker. Read the decoder to EOF as well so gzip
+    // trailer/checksum failures cannot be hidden behind an otherwise valid tar.
+    let mut decoder = archive.into_inner();
+    io::copy(&mut decoder, &mut io::sink()).context("validating gzip trailer")?;
+    let mut compressed = decoder.into_inner();
+    ensure!(
+        compressed
+            .fill_buf()
+            .context("checking for trailing archive bytes")?
+            .is_empty(),
+        "archive contains bytes or another gzip member after its gzip trailer"
+    );
+
+    let root = extraction.path().join(&expected_root);
+    let metadata = fs::symlink_metadata(&root)
+        .with_context(|| format!("archive is missing top directory {expected_root}"))?;
+    ensure!(
+        metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+        "archive top path is not a real directory: {expected_root}"
+    );
+    let manifest = kiln_train::verify_hf_trl_export_bundle(&root)
+        .context("verifying downloaded pristine HF/TRL bundle")?;
+    ensure!(
+        manifest.export_sha256 == expected_export_sha256,
+        "downloaded export identity {} differs from create response {}",
+        manifest.export_sha256,
+        expected_export_sha256
+    );
+    Ok(manifest)
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+async fn download_and_publish(
+    client: &reqwest::Client,
+    base_url: &str,
+    summary: &ExportSummary,
+    output: &Path,
+) -> Result<DownloadedBundle> {
+    ensure_available_destination(output)?;
+    let parent = destination_parent(output);
+    let mut staged = tempfile::Builder::new()
+        .prefix(".kiln-hf-download-")
+        .tempfile_in(parent)
+        .with_context(|| format!("creating staged download in {}", parent.display()))?;
+    let staged_path = staged.path().to_path_buf();
+    let mut async_file = tokio::fs::File::from_std(
+        staged
+            .as_file()
+            .try_clone()
+            .context("cloning staged download handle")?,
+    );
+
+    let download_url = endpoint(
+        base_url,
+        &format!("/v1/train/hf/exports/{}/download", summary.name),
+    )?;
+    let mut response = client
+        .get(download_url)
+        .send()
+        .await
+        .context("requesting HF/TRL export download")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = read_bounded_body(response, MAX_JSON_RESPONSE_BYTES).await?;
+        bail!("{}", render_api_error(status, &body));
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    ensure!(
+        content_type
+            .split(';')
+            .next()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/gzip")),
+        "download returned unexpected content type {content_type:?}"
+    );
+    validate_export_etag(response.headers(), &summary.export_sha256)?;
+    if let Some(content_length) = response.content_length() {
+        ensure!(
+            content_length <= MAX_ARCHIVE_BYTES,
+            "download declares {content_length} bytes; maximum archive size is {MAX_ARCHIVE_BYTES} bytes"
+        );
+    }
+
+    let mut archive_hasher = Sha256::new();
+    let mut archive_bytes = 0u64;
+    while let Some(chunk) = response.chunk().await.context("streaming HF/TRL export")? {
+        archive_bytes = archive_bytes
+            .checked_add(u64::try_from(chunk.len()).context("download chunk length overflow")?)
+            .context("download size overflow")?;
+        ensure!(
+            archive_bytes <= MAX_ARCHIVE_BYTES,
+            "download exceeds maximum archive size of {MAX_ARCHIVE_BYTES} bytes"
+        );
+        archive_hasher.update(&chunk);
+        async_file
+            .write_all(&chunk)
+            .await
+            .context("writing staged HF/TRL export")?;
+    }
+    ensure!(archive_bytes > 0, "downloaded HF/TRL archive is empty");
+    async_file
+        .flush()
+        .await
+        .context("flushing staged HF/TRL export")?;
+    async_file
+        .sync_all()
+        .await
+        .context("syncing staged HF/TRL export")?;
+    drop(async_file);
+
+    let expected_sha256 = summary.export_sha256.clone();
+    let name = summary.name.clone();
+    let verification_parent = parent.to_path_buf();
+    let manifest = tokio::task::spawn_blocking(move || {
+        verify_downloaded_archive(&staged_path, &verification_parent, &name, &expected_sha256)
+    })
+    .await
+    .context("archive verification worker panicked")??;
+
+    let digest = archive_hasher.finalize();
+    let archive_sha256 = format!("sha256:{}", hex_digest(digest.as_slice()));
+    staged
+        .as_file_mut()
+        .sync_all()
+        .context("syncing staged archive before publication")?;
+    staged.persist_noclobber(output).map_err(|error| {
+        anyhow::anyhow!(
+            "publishing verified archive {} without overwrite: {}",
+            output.display(),
+            error.error
+        )
+    })?;
+    sync_directory(parent)
+        .with_context(|| format!("syncing output directory {}", parent.display()))?;
+
+    Ok(DownloadedBundle {
+        manifest,
+        archive_sha256,
+        archive_bytes,
+    })
+}
+
+async fn delete_export(
+    client: &reqwest::Client,
+    base_url: &str,
+    name: &str,
+    expected_export_sha256: Option<&str>,
+    missing_is_success: bool,
+) -> Result<()> {
+    let mut request = client.delete(endpoint(base_url, &format!("/v1/train/hf/exports/{name}"))?);
+    if let Some(expected) = expected_export_sha256 {
+        request = request.header(reqwest::header::IF_MATCH, format!("\"{expected}\""));
+    }
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("deleting server HF/TRL export {name}"))?;
+    let status = response.status();
+    let body = read_bounded_body(response, MAX_JSON_RESPONSE_BYTES).await?;
+    if missing_is_success && status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    if !status.is_success() {
+        bail!("{}", render_api_error(status, &body));
+    }
+    let deleted: DeleteExportResponse =
+        serde_json::from_slice(&body).context("decoding HF/TRL delete response")?;
+    ensure!(
+        deleted.status == "deleted" && deleted.name == name,
+        "server returned an inconsistent HF/TRL delete receipt"
+    );
+    Ok(())
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn shell_quote(value: &Path) -> String {
+    shell_quote_text(&value.to_string_lossy())
+}
+
+fn shell_quote_text(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+pub async fn run_export_sft(options: ExportSftOptions) -> Result<()> {
+    validate_export_name(&options.name)?;
+    ensure!(
+        matches!(options.invalid_row_policy.as_str(), "fail" | "skip"),
+        "invalid row policy must be fail or skip"
+    );
+    let output = options.output.clone().unwrap_or_else(|| {
+        PathBuf::from(format!("{}{}.tar.gz", options.name, HF_TRL_BUNDLE_SUFFIX))
+    });
+    ensure_available_destination(&output)?;
+
+    let file = options
+        .file
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let dataset = options
+        .dataset
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    ensure!(
+        matches!((file, dataset), (Some(_), None) | (None, Some(_))),
+        "exactly one non-blank --file or --dataset is required"
+    );
+    let split_manifest = options
+        .split_manifest
+        .as_deref()
+        .map(read_split_manifest)
+        .transpose()?;
+
+    let mut request = serde_json::Map::new();
+    request.insert("name".to_string(), options.name.clone().into());
+    request.insert(
+        "invalid_row_policy".to_string(),
+        options.invalid_row_policy.clone().into(),
+    );
+    if let Some(file) = file {
+        request.insert("dataset_path".to_string(), file.into());
+    }
+    if let Some(dataset) = dataset {
+        request.insert("dataset".to_string(), dataset.into());
+    }
+    if let Some(input_adapter) = options.input_adapter.as_deref() {
+        ensure!(!input_adapter.is_empty(), "input adapter must not be blank");
+        request.insert("input_adapter".to_string(), input_adapter.into());
+    }
+    if let Some(split_manifest) = split_manifest {
+        request.insert("split_manifest".to_string(), split_manifest);
+    }
+
+    let client = build_client()?;
+    println!(
+        "{} Creating immutable HF/TRL SFT export '{}'",
+        style("→").cyan().bold(),
+        style(&options.name).white().bold()
+    );
+    let response = client
+        .post(endpoint(&options.url, "/v1/train/hf/sft/exports")?)
+        .json(&serde_json::Value::Object(request))
+        .send()
+        .await
+        .context("creating server HF/TRL SFT export")?;
+    let response_headers = response.headers().clone();
+    let summary: ExportSummary = decode_json_response(response).await?;
+    validate_export_sha256(&summary.export_sha256)?;
+    validate_export_etag(&response_headers, &summary.export_sha256)?;
+    ensure!(
+        summary.name == options.name
+            && summary.task == HfTrlTask::Sft
+            && summary.bundle_filename == format!("{}{}", options.name, HF_TRL_BUNDLE_SUFFIX)
+            && summary.download_url == format!("/v1/train/hf/exports/{}/download", options.name),
+        "server returned an inconsistent HF/TRL export summary"
+    );
+
+    println!(
+        "{} Streaming and verifying {} row(s) into {}",
+        style("→").cyan().bold(),
+        summary.row_count,
+        output.display()
+    );
+    let downloaded = download_and_publish(&client, &options.url, &summary, &output)
+        .await
+        .with_context(|| {
+            format!(
+                "server export '{}' remains available; retry the download or remove only identity {} with: kiln train hf delete --name {} --export-sha256 {} --url {}",
+                options.name,
+                summary.export_sha256,
+                options.name,
+                summary.export_sha256,
+                shell_quote_text(&options.url),
+            )
+        })?;
+
+    let server_copy_removed = if options.keep_server_copy {
+        false
+    } else {
+        match delete_export(
+            &client,
+            &options.url,
+            &options.name,
+            Some(&summary.export_sha256),
+            true,
+        )
+        .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!(
+                    "{} verified local archive is safe, but server cleanup failed: {error:#}",
+                    style("warning:").yellow().bold()
+                );
+                eprintln!(
+                    "  retry safely with: kiln train hf delete --name {} --export-sha256 {} --url {}",
+                    options.name,
+                    summary.export_sha256,
+                    shell_quote_text(&options.url)
+                );
+                false
+            }
+        }
+    };
+
+    println!(
+        "{} Published verified HF/TRL export {}",
+        style("✓").green().bold(),
+        output.display()
+    );
+    println!("export_sha256: {}", downloaded.manifest.export_sha256);
+    println!("archive_sha256: {}", downloaded.archive_sha256);
+    println!("archive_bytes: {}", downloaded.archive_bytes);
+    println!("rows: {}", downloaded.manifest.data.row_count);
+    println!(
+        "server_copy: {}",
+        if options.keep_server_copy {
+            "retained"
+        } else if server_copy_removed {
+            "removed"
+        } else {
+            "cleanup required"
+        }
+    );
+
+    let parent = destination_parent(&output);
+    let bundle = parent.join(format!("{}{}", options.name, HF_TRL_BUNDLE_SUFFIX));
+    println!("next:");
+    println!(
+        "  tar -xzf {} -C {}",
+        shell_quote(&output),
+        shell_quote(parent)
+    );
+    println!(
+        "  python {} {} --base-model /absolute/path/to/hf-model",
+        shell_quote(&bundle.join("train.py")),
+        shell_quote(&bundle)
+    );
+    Ok(())
+}
+
+pub async fn run_list(base_url: &str, json: bool) -> Result<()> {
+    let client = build_client()?;
+    let response = client
+        .get(endpoint(base_url, "/v1/train/hf/exports")?)
+        .send()
+        .await
+        .context("listing server HF/TRL exports")?;
+    let exports: ExportList = decode_json_response(response).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&exports)?);
+        return Ok(());
+    }
+    if exports.data.is_empty() {
+        println!("No server HF/TRL exports.");
+        return Ok(());
+    }
+    for export in exports.data {
+        let task = match export.task {
+            HfTrlTask::Sft => "sft",
+            HfTrlTask::Grpo => "grpo",
+        };
+        let adapter = export.input_adapter.as_deref().unwrap_or("new adapter");
+        println!(
+            "{}  task={} rows={} source={} input={}\n  {}",
+            style(export.name).white().bold(),
+            task,
+            export.row_count,
+            export.source_name,
+            adapter,
+            export.export_sha256
+        );
+    }
+    Ok(())
+}
+
+pub async fn run_delete(
+    base_url: &str,
+    name: &str,
+    expected_export_sha256: Option<&str>,
+) -> Result<()> {
+    validate_export_name(name)?;
+    if let Some(expected) = expected_export_sha256 {
+        validate_export_sha256(expected)?;
+    }
+    let client = build_client()?;
+    delete_export(&client, base_url, name, expected_export_sha256, false).await?;
+    println!(
+        "{} Deleted server HF/TRL export '{}'",
+        style("✓").green().bold(),
+        style(name).white().bold()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    fn write_test_archive(path: &Path, entries: &[(&str, tar::EntryType, &[u8])]) {
+        let file = File::create(path).unwrap();
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for (path, entry_type, bytes) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(*entry_type);
+            header.set_mode(0o600);
+            header.set_size(u64::try_from(bytes.len()).unwrap());
+            header.set_cksum();
+            archive.append_data(&mut header, path, *bytes).unwrap();
+        }
+        archive.into_inner().unwrap().finish().unwrap();
+    }
+
+    #[test]
+    fn export_name_validation_matches_server_contract() {
+        for valid in ["a", "run-01", "run_01", "A9"] {
+            validate_export_name(valid).unwrap();
+        }
+        for invalid in ["", "-run", "_run", "run.x", "run/path", "é"] {
+            assert!(
+                validate_export_name(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        assert!(validate_export_name(&"a".repeat(129)).is_err());
+        validate_export_sha256(&format!("sha256:{}", "a".repeat(64))).unwrap();
+        assert!(validate_export_sha256(&format!("sha256:{}", "A".repeat(64))).is_err());
+        assert!(validate_export_sha256("sha256:short").is_err());
+    }
+
+    #[test]
+    fn split_manifest_requires_an_object() {
+        let directory = tempfile::tempdir().unwrap();
+        let object = directory.path().join("object.json");
+        fs::write(&object, br#"{"train":[0]}"#).unwrap();
+        assert!(read_split_manifest(&object).unwrap().is_object());
+        let array = directory.path().join("array.json");
+        fs::write(&array, b"[]").unwrap();
+        assert!(read_split_manifest(&array).is_err());
+    }
+
+    #[test]
+    fn destination_check_rejects_files_and_dangling_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("run.tar.gz");
+        ensure_available_destination(&output).unwrap();
+        fs::write(&output, b"existing").unwrap();
+        assert!(ensure_available_destination(&output).is_err());
+
+        #[cfg(unix)]
+        {
+            let dangling = directory.path().join("dangling.tar.gz");
+            std::os::unix::fs::symlink("missing", &dangling).unwrap();
+            assert!(ensure_available_destination(&dangling).is_err());
+        }
+    }
+
+    #[test]
+    fn archive_paths_require_one_exact_safe_root() {
+        let root = OsStr::new("run.kiln-hf");
+        validate_archive_path(Path::new("run.kiln-hf/manifest.json"), root).unwrap();
+        assert!(validate_archive_path(Path::new("other/manifest.json"), root).is_err());
+        assert!(validate_archive_path(Path::new("../run.kiln-hf/manifest.json"), root).is_err());
+        assert!(validate_archive_path(Path::new("/run.kiln-hf/manifest.json"), root).is_err());
+        assert!(validate_archive_path_bytes(b"run.kiln-hf/manifest.json", "run.kiln-hf").is_ok());
+        for invalid in [
+            b"run.kiln-hf//manifest.json".as_slice(),
+            b"run.kiln-hf/./manifest.json",
+            b"run.kiln-hf/../manifest.json",
+            b"run.kiln-hf\\manifest.json",
+            b"run.kiln-hf/\xff",
+        ] {
+            assert!(
+                validate_archive_path_bytes(invalid, "run.kiln-hf").is_err(),
+                "accepted raw archive path {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_and_etag_validation_fail_closed() {
+        assert!(endpoint("file:///tmp/server", "/v1/test").is_err());
+        assert!(endpoint("http://localhost:8420?x=1", "/v1/test").is_err());
+        assert!(endpoint("http://user:secret@localhost:8420", "/v1/test").is_err());
+        assert_eq!(
+            endpoint("http://localhost:8420/", "/v1/test")
+                .unwrap()
+                .as_str(),
+            "http://localhost:8420/v1/test"
+        );
+
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert!(validate_export_etag(&headers, &digest).is_err());
+        headers.insert(
+            reqwest::header::ETAG,
+            reqwest::header::HeaderValue::from_str(&format!("\"{digest}\"")).unwrap(),
+        );
+        validate_export_etag(&headers, &digest).unwrap();
+        assert!(validate_export_etag(&headers, &format!("sha256:{}", "b".repeat(64))).is_err());
+    }
+
+    #[test]
+    fn archive_verifier_rejects_links_before_unpacking() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("link.tar.gz");
+        write_test_archive(
+            &archive,
+            &[("run.kiln-hf/link", tar::EntryType::new(b'2'), b"")],
+        );
+        let error = verify_downloaded_archive(&archive, directory.path(), "run", "sha256:unused")
+            .unwrap_err();
+        assert!(error.to_string().contains("link or special"), "{error:#}");
+        assert!(!directory.path().join("run.kiln-hf").exists());
+    }
+
+    #[test]
+    fn archive_verifier_rejects_duplicate_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("duplicate.tar.gz");
+        write_test_archive(
+            &archive,
+            &[
+                ("run.kiln-hf/manifest.json", tar::EntryType::Regular, b"a"),
+                ("run.kiln-hf/manifest.json", tar::EntryType::Regular, b"b"),
+            ],
+        );
+        let error = verify_downloaded_archive(&archive, directory.path(), "run", "sha256:unused")
+            .unwrap_err();
+        assert!(error.to_string().contains("duplicate entry"), "{error:#}");
+    }
+
+    #[test]
+    fn archive_verifier_rejects_case_insensitive_aliases() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("alias.tar.gz");
+        write_test_archive(
+            &archive,
+            &[
+                ("run.kiln-hf/manifest.json", tar::EntryType::Regular, b"a"),
+                ("run.kiln-hf/MANIFEST.JSON", tar::EntryType::Regular, b"b"),
+            ],
+        );
+        let error = verify_downloaded_archive(&archive, directory.path(), "run", "sha256:unused")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("platform path alias"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn archive_verifier_rejects_trailing_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("trailing.tar.gz");
+        write_test_archive(
+            &archive,
+            &[(
+                "run.kiln-hf/manifest.json",
+                tar::EntryType::Regular,
+                b"not reached",
+            )],
+        );
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new().append(true).open(&archive).unwrap();
+        file.write_all(b"trailing").unwrap();
+        let error = verify_downloaded_archive(&archive, directory.path(), "run", "sha256:unused")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("after its gzip trailer"),
+            "{error:#}"
+        );
+    }
+}

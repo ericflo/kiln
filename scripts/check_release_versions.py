@@ -59,7 +59,14 @@ CLI_EXAMPLE_SURFACES = [
 ]
 
 CLI_BINARIES = ("kiln", "./target/release/kiln")
-NO_VALUE_FLAGS = frozenset({"--json", "--quiet", "-q", "--verbose", "-v"})
+NO_VALUE_FLAGS = frozenset({
+    "--json",
+    "--keep-server-copy",
+    "--quiet",
+    "-q",
+    "--verbose",
+    "-v",
+})
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 DOCS_SITE = ROOT / "docs/site"
 DOCS_SITE_URL_ATTR_RE = re.compile(r"\b(?:href|src)\s*=\s*(['\"])(.*?)\1", re.IGNORECASE | re.DOTALL)
@@ -191,6 +198,7 @@ def parse_cli_surface() -> CliSurface:
 
     command_variants = parse_variant_blocks(extract_block_after(text, "pub enum Commands"))
     train_variants = parse_variant_blocks(extract_block_after(text, "pub enum TrainCommands"))
+    hf_train_variants = parse_variant_blocks(extract_block_after(text, "pub enum HfTrainCommands"))
     adapter_variants = parse_variant_blocks(extract_block_after(text, "pub enum AdapterCommands"))
     judge_variants = parse_variant_blocks(extract_block_after(text, "pub enum JudgeCommands"))
 
@@ -205,6 +213,13 @@ def parse_cli_surface() -> CliSurface:
     for variant, block in train_variants.items():
         flags, positionals = parse_arg_fields(block)
         commands[("train", variant_name_to_cli(variant))] = CommandSpec(frozenset(flags), positionals)
+
+    for variant, block in hf_train_variants.items():
+        flags, positionals = parse_arg_fields(block)
+        commands[("train", "hf", variant_name_to_cli(variant))] = CommandSpec(
+            frozenset(flags),
+            positionals,
+        )
 
     for variant, block in adapter_variants.items():
         flags, positionals = parse_arg_fields(block)
@@ -333,19 +348,19 @@ def command_key(tokens: list[str], surface: CliSurface) -> tuple[tuple[str, ...]
     if index >= len(tokens):
         return None, index, None
 
-    first = tokens[index]
-    if first in {"train", "adapters", "judge"}:
-        if index + 1 >= len(tokens):
-            return None, index, f"unknown subcommand {' '.join(tokens[1:index + 1])!r}"
-        key = (first, tokens[index + 1])
-        if key not in surface.commands:
-            return None, index + 1, f"unknown subcommand {' '.join(key)!r}"
-        return key, index + 2, None
+    max_depth = max(map(len, surface.commands), default=1)
+    for depth in range(max_depth, 0, -1):
+        key = tuple(tokens[index : index + depth])
+        if len(key) == depth and key in surface.commands:
+            return key, index + depth, None
 
-    key = (first,)
-    if key not in surface.commands:
-        return None, index, f"unknown subcommand {first!r}"
-    return key, index + 1, None
+    command_tokens: list[str] = []
+    for token in tokens[index : index + max_depth]:
+        if token.startswith("-"):
+            break
+        command_tokens.append(token)
+    unknown = " ".join(command_tokens) or tokens[index]
+    return None, index, f"unknown subcommand {unknown!r}"
 
 
 def check_cli_command(tokens: list[str], surface: CliSurface) -> str | None:

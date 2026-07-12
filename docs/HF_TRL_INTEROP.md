@@ -143,9 +143,13 @@ The remaining management routes are:
   and streams a gzip-compressed tar whose top directory is
   `{name}.kiln-hf`; it is never buffered as one archive in memory.
 - `DELETE /v1/train/hf/exports/{name}` durably renames and removes an export.
-  Download first when the bundle must be retained. Explicit deletion validates
-  the registry target shape rather than requiring intact artifact bytes, so an
-  operator can remove a damaged export that cannot be listed or downloaded.
+  Download first when the bundle must be retained. Creation, detail, and
+  download return the quoted `export_sha256` as `ETag`. Send that value in
+  `If-Match` to delete only those exact bytes; a name reused for a different
+  identity returns HTTP 412. An explicit unconditioned operator deletion
+  validates the registry target shape rather than requiring intact artifact
+  bytes, so a damaged export that cannot be listed or downloaded remains
+  removable.
 
 The registry is private (`0700` on Unix). Export creation, download, and
 deletion share a dedicated lock; an optional adapter snapshot additionally
@@ -155,6 +159,77 @@ Crash-left staging and deletion directories are removed on the next creation,
 but unexpected symlinks or special entries fail closed. Download responses use
 `Cache-Control: private, no-store` because a deliberately deleted name may be
 reused for different bytes.
+
+## Verified CLI Handoff
+
+The CLI performs creation, download, local verification, atomic publication,
+and server cleanup as one fail-closed workflow:
+
+```bash
+mkdir -p ./handoffs
+kiln train hf export-sft \
+  --file /data/support-sft.jsonl \
+  --name support_run_01 \
+  --output ./handoffs/support_run_01.tar.gz \
+  --invalid-row-policy fail \
+  --input-adapter support-base \
+  --split-manifest ./support-split.json
+```
+
+`--file` is a path in the running server's filesystem. It intentionally has
+the same server-local meaning as native JSONL training and is not uploaded from
+the CLI host. Use `--dataset corrections:active` to snapshot active
+corrections without marking them trained, or pass another named server
+dataset. Exactly one of `--file` and `--dataset` is required. The optional
+split file is read by the CLI and must contain a JSON object.
+
+The default local output is `{name}.kiln-hf.tar.gz`. Before creating anything
+on the server, the CLI rejects an existing output, a missing output directory,
+an invalid name or policy, and an invalid split manifest. It uses an HTTP
+client with redirects disabled and computes the compressed archive SHA-256
+while streaming into a private sibling temporary file. It does not trust the
+response's `download_url`; it constructs the expected name-bound endpoint
+itself. Creation and download must both return a strong `ETag` equal to the
+manifest identity. A response that remains idle for 120 seconds or a compressed
+archive larger than 64 GiB fails instead of consuming unbounded time or disk.
+
+Before local publication, the CLI extracts into a private temporary directory
+and requires no more than 4096 entries and 64 GiB of declared expanded bytes.
+Every tar entry must be a regular file or directory under the single exact
+`{name}.kiln-hf` root; absolute paths, parent traversal, links, special files,
+duplicate paths, extra roots, invalid gzip trailers, and empty archives fail.
+The pristine bundle verifier then checks the exact recursive file set,
+manifest self-digest, every artifact hash and size, and equality with the
+creation receipt's `export_sha256`.
+
+Only a fully verified archive is published with a no-clobber atomic rename
+followed by a parent-directory sync. Failure leaves no partial local output
+and retains the named server export for an explicit retry. After successful
+local publication the CLI deletes the server copy by default with
+`If-Match: "{export_sha256}"`, so concurrent name reuse cannot delete a
+replacement export. Cleanup failure does not discard or mislabel the verified
+local artifact; it prints the exact retry command. Use `--keep-server-copy` to
+retain it deliberately.
+
+```bash
+kiln train hf list
+kiln train hf list --json
+kiln train hf delete \
+  --name support_run_01 \
+  --export-sha256 sha256:<64-hex-from-create-or-list>
+```
+
+Omitting `--export-sha256` is an intentional unconditioned operator deletion.
+Use it only after inspecting the current name, or when a damaged manifest
+prevents identity-conditional cleanup.
+
+After extraction, run the copy embedded in the bundle:
+
+```bash
+tar -xzf support_run_01.kiln-hf.tar.gz
+python ./support_run_01.kiln-hf/train.py ./support_run_01.kiln-hf \
+  --base-model /absolute/path/to/the/hf-model
+```
 
 ## Pinned SFT Runner
 

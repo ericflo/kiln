@@ -8,7 +8,9 @@ use clap::Parser;
 use socket2::{SockRef, Socket};
 
 use kiln_server::api;
-use kiln_server::cli::{self, AdapterCommands, Cli, Commands, TrainCommands, TrajectoryCommands};
+use kiln_server::cli::{
+    self, AdapterCommands, Cli, Commands, HfTrainCommands, TrainCommands, TrajectoryCommands,
+};
 use kiln_server::config::KilnConfig;
 use kiln_server::device::select_device_with_options_kt;
 use kiln_server::state;
@@ -302,6 +304,49 @@ async fn main() -> Result<()> {
                 )
                 .await;
             }
+            TrainCommands::Hf(command) => match command {
+                HfTrainCommands::ExportSft {
+                    file,
+                    dataset,
+                    name,
+                    output,
+                    invalid_row_policy,
+                    input_adapter,
+                    split_manifest,
+                    keep_server_copy,
+                    url,
+                } => {
+                    return kiln_server::hf_train_cli::run_export_sft(
+                        kiln_server::hf_train_cli::ExportSftOptions {
+                            url: url.clone(),
+                            file: file.clone(),
+                            dataset: dataset.clone(),
+                            name: name.clone(),
+                            output: output.clone(),
+                            invalid_row_policy: invalid_row_policy.clone(),
+                            input_adapter: input_adapter.clone(),
+                            split_manifest: split_manifest.clone(),
+                            keep_server_copy: *keep_server_copy,
+                        },
+                    )
+                    .await;
+                }
+                HfTrainCommands::List { json, url } => {
+                    return kiln_server::hf_train_cli::run_list(url, *json).await;
+                }
+                HfTrainCommands::Delete {
+                    name,
+                    export_sha256,
+                    url,
+                } => {
+                    return kiln_server::hf_train_cli::run_delete(
+                        url,
+                        name,
+                        export_sha256.as_deref(),
+                    )
+                    .await;
+                }
+            },
             TrainCommands::Status { job_id, url } => {
                 return cli::run_train_status(url, job_id.as_deref()).await;
             }

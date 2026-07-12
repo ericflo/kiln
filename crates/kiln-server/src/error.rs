@@ -515,6 +515,22 @@ impl ApiError {
         }
     }
 
+    pub fn hf_trl_export_precondition_failed(
+        name: impl std::fmt::Display,
+        expected: impl std::fmt::Display,
+        actual: impl std::fmt::Display,
+    ) -> Self {
+        Self {
+            status: StatusCode::PRECONDITION_FAILED,
+            code: "hf_trl_export_precondition_failed",
+            message: format!(
+                "HF/TRL export '{name}' has identity {actual}, not the If-Match identity {expected}"
+            ),
+            hint: "Do not delete this replacement export. List current exports and retry only with the intended export identity.",
+            retry_after_seconds: None,
+        }
+    }
+
     pub fn hf_trl_export_failed(detail: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

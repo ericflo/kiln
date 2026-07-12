@@ -29,6 +29,7 @@ Common next steps:
   kiln train sft      train a LoRA adapter from corrections
   kiln train grpo     train a LoRA adapter from scored completions
   kiln train opd      distill a LoRA adapter from a registered teacher
+  kiln train hf       create or manage a verified HF/TRL handoff
   kiln adapters list  list saved adapters and show which one is active
 "#;
 
@@ -49,6 +50,9 @@ const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
 
   kiln train opd --file opd-request.json --adapter distilled-task --teacher teacher-v1
       Distill an adapter from a registered teacher with exact resume points.
+
+  kiln train hf export-sft --file /data/examples.jsonl --name my-task-hf
+      Create, download, and verify an immutable bundle for the pinned HF/TRL runner.
 
   kiln adapters list
       Show saved adapters and which adapter is active on the running server.
@@ -115,12 +119,14 @@ SFT reads JSONL: one chat correction example per line with a messages array. GRP
 
 Add --adapter-smoke-test to record a small base-vs-adapter canary check in train_receipt.json after successful training.
 
+Use `kiln train hf export-sft` to create, download, and verify an immutable handoff bundle for the pinned Hugging Face TRL/PEFT correctness runner. The export source path is read by the server process, not uploaded by the CLI.
+
 Prefer http://127.0.0.1:8420/ui/ for guided submission and status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
 
 const TRAIN_SFT_OVERVIEW: &str = r#"Train from SFT JSONL: one chat correction example per line with a messages array.
 
-Native SFT uses the fixed native_online_lora_v1 online-LoRA profile: one conversation and one optimizer update at a time, constant learning rate, and no accumulation, warmup, decay, or gradient clipping. Use HF/TRL directly for general trainer configuration; Kiln's first-class export/import route is not shipped yet.
+Native SFT uses the fixed native_online_lora_v1 online-LoRA profile: one conversation and one optimizer update at a time, constant learning rate, and no accumulation, warmup, decay, or gradient clipping. Use `kiln train hf export-sft` for an immutable bundle containing the pinned HF/TRL correctness runner when general trainer configuration is required.
 
 Rows fail closed by default. Use --invalid-row-policy skip only when you intend to review the stable kept/rejected row hashes in train_receipt.json.
 
@@ -171,6 +177,12 @@ const TRAIN_EXAMPLES: &str = r#"Examples:
   kiln train opd --file opd-request.json --adapter distilled-bot --teacher teacher-v1 --resume-checkpoint distilled-bot-checkpoint-step-00000025.kiln-checkpoint
       Resume from the exact immutable OPD checkpoint reported by job status.
 
+  kiln train hf export-sft --file /data/corrections.jsonl --name support-hf-01
+      Export a server-local SFT corpus, download and fully verify its immutable HF/TRL bundle, then remove the server copy.
+
+  kiln train hf list
+      List immutable HF/TRL exports still retained by the running server.
+
   kiln train status
       Show the training queue and recent jobs on the running server.
 
@@ -180,6 +192,20 @@ const TRAIN_EXAMPLES: &str = r#"Examples:
   kiln train cancel --job-id train_123
       Cancel a job: queued jobs leave the queue; running jobs stop at the
       next step boundary.
+"#;
+
+const TRAIN_HF_OVERVIEW: &str = r#"Create and manage immutable Hugging Face TRL/PEFT handoff bundles.
+
+`export-sft` asks the running server to snapshot a canonical SFT corpus and optional input adapter, streams the resulting tar.gz into a sibling temporary file, verifies its exact archive shape and every manifest-bound byte, and only then publishes the requested local output without overwriting an existing path.
+
+The `--file` path is server-local: the running Kiln process must be able to read it. Use `--dataset corrections:active` to snapshot active corrections or another named server dataset. Successful local verification removes the server copy by default; pass `--keep-server-copy` when another client still needs it.
+"#;
+
+const TRAIN_HF_EXPORT_SFT_OVERVIEW: &str = r#"Create and download a verified immutable SFT handoff bundle.
+
+Exactly one of `--file` or `--dataset` is required. `--file` names JSONL visible to the server process; it is not uploaded from the CLI machine. `--dataset` names a server-side eval dataset, including the special `corrections:active` snapshot.
+
+The output defaults to `{name}.kiln-hf.tar.gz` in the current directory. Existing output paths are never replaced. The CLI refuses redirects, streams rather than buffering the archive, rejects links and unsafe tar paths, requires exactly one `{name}.kiln-hf` root, and verifies the pristine Kiln manifest before atomic publication.
 "#;
 
 const ADAPTERS_OVERVIEW: &str = r#"Inspect and manage LoRA adapters on the running Kiln server at http://localhost:8420 by default.
@@ -816,6 +842,9 @@ pub enum TrainCommands {
         #[arg(long, default_value_t = default_server_url())]
         url: String,
     },
+    /// Create and manage immutable Hugging Face TRL/PEFT handoff bundles
+    #[command(subcommand, long_about = TRAIN_HF_OVERVIEW)]
+    Hf(HfTrainCommands),
     /// Show training queue / per-job status
     Status {
         /// Specific job ID to look up. If omitted, shows the full queue.
@@ -832,6 +861,78 @@ pub enum TrainCommands {
         /// stop at the next step boundary)
         #[arg(long)]
         job_id: String,
+
+        /// Server URL; defaults to the local kiln serve instance
+        #[arg(long, default_value_t = default_server_url())]
+        url: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum HfTrainCommands {
+    /// Create, download, and verify an immutable SFT handoff bundle
+    #[command(name = "export-sft", long_about = TRAIN_HF_EXPORT_SFT_OVERVIEW)]
+    ExportSft {
+        /// Server-local SFT JSONL path; the CLI does not upload this file
+        #[arg(
+            long,
+            short,
+            conflicts_with = "dataset",
+            required_unless_present = "dataset"
+        )]
+        file: Option<String>,
+
+        /// Named server dataset, including corrections:active
+        #[arg(long, conflicts_with = "file", required_unless_present = "file")]
+        dataset: Option<String>,
+
+        /// Immutable server export name
+        #[arg(long)]
+        name: String,
+
+        /// Local tar.gz destination; defaults to {name}.kiln-hf.tar.gz
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+
+        /// Invalid-row behavior: fail the export or skip and receipt rows
+        #[arg(long, default_value = "fail", value_parser = ["fail", "skip"])]
+        invalid_row_policy: String,
+
+        /// Existing server adapter to snapshot and continue training
+        #[arg(long)]
+        input_adapter: Option<String>,
+
+        /// Local JSON file containing an object-valued split manifest
+        #[arg(long)]
+        split_manifest: Option<PathBuf>,
+
+        /// Retain the verified export in the server registry after download
+        #[arg(long)]
+        keep_server_copy: bool,
+
+        /// Server URL; defaults to the local kiln serve instance
+        #[arg(long, default_value_t = default_server_url())]
+        url: String,
+    },
+    /// List immutable HF/TRL exports retained by the server
+    List {
+        /// Emit the exact server response as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Server URL; defaults to the local kiln serve instance
+        #[arg(long, default_value_t = default_server_url())]
+        url: String,
+    },
+    /// Delete one immutable HF/TRL export from the server
+    Delete {
+        /// Export name
+        #[arg(long)]
+        name: String,
+
+        /// Delete only when the current export has this sha256:<64-hex> identity
+        #[arg(long)]
+        export_sha256: Option<String>,
 
         /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value_t = default_server_url())]
@@ -4508,6 +4609,148 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn parses_hf_sft_export_and_requires_exactly_one_source() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "kiln",
+            "train",
+            "hf",
+            "export-sft",
+            "--file",
+            "/srv/data/rows.jsonl",
+            "--name",
+            "portable-run",
+            "--output",
+            "artifacts/portable.tar.gz",
+            "--invalid-row-policy",
+            "skip",
+            "--input-adapter",
+            "seed-adapter",
+            "--split-manifest",
+            "split.json",
+            "--keep-server-copy",
+        ])
+        .expect("parse failed");
+        match cli.command {
+            Some(Commands::Train(TrainCommands::Hf(HfTrainCommands::ExportSft {
+                file,
+                dataset,
+                name,
+                output,
+                invalid_row_policy,
+                input_adapter,
+                split_manifest,
+                keep_server_copy,
+                url,
+            }))) => {
+                assert_eq!(file.as_deref(), Some("/srv/data/rows.jsonl"));
+                assert!(dataset.is_none());
+                assert_eq!(name, "portable-run");
+                assert_eq!(output, Some(PathBuf::from("artifacts/portable.tar.gz")));
+                assert_eq!(invalid_row_policy, "skip");
+                assert_eq!(input_adapter.as_deref(), Some("seed-adapter"));
+                assert_eq!(split_manifest, Some(PathBuf::from("split.json")));
+                assert!(keep_server_copy);
+                assert_eq!(url, "http://localhost:8420");
+            }
+            other => panic!("expected Train(Hf(ExportSft)), got {:?}", other.is_some()),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "kiln",
+                "train",
+                "hf",
+                "export-sft",
+                "--name",
+                "missing-source",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "kiln",
+                "train",
+                "hf",
+                "export-sft",
+                "--file",
+                "rows.jsonl",
+                "--dataset",
+                "corrections:active",
+                "--name",
+                "two-sources",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_hf_dataset_list_and_delete_commands() {
+        use clap::Parser;
+        let export = Cli::try_parse_from([
+            "kiln",
+            "train",
+            "hf",
+            "export-sft",
+            "--dataset",
+            "corrections:active",
+            "--name",
+            "corrections-01",
+        ])
+        .unwrap();
+        assert!(matches!(
+            export.command,
+            Some(Commands::Train(TrainCommands::Hf(
+                HfTrainCommands::ExportSft {
+                    file: None,
+                    dataset: Some(_),
+                    ..
+                }
+            )))
+        ));
+
+        let list = Cli::try_parse_from(["kiln", "train", "hf", "list", "--json"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Some(Commands::Train(TrainCommands::Hf(HfTrainCommands::List {
+                json: true,
+                ..
+            })))
+        ));
+
+        let delete =
+            Cli::try_parse_from(["kiln", "train", "hf", "delete", "--name", "corrections-01"])
+                .unwrap();
+        assert!(matches!(
+            delete.command,
+            Some(Commands::Train(TrainCommands::Hf(HfTrainCommands::Delete {
+                name,
+                export_sha256: None,
+                ..
+            }))) if name == "corrections-01"
+        ));
+
+        let conditional_delete = Cli::try_parse_from([
+            "kiln",
+            "train",
+            "hf",
+            "delete",
+            "--name",
+            "corrections-01",
+            "--export-sha256",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .unwrap();
+        assert!(matches!(
+            conditional_delete.command,
+            Some(Commands::Train(TrainCommands::Hf(HfTrainCommands::Delete {
+                export_sha256: Some(identity),
+                ..
+            }))) if identity.starts_with("sha256:")
+        ));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, State, rejection::JsonRejection};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -118,6 +118,45 @@ fn validate_export_name(name: &str) -> Result<(), ApiError> {
 
 fn bundle_filename(name: &str) -> String {
     format!("{name}{HF_TRL_BUNDLE_SUFFIX}")
+}
+
+fn export_etag(export_sha256: &str) -> Result<HeaderValue, ApiError> {
+    HeaderValue::from_str(&format!("\"{export_sha256}\""))
+        .map_err(|error| ApiError::hf_trl_export_failed(format!("export ETag: {error}")))
+}
+
+fn parse_delete_if_match(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let mut values = headers.get_all(header::IF_MATCH).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(ApiError::hf_trl_invalid_request(
+            "DELETE accepts at most one If-Match header",
+        ));
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| ApiError::hf_trl_invalid_request("If-Match must be visible ASCII"))?;
+    let digest = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .ok_or_else(|| {
+            ApiError::hf_trl_invalid_request(
+                "If-Match must be one strong quoted export SHA-256 entity tag",
+            )
+        })?;
+    if digest.len() != "sha256:".len() + 64
+        || !digest.starts_with("sha256:")
+        || !digest["sha256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(ApiError::hf_trl_invalid_request(
+            "If-Match must contain a lowercase sha256:<64-hex> export identity",
+        ));
+    }
+    Ok(Some(digest.to_string()))
 }
 
 fn registry_path(adapter_dir: &Path) -> PathBuf {
@@ -381,7 +420,7 @@ struct PreparedExport {
 async fn create_sft_export(
     State(state): State<AppState>,
     payload: Result<Json<SftExportRequest>, JsonRejection>,
-) -> Result<(StatusCode, Json<ExportSummary>), ApiError> {
+) -> Result<Response, ApiError> {
     let request = payload.map(|Json(request)| request).map_err(|error| {
         ApiError::hf_trl_invalid_request(format!("invalid SFT export JSON: {}", error.body_text()))
     })?;
@@ -481,10 +520,13 @@ async fn create_sft_export(
     .map_err(|error| ApiError::hf_trl_export_failed(format!("{error:#}")))?;
 
     tracing::info!(export = %name, export_sha256 = %manifest.export_sha256, rows = manifest.data.row_count, "published immutable HF/TRL SFT export");
+    let etag = export_etag(&manifest.export_sha256)?;
     Ok((
         StatusCode::CREATED,
+        [(header::ETAG, etag)],
         Json(ExportSummary::from_manifest(&name, &manifest)),
-    ))
+    )
+        .into_response())
 }
 
 fn list_exports_sync(adapter_dir: &Path) -> anyhow::Result<Vec<ExportSummary>> {
@@ -529,7 +571,7 @@ async fn list_exports(State(state): State<AppState>) -> Result<Json<ExportList>,
 async fn get_export(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
-) -> Result<Json<ExportDetail>, ApiError> {
+) -> Result<Response, ApiError> {
     validate_export_name(&name)?;
     let guard = state.hf_trl_export_lock.clone().lock_owned().await;
     let path = bundle_path(&state.adapter_dir, &name);
@@ -543,10 +585,15 @@ async fn get_export(
     .await
     .map_err(|error| ApiError::hf_trl_export_failed(format!("verify worker panicked: {error}")))?
     .map_err(|error| ApiError::hf_trl_export_failed(format!("{error:#}")))?;
-    Ok(Json(ExportDetail {
-        summary: ExportSummary::from_manifest(&name, &manifest),
-        manifest,
-    }))
+    let etag = export_etag(&manifest.export_sha256)?;
+    Ok((
+        [(header::ETAG, etag)],
+        Json(ExportDetail {
+            summary: ExportSummary::from_manifest(&name, &manifest),
+            manifest,
+        }),
+    )
+        .into_response())
 }
 
 fn append_bundle_to_tar<W: io::Write>(
@@ -640,6 +687,7 @@ async fn download_export(
     let disposition =
         HeaderValue::from_str(&format!("attachment; filename=\"{archive_name}.tar.gz\""))
             .map_err(|error| ApiError::hf_trl_export_failed(format!("download header: {error}")))?;
+    let etag = export_etag(&manifest.export_sha256)?;
     tracing::info!(export = %name, export_sha256 = %manifest.export_sha256, "streaming verified HF/TRL export");
     Ok((
         StatusCode::OK,
@@ -653,6 +701,7 @@ async fn download_export(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("private, no-store"),
             ),
+            (header::ETAG, etag),
         ],
         Body::from_stream(ReceiverStream::new(rx)),
     )
@@ -666,42 +715,52 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 async fn delete_export(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
 ) -> Result<Json<DeleteExportResponse>, ApiError> {
     validate_export_name(&name)?;
+    let expected_export_sha256 = parse_delete_if_match(&headers)?;
     let guard = state.hf_trl_export_lock.clone().lock_owned().await;
     let adapter_dir = state.adapter_dir.clone();
     let name_for_task = name.clone();
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
         let _guard = guard;
-        let root = existing_registry(&adapter_dir)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "HF/TRL export registry does not exist",
-            )
-        })?;
+        let root = existing_registry(&adapter_dir)
+            .map_err(ApiError::hf_trl_export_failed)?
+            .ok_or_else(|| ApiError::hf_trl_export_not_found(&name_for_task))?;
         let target = root.join(bundle_filename(&name_for_task));
-        let metadata = fs::symlink_metadata(&target)?;
+        let metadata = fs::symlink_metadata(&target).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                ApiError::hf_trl_export_not_found(&name_for_task)
+            } else {
+                ApiError::hf_trl_export_failed(error)
+            }
+        })?;
         if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            return Err(ApiError::hf_trl_export_failed(
                 "HF/TRL export target is not a real directory",
             ));
         }
+        if let Some(expected) = expected_export_sha256.as_deref() {
+            let manifest = read_hf_trl_export_manifest(&target)
+                .map_err(|error| ApiError::hf_trl_export_failed(format!("{error:#}")))?;
+            if manifest.export_sha256 != expected {
+                return Err(ApiError::hf_trl_export_precondition_failed(
+                    &name_for_task,
+                    expected,
+                    manifest.export_sha256,
+                ));
+            }
+        }
         let tombstone = root.join(format!(".deleting-{}-{}", name_for_task, Uuid::new_v4()));
-        fs::rename(&target, &tombstone)?;
-        sync_directory(&root)?;
-        fs::remove_dir_all(&tombstone)?;
-        sync_directory(&root)
+        fs::rename(&target, &tombstone).map_err(ApiError::hf_trl_export_failed)?;
+        sync_directory(&root).map_err(ApiError::hf_trl_export_failed)?;
+        fs::remove_dir_all(&tombstone).map_err(ApiError::hf_trl_export_failed)?;
+        sync_directory(&root).map_err(ApiError::hf_trl_export_failed)
     })
     .await
-    .map_err(|error| ApiError::hf_trl_export_failed(format!("delete worker panicked: {error}")))?
     .map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            ApiError::hf_trl_export_not_found(&name)
-        } else {
-            ApiError::hf_trl_export_failed(error)
-        }
-    })?;
+        ApiError::hf_trl_export_failed(format!("delete worker panicked: {error}"))
+    })??;
     Ok(Json(DeleteExportResponse {
         status: "deleted",
         name,
@@ -884,6 +943,37 @@ mod tests {
         })
     }
 
+    #[test]
+    fn delete_if_match_requires_one_strong_lowercase_export_digest() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::IF_MATCH,
+            HeaderValue::from_str(&format!("\"{digest}\"")).unwrap(),
+        );
+        assert_eq!(parse_delete_if_match(&headers).unwrap(), Some(digest));
+
+        for invalid in [
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "W/\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "\"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"",
+            "\"sha256:short\"",
+        ] {
+            headers.insert(header::IF_MATCH, HeaderValue::from_static(invalid));
+            assert!(
+                parse_delete_if_match(&headers).is_err(),
+                "accepted {invalid}"
+            );
+        }
+        headers.append(
+            header::IF_MATCH,
+            HeaderValue::from_static(
+                "\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"",
+            ),
+        );
+        assert!(parse_delete_if_match(&headers).is_err());
+    }
+
     #[tokio::test]
     async fn create_list_download_and_delete_round_trip() {
         let fixture = test_state(true);
@@ -896,6 +986,52 @@ mod tests {
         .unwrap();
         fs::write(source_adapter.join("adapter_model.safetensors"), b"adapter").unwrap();
         let app = routes().with_state(fixture.state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_app = app.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, server_app).await.unwrap();
+        });
+
+        let cli_output_dir = tempfile::tempdir().unwrap();
+        let cli_dataset = cli_output_dir.path().join("rows.jsonl");
+        fs::write(
+            &cli_dataset,
+            r#"{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"}]}
+"#,
+        )
+        .unwrap();
+        let cli_output = cli_output_dir.path().join("cli_portable.tar.gz");
+        crate::hf_train_cli::run_export_sft(crate::hf_train_cli::ExportSftOptions {
+            url: format!("http://{address}"),
+            file: Some(cli_dataset.to_string_lossy().into_owned()),
+            dataset: None,
+            name: "cli_portable".to_string(),
+            output: Some(cli_output.clone()),
+            invalid_row_policy: "fail".to_string(),
+            input_adapter: None,
+            split_manifest: None,
+            keep_server_copy: false,
+        })
+        .await
+        .unwrap();
+        assert!(cli_output.is_file());
+        assert!(!bundle_path(&fixture.state.adapter_dir, "cli_portable").exists());
+        let collision =
+            crate::hf_train_cli::run_export_sft(crate::hf_train_cli::ExportSftOptions {
+                url: format!("http://{address}"),
+                file: Some(cli_dataset.to_string_lossy().into_owned()),
+                dataset: None,
+                name: "cli_portable".to_string(),
+                output: Some(cli_output.clone()),
+                invalid_row_policy: "fail".to_string(),
+                input_adapter: None,
+                split_manifest: None,
+                keep_server_copy: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(collision.to_string().contains("refusing to overwrite"));
 
         let created = app
             .clone()
@@ -907,6 +1043,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(created.status(), StatusCode::CREATED);
+        let created_etag = created.headers()[header::ETAG].clone();
         let created = response_json(created).await;
         assert_eq!(created["name"], "portable_run");
         assert_eq!(created["row_count"], 1);
@@ -914,6 +1051,10 @@ mod tests {
         assert_eq!(
             created["download_url"],
             "/v1/train/hf/exports/portable_run/download"
+        );
+        assert_eq!(
+            created_etag,
+            format!("\"{}\"", created["export_sha256"].as_str().unwrap())
         );
 
         let bundle = bundle_path(&fixture.state.adapter_dir, "portable_run");
@@ -994,14 +1135,47 @@ mod tests {
             download.headers()[header::CACHE_CONTROL],
             "private, no-store"
         );
+        assert_eq!(
+            download.headers()[header::ETAG],
+            format!("\"{}\"", manifest.export_sha256)
+        );
         let bytes = to_bytes(download.into_body(), 16 * 1024 * 1024)
             .await
             .unwrap();
+        let archive_file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(archive_file.path(), &bytes).unwrap();
+        let cli_verified = crate::hf_train_cli::verify_downloaded_archive(
+            archive_file.path(),
+            archive_file.path().parent().unwrap(),
+            "portable_run",
+            &manifest.export_sha256,
+        )
+        .unwrap();
+        assert_eq!(cli_verified.export_sha256, manifest.export_sha256);
         let extracted = tempfile::tempdir().unwrap();
         tar::Archive::new(GzDecoder::new(bytes.as_ref()))
             .unpack(extracted.path())
             .unwrap();
         verify_hf_trl_export_bundle(&extracted.path().join("portable_run.kiln-hf")).unwrap();
+
+        let refused_delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/train/hf/exports/portable_run")
+                    .header(header::IF_MATCH, format!("\"sha256:{}\"", "0".repeat(64)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refused_delete.status(), StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            response_json(refused_delete).await["error"]["code"],
+            "hf_trl_export_precondition_failed"
+        );
+        assert!(bundle.exists());
 
         let deleted = app
             .clone()
@@ -1028,6 +1202,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        server.abort();
     }
 
     #[tokio::test]

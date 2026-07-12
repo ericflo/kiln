@@ -16,6 +16,7 @@ pub mod eval;
 pub mod eval_adapter_cli;
 pub mod eval_history;
 pub mod execution_provenance;
+pub mod hf_train_cli;
 pub mod kv_autoscaler;
 pub mod logging;
 pub mod metrics;
