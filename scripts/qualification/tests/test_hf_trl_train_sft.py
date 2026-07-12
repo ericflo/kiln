@@ -357,7 +357,9 @@ class HfTrlSftReferenceTests(unittest.TestCase):
     def test_export_and_base_bytes_verify_then_tampering_fails(self) -> None:
         root, manifest = train_sft.load_export_bundle(self.fixture.bundle)
         self.assertEqual(
-            train_sft.verify_base_model_source(self.fixture.base_model, manifest),
+            train_sft.verify_base_model_source(
+                self.fixture.base_model, root, manifest
+            ),
             self.fixture.base_model.resolve(),
         )
         self.assertTrue(train_sft._script_matches_export(root, manifest))
@@ -391,12 +393,54 @@ class HfTrlSftReferenceTests(unittest.TestCase):
             train_sft.load_export_bundle(self.fixture.bundle)
 
     def test_base_shard_mismatch_fails_before_training_imports(self) -> None:
-        _, manifest = train_sft.load_export_bundle(self.fixture.bundle)
+        root, manifest = train_sft.load_export_bundle(self.fixture.bundle)
         (self.fixture.base_model / "model.safetensors").write_bytes(
             b"different shard bytes!!"
         )
         with self.assertRaisesRegex(train_sft.ContractError, "wrong size|differs"):
-            train_sft.verify_base_model_source(self.fixture.base_model, manifest)
+            train_sft.verify_base_model_source(
+                self.fixture.base_model, root, manifest
+            )
+
+    def test_base_tokenizer_accepts_only_equivalent_merge_framing(self) -> None:
+        canonical = self.fixture.bundle / "canonical-tokenizer.json"
+        legacy = self.fixture.bundle / "legacy-tokenizer.json"
+        changed = self.fixture.bundle / "changed-tokenizer.json"
+        malformed = self.fixture.bundle / "malformed-tokenizer.json"
+        write(
+            canonical,
+            b'{"version":"1.0","model":{"type":"BPE","merges":[["a","b"],["c","d"]]}}',
+        )
+        write(
+            legacy,
+            b'{"version":"1.0","model":{"type":"BPE","merges":["a b","c d"]}}',
+        )
+        write(
+            changed,
+            b'{"version":"1.0","model":{"type":"BPE","merges":["a b","c e"]}}',
+        )
+        write(
+            malformed,
+            b'{"version":"1.0","model":{"type":"BPE","merges":["a b c"]}}',
+        )
+        self.assertEqual(
+            train_sft._tokenizer_semantics(canonical, "canonical tokenizer"),
+            train_sft._tokenizer_semantics(legacy, "legacy tokenizer"),
+        )
+        self.assertNotEqual(
+            train_sft._tokenizer_semantics(canonical, "canonical tokenizer"),
+            train_sft._tokenizer_semantics(changed, "changed tokenizer"),
+        )
+        with self.assertRaisesRegex(train_sft.ContractError, "exactly two"):
+            train_sft._tokenizer_semantics(malformed, "malformed tokenizer")
+
+    def test_base_tokenizer_semantic_drift_fails_full_preflight(self) -> None:
+        root, manifest = train_sft.load_export_bundle(self.fixture.bundle)
+        write(self.fixture.base_model / "tokenizer.json", b'{"version":"2.0"}')
+        with self.assertRaisesRegex(train_sft.ContractError, "semantics differ"):
+            train_sft.verify_base_model_source(
+                self.fixture.base_model, root, manifest
+            )
 
     def test_base_aggregate_is_recomputed_instead_of_trusted(self) -> None:
         self.fixture.manifest["model"]["base_weight_shard_manifest"][
@@ -512,7 +556,9 @@ class HfTrlGrpoReferenceTests(unittest.TestCase):
         root, manifest = train_sft.load_export_bundle(self.fixture.bundle)
         self.assertEqual(manifest["task"], "grpo")
         self.assertEqual(
-            train_sft.verify_base_model_source(self.fixture.base_model, manifest),
+            train_sft.verify_base_model_source(
+                self.fixture.base_model, root, manifest
+            ),
             self.fixture.base_model.resolve(),
         )
         summary = train_sft._scan_grpo_dataset(

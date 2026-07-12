@@ -352,8 +352,12 @@ python ./my-run.kiln-hf/train.py ./my-run.kiln-hf \
 `--base-model` is deliberately local and explicit. Before importing PyTorch,
 the runner verifies the export self-digest, closed schema, exact recursive
 file set, every artifact size and hash, environment lock, local tokenizer
-bytes, and every base-weight shard byte. SFT additionally verifies its complete
-selection receipt and generation-span template. GRPO streams and reconstructs
+semantics, and every base-weight shard byte. Tokenizer comparison normalizes
+only Tokenizers' equivalent legacy string-pair and current two-token-array BPE
+merge framing; any vocabulary, merge, normalizer, pre-tokenizer,
+post-processor, decoder, or added-token drift still fails. SFT additionally
+verifies its complete selection receipt and generation-span template. GRPO
+streams and reconstructs
 the typed canonical corpus, then checks every prompt, scored payload,
 tokenizer, template, behavior policy, adapter revision, sampling control,
 thinking budget, token boundary, sampled/forced action, behavior log-probability,

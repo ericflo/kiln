@@ -45,6 +45,7 @@ MAX_GRPO_STOP_BYTES = 16 * 1024
 MAX_GRPO_TEMPLATE_TOOLS = 256
 MAX_GRPO_TEMPLATE_KWARGS = 256
 MAX_GRPO_TEMPLATE_BYTES = 1024 * 1024
+MAX_BASE_TOKENIZER_BYTES = 512 * 1024 * 1024
 KILN_TARGET_MODULES = (
     "q_proj",
     "k_proj",
@@ -1686,7 +1687,47 @@ def _validate_environment_lock(path: Path) -> None:
         raise ContractError(f"requirements.lock pins {pins!r}; expected {PINNED_PACKAGES!r}")
 
 
-def verify_base_model_source(base_model: Path, manifest: dict[str, Any]) -> Path:
+def _tokenizer_semantics(path: Path, label: str) -> dict[str, Any]:
+    try:
+        size = path.stat().st_size
+        if size <= 0 or size > MAX_BASE_TOKENIZER_BYTES:
+            raise ContractError(
+                f"{label} must contain 1..={MAX_BASE_TOKENIZER_BYTES} bytes"
+            )
+        raw = path.read_bytes()
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
+    except ContractError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ContractError(f"cannot read {label} {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ContractError(f"{label} must be a JSON object")
+
+    model = value.get("model")
+    if isinstance(model, dict) and "merges" in model:
+        merges = model["merges"]
+        if not isinstance(merges, list):
+            raise ContractError(f"{label}.model.merges must be an array")
+        normalized_merges: list[list[str]] = []
+        for index, merge in enumerate(merges):
+            if isinstance(merge, str):
+                parts = merge.split(" ")
+            elif isinstance(merge, list):
+                parts = merge
+            else:
+                parts = []
+            if len(parts) != 2 or any(not isinstance(token, str) for token in parts):
+                raise ContractError(
+                    f"{label}.model.merges[{index}] must contain exactly two string tokens"
+                )
+            normalized_merges.append(parts)
+        model["merges"] = normalized_merges
+    return value
+
+
+def verify_base_model_source(
+    base_model: Path, bundle_root: Path, manifest: dict[str, Any]
+) -> Path:
     try:
         root = base_model.resolve(strict=True)
     except OSError as exc:
@@ -1712,11 +1753,14 @@ def verify_base_model_source(base_model: Path, manifest: dict[str, Any]) -> Path
         tokenizer_path = tokenizer_path.resolve(strict=True)
     except OSError as exc:
         raise ContractError(f"cannot resolve base tokenizer {tokenizer_path}: {exc}") from exc
-    tokenizer_hash = _sha256_file(tokenizer_path)
-    expected_tokenizer_hash = manifest["model"]["tokenizer"]["sha256"]
-    if tokenizer_hash != expected_tokenizer_hash:
+    exported_tokenizer_path = bundle_root / manifest["model"]["tokenizer"]["relative_path"]
+    expected_tokenizer = _tokenizer_semantics(
+        exported_tokenizer_path, "exported tokenizer"
+    )
+    actual_tokenizer = _tokenizer_semantics(tokenizer_path, "base tokenizer")
+    if actual_tokenizer != expected_tokenizer:
         raise ContractError(
-            f"base tokenizer differs: manifest={expected_tokenizer_hash}, actual={tokenizer_hash}"
+            "base tokenizer semantics differ from the canonical exported tokenizer"
         )
     config = root / "config.json"
     if not config.is_file():
@@ -2508,7 +2552,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.lora_alpha is not None and args.lora_alpha <= 0:
             raise ContractError("LoRA alpha must be positive")
         root, manifest = load_export_bundle(args.bundle)
-        base_model = verify_base_model_source(args.base_model, manifest)
+        base_model = verify_base_model_source(args.base_model, root, manifest)
         reference_match = _script_matches_export(root, manifest)
         if args.verify_only:
             print(
