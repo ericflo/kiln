@@ -53,6 +53,75 @@ use kiln_tensor::{Device, Tensor};
 static ROCM_TEST_NATIVE_REPLAY_LAUNCHES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+#[cfg(feature = "rocm")]
+fn attributed_rocm_graph_synchronize(
+    phase: &'static str,
+    reason: &'static str,
+    affected_bytes: u64,
+    byte_scope: &'static str,
+    synchronize: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    let result = synchronize();
+    let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+    match &result {
+        Ok(()) => tracing::info!(
+            event = "gpu_memory_operation",
+            operation = "synchronize",
+            reason,
+            outcome = "completed",
+            phase,
+            affected_bytes,
+            byte_scope,
+            wait_ms = duration_ms,
+            duration_ms,
+            "ROCm graph host synchronization completed"
+        ),
+        Err(error) => tracing::warn!(
+            event = "gpu_memory_operation",
+            operation = "synchronize",
+            reason,
+            outcome = "failed",
+            phase,
+            affected_bytes,
+            byte_scope,
+            error = %format!("{error:#}"),
+            wait_ms = duration_ms,
+            duration_ms,
+            "ROCm graph host synchronization failed"
+        ),
+    }
+    result
+}
+
+#[cfg(feature = "rocm")]
+fn graph_tensor_bytes<'a>(tensors: impl IntoIterator<Item = &'a Tensor>) -> u64 {
+    tensors.into_iter().fold(0u64, |total, tensor| {
+        total.saturating_add(
+            (tensor.element_count() as u64).saturating_mul(tensor.dtype().size_in_bytes() as u64),
+        )
+    })
+}
+
+#[cfg(feature = "rocm")]
+fn synchronize_after_rocm_graph_capture_failure(device: &Device) {
+    let Some(device_idx) = device.index() else {
+        return;
+    };
+    if let Err(error) = attributed_rocm_graph_synchronize(
+        "failure_recovery_default_stream",
+        "rocm_graph_capture_failure_recovery",
+        0,
+        "unknown_in_flight_device_work",
+        || {
+            kiln_tensor::rocm_synchronize_default_stream(device_idx)
+                .map_err(|error| anyhow::anyhow!("{error}"))
+        },
+    ) {
+        tracing::warn!("post-capfail default-stream sync failed: {error:#}");
+    }
+}
+
 /// Whether ROCm HIP-graph decode is requested via `KILN_ROCM_GRAPHS` (default
 /// ON). This is the primary runtime gate; `KILN_ROCM_GRAPH_CAPTURE` is the
 /// narrower capture opt-out described below.
@@ -836,15 +905,11 @@ impl RocmGraphRunner {
                 Err(e) => {
                     tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
                     self.enabled = false;
-                    // A failed capture can leave pending/poisoned device work (an
-                    // aborted capture stream, a half-issued kernel). Synchronize
-                    // the device before the eager fallback so it runs from a clean
-                    // state rather than cascading into a second failure.
-                    if let Some(idx) = weights.embed_tokens.device().index() {
-                        if let Err(sync_err) = kiln_tensor::rocm_synchronize_default_stream(idx) {
-                            tracing::warn!("post-capfail device sync failed: {sync_err:#}");
-                        }
-                    }
+                    // A failed capture can leave pending default-stream work.
+                    // Drain it before eager fallback rather than cascading into
+                    // a second failure. Capture-stream failures trip the runner
+                    // circuit breaker and are settled at external yield.
+                    synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device());
                     return Self::eager_forward(
                         backend,
                         token_id,
@@ -1082,11 +1147,7 @@ impl RocmGraphRunner {
                 Err(e) => {
                     tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
                     self.enabled = false;
-                    if let Some(idx) = weights.embed_tokens.device().index() {
-                        if let Err(sync_err) = kiln_tensor::rocm_synchronize_default_stream(idx) {
-                            tracing::warn!("post-capfail device sync failed: {sync_err:#}");
-                        }
-                    }
+                    synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device());
                     return Self::eager_forward_hidden(
                         backend,
                         token_id,
@@ -1317,11 +1378,7 @@ impl RocmGraphRunner {
                 Err(e) => {
                     tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
                     self.enabled = false;
-                    if let Some(idx) = weights.embed_tokens.device().index() {
-                        if let Err(sync_err) = kiln_tensor::rocm_synchronize_default_stream(idx) {
-                            tracing::warn!("post-capfail device sync failed: {sync_err:#}");
-                        }
-                    }
+                    synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device());
                     return Self::eager_forward_greedy(
                         backend,
                         token_id,
@@ -2169,6 +2226,28 @@ impl RocmGraphRunner {
         };
         let gdn_decode_outputs = Self::new_gdn_decode_outputs(config, device)?;
         Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
+        let stable_graph_io_bytes = graph_tensor_bytes(
+            [
+                &token_buffer,
+                &position_buffer,
+                &output_hidden,
+                &rotary_cos_buffer,
+                &rotary_sin_buffer,
+            ]
+            .into_iter()
+            .chain(
+                [
+                    block_table_buffer.as_ref(),
+                    seqused_k_buffer.as_ref(),
+                    kv_slot_buffer.as_ref(),
+                ]
+                .into_iter()
+                .flatten(),
+            )
+            .chain(paged_decode_outputs.iter())
+            .chain(paged_decode_lse.iter())
+            .chain(gdn_decode_outputs.iter()),
+        );
 
         // === freeze-pointers Pass 1 (Record / warm) ===
         let arena_ctx = kiln_tensor::primary_rocm_context(device_idx)
@@ -2184,8 +2263,16 @@ impl RocmGraphRunner {
         // non-default stream that will be captured so hipBLASLt's per-stream
         // workspace is allocated before `hipStreamBeginCapture`; sync first so
         // that stream sees initialized inputs/state.
-        kiln_tensor::rocm_synchronize_default_stream(device_idx)
-            .context("ROCm graph capture: sync kt default stream before warm pass")?;
+        attributed_rocm_graph_synchronize(
+            "default_inputs_before_warmup",
+            "rocm_graph_capture_warmup",
+            stable_graph_io_bytes,
+            "stable_graph_io",
+            || {
+                kiln_tensor::rocm_synchronize_default_stream(device_idx)
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            },
+        )?;
         // Snapshot the host→device copy count across the warm forward. Any
         // host_to_rocm_copy issued by the forward (e.g. a GDN-gates/softplus or
         // KV-write FALLBACK path that allocates a device tensor from host) does a
@@ -2217,9 +2304,17 @@ impl RocmGraphRunner {
                 Ok::<(), anyhow::Error>(())
             })
         });
-        let warm_sync_result = stream
-            .synchronize()
-            .map_err(|e| anyhow::anyhow!("sync capture stream after ROCm graph warm pass: {e}"));
+        let warm_sync_result = attributed_rocm_graph_synchronize(
+            "capture_stream_warmup_completion",
+            "rocm_graph_capture_warmup",
+            stable_graph_io_bytes,
+            "stable_graph_io",
+            || {
+                stream
+                    .synchronize()
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            },
+        );
         if let Err(err) = warm_result {
             if let Err(sync_err) = warm_sync_result {
                 tracing::warn!("post-warm-failure capture stream sync failed: {sync_err:#}");
@@ -2274,13 +2369,29 @@ impl RocmGraphRunner {
             .snapshot()
             .context("snapshot GDN recurrent state before capture pass")?;
 
-        // The buffer allocs filled their contents via H2D on the kt DEFAULT
-        // stream; sync it so those fills are visible to the captured forward.
-        kiln_tensor::rocm_synchronize_default_stream(device_idx)
-            .context("ROCm graph capture: sync kt default stream before capture")?;
-        stream
-            .synchronize()
-            .map_err(|e| anyhow::anyhow!("sync capture stream before begin_capture: {e}"))?;
+        // Capture establishment makes a host-side success/rollback decision,
+        // so these one-time waits remain explicit and attributed.
+        attributed_rocm_graph_synchronize(
+            "default_inputs_before_capture",
+            "rocm_graph_capture_begin",
+            stable_graph_io_bytes,
+            "stable_graph_io",
+            || {
+                kiln_tensor::rocm_synchronize_default_stream(device_idx)
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            },
+        )?;
+        attributed_rocm_graph_synchronize(
+            "capture_stream_before_begin",
+            "rocm_graph_capture_begin",
+            stable_graph_io_bytes,
+            "stable_graph_io",
+            || {
+                stream
+                    .synchronize()
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            },
+        )?;
 
         // === capture Pass 2 (Replay arena views, on the capture stream) ===
         let _ = &gdn_decode_outputs;
@@ -2342,7 +2453,17 @@ impl RocmGraphRunner {
                 "execute captured decode graph (first run): {err}"
             ));
         }
-        if let Err(err) = stream.synchronize() {
+        if let Err(err) = attributed_rocm_graph_synchronize(
+            "first_launch_completion",
+            "rocm_graph_first_launch",
+            stable_graph_io_bytes,
+            "stable_graph_io",
+            || {
+                stream
+                    .synchronize()
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            },
+        ) {
             *linear_state = capture_snapshot;
             return Err(anyhow::anyhow!(
                 "sync after first captured-graph launch: {err}"

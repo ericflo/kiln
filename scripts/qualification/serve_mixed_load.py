@@ -1144,8 +1144,28 @@ def parse_server_log_line(line: str) -> tuple[str, dict[str, Any]]:
 def classify_server_event(
     message: str, fields: dict[str, Any] | None = None
 ) -> str | None:
-    event_name = fields.get("event") if isinstance(fields, dict) else None
-    lowered = (event_name if isinstance(event_name, str) else message).strip().lower()
+    structured = fields if isinstance(fields, dict) else {}
+    event_name = structured.get("event")
+    lowered_event = event_name.strip().lower() if isinstance(event_name, str) else ""
+    lowered_message = message.strip().lower()
+    if lowered_event == "gpu_memory_operation":
+        operation = structured.get("operation")
+        reason = structured.get("reason")
+        operation = operation.strip().lower() if isinstance(operation, str) else ""
+        reason = reason.strip().lower() if isinstance(reason, str) else ""
+        if operation == "resize":
+            return "kv_resize"
+        if operation in {"reclaim", "trim"}:
+            return "memory_reclaim"
+        if operation == "synchronize" and reason in {
+            "rocm_graph_capture_warmup",
+            "rocm_graph_capture_begin",
+            "rocm_graph_first_launch",
+            "rocm_graph_capture_failure_recovery",
+        }:
+            return "graph_sync"
+        return None
+    lowered = lowered_event or lowered_message
     if lowered == "background inference prewarm complete":
         return "prewarm_complete"
     if lowered in {
@@ -2277,10 +2297,11 @@ def disabled_policy_attestation_failures(
                 f"{initial_blocks_total} to {final_blocks_total}"
             )
     if not runtime["rocm_graphs_enabled"] and any(
-        category in {"graph_capture", "graph_fallback"} for category in categories
+        category in {"graph_capture", "graph_fallback", "graph_sync"}
+        for category in categories
     ):
         failures.append(
-            "ROCm-graphs-off policy observed graph capture or fallback during startup or load"
+            "ROCm-graphs-off policy observed graph capture, fallback, or synchronization during startup or load"
         )
     return failures
 
@@ -2310,6 +2331,7 @@ def classify_itl_outliers(
         "memory_reclaim",
         "graph_capture",
         "graph_fallback",
+        "graph_sync",
         "external_yield_sync",
         "client_backpressure_start",
         "client_backpressure_timeout",

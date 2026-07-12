@@ -700,6 +700,58 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 {"event": "slow_batching_actor_phase", "phase": "unknown"},
             )
         )
+        structured_cases = [
+            (
+                "KV cache physical resize completed",
+                {
+                    "event": "gpu_memory_operation",
+                    "operation": "resize",
+                    "reason": "automatic_memory_policy",
+                },
+                "kv_resize",
+            ),
+            (
+                "ROCm pool reclaim completed",
+                {
+                    "event": "gpu_memory_operation",
+                    "operation": "trim",
+                    "reason": "memory_governor",
+                },
+                "memory_reclaim",
+            ),
+            (
+                "ROCm graph host synchronization completed",
+                {
+                    "event": "gpu_memory_operation",
+                    "operation": "synchronize",
+                    "reason": "rocm_graph_capture_begin",
+                },
+                "graph_sync",
+            ),
+            (
+                "KV pool allocation completed",
+                {
+                    "event": "gpu_memory_operation",
+                    "operation": "allocation",
+                    "reason": "kv_physical_resize",
+                },
+                None,
+            ),
+            (
+                "unknown synchronization",
+                {
+                    "event": "gpu_memory_operation",
+                    "operation": "synchronize",
+                    "reason": "operator_supplied_text",
+                },
+                None,
+            ),
+        ]
+        for message, fields, expected in structured_cases:
+            with self.subTest(message=message, fields=fields):
+                self.assertEqual(
+                    serve.classify_server_event(message, fields), expected
+                )
 
     def test_structured_log_fields_bind_pressure_to_the_slow_request(self) -> None:
         line = json.dumps(
@@ -1212,7 +1264,10 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
 
         graph_failures = serve.disabled_policy_attestation_failures(
             "graphs-off",
-            [serve.ObservedEvent(1.0, "graph_capture", "warmup capture")],
+            [
+                serve.ObservedEvent(1.0, "graph_capture", "warmup capture"),
+                serve.ObservedEvent(1.1, "graph_sync", "warmup synchronization"),
+            ],
             initial_blocks_total=100,
             final_blocks_total=100,
         )
