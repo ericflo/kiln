@@ -336,6 +336,15 @@ fn synthetic_base_teacher_identity(
     tokenizer: &KilnTokenizer,
     backend: &str,
 ) -> Arc<kiln_train::TeacherIdentityV1> {
+    synthetic_base_teacher_identity_with_model_sha256(config, tokenizer, backend, &"a".repeat(64))
+}
+
+fn synthetic_base_teacher_identity_with_model_sha256(
+    config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    backend: &str,
+    model_sha256: &str,
+) -> Arc<kiln_train::TeacherIdentityV1> {
     let tokenizer_vocab_sha256 = tokenizer
         .vocab_identity_sha256()
         .strip_prefix("sha256:")
@@ -350,7 +359,7 @@ fn synthetic_base_teacher_identity(
     Arc::new(
         kiln_train::TeacherIdentityV1::new(
             "Qwen3.5-4B",
-            "a".repeat(64),
+            model_sha256,
             tokenizer_vocab_sha256,
             tokenizer_config_sha256,
             None,
@@ -953,11 +962,83 @@ fn public_training_tokenizer() -> KilnTokenizer {
 }
 
 #[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn public_training_base_weight_manifest(
+    weights: &GpuWeights,
+    root: &std::path::Path,
+) -> anyhow::Result<kiln_core::model_provenance::BaseWeightShardManifest> {
+    let mut tensors = Vec::<(String, Tensor)>::new();
+    let mut add_tensor = |name: String, tensor: &Tensor| -> anyhow::Result<()> {
+        tensors.push((name, tensor.to_device(Device::Cpu)?.contiguous()?));
+        Ok(())
+    };
+
+    add_tensor(
+        "model.embed_tokens.weight".to_string(),
+        &weights.embed_tokens,
+    )?;
+    add_tensor("model.norm.weight".to_string(), &weights.final_norm)?;
+    for (index, layer) in weights.layers.iter().enumerate() {
+        let prefix = format!("model.layers.{index}");
+        add_tensor(
+            format!("{prefix}.input_layernorm.weight"),
+            &layer.input_layernorm,
+        )?;
+        add_tensor(
+            format!("{prefix}.post_attention_layernorm.weight"),
+            &layer.post_attention_layernorm,
+        )?;
+        let GpuAttentionWeights::Full(attention) = &layer.attention else {
+            anyhow::bail!("public training fixture unexpectedly contains linear attention")
+        };
+        for (name, tensor) in [
+            ("q_proj", &attention.q_proj),
+            ("k_proj", &attention.k_proj),
+            ("v_proj", &attention.v_proj),
+            ("o_proj", &attention.o_proj),
+        ] {
+            add_tensor(format!("{prefix}.self_attn.{name}.weight"), tensor)?;
+        }
+        add_tensor(
+            format!("{prefix}.self_attn.q_norm.weight"),
+            &attention.q_norm,
+        )?;
+        add_tensor(
+            format!("{prefix}.self_attn.k_norm.weight"),
+            &attention.k_norm,
+        )?;
+        for (name, tensor) in [
+            ("gate_proj", &layer.mlp.gate_proj),
+            ("up_proj", &layer.mlp.up_proj),
+            ("down_proj", &layer.mlp.down_proj),
+        ] {
+            add_tensor(format!("{prefix}.mlp.{name}.weight"), tensor)?;
+        }
+    }
+    drop(add_tensor);
+
+    let refs: HashMap<&str, &Tensor> = tensors
+        .iter()
+        .map(|(name, tensor)| (name.as_str(), tensor))
+        .collect();
+    let filename = "qualification-base-model.safetensors";
+    let path = root.join(filename);
+    kiln_tensor::safetensors::save_cpu(&refs, &path)?;
+    let bytes = std::fs::read(&path)?;
+    Ok(kiln_core::model_provenance::BaseWeightShardManifest::new(
+        vec![kiln_core::model_provenance::BaseWeightShardIdentity::new(
+            filename,
+            bytes.len() as u64,
+            kiln_train::train_receipt::sha256_bytes(&bytes),
+        )?],
+    )?)
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
 fn public_training_state(
     device: Device,
     expected_backend: &str,
     adapter_dir: &std::path::Path,
-) -> AppState {
+) -> anyhow::Result<AppState> {
     let mut config = tiny_config();
     let mut weights = if matches!(&device, Device::Rocm(_)) {
         config.dtype = kiln_core::config::DType::BF16;
@@ -965,17 +1046,43 @@ fn public_training_state(
     } else {
         tiny_weights(&config, &device)
     };
-    weights.source_content_sha256 = Some(format!("sha256:{}", "a".repeat(64)));
+    let base_weight_shard_manifest = public_training_base_weight_manifest(&weights, adapter_dir)?;
+    weights.source_content_sha256 = Some(base_weight_shard_manifest.aggregate_sha256.clone());
+    weights.base_weight_shard_manifest = Some(base_weight_shard_manifest);
     let runner_tokenizer = public_training_tokenizer();
     let state_tokenizer = public_training_tokenizer();
-    let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
+    let mut runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
     assert_eq!(
         runner.backend_name(),
         expected_backend,
         "public training qualification selected the wrong backend"
     );
-    let base_teacher_identity =
-        synthetic_base_teacher_identity(&config, &state_tokenizer, runner.backend_name());
+    let executable_sha256 = kiln_server::teacher_identity::current_executable_sha256()?;
+    let numerical_runtime_sha256 = kiln_server::teacher_identity::numerical_runtime_sha256(device);
+    runner.weights.execution_provenance = Some(
+        kiln_server::execution_provenance::build_execution_provenance(
+            &kiln_server::config::KilnConfig::default(),
+            &config,
+            &state_tokenizer,
+            runner.backend_name(),
+            device,
+            &executable_sha256,
+            &numerical_runtime_sha256,
+            runner.training_precision_policy(),
+        )?,
+    );
+    let model_sha256 = runner
+        .weights
+        .source_content_sha256
+        .as_deref()
+        .and_then(|sha256| sha256.strip_prefix("sha256:"))
+        .context("public training fixture model identity lacks sha256: prefix")?;
+    let base_teacher_identity = synthetic_base_teacher_identity_with_model_sha256(
+        &config,
+        &state_tokenizer,
+        runner.backend_name(),
+        model_sha256,
+    );
     let mut state = AppState::new_real(
         config,
         runner,
@@ -991,7 +1098,7 @@ fn public_training_state(
         Some(base_teacher_identity),
     );
     enable_experimental_serving(&mut state);
-    state
+    Ok(state)
 }
 
 #[cfg(any(feature = "rocm", feature = "vulkan"))]
@@ -1048,6 +1155,32 @@ async fn wait_for_public_training_state(
         );
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn public_sft_config(adapter_name: &str, seed: u64, resume_checkpoint: Option<&str>) -> Value {
+    let mut config = json!({
+        "epochs": 2,
+        "learning_rate": 0.001,
+        "lora_rank": 2,
+        "lora_alpha": 4.0,
+        "train_mtp": false,
+        "output_name": adapter_name,
+        "auto_load": false,
+        "checkpoint_interval": 3,
+        "grad_checkpoint_segments": 1,
+        "seed": seed,
+        "optimizer": {"kind": "adam_w"}
+    });
+    if let Some(checkpoint) = resume_checkpoint {
+        config["resume_checkpoint"] = json!(checkpoint);
+    }
+    config
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn public_sft_request(examples: &[Value], config: Value) -> Value {
+    json!({"examples": examples, "config": config})
 }
 
 #[cfg(any(feature = "rocm", feature = "vulkan"))]
@@ -1149,6 +1282,13 @@ fn public_checkpoint_path(
 }
 
 #[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn public_sft_semantic_loop_state(checkpoint_dir: &std::path::Path) -> anyhow::Result<Value> {
+    Ok(serde_json::from_slice(&std::fs::read(
+        checkpoint_dir.join("sft_loop_state.json"),
+    )?)?)
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
 fn public_grpo_semantic_loop_state(checkpoint_dir: &std::path::Path) -> anyhow::Result<Value> {
     let loop_state: Value =
         serde_json::from_slice(&std::fs::read(checkpoint_dir.join("grpo_loop_state.json"))?)?;
@@ -1219,6 +1359,7 @@ fn public_training_semantic_manifest(
 #[cfg(any(feature = "rocm", feature = "vulkan"))]
 struct PublicTrainingControl {
     losses: Vec<f64>,
+    final_adapter_sha256: String,
     final_adapter: Vec<u8>,
     adapter_state: Vec<u8>,
     optimizer_state: Vec<u8>,
@@ -1238,6 +1379,21 @@ fn capture_public_training_control(
 ) -> anyhow::Result<PublicTrainingControl> {
     let checkpoint = public_checkpoint_path(adapter_dir, detail)?;
     let loaded = kiln_train::checkpoint::load_training_checkpoint(&checkpoint)?;
+    let final_adapter_dir = adapter_dir.join(adapter_name);
+    let final_adapter = std::fs::read(final_adapter_dir.join("adapter_model.safetensors"))?;
+    let receipt =
+        kiln_train::train_receipt::TrainReceipt::read_from_adapter_dir(&final_adapter_dir)?
+            .context("completed public training omitted train_receipt.json")?;
+    let recorded_adapter_sha256 = receipt
+        .adapters
+        .output
+        .adapter_model_sha256
+        .context("completed public training receipt omitted adapter_model_sha256")?;
+    let actual_adapter_sha256 = kiln_train::train_receipt::sha256_bytes(&final_adapter);
+    anyhow::ensure!(
+        recorded_adapter_sha256 == actual_adapter_sha256,
+        "public {adapter_name} receipt adapter hash disagrees with its PEFT bytes: recorded={recorded_adapter_sha256}, actual={actual_adapter_sha256}"
+    );
     let loop_state_path = checkpoint.join(loop_state_file);
     anyhow::ensure!(
         loop_state_path.is_file(),
@@ -1248,17 +1404,52 @@ fn capture_public_training_control(
         .transpose()?;
     Ok(PublicTrainingControl {
         losses: public_job_losses(detail)?,
-        final_adapter: std::fs::read(
-            adapter_dir
-                .join(adapter_name)
-                .join("adapter_model.safetensors"),
-        )?,
+        final_adapter_sha256: actual_adapter_sha256,
+        final_adapter,
         adapter_state: std::fs::read(checkpoint.join("adapter.safetensors"))?,
         optimizer_state: std::fs::read(checkpoint.join("optimizer.safetensors"))?,
         reference_state,
         semantic_manifest: public_training_semantic_manifest(&loaded)?,
         semantic_loop_state: semantic_loop_state(&checkpoint)?,
     })
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn ensure_public_training_artifacts_equal(
+    expected: &PublicTrainingControl,
+    actual: &PublicTrainingControl,
+    training_label: &str,
+    comparison: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        expected.final_adapter_sha256 == actual.final_adapter_sha256,
+        "public {training_label} adapter hash differs {comparison}: expected={}, actual={}",
+        expected.final_adapter_sha256,
+        actual.final_adapter_sha256
+    );
+    anyhow::ensure!(
+        expected.final_adapter == actual.final_adapter,
+        "public {training_label} final adapter bytes differ {comparison}"
+    );
+    anyhow::ensure!(
+        expected.adapter_state == actual.adapter_state
+            && expected.optimizer_state == actual.optimizer_state
+            && expected.reference_state == actual.reference_state,
+        "public {training_label} final checkpoint tensor state differs {comparison}"
+    );
+    anyhow::ensure!(
+        expected.semantic_manifest == actual.semantic_manifest,
+        "public {training_label} semantic checkpoint manifest differs {comparison}: expected={}, actual={}",
+        expected.semantic_manifest,
+        actual.semantic_manifest
+    );
+    anyhow::ensure!(
+        expected.semantic_loop_state == actual.semantic_loop_state,
+        "public {training_label} semantic loop state differs {comparison}: expected={}, actual={}",
+        expected.semantic_loop_state,
+        actual.semantic_loop_state
+    );
+    Ok(())
 }
 
 #[cfg(any(feature = "rocm", feature = "vulkan"))]
@@ -1283,7 +1474,7 @@ fn remove_public_training_artifacts(
 }
 
 #[cfg(any(feature = "rocm", feature = "vulkan"))]
-async fn qualify_public_exact_resume_case<BuildRequest, ValidateCheckpoint>(
+async fn qualify_public_repeatability_and_exact_resume_case<BuildRequest, ValidateCheckpoint>(
     app: &axum::Router,
     adapter_dir: &std::path::Path,
     endpoint: &str,
@@ -1329,6 +1520,51 @@ where
         loop_state_file,
         reference_state_file,
         semantic_loop_state,
+    )?;
+    remove_public_training_artifacts(adapter_dir, adapter_name)?;
+
+    let repeated_request = build_request(None);
+    let (status, response) = public_training_json(
+        app,
+        axum::http::Method::POST,
+        endpoint,
+        Some(&repeated_request),
+    )
+    .await?;
+    anyhow::ensure!(
+        status == StatusCode::OK,
+        "repeat submit failed: {status} {response}"
+    );
+    let repeated_job = response["job_id"]
+        .as_str()
+        .context("repeat submit omitted job_id")?;
+    let repeated_detail =
+        wait_for_public_training_state(app, repeated_job, &["completed", "failed"]).await?;
+    anyhow::ensure!(
+        repeated_detail["state"].as_str() == Some("completed"),
+        "repeated public {training_label} job failed: {repeated_detail}"
+    );
+    validate_checkpoint(&repeated_detail["latest_checkpoint"])
+        .with_context(|| format!("repeated {training_label} checkpoint contract"))?;
+    let repeated = capture_public_training_control(
+        adapter_dir,
+        adapter_name,
+        &repeated_detail,
+        loop_state_file,
+        reference_state_file,
+        semantic_loop_state,
+    )?;
+    anyhow::ensure!(
+        control.losses == repeated.losses,
+        "public {training_label} loss sequence differs between fresh repeated runs: first={:?}, repeated={:?}",
+        control.losses,
+        repeated.losses
+    );
+    ensure_public_training_artifacts_equal(
+        &control,
+        &repeated,
+        training_label,
+        "between fresh repeated runs",
     )?;
     remove_public_training_artifacts(adapter_dir, adapter_name)?;
 
@@ -1430,28 +1666,91 @@ where
         "public {training_label} loss sequence differs after resume: control={:?}, resumed={combined_losses:?}",
         control.losses
     );
+    ensure_public_training_artifacts_equal(
+        &control,
+        &resumed,
+        training_label,
+        "after stop/resume",
+    )?;
+    Ok(())
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+async fn qualify_public_sft_route(device: Device, backend: &str) -> anyhow::Result<()> {
+    let adapter_root = tempfile::tempdir()?;
+    let state = public_training_state(device, backend, adapter_root.path())?;
+    let app = api::router(state.clone());
+    kiln_server::training_queue::spawn_training_worker(state.clone(), state.shutdown.clone());
+
+    let examples: Vec<Value> = (0..24)
+        .map(|index| {
+            json!({
+                "messages": [
+                    {"role": "user", "content": format!("t{}", 1 + index % 3)},
+                    {"role": "assistant", "content": format!("t{}", 4 + index % 3)}
+                ]
+            })
+        })
+        .collect();
+    let adapter_name = "public-sft";
+    let seed = 0x5F7;
+    qualify_public_repeatability_and_exact_resume_case(
+        &app,
+        adapter_root.path(),
+        "/v1/train/sft",
+        "SFT",
+        adapter_name,
+        |resume_checkpoint| {
+            public_sft_request(
+                &examples,
+                public_sft_config(adapter_name, seed, resume_checkpoint),
+            )
+        },
+        |checkpoint| {
+            anyhow::ensure!(
+                checkpoint["training_kind"].as_str() == Some("sft")
+                    && checkpoint["data_source_kind"].as_str()
+                        == Some("sft-valid-example-order-v1"),
+                "SFT checkpoint route identity is wrong: {checkpoint}"
+            );
+            anyhow::ensure!(
+                checkpoint["data_item_count"].as_u64() == Some(examples.len() as u64),
+                "SFT checkpoint item count is wrong: {checkpoint}"
+            );
+            anyhow::ensure!(
+                checkpoint["effective_config"]["output_name"].as_str() == Some(adapter_name),
+                "SFT checkpoint output_name is wrong: {checkpoint}"
+            );
+            anyhow::ensure!(
+                checkpoint["effective_config"]["seed"].as_u64() == Some(seed),
+                "SFT checkpoint seed is wrong: expected {seed}, got {:?}",
+                checkpoint["effective_config"]["seed"]
+            );
+            anyhow::ensure!(
+                checkpoint["effective_config"]["checkpoint_interval"].as_u64() == Some(3),
+                "SFT checkpoint cadence is wrong: {checkpoint}"
+            );
+            Ok(())
+        },
+        "sft_loop_state.json",
+        None,
+        public_sft_semantic_loop_state,
+    )
+    .await?;
+
+    let health = match state.backend.as_ref() {
+        ModelBackend::Real { backend_health, .. } => backend_health.snapshot(),
+        ModelBackend::Mock { .. } => unreachable!("qualification state is real"),
+    };
     anyhow::ensure!(
-        control.final_adapter == resumed.final_adapter,
-        "public {training_label} final adapter differs after resume"
+        !health.quarantined,
+        "public SFT qualification quarantined the backend: {:?}",
+        health.reason
     );
-    anyhow::ensure!(
-        control.adapter_state == resumed.adapter_state
-            && control.optimizer_state == resumed.optimizer_state
-            && control.reference_state == resumed.reference_state,
-        "public {training_label} final checkpoint tensor state differs after resume"
-    );
-    anyhow::ensure!(
-        control.semantic_manifest == resumed.semantic_manifest,
-        "public {training_label} semantic checkpoint manifest differs after resume: control={}, resumed={}",
-        control.semantic_manifest,
-        resumed.semantic_manifest
-    );
-    anyhow::ensure!(
-        control.semantic_loop_state == resumed.semantic_loop_state,
-        "public {training_label} semantic loop state differs after resume: control={}, resumed={}",
-        control.semantic_loop_state,
-        resumed.semantic_loop_state
-    );
+    state
+        .shutdown
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(550)).await;
     Ok(())
 }
 
@@ -1464,7 +1763,7 @@ async fn qualify_public_grpo_source(
     seed: u64,
     expected_source_kind: &str,
 ) -> anyhow::Result<()> {
-    qualify_public_exact_resume_case(
+    qualify_public_repeatability_and_exact_resume_case(
         app,
         adapter_dir,
         "/v1/train/grpo",
@@ -1494,7 +1793,7 @@ async fn qualify_public_grpo_source(
 #[cfg(any(feature = "rocm", feature = "vulkan"))]
 async fn qualify_public_grpo_routes(device: Device, backend: &str) -> anyhow::Result<()> {
     let adapter_root = tempfile::tempdir()?;
-    let state = public_training_state(device, backend, adapter_root.path());
+    let state = public_training_state(device, backend, adapter_root.path())?;
     let app = api::router(state.clone());
     kiln_server::training_queue::spawn_training_worker(state.clone(), state.shutdown.clone());
 
@@ -1559,7 +1858,7 @@ async fn qualify_public_grpo_routes(device: Device, backend: &str) -> anyhow::Re
 #[cfg(any(feature = "rocm", feature = "vulkan"))]
 async fn qualify_public_opd_route(device: Device, backend: &str) -> anyhow::Result<()> {
     let adapter_root = tempfile::tempdir()?;
-    let state = public_training_state(device, backend, adapter_root.path());
+    let state = public_training_state(device, backend, adapter_root.path())?;
     let app = api::router(state.clone());
     kiln_server::training_queue::spawn_training_worker(state.clone(), state.shutdown.clone());
 
@@ -1592,7 +1891,7 @@ async fn qualify_public_opd_route(device: Device, backend: &str) -> anyhow::Resu
         .collect();
     let adapter_name = "public-opd";
     let seed = 0x0D15_7111;
-    qualify_public_exact_resume_case(
+    qualify_public_repeatability_and_exact_resume_case(
         &app,
         adapter_root.path(),
         "/v1/train/opd",
@@ -1698,6 +1997,37 @@ async fn qualify_public_opd_route(device: Device, backend: &str) -> anyhow::Resu
         .store(true, std::sync::atomic::Ordering::Relaxed);
     tokio::time::sleep(Duration::from_millis(550)).await;
     Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_sft_repeatability_and_exact_resume_route_rocm() -> anyhow::Result<()> {
+    if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+        eprintln!("skip public_sft_repeatability_and_exact_resume_route_rocm: qualification off");
+        return Ok(());
+    }
+    anyhow::ensure!(
+        kiln_tensor::rocm_is_available(),
+        "ROCm qualification requested but no ROCm device is available"
+    );
+    let _lock = PUBLIC_TRAINING_QUALIFICATION_ENV.lock().unwrap();
+    qualify_public_sft_route(Device::Rocm(0), "rocm").await
+}
+
+#[cfg(feature = "vulkan")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_sft_repeatability_and_exact_resume_route_vulkan() -> anyhow::Result<()> {
+    if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+        eprintln!("skip public_sft_repeatability_and_exact_resume_route_vulkan: qualification off");
+        return Ok(());
+    }
+    anyhow::ensure!(
+        kiln_model::backend::vulkan::vulkan_is_available(),
+        "Vulkan qualification requested but no Vulkan device is available"
+    );
+    let _lock = PUBLIC_TRAINING_QUALIFICATION_ENV.lock().unwrap();
+    let _env = PublicTrainingEnvRestore::set(&[("KILN_TRAIN_RESIDENT", "1")]);
+    qualify_public_sft_route(Device::Vulkan(0), "vulkan").await
 }
 
 #[cfg(feature = "rocm")]
