@@ -19,6 +19,8 @@ use tower::ServiceExt; // for `oneshot`
 
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
+#[cfg(feature = "rocm")]
+use kiln_model::ModelRunnerRuntimeOptions;
 use kiln_model::forward::{
     GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
     GpuLinearAttentionWeights, GpuWeights, LinearAttentionState,
@@ -4160,6 +4162,8 @@ use kiln_model::{
     CancelHandle, FinishReason, PagedBatchedPrefillStart, PagedKvCacheKt, PagedPrefixReuse,
     StreamEvent,
 };
+#[cfg(feature = "rocm")]
+use kiln_server::batching_engine::{BatchingEngineHandle, EngineEvent};
 use kiln_server::batching_engine::{
     DecodeForward, DecodeSlot, EngineRequest, RealDecodeForward, RequestPreparation,
 };
@@ -4832,6 +4836,351 @@ fn resumable_paged_prefill_matches_monolithic_rocm() {
         false,
         "ROCm",
         Some("rocm"),
+    );
+}
+
+#[cfg(feature = "rocm")]
+fn rocm_graph_resize_config() -> ModelConfig {
+    let mut config = tiny_config();
+    config.hidden_size = 64;
+    config.num_attention_heads = 1;
+    config.num_kv_heads = 1;
+    config.head_dim = 64;
+    config.intermediate_size = 128;
+    config.max_position_embeddings = 128;
+    config.dtype = kiln_core::config::DType::BF16;
+    config
+}
+
+#[cfg(feature = "rocm")]
+fn rocm_graph_resize_request(max_tokens: usize) -> EngineRequest {
+    EngineRequest {
+        request_id: Uuid::new_v4(),
+        prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7],
+        sampling: SamplingParams {
+            max_tokens,
+            ignore_eos: true,
+            ..SamplingParams::greedy()
+        },
+        adapter: None,
+        capture_behavior_logprobs: false,
+        cancel: CancelHandle::new(),
+    }
+}
+
+#[cfg(feature = "rocm")]
+async fn rocm_graph_resize_recv(rx: &mut tokio::sync::mpsc::Receiver<EngineEvent>) -> EngineEvent {
+    tokio::time::timeout(Duration::from_secs(30), rx.recv())
+        .await
+        .expect("ROCm resize qualification event deadline")
+        .expect("ROCm resize qualification actor closed response lane")
+}
+
+#[cfg(feature = "rocm")]
+async fn rocm_graph_resize_collect(
+    rx: &mut tokio::sync::mpsc::Receiver<EngineEvent>,
+) -> Vec<TokenId> {
+    loop {
+        match rocm_graph_resize_recv(rx).await {
+            EngineEvent::Token { .. } => {}
+            EngineEvent::Done { output } => return output.token_ids,
+            EngineEvent::Error(error) => {
+                panic!("ROCm resize qualification request failed: {error}")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "rocm")]
+async fn rocm_run_resize_qualification_request(
+    forward: Arc<RealDecodeForward>,
+    max_tokens: usize,
+) -> Vec<TokenId> {
+    let handle = BatchingEngineHandle::start_with_options(forward, 1);
+    let mut rx = handle
+        .enqueue(rocm_graph_resize_request(max_tokens))
+        .await
+        .expect("enqueue ROCm resize qualification request");
+    let output = rocm_graph_resize_collect(&mut rx).await;
+    tokio::time::timeout(Duration::from_secs(30), handle.stop())
+        .await
+        .expect("ROCm resize qualification actor stop deadline")
+        .expect("stop ROCm resize qualification actor");
+    output
+}
+
+#[cfg(feature = "rocm")]
+async fn rocm_run_graph_request_with_pending_resize(
+    forward: Arc<RealDecodeForward>,
+    runner: &Arc<RwLock<ModelRunner>>,
+    max_tokens: usize,
+    target_blocks: usize,
+    baseline_capture_successes: u64,
+    baseline_replay_successes: u64,
+) -> (Vec<TokenId>, usize) {
+    let handle = BatchingEngineHandle::start_with_options(forward, 1);
+    let mut rx = handle
+        .enqueue(rocm_graph_resize_request(max_tokens))
+        .await
+        .expect("enqueue graph-backed ROCm resize qualification request");
+
+    loop {
+        match rocm_graph_resize_recv(&mut rx).await {
+            EngineEvent::Token { .. } => {}
+            EngineEvent::Done { .. } => {
+                panic!("graph-backed request finished before capture and replay were observable")
+            }
+            EngineEvent::Error(error) => panic!("graph-backed request failed: {error}"),
+        }
+        let stats = runner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .rocm_graph_stats()
+            .ok();
+        if stats.as_ref().is_some_and(|stats| {
+            stats.capture_successes > baseline_capture_successes
+                && stats.replay_successes > baseline_replay_successes
+        }) {
+            let stats = stats.expect("checked graph statistics");
+            assert!(
+                stats.captured_graph_count > 0,
+                "a live request must retain the graph whose replay was observed"
+            );
+            break;
+        }
+    }
+
+    let resize_task = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.resize_kv(target_blocks).await })
+    };
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(
+        !resize_task.is_finished(),
+        "KV resize completed while the captured request was still active"
+    );
+
+    // Snapshot is enqueued after the resize task has sent its command. FIFO
+    // processing therefore proves the actor has registered the pending resize
+    // while retaining the live decode row.
+    let snapshot = tokio::time::timeout(Duration::from_secs(10), handle.snapshot())
+        .await
+        .expect("active graph request snapshot deadline")
+        .expect("snapshot active graph request");
+    assert_eq!(snapshot.active_decode, 1);
+    assert_eq!(snapshot.active_prefill, 0);
+
+    let next_event = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("active request must continue while resize waits")
+        .expect("active request response lane closed while resize waited");
+    assert!(
+        matches!(next_event, EngineEvent::Token { .. }),
+        "an active request must make another decode step before resize can complete"
+    );
+
+    let output = rocm_graph_resize_collect(&mut rx).await;
+    let achieved = tokio::time::timeout(Duration::from_secs(30), resize_task)
+        .await
+        .expect("drained ROCm resize deadline")
+        .expect("join drained ROCm resize task")
+        .expect("drained ROCm resize");
+    tokio::time::timeout(Duration::from_secs(30), handle.stop())
+        .await
+        .expect("graph-backed ROCm actor stop deadline")
+        .expect("stop graph-backed ROCm actor");
+    (output, achieved)
+}
+
+/// Real gfx1151 serving-path proof for transactional pool replacement. This is
+/// ignored because it requires a ROCm device and native HIP graph capture; the
+/// qualification command runs this exact test in its own process.
+#[cfg(feature = "rocm")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an explicit real-ROCm qualification run"]
+async fn rocm_eager_and_graph_decode_survive_active_shrink_and_grow() {
+    assert_eq!(
+        std::env::var("KILN_QUALIFICATION").ok().as_deref(),
+        Some("1"),
+        "set KILN_QUALIFICATION=1 for the explicit hardware run"
+    );
+    assert!(
+        kiln_tensor::rocm_is_available(),
+        "ROCm qualification requested but no ROCm device is available"
+    );
+
+    const MAX_TOKENS: usize = 48;
+    const SHRUNK_BLOCKS: usize = PREFIX_TEST_NUM_BLOCKS / 2;
+
+    let config = rocm_graph_resize_config();
+    let device = Device::Rocm(0);
+    let weights = tiny_weights_bf16(&config, &device);
+    let paged_cache = Arc::new(prefix_test_paged_cache_on(&config, device));
+    let block_manager = Arc::new(Mutex::new(BlockManager::new(
+        PREFIX_TEST_NUM_BLOCKS,
+        PREFIX_TEST_BLOCK_SIZE,
+    )));
+    let prefix_cache = Arc::new(Mutex::new(RealPrefixCache::disabled(
+        PREFIX_TEST_BLOCK_SIZE,
+    )));
+    let gpu_lock = Arc::new(tokio::sync::RwLock::new(()));
+    let loaded_adapter = Arc::new(RwLock::new(None));
+
+    let eager_runner = Arc::new(RwLock::new(ModelRunner::new_with_runtime_options(
+        weights.clone(),
+        test_tokenizer(),
+        config.clone(),
+        ModelRunnerRuntimeOptions::eager_only(),
+    )));
+    let graph_runner = Arc::new(RwLock::new(ModelRunner::new_with_runtime_options(
+        weights,
+        test_tokenizer(),
+        config.clone(),
+        ModelRunnerRuntimeOptions {
+            cuda_graphs: false,
+            rocm_graphs: true,
+            metal_graphs: false,
+            max_decode_batch: Some(1),
+        },
+    )));
+    assert!(
+        !eager_runner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .rocm_graph_enabled()
+            .expect("eager graph state")
+    );
+    let initial_graph_stats = graph_runner
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .rocm_graph_stats()
+        .expect("initial graph stats");
+    assert!(initial_graph_stats.requested);
+    assert!(initial_graph_stats.capture_requested);
+    assert!(initial_graph_stats.enabled);
+    assert!(initial_graph_stats.capture_enabled);
+
+    let eager_forward = Arc::new(RealDecodeForward::new(
+        eager_runner,
+        Arc::clone(&block_manager),
+        Arc::clone(&paged_cache),
+        Arc::clone(&prefix_cache),
+        Arc::clone(&gpu_lock),
+        Arc::clone(&loaded_adapter),
+        true,
+    ));
+    let graph_forward = Arc::new(RealDecodeForward::new(
+        Arc::clone(&graph_runner),
+        Arc::clone(&block_manager),
+        Arc::clone(&paged_cache),
+        prefix_cache,
+        gpu_lock,
+        loaded_adapter,
+        true,
+    ));
+
+    let initial_identity = paged_cache.pool_identity();
+    let eager_before_shrink =
+        rocm_run_resize_qualification_request(Arc::clone(&eager_forward), MAX_TOKENS).await;
+    assert_eq!(eager_before_shrink.len(), MAX_TOKENS);
+    assert_eq!(block_manager.lock().unwrap().num_used(), 0);
+
+    let (graph_before_shrink, achieved) = rocm_run_graph_request_with_pending_resize(
+        Arc::clone(&graph_forward),
+        &graph_runner,
+        MAX_TOKENS,
+        SHRUNK_BLOCKS,
+        initial_graph_stats.capture_successes,
+        initial_graph_stats.replay_successes,
+    )
+    .await;
+    assert_eq!(achieved, SHRUNK_BLOCKS);
+    assert_eq!(graph_before_shrink, eager_before_shrink);
+    let shrunk_identity = paged_cache.pool_identity();
+    assert_eq!(shrunk_identity.num_blocks, SHRUNK_BLOCKS);
+    assert_eq!(shrunk_identity.generation, initial_identity.generation + 1);
+    assert_eq!(
+        shrunk_identity.allocation_id,
+        initial_identity.allocation_id
+    );
+    let after_shrink_graph_stats = graph_runner
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .rocm_graph_stats()
+        .expect("post-shrink graph stats");
+    assert!(after_shrink_graph_stats.capture_successes > initial_graph_stats.capture_successes);
+    assert!(after_shrink_graph_stats.replay_successes > initial_graph_stats.replay_successes);
+    assert_eq!(after_shrink_graph_stats.captured_graph_count, 0);
+    assert_eq!(after_shrink_graph_stats.failures, 0);
+    assert_eq!(block_manager.lock().unwrap().num_used(), 0);
+
+    let eager_after_shrink =
+        rocm_run_resize_qualification_request(Arc::clone(&eager_forward), MAX_TOKENS).await;
+    assert_eq!(eager_after_shrink, eager_before_shrink);
+    let (graph_after_shrink, achieved) = rocm_run_graph_request_with_pending_resize(
+        Arc::clone(&graph_forward),
+        &graph_runner,
+        MAX_TOKENS,
+        PREFIX_TEST_NUM_BLOCKS,
+        after_shrink_graph_stats.capture_successes,
+        after_shrink_graph_stats.replay_successes,
+    )
+    .await;
+    assert_eq!(achieved, PREFIX_TEST_NUM_BLOCKS);
+    assert_eq!(graph_after_shrink, eager_after_shrink);
+    let grown_identity = paged_cache.pool_identity();
+    assert_eq!(grown_identity.num_blocks, PREFIX_TEST_NUM_BLOCKS);
+    assert_eq!(grown_identity.generation, shrunk_identity.generation + 1);
+    assert_eq!(grown_identity.allocation_id, shrunk_identity.allocation_id);
+    let after_grow_graph_stats = graph_runner
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .rocm_graph_stats()
+        .expect("post-grow graph stats");
+    assert!(after_grow_graph_stats.capture_successes > after_shrink_graph_stats.capture_successes);
+    assert!(after_grow_graph_stats.replay_successes > after_shrink_graph_stats.replay_successes);
+    assert_eq!(after_grow_graph_stats.captured_graph_count, 0);
+    assert_eq!(after_grow_graph_stats.failures, 0);
+
+    // Hold every surviving low block so both post-grow requests must allocate,
+    // initialize, and attend through blocks from the previously uninitialized
+    // grown tail.
+    let held_low_blocks = block_manager
+        .lock()
+        .unwrap()
+        .allocate(SHRUNK_BLOCKS)
+        .expect("reserve surviving low blocks");
+    let mut held_low_blocks_sorted = held_low_blocks.clone();
+    held_low_blocks_sorted.sort_unstable();
+    assert_eq!(
+        held_low_blocks_sorted,
+        (0..SHRUNK_BLOCKS as u32).collect::<Vec<_>>()
+    );
+    let eager_after_grow =
+        rocm_run_resize_qualification_request(Arc::clone(&eager_forward), MAX_TOKENS).await;
+    assert_eq!(eager_after_grow, eager_before_shrink);
+    let graph_after_grow = rocm_run_resize_qualification_request(graph_forward, MAX_TOKENS).await;
+    assert_eq!(graph_after_grow, eager_after_grow);
+    let final_graph_stats = graph_runner
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .rocm_graph_stats()
+        .expect("final graph stats");
+    assert!(final_graph_stats.capture_successes > after_grow_graph_stats.capture_successes);
+    assert!(final_graph_stats.replay_successes > after_grow_graph_stats.replay_successes);
+    assert_eq!(final_graph_stats.failures, 0);
+    assert_eq!(paged_cache.pool_identity(), grown_identity);
+
+    block_manager.lock().unwrap().free_all(&held_low_blocks);
+    assert_eq!(block_manager.lock().unwrap().num_used(), 0);
+    eprintln!(
+        "[rocm-kv-resize-decode] generations={} -> {} -> {}; captures={}; replays={}; failures={}",
+        initial_identity.generation,
+        shrunk_identity.generation,
+        grown_identity.generation,
+        final_graph_stats.capture_successes,
+        final_graph_stats.replay_successes,
+        final_graph_stats.failures,
     );
 }
 
