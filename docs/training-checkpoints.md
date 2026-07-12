@@ -139,6 +139,28 @@ Native SFT, inline and streamed-JSONL GRPO, and OPD support exact resume. A
 legacy PEFT snapshot from any training mode remains serving-only and is never
 accepted as an exact checkpoint.
 
+### Repeatability qualification
+
+The opt-in real-hardware qualification runs each public SFT, inline GRPO,
+streamed-JSONL GRPO, and OPD route twice from a clean adapter/checkpoint
+directory with the same resident model, data, effective configuration, and
+seed. It requires exact equality of the loss sequence, final PEFT bytes and
+SHA-256, checkpoint adapter and optimizer tensors, objective-specific reference
+state, semantic manifest, and loop state. Each completed run must also record an
+`adapter_model_sha256` in `train_receipt.json` that matches the actual
+`adapter_model.safetensors` bytes. The same fixture then cancels a third run at
+a committed boundary, resumes its immutable checkpoint through the public HTTP
+route, and compares the combined result with the first clean run.
+
+These tests currently run locally on real ROCm and Vulkan devices when
+`KILN_QUALIFICATION=1`; the default CPU CI job does not execute them. ROCm and
+Vulkan feature builds can compile the gated paths without opting into the
+hardware run. Passing establishes repeatability inside that one process's
+recorded model, executable, source, backend, device, driver/runtime, precision,
+kernel, tokenizer/template, configuration, environment, data, and seed
+envelope. It does not claim that different devices, backends, builds, drivers,
+or machines produce identical bytes.
+
 ### SFT
 
 `SftConfig.checkpoint_interval` publishes a resumable directory after every N
@@ -158,8 +180,9 @@ The native parameter codec validates the complete tensor set, shape, dtype,
 finite values, and optimizer step before mutation. It restores both
 resident-device and host-fallback state so a later optimizer route cannot
 silently reset momentum. CPU and ROCm continuation tests cover byte-identical
-next-step state; the ROCm SFT qualification compares an uninterrupted run with
-a cancelled-and-resumed run through final adapter and optimizer artifacts.
+next-step state. Real ROCm BF16 and Vulkan F32 qualification compares two fresh
+runs and an uninterrupted run with its cancelled-and-resumed counterpart
+through final adapter, optimizer, receipt, manifest, and loop-state artifacts.
 
 ### GRPO
 
@@ -185,10 +208,10 @@ optimizer step. The route is part of checkpoint identity: an inline checkpoint
 must resume from identical inline groups, and a JSONL checkpoint must resume
 from the identical JSONL bytes through the streamed route.
 
-Real ROCm and Vulkan qualification compares uninterrupted runs with
-cancelled-and-resumed runs for both routes. Losses, final adapter bytes,
-intermediate adapter/optimizer/reference artifacts, EMA cadence, and diagnostic
-state match exactly.
+Real ROCm and Vulkan qualification compares two fresh runs and an uninterrupted
+run with its cancelled-and-resumed counterpart for both routes. Losses, receipt
+hashes, final adapter bytes, intermediate adapter/optimizer/reference artifacts,
+EMA cadence, and diagnostic state match exactly.
 
 ### OPD
 
@@ -222,10 +245,11 @@ algorithm identity is rejected. The complete immutable bundle is restored
 before continuation; a `base_adapter` is not a substitute for checkpoint
 state.
 
-Real ROCm BF16 and Vulkan F32 qualification compares uninterrupted OPD with a
-cancelled-and-resumed run. Loss history, final and intermediate adapter bytes,
-optimizer tensors, cursor/RNG state, and diagnostics match exactly, while
-inference can acquire the shared device between settled candidate phases.
+Real ROCm BF16 and Vulkan F32 qualification compares two fresh OPD runs and an
+uninterrupted run with its cancelled-and-resumed counterpart. Loss history,
+receipt hashes, final and intermediate adapter bytes, optimizer tensors,
+cursor/RNG state, and diagnostics match exactly, while inference can acquire
+the shared device between settled candidate phases.
 
 ### Legacy snapshots
 
