@@ -113,6 +113,9 @@ def health_fixture(
                 "max_decode_batch": serve.MAX_DECODE_BATCH,
                 "max_prefill_staging_slots": serve.MAX_PREFILL_STAGING_SLOTS,
                 "max_active_requests": serve.MAX_ACTIVE_REQUESTS,
+                "max_prefill_staging_priority_burst": (
+                    serve.MAX_PREFILL_STAGING_PRIORITY_BURST
+                ),
                 "max_observed_active_requests": serve.MAX_DECODE_BATCH,
                 "max_observed_batch_size": 8,
                 "total_errors": 0,
@@ -169,6 +172,9 @@ def debug_fixture(
                 "max_decode_batch": serve.MAX_DECODE_BATCH,
                 "max_prefill_staging_slots": serve.MAX_PREFILL_STAGING_SLOTS,
                 "max_active_requests": serve.MAX_ACTIVE_REQUESTS,
+                "max_prefill_staging_priority_burst": (
+                    serve.MAX_PREFILL_STAGING_PRIORITY_BURST
+                ),
             },
         },
         "env_flags": {
@@ -1487,6 +1493,10 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             values["batching_max_active_requests"], serve.MAX_ACTIVE_REQUESTS
         )
         self.assertEqual(
+            values["batching_prefill_staging_priority_burst"],
+            serve.MAX_PREFILL_STAGING_PRIORITY_BURST,
+        )
+        self.assertEqual(
             values["batching_max_observed_active_requests"],
             serve.MAX_ACTIVE_REQUESTS - 1,
         )
@@ -1534,6 +1544,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "batching_max_decode_batch": serve.MAX_DECODE_BATCH,
             "batching_prefill_staging_slot_count": serve.MAX_PREFILL_STAGING_SLOTS,
             "batching_max_active_requests": serve.MAX_ACTIVE_REQUESTS,
+            "batching_prefill_staging_priority_burst": (
+                serve.MAX_PREFILL_STAGING_PRIORITY_BURST
+            ),
             "batching_max_observed_active_requests": serve.MAX_DECODE_BATCH + 1,
             "batching_prefill_staging_admission_count": 1,
             "batching_prefill_staging_priority_forward_count": 1,
@@ -1545,6 +1558,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "batching_max_decode_batch": serve.MAX_DECODE_BATCH + 1,
             "batching_prefill_staging_slot_count": 0,
             "batching_max_active_requests": serve.MAX_ACTIVE_REQUESTS + 1,
+            "batching_prefill_staging_priority_burst": 0,
             "batching_max_observed_active_requests": serve.MAX_DECODE_BATCH,
             "batching_prefill_staging_admission_count": 0,
             "batching_prefill_staging_priority_forward_count": 0,

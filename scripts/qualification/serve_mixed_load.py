@@ -64,6 +64,7 @@ MAX_PREFILL_LAYERS_PER_CYCLE = 4
 MAX_DECODE_BATCH = 8
 MAX_PREFILL_STAGING_SLOTS = 4
 MAX_ACTIVE_REQUESTS = MAX_DECODE_BATCH + MAX_PREFILL_STAGING_SLOTS
+MAX_PREFILL_STAGING_PRIORITY_BURST = 4
 SLO_TTFT_MS = 30_000.0
 SLO_E2E_MS = 120_000.0
 STREAM_READ_POLL_SECONDS = 0.25
@@ -120,6 +121,9 @@ def _variant_config(
             "max_decode_batch": MAX_DECODE_BATCH,
             "max_prefill_staging_slots": MAX_PREFILL_STAGING_SLOTS,
             "max_active_requests": MAX_ACTIVE_REQUESTS,
+            "max_prefill_staging_priority_burst": (
+                MAX_PREFILL_STAGING_PRIORITY_BURST
+            ),
             "max_prefill_tokens_per_cycle": MAX_PREFILL_TOKENS_PER_CYCLE,
             "max_prefill_layers_per_cycle": MAX_PREFILL_LAYERS_PER_CYCLE,
         },
@@ -247,6 +251,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "batching_prefill_layer_count": ("layers", "sum", True),
     "batching_prefill_layer_yield_count": ("count", "sum", True),
     "batching_prefill_staging_admission_count": ("count", "sum", False),
+    "batching_prefill_staging_priority_burst": ("forwards", "exact", False),
     "batching_prefill_staging_priority_forward_count": ("count", "sum", False),
     "batching_prefill_staging_slot_count": ("slots", "exact", False),
     "batching_short_prefill_priority_forward_count": ("count", "sum", False),
@@ -1801,6 +1806,9 @@ def attest_runtime(
             "max_active_requests": VARIANT_CONFIGS[variant]["server"][
                 "max_active_requests"
             ],
+            "max_prefill_staging_priority_burst": VARIANT_CONFIGS[variant]["server"][
+                "max_prefill_staging_priority_burst"
+            ],
         }
         for field, expected_value in expected_active_policy.items():
             if batching.get(field) != expected_value:
@@ -1924,6 +1932,7 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int]:
         "max_decode_batch",
         "max_prefill_staging_slots",
         "max_active_requests",
+        "max_prefill_staging_priority_burst",
         "active_staged_requests",
         "max_observed_active_requests",
         "max_observed_batch_size",
@@ -2425,6 +2434,9 @@ def metric_values(
         "batching_prefill_staging_admission_count": counter_delta(
             batching_start, batching_end, "total_prefill_staging_admissions"
         ),
+        "batching_prefill_staging_priority_burst": batching_end[
+            "max_prefill_staging_priority_burst"
+        ],
         "batching_prefill_staging_priority_forward_count": counter_delta(
             batching_start,
             batching_end,
@@ -2526,6 +2538,9 @@ def batching_staging_contract_failures(
         "batching_max_decode_batch": MAX_DECODE_BATCH,
         "batching_prefill_staging_slot_count": MAX_PREFILL_STAGING_SLOTS,
         "batching_max_active_requests": MAX_ACTIVE_REQUESTS,
+        "batching_prefill_staging_priority_burst": (
+            MAX_PREFILL_STAGING_PRIORITY_BURST
+        ),
     }
     for name, expected_value in expected.items():
         if values.get(name) != expected_value:
