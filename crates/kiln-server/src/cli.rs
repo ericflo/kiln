@@ -54,6 +54,9 @@ const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
   kiln train hf export-sft --file /data/examples.jsonl --name my-task-hf
       Create, download, and verify an immutable bundle for the pinned HF/TRL runner.
 
+  kiln train hf import-peft --bundle ./my-task-hf.kiln-hf --name my-task
+      Verify a completed external-training bundle and stream its PEFT adapter into Kiln.
+
   kiln adapters list
       Show saved adapters and which adapter is active on the running server.
 "#;
@@ -119,7 +122,7 @@ SFT reads JSONL: one chat correction example per line with a messages array. GRP
 
 Add --adapter-smoke-test to record a small base-vs-adapter canary check in train_receipt.json after successful training.
 
-Use `kiln train hf export-sft` to create, download, and verify an immutable handoff bundle for the pinned Hugging Face TRL/PEFT correctness runner. The export source path is read by the server process, not uploaded by the CLI.
+Use `kiln train hf export-sft` to create, download, and verify an immutable handoff bundle for the pinned Hugging Face TRL/PEFT correctness runner. The export source path is read by the server process, not uploaded by the CLI. After external training, use `kiln train hf import-peft` to verify the completed local bundle and stream only its model-identity and PEFT result envelope back to the server.
 
 Prefer http://127.0.0.1:8420/ui/ for guided submission and status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
@@ -198,6 +201,8 @@ const TRAIN_HF_OVERVIEW: &str = r#"Create and manage immutable Hugging Face TRL/
 
 `export-sft` asks the running server to snapshot a canonical SFT corpus and optional input adapter, streams the resulting tar.gz into a sibling temporary file, verifies its exact archive shape and every manifest-bound byte, and only then publishes the requested local output without overwriting an existing path.
 
+`import-peft` takes the completed extracted `.kiln-hf` directory after external training. It verifies the unchanged export plus the result manifest and PEFT files locally, derives the expected server receipt, streams a minimal bounded envelope, and requires exact response identity agreement. It never modifies or removes the completed source bundle.
+
 The `--file` path is server-local: the running Kiln process must be able to read it. Use `--dataset corrections:active` to snapshot active corrections or another named server dataset. Successful local verification removes the server copy by default; pass `--keep-server-copy` when another client still needs it.
 "#;
 
@@ -206,6 +211,13 @@ const TRAIN_HF_EXPORT_SFT_OVERVIEW: &str = r#"Create and download a verified imm
 Exactly one of `--file` or `--dataset` is required. `--file` names JSONL visible to the server process; it is not uploaded from the CLI machine. `--dataset` names a server-side eval dataset, including the special `corrections:active` snapshot.
 
 The output defaults to `{name}.kiln-hf.tar.gz` in the current directory. Existing output paths are never replaced. The CLI refuses redirects, streams rather than buffering the archive, rejects links and unsafe tar paths, requires exactly one `{name}.kiln-hf` root, and verifies the pristine Kiln manifest before atomic publication.
+"#;
+
+const TRAIN_HF_IMPORT_PEFT_OVERVIEW: &str = r#"Verify and import a completed external-training PEFT result.
+
+`--bundle` is the extracted `.kiln-hf` directory after the embedded runner has completed successfully. The original export must remain byte-identical and exactly the executed script, adapter config, adapter weights, and self-verifying result manifest must have been added.
+
+The CLI verifies the complete local directory before connecting, derives a ten-file corpus-free envelope in private staging, and streams a deterministic gzip tar through a bounded channel. The server must return HTTP 201 with the exact locally predicted import digest, content revision, installed size, file count, task, and strong ETag. The source bundle is retained on every outcome.
 "#;
 
 const ADAPTERS_OVERVIEW: &str = r#"Inspect and manage LoRA adapters on the running Kiln server at http://localhost:8420 by default.
@@ -909,6 +921,21 @@ pub enum HfTrainCommands {
         /// Retain the verified export in the server registry after download
         #[arg(long)]
         keep_server_copy: bool,
+
+        /// Server URL; defaults to the local kiln serve instance
+        #[arg(long, default_value_t = default_server_url())]
+        url: String,
+    },
+    /// Verify and import a completed external-training PEFT result
+    #[command(name = "import-peft", long_about = TRAIN_HF_IMPORT_PEFT_OVERVIEW)]
+    ImportPeft {
+        /// Completed extracted .kiln-hf directory containing result artifacts
+        #[arg(long)]
+        bundle: PathBuf,
+
+        /// New adapter name on the receiving server
+        #[arg(long)]
+        name: String,
 
         /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value_t = default_server_url())]
@@ -4688,7 +4715,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_hf_dataset_list_and_delete_commands() {
+    fn parses_hf_dataset_import_list_and_delete_commands() {
         use clap::Parser;
         let export = Cli::try_parse_from([
             "kiln",
@@ -4710,6 +4737,30 @@ mod tests {
                     ..
                 }
             )))
+        ));
+
+        let import = Cli::try_parse_from([
+            "kiln",
+            "train",
+            "hf",
+            "import-peft",
+            "--bundle",
+            "corrections-01.kiln-hf",
+            "--name",
+            "corrections.peft-01",
+        ])
+        .unwrap();
+        assert!(matches!(
+            import.command,
+            Some(Commands::Train(TrainCommands::Hf(
+                HfTrainCommands::ImportPeft {
+                    bundle,
+                    name,
+                    url,
+                }
+            ))) if bundle == PathBuf::from("corrections-01.kiln-hf")
+                && name == "corrections.peft-01"
+                && url == "http://localhost:8420"
         ));
 
         let list = Cli::try_parse_from(["kiln", "train", "hf", "list", "--json"]).unwrap();

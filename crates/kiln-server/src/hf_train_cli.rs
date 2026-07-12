@@ -3,23 +3,43 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use console::style;
 use flate2::bufread::GzDecoder;
-use kiln_train::{HF_TRL_BUNDLE_SUFFIX, HfTrlExportManifestV1, HfTrlTask};
+use flate2::{Compression, GzBuilder};
+use kiln_model::lora_loader::LoraSourceIdentity;
+use kiln_train::{
+    HF_TRL_ADAPTER_CONFIG_FILENAME, HF_TRL_ADAPTER_MODEL_FILENAME, HF_TRL_BUNDLE_SUFFIX,
+    HF_TRL_EXECUTED_SCRIPT_FILENAME, HF_TRL_EXPORT_MANIFEST_FILENAME,
+    HF_TRL_IMPORT_ENVELOPE_SUFFIX,
+    HF_TRL_IMPORT_MAX_ADAPTER_CONFIG_BYTES as MAX_IMPORT_ADAPTER_CONFIG_BYTES,
+    HF_TRL_IMPORT_MAX_ARCHIVE_BYTES as MAX_IMPORT_ARCHIVE_BYTES,
+    HF_TRL_IMPORT_MAX_AUXILIARY_BYTES as MAX_IMPORT_AUXILIARY_BYTES,
+    HF_TRL_IMPORT_MAX_EXPANDED_BYTES as MAX_IMPORT_EXPANDED_BYTES,
+    HF_TRL_IMPORT_MAX_MANIFEST_BYTES as MAX_IMPORT_MANIFEST_BYTES,
+    HF_TRL_IMPORT_MAX_SCRIPT_BYTES as MAX_IMPORT_SCRIPT_BYTES, HF_TRL_IMPORT_RECEIPT_FILENAME,
+    HF_TRL_IMPORTED_ADAPTER_FILES as IMPORTED_ADAPTER_FILES, HF_TRL_RESULT_MANIFEST_FILENAME,
+    HfTrlExportManifestV1, HfTrlImportReceiptV1, HfTrlResidentModelIdentity, HfTrlTask,
+    HfTrlTrainingResultV1, hf_trl_import_envelope_files,
+    validate_hf_trl_import_name as validate_import_name,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 const MAX_JSON_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4096;
 const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_EXPANDED_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const HTTP_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const IMPORT_UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
+const IMPORT_UPLOAD_CHANNEL_DEPTH: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct ExportSftOptions {
@@ -32,6 +52,13 @@ pub struct ExportSftOptions {
     pub input_adapter: Option<String>,
     pub split_manifest: Option<PathBuf>,
     pub keep_server_copy: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportPeftOptions {
+    pub url: String,
+    pub bundle: PathBuf,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -56,6 +83,38 @@ struct ExportList {
 struct DeleteExportResponse {
     status: String,
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportPeftResponse {
+    status: String,
+    name: String,
+    task: HfTrlTask,
+    export_sha256: String,
+    result_sha256: String,
+    import_sha256: String,
+    content_revision: String,
+    used_exported_reference_script: bool,
+    size_bytes: u64,
+    files: usize,
+}
+
+struct PreparedImportUpload {
+    _temporary: tempfile::TempDir,
+    envelope: PathBuf,
+    export: HfTrlExportManifestV1,
+    result: HfTrlTrainingResultV1,
+    receipt: HfTrlImportReceiptV1,
+    content_revision: String,
+    expanded_bytes: u64,
+    installed_bytes: u64,
+}
+
+struct ImportArchiveWriter {
+    sender: mpsc::Sender<std::result::Result<Vec<u8>, io::Error>>,
+    buffer: Vec<u8>,
+    written: u64,
 }
 
 struct DownloadedBundle {
@@ -135,6 +194,50 @@ fn validate_export_etag(
     ensure!(
         value == format!("\"{expected_export_sha256}\""),
         "HF/TRL export ETag {value:?} differs from identity {expected_export_sha256}"
+    );
+    Ok(())
+}
+
+fn validate_import_etag(
+    headers: &reqwest::header::HeaderMap,
+    expected_import_sha256: &str,
+) -> Result<()> {
+    let mut values = headers.get_all(reqwest::header::ETAG).iter();
+    let value = values
+        .next()
+        .context("HF/TRL import response is missing its ETag identity")?;
+    ensure!(
+        values.next().is_none(),
+        "HF/TRL import response contains multiple ETag identities"
+    );
+    let value = value
+        .to_str()
+        .context("HF/TRL import ETag must be visible ASCII")?;
+    ensure!(
+        value == format!("\"{expected_import_sha256}\""),
+        "HF/TRL import ETag {value:?} differs from expected identity {expected_import_sha256}"
+    );
+    Ok(())
+}
+
+fn validate_json_content_type(headers: &reqwest::header::HeaderMap) -> Result<()> {
+    let mut values = headers.get_all(reqwest::header::CONTENT_TYPE).iter();
+    let value = values
+        .next()
+        .context("HF/TRL import response is missing Content-Type")?;
+    ensure!(
+        values.next().is_none(),
+        "HF/TRL import response contains multiple Content-Type values"
+    );
+    let value = value
+        .to_str()
+        .context("HF/TRL import Content-Type must be visible ASCII")?;
+    ensure!(
+        value
+            .split(';')
+            .next()
+            .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json")),
+        "HF/TRL import response has unexpected Content-Type {value:?}"
     );
     Ok(())
 }
@@ -234,6 +337,340 @@ async fn decode_json_response<T: DeserializeOwned>(response: reqwest::Response) 
         bail!("{}", render_api_error(status, &body));
     }
     serde_json::from_slice(&body).context("decoding HF/TRL export server response")
+}
+
+impl ImportArchiveWriter {
+    fn new(sender: mpsc::Sender<std::result::Result<Vec<u8>, io::Error>>) -> Self {
+        Self {
+            sender,
+            buffer: Vec::with_capacity(IMPORT_UPLOAD_CHUNK_BYTES),
+            written: 0,
+        }
+    }
+
+    fn emit(&mut self) -> io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::replace(
+            &mut self.buffer,
+            Vec::with_capacity(IMPORT_UPLOAD_CHUNK_BYTES),
+        );
+        self.sender.blocking_send(Ok(chunk)).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "HF/TRL import request stopped consuming the upload",
+            )
+        })
+    }
+
+    fn finish(mut self) -> io::Result<u64> {
+        self.emit()?;
+        Ok(self.written)
+    }
+}
+
+impl Write for ImportArchiveWriter {
+    fn write(&mut self, mut bytes: &[u8]) -> io::Result<usize> {
+        let accepted = bytes.len();
+        let next = self
+            .written
+            .checked_add(u64::try_from(accepted).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "upload write length exceeds u64",
+                )
+            })?)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "upload size overflow"))?;
+        if next > MAX_IMPORT_ARCHIVE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("compressed import archive exceeds {MAX_IMPORT_ARCHIVE_BYTES} bytes"),
+            ));
+        }
+        self.written = next;
+        while !bytes.is_empty() {
+            let available = IMPORT_UPLOAD_CHUNK_BYTES - self.buffer.len();
+            let take = available.min(bytes.len());
+            self.buffer.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            if self.buffer.len() == IMPORT_UPLOAD_CHUNK_BYTES {
+                self.emit()?;
+            }
+        }
+        Ok(accepted)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.emit()
+    }
+}
+
+fn import_file_limit(relative: &str) -> u64 {
+    match relative {
+        HF_TRL_EXPORT_MANIFEST_FILENAME | HF_TRL_RESULT_MANIFEST_FILENAME => {
+            MAX_IMPORT_MANIFEST_BYTES
+        }
+        HF_TRL_EXECUTED_SCRIPT_FILENAME => MAX_IMPORT_SCRIPT_BYTES,
+        HF_TRL_ADAPTER_CONFIG_FILENAME => MAX_IMPORT_ADAPTER_CONFIG_BYTES,
+        HF_TRL_ADAPTER_MODEL_FILENAME => MAX_IMPORT_EXPANDED_BYTES,
+        _ => MAX_IMPORT_AUXILIARY_BYTES,
+    }
+}
+
+fn regular_file_size(root: &Path, relative: &str) -> Result<u64> {
+    let path = root.join(relative);
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("inspecting verified import artifact {}", path.display()))?;
+    ensure!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "verified import artifact is not a regular file: {}",
+        path.display()
+    );
+    ensure!(
+        metadata.len() <= import_file_limit(relative),
+        "import artifact {relative:?} is {} bytes; server limit is {} bytes",
+        metadata.len(),
+        import_file_limit(relative)
+    );
+    Ok(metadata.len())
+}
+
+fn expected_resident_identity(export: &HfTrlExportManifestV1) -> HfTrlResidentModelIdentity {
+    HfTrlResidentModelIdentity {
+        served_model_id: export.model.served_model_id.clone(),
+        base_weight_shard_manifest: export.model.base_weight_shard_manifest.clone(),
+        model_config_sha256: export.model.model_config.sha256.clone(),
+        tokenizer_vocab_sha256: export.model.tokenizer_vocab_sha256.clone(),
+        tokenizer_config_sha256: export.model.tokenizer.sha256.clone(),
+        chat_template_sha256: export.model.chat_template.sha256.clone(),
+        native_training_chat_template_sha256: export
+            .model
+            .native_training_chat_template
+            .sha256
+            .clone(),
+        trl_training_chat_template_sha256: export.model.trl_training_chat_template.sha256.clone(),
+    }
+}
+
+fn preflight_import_bundle(
+    bundle: &Path,
+) -> Result<(HfTrlExportManifestV1, HfTrlTrainingResultV1, u64)> {
+    let root_metadata = fs::symlink_metadata(bundle)
+        .with_context(|| format!("inspecting completed HF/TRL bundle {}", bundle.display()))?;
+    ensure!(
+        root_metadata.file_type().is_dir() && !root_metadata.file_type().is_symlink(),
+        "completed HF/TRL bundle is not a real directory: {}",
+        bundle.display()
+    );
+    regular_file_size(bundle, HF_TRL_EXPORT_MANIFEST_FILENAME)?;
+    regular_file_size(bundle, HF_TRL_RESULT_MANIFEST_FILENAME)?;
+    let export = kiln_train::read_hf_trl_export_manifest(bundle)
+        .context("reading completed-bundle export manifest")?;
+    let result = kiln_train::read_hf_trl_training_result(bundle)
+        .context("reading completed-bundle result manifest")?;
+    result
+        .validate_against_export(&export)
+        .context("validating completed-bundle manifest linkage")?;
+    let files = hf_trl_import_envelope_files(&export);
+    ensure!(
+        files.len() == 10,
+        "HF/TRL import envelope contract must contain exactly ten files"
+    );
+    let mut expanded_bytes = 0u64;
+    for relative in files {
+        expanded_bytes = expanded_bytes
+            .checked_add(regular_file_size(bundle, &relative)?)
+            .context("HF/TRL import expanded-size overflow")?;
+    }
+    ensure!(
+        expanded_bytes <= MAX_IMPORT_EXPANDED_BYTES,
+        "HF/TRL import envelope contains {expanded_bytes} bytes; server limit is {MAX_IMPORT_EXPANDED_BYTES} bytes"
+    );
+    Ok((export, result, expanded_bytes))
+}
+
+fn prepare_import_upload(bundle: &Path, name: &str) -> Result<PreparedImportUpload> {
+    let (preflight_export, preflight_result, expanded_bytes) = preflight_import_bundle(bundle)?;
+    let temporary = tempfile::Builder::new()
+        .prefix("kiln-hf-import-")
+        .tempdir()
+        .context("creating private HF/TRL import staging directory")?;
+    let envelope = temporary
+        .path()
+        .join(format!("{name}{HF_TRL_IMPORT_ENVELOPE_SUFFIX}"));
+    let (export, result) = kiln_train::write_hf_trl_import_envelope(bundle, &envelope)
+        .with_context(|| format!("verifying completed HF/TRL bundle {}", bundle.display()))?;
+    ensure!(
+        export == preflight_export && result == preflight_result,
+        "HF/TRL completed-bundle identities changed after resource preflight"
+    );
+
+    let receipt = HfTrlImportReceiptV1::new(
+        name.to_string(),
+        &export,
+        &result,
+        expected_resident_identity(&export),
+    )
+    .context("deriving expected HF/TRL import receipt")?;
+    let mut receipt_bytes = serde_json::to_vec_pretty(&receipt)
+        .context("serializing expected HF/TRL import receipt")?;
+    receipt_bytes.push(b'\n');
+    let mut installed_bytes =
+        u64::try_from(receipt_bytes.len()).context("import receipt size exceeds u64")?;
+    for relative in IMPORTED_ADAPTER_FILES
+        .into_iter()
+        .filter(|relative| *relative != HF_TRL_IMPORT_RECEIPT_FILENAME)
+    {
+        installed_bytes = installed_bytes
+            .checked_add(regular_file_size(&envelope, relative)?)
+            .context("installed HF/TRL adapter size overflow")?;
+    }
+    let weights_sha256 = result
+        .output_adapter
+        .model
+        .sha256
+        .strip_prefix("sha256:")
+        .context("verified PEFT weight identity is not sha256-prefixed")?;
+    let config_sha256 = result
+        .output_adapter
+        .config
+        .sha256
+        .strip_prefix("sha256:")
+        .context("verified PEFT configuration identity is not sha256-prefixed")?;
+    let content_revision = LoraSourceIdentity::from_verified_peft_digests(
+        result.output_adapter.model.size_bytes,
+        weights_sha256,
+        config_sha256,
+    )
+    .context("deriving expected imported adapter content revision")?
+    .content_revision();
+
+    Ok(PreparedImportUpload {
+        _temporary: temporary,
+        envelope,
+        export,
+        result,
+        receipt,
+        content_revision,
+        expanded_bytes,
+        installed_bytes,
+    })
+}
+
+fn write_import_archive(
+    envelope: &Path,
+    root: &str,
+    sender: mpsc::Sender<std::result::Result<Vec<u8>, io::Error>>,
+) -> Result<u64> {
+    let writer = ImportArchiveWriter::new(sender);
+    let encoder = GzBuilder::new()
+        .mtime(0)
+        .write(writer, Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    let export = kiln_train::read_hf_trl_export_manifest(envelope)
+        .context("reading verified import-envelope manifest")?;
+    for relative in hf_trl_import_envelope_files(&export) {
+        let path = envelope.join(&relative);
+        let size = regular_file_size(envelope, &relative)?;
+        let file = File::open(&path)
+            .with_context(|| format!("opening import artifact {}", path.display()))?;
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o600);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_size(size);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, format!("{root}/{relative}"), file)
+            .with_context(|| format!("archiving import artifact {relative}"))?;
+    }
+    let encoder = archive
+        .into_inner()
+        .context("finishing HF/TRL import tar stream")?;
+    let writer = encoder
+        .finish()
+        .context("finishing HF/TRL import gzip stream")?;
+    writer
+        .finish()
+        .context("flushing HF/TRL import upload stream")
+}
+
+fn spawn_import_archive(
+    envelope: PathBuf,
+    root: String,
+) -> (
+    ReceiverStream<std::result::Result<Vec<u8>, io::Error>>,
+    tokio::task::JoinHandle<Result<u64>>,
+) {
+    let (sender, receiver) = mpsc::channel(IMPORT_UPLOAD_CHANNEL_DEPTH);
+    let error_sender = sender.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        let result = write_import_archive(&envelope, &root, sender);
+        if let Err(error) = &result {
+            let _ = error_sender.blocking_send(Err(io::Error::other(format!("{error:#}"))));
+        }
+        result
+    });
+    (ReceiverStream::new(receiver), worker)
+}
+
+fn validate_import_response(
+    response: &ImportPeftResponse,
+    prepared: &PreparedImportUpload,
+    name: &str,
+) -> Result<()> {
+    let expected_reference_script = prepared
+        .result
+        .uses_exported_reference_script(&prepared.export)
+        .context("checking expected reference-script identity")?;
+    ensure!(
+        response.status == "imported",
+        "server import status is not imported"
+    );
+    ensure!(
+        response.name == name,
+        "server imported a different adapter name"
+    );
+    ensure!(
+        response.task == prepared.result.task,
+        "server import task differs from the verified result"
+    );
+    ensure!(
+        response.export_sha256 == prepared.export.export_sha256,
+        "server import export identity differs from the verified bundle"
+    );
+    ensure!(
+        response.result_sha256 == prepared.result.result_sha256,
+        "server import result identity differs from the verified bundle"
+    );
+    ensure!(
+        response.import_sha256 == prepared.receipt.import_sha256,
+        "server import receipt identity differs from the locally derived identity"
+    );
+    ensure!(
+        response.content_revision == prepared.content_revision,
+        "server adapter content revision differs from the verified PEFT bytes"
+    );
+    ensure!(
+        response.used_exported_reference_script == expected_reference_script,
+        "server import reference-script status differs from the verified result"
+    );
+    ensure!(
+        response.size_bytes == prepared.installed_bytes,
+        "server installed byte count {} differs from locally derived {}",
+        response.size_bytes,
+        prepared.installed_bytes
+    );
+    ensure!(
+        response.files == IMPORTED_ADAPTER_FILES.len(),
+        "server installed file count {} differs from contract value {}",
+        response.files,
+        IMPORTED_ADAPTER_FILES.len()
+    );
+    Ok(())
 }
 
 fn validate_archive_path(path: &Path, expected_root: &OsStr) -> Result<()> {
@@ -711,6 +1148,157 @@ pub async fn run_export_sft(options: ExportSftOptions) -> Result<()> {
     Ok(())
 }
 
+pub async fn run_import_peft(options: ImportPeftOptions) -> Result<()> {
+    validate_import_name(&options.name)?;
+    let import_url = endpoint(
+        &options.url,
+        &format!("/v1/train/hf/peft/imports/{}", options.name),
+    )?;
+    let client = build_client()?;
+
+    println!(
+        "{} Verifying completed HF/TRL bundle {}",
+        style("→").cyan().bold(),
+        options.bundle.display()
+    );
+    let bundle = options.bundle.clone();
+    let name = options.name.clone();
+    let prepared = tokio::task::spawn_blocking(move || prepare_import_upload(&bundle, &name))
+        .await
+        .context("HF/TRL import preparation worker panicked")??;
+
+    println!(
+        "{} Streaming {} verified envelope bytes for adapter '{}'",
+        style("→").cyan().bold(),
+        prepared.expanded_bytes,
+        style(&options.name).white().bold()
+    );
+    let root = format!("{}{}", options.name, HF_TRL_IMPORT_ENVELOPE_SUFFIX);
+    let (stream, producer) = spawn_import_archive(prepared.envelope.clone(), root);
+    let request_result = client
+        .post(import_url)
+        .header(reqwest::header::CONTENT_TYPE, "application/gzip")
+        .header(reqwest::header::CONTENT_ENCODING, "identity")
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await;
+    let producer_result = match producer.await {
+        Ok(result) => result,
+        Err(worker_error) => {
+            if request_result
+                .as_ref()
+                .is_ok_and(|response| response.status() == reqwest::StatusCode::CREATED)
+            {
+                bail!(
+                    "server returned HTTP 201 but the HF/TRL import archive worker failed: {worker_error}; adapter '{}' may already be installed",
+                    options.name
+                );
+            }
+            bail!("HF/TRL import archive worker failed: {worker_error}");
+        }
+    };
+
+    let response = match request_result {
+        Ok(response) => response,
+        Err(request_error) => match producer_result {
+            Ok(_) => {
+                bail!(
+                    "HF/TRL import request failed and its server outcome is unknown: {request_error}; inspect adapter '{}' with `kiln adapters list --url {}` before retrying",
+                    options.name,
+                    shell_quote_text(&options.url)
+                )
+            }
+            Err(producer_error) => {
+                bail!(
+                    "HF/TRL import request and upload producer failed, so the server outcome is unknown: request={request_error}; producer={producer_error:#}; inspect adapter '{}' with `kiln adapters list --url {}` before retrying",
+                    options.name,
+                    shell_quote_text(&options.url)
+                )
+            }
+        },
+    };
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = read_bounded_body(response, MAX_JSON_RESPONSE_BYTES)
+        .await
+        .with_context(|| {
+            if status == reqwest::StatusCode::CREATED {
+                format!(
+                    "server returned HTTP 201 but its bounded response body could not be read; adapter '{}' may already be installed",
+                    options.name
+                )
+            } else {
+                "reading HF/TRL import response body".to_string()
+            }
+        })?;
+    if status != reqwest::StatusCode::CREATED {
+        if status.is_success() {
+            bail!(
+                "server returned HTTP {status} instead of HTTP 201; adapter '{}' may already be installed, so inspect `kiln adapters list --url {}` before retrying",
+                options.name,
+                shell_quote_text(&options.url)
+            );
+        }
+        let api_error = render_api_error(status, &body);
+        if let Err(producer_error) = producer_result {
+            let producer_detail = format!("{producer_error:#}");
+            if !producer_detail.contains("stopped consuming the upload") {
+                bail!("{api_error}\n  upload: {producer_detail}");
+            }
+        }
+        bail!("{api_error}");
+    }
+    let archive_bytes = producer_result.with_context(|| {
+        format!(
+            "server returned HTTP 201 but the HF/TRL import archive did not finish; adapter '{}' may already be installed",
+            options.name
+        )
+    })?;
+    ensure!(
+        archive_bytes > 0,
+        "HF/TRL import archive producer emitted no bytes"
+    );
+
+    validate_json_content_type(&headers).with_context(|| {
+        format!(
+            "server returned HTTP 201 with an invalid content type; adapter '{}' may already be installed",
+            options.name
+        )
+    })?;
+    let imported: ImportPeftResponse = serde_json::from_slice(&body).with_context(|| {
+        format!(
+            "server returned HTTP 201 with an invalid import receipt; adapter '{}' may already be installed",
+            options.name
+        )
+    })?;
+    validate_import_etag(&headers, &prepared.receipt.import_sha256).with_context(|| {
+        format!(
+            "server returned HTTP 201 but its response identity is invalid; adapter '{}' may already be installed",
+            options.name
+        )
+    })?;
+    validate_import_response(&imported, &prepared, &options.name).with_context(|| {
+        format!(
+            "server returned HTTP 201 but its import receipt is inconsistent; adapter '{}' may already be installed",
+            options.name
+        )
+    })?;
+
+    println!(
+        "{} Imported verified PEFT adapter '{}'",
+        style("✓").green().bold(),
+        style(&options.name).white().bold()
+    );
+    println!("import_sha256: {}", imported.import_sha256);
+    println!("export_sha256: {}", imported.export_sha256);
+    println!("result_sha256: {}", imported.result_sha256);
+    println!("content_revision: {}", imported.content_revision);
+    println!("uploaded_archive_bytes: {archive_bytes}");
+    println!("installed_bytes: {}", imported.size_bytes);
+    println!("source_bundle: retained at {}", options.bundle.display());
+    Ok(())
+}
+
 pub async fn run_list(base_url: &str, json: bool) -> Result<()> {
     let client = build_client()?;
     let response = client
@@ -804,6 +1392,64 @@ mod tests {
     }
 
     #[test]
+    fn import_name_validation_is_portable_and_bounded() {
+        for valid in ["a", "run-01", "run_01", "run.v2", "A9"] {
+            validate_import_name(valid).unwrap();
+        }
+        for invalid in ["", "-run", ".run", "run..v2", "run/path", "run path", "é"] {
+            assert!(
+                validate_import_name(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        let boundary = "a".repeat(128);
+        validate_import_name(&boundary).unwrap();
+        let archive_path =
+            format!("{boundary}{HF_TRL_IMPORT_ENVELOPE_SUFFIX}/kiln_training_chat_template.jinja");
+        let mut header = tar::Header::new_ustar();
+        header.set_path(&archive_path).unwrap();
+        assert_eq!(header.path().unwrap(), Path::new(&archive_path));
+        assert!(validate_import_name(&"a".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn import_archive_writer_chunks_and_enforces_compressed_limit() {
+        let (sender, mut receiver) = mpsc::channel(IMPORT_UPLOAD_CHANNEL_DEPTH);
+        let mut writer = ImportArchiveWriter::new(sender);
+        let bytes = vec![7u8; IMPORT_UPLOAD_CHUNK_BYTES + 1];
+        writer.write_all(&bytes).unwrap();
+        assert_eq!(writer.finish().unwrap(), bytes.len() as u64);
+        let first = receiver.try_recv().unwrap().unwrap();
+        let second = receiver.try_recv().unwrap().unwrap();
+        assert_eq!(first.len(), IMPORT_UPLOAD_CHUNK_BYTES);
+        assert_eq!(second, vec![7u8]);
+
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut writer = ImportArchiveWriter::new(sender);
+        writer.written = MAX_IMPORT_ARCHIVE_BYTES;
+        let error = writer.write_all(&[1]).unwrap_err();
+        assert!(error.to_string().contains("compressed import archive"));
+    }
+
+    #[tokio::test]
+    async fn import_rejects_incomplete_bundle_before_connecting() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = run_import_peft(ImportPeftOptions {
+            url: "http://127.0.0.1:1".to_string(),
+            bundle: directory.path().to_path_buf(),
+            name: "not-contacted".to_string(),
+        })
+        .await
+        .unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains("inspecting verified import artifact"),
+            "{detail}"
+        );
+        assert!(!detail.contains("connection refused"), "{detail}");
+    }
+
+    #[test]
     fn split_manifest_requires_an_object() {
         let directory = tempfile::tempdir().unwrap();
         let object = directory.path().join("object.json");
@@ -873,6 +1519,19 @@ mod tests {
         );
         validate_export_etag(&headers, &digest).unwrap();
         assert!(validate_export_etag(&headers, &format!("sha256:{}", "b".repeat(64))).is_err());
+
+        let mut content_headers = reqwest::header::HeaderMap::new();
+        assert!(validate_json_content_type(&content_headers).is_err());
+        content_headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        validate_json_content_type(&content_headers).unwrap();
+        content_headers.append(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+        assert!(validate_json_content_type(&content_headers).is_err());
     }
 
     #[test]

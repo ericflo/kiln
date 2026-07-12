@@ -9,10 +9,9 @@ audit the handoff.
 
 The version-1 manifests, validation library, atomic bundle/envelope writers,
 pinned SFT reference runner, public SFT export/download CLI and API, and
-resident-validated PEFT import API are implemented. The first-party import
-upload CLI, GRPO exporter, and GRPO runner are not yet available. A PEFT
-directory installed through the generic adapter upload route has not passed
-this contract.
+resident-validated PEFT import API and CLI are implemented. The GRPO exporter
+and GRPO runner are not yet available. A PEFT directory installed through the
+generic adapter upload route has not passed this contract.
 
 ## Bundle Model
 
@@ -328,9 +327,51 @@ envelope, fsyncs it, and publishes with a kernel-enforced no-clobber atomic
 rename on Linux and Apple platforms. Unsupported platforms fail closed rather
 than falling back to an existence-check race.
 
+## Verified PEFT Import CLI
+
+Use the completed extracted directory produced by the embedded runner, not the
+downloaded tarball and not a bare PEFT directory:
+
+```bash
+kiln train hf import-peft \
+  --bundle ./support_run_01.kiln-hf \
+  --name support-v2 \
+  --url http://localhost:8420
+```
+
+Adapter names are portable archive roots: 1 to 128 ASCII bytes, beginning with
+an alphanumeric character, followed only by alphanumerics, `-`, `_`, or `.`,
+with no `..`. Before making a request, the CLI fully verifies the completed
+bundle, materializes the exact ten-file envelope in a private temporary
+directory, revalidates every copied byte, and applies the server's 4 GiB
+expanded and per-file limits. A malformed, partial, changed, linked, or
+over-limit local result therefore never contacts the server.
+
+The request body is generated on a blocking worker as deterministic USTAR plus
+gzip and fed directly to reqwest through a four-chunk bounded channel. Each
+chunk is at most 256 KiB and compressed output is capped at 2 GiB, so neither
+the adapter nor archive is buffered in memory. USTAR prefix fields carry the
+bounded root without GNU/PAX extension entries that the strict server would
+reject. Redirects are disabled and response reads have a 120-second idle
+timeout. Private envelope staging is removed on success and every error; the
+completed `--bundle` directory is never modified or removed.
+
+Before upload, exact resident equivalence lets the CLI derive the receipt the
+server must publish, including `import_sha256`, adapter content revision,
+reference-script match, installed byte count, and six-file count. Success is
+accepted only as HTTP 201 with JSON and one strong `ETag` matching those local
+values plus the task and export/result identities. A normal structured API
+rejection means no adapter was published. A connection failure after sending
+the request has an unknown outcome; the CLI says so and directs the operator
+to inspect `kiln adapters list` before retrying. If an invalid success response
+arrives, it similarly warns that the named adapter may already be installed.
+An existing name returns the server's `adapter_already_exists` error and is
+never replaced.
+
 ## Validated PEFT Import API
 
-`POST /v1/train/hf/peft/imports/{name}` installs one completed external result.
+`POST /v1/train/hf/peft/imports/{name}` is the lower-level transport used by
+the verified CLI and installs one completed external result.
 The request body is a gzip-compressed tar with `Content-Type:
 application/gzip`, absent or `identity` content encoding, and the single exact
 root `{name}.kiln-hf-import`. Materialize that directory with
@@ -377,8 +418,8 @@ script, both source manifests, and `kiln_hf_import.json`
 and result digests, current resident identity, reference-script match, and its
 own digest. Success returns HTTP 201, the receipt digest as a strong `ETag`,
 and the adapter content revision. The first-party command that derives,
-archives, streams, and reports this API transaction remains the next CLI
-checkpoint.
+archives, streams, predicts, and verifies this API transaction is
+`kiln train hf import-peft`.
 
 ## Validation Boundary
 

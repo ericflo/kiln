@@ -331,6 +331,16 @@ async fn main() -> Result<()> {
                     )
                     .await;
                 }
+                HfTrainCommands::ImportPeft { bundle, name, url } => {
+                    return kiln_server::hf_train_cli::run_import_peft(
+                        kiln_server::hf_train_cli::ImportPeftOptions {
+                            url: url.clone(),
+                            bundle: bundle.clone(),
+                            name: name.clone(),
+                        },
+                    )
+                    .await;
+                }
                 HfTrainCommands::List { json, url } => {
                     return kiln_server::hf_train_cli::run_list(url, *json).await;
                 }

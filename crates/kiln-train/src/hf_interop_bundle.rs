@@ -15,7 +15,7 @@ use crate::adapter_output::{ADAPTER_MANIFEST_FILENAME, read_adapter_manifest};
 use crate::{
     HF_TRL_ADAPTER_CONFIG_FILENAME, HF_TRL_ADAPTER_MODEL_FILENAME, HF_TRL_CHAT_TEMPLATE_FILENAME,
     HF_TRL_DATASET_FILENAME, HF_TRL_ENVIRONMENT_LOCK_FILENAME, HF_TRL_EXECUTED_SCRIPT_FILENAME,
-    HF_TRL_EXPORT_MANIFEST_FILENAME, HF_TRL_MODEL_CONFIG_FILENAME,
+    HF_TRL_EXPORT_MANIFEST_FILENAME, HF_TRL_IMPORT_RECEIPT_FILENAME, HF_TRL_MODEL_CONFIG_FILENAME,
     HF_TRL_NATIVE_TRAINING_TEMPLATE_FILENAME, HF_TRL_REFERENCE_SCRIPT_FILENAME,
     HF_TRL_RESULT_MANIFEST_FILENAME, HF_TRL_SFT_INGESTION_FILENAME, HF_TRL_SPLIT_MANIFEST_FILENAME,
     HF_TRL_TOKENIZER_FILENAME, HF_TRL_TRAINING_TEMPLATE_FILENAME, HfTrlDataExport,
@@ -25,6 +25,39 @@ use crate::{
 
 pub const HF_TRL_BUNDLE_SUFFIX: &str = ".kiln-hf";
 pub const HF_TRL_IMPORT_ENVELOPE_SUFFIX: &str = ".kiln-hf-import";
+pub const HF_TRL_IMPORT_MAX_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const HF_TRL_IMPORT_MAX_EXPANDED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+pub const HF_TRL_IMPORT_MAX_ARCHIVE_ENTRIES: usize = 32;
+pub const HF_TRL_IMPORT_MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+pub const HF_TRL_IMPORT_MAX_SCRIPT_BYTES: u64 = 16 * 1024 * 1024;
+pub const HF_TRL_IMPORT_MAX_ADAPTER_CONFIG_BYTES: u64 = 1024 * 1024;
+pub const HF_TRL_IMPORT_MAX_AUXILIARY_BYTES: u64 = 512 * 1024 * 1024;
+pub const HF_TRL_IMPORT_MAX_SAFETENSORS_HEADER_BYTES: u64 = 16 * 1024 * 1024;
+pub const HF_TRL_IMPORT_MAX_TAR_ZERO_PADDING_BYTES: u64 = 10 * 1024;
+pub const HF_TRL_IMPORTED_ADAPTER_FILES: [&str; 6] = [
+    HF_TRL_ADAPTER_CONFIG_FILENAME,
+    HF_TRL_ADAPTER_MODEL_FILENAME,
+    HF_TRL_EXECUTED_SCRIPT_FILENAME,
+    HF_TRL_EXPORT_MANIFEST_FILENAME,
+    HF_TRL_RESULT_MANIFEST_FILENAME,
+    HF_TRL_IMPORT_RECEIPT_FILENAME,
+];
+
+/// Validate the adapter name used as both an import archive root and a
+/// resident adapter directory name.
+pub fn validate_hf_trl_import_name(name: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty()
+            && name.len() <= 128
+            && name.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'-' | b'_' | b'.'))
+            })
+            && !name.contains(".."),
+        "adapter name must be 1..=128 ASCII bytes, start with an alphanumeric character, contain only alphanumerics, '-', '_' or '.', and not contain '..'"
+    );
+    Ok(())
+}
+
 pub const HF_TRL_SFT_REFERENCE_SCRIPT: &[u8] =
     include_bytes!("../../../scripts/hf_trl/train_sft.py");
 pub const HF_TRL_SFT_ENVIRONMENT_LOCK: &[u8] =
@@ -241,7 +274,7 @@ pub fn verify_hf_trl_import_envelope(
     let export = crate::read_hf_trl_export_manifest(root)?;
     let result = crate::read_hf_trl_training_result(root)?;
     result.validate_against_export(&export)?;
-    let expected = expected_import_envelope_files(&export);
+    let expected = hf_trl_import_envelope_files(&export);
     ensure_exact_files(root, &expected, "import envelope")?;
     export.verify_model_files(root)?;
     result.verify_files(root)?;
@@ -267,7 +300,7 @@ pub fn write_hf_trl_import_envelope(
     })?;
     let mut guard = StagingGuard::new(staging.clone());
 
-    for relative in expected_import_envelope_files(&export) {
+    for relative in hf_trl_import_envelope_files(&export) {
         copy_regular_file(&source.join(&relative), &staging.join(&relative))?;
     }
     let verified = verify_hf_trl_import_envelope(&staging)?;
@@ -593,7 +626,8 @@ fn expected_result_files() -> BTreeSet<String> {
     ])
 }
 
-fn expected_import_envelope_files(export: &HfTrlExportManifestV1) -> BTreeSet<String> {
+/// Exact relative paths transported by the corpus-free import envelope.
+pub fn hf_trl_import_envelope_files(export: &HfTrlExportManifestV1) -> BTreeSet<String> {
     BTreeSet::from([
         HF_TRL_EXPORT_MANIFEST_FILENAME.to_string(),
         HF_TRL_RESULT_MANIFEST_FILENAME.to_string(),

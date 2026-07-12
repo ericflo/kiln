@@ -416,6 +416,10 @@ kiln train hf export-sft \
 tar -xzf support-hf-01.kiln-hf.tar.gz
 python support-hf-01.kiln-hf/train.py support-hf-01.kiln-hf \
   --base-model /absolute/path/to/the/hf-model
+
+kiln train hf import-peft \
+  --bundle ./support-hf-01.kiln-hf \
+  --name support-v2
 ```
 
 `--file` is read by the running server, not uploaded by the CLI. Use
@@ -425,10 +429,13 @@ rejects redirects, links, unsafe/multiple archive roots, identity drift, and
 existing outputs, and publishes only after complete manifest verification.
 It removes the server copy after success unless `--keep-server-copy` is set;
 `kiln train hf list` and `kiln train hf delete --name NAME` manage retained
-exports. The resident-validated raw PEFT import API is available at
-`POST /v1/train/hf/peft/imports/{name}`; the first-party import upload command
-and GRPO handoff are still in progress. The versioned identity, envelope, and
-receipt model is documented in the
+exports. After the embedded runner publishes its result, `import-peft` verifies
+the completed extracted directory before connecting, derives and streams only
+the bounded ten-file result envelope, and requires the server's HTTP 201,
+strong ETag, import digest, content revision, installed size, and file count to
+match values derived locally. It never modifies or removes the completed
+bundle. The lower-level API is `POST /v1/train/hf/peft/imports/{name}`. The
+versioned identity, envelope, receipt, and failure model is documented in the
 [HF/TRL Interoperability Contract](docs/HF_TRL_INTEROP.md).
 
 SFT row admission is also identical across inline examples, server-local

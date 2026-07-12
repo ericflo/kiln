@@ -85,10 +85,15 @@ pub use hf_interop::{
     read_hf_trl_export_manifest, read_hf_trl_import_receipt, read_hf_trl_training_result,
 };
 pub use hf_interop_bundle::{
-    HF_TRL_BUNDLE_SUFFIX, HF_TRL_IMPORT_ENVELOPE_SUFFIX, HF_TRL_SFT_ENVIRONMENT_LOCK,
-    HF_TRL_SFT_REFERENCE_SCRIPT, HfTrlInputAdapterSource, HfTrlSftBundleInput,
-    verify_hf_trl_completed_bundle, verify_hf_trl_export_bundle, verify_hf_trl_import_envelope,
-    write_hf_trl_import_envelope, write_hf_trl_sft_bundle,
+    HF_TRL_BUNDLE_SUFFIX, HF_TRL_IMPORT_ENVELOPE_SUFFIX, HF_TRL_IMPORT_MAX_ADAPTER_CONFIG_BYTES,
+    HF_TRL_IMPORT_MAX_ARCHIVE_BYTES, HF_TRL_IMPORT_MAX_ARCHIVE_ENTRIES,
+    HF_TRL_IMPORT_MAX_AUXILIARY_BYTES, HF_TRL_IMPORT_MAX_EXPANDED_BYTES,
+    HF_TRL_IMPORT_MAX_MANIFEST_BYTES, HF_TRL_IMPORT_MAX_SAFETENSORS_HEADER_BYTES,
+    HF_TRL_IMPORT_MAX_SCRIPT_BYTES, HF_TRL_IMPORT_MAX_TAR_ZERO_PADDING_BYTES,
+    HF_TRL_IMPORTED_ADAPTER_FILES, HF_TRL_SFT_ENVIRONMENT_LOCK, HF_TRL_SFT_REFERENCE_SCRIPT,
+    HfTrlInputAdapterSource, HfTrlSftBundleInput, hf_trl_import_envelope_files,
+    validate_hf_trl_import_name, verify_hf_trl_completed_bundle, verify_hf_trl_export_bundle,
+    verify_hf_trl_import_envelope, write_hf_trl_import_envelope, write_hf_trl_sft_bundle,
 };
 pub use logit_cache::{CacheEntry, CacheStats, CachedLogitSource, LogitCache, hash_prefix};
 pub use receipt::{

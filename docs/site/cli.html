@@ -260,10 +260,11 @@ kiln health --json</code></pre>
           </div>
           <div>
             <h3 class="font-semibold mb-2">Submit training</h3>
-            <p class="mb-3" style="color: var(--fg-dim);">Send native training data, export a verified HF/TRL handoff, or check progress.</p>
+            <p class="mb-3" style="color: var(--fg-dim);">Send native training data, export or import a verified HF/TRL handoff, or check progress.</p>
 <pre class="text-xs"><code>kiln train sft --file corrections.jsonl --adapter support-bot
 kiln train grpo --file grpo-batch.json --adapter support-bot
 kiln train hf export-sft --file /data/corrections.jsonl --name support-hf-01
+kiln train hf import-peft --bundle ./support-hf-01.kiln-hf --name support-v2
 kiln train status</code></pre>
           </div>
           <div>
@@ -386,7 +387,7 @@ pi -p "Use the bash tool to run: pwd"</code></pre>
   <section id="training" class="divider">
     <div class="max-w-5xl mx-auto px-6 py-12">
       <p class="label mb-2">Training</p>
-      <h2 class="text-2xl font-semibold tracking-tight mb-4">Run native jobs or export a verified HF/TRL handoff</h2>
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Run native jobs or move a verified HF/TRL handoff</h2>
       <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">Training commands talk to an already-running server. SFT reads JSONL with one chat correction example per line, each with a <code>messages</code> array. GRPO accepts either one JSON request/batch with <code>groups</code> or streamed JSONL with one group per line; each group has prompt <code>messages</code> plus candidate <code>completions</code> containing <code>text</code> and <code>reward</code> scores. OPD reads one <code>/v1/train/opd</code> request object, or a JSON prompt array paired with <code>--teacher</code>, and binds the registered teacher's exact content revision. The nested <code>train hf</code> commands create and manage immutable bundles for broader Transformers/TRL/PEFT training.</p>
       <div class="grid lg:grid-cols-2 gap-4">
         <div class="card p-5">
@@ -429,12 +430,17 @@ kiln train hf export-sft \
   --dataset corrections:active \
   --name corrections-hf-01
 
+# After extracting and running the embedded trainer
+kiln train hf import-peft \
+  --bundle ./support-hf-01.kiln-hf \
+  --name support-v2
+
 kiln train hf list
 kiln train hf list --json
 kiln train hf delete \
   --name retained-export \
   --export-sha256 sha256:&lt;64-hex-from-list&gt;</code></pre>
-          <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>--file</code> is read by the server process; it is not uploaded from the CLI host. Exactly one of <code>--file</code> or <code>--dataset</code> is required. Add <code>--input-adapter NAME</code>, <code>--split-manifest FILE</code>, <code>--invalid-row-policy skip</code>, or <code>--keep-server-copy</code> when needed. The CLI refuses redirects and existing outputs, requires response <code>ETag</code> identity agreement, bounds idle reads and compressed/expanded bytes, streams into a sibling temporary file, rejects links, special entries, duplicate paths, trailing gzip data, and any root other than <code>{name}.kiln-hf</code>, verifies every manifest-bound byte, then publishes atomically. Automatic cleanup and safe manual retry use identity-conditional <code>If-Match</code> through <code>--export-sha256</code>, so a concurrently reused server name is never deleted; omit that flag only for deliberate operator cleanup of the current name or a damaged bundle. The verified local archive is kept if cleanup fails.</p>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>--file</code> is read by the server process; it is not uploaded from the CLI host. Exactly one of <code>--file</code> or <code>--dataset</code> is required. Add <code>--input-adapter NAME</code>, <code>--split-manifest FILE</code>, <code>--invalid-row-policy skip</code>, or <code>--keep-server-copy</code> when needed. Export refuses redirects and existing outputs, requires response <code>ETag</code> identity agreement, bounds idle reads and compressed/expanded bytes, streams into a sibling temporary file, rejects links, special entries, duplicate paths, trailing gzip data, and any root other than <code>{name}.kiln-hf</code>, verifies every manifest-bound byte, then publishes atomically. Automatic cleanup and safe manual retry use identity-conditional <code>If-Match</code> through <code>--export-sha256</code>, so a concurrently reused server name is never deleted; omit that flag only for deliberate operator cleanup of the current name or a damaged bundle. Import takes the completed extracted <code>.kiln-hf</code> directory, fails local verification before connecting, streams a deterministic ten-file envelope through bounded memory, and requires HTTP 201 plus exact locally predicted receipt, <code>ETag</code>, PEFT revision, installed size, and file count. It never changes or removes the source bundle; an existing target is rejected without replacement.</p>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">OPD teacher distillation</h3>

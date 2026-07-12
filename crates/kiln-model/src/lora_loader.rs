@@ -178,6 +178,28 @@ impl LoraSourceIdentity {
         Ok(source.identity)
     }
 
+    /// Derive the same source identity from already verified PEFT file
+    /// metadata without reading the weight file again.
+    ///
+    /// Both digests are raw lowercase 64-character SHA-256 values. Callers
+    /// must have independently verified that the exact regular files have the
+    /// supplied size and digests before using this constructor.
+    pub fn from_verified_peft_digests(
+        weights_size_bytes: u64,
+        weights_sha256: &str,
+        config_sha256: &str,
+    ) -> Result<Self> {
+        let raw_weights_sha256 = decode_raw_sha256("adapter weights", weights_sha256)?;
+        Self::new(
+            adapter_weights_identity_from_digest(
+                PEFT_SAFETENSORS_FILENAME,
+                weights_size_bytes,
+                &raw_weights_sha256,
+            ),
+            config_sha256,
+        )
+    }
+
     /// Fingerprint an adapter only after its complete A/B tensor structure and
     /// every projection shape are proven compatible with `model_config`.
     ///
@@ -699,13 +721,38 @@ fn read_lora_source(adapter_dir: &Path) -> Result<LoadedLoraSource> {
 
 fn adapter_weights_identity_sha256(filename: &str, bytes: &[u8]) -> String {
     let raw_weights_sha256 = Sha256::digest(bytes);
+    adapter_weights_identity_from_digest(filename, bytes.len() as u64, &raw_weights_sha256)
+}
+
+fn adapter_weights_identity_from_digest(
+    filename: &str,
+    size_bytes: u64,
+    raw_weights_sha256: &[u8],
+) -> String {
     let mut aggregate = Sha256::new();
     aggregate.update(ADAPTER_WEIGHTS_IDENTITY_DOMAIN);
     aggregate.update(1u64.to_le_bytes());
     feed_len_prefixed(&mut aggregate, filename.as_bytes());
-    aggregate.update((bytes.len() as u64).to_le_bytes());
+    aggregate.update(size_bytes.to_le_bytes());
     aggregate.update(raw_weights_sha256);
     hex_digest(&aggregate.finalize())
+}
+
+fn decode_raw_sha256(field: &str, digest: &str) -> Result<[u8; 32]> {
+    ensure!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "{field} SHA-256 must contain exactly 64 lowercase hexadecimal characters"
+    );
+    let mut decoded = [0u8; 32];
+    for (index, byte) in decoded.iter_mut().enumerate() {
+        let offset = index * 2;
+        *byte = u8::from_str_radix(&digest[offset..offset + 2], 16)
+            .expect("validated lowercase hexadecimal pair must decode");
+    }
+    Ok(decoded)
 }
 
 fn feed_len_prefixed(digest: &mut Sha256, bytes: &[u8]) {
@@ -971,6 +1018,32 @@ mod tests {
         assert_eq!(
             adapter_weights_identity_sha256(PEFT_SAFETENSORS_FILENAME, b"weights"),
             "f9cf9b7ba0de3353dc9baf8047675fe8e5077518c16b293d50a2f23e50aa5c15"
+        );
+    }
+
+    #[test]
+    fn verified_peft_digest_identity_matches_byte_identity() {
+        let weights = b"weights";
+        let weights_sha256 = hex_digest(&Sha256::digest(weights));
+        let config_sha256 = hex_digest(&Sha256::digest(b"config"));
+        let identity = LoraSourceIdentity::from_verified_peft_digests(
+            weights.len() as u64,
+            &weights_sha256,
+            &config_sha256,
+        )
+        .unwrap();
+        assert_eq!(
+            identity.weights_sha256(),
+            adapter_weights_identity_sha256(PEFT_SAFETENSORS_FILENAME, weights)
+        );
+        assert_eq!(identity.config_sha256(), config_sha256);
+        assert!(
+            LoraSourceIdentity::from_verified_peft_digests(
+                weights.len() as u64,
+                &weights_sha256.to_uppercase(),
+                &config_sha256,
+            )
+            .is_err()
         );
     }
 

@@ -20,33 +20,27 @@ use serde::Serialize;
 use kiln_model::lora_loader::LoraSourceIdentity;
 use kiln_train::{
     HF_TRL_ADAPTER_CONFIG_FILENAME, HF_TRL_ADAPTER_MODEL_FILENAME, HF_TRL_EXECUTED_SCRIPT_FILENAME,
-    HF_TRL_EXPORT_MANIFEST_FILENAME, HF_TRL_IMPORT_ENVELOPE_SUFFIX, HF_TRL_IMPORT_RECEIPT_FILENAME,
+    HF_TRL_EXPORT_MANIFEST_FILENAME, HF_TRL_IMPORT_ENVELOPE_SUFFIX,
+    HF_TRL_IMPORT_MAX_ADAPTER_CONFIG_BYTES as MAX_IMPORT_ADAPTER_CONFIG_BYTES,
+    HF_TRL_IMPORT_MAX_ARCHIVE_BYTES as MAX_IMPORT_ARCHIVE_BYTES,
+    HF_TRL_IMPORT_MAX_ARCHIVE_ENTRIES as MAX_IMPORT_ARCHIVE_ENTRIES,
+    HF_TRL_IMPORT_MAX_AUXILIARY_BYTES as MAX_IMPORT_AUXILIARY_BYTES,
+    HF_TRL_IMPORT_MAX_EXPANDED_BYTES as MAX_IMPORT_EXPANDED_BYTES,
+    HF_TRL_IMPORT_MAX_MANIFEST_BYTES as MAX_IMPORT_MANIFEST_BYTES,
+    HF_TRL_IMPORT_MAX_SAFETENSORS_HEADER_BYTES as MAX_IMPORT_SAFETENSORS_HEADER_BYTES,
+    HF_TRL_IMPORT_MAX_SCRIPT_BYTES as MAX_IMPORT_SCRIPT_BYTES,
+    HF_TRL_IMPORT_MAX_TAR_ZERO_PADDING_BYTES as MAX_IMPORT_TAR_ZERO_PADDING_BYTES,
+    HF_TRL_IMPORT_RECEIPT_FILENAME, HF_TRL_IMPORTED_ADAPTER_FILES as IMPORTED_ADAPTER_FILES,
     HF_TRL_RESULT_MANIFEST_FILENAME, HfTrlExportManifestV1, HfTrlImportReceiptV1,
     HfTrlResidentModelIdentity, HfTrlTrainingResultV1, read_hf_trl_export_manifest,
-    read_hf_trl_import_receipt, read_hf_trl_training_result, verify_hf_trl_import_envelope,
+    read_hf_trl_import_receipt, read_hf_trl_training_result, validate_hf_trl_import_name,
+    verify_hf_trl_import_envelope,
 };
 
 use crate::error::ApiError;
 use crate::state::AppState;
 
-const MAX_IMPORT_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_IMPORT_EXPANDED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const MAX_IMPORT_ARCHIVE_ENTRIES: usize = 32;
-const MAX_IMPORT_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_IMPORT_SCRIPT_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_IMPORT_ADAPTER_CONFIG_BYTES: u64 = 1024 * 1024;
-const MAX_IMPORT_AUXILIARY_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_IMPORT_SAFETENSORS_HEADER_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_IMPORT_TAR_ZERO_PADDING_BYTES: u64 = 10 * 1024;
 const IMPORT_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const IMPORTED_ADAPTER_FILES: [&str; 6] = [
-    HF_TRL_ADAPTER_CONFIG_FILENAME,
-    HF_TRL_ADAPTER_MODEL_FILENAME,
-    HF_TRL_EXECUTED_SCRIPT_FILENAME,
-    HF_TRL_EXPORT_MANIFEST_FILENAME,
-    HF_TRL_RESULT_MANIFEST_FILENAME,
-    HF_TRL_IMPORT_RECEIPT_FILENAME,
-];
 
 #[derive(Debug, Serialize)]
 struct ImportPeftResponse {
@@ -88,6 +82,7 @@ async fn import_peft(
     body: Body,
 ) -> Result<Response, ApiError> {
     super::adapters::validate_adapter_name(&name)?;
+    validate_import_name(&name)?;
     super::adapters::ensure_adapter_mutation_admission(&state)?;
     if state.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
@@ -185,6 +180,11 @@ async fn import_peft(
         }),
     )
         .into_response())
+}
+
+fn validate_import_name(name: &str) -> Result<(), ApiError> {
+    validate_hf_trl_import_name(name)
+        .map_err(|error| ApiError::hf_trl_import_invalid(error.to_string()))
 }
 
 fn validate_import_headers(headers: &HeaderMap) -> Result<(), ApiError> {
@@ -863,6 +863,20 @@ mod tests {
         HfTrlFileIdentity::from_file(root, relative).unwrap()
     }
 
+    #[test]
+    fn import_names_match_portable_archive_root_contract() {
+        for valid in ["a", "run-01", "run_01", "run.v2", "A9"] {
+            validate_import_name(valid).unwrap();
+        }
+        for invalid in ["", "-run", ".run", "run..v2", "run path", "run/path", "é"] {
+            assert!(
+                validate_import_name(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        assert!(validate_import_name(&"a".repeat(129)).is_err());
+    }
+
     fn write_peft_result(
         root: &Path,
         export: &HfTrlExportManifestV1,
@@ -1067,6 +1081,97 @@ mod tests {
             response_json(collision).await["error"]["code"],
             "adapter_already_exists"
         );
+    }
+
+    #[tokio::test]
+    async fn peft_import_cli_streams_completed_bundle_and_retains_source() {
+        let fixture = super::super::hf_trl::tests::test_state(true);
+        let (_temporary, _envelope) = completed_envelope(&fixture.state, "cli-source").await;
+        let completed = fixture
+            .state
+            .adapter_dir
+            .join(".hf_trl_exports")
+            .join("cli-source.kiln-hf");
+        let expected = verify_hf_trl_completed_bundle(&completed).unwrap();
+
+        let app = crate::api::router(fixture.state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let options = crate::hf_train_cli::ImportPeftOptions {
+            url: format!("http://{address}"),
+            bundle: completed.clone(),
+            name: "cli.imported-01".to_string(),
+        };
+        crate::hf_train_cli::run_import_peft(options.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            verify_hf_trl_completed_bundle(&completed).unwrap(),
+            expected,
+            "the CLI must not modify or remove its completed source bundle"
+        );
+        let installed = fixture.state.adapter_dir.join("cli.imported-01");
+        let export = read_hf_trl_export_manifest(&installed).unwrap();
+        let result = read_hf_trl_training_result(&installed).unwrap();
+        let receipt = read_hf_trl_import_receipt(&installed).unwrap();
+        receipt.validate_against(&export, &result).unwrap();
+        assert_eq!(receipt.adapter_name, "cli.imported-01");
+
+        let collision = crate::hf_train_cli::run_import_peft(options)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{collision:#}").contains("adapter_already_exists"),
+            "{collision:#}"
+        );
+        assert_eq!(
+            verify_hf_trl_completed_bundle(&completed).unwrap(),
+            expected
+        );
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn peft_import_cli_treats_non_created_success_as_ambiguous() {
+        let fixture = super::super::hf_trl::tests::test_state(true);
+        let (_temporary, _envelope) = completed_envelope(&fixture.state, "status-source").await;
+        let completed = fixture
+            .state
+            .adapter_dir
+            .join(".hf_trl_exports")
+            .join("status-source.kiln-hf");
+        let expected = verify_hf_trl_completed_bundle(&completed).unwrap();
+
+        let app = axum::Router::new().route(
+            "/v1/train/hf/peft/imports/{name}",
+            axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let error = crate::hf_train_cli::run_import_peft(crate::hf_train_cli::ImportPeftOptions {
+            url: format!("http://{address}"),
+            bundle: completed.clone(),
+            name: "ambiguous-status".to_string(),
+        })
+        .await
+        .unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(detail.contains("instead of HTTP 201"), "{detail}");
+        assert!(detail.contains("may already be installed"), "{detail}");
+        assert_eq!(
+            verify_hf_trl_completed_bundle(&completed).unwrap(),
+            expected
+        );
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]
