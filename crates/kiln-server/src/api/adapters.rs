@@ -132,7 +132,7 @@ struct DeleteAdapterResponse {
     name: String,
 }
 
-fn ensure_adapter_mutation_admission(state: &AppState) -> Result<(), ApiError> {
+pub(crate) fn ensure_adapter_mutation_admission(state: &AppState) -> Result<(), ApiError> {
     state
         .ensure_backend_healthy()
         .map_err(ApiError::backend_quarantined)

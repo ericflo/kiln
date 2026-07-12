@@ -21,6 +21,35 @@ pub fn locked_atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     locked_update(path, |_| Ok(bytes.to_vec()))
 }
 
+/// Atomically move `source` to a new `target` without replacing any existing
+/// filesystem entry at `target`.
+///
+/// Linux, Android, and Apple platforms provide a kernel-enforced no-replace
+/// rename. Other targets fail closed instead of emulating the operation with a
+/// racy existence check followed by an ordinary rename.
+pub fn atomic_rename_noreplace(source: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            source,
+            rustix::fs::CWD,
+            target,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(Into::into)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    {
+        let _ = (source, target);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "atomic no-replace rename is unavailable on this platform",
+        ))
+    }
+}
+
 /// Update `path` under the resource lock for that path.
 ///
 /// The existing bytes are read after the lock is held and passed to `update`.
@@ -232,6 +261,48 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"ok\":true}");
         assert_no_temp_or_lock_files(&dir, &path);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn atomic_rename_noreplace_publishes_new_target_and_preserves_collision() {
+        let dir = std::env::temp_dir().join(format!(
+            "kiln-resource-noreplace-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let source = dir.join("source");
+        let target = dir.join("target");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("payload"), b"first").unwrap();
+
+        atomic_rename_noreplace(&source, &target).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(target.join("payload")).unwrap(), b"first");
+
+        let replacement = dir.join("replacement");
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::write(replacement.join("payload"), b"second").unwrap();
+        let error = atomic_rename_noreplace(&replacement, &target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(target.join("payload")).unwrap(), b"first");
+        assert_eq!(
+            std::fs::read(replacement.join("payload")).unwrap(),
+            b"second"
+        );
+
+        let empty_target = dir.join("empty-target");
+        std::fs::create_dir(&empty_target).unwrap();
+        let error = atomic_rename_noreplace(&replacement, &empty_target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(empty_target.read_dir().unwrap().next().is_none());
+        assert_eq!(
+            std::fs::read(replacement.join("payload")).unwrap(),
+            b"second"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]

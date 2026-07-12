@@ -158,6 +158,7 @@ const expectedApiEndpoints = [
   '/v1/train/hf/exports',
   '/v1/train/hf/exports/{name}',
   '/v1/train/hf/exports/{name}/download',
+  '/v1/train/hf/peft/imports/{name}',
   '/v1/adapters',
   '/v1/adapters/default/download',
   '/v1/adapters/upload',
@@ -203,6 +204,7 @@ const expectedApiSections = [
   { label: 'base-weight provenance', terms: ['kiln.base-weight-shards.v1', 'base-weight aggregate', 'complete base-weight shard manifest', 'legacy aggregate-only checkpoints'] },
   { label: 'execution provenance', terms: ['kiln.execution-provenance.v1', 'execution-provenance record', 'admission-time base-weight and execution identities', 'validated execution-provenance record'] },
   { label: 'HF/TRL conditional export cleanup', terms: ['/v1/train/hf/exports/{name}', 'etag', 'if-match', 'http 412', 'damaged bundles'] },
+  { label: 'HF/TRL resident-validated PEFT import', terms: ['/v1/train/hf/peft/imports/{name}', '{name}.kiln-hf-import', 'resident model/tokenizer/template identity', 'peft tensor shapes', 'import-receipt digest', 'content revision'] },
   { label: 'training data safety', terms: ['training data changes', 'adapter'] },
   { label: 'response shapes', terms: ['response shapes'] },
 ];

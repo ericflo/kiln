@@ -425,8 +425,10 @@ rejects redirects, links, unsafe/multiple archive roots, identity drift, and
 existing outputs, and publishes only after complete manifest verification.
 It removes the server copy after success unless `--keep-server-copy` is set;
 `kiln train hf list` and `kiln train hf delete --name NAME` manage retained
-exports. Validated PEFT import and the GRPO handoff are still in progress. The
-versioned identity and validation model is documented in the
+exports. The resident-validated raw PEFT import API is available at
+`POST /v1/train/hf/peft/imports/{name}`; the first-party import upload command
+and GRPO handoff are still in progress. The versioned identity, envelope, and
+receipt model is documented in the
 [HF/TRL Interoperability Contract](docs/HF_TRL_INTEROP.md).
 
 SFT row admission is also identical across inline examples, server-local
@@ -519,6 +521,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET | `/v1/train/hf/exports/{name}` | Revalidate and return one complete export manifest |
 | GET | `/v1/train/hf/exports/{name}/download` | Revalidate and stream one `.kiln-hf` bundle as tar.gz |
 | DELETE | `/v1/train/hf/exports/{name}` | Durably delete an immutable server-owned export, optionally identity-conditional with `If-Match` |
+| POST | `/v1/train/hf/peft/imports/{name}` | Stream, fully verify, resident-validate, and atomically publish one `.kiln-hf-import` PEFT result |
 | POST | `/v1/train/grpo` | Submit GRPO scored completions and return the exact effective seed under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — same handler, semantically-honest name for multi-turn rollouts |
 | POST | `/v1/train/opd` | Submit on-policy or off-policy distillation against a registered, identity-bound teacher, return the exact effective seed, and default exact checkpoints to every 25 committed optimizer steps |

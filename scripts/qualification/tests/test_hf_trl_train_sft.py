@@ -320,6 +320,34 @@ class HfTrlSftReferenceTests(unittest.TestCase):
                 {"seed": {"kind": "unsigned", "value": -1}}
             )
 
+    def test_reference_target_modules_are_exactly_kiln_loadable(self) -> None:
+        expected = [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "in_proj_qkv",
+            "in_proj_z",
+            "out_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ]
+        self.assertEqual(list(train_sft.KILN_TARGET_MODULES), expected)
+        self.assertEqual(
+            train_sft._target_modules(None),
+            expected,
+        )
+        self.assertEqual(
+            train_sft._target_modules("q_proj, down_proj"),
+            ["q_proj", "down_proj"],
+        )
+        for invalid in ("all-linear", "q_proj,q_proj", "q_proj,"):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                train_sft.ContractError
+            ):
+                train_sft._target_modules(invalid)
+
     def test_incomplete_result_is_recovered_but_unattributed_files_fail(self) -> None:
         root, _ = train_sft.load_export_bundle(self.fixture.bundle)
         write(root / train_sft.RESULT_SENTINEL, b"incomplete")

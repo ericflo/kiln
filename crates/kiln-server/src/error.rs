@@ -541,6 +541,46 @@ impl ApiError {
         }
     }
 
+    pub fn hf_trl_import_invalid(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "hf_trl_import_invalid",
+            message: format!("Invalid HF/TRL PEFT import: {detail}"),
+            hint: "Upload a completed, self-verifying .kiln-hf-import archive produced from one unmodified HF/TRL result bundle.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn hf_trl_import_identity_mismatch(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "hf_trl_import_identity_mismatch",
+            message: format!("HF/TRL PEFT import does not match the resident model: {detail}"),
+            hint: "Import into a server with the exact exported base shards, model configuration, tokenizer, and inference/native/TRL templates.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn hf_trl_import_timeout(idle_seconds: u64) -> Self {
+        Self {
+            status: StatusCode::REQUEST_TIMEOUT,
+            code: "hf_trl_import_timeout",
+            message: format!("HF/TRL PEFT import body made no progress for {idle_seconds} seconds"),
+            hint: "Retry from a stable connection. The incomplete private staging directory has been removed and no adapter was published.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn hf_trl_import_failed(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "hf_trl_import_failed",
+            message: format!("HF/TRL PEFT import failed: {detail}"),
+            hint: "Check server logs and adapter-registry storage before retrying. Publication does not replace an existing target; an fsync failure also reports its rollback outcome.",
+            retry_after_seconds: None,
+        }
+    }
+
     // ── Teacher registry ───────────────────────────────────────────
 
     pub fn teacher_registration_invalid(detail: impl std::fmt::Display) -> Self {

@@ -17,12 +17,25 @@ use anyhow::{Context, Result, ensure};
 use kiln_tensor::Tensor as KtTensor;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 const ADAPTER_WEIGHTS_IDENTITY_DOMAIN: &[u8] = b"kiln.adapter-weights.v1\0";
 const ADAPTER_CONTENT_REVISION_DOMAIN: &[u8] = b"kiln.adapter-content-revision.v1\0";
 const PEFT_SAFETENSORS_FILENAME: &str = "adapter_model.safetensors";
+
+pub const SUPPORTED_LORA_TARGET_MODULES: &[&str] = &[
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "in_proj_qkv",
+    "in_proj_z",
+    "out_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+];
 
 /// Configuration from PEFT's adapter_config.json.
 #[derive(Debug, Deserialize)]
@@ -165,6 +178,21 @@ impl LoraSourceIdentity {
         Ok(source.identity)
     }
 
+    /// Fingerprint an adapter only after its complete A/B tensor structure and
+    /// every projection shape are proven compatible with `model_config`.
+    ///
+    /// # Safety
+    ///
+    /// Both PEFT files must remain immutable until this function returns. The
+    /// weight file is memory-mapped to avoid a heap copy proportional to its
+    /// size; concurrent truncation of a mapped file can terminate the process.
+    pub unsafe fn from_immutable_adapter_dir_for_model(
+        adapter_dir: &Path,
+        model_config: &kiln_core::config::ModelConfig,
+    ) -> Result<Self> {
+        inspect_immutable_adapter_dir(adapter_dir, model_config)
+    }
+
     pub fn weights_sha256(&self) -> &str {
         &self.weights_sha256
     }
@@ -184,6 +212,217 @@ impl LoraSourceIdentity {
         feed_len_prefixed(&mut digest, self.weights_sha256.as_bytes());
         feed_len_prefixed(&mut digest, self.config_sha256.as_bytes());
         hex_digest(&digest.finalize())
+    }
+}
+
+fn inspect_immutable_adapter_dir(
+    adapter_dir: &Path,
+    model_config: &kiln_core::config::ModelConfig,
+) -> Result<LoraSourceIdentity> {
+    let config_path = adapter_dir.join("adapter_config.json");
+    let config_metadata = std::fs::symlink_metadata(&config_path)
+        .with_context(|| format!("failed to stat {}", config_path.display()))?;
+    ensure!(
+        !config_metadata.file_type().is_symlink() && config_metadata.file_type().is_file(),
+        "{} is not a regular file",
+        config_path.display()
+    );
+    let config_bytes = std::fs::read(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let config: AdapterConfig =
+        serde_json::from_slice(&config_bytes).context("failed to parse adapter_config.json")?;
+
+    let weights_path = adapter_dir.join(PEFT_SAFETENSORS_FILENAME);
+    let weights_metadata = std::fs::symlink_metadata(&weights_path)
+        .with_context(|| format!("failed to stat {}", weights_path.display()))?;
+    ensure!(
+        !weights_metadata.file_type().is_symlink() && weights_metadata.file_type().is_file(),
+        "{} is not a regular file",
+        weights_path.display()
+    );
+    let weights_file = std::fs::File::open(&weights_path)
+        .with_context(|| format!("failed to open {}", weights_path.display()))?;
+    // SAFETY: the caller supplies a stable regular adapter file and this
+    // mapping is read-only. Identity-only validation avoids a second heap
+    // allocation proportional to the complete PEFT weight file.
+    let weights = unsafe { memmap2::MmapOptions::new().map(&weights_file) }
+        .with_context(|| format!("failed to map {}", weights_path.display()))?;
+    let tensors = safetensors::SafeTensors::deserialize(&weights)
+        .context("failed to deserialize safetensors")?;
+    validate_lora_structure(&config, &tensors, model_config)?;
+    Ok(LoraSourceIdentity {
+        weights_sha256: adapter_weights_identity_sha256(PEFT_SAFETENSORS_FILENAME, &weights),
+        config_sha256: sha256_hex(&config_bytes),
+    })
+}
+
+#[derive(Default)]
+struct LoraPairMetadata {
+    a: Option<(Vec<usize>, safetensors::Dtype)>,
+    b: Option<(Vec<usize>, safetensors::Dtype)>,
+}
+
+fn validate_lora_structure(
+    config: &AdapterConfig,
+    tensors: &safetensors::SafeTensors<'_>,
+    model_config: &kiln_core::config::ModelConfig,
+) -> Result<()> {
+    ensure!(config.r > 0, "adapter LoRA rank must be greater than zero");
+    ensure!(
+        config.lora_alpha.is_finite() && config.lora_alpha > 0.0,
+        "adapter lora_alpha must be finite and greater than zero"
+    );
+    if let Some(task_type) = config.task_type.as_deref() {
+        ensure!(
+            task_type == "CAUSAL_LM",
+            "adapter task_type must be CAUSAL_LM, found {task_type:?}"
+        );
+    }
+    ensure!(
+        !config.target_modules.is_empty(),
+        "adapter target_modules must not be empty"
+    );
+    let targets = config
+        .target_modules
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        targets.len() == config.target_modules.len(),
+        "adapter target_modules contains duplicates"
+    );
+    let supported = SUPPORTED_LORA_TARGET_MODULES
+        .iter()
+        .map(|module| (*module).to_string())
+        .collect::<BTreeSet<_>>();
+    let unsupported = targets.difference(&supported).cloned().collect::<Vec<_>>();
+    ensure!(
+        unsupported.is_empty(),
+        "adapter targets unsupported modules {unsupported:?}; supported modules are {supported:?}"
+    );
+
+    let mut pairs = BTreeMap::<(bool, usize, String), LoraPairMetadata>::new();
+    let mut observed_targets = BTreeSet::new();
+    for name in tensors.names() {
+        let parsed = parse_peft_key_strict(name)
+            .with_context(|| format!("unsupported PEFT tensor key {name:?}"))?;
+        ensure!(
+            targets.contains(&parsed.module),
+            "PEFT tensor {name:?} targets module {:?} absent from adapter_config.json",
+            parsed.module
+        );
+        ensure!(
+            !parsed.is_mtp || parsed.layer == 0,
+            "PEFT MTP tensor {name:?} uses unsupported MTP layer {}",
+            parsed.layer
+        );
+        ensure!(
+            parsed.is_mtp || parsed.layer < model_config.num_layers,
+            "PEFT tensor {name:?} addresses layer {} but the resident model has {} layers",
+            parsed.layer,
+            model_config.num_layers
+        );
+        let view = tensors
+            .tensor(name)
+            .with_context(|| format!("read PEFT tensor metadata {name:?}"))?;
+        ensure!(
+            matches!(
+                view.dtype(),
+                safetensors::Dtype::F32 | safetensors::Dtype::F16 | safetensors::Dtype::BF16
+            ),
+            "PEFT tensor {name:?} uses unsupported dtype {:?}; expected F32, F16, or BF16",
+            view.dtype()
+        );
+        let pair = pairs
+            .entry((parsed.is_mtp, parsed.layer, parsed.module.clone()))
+            .or_default();
+        let slot = if parsed.ab == "A" {
+            &mut pair.a
+        } else {
+            &mut pair.b
+        };
+        ensure!(
+            slot.is_none(),
+            "duplicate PEFT projection tensor for {name:?}"
+        );
+        *slot = Some((view.shape().to_vec(), view.dtype()));
+        observed_targets.insert(parsed.module);
+    }
+    ensure!(
+        !pairs.is_empty(),
+        "adapter contains no supported LoRA A/B tensors"
+    );
+    ensure!(
+        observed_targets == targets,
+        "adapter target_modules differs from tensors: declared {targets:?}, observed {observed_targets:?}"
+    );
+
+    for ((is_mtp, layer, module), pair) in pairs {
+        let a = pair.a.with_context(|| {
+            format!("adapter projection layer={layer} module={module} is missing lora_A")
+        })?;
+        let b = pair.b.with_context(|| {
+            format!("adapter projection layer={layer} module={module} is missing lora_B")
+        })?;
+        ensure!(
+            a.0.len() == 2 && b.0.len() == 2,
+            "adapter projection layer={layer} module={module} must use 2D A/B tensors, found A={:?}, B={:?}",
+            a.0,
+            b.0
+        );
+        ensure!(
+            a.0[0] == config.r && b.0[1] == config.r,
+            "adapter projection layer={layer} module={module} rank differs from config r={}: A={:?}, B={:?}",
+            config.r,
+            a.0,
+            b.0
+        );
+        ensure!(
+            a.1 == b.1,
+            "adapter projection layer={layer} module={module} mixes A/B dtypes {:?} and {:?}",
+            a.1,
+            b.1
+        );
+        let (input, output) =
+            expected_lora_projection_shape(model_config, layer, &module, is_mtp).with_context(
+                || {
+                    format!(
+                        "adapter projection layer={layer} module={module} is incompatible with the resident model"
+                    )
+                },
+            )?;
+        let expected_a = [config.r, input];
+        let expected_b = [output, config.r];
+        ensure!(
+            a.0 == expected_a && b.0 == expected_b,
+            "adapter projection layer={layer} module={module} shape mismatch: expected A={expected_a:?}, B={expected_b:?}; found A={:?}, B={:?}",
+            a.0,
+            b.0
+        );
+    }
+    Ok(())
+}
+
+fn expected_lora_projection_shape(
+    config: &kiln_core::config::ModelConfig,
+    layer: usize,
+    module: &str,
+    is_mtp: bool,
+) -> Option<(usize, usize)> {
+    let hidden = config.hidden_size;
+    let full_attention = is_mtp || config.is_full_attention_layer(layer);
+    match module {
+        "q_proj" if full_attention => Some((hidden, config.full_attn_q_proj_dim())),
+        "k_proj" | "v_proj" if full_attention => {
+            Some((hidden, config.num_kv_heads * config.head_dim))
+        }
+        "o_proj" if full_attention => Some((config.num_attention_heads * config.head_dim, hidden)),
+        "in_proj_qkv" if !full_attention => Some((hidden, config.linear_qkv_dim())),
+        "in_proj_z" if !full_attention => Some((hidden, config.linear_v_dim())),
+        "out_proj" if !full_attention => Some((config.linear_v_dim(), hidden)),
+        "gate_proj" | "up_proj" => Some((hidden, config.intermediate_size)),
+        "down_proj" => Some((config.intermediate_size, hidden)),
+        _ => None,
     }
 }
 
@@ -503,14 +742,14 @@ struct ParsedKey {
 /// - `base_model.model.model.layers.{i}.self_attn.{module}.lora_{A|B}.weight`
 /// - `base_model.model.model.layers.{i}.mlp.{module}.lora_{A|B}.weight`
 fn parse_peft_key(key: &str) -> Option<ParsedKey> {
-    // Look for "layers.{i}." and "lora_{A|B}.weight"
+    // Look for "layers.{i}." and "lora_{A|B}.weight". Production loading
+    // retains this permissive parser for compatibility with existing PEFT
+    // names; verified import applies `parse_peft_key_strict` first.
     let parts: Vec<&str> = key.split('.').collect();
 
-    // Find "layers" followed by a number
     let layer_pos = parts.iter().position(|&p| p == "layers")?;
     let layer_idx: usize = parts.get(layer_pos + 1)?.parse().ok()?;
 
-    // Find "lora_A" or "lora_B"
     let lora_pos = parts
         .iter()
         .position(|p| *p == "lora_A" || *p == "lora_B")?;
@@ -519,12 +758,7 @@ fn parse_peft_key(key: &str) -> Option<ParsedKey> {
     } else {
         "B".to_string()
     };
-
-    // The module name is the part just before "lora_A" or "lora_B"
     let module = parts.get(lora_pos.checked_sub(1)?)?.to_string();
-
-    // `...mtp.layers.0...` keys address the MTP draft block; without this
-    // check they'd alias main layer 0.
     let is_mtp = parts[..layer_pos].contains(&"mtp");
 
     Some(ParsedKey {
@@ -533,6 +767,26 @@ fn parse_peft_key(key: &str) -> Option<ParsedKey> {
         ab,
         is_mtp,
     })
+}
+
+fn parse_peft_key_strict(key: &str) -> Option<ParsedKey> {
+    let parts = key.split('.').collect::<Vec<_>>();
+    if parts.last() != Some(&"weight") || parts.len() < 6 {
+        return None;
+    }
+    let lora_pos = parts.len().checked_sub(2)?;
+    if !matches!(parts[lora_pos], "lora_A" | "lora_B") {
+        return None;
+    }
+    let layer_positions = parts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, part)| (*part == "layers").then_some(index))
+        .collect::<Vec<_>>();
+    if layer_positions.len() != 1 || lora_pos <= layer_positions[0] + 2 {
+        return None;
+    }
+    parse_peft_key(key)
 }
 
 /// Convert a safetensors tensor view to a kt [`kiln_tensor::Tensor`].
@@ -764,6 +1018,69 @@ mod tests {
     fn test_parse_peft_key_invalid() {
         assert!(parse_peft_key("random.key.name").is_none());
         assert!(parse_peft_key("layers.abc.q_proj.lora_A.weight").is_none());
+        let namespaced = "base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight";
+        assert!(parse_peft_key(namespaced).is_some());
+        assert!(parse_peft_key_strict(namespaced).is_none());
+        assert!(
+            parse_peft_key_strict("base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn import_validation_rejects_missing_pairs_targets_and_layers() -> Result<()> {
+        let mut resident = kiln_core::config::ModelConfig::qwen3_5_4b();
+        resident.hidden_size = 4;
+        resident.num_layers = 1;
+        resident.num_attention_heads = 1;
+        resident.num_kv_heads = 1;
+        resident.head_dim = 4;
+        resident.num_full_attention_layers = 1;
+        resident.full_attention_interval = 1;
+        resident.attn_output_gate = false;
+        let config = AdapterConfig {
+            r: 1,
+            lora_alpha: 2.0,
+            target_modules: vec!["q_proj".to_string()],
+            task_type: Some("CAUSAL_LM".to_string()),
+        };
+        let a_bytes = vec![0u8; 4 * std::mem::size_of::<f32>()];
+        let b_bytes = vec![0u8; 4 * std::mem::size_of::<f32>()];
+        let a =
+            safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![1, 4], &a_bytes)?;
+        let missing_b = safetensors::tensor::serialize(
+            [("base.model.layers.0.self_attn.q_proj.lora_A.weight", a)],
+            None,
+        )?;
+        let tensors = safetensors::SafeTensors::deserialize(&missing_b)?;
+        let error = validate_lora_structure(&config, &tensors, &resident).unwrap_err();
+        assert!(error.to_string().contains("missing lora_B"), "{error:#}");
+
+        let a =
+            safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![1, 4], &a_bytes)?;
+        let b =
+            safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![4, 1], &b_bytes)?;
+        let wrong_layer = safetensors::tensor::serialize(
+            [
+                ("base.model.layers.1.self_attn.q_proj.lora_A.weight", a),
+                ("base.model.layers.1.self_attn.q_proj.lora_B.weight", b),
+            ],
+            None,
+        )?;
+        let tensors = safetensors::SafeTensors::deserialize(&wrong_layer)?;
+        let error = validate_lora_structure(&config, &tensors, &resident).unwrap_err();
+        assert!(error.to_string().contains("has 1 layers"), "{error:#}");
+
+        let unsupported = AdapterConfig {
+            target_modules: vec!["in_proj_a".to_string()],
+            ..config
+        };
+        let error = validate_lora_structure(&unsupported, &tensors, &resident).unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported modules"),
+            "{error:#}"
+        );
+        Ok(())
     }
 
     /// MTP draft-block keys must parse as MTP — without the flag they'd
@@ -1028,6 +1345,27 @@ mod tests {
             .source_identity
             .as_ref()
             .expect("disk-loaded LoRA publishes exact source identity");
+        assert_eq!(
+            LoraSourceIdentity::from_adapter_dir(adapter_dir)?,
+            *source_identity
+        );
+        let mut resident = kiln_core::config::ModelConfig::qwen3_5_4b();
+        resident.hidden_size = in_features;
+        resident.num_layers = 1;
+        resident.num_attention_heads = 2;
+        resident.num_kv_heads = 2;
+        resident.head_dim = 4;
+        resident.num_full_attention_layers = 1;
+        resident.full_attention_interval = 1;
+        resident.attn_output_gate = false;
+        // SAFETY: this test owns the temporary directory and does not mutate
+        // either PEFT file while the validation call is active.
+        assert_eq!(
+            unsafe {
+                LoraSourceIdentity::from_immutable_adapter_dir_for_model(adapter_dir, &resident)?
+            },
+            *source_identity
+        );
         assert_eq!(source_identity.config_sha256(), sha256_hex(&config_bytes));
         assert_eq!(
             source_identity.weights_sha256(),

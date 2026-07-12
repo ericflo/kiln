@@ -19,9 +19,12 @@ pub const HF_TRL_EXPORT_SCHEMA_VERSION: u32 = 1;
 pub const HF_TRL_EXPORT_TYPE: &str = "kiln.hf-trl-export.v1";
 pub const HF_TRL_RESULT_SCHEMA_VERSION: u32 = 1;
 pub const HF_TRL_RESULT_TYPE: &str = "kiln.hf-trl-result.v1";
+pub const HF_TRL_IMPORT_SCHEMA_VERSION: u32 = 1;
+pub const HF_TRL_IMPORT_TYPE: &str = "kiln.hf-trl-import.v1";
 
 pub const HF_TRL_EXPORT_MANIFEST_FILENAME: &str = "kiln_hf_export.json";
 pub const HF_TRL_RESULT_MANIFEST_FILENAME: &str = "kiln_hf_result.json";
+pub const HF_TRL_IMPORT_RECEIPT_FILENAME: &str = "kiln_hf_import.json";
 pub const HF_TRL_DATASET_FILENAME: &str = "train.jsonl";
 pub const HF_TRL_MODEL_CONFIG_FILENAME: &str = "kiln_model_config.json";
 pub const HF_TRL_TOKENIZER_FILENAME: &str = "tokenizer.json";
@@ -782,6 +785,237 @@ impl HfTrlTrainingResultV1 {
     }
 }
 
+/// Exact model identity observed by the Kiln server that accepts an imported
+/// PEFT adapter. Backend, executable, and host identities are intentionally
+/// absent: import portability requires model equivalence, not the same
+/// machine that created the export.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HfTrlResidentModelIdentity {
+    pub served_model_id: String,
+    pub base_weight_shard_manifest: kiln_core::model_provenance::BaseWeightShardManifest,
+    pub model_config_sha256: String,
+    pub tokenizer_vocab_sha256: String,
+    pub tokenizer_config_sha256: String,
+    pub chat_template_sha256: String,
+    pub native_training_chat_template_sha256: String,
+    pub trl_training_chat_template_sha256: String,
+}
+
+impl HfTrlResidentModelIdentity {
+    pub fn validate(&self) -> Result<()> {
+        validate_text("resident served_model_id", &self.served_model_id)?;
+        self.base_weight_shard_manifest
+            .validate()
+            .context("validate resident HF/TRL base-weight identity")?;
+        for (field, value) in [
+            (
+                "resident model_config_sha256",
+                self.model_config_sha256.as_str(),
+            ),
+            (
+                "resident tokenizer_vocab_sha256",
+                self.tokenizer_vocab_sha256.as_str(),
+            ),
+            (
+                "resident tokenizer_config_sha256",
+                self.tokenizer_config_sha256.as_str(),
+            ),
+            (
+                "resident chat_template_sha256",
+                self.chat_template_sha256.as_str(),
+            ),
+            (
+                "resident native_training_chat_template_sha256",
+                self.native_training_chat_template_sha256.as_str(),
+            ),
+            (
+                "resident trl_training_chat_template_sha256",
+                self.trl_training_chat_template_sha256.as_str(),
+            ),
+        ] {
+            validate_sha256(field, value)?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_against_export(&self, export: &HfTrlExportManifestV1) -> Result<()> {
+        self.validate()?;
+        export.validate()?;
+        ensure!(
+            self.served_model_id == export.model.served_model_id,
+            "resident served model differs from HF/TRL export"
+        );
+        ensure!(
+            self.base_weight_shard_manifest == export.model.base_weight_shard_manifest,
+            "resident base-weight shard manifest differs from HF/TRL export"
+        );
+        ensure!(
+            self.model_config_sha256 == export.model.model_config.sha256,
+            "resident model configuration differs from HF/TRL export"
+        );
+        ensure!(
+            self.tokenizer_vocab_sha256 == export.model.tokenizer_vocab_sha256,
+            "resident tokenizer vocabulary differs from HF/TRL export"
+        );
+        ensure!(
+            self.tokenizer_config_sha256 == export.model.tokenizer.sha256,
+            "resident tokenizer configuration differs from HF/TRL export"
+        );
+        ensure!(
+            self.chat_template_sha256 == export.model.chat_template.sha256,
+            "resident inference chat template differs from HF/TRL export"
+        );
+        ensure!(
+            self.native_training_chat_template_sha256
+                == export.model.native_training_chat_template.sha256,
+            "resident native training chat template differs from HF/TRL export"
+        );
+        ensure!(
+            self.trl_training_chat_template_sha256
+                == export.model.trl_training_chat_template.sha256,
+            "resident TRL training chat template differs from HF/TRL export"
+        );
+        Ok(())
+    }
+}
+
+/// Durable provenance receipt stored beside a PEFT adapter accepted through
+/// the HF/TRL import route.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HfTrlImportReceiptV1 {
+    pub schema_version: u32,
+    pub import_type: String,
+    pub adapter_name: String,
+    pub task: HfTrlTask,
+    pub export_sha256: String,
+    pub result_sha256: String,
+    pub resident_model: HfTrlResidentModelIdentity,
+    pub used_exported_reference_script: bool,
+    pub import_sha256: String,
+}
+
+impl HfTrlImportReceiptV1 {
+    pub fn new(
+        adapter_name: String,
+        export: &HfTrlExportManifestV1,
+        result: &HfTrlTrainingResultV1,
+        resident_model: HfTrlResidentModelIdentity,
+    ) -> Result<Self> {
+        let mut receipt = Self {
+            schema_version: HF_TRL_IMPORT_SCHEMA_VERSION,
+            import_type: HF_TRL_IMPORT_TYPE.to_string(),
+            adapter_name,
+            task: result.task,
+            export_sha256: export.export_sha256.clone(),
+            result_sha256: result.result_sha256.clone(),
+            resident_model,
+            used_exported_reference_script: result.uses_exported_reference_script(export)?,
+            import_sha256: empty_sha256(),
+        };
+        receipt.validate_fields()?;
+        receipt.validate_links(export, result)?;
+        receipt.import_sha256 = receipt.compute_sha256()?;
+        Ok(receipt)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.validate_fields()?;
+        validate_sha256("import_sha256", &self.import_sha256)?;
+        let expected = self.compute_sha256()?;
+        ensure!(
+            self.import_sha256 == expected,
+            "HF/TRL import receipt digest differs: receipt={}, expected={expected}",
+            self.import_sha256
+        );
+        Ok(())
+    }
+
+    pub fn validate_against(
+        &self,
+        export: &HfTrlExportManifestV1,
+        result: &HfTrlTrainingResultV1,
+    ) -> Result<()> {
+        self.validate()?;
+        self.validate_links(export, result)
+    }
+
+    fn validate_links(
+        &self,
+        export: &HfTrlExportManifestV1,
+        result: &HfTrlTrainingResultV1,
+    ) -> Result<()> {
+        result.validate_against_export(export)?;
+        self.resident_model.validate_against_export(export)?;
+        ensure!(
+            self.task == result.task,
+            "HF/TRL import task differs from result"
+        );
+        ensure!(
+            self.export_sha256 == export.export_sha256,
+            "HF/TRL import export identity differs from manifest"
+        );
+        ensure!(
+            self.result_sha256 == result.result_sha256,
+            "HF/TRL import result identity differs from manifest"
+        );
+        ensure!(
+            self.used_exported_reference_script == result.uses_exported_reference_script(export)?,
+            "HF/TRL import reference-script status differs from result"
+        );
+        Ok(())
+    }
+
+    fn validate_fields(&self) -> Result<()> {
+        ensure!(
+            self.schema_version == HF_TRL_IMPORT_SCHEMA_VERSION,
+            "unsupported HF/TRL import schema_version {}",
+            self.schema_version
+        );
+        ensure!(
+            self.import_type == HF_TRL_IMPORT_TYPE,
+            "invalid HF/TRL import_type {:?}",
+            self.import_type
+        );
+        validate_text("import adapter_name", &self.adapter_name)?;
+        ensure!(
+            !self.adapter_name.starts_with('.')
+                && !self.adapter_name.contains('/')
+                && !self.adapter_name.contains('\\')
+                && !self.adapter_name.contains(".."),
+            "HF/TRL import adapter_name must be a safe path segment"
+        );
+        validate_sha256("import export_sha256", &self.export_sha256)?;
+        validate_sha256("import result_sha256", &self.result_sha256)?;
+        self.resident_model.validate()
+    }
+
+    fn compute_sha256(&self) -> Result<String> {
+        #[derive(Serialize)]
+        struct Identity<'a> {
+            schema_version: u32,
+            import_type: &'a str,
+            adapter_name: &'a str,
+            task: HfTrlTask,
+            export_sha256: &'a str,
+            result_sha256: &'a str,
+            resident_model: &'a HfTrlResidentModelIdentity,
+            used_exported_reference_script: bool,
+        }
+        canonical_json_sha256(&Identity {
+            schema_version: self.schema_version,
+            import_type: &self.import_type,
+            adapter_name: &self.adapter_name,
+            task: self.task,
+            export_sha256: &self.export_sha256,
+            result_sha256: &self.result_sha256,
+            resident_model: &self.resident_model,
+            used_exported_reference_script: self.used_exported_reference_script,
+        })
+    }
+}
+
 pub fn read_hf_trl_export_manifest(root: &Path) -> Result<HfTrlExportManifestV1> {
     let manifest: HfTrlExportManifestV1 = read_manifest(root, HF_TRL_EXPORT_MANIFEST_FILENAME)?;
     manifest.validate()?;
@@ -792,6 +1026,12 @@ pub fn read_hf_trl_training_result(root: &Path) -> Result<HfTrlTrainingResultV1>
     let result: HfTrlTrainingResultV1 = read_manifest(root, HF_TRL_RESULT_MANIFEST_FILENAME)?;
     result.validate()?;
     Ok(result)
+}
+
+pub fn read_hf_trl_import_receipt(root: &Path) -> Result<HfTrlImportReceiptV1> {
+    let receipt: HfTrlImportReceiptV1 = read_manifest(root, HF_TRL_IMPORT_RECEIPT_FILENAME)?;
+    receipt.validate()?;
+    Ok(receipt)
 }
 
 fn deserialize_unique_effective_config<'de, D>(
@@ -1225,6 +1465,27 @@ mod tests {
         .unwrap()
     }
 
+    fn resident_model(export: &HfTrlExportManifestV1) -> HfTrlResidentModelIdentity {
+        HfTrlResidentModelIdentity {
+            served_model_id: export.model.served_model_id.clone(),
+            base_weight_shard_manifest: export.model.base_weight_shard_manifest.clone(),
+            model_config_sha256: export.model.model_config.sha256.clone(),
+            tokenizer_vocab_sha256: export.model.tokenizer_vocab_sha256.clone(),
+            tokenizer_config_sha256: export.model.tokenizer.sha256.clone(),
+            chat_template_sha256: export.model.chat_template.sha256.clone(),
+            native_training_chat_template_sha256: export
+                .model
+                .native_training_chat_template
+                .sha256
+                .clone(),
+            trl_training_chat_template_sha256: export
+                .model
+                .trl_training_chat_template
+                .sha256
+                .clone(),
+        }
+    }
+
     #[test]
     fn export_and_result_bind_every_referenced_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1350,6 +1611,98 @@ mod tests {
         result.result_sha256 = result.compute_sha256().unwrap();
         let error = result.validate().unwrap_err();
         assert!(error.to_string().contains("trainer kind"), "{error:#}");
+    }
+
+    #[test]
+    fn import_receipt_binds_result_and_resident_model_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let export = export_bundle(dir.path());
+        let result = training_result(dir.path(), &export);
+        let receipt = HfTrlImportReceiptV1::new(
+            "trained-adapter".to_string(),
+            &export,
+            &result,
+            resident_model(&export),
+        )
+        .unwrap();
+        receipt.validate_against(&export, &result).unwrap();
+        assert!(receipt.used_exported_reference_script);
+        write(
+            dir.path(),
+            HF_TRL_IMPORT_RECEIPT_FILENAME,
+            &serde_json::to_vec_pretty(&receipt).unwrap(),
+        );
+        assert_eq!(read_hf_trl_import_receipt(dir.path()).unwrap(), receipt);
+
+        let mut tampered = receipt.clone();
+        tampered.adapter_name = "replacement".to_string();
+        assert!(tampered.validate().is_err());
+
+        let mut zero_digest = receipt;
+        zero_digest.import_sha256 = empty_sha256();
+        assert!(zero_digest.validate_against(&export, &result).is_err());
+    }
+
+    #[test]
+    fn import_receipt_rejects_every_resident_identity_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let export = export_bundle(dir.path());
+        let result = training_result(dir.path(), &export);
+        let baseline = resident_model(&export);
+        let mutations: [fn(&mut HfTrlResidentModelIdentity); 7] = [
+            |identity: &mut HfTrlResidentModelIdentity| {
+                identity.served_model_id = "different/model".to_string()
+            },
+            |identity: &mut HfTrlResidentModelIdentity| {
+                identity.model_config_sha256 = crate::train_receipt::sha256_bytes(b"different")
+            },
+            |identity: &mut HfTrlResidentModelIdentity| {
+                identity.tokenizer_vocab_sha256 = crate::train_receipt::sha256_bytes(b"different")
+            },
+            |identity: &mut HfTrlResidentModelIdentity| {
+                identity.tokenizer_config_sha256 = crate::train_receipt::sha256_bytes(b"different")
+            },
+            |identity: &mut HfTrlResidentModelIdentity| {
+                identity.chat_template_sha256 = crate::train_receipt::sha256_bytes(b"different")
+            },
+            |identity: &mut HfTrlResidentModelIdentity| {
+                identity.native_training_chat_template_sha256 =
+                    crate::train_receipt::sha256_bytes(b"different")
+            },
+            |identity: &mut HfTrlResidentModelIdentity| {
+                identity.trl_training_chat_template_sha256 =
+                    crate::train_receipt::sha256_bytes(b"different")
+            },
+        ];
+        for mutate in mutations {
+            let mut mismatched = baseline.clone();
+            mutate(&mut mismatched);
+            assert!(
+                HfTrlImportReceiptV1::new(
+                    "trained-adapter".to_string(),
+                    &export,
+                    &result,
+                    mismatched,
+                )
+                .is_err()
+            );
+        }
+
+        let mut mismatched = baseline;
+        mismatched.base_weight_shard_manifest =
+            kiln_core::model_provenance::BaseWeightShardManifest::new(vec![
+                kiln_core::model_provenance::BaseWeightShardIdentity::new(
+                    "different.safetensors",
+                    9,
+                    crate::train_receipt::sha256_bytes(b"different"),
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+        assert!(
+            HfTrlImportReceiptV1::new("trained-adapter".to_string(), &export, &result, mismatched,)
+                .is_err()
+        );
     }
 
     #[test]

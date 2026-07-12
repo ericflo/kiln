@@ -782,7 +782,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -803,12 +803,12 @@ mod tests {
 
     use super::*;
 
-    struct TestState {
-        state: AppState,
+    pub(crate) struct TestState {
+        pub(crate) state: AppState,
         _directory: tempfile::TempDir,
     }
 
-    fn test_state(with_identity: bool) -> TestState {
+    pub(crate) fn test_state(with_identity: bool) -> TestState {
         let directory = tempfile::tempdir().unwrap();
         let adapter_dir = directory.path().join("adapters");
         fs::create_dir(&adapter_dir).unwrap();

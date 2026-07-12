@@ -1577,6 +1577,7 @@ name = "kiln-resource"
 version = "0.4.1"
 dependencies = [
  "libc",
+ "rustix",
 ]
 
 [[package]]

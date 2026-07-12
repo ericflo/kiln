@@ -9,3 +9,6 @@ repository.workspace = true
 
 [dependencies]
 libc = "0.2"
+
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
+rustix = { version = "1", features = ["fs"] }

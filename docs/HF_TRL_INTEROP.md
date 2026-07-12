@@ -7,11 +7,12 @@ Transformers, TRL, and PEFT. The interoperability route moves data and
 adapters between those systems without discarding the identities needed to
 audit the handoff.
 
-The version-1 manifest, validation library, atomic SFT bundle writer, pinned
-SFT reference runner, and public SFT export/download API are implemented. The
-CLI transport, validated import API, GRPO exporter, and GRPO runner are not yet
-available; until import ships, Kiln does not claim that manually assembled
-PEFT output has passed this contract.
+The version-1 manifests, validation library, atomic bundle/envelope writers,
+pinned SFT reference runner, public SFT export/download CLI and API, and
+resident-validated PEFT import API are implemented. The first-party import
+upload CLI, GRPO exporter, and GRPO runner are not yet available. A PEFT
+directory installed through the generic adapter upload route has not passed
+this contract.
 
 ## Bundle Model
 
@@ -273,8 +274,14 @@ PEFT LoRA, no packing or dataset shuffle, AdamW, and a materialized seed. It
 derives `max_length` from the admitted rows and refuses an explicit value that
 would truncate any row. Input adapters are resumed as trainable PEFT adapters;
 new-adapter LoRA shape flags are rejected in that mode rather than silently
-ignored. A modified runner requires `--allow-custom-script` and remains
-distinguishable through `executed_train.py`.
+ignored. New adapters target exactly Kiln's supported `q_proj`, `k_proj`,
+`v_proj`, `o_proj`, `in_proj_qkv`, `in_proj_z`, `out_proj`, `gate_proj`,
+`up_proj`, and `down_proj` modules by default. `--target-modules` accepts a
+comma-separated subset and rejects unknown or duplicate modules; PEFT's
+`all-linear` selector is intentionally rejected because it also trains
+projections Kiln cannot apply. A modified runner requires
+`--allow-custom-script` and remains distinguishable through
+`executed_train.py`.
 
 The pinned v1 runner is deliberately a single-process correctness reference;
 it rejects `WORLD_SIZE != 1` instead of allowing multiple ranks to race result
@@ -317,9 +324,61 @@ the exact model-side bytes needed for resident identity comparison.
 
 `write_hf_trl_import_envelope` first verifies the complete source, copies only
 that allowlist into a private sibling staging directory, revalidates the
-envelope, fsyncs it, and publishes with a no-clobber atomic rename. The public
-upload/import endpoint and CLI command are the next integration checkpoint;
-the presence of these library contracts alone is not an import claim.
+envelope, fsyncs it, and publishes with a kernel-enforced no-clobber atomic
+rename on Linux and Apple platforms. Unsupported platforms fail closed rather
+than falling back to an existence-check race.
+
+## Validated PEFT Import API
+
+`POST /v1/train/hf/peft/imports/{name}` installs one completed external result.
+The request body is a gzip-compressed tar with `Content-Type:
+application/gzip`, absent or `identity` content encoding, and the single exact
+root `{name}.kiln-hf-import`. Materialize that directory with
+`write_hf_trl_import_envelope`, naming its target for the desired adapter, then
+archive and upload it:
+
+```bash
+tar -C ./handoffs -czf support-v2.kiln-hf-import.tar.gz \
+  support-v2.kiln-hf-import
+curl --fail-with-body -X POST \
+  http://localhost:8420/v1/train/hf/peft/imports/support-v2 \
+  -H 'content-type: application/gzip' \
+  --data-binary @support-v2.kiln-hf-import.tar.gz
+```
+
+The server streams the compressed body into a private Kiln-owned staging file,
+then performs extraction and hashing on a blocking worker. It admits at most 2
+GiB compressed, 4 GiB expanded, and 32 tar entries, with a 60-second body-idle
+timeout. Manifests are limited to 8 MiB, the executed script to 16 MiB, PEFT
+configuration to 1 MiB, other identity artifacts to 512 MiB each, and the
+safetensors header to 16 MiB. Paths must be ASCII and unique even under
+case-folding. Traversal, aliases, links, special entries, nonzero directory
+payloads, nonzero or excessive tar tail data, trailing bytes, another gzip
+member, malformed framing headers, and unlisted files fail before publication.
+
+After the envelope verifies, the server recomputes the current served model
+ID, complete base-shard manifest, model configuration, tokenizer vocabulary
+and configuration, and inference/native/TRL template hashes. Every value must
+equal the export. It then validates the PEFT configuration and safetensors
+metadata without copying the complete weight file into heap memory: rank,
+alpha, task type, target-module set, A/B pairing, floating dtype, layer range,
+and every projection dimension must be loadable by the resident model. A
+self-consistent result for a different model therefore returns HTTP 409; a
+self-consistent but structurally unloadable adapter returns HTTP 400.
+
+Publication shares the adapter mutation barrier and optional disk quota with
+the rest of the registry. Quota measurement fails closed on unreadable,
+symlinked, or special registry entries. The target name is checked twice and
+the final move uses a kernel no-replace operation, so neither an API race nor
+an external empty-directory race can replace an existing name. All six final
+files are synced before publication: PEFT configuration and weights, executed
+script, both source manifests, and `kiln_hf_import.json`
+(`kiln.hf-trl-import.v1`). The receipt binds the requested name, task, export
+and result digests, current resident identity, reference-script match, and its
+own digest. Success returns HTTP 201, the receipt digest as a strong `ETag`,
+and the adapter content revision. The first-party command that derives,
+archives, streams, and reports this API transaction remains the next CLI
+checkpoint.
 
 ## Validation Boundary
 
@@ -330,8 +389,9 @@ trainer produced a correct optimization result. The pinned runner and oracle
 fixtures provide narrower behavioral evidence; real cross-stack round-trip
 tests remain required before the route is declared complete.
 
-Import must validate both self-digests, the result-to-export link, every
-referenced file, trainer/task consistency, and current resident
-base/tokenizer/template identities before publishing an adapter. Validation is
-performed on a Kiln-owned, quiescent bundle directory; concurrently mutating a
-bundle during validation is outside the contract.
+Import validates both self-digests, the result-to-export link, every transported
+file, trainer/task consistency, current resident base/tokenizer/template
+identities, and PEFT tensor compatibility before publishing an adapter.
+Validation is performed on a private Kiln-owned staging directory. The API
+does not attest that an external trainer actually executed the claimed code;
+the preserved bytes and reference-script flag make that distinction auditable.

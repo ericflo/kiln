@@ -31,6 +31,18 @@ ADAPTER_MODEL = "adapter_model.safetensors"
 RESULT_SENTINEL = ".kiln_hf_result.incomplete"
 SHA256_PREFIX = "sha256:"
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+KILN_TARGET_MODULES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "in_proj_qkv",
+    "in_proj_z",
+    "out_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
 
 PINNED_PACKAGES = {
     "accelerate": "1.14.0",
@@ -47,6 +59,23 @@ PINNED_PACKAGES = {
 
 class ContractError(RuntimeError):
     """The handoff cannot be trained without weakening its contract."""
+
+
+def _target_modules(value: str | None) -> list[str]:
+    modules = list(KILN_TARGET_MODULES) if value is None else [
+        module.strip() for module in value.split(",")
+    ]
+    if not modules or any(not module for module in modules):
+        raise ContractError("target modules must be a non-empty comma-separated list")
+    if len(set(modules)) != len(modules):
+        raise ContractError("target modules must not contain duplicates")
+    unsupported = sorted(set(modules) - set(KILN_TARGET_MODULES))
+    if unsupported:
+        raise ContractError(
+            f"target modules {unsupported!r} are not loadable by Kiln; "
+            f"supported modules are {list(KILN_TARGET_MODULES)!r}"
+        )
+    return modules
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -874,7 +903,7 @@ def run_training(args: argparse.Namespace, root: Path, manifest: dict[str, Any],
         alpha = args.lora_alpha or (rank * 2)
         dropout_text = args.lora_dropout or "0.0"
         dropout = _decimal(dropout_text, "LoRA dropout", minimum=0.0, maximum=1.0)
-        target_modules = args.target_modules or "all-linear"
+        target_modules = _target_modules(args.target_modules)
         peft_config = LoraConfig(
             r=rank,
             lora_alpha=alpha,
@@ -956,7 +985,7 @@ def run_training(args: argparse.Namespace, root: Path, manifest: dict[str, Any],
                         "lora_alpha": _config_value("unsigned", alpha),
                         "lora_dropout": _config_value("decimal", dropout_text),
                         "lora_rank": _config_value("unsigned", rank),
-                        "target_modules": _config_value("text", target_modules),
+                        "target_modules": _config_value("text", ",".join(target_modules)),
                     }
                 )
             _publish_result(root, manifest, adapter_dir, effective)
@@ -987,7 +1016,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lora-rank", type=int)
     parser.add_argument("--lora-alpha", type=int)
     parser.add_argument("--lora-dropout")
-    parser.add_argument("--target-modules", help="PEFT target module selector; defaults to all-linear")
+    parser.add_argument(
+        "--target-modules",
+        help="comma-separated Kiln-loadable LoRA modules; defaults to Kiln's complete supported set",
+    )
     parser.add_argument("--no-gradient-checkpointing", dest="gradient_checkpointing", action="store_false")
     parser.set_defaults(gradient_checkpointing=True)
     parser.add_argument("--keep-work-dir", action="store_true", help="retain temporary trainer outputs for diagnosis")

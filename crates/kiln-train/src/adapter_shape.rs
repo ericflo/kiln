@@ -11,18 +11,8 @@ use kiln_tensor as kt;
 
 pub const ALLOW_ADAPTER_SHAPE_CONVERSION_FLAG: &str = "--allow-adapter-shape-conversion";
 
-pub const TRAINABLE_TARGET_MODULES: &[&str] = &[
-    "q_proj",
-    "k_proj",
-    "v_proj",
-    "o_proj",
-    "in_proj_qkv",
-    "in_proj_z",
-    "out_proj",
-    "gate_proj",
-    "up_proj",
-    "down_proj",
-];
+pub const TRAINABLE_TARGET_MODULES: &[&str] =
+    kiln_model::lora_loader::SUPPORTED_LORA_TARGET_MODULES;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseAdapterCompatibility {

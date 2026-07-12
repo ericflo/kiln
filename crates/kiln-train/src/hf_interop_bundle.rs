@@ -187,7 +187,7 @@ pub fn write_hf_trl_sft_bundle(
     );
     sync_directory_tree(&staging)?;
 
-    fs::rename(&staging, &target).with_context(|| {
+    kiln_resource::atomic_rename_noreplace(&staging, &target).with_context(|| {
         format!(
             "publish HF/TRL bundle {} -> {}",
             staging.display(),
@@ -276,7 +276,7 @@ pub fn write_hf_trl_import_envelope(
         "HF/TRL import envelope identity changed during materialization"
     );
     sync_directory_tree(&staging)?;
-    fs::rename(&staging, &target).with_context(|| {
+    kiln_resource::atomic_rename_noreplace(&staging, &target).with_context(|| {
         format!(
             "publish HF/TRL import envelope {} -> {}",
             staging.display(),
