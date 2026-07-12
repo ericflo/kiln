@@ -23,7 +23,16 @@ from source_tree_hash import HASH_FORMAT, SourceTreeHashError, source_tree_hash
 
 ROOT = Path(__file__).resolve().parents[2]
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-SENSITIVE_ENV_PARTS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "WEBHOOK_URL")
+SENSITIVE_ENV_PARTS = (
+    "AUTH",
+    "TOKEN",
+    "KEY",
+    "SECRET",
+    "PASSWORD",
+    "CREDENTIAL",
+    "WEBHOOK",
+    "COOKIE",
+)
 CAPTURE_ENV_PREFIXES = ("KILN_", "HIP_", "HSA_", "ROCR_", "VK_", "GGML_VK_")
 
 
@@ -37,6 +46,11 @@ def utc_text(value: datetime) -> str:
 
 def sha256_bytes(value: bytes) -> str:
     return f"sha256:{hashlib.sha256(value).hexdigest()}"
+
+
+def is_sensitive_environment_name(name: str) -> bool:
+    normalized = name.upper()
+    return any(part in normalized for part in SENSITIVE_ENV_PARTS)
 
 
 def read_text(path: Path, default: str = "") -> str:
@@ -146,7 +160,7 @@ def captured_environment() -> dict[str, dict[str, Any]]:
     for key, value in sorted(os.environ.items()):
         if not key.startswith(CAPTURE_ENV_PREFIXES):
             continue
-        sensitive = any(part in key.upper() for part in SENSITIVE_ENV_PARTS)
+        sensitive = is_sensitive_environment_name(key)
         captured[key] = {
             "value": sha256_bytes(value.encode("utf-8")) if sensitive else value,
             "redacted": sensitive,

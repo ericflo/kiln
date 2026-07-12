@@ -288,6 +288,23 @@ class RunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.hook_calls = {"environment": 0, "model": 0, "network": 0}
 
+    def test_inherited_auth_payloads_are_hashed_before_local_capture(self) -> None:
+        captured = run_module._redacted_environment(
+            {
+                "CODEX_AUTH_JSON": '{"refresh_token":"must-not-appear"}',
+                "HTTP_COOKIE": "session=must-not-appear",
+                "QUALIFICATION_LABEL": "visible",
+            }
+        )
+        self.assertEqual(
+            captured["QUALIFICATION_LABEL"],
+            {"redacted": False, "value": "visible"},
+        )
+        for name in ("CODEX_AUTH_JSON", "HTTP_COOKIE"):
+            self.assertTrue(captured[name]["redacted"])
+            self.assertRegex(captured[name]["value"], r"^sha256:[0-9a-f]{64}$")
+            self.assertNotIn("must-not-appear", captured[name]["value"])
+
     def fake_environment(
         self, backend: str, host_id: str, root: Path
     ) -> run_module.EnvironmentCapture:

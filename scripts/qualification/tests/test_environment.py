@@ -87,6 +87,7 @@ class EnvironmentTests(unittest.TestCase):
             os.environ,
             {
                 "KILN_MAX_DECODE_BATCH": "8",
+                "KILN_OAUTH_JSON": '{"refresh_token":"must-not-appear"}',
                 "KILN_TRAINING_WEBHOOK_URL": "https://secret.example/token",
                 "UNRELATED": "ignored",
             },
@@ -94,6 +95,8 @@ class EnvironmentTests(unittest.TestCase):
         ):
             captured = environment.captured_environment()
         self.assertEqual(captured["KILN_MAX_DECODE_BATCH"], {"value": "8", "redacted": False})
+        self.assertTrue(captured["KILN_OAUTH_JSON"]["redacted"])
+        self.assertNotIn("must-not-appear", captured["KILN_OAUTH_JSON"]["value"])
         self.assertTrue(captured["KILN_TRAINING_WEBHOOK_URL"]["redacted"])
         self.assertRegex(captured["KILN_TRAINING_WEBHOOK_URL"]["value"], r"^sha256:[0-9a-f]{64}$")
         self.assertNotIn("UNRELATED", captured)

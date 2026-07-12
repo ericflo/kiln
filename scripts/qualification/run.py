@@ -55,15 +55,6 @@ HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 RECEIPT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,127}$")
 CASE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,127}$")
 METRIC_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
-SENSITIVE_ENV_PARTS = (
-    "TOKEN",
-    "KEY",
-    "SECRET",
-    "PASSWORD",
-    "CREDENTIAL",
-    "WEBHOOK",
-    "COOKIE",
-)
 CASE_RESULT_KEYS = {
     "schema_version",
     "case_id",
@@ -497,7 +488,7 @@ def _resolve_text(
 def _redacted_environment(environment: dict[str, str]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for key, value in sorted(environment.items()):
-        sensitive = any(part in key.upper() for part in SENSITIVE_ENV_PARTS)
+        sensitive = environment_module.is_sensitive_environment_name(key)
         result[key] = {
             "redacted": sensitive,
             "value": sha256_bytes(value.encode("utf-8")) if sensitive else value,
