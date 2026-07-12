@@ -65,6 +65,23 @@ fn from_vec_on_rocm_roundtrip() {
 }
 
 #[test]
+fn compact_nonzero_offset_view_copies_directly_to_host() {
+    if no_rocm() {
+        return;
+    }
+    let data: Vec<f32> = (0..256).map(|i| i as f32 + 0.25).collect();
+    let t =
+        Tensor::from_vec_on(Device::Rocm(0), data.clone(), vec![32, 8]).expect("from_vec_on ROCm");
+    let view = t.narrow(0, 7, 3).expect("compact row view");
+    assert!(!view.is_contiguous(), "nonzero offset is a view");
+    assert_eq!(view.layout().start_offset(), 7 * 8);
+
+    let host = kiln_tensor::rocm_to_host_copy(&view).expect("direct compact range D2H");
+    let got = host.to_vec::<f32>().expect("view to_vec");
+    assert_eq!(got, data[7 * 8..10 * 8]);
+}
+
+#[test]
 fn rocm_contiguous_materializes_transpose() {
     if no_rocm() {
         return;

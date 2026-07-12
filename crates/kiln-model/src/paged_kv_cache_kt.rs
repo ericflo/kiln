@@ -151,8 +151,11 @@ impl KvPoolKind {
     }
 }
 
-/// Allocate one zero-filled pool tensor of shape `shape` on `device`, using the
-/// exact per-backend routing shared by construction and resize.
+/// Allocate one pool tensor of shape `shape` on `device`, using the exact
+/// per-backend routing shared by construction and resize. ROCm replacement
+/// pools may skip initialization because their live prefix is overwritten and
+/// their free tail is not addressable until the block manager assigns and the
+/// cache writer initializes those slots.
 fn alloc_pool_tensor(
     device: kiln_tensor::Device,
     shape: &[usize],
@@ -160,9 +163,10 @@ fn alloc_pool_tensor(
     storage_dtype: KtDType,
     layer_idx: usize,
     kind: KvPoolKind,
+    zero_initialize: bool,
 ) -> Result<KtTensor> {
     let label = kind.label();
-    let _ = (label, layer_idx);
+    let _ = (label, layer_idx, zero_initialize);
     let shape = shape.to_vec();
     match device {
         kiln_tensor::Device::Cpu => {
@@ -178,10 +182,30 @@ fn alloc_pool_tensor(
         }
         #[cfg(feature = "rocm")]
         kiln_tensor::Device::Rocm(i) if crate::forward::rocm_paged_decode_enabled() => {
-            let storage =
+            let storage: kiln_tensor::Storage = if zero_initialize {
                 kiln_tensor::rocm_zeros_ctx(i, storage_dtype, n_elements).map_err(|e| {
                     anyhow::anyhow!("kt paged-kv: alloc {label} (rocm) layer {layer_idx}: {e}")
+                })?
+            } else {
+                let context = kiln_tensor::primary_rocm_context(i).map_err(|e| {
+                    anyhow::anyhow!(
+                        "kt paged-kv: context for {label} (rocm) layer {layer_idx}: {e}"
+                    )
                 })?;
+                std::sync::Arc::new(
+                    kiln_tensor::RocmStorage::alloc_uninit_ctx(
+                        &context,
+                        i,
+                        storage_dtype,
+                        n_elements,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "kt paged-kv: alloc uninitialized {label} (rocm) layer {layer_idx}: {e}"
+                        )
+                    })?,
+                )
+            };
             KtTensor::from_parts(storage, Layout::contiguous(shape), TensorId::next()).map_err(
                 |e| anyhow::anyhow!("kt paged-kv: wrap {label} (rocm) layer {layer_idx}: {e}"),
             )
@@ -225,6 +249,7 @@ fn alloc_pool_pair(
             storage_dtype,
             layer_idx,
             KvPoolKind::Key,
+            true,
         )?,
         alloc_pool_tensor(
             device,
@@ -233,6 +258,7 @@ fn alloc_pool_pair(
             storage_dtype,
             layer_idx,
             KvPoolKind::Value,
+            true,
         )?,
     ))
 }
@@ -522,6 +548,15 @@ impl PagedKvCacheKt {
     /// `slot = block_id*block_size + off` is preserved, so existing `BlockTable`s
     /// stay valid with NO remapping.
     ///
+    /// ROCm replacement pools are allocated uninitialized. The surviving prefix
+    /// is overwritten before commit; a grown tail consists only of free blocks,
+    /// which no `BlockTable` can address until allocation and whose KV slots are
+    /// written before attention includes them in a sequence length. Avoiding a
+    /// multi-gigabyte tail zero is also correctness-critical on gfx1151/ROCm 7.2:
+    /// qualification reproduced loss of an already-copied prefix after later
+    /// pages in the staged generation were first touched. Construction remains
+    /// zero-initialized, and other resize backends retain their zeroed tails.
+    ///
     /// Both shrink and grow stage every new pool before one commit. This costs a
     /// temporary `old + new` allocation, but it is the only portable way to make
     /// allocation, copy, and synchronization failures leave every layer, the
@@ -592,6 +627,7 @@ impl PagedKvCacheKt {
                 storage_dtype,
                 layer_idx,
                 KvPoolKind::Key,
+                false,
             )?;
             checkpoint(KvResizeFaultPoint::AllocateValue { layer: layer_idx })?;
             let new_v = alloc_pool_tensor(
@@ -601,10 +637,12 @@ impl PagedKvCacheKt {
                 storage_dtype,
                 layer_idx,
                 KvPoolKind::Value,
+                false,
             )?;
 
-            // Complete async zero-fill before copying the surviving prefix;
-            // otherwise a late fill can erase copied KV.
+            // Complete asynchronous allocation/initialization before copying
+            // the surviving prefix. ROCm replacement pools intentionally skip
+            // initialization; other backends retain their zero-fill behavior.
             if copy_slots > 0 {
                 checkpoint(KvResizeFaultPoint::ZeroFillSync { layer: layer_idx })?;
                 sync_device_for_resize(device)?;

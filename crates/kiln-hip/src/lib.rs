@@ -587,6 +587,40 @@ impl RocmStream {
         Ok(out)
     }
 
+    /// Copy a caller-supplied device byte range back to a fresh host `Vec`,
+    /// synchronizing before returning. Unlike [`Self::memcpy_dtoh`], this can
+    /// read a validated subrange of a larger allocation without first creating
+    /// a temporary device buffer.
+    ///
+    /// # Safety
+    /// `src` must point to at least `len` bytes of a live device allocation
+    /// reachable from this stream's device. The allocation must remain live
+    /// until this method returns.
+    pub unsafe fn memcpy_dtoh_raw(&self, src: *const c_void, len: usize) -> Result<Vec<u8>> {
+        let mut out = vec![0u8; len];
+        if len == 0 {
+            return Ok(out);
+        }
+        self.bind()?;
+        // SAFETY: the caller guarantees `src` addresses at least `len` live
+        // device bytes; `out` owns exactly `len` writable host bytes. The
+        // stream synchronization below completes the copy before either
+        // pointer can become invalid.
+        check(
+            unsafe {
+                sys::hipMemcpyDtoHAsync(
+                    out.as_mut_ptr() as *mut c_void,
+                    src as *mut c_void,
+                    len,
+                    self.handle,
+                )
+            },
+            "hipMemcpyDtoHAsync",
+        )?;
+        self.synchronize()?;
+        Ok(out)
+    }
+
     /// Device-to-device copy on this stream (async; caller orders via the
     /// stream). `dst` and `src` must have equal length.
     pub fn memcpy_dtod(&self, dst: &mut RocmSlice, src: &RocmSlice) -> Result<()> {

@@ -941,37 +941,62 @@ pub fn rocm_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
 
     let dtype = src.dtype();
     let expected_byte_len = dtype.packed_buffer_bytes(src.element_count());
-    if src.is_contiguous() && src.layout().start_offset() == 0 {
-        if let Some(src_storage) = src.storage().as_any().downcast_ref::<RocmStorage>() {
-            if src_storage.is_owned() && src_storage.byte_len() == expected_byte_len {
-                let ctx = src_storage.context();
-                let stream = crate::active_rocm_stream(&ctx);
-                let host_bytes = stream.memcpy_dtoh(src_storage.slice()).map_err(|e| {
-                    Error::Msg(format!(
-                        "rocm_to_host_copy: direct memcpy_dtoh failed: {e:?}"
-                    ))
-                })?;
-                if rocm_profile_on() {
-                    let n = ROCM_DTOH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                    rocm_bt_once("dtoh", src.shape(), n);
-                    if n % 200 == 0 {
-                        eprintln!(
-                            "[rocm-profile] dtoh={} htod={} (last shape {:?})",
-                            n,
-                            ROCM_HTOD_COUNT.load(Ordering::Relaxed),
-                            src.shape()
-                        );
-                    }
-                }
-                let cpu_storage = crate::CpuStorage::from_bytes(dtype, host_bytes)?;
-                let storage_arc: crate::Storage = Arc::new(cpu_storage);
-                return crate::Tensor::from_parts(
-                    storage_arc,
-                    crate::Layout::contiguous(src.shape().to_vec()),
-                    crate::TensorId::next(),
+    if rocm_view_is_physically_compact(src.shape(), src.strides()) {
+        let src_storage = src
+            .storage()
+            .as_any()
+            .downcast_ref::<RocmStorage>()
+            .ok_or_else(|| Error::Msg("rocm_to_host_copy: source must be ROCm storage".into()))?;
+        let byte_offset = src
+            .layout()
+            .start_offset()
+            .checked_mul(dtype.size_in_bytes())
+            .ok_or_else(|| Error::Msg("rocm_to_host_copy: byte offset overflow".into()))?;
+        let byte_end = byte_offset
+            .checked_add(expected_byte_len)
+            .ok_or_else(|| Error::Msg("rocm_to_host_copy: byte range overflow".into()))?;
+        let (base, storage_byte_len) = src_storage.device_ptr_raw();
+        if byte_end > storage_byte_len {
+            return Err(Error::Msg(format!(
+                "rocm_to_host_copy: compact view byte range {byte_offset}..{byte_end} exceeds storage length {storage_byte_len}"
+            )));
+        }
+        let src_ptr = base
+            .checked_add(byte_offset as u64)
+            .ok_or_else(|| Error::Msg("rocm_to_host_copy: device pointer overflow".into()))?;
+        let ctx = src_storage.context();
+        let stream = crate::active_rocm_stream(&ctx);
+        // SAFETY: `Tensor::from_parts` validates every layout against physical
+        // storage, and the checked range above proves this compact view stays
+        // within that live allocation. The tensor keeps the storage alive
+        // through the synchronized copy.
+        let host_bytes = unsafe {
+            stream.memcpy_dtoh_raw(src_ptr as *const core::ffi::c_void, expected_byte_len)
+        }
+        .map_err(|e| {
+            Error::Msg(format!(
+                "rocm_to_host_copy: direct range copy failed: {e:?}"
+            ))
+        })?;
+        if rocm_profile_on() {
+            let n = ROCM_DTOH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            rocm_bt_once("dtoh", src.shape(), n);
+            if n % 200 == 0 {
+                eprintln!(
+                    "[rocm-profile] dtoh={} htod={} (last shape {:?})",
+                    n,
+                    ROCM_HTOD_COUNT.load(Ordering::Relaxed),
+                    src.shape()
                 );
             }
         }
+        let cpu_storage = crate::CpuStorage::from_bytes(dtype, host_bytes)?;
+        let storage_arc: crate::Storage = Arc::new(cpu_storage);
+        return crate::Tensor::from_parts(
+            storage_arc,
+            crate::Layout::contiguous(src.shape().to_vec()),
+            crate::TensorId::next(),
+        );
     }
 
     // Force a contiguous, start_offset=0 device buffer first (Owned output with
