@@ -7405,6 +7405,26 @@ fn rocm_graph_replay_hidden_routes_through_replay_plan_contract() {
         !replay_hidden_section.contains(".exec\n            .launch("),
         "ROCm graph replay_hidden should not launch the native graph outside ReplayPlan::replay"
     );
+    let replay_plan_section = source_between(
+        &rocm_graph_source,
+        "impl ReplayPlan for RocmDecodeReplayPlan",
+        "enum RocmCaptureStep",
+    );
+    assert!(
+        replay_hidden_section.contains("record_event(&captured.replay_inputs_ready_event)")
+            && replay_hidden_section.contains("wait_event(&captured.replay_inputs_ready_event)"),
+        "ROCm graph replay inputs should use a default-to-capture event dependency"
+    );
+    assert!(
+        replay_plan_section.contains("record_event(&self.captured.replay_complete_event)")
+            && replay_plan_section.contains("wait_event(&self.captured.replay_complete_event)"),
+        "ROCm graph replay outputs should use a capture-to-default event dependency"
+    );
+    assert!(
+        !replay_hidden_section.contains("rocm_synchronize_default_stream")
+            && !replay_plan_section.contains(".synchronize()"),
+        "steady-state ROCm graph replay must not host-synchronize either stream"
+    );
 }
 
 #[test]

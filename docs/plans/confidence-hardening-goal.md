@@ -213,7 +213,7 @@ device-wide synchronization while a request is active.
 
 - [x] Add a monotonically increasing KV-pool generation or stable allocation
   identity.
-- [ ] Include pool generation/identity in graph replay validation for every
+- [x] Include pool generation/identity in graph replay validation for every
   backend that captures paged-KV pointers.
 - [x] Destroy/invalidate affected graphs before any old pool allocation is
   released.
@@ -353,11 +353,8 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
 
 ### 1.5 ROCm graph behavior
 
-- [ ] Replace per-replay device-wide synchronization with stream/event ordering
+- [x] Replace per-replay device-wide synchronization with stream/event ordering
   where ROCm correctness permits it.
-  - Progress: `kiln-hip` now owns reusable device-bound ordering events and
-    cross-stream record/wait operations; the real gfx1151 substrate test passes.
-    Wiring replay inputs and outputs through these events is the next slice.
 - [ ] Pre-capture supported graph buckets during an explicit warmup phase, or
   keep graphs disabled in stable mode until this is reliable.
 - [ ] Do not perform warm-forward plus failed-capture plus eager-forward on a
@@ -1265,6 +1262,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-12 | Server-owned dynamic GPU memory attribution | `sha256:0432bfda2076` | this commit | portable + ROCm gfx1151/Vulkan/CUDA compile gates | 924 server library tests; 47 focused qualification tests; default, ROCm gfx1151, Vulkan, and toolkit-free CUDA server all-target checks; formatting and diff hygiene | passed | Aggregate initial KV allocations and their same-size reclaim retries now record bounded attempt, byte, outcome, wait, and duration fields. Actor-owned physical resize carries a closed automatic-policy, forced-configuration, training-preparation, or maintenance reason from enqueue through the quiescence barrier; its record separates barrier, GPU-coordination, model-lock, mutation, and total duration while reporting requested and actual blocks/bytes. Training reclaim and coordinated ROCm pool trim use the same event schema, including zero-yield and failure outcomes. The qualification parser recognizes the authoritative physical-resize event. The first all-target run caught that replacing the public `DecodeForward::resize_kv` signature broke an integration caller; the final design preserves that method and adds a defaulted hidden contextual hook, keeping existing implementations and consumers source-compatible. Graph capture/replay synchronization attribution remains open. |
 
 | 2026-07-12 | HIP cross-stream event-ordering substrate | `sha256:07c32e97fca4` | this commit | Strix Halo ROCm/gfx1151 + portable compile | 7 real HIP tests; portable `kiln-hip` check; formatting and diff hygiene | passed | The bounded HIP wrapper now owns device-bound, timing-disabled events with RAII destruction and rejects cross-device stream/event use before FFI. Streams can record and wait on reusable events without blocking the host. A real two-stream test uploads on the default stream, orders a non-default-stream device copy through an input event, orders the download through a completion event, and proves all 4,096 bytes exactly. This is the independently tested primitive for removing replay host synchronization; the graph runner is intentionally unchanged in this checkpoint. |
+
+| 2026-07-12 | Event-ordered ROCm graph replay | `sha256:858b4f69d946` | this commit | Strix Halo ROCm/gfx1151 + portable contract | exact stale-generation hardware test; exact eager/graph active-resize hardware qualification; 135 native replays, 3 captures, and generations 0 -> 1 -> 2; focused replay-route contract; ROCm model all-target check; formatting and diff hygiene | passed | Each captured graph retains reusable input-ready and replay-complete events plus both streams. Steady-state replay records refreshed inputs on the kt default stream and makes the capture stream wait, then records launch completion on the capture stream and makes eager lm-head work on the default stream wait. Neither handoff blocks the host, while external-yield settlement still confirms device completion before progress publication. The structural contract rejects reintroduction of either host synchronization. The real resize qualification produced exact eager/captured 48-token parity before shrink, after shrink, and after grow across 135 replays with zero failures; the separate poisoned-generation test still refused native launch and returned the exact eager fallback. CUDA single-row and batched graphs plus ROCm graphs all already retain and validate exact allocation ID, generation, and block count before launch, so the stale Phase 1.2 implementation checkbox is now closed. Capture-establishment and failure-recovery synchronization remain host-blocking and will be attributed separately. |
 
 ## Known Starting Defects
 

@@ -199,9 +199,16 @@ struct CapturedDecodeGraphRocm {
     /// Graph-stable PRE-final-norm hidden `[1, 1, hidden]`; refreshed in place by
     /// the captured forward, read eagerly by lm_head after launch.
     output_hidden: Tensor,
-    /// The non-default capture stream the graph launches on; synchronized after
-    /// each launch so `output_hidden` is visible before the eager lm_head.
+    /// The non-default capture stream the graph launches on. Replay completion
+    /// is ordered into `default_stream` without blocking the host.
     capture_stream: std::sync::Arc<kiln_hip::RocmStream>,
+    /// The kt default stream that receives refreshed inputs and consumes the
+    /// graph-stable hidden output.
+    default_stream: std::sync::Arc<kiln_hip::RocmStream>,
+    /// Reusable default-to-capture dependency for refreshed replay inputs.
+    replay_inputs_ready_event: std::sync::Arc<kiln_hip::RocmEvent>,
+    /// Reusable capture-to-default dependency for replayed hidden output.
+    replay_complete_event: std::sync::Arc<kiln_hip::RocmEvent>,
     adapter_gen: u64,
     /// Exact paged-KV allocation/generation whose pool pointers are embedded in
     /// the captured kernels.
@@ -270,9 +277,18 @@ impl ReplayPlan for RocmDecodeReplayPlan<'_> {
             .exec
             .launch(&self.captured.capture_stream)
             .map_err(|e| CaptureError::Backend(format!("ROCm graph launch: {e}")))?;
-        self.captured.capture_stream.synchronize().map_err(|e| {
-            CaptureError::Backend(format!("sync capture stream after replay launch: {e}"))
-        })?;
+        self.captured
+            .capture_stream
+            .record_event(&self.captured.replay_complete_event)
+            .map_err(|e| {
+                CaptureError::Backend(format!("record ROCm graph replay completion: {e}"))
+            })?;
+        self.captured
+            .default_stream
+            .wait_event(&self.captured.replay_complete_event)
+            .map_err(|e| {
+                CaptureError::Backend(format!("order ROCm graph replay output handoff: {e}"))
+            })?;
         Ok(ReplayOutputs::new(inputs.resources.to_vec(), 1))
     }
 
@@ -368,7 +384,9 @@ pub struct RocmGraphStats {
     pub capture_failures: u64,
     /// Native replay launches attempted from any decode API.
     pub replay_attempts: u64,
-    /// Native replay launches that completed successfully.
+    /// Native replay launches whose input/output stream dependencies and launch
+    /// were queued successfully. External-yield settlement confirms device
+    /// completion before progress is published.
     pub replay_successes: u64,
     /// Native replay launches that failed and tripped the circuit breaker.
     pub replay_failures: u64,
@@ -1626,13 +1644,17 @@ impl RocmGraphRunner {
             )?;
         }
 
-        // The per-replay writes above land on the kt DEFAULT stream; the graph
-        // launches on its non-default capture stream. Sync the default stream so
-        // the writes are visible before launch (else replay reads a stale token).
-        if let Some(idx) = captured.token_buffer.device().index() {
-            kiln_tensor::rocm_synchronize_default_stream(idx)
-                .context("sync per-replay input writes before ROCm graph launch")?;
-        }
+        // The writes above land on the kt default stream while the graph
+        // launches on its capture stream. The event dependency prevents stale
+        // replay inputs without forcing the host to wait for either stream.
+        captured
+            .default_stream
+            .record_event(&captured.replay_inputs_ready_event)
+            .context("record per-replay ROCm graph inputs")?;
+        captured
+            .capture_stream
+            .wait_event(&captured.replay_inputs_ready_event)
+            .context("order per-replay ROCm graph input handoff")?;
 
         let mut plan = RocmDecodeReplayPlan::new(captured);
         let replay_key = kiln_graph::ReplayPlan::key(&plan);
@@ -2084,10 +2106,18 @@ impl RocmGraphRunner {
 
         // Capture on a FRESH non-default stream (mirror the CUDA discipline; the
         // with_active_rocm_stream scope routes every kt op onto it).
-        let stream = kiln_tensor::primary_rocm_context(device_idx)
-            .context("ROCm graph capture: primary_rocm_context for capture stream")?
+        let context = kiln_tensor::primary_rocm_context(device_idx)
+            .context("ROCm graph capture: primary_rocm_context for capture stream")?;
+        let stream = context
             .new_stream()
             .map_err(|e| anyhow::anyhow!("ROCm graph capture: create capture stream: {e}"))?;
+        let default_stream = context.default_stream();
+        let replay_inputs_ready_event = context
+            .new_event()
+            .map_err(|e| anyhow::anyhow!("ROCm graph capture: create input event: {e}"))?;
+        let replay_complete_event = context
+            .new_event()
+            .map_err(|e| anyhow::anyhow!("ROCm graph capture: create completion event: {e}"))?;
 
         // Pre-allocate graph-stable buffers before capture.
         let token_buffer = Self::new_token_buffer(device, token_id)?;
@@ -2343,6 +2373,9 @@ impl RocmGraphRunner {
                 exec,
                 output_hidden,
                 capture_stream: stream,
+                default_stream,
+                replay_inputs_ready_event,
+                replay_complete_event,
                 adapter_gen: self.adapter_generation,
                 kv_pool_identity: paged_cache.pool_identity(),
                 token_buffer,
