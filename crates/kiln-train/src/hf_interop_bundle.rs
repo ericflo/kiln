@@ -20,6 +20,10 @@ use crate::{
 };
 
 pub const HF_TRL_BUNDLE_SUFFIX: &str = ".kiln-hf";
+pub const HF_TRL_SFT_REFERENCE_SCRIPT: &[u8] =
+    include_bytes!("../../../scripts/hf_trl/train_sft.py");
+pub const HF_TRL_SFT_ENVIRONMENT_LOCK: &[u8] =
+    include_bytes!("../../../scripts/hf_trl/requirements-sft.lock");
 
 /// Optional Kiln PEFT adapter to copy into an SFT handoff.
 #[derive(Debug, Clone, Copy)]
@@ -572,6 +576,23 @@ mod tests {
 
     use super::*;
     use crate::{ChatMessage, SftExample, SftInvalidRowPolicy, prepare_sft_examples};
+
+    #[test]
+    fn embedded_sft_reference_assets_are_pinned_and_executable_text() {
+        let script = std::str::from_utf8(HF_TRL_SFT_REFERENCE_SCRIPT).unwrap();
+        let lock = std::str::from_utf8(HF_TRL_SFT_ENVIRONMENT_LOCK).unwrap();
+        assert!(script.starts_with("#!/usr/bin/env python3\n"));
+        assert!(script.contains("assistant_only_loss=True"));
+        assert!(script.contains("kiln.hf-trl-result.v1"));
+        for package in [
+            "torch==2.13.0",
+            "transformers==5.13.1",
+            "trl==1.8.0",
+            "peft==0.19.1",
+        ] {
+            assert!(lock.lines().any(|line| line == package));
+        }
+    }
 
     struct Fixture {
         model_config: ModelConfig,

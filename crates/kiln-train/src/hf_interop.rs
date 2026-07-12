@@ -1310,6 +1310,19 @@ mod tests {
     }
 
     #[test]
+    fn canonical_digest_matches_python_reference_runner_golden() {
+        let value = json!({
+            "z": [3, {"kind": "decimal", "value": "2e-5"}],
+            "a": {"text": "qwen/3.5", "flag": true},
+            "n": 42,
+        });
+        assert_eq!(
+            canonical_json_sha256(&value).unwrap(),
+            "sha256:1a00ddf29092a9e9e9ecd4ea9faf9c48f69208e5439834c6674d1d6bfb45e258"
+        );
+    }
+
+    #[test]
     fn result_records_custom_script_and_rejects_a_different_task() {
         let dir = tempfile::tempdir().unwrap();
         let export = export_bundle(dir.path());

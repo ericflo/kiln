@@ -7,10 +7,10 @@ Transformers, TRL, and PEFT. The interoperability route moves data and
 adapters between those systems without discarding the identities needed to
 audit the handoff.
 
-The version-1 manifest, validation library, and atomic SFT bundle writer are
-implemented. The public export/import API and reference training scripts are
-not yet available; until those surfaces ship, Kiln does not claim that
-manually assembled PEFT output has passed this contract.
+The version-1 manifest, validation library, atomic SFT bundle writer, and
+pinned SFT reference runner are implemented. The public export/import API and
+GRPO runner are not yet available; until those surfaces ship, Kiln does not
+claim that manually assembled PEFT output has passed this contract.
 
 ## Bundle Model
 
@@ -98,13 +98,73 @@ removes staging, and an existing final target is never replaced. Optional
 input-adapter files reject symlinks and are copied while the caller holds its
 adapter revision stable.
 
+## Pinned SFT Runner
+
+`scripts/hf_trl/train_sft.py` is the exact standalone runner embedded in SFT
+exports. `scripts/hf_trl/requirements-sft.lock` pins the public package
+versions it accepts:
+
+| Package | Version |
+| --- | --- |
+| PyTorch | `2.13.0` |
+| Transformers | `5.13.1` |
+| TRL | `1.8.0` |
+| PEFT | `0.19.1` |
+| Datasets | `5.0.0` |
+| Accelerate | `1.14.0` |
+| Tokenizers | `0.22.2` |
+| Safetensors | `0.8.0` |
+| Jinja2 | `3.1.6` |
+
+Install the PyTorch build from the official index appropriate to CUDA, ROCm,
+CPU, or MPS while retaining the exact public version, then install the
+remaining pinned requirements. The script rejects a missing package, version
+drift, or a PyTorch version other than the allowed platform-suffixed pin.
+
+Run the exported copy, not the repository source:
+
+```bash
+python ./my-run.kiln-hf/train.py ./my-run.kiln-hf \
+  --base-model /absolute/path/to/the/hf-model
+```
+
+`--base-model` is deliberately local and explicit. Before importing PyTorch,
+the runner verifies the export self-digest, closed schema, exact recursive
+file set, every artifact size and hash, complete SFT selection receipt,
+generation-span template, environment lock, local tokenizer bytes, and every
+base-weight shard byte. `--verify-only` performs this dependency-free
+preflight.
+
+The default route uses TRL `SFTTrainer`, assistant-only generation masks,
+PEFT LoRA, no packing or dataset shuffle, AdamW, and a materialized seed. It
+derives `max_length` from the admitted rows and refuses an explicit value that
+would truncate any row. Input adapters are resumed as trainable PEFT adapters;
+new-adapter LoRA shape flags are rejected in that mode rather than silently
+ignored. A modified runner requires `--allow-custom-script` and remains
+distinguishable through `executed_train.py`.
+
+The pinned v1 runner is deliberately a single-process correctness reference;
+it rejects `WORLD_SIZE != 1` instead of allowing multiple ranks to race result
+publication. The bundle format itself supports custom distributed
+Transformers/TRL/PEFT training. Run that through an explicit modified script
+with `--allow-custom-script` so the result records the exact code that ran.
+
+Training uses a sibling temporary work directory. On rank zero, the runner
+publishes `executed_train.py`, `adapter_config.json`, and
+`adapter_model.safetensors`, then creates the self-verifying
+`kiln_hf_result.json` last. Import therefore cannot mistake an interrupted
+publication for a complete result. In-process failures clean partial result
+files; a later invocation can recover a result carrying the explicit
+incomplete sentinel, while unattributed output files fail closed.
+
 ## Validation Boundary
 
 This contract proves byte and identity continuity across an explicitly
 provided handoff. It does not prove that an external process executed the
 reported script, that package version strings are trustworthy, or that the
-trainer produced a correct optimization result. The pinned reference scripts,
-oracle fixtures, and round-trip tests provide behavioral evidence separately.
+trainer produced a correct optimization result. The pinned runner and oracle
+fixtures provide narrower behavioral evidence; real cross-stack round-trip
+tests remain required before the route is declared complete.
 
 Import must validate both self-digests, the result-to-export link, every
 referenced file, trainer/task consistency, and current resident

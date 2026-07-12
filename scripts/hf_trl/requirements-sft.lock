@@ -1,0 +1,12 @@
+# Kiln HF/TRL SFT reference environment. Install torch from the index for the
+# target platform (CUDA, ROCm, or PyPI CPU/MPS), while preserving this exact
+# public version. The reference script verifies every version before training.
+accelerate==1.14.0
+datasets==5.0.0
+jinja2==3.1.6
+peft==0.19.1
+safetensors==0.8.0
+tokenizers==0.22.2
+torch==2.13.0
+transformers==5.13.1
+trl==1.8.0
