@@ -30,7 +30,9 @@ pub const HF_TRL_NATIVE_TRAINING_TEMPLATE_FILENAME: &str = "kiln_training_chat_t
 pub const HF_TRL_TRAINING_TEMPLATE_FILENAME: &str = "training_chat_template.jinja";
 pub const HF_TRL_REFERENCE_SCRIPT_FILENAME: &str = "train.py";
 pub const HF_TRL_EXECUTED_SCRIPT_FILENAME: &str = "executed_train.py";
+pub const HF_TRL_ENVIRONMENT_LOCK_FILENAME: &str = "requirements.lock";
 pub const HF_TRL_SPLIT_MANIFEST_FILENAME: &str = "split_manifest.json";
+pub const HF_TRL_SFT_INGESTION_FILENAME: &str = "sft_ingestion.json";
 pub const HF_TRL_ADAPTER_CONFIG_FILENAME: &str = "adapter_config.json";
 pub const HF_TRL_ADAPTER_MODEL_FILENAME: &str = "adapter_model.safetensors";
 
@@ -60,6 +62,13 @@ pub enum HfTrlDatasetFormat {
 pub enum HfTrlTrainerKind {
     TrlSftTrainer,
     TrlGrpoTrainer,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HfTrlSftLabelPolicy {
+    /// TRL derives labels from `{% generation %}` template spans.
+    AssistantOnlyGenerationSpans,
 }
 
 /// Cross-language-stable value used in the effective trainer configuration.
@@ -246,23 +255,32 @@ impl HfTrlModelIdentity {
 #[serde(deny_unknown_fields)]
 pub struct HfTrlSftSelection {
     pub invalid_row_policy: SftInvalidRowPolicy,
+    pub label_policy: HfTrlSftLabelPolicy,
     pub rows_read: u64,
     pub rows_kept: u64,
     pub rows_rejected: u64,
     pub kept_corpus_sha256: String,
+    pub ingestion_receipt: HfTrlFileIdentity,
 }
 
 impl HfTrlSftSelection {
-    pub fn from_ingestion(ingestion: &crate::SftIngestionReceipt) -> Result<Self> {
+    pub fn from_ingestion(
+        ingestion: &crate::SftIngestionReceipt,
+        ingestion_receipt: HfTrlFileIdentity,
+    ) -> Result<Self> {
         ingestion.validate()?;
-        Ok(Self {
+        let selection = Self {
             invalid_row_policy: ingestion.invalid_row_policy,
+            label_policy: HfTrlSftLabelPolicy::AssistantOnlyGenerationSpans,
             rows_read: u64::try_from(ingestion.rows_read).context("SFT rows_read exceeds u64")?,
             rows_kept: u64::try_from(ingestion.rows_kept).context("SFT rows_kept exceeds u64")?,
             rows_rejected: u64::try_from(ingestion.rows_rejected)
                 .context("SFT rows_rejected exceeds u64")?,
             kept_corpus_sha256: ingestion.kept_corpus_sha256.clone(),
-        })
+            ingestion_receipt,
+        };
+        selection.validate()?;
+        Ok(selection)
     }
 
     fn validate(&self) -> Result<()> {
@@ -278,7 +296,30 @@ impl HfTrlSftSelection {
             self.rows_read == expected_rows_read,
             "HF/TRL SFT row counts are inconsistent"
         );
-        validate_sha256("kept_corpus_sha256", &self.kept_corpus_sha256)
+        validate_sha256("kept_corpus_sha256", &self.kept_corpus_sha256)?;
+        self.ingestion_receipt.validate()?;
+        ensure_exact_path(&self.ingestion_receipt, HF_TRL_SFT_INGESTION_FILENAME)
+    }
+
+    fn verify_files(&self, root: &Path) -> Result<crate::SftIngestionReceipt> {
+        self.ingestion_receipt.verify(root)?;
+        let path = resolve_regular_bundle_file(root, &self.ingestion_receipt.relative_path)?;
+        let file = std::fs::File::open(&path)
+            .with_context(|| format!("open HF/TRL SFT ingestion receipt {}", path.display()))?;
+        let ingestion: crate::SftIngestionReceipt = serde_json::from_reader(file)
+            .with_context(|| format!("parse HF/TRL SFT ingestion receipt {}", path.display()))?;
+        ingestion
+            .validate()
+            .context("validate HF/TRL SFT ingestion receipt")?;
+        ensure!(
+            ingestion.invalid_row_policy == self.invalid_row_policy
+                && u64::try_from(ingestion.rows_read).ok() == Some(self.rows_read)
+                && u64::try_from(ingestion.rows_kept).ok() == Some(self.rows_kept)
+                && u64::try_from(ingestion.rows_rejected).ok() == Some(self.rows_rejected)
+                && ingestion.kept_corpus_sha256 == self.kept_corpus_sha256,
+            "HF/TRL SFT selection differs from its full ingestion receipt"
+        );
+        Ok(ingestion)
     }
 }
 
@@ -352,10 +393,21 @@ impl HfTrlDataExport {
         Ok(())
     }
 
-    fn verify_files(&self, root: &Path) -> Result<()> {
+    fn verify_files(&self, root: &Path, task: HfTrlTask) -> Result<()> {
         self.dataset.verify(root)?;
         if let Some(split) = self.split_manifest.as_ref() {
             split.verify(root)?;
+        }
+        if task == HfTrlTask::Sft {
+            let selection = self
+                .sft_selection
+                .as_ref()
+                .context("SFT interoperability export is missing row-selection evidence")?;
+            let ingestion = selection.verify_files(root)?;
+            ensure!(
+                ingestion.source == self.source_name,
+                "HF/TRL SFT source_name differs from its ingestion receipt"
+            );
         }
         Ok(())
     }
@@ -402,9 +454,11 @@ pub struct HfTrlExportManifestV1 {
     pub schema_version: u32,
     pub manifest_type: String,
     pub task: HfTrlTask,
+    pub source_execution_provenance: kiln_core::execution_provenance::ExecutionProvenanceV1,
     pub model: HfTrlModelIdentity,
     pub data: HfTrlDataExport,
     pub reference_script: HfTrlFileIdentity,
+    pub environment_lock: HfTrlFileIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_adapter: Option<HfTrlInputAdapter>,
     pub export_sha256: String,
@@ -413,18 +467,22 @@ pub struct HfTrlExportManifestV1 {
 impl HfTrlExportManifestV1 {
     pub fn new(
         task: HfTrlTask,
+        source_execution_provenance: kiln_core::execution_provenance::ExecutionProvenanceV1,
         model: HfTrlModelIdentity,
         data: HfTrlDataExport,
         reference_script: HfTrlFileIdentity,
+        environment_lock: HfTrlFileIdentity,
         input_adapter: Option<HfTrlInputAdapter>,
     ) -> Result<Self> {
         let mut manifest = Self {
             schema_version: HF_TRL_EXPORT_SCHEMA_VERSION,
             manifest_type: HF_TRL_EXPORT_TYPE.to_string(),
             task,
+            source_execution_provenance,
             model,
             data,
             reference_script,
+            environment_lock,
             input_adapter,
             export_sha256: empty_sha256(),
         };
@@ -448,8 +506,9 @@ impl HfTrlExportManifestV1 {
     pub fn verify_files(&self, root: &Path) -> Result<()> {
         self.validate()?;
         self.model.verify_files(root)?;
-        self.data.verify_files(root)?;
+        self.data.verify_files(root, self.task)?;
         self.reference_script.verify(root)?;
+        self.environment_lock.verify(root)?;
         if let Some(adapter) = self.input_adapter.as_ref() {
             adapter.verify_files(root)?;
         }
@@ -467,10 +526,26 @@ impl HfTrlExportManifestV1 {
             "invalid HF/TRL export manifest_type {:?}",
             self.manifest_type
         );
+        self.source_execution_provenance
+            .validate()
+            .context("validate source execution provenance in HF/TRL export")?;
         self.model.validate()?;
+        let source_model = &self.source_execution_provenance.model;
+        ensure!(
+            source_model.model_config_sha256 == self.model.model_config.sha256
+                && source_model.tokenizer_config_sha256 == self.model.tokenizer.sha256
+                && source_model.tokenizer_vocab_sha256 == self.model.tokenizer_vocab_sha256
+                && source_model.chat_template_sha256.as_deref()
+                    == Some(self.model.chat_template.sha256.as_str())
+                && source_model.training_chat_template_sha256.as_deref()
+                    == Some(self.model.native_training_chat_template.sha256.as_str()),
+            "HF/TRL model artifacts differ from source execution provenance"
+        );
         self.data.validate(self.task)?;
         self.reference_script.validate()?;
         ensure_exact_path(&self.reference_script, HF_TRL_REFERENCE_SCRIPT_FILENAME)?;
+        self.environment_lock.validate()?;
+        ensure_exact_path(&self.environment_lock, HF_TRL_ENVIRONMENT_LOCK_FILENAME)?;
         if let Some(adapter) = self.input_adapter.as_ref() {
             adapter.validate()?;
         }
@@ -483,9 +558,11 @@ impl HfTrlExportManifestV1 {
             schema_version: u32,
             manifest_type: &'a str,
             task: HfTrlTask,
+            source_execution_provenance: &'a kiln_core::execution_provenance::ExecutionProvenanceV1,
             model: &'a HfTrlModelIdentity,
             data: &'a HfTrlDataExport,
             reference_script: &'a HfTrlFileIdentity,
+            environment_lock: &'a HfTrlFileIdentity,
             #[serde(skip_serializing_if = "Option::is_none")]
             input_adapter: &'a Option<HfTrlInputAdapter>,
         }
@@ -493,9 +570,11 @@ impl HfTrlExportManifestV1 {
             schema_version: self.schema_version,
             manifest_type: &self.manifest_type,
             task: self.task,
+            source_execution_provenance: &self.source_execution_provenance,
             model: &self.model,
             data: &self.data,
             reference_script: &self.reference_script,
+            environment_lock: &self.environment_lock,
             input_adapter: &self.input_adapter,
         })
     }
@@ -904,6 +983,11 @@ fn canonicalize_json(value: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_core::execution_provenance::{
+        ExecutionBackendIdentity, ExecutionBuildIdentity, ExecutionConfigurationIdentity,
+        ExecutionKernelIdentity, ExecutionModelIdentity, ExecutionPrecisionIdentity,
+        ExecutionProvenanceV1,
+    };
     use kiln_core::model_provenance::{BaseWeightShardIdentity, BaseWeightShardManifest};
     use serde_json::json;
 
@@ -917,6 +1001,48 @@ mod tests {
 
     fn artifact(root: &Path, relative: &str) -> HfTrlFileIdentity {
         HfTrlFileIdentity::from_file(root, relative).unwrap()
+    }
+
+    fn source_execution(model: &HfTrlModelIdentity) -> ExecutionProvenanceV1 {
+        let hash = |label: &[u8]| crate::train_receipt::sha256_bytes(label);
+        ExecutionProvenanceV1::new(
+            ExecutionBackendIdentity {
+                name: "cpu".to_string(),
+                device: "test-device".to_string(),
+                numerical_runtime_sha256: hash(b"runtime"),
+            },
+            ExecutionBuildIdentity {
+                package_version: "0.4.1".to_string(),
+                target: "test-target".to_string(),
+                executable_sha256: hash(b"executable"),
+                git_commit: None,
+                source_tree_sha256: None,
+                source_dirty: None,
+            },
+            ExecutionModelIdentity {
+                model_config_sha256: model.model_config.sha256.clone(),
+                tokenizer_vocab_sha256: model.tokenizer_vocab_sha256.clone(),
+                tokenizer_config_sha256: model.tokenizer.sha256.clone(),
+                chat_template_sha256: Some(model.chat_template.sha256.clone()),
+                training_chat_template_sha256: Some(
+                    model.native_training_chat_template.sha256.clone(),
+                ),
+            },
+            ExecutionPrecisionIdentity {
+                inference_dtype: "f32".to_string(),
+                training_policy: "f32".to_string(),
+            },
+            ExecutionKernelIdentity::new(
+                BTreeMap::from([("test_kernel".to_string(), "v1".to_string())]),
+                Vec::new(),
+            )
+            .unwrap(),
+            ExecutionConfigurationIdentity {
+                effective_server_config_sha256: hash(b"server-config"),
+                effective_environment_sha256: hash(b"environment"),
+            },
+        )
+        .unwrap()
     }
 
     fn export_bundle(root: &Path) -> HfTrlExportManifestV1 {
@@ -938,6 +1064,10 @@ mod tests {
             (
                 HF_TRL_REFERENCE_SCRIPT_FILENAME,
                 b"print('train')\n".as_slice(),
+            ),
+            (
+                HF_TRL_ENVIRONMENT_LOCK_FILENAME,
+                b"transformers==5.13.1\ntrl==1.8.0\n".as_slice(),
             ),
             (
                 HF_TRL_DATASET_FILENAME,
@@ -965,6 +1095,7 @@ mod tests {
             native_training_chat_template: artifact(root, HF_TRL_NATIVE_TRAINING_TEMPLATE_FILENAME),
             trl_training_chat_template: artifact(root, HF_TRL_TRAINING_TEMPLATE_FILENAME),
         };
+        let source_execution_provenance = source_execution(&model);
         let data = HfTrlDataExport {
             source_name: "rollouts".to_string(),
             format: HfTrlDatasetFormat::GrpoGroupsJsonl,
@@ -977,9 +1108,75 @@ mod tests {
         };
         HfTrlExportManifestV1::new(
             HfTrlTask::Grpo,
+            source_execution_provenance,
             model,
             data,
             artifact(root, HF_TRL_REFERENCE_SCRIPT_FILENAME),
+            artifact(root, HF_TRL_ENVIRONMENT_LOCK_FILENAME),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn sft_export_bundle(root: &Path) -> HfTrlExportManifestV1 {
+        let base = export_bundle(root);
+        let tokenizer = kiln_core::tokenizer::KilnTokenizer::from_bytes(
+            br#"{
+                "version": "1.0",
+                "model": {
+                    "type": "BPE",
+                    "vocab": {"a": 0, "b": 1},
+                    "merges": []
+                }
+            }"#,
+        )
+        .unwrap()
+        .with_chat_template(
+            "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
+        );
+        let prepared = crate::prepare_sft_examples(
+            [crate::SftExample {
+                messages: vec![
+                    crate::ChatMessage::new("user", "a"),
+                    crate::ChatMessage::new("assistant", "b"),
+                ],
+            }],
+            &tokenizer,
+            SftInvalidRowPolicy::Fail,
+            "inline",
+            None,
+        )
+        .unwrap();
+        let mut dataset = serde_json::to_vec(&prepared.examples[0]).unwrap();
+        dataset.push(b'\n');
+        write(root, HF_TRL_DATASET_FILENAME, &dataset);
+        write(
+            root,
+            HF_TRL_SFT_INGESTION_FILENAME,
+            &serde_json::to_vec_pretty(&prepared.ingestion).unwrap(),
+        );
+        let selection = HfTrlSftSelection::from_ingestion(
+            &prepared.ingestion,
+            artifact(root, HF_TRL_SFT_INGESTION_FILENAME),
+        )
+        .unwrap();
+        let data = HfTrlDataExport {
+            source_name: prepared.ingestion.source.clone(),
+            format: HfTrlDatasetFormat::SftMessagesJsonl,
+            row_count: 1,
+            ordered_corpus_sha256: prepared.ingestion.kept_corpus_sha256.clone(),
+            dataset: artifact(root, HF_TRL_DATASET_FILENAME),
+            sft_selection: Some(selection),
+            rollout_provenance_schema: None,
+            split_manifest: None,
+        };
+        HfTrlExportManifestV1::new(
+            HfTrlTask::Sft,
+            base.source_execution_provenance,
+            base.model,
+            data,
+            base.reference_script,
+            base.environment_lock,
             None,
         )
         .unwrap()
@@ -1027,6 +1224,19 @@ mod tests {
         export.validate().unwrap();
         export.verify_files(dir.path()).unwrap();
 
+        write(
+            dir.path(),
+            HF_TRL_ENVIRONMENT_LOCK_FILENAME,
+            b"tampered lock\n",
+        );
+        let error = export.verify_files(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("differs"), "{error:#}");
+        write(
+            dir.path(),
+            HF_TRL_ENVIRONMENT_LOCK_FILENAME,
+            b"transformers==5.13.1\ntrl==1.8.0\n",
+        );
+
         let result = training_result(dir.path(), &export);
         result.validate_against_export(&export).unwrap();
         assert!(result.uses_exported_reference_script(&export).unwrap());
@@ -1035,6 +1245,32 @@ mod tests {
         write(dir.path(), HF_TRL_ADAPTER_MODEL_FILENAME, b"tampered");
         let error = result.verify_files(dir.path()).unwrap_err();
         assert!(error.to_string().contains("differs"), "{error:#}");
+    }
+
+    #[test]
+    fn sft_export_verifies_full_ingestion_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut export = sft_export_bundle(dir.path());
+        export.verify_files(dir.path()).unwrap();
+
+        let receipt_path = dir.path().join(HF_TRL_SFT_INGESTION_FILENAME);
+        let mut receipt: crate::SftIngestionReceipt =
+            serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+        receipt.source = "dataset_path".to_string();
+        write(
+            dir.path(),
+            HF_TRL_SFT_INGESTION_FILENAME,
+            &serde_json::to_vec_pretty(&receipt).unwrap(),
+        );
+        export
+            .data
+            .sft_selection
+            .as_mut()
+            .unwrap()
+            .ingestion_receipt = artifact(dir.path(), HF_TRL_SFT_INGESTION_FILENAME);
+        export.export_sha256 = export.compute_sha256().unwrap();
+        let error = export.verify_files(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("source_name"), "{error:#}");
     }
 
     #[test]
@@ -1152,6 +1388,13 @@ mod tests {
         assert!(invalid_decimal.validate("learning_rate").is_err());
 
         let dir = tempfile::tempdir().unwrap();
+        let mut provenance_mismatch = export_bundle(dir.path());
+        provenance_mismatch.model.tokenizer.sha256 =
+            crate::train_receipt::sha256_bytes(b"other-tokenizer");
+        provenance_mismatch.export_sha256 = provenance_mismatch.compute_sha256().unwrap();
+        let error = provenance_mismatch.validate().unwrap_err();
+        assert!(error.to_string().contains("source execution"), "{error:#}");
+
         let mut export = export_bundle(dir.path());
         export.data.rollout_provenance_schema = None;
         export.export_sha256 = export.compute_sha256().unwrap();

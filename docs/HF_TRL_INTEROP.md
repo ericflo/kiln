@@ -24,13 +24,15 @@ One handoff directory contains two independently self-verifying documents:
 The export binds all of the following:
 
 - the served model ID and complete base-weight shard manifest;
+- the validated execution provenance of the Kiln process that made the
+  export, cross-checked against the exported model/tokenizer/template files;
 - exact model configuration, tokenizer, and tokenizer-vocabulary identity;
 - inference, native-training, and TRL-training template bytes;
 - exact exported dataset bytes, ordered corpus identity, and row count;
-- SFT kept/rejected-row evidence or the exact rollout-provenance schema for
-  GRPO;
+- the complete SFT ingestion receipt, including ordered kept and rejected row
+  hashes, or the exact rollout-provenance schema for GRPO;
 - an optional evaluation split manifest and optional input PEFT adapter; and
-- Kiln's exact reference script.
+- Kiln's exact reference script and pinned Python environment lock.
 
 The result binds the export digest, task, package versions, trainer kind,
 effective configuration, preserved executed-script bytes, and exact PEFT
@@ -42,6 +44,12 @@ length, and a complete lowercase `sha256:<64 hex>` digest. Bundle paths must
 not be absolute, contain `..`, contain backslashes, or traverse symlinks.
 Readers reject unsupported schema versions, unknown or duplicate fields,
 missing files, non-regular files, and byte or length mismatches.
+
+SFT exports declare `assistant_only_generation_spans`: labels must come from
+the TRL template's generation blocks. The compact selection fields in the
+export manifest are cross-checked against the complete `sft_ingestion.json`
+receipt, including its source, row counts, invalid-row policy, ordered corpus
+digest, and internally validated per-row identities.
 
 ## Template Identities
 
