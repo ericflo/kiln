@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "workload_id": "serving-rocm-memory-pressure-v1",
+  "kind": "performance",
+  "description": "Prove sustained sub-10-percent ROCm memory pressure does not introduce a periodic two-second server-ready token stall.",
+  "determinism": {
+    "seed": 20260712,
+    "seed_delivery": "argv",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "automatic-pressure",
+      "description": "Experimental fixed-KV graph-off ROCm serving with the automatic memory-governor monitor enabled.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "features": "rocm",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "rocm_archs": "gfx1151",
+          "rocm_path": "/opt/rocm"
+        },
+        "runtime": {
+          "kv_autoscale_enabled": false,
+          "kv_autoscale_requested": false,
+          "memory_reclaim_mode": "automatic",
+          "memory_reclaim_requested_mode": "automatic",
+          "rocm_graphs_enabled": false,
+          "rocm_graphs_requested": false,
+          "serving_profile": "experimental"
+        },
+        "server": {
+          "chat_performance_metadata_enabled": true,
+          "debug_endpoints_enabled": true,
+          "default_thinking_enabled": false,
+          "http_send_buffer_bytes": 4096,
+          "log_format": "json",
+          "max_active_requests": 12,
+          "max_decode_batch": 8,
+          "max_prefill_layers_per_cycle": 4,
+          "max_prefill_staging_priority_burst": 4,
+          "max_prefill_staging_slots": 4,
+          "max_prefill_tokens_per_cycle": 64,
+          "request_timeout_seconds": 180,
+          "stream_stall_grace_ms": 2000
+        },
+        "workload": {
+          "maximum_pressure_itl_ms": 1000,
+          "maximum_qualified_free_fraction": 0.1,
+          "memory_recovery_free_fraction": 0.2,
+          "memory_recovery_timeout_seconds": 30,
+          "minimum_free_fraction": 0.05,
+          "minimum_pressure_duration_seconds": 20,
+          "minimum_pressure_itl_gaps": 32,
+          "minimum_pressure_samples": 40,
+          "overall_timeout_seconds": 540,
+          "peer_chunk_mib": 512,
+          "peer_hold_seconds": 180,
+          "peer_max_allocation_gib": 110.0,
+          "pressure_hold_seconds": 30,
+          "pressure_ready_timeout_seconds": 120,
+          "pressure_sample_interval_ms": 500,
+          "request_count": 4,
+          "request_max_tokens": 384,
+          "request_prompt_words": 48,
+          "request_timeout_seconds": 180,
+          "target_free_fraction": 0.08
+        }
+      },
+      "cases": [
+        {
+          "id": "rocm-memory-pressure",
+          "description": "Build current source, hold external HIP allocations below ten percent free, and gate server-ready inter-token latency while four requests remain active.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_rocm_pressure.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 1200,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*rocm)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "automatic_last_duration_ms",
+              "automatic_last_reclaimed_bytes",
+              "automatic_last_target_bytes",
+              "automatic_reclaim_attempt_count",
+              "automatic_reclaim_successful_count",
+              "automatic_reclaim_suppressed_count",
+              "automatic_reclaim_zero_yield_count",
+              "automatic_reclaimed_bytes",
+              "automatic_zero_yield_streak",
+              "backend_quarantine_count",
+              "batching_decode_forward_ms_max",
+              "batching_total_error_count",
+              "completion_token_count",
+              "external_yield_sync_call_count",
+              "external_yield_sync_failure_count",
+              "external_yield_sync_max_ms",
+              "external_yield_sync_slow_count",
+              "external_yield_sync_total_ms",
+              "graph_event_count",
+              "kv_blocks_end",
+              "kv_blocks_start",
+              "kv_resize_event_count",
+              "length_terminated_request_count",
+              "memory_reclaim_event_count",
+              "peer_allocated_bytes",
+              "peer_exit_code",
+              "pressure_below_ten_percent_sample_count",
+              "pressure_duration_ms",
+              "pressure_free_fraction_max",
+              "pressure_free_fraction_min",
+              "pressure_itl_gap_count",
+              "pressure_itl_ms_max",
+              "pressure_itl_ms_p99",
+              "pressure_itl_over_1000ms_count",
+              "pressure_sample_count",
+              "recovery_duration_ms",
+              "request_count",
+              "request_failure_count",
+              "requests_active_through_pressure_count"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "same_environment_performance",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": [
+      {
+        "scope": "result",
+        "result_id": "rocm-memory-pressure",
+        "metric": "pressure_itl_ms_max",
+        "metric_class": "performance",
+        "unit": "ms",
+        "aggregation": "max",
+        "lower_is_better": true,
+        "operator": "not_greater",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "rocm-memory-pressure",
+        "metric": "request_failure_count",
+        "metric_class": "performance",
+        "unit": "count",
+        "aggregation": "sum",
+        "lower_is_better": true,
+        "operator": "not_greater",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      }
+    ]
+  }
+}

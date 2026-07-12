@@ -96,6 +96,7 @@ class WorkloadTests(unittest.TestCase):
             "correctness-core-v1.json",
             "prefill-scheduling-v1.json",
             "serving-mixed-rocm-v1.json",
+            "serving-rocm-memory-pressure-v1.json",
         ):
             with self.subTest(name=name):
                 path = ROOT / "qualification/workloads" / name

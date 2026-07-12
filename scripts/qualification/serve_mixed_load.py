@@ -1152,6 +1152,7 @@ def classify_server_event(
         return "kv_resize"
     if lowered in {
         "memory governor: reclaimed under pressure",
+        "memory governor automatic reclaim completed",
         "rocm pool reclaim completed",
     }:
         return "memory_reclaim"
@@ -1779,8 +1780,11 @@ def attest_runtime(
             != expected["memory_reclaim_requested_mode"]
         ):
             failures.append("memory reclaim requested mode does not match isolated input")
-        if governor.get("automatic_monitor_enabled") is not False:
-            failures.append("memory governor automatic monitor unexpectedly enabled")
+        expected_monitor = expected["memory_reclaim_mode"] == "automatic"
+        if governor.get("automatic_monitor_enabled") is not expected_monitor:
+            failures.append(
+                "memory governor automatic monitor state does not match effective mode"
+            )
         if governor.get("source") != "environment":
             failures.append("memory reclaim mode was not sourced from the isolated environment")
         if governor.get("disabled_by_serving_profile") != (

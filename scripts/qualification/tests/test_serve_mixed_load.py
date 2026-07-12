@@ -38,6 +38,7 @@ def health_fixture(
     serving_profile: str = "experimental",
     kv_autoscale_requested: bool | None = None,
     memory_reclaim_requested_mode: str = "off",
+    memory_reclaim_mode: str = "off",
 ) -> dict:
     kv_autoscale_requested = (
         kv_autoscale
@@ -93,9 +94,9 @@ def health_fixture(
                 ),
             },
             "memory_governor": {
-                "reclaim_mode": "off",
+                "reclaim_mode": memory_reclaim_mode,
                 "requested_reclaim_mode": memory_reclaim_requested_mode,
-                "automatic_monitor_enabled": False,
+                "automatic_monitor_enabled": memory_reclaim_mode == "automatic",
                 "source": "environment",
                 "disabled_by_serving_profile": serving_profile == "stable",
             },
@@ -669,6 +670,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "background inference prewarm complete": "prewarm_complete",
             "KV autoscaler resized cache": "kv_resize",
             "ROCm pool reclaim completed": "memory_reclaim",
+            "memory governor automatic reclaim completed": "memory_reclaim",
             "ROCm HIP graph captured for decode (24 layers)": "graph_capture",
             "ROCm graph capture failed: bad launch": "graph_fallback",
             "slow_backend_external_yield_sync": "external_yield_sync",
@@ -1087,6 +1089,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                         memory_reclaim_requested_mode=runtime[
                             "memory_reclaim_requested_mode"
                         ],
+                        memory_reclaim_mode=runtime["memory_reclaim_mode"],
                     ),
                     debug_fixture(
                         kv_autoscale=runtime["kv_autoscale_requested"],
@@ -1126,6 +1129,36 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 for failure in failures
             )
         )
+
+    def test_runtime_attestation_accepts_automatic_monitor_when_effective(self) -> None:
+        variant = "test-automatic"
+        serve.VARIANT_CONFIGS[variant] = serve._variant_config(
+            serving_profile="experimental",
+            kv_autoscale_requested=False,
+            kv_autoscale_enabled=False,
+            memory_reclaim_requested_mode="automatic",
+            memory_reclaim_mode="automatic",
+            rocm_graphs_requested=False,
+            rocm_graphs_enabled=False,
+        )
+        try:
+            failures = serve.attest_runtime(
+                variant,
+                health_fixture(
+                    kv_autoscale=False,
+                    rocm_graphs=False,
+                    memory_reclaim_requested_mode="automatic",
+                    memory_reclaim_mode="automatic",
+                ),
+                debug_fixture(
+                    kv_autoscale=False,
+                    rocm_graphs=False,
+                    memory_reclaim_requested_mode="automatic",
+                ),
+            )
+        finally:
+            del serve.VARIANT_CONFIGS[variant]
+        self.assertEqual(failures, [])
 
     def test_runtime_execution_requires_capture_and_replay_only_when_enabled(self) -> None:
         warmup = health_fixture(kv_autoscale=True, rocm_graphs=True)
