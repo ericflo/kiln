@@ -138,8 +138,11 @@ kiln rollout-generate \
 Each completion contains `text`, `reward`, and the server-issued
 `kiln.rollout-provenance.v1` object. It intentionally has no synthetic
 single-turn `trajectory`: adding one after generation would change the scored
-payload identity. When the JSONL path is visible to the server, submit it with
-recorded importance correction:
+payload identity. The JSONL contains only the canonical training schema, so it
+can enter strict HF/TRL export without normalization. Per-request latency,
+usage, seed, adapter, server performance, and raw scorer output live in the
+separate summary JSON. When the JSONL path is visible to the server, submit it
+with recorded importance correction:
 
 ```bash
 curl -s http://localhost:8420/v1/train/grpo \

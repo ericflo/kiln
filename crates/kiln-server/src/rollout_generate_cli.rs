@@ -115,6 +115,10 @@ pub struct RolloutCompletionSummary {
     pub sampled_action_tokens: usize,
     #[serde(default)]
     pub forced_action_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_performance: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scorer_output: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -362,48 +366,25 @@ pub async fn run_rollout_generate(
                 rollout_provenance_schema: Some(provenance.schema().to_string()),
                 sampled_action_tokens,
                 forced_action_tokens,
+                server_performance: response.pointer("/metadata/performance").cloned(),
+                scorer_output: Some(score.raw.clone()),
             };
             summaries.push(completion_summary.clone());
 
-            completions.push(json!({
-                "text": content,
-                "reward": score.reward,
-                "provenance": provenance,
-                "metadata": {
-                    "task_index": task.index,
-                    "task_id": task.id,
-                    "seed": seed,
-                    "adapter": adapter.request_value,
-                    "adapter_label": adapter.label,
-                    "thinking_enabled": options.thinking,
-                    "usage": usage,
-                    "latency": {
-                        "client_ms": client_latency_ms,
-                        "server_total_ms": server_total_latency_ms
-                    },
-                    "performance": response.pointer("/metadata/performance").cloned(),
-                    "finish_reason": finish_reason,
-                    "response_id": response.get("id").cloned(),
-                    "scorer_output": score.raw
-                }
-            }));
+            completions.push(
+                kiln_train::ScoredRollout::legacy(content, score.reward)
+                    .with_provenance(provenance),
+            );
         }
 
-        let group = json!({
-            "messages": group_messages.unwrap_or_default(),
-            "completions": completions,
-            "metadata": {
-                "source": "kiln rollout-generate",
-                "task_index": task.index,
-                "task_id": task.id,
-                "adapter": adapter.request_value,
-                "adapter_label": adapter.label,
-                "thinking_enabled": options.thinking,
-                "seed_start": options.seed_start,
-                "seeds": options.seeds
-            }
-        });
-        writeln!(writer, "{}", serde_json::to_string(&group)?)
+        let group = kiln_train::GrpoGroup {
+            messages: group_messages.unwrap_or_default(),
+            completions,
+        };
+        serde_json::to_writer(&mut writer, &group)
+            .with_context(|| format!("serializing {}", options.output.display()))?;
+        writer
+            .write_all(b"\n")
             .with_context(|| format!("writing {}", options.output.display()))?;
     }
     writer
@@ -1745,6 +1726,12 @@ mod tests {
         let line = std::fs::read_to_string(&output).unwrap();
         let group_value: Value = serde_json::from_str(line.trim()).unwrap();
         let group: kiln_train::GrpoGroup = serde_json::from_value(group_value.clone()).unwrap();
+        assert_eq!(
+            line.trim_end().as_bytes(),
+            serde_json::to_vec(&group).unwrap()
+        );
+        assert!(group_value.get("metadata").is_none());
+        assert!(group_value["completions"][0].get("metadata").is_none());
         assert_eq!(group.messages.len(), 1);
         assert_eq!(group.messages[0].content, "say hi");
         assert_eq!(group.completions.len(), 2);
@@ -1760,6 +1747,21 @@ mod tests {
             &provenance_test_tokenizer(),
         )
         .unwrap();
+        let behavior = &group.completions[0]
+            .provenance
+            .as_ref()
+            .unwrap()
+            .behavior_policy;
+        kiln_train::validate_hf_trl_grpo_jsonl_for_export(
+            &output,
+            kiln_train::HfTrlGrpoExportIdentity {
+                served_model_id: &behavior.served_model_id,
+                base_model_sha256: &behavior.base_model_sha256,
+                input_adapter: behavior.adapter.as_ref(),
+            },
+            &provenance_test_tokenizer(),
+        )
+        .unwrap();
         let expected_total_tokens = group.completions[0]
             .provenance
             .as_ref()
@@ -1767,12 +1769,20 @@ mod tests {
             .prompt_token_count
             + 1;
         assert_eq!(
-            group_value["completions"][0]["metadata"]["usage"]["total_tokens"],
+            summary_json["completions"][0]["total_tokens"],
             expected_total_tokens
         );
         assert_eq!(
-            group_value["completions"][0]["metadata"]["latency"]["server_total_ms"],
+            summary_json["completions"][0]["server_total_latency_ms"],
             4.0
+        );
+        assert_eq!(
+            summary_json["completions"][0]["scorer_output"]["reward"],
+            1.0
+        );
+        assert_eq!(
+            summary_json["completions"][0]["server_performance"]["finish_reason"],
+            "stop"
         );
 
         let observed = calls.0.lock().unwrap().clone();

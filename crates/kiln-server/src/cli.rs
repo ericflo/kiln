@@ -318,9 +318,10 @@ recorded in the rollout summary.
 The scorer executable receives one JSON object on stdin with the task, request,
 response, content, seed, adapter, token usage, and latency. It may print a
 single numeric reward or a JSON object with `reward`, `score`, or `value`.
-Output JSONL contains one GRPO group per task with ScoredRollout-compatible
-completions, exact `kiln.rollout-provenance.v1` records, and metadata recording
-latency, token counts, seed, adapter, and scorer output. Before scoring, the CLI
+Output JSONL contains one canonical GRPO group per task with only the strict
+training fields and exact `kiln.rollout-provenance.v1` records. The separate
+rollout summary records latency, token counts, seed, adapter, performance, and
+scorer output. Before scoring, the CLI
 validates the record's schema, seed, adapter, prompt hash, content hash, action
 coverage, and usage counts. It publishes each output by atomic replacement only
 after every completion succeeds, so an invalid late response cannot leave a
