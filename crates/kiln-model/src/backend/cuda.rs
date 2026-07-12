@@ -2254,6 +2254,8 @@ mod tests {
         // candle `device` field was dropped; `device_kt` is the sole device.)
         CudaBackend {
             device_kt: kiln_tensor::Device::Cpu,
+            resident_tensor_ids: crate::backend::cuda_rocm_common::new_resident_tensor_id_registry(
+            ),
             gdn_enabled: false,
             gdn_gates_enabled: false,
             gdn_gated_rms_norm_enabled: false,
@@ -2519,7 +2521,9 @@ mod tests {
         let k = KtTensor::zeros_cpu(vec![1, 2, 1, 128], KtDType::F32);
         let v = KtTensor::zeros_cpu(vec![1, 2, 1, 128], KtDType::F32);
         assert!(
-            backend.flash_attn_prefill(&q, &k, &v, 1.0, true)?.is_none(),
+            backend
+                .runtime_flash_attn_prefill(&q, &k, &v, 1.0, true)?
+                .is_none(),
             "CUDA FlashAttention prefill must decline non-BF16 inputs"
         );
 
@@ -2531,7 +2535,7 @@ mod tests {
 
         assert!(
             backend
-                .flash_attn_paged_decode(
+                .runtime_flash_attn_paged_decode(
                     &q_decode,
                     &k_pool,
                     &v_pool,
@@ -2546,7 +2550,7 @@ mod tests {
         );
         assert!(
             backend
-                .flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+                .runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
                     &q_decode,
                     &k_pool,
                     &v_pool,
