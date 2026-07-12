@@ -587,7 +587,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
       <div class="card p-5 mb-4" style="background: var(--bg-soft-2); border-color: var(--line-2);">
         <h3 class="font-semibold mb-2">Training file shapes at a glance</h3>
         <p style="color: var(--fg-dim);">
-          <code>kiln train sft</code> reads <strong>SFT JSONL</strong>: one chat correction per line, each with a <code>messages</code> array.
+          <code>kiln train sft</code> reads <strong>SFT JSONL</strong>: one chat correction per line, each with a <code>messages</code> array. Rows fail closed by default; use <code>--invalid-row-policy skip</code> only when rejected row hashes in the final receipt are part of your review workflow.
           <code>kiln train grpo</code> reads either a <strong>GRPO JSON request/batch</strong> or <strong>JSONL with one group per line</strong>: groups of candidate completions with reward scores.
           <code>kiln train opd</code> reads one <strong>OPD request object</strong>, or a JSON prompt array with <code>--teacher</code>, and requires a registered exact teacher identity.
           See the <a href="grpo.html">GRPO Guide</a> for the generate &rarr; score &rarr; train loop and the <a href="cli.html">CLI Reference</a> for full command examples.

@@ -200,6 +200,7 @@ async fn post_eval_config_serializes_through_train_request_round_trip() {
         dataset: None,
         examples: vec![],
         config: Default::default(),
+        ingestion: None,
         post_eval: Some(PostEvalConfig {
             suite: "smoke".into(),
             generation: Some(EvalGenerationParams {

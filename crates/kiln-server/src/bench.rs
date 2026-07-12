@@ -2485,6 +2485,7 @@ fn bench_training(
         .collect();
 
     let config = SftConfig {
+        invalid_row_policy: kiln_train::SftInvalidRowPolicy::Fail,
         train_mtp: Some(false), // bench measures the main SFT step only
         epochs: 1,
         learning_rate: None,

@@ -400,6 +400,14 @@ system, user, and tool-response turns. See
 [SFT Tokenization and Assistant-Only Loss](docs/sft-tokenization.md) for the
 exact assistant mask and local reproduction command.
 
+SFT row admission is also identical across inline examples, server-local
+JSONL, named datasets, corrections, recipes, and direct Rust calls. The default
+`config.invalid_row_policy: "fail"` rejects the full submission; explicit
+`"skip"` records ordered stable hashes for every kept and rejected row in
+`train_receipt.json`. Local JSONL is revalidated before training so a queued
+file cannot change unnoticed. See
+[SFT Ingestion, Invalid Rows, and Row Identity](docs/sft-ingestion.md).
+
 **Optional: use Kiln as pi's local agent model.** With the server running on `localhost:8420`, `kiln pi-setup` adds a `kiln-local` provider to pi without deleting your other providers or settings. Existing files are backed up first as `models.json.bak-<timestamp>` and `settings.json.bak-<timestamp>`.
 
 ```bash

@@ -40,10 +40,49 @@ struct GrpoSubmissionStats {
 }
 
 struct SftSubmissionStats {
+    rows_read: usize,
     num_examples: usize,
+    rows_rejected: usize,
     max_seq_len: usize,
     max_supervised_tokens: usize,
     streaming_dataset: bool,
+}
+
+fn retained_correction_ids(
+    ids: Vec<String>,
+    ingestion: &kiln_train::SftIngestionReceipt,
+) -> Result<Vec<String>, ApiError> {
+    ingestion.validate().map_err(|error| {
+        ApiError::internal(format!(
+            "corrections SFT ingestion receipt failed validation: {error:#}"
+        ))
+    })?;
+    if ids.len() != ingestion.rows_read {
+        return Err(ApiError::internal(format!(
+            "corrections row IDs ({}) differ from ingested rows ({})",
+            ids.len(),
+            ingestion.rows_read
+        )));
+    }
+
+    let rejected = ingestion
+        .rejected_rows
+        .iter()
+        .map(|row| row.row_index)
+        .collect::<std::collections::HashSet<_>>();
+    let retained = ids
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, id)| (!rejected.contains(&(index + 1))).then_some(id))
+        .collect::<Vec<_>>();
+    if retained.len() != ingestion.rows_kept {
+        return Err(ApiError::internal(format!(
+            "retained correction IDs ({}) differ from kept SFT rows ({})",
+            retained.len(),
+            ingestion.rows_kept
+        )));
+    }
+    Ok(retained)
 }
 
 struct PreflightAdmission {
@@ -1016,6 +1055,7 @@ async fn submit_sft(
     // to trained_into ON COMPLETION — a failed job leaves the basket
     // intact and re-trainable.
     let mut consumed_correction_ids: Vec<String> = Vec::new();
+    let mut inline_source = "inline";
     if let Some(path) = req.dataset_path.take() {
         let path = path.trim().to_string();
         if !path.is_empty() {
@@ -1050,13 +1090,14 @@ async fn submit_sft(
         }
         consumed_correction_ids = ids;
         req.examples = examples;
+        inline_source = "corrections";
     }
 
     // Train-by-dataset-name: resolve an uploaded dataset (the eval dataset
     // store) into inline examples server-side. The UI/CLI sends just the name,
     // so rows never round-trip through the client and the whole dataset trains
     // (the rows preview endpoint clamps at 5000 — this path has no such cap).
-    if let Some(dataset_name) = req.dataset.take() {
+    let named_dataset_source = if let Some(dataset_name) = req.dataset.take() {
         if !req.examples.is_empty() {
             return Err(ApiError::training_invalid_request(
                 "SFT request must use exactly one of examples, dataset_path, or dataset",
@@ -1066,54 +1107,20 @@ async fn submit_sft(
             .dataset_registry
             .as_ref()
             .ok_or_else(ApiError::dataset_registry_unavailable)?;
-        let iter = registry.iter_sft(&dataset_name).map_err(|e| match e {
+        let dataset_dir = registry.dataset_dir(&dataset_name).map_err(|e| match e {
             crate::eval::DatasetError::NotFound(_) => ApiError::dataset_not_found(&dataset_name),
             crate::eval::DatasetError::InvalidName(_) => ApiError::dataset_invalid(&dataset_name),
             other => ApiError::dataset_invalid(format!("{other}")),
         })?;
-        req.examples = iter
-            .map(|conv| kiln_train::SftExample {
-                messages: conv.messages,
-            })
-            .filter(|ex| !ex.messages.is_empty())
-            .collect();
-        if req.examples.is_empty() {
-            return Err(ApiError::training_invalid_request(format!(
-                "dataset '{dataset_name}' contains no usable SFT examples",
-            )));
+        let data_path = dataset_dir.join("data.jsonl");
+        if !data_path.is_file() {
+            return Err(ApiError::dataset_not_found(&dataset_name));
         }
-    }
-
-    let stats = if let Some(path) = req.dataset_path.as_deref() {
-        let path = Path::new(path);
-        let stats = crate::sft_dataset::scan_sft_jsonl_stats(path, Some(state.tokenizer.as_ref()))
-            .map_err(|e| {
-                ApiError::training_invalid_request(format!(
-                    "invalid SFT dataset_path '{}': {e:#}",
-                    path.display()
-                ))
-            })?;
-        SftSubmissionStats {
-            num_examples: stats.examples,
-            max_seq_len: stats.max_seq_len,
-            max_supervised_tokens: stats.max_supervised_tokens,
-            streaming_dataset: true,
-        }
+        Some((dataset_name, data_path))
     } else {
-        SftSubmissionStats {
-            num_examples: req.examples.len(),
-            max_seq_len: training_preflight::approximate_max_seq_len_sft(
-                &req.examples,
-                Some(state.tokenizer.as_ref()),
-            ),
-            max_supervised_tokens: training_preflight::approximate_max_supervised_tokens_sft(
-                &req.examples,
-                Some(state.tokenizer.as_ref()),
-            ),
-            streaming_dataset: false,
-        }
+        None
     };
-    let num_examples = stats.num_examples;
+
     let job_id = uuid::Uuid::new_v4().to_string();
     if let Some(name) = req.config.output_name.as_deref() {
         super::adapters::validate_adapter_name(name)?;
@@ -1141,10 +1148,72 @@ async fn submit_sft(
     )
     .map_err(ApiError::training_invalid_request)?;
 
-    // Verify we have real model weights
+    // Preserve the public admission order: static request errors and capacity
+    // limits are reported first, then mock mode refuses training without
+    // attempting tokenizer-dependent row admission.
     if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
         return Err(ApiError::mock_mode_no_training());
     }
+
+    let streaming_dataset = req.dataset_path.is_some();
+    let prepared = if let Some((dataset_name, data_path)) = named_dataset_source {
+        crate::sft_dataset::prepare_sft_jsonl(
+            &data_path,
+            state.tokenizer.as_ref(),
+            req.config.invalid_row_policy,
+            "named_dataset",
+            Some(dataset_name.clone()),
+        )
+        .map_err(|error| {
+            ApiError::training_invalid_request(format!(
+                "invalid SFT dataset {dataset_name:?}: {error:#}"
+            ))
+        })?
+    } else if let Some(path) = req.dataset_path.as_deref() {
+        let path = Path::new(path);
+        crate::sft_dataset::prepare_sft_jsonl(
+            path,
+            state.tokenizer.as_ref(),
+            req.config.invalid_row_policy,
+            "dataset_path",
+            Some(path.display().to_string()),
+        )
+        .map_err(|error| {
+            ApiError::training_invalid_request(format!(
+                "invalid SFT dataset_path '{}': {error:#}",
+                path.display()
+            ))
+        })?
+    } else {
+        kiln_train::prepare_sft_examples(
+            std::mem::take(&mut req.examples),
+            state.tokenizer.as_ref(),
+            req.config.invalid_row_policy,
+            inline_source,
+            None,
+        )
+        .map_err(|error| {
+            ApiError::training_invalid_request(format!("invalid SFT rows: {error:#}"))
+        })?
+    };
+    let stats = SftSubmissionStats {
+        rows_read: prepared.ingestion.rows_read,
+        num_examples: prepared.ingestion.rows_kept,
+        rows_rejected: prepared.ingestion.rows_rejected,
+        max_seq_len: prepared.max_seq_len,
+        max_supervised_tokens: prepared.max_supervised_tokens,
+        streaming_dataset,
+    };
+    if inline_source == "corrections" {
+        consumed_correction_ids =
+            retained_correction_ids(consumed_correction_ids, &prepared.ingestion)?;
+    }
+    if !streaming_dataset {
+        req.examples = prepared.examples;
+    }
+    req.ingestion = Some(prepared.ingestion);
+    let num_examples = stats.num_examples;
+    let invalid_row_policy = req.config.invalid_row_policy;
 
     // Working-set preflight: refuse jobs that won't fit in the
     // corrected memory budget. Better than OOM-killing the server
@@ -1172,6 +1241,9 @@ async fn submit_sft(
 
     tracing::info!(
         num_examples,
+        rows_read = stats.rows_read,
+        rows_rejected = stats.rows_rejected,
+        invalid_row_policy = %invalid_row_policy,
         job_id = %job_id,
         adapter = %adapter_name,
         max_seq_len,
@@ -1223,7 +1295,9 @@ async fn submit_sft(
         state: TrainingState::Queued,
         effective_seed: effective_seed.to_string(),
         message: format!(
-            "Queued SFT training with {num_examples} examples (position {queue_position} in queue)"
+            "Queued SFT training with {num_examples} kept examples and {} rejected rows \
+             under {} policy (position {queue_position} in queue)",
+            stats.rows_rejected, invalid_row_policy,
         ),
     }))
 }
@@ -3003,10 +3077,53 @@ mod tests {
     use kiln_train::opd::{OpdConfig, OpdPrompt};
     use kiln_train::{
         ChatMessage, GrpoConfig, OpdLossGranularity, OpdObjective, ScoredCompletion, SftConfig,
+        SftExample, SftInvalidRowPolicy,
     };
     use std::sync::{Arc, Barrier, Mutex, RwLock};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn correction_ids_follow_the_server_owned_skip_manifest() {
+        let tokenizer = crate::api::test_tokenizer().with_chat_template(
+            "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
+        );
+        let valid = |user: &str, assistant: &str| SftExample {
+            messages: vec![
+                ChatMessage::new("user", user),
+                ChatMessage::new("assistant", assistant),
+            ],
+        };
+        let prepared = kiln_train::prepare_sft_examples(
+            vec![
+                valid("a", "b"),
+                SftExample { messages: vec![] },
+                valid("b", "a"),
+            ],
+            &tokenizer,
+            SftInvalidRowPolicy::Skip,
+            "corrections",
+            None,
+        )
+        .unwrap();
+
+        let retained = retained_correction_ids(
+            vec!["first".into(), "rejected".into(), "third".into()],
+            &prepared.ingestion,
+        )
+        .unwrap();
+        assert_eq!(retained, ["first", "third"]);
+
+        let error =
+            retained_correction_ids(vec!["first".into(), "rejected".into()], &prepared.ingestion)
+                .unwrap_err();
+        assert_eq!(error.code, "internal_error");
+        assert!(
+            error
+                .message
+                .contains("row IDs (2) differ from ingested rows (3)")
+        );
+    }
 
     fn discovery_teacher_identity() -> kiln_train::TeacherIdentityV1 {
         kiln_train::TeacherIdentityV1::new(
@@ -3378,6 +3495,7 @@ mod tests {
             dataset_path: None,
             dataset: None,
             config: SftConfig::default(),
+            ingestion: None,
             post_eval: None,
         };
         (
@@ -3534,6 +3652,7 @@ mod tests {
             dataset_path: None,
             dataset: None,
             config: SftConfig::default(),
+            ingestion: None,
             post_eval: None,
         };
         let mut pending = vec![

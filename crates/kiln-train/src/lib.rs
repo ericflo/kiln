@@ -52,6 +52,7 @@ pub mod pi_trajectory;
 pub mod receipt;
 pub mod remote_teacher;
 pub mod replay;
+pub mod sft_ingestion;
 pub mod sft_tape_shim;
 // CP-4 substrate pilot — `kiln_autograd::Tape`-based parallel training
 // entry. Sits alongside the candle-typed `trainer` module so future PRs
@@ -73,6 +74,11 @@ pub use receipt::{
 pub use remote_teacher::{
     RemoteProvider, RemoteTeacher, RemoteTeacherConfig, discover_vllm_identity,
     normalize_vllm_completions_url,
+};
+pub use sft_ingestion::{
+    SFT_INGESTION_SCHEMA_V1, SftIngestionReceipt, SftInvalidRowPolicy, SftPreparedDataset,
+    SftRejectedRowReceipt, SftRowRejectionReason, prepare_sft_examples, prepare_sft_jsonl,
+    verify_prepared_sft_examples,
 };
 pub use teacher_identity::{
     MAX_TEACHER_IDENTITY_FINGERPRINT_BYTES, MAX_TEACHER_IDENTITY_JSON_BYTES,
@@ -150,8 +156,9 @@ use serde::{Deserialize, Serialize};
 pub use kiln_core::tokenizer::ChatMessage;
 
 /// An SFT training example — a conversation with the correct assistant response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SftExample {
+    #[serde(default)]
     pub messages: Vec<ChatMessage>,
 }
 
@@ -179,6 +186,11 @@ pub struct SftRequest {
     pub dataset: Option<String>,
     #[serde(default)]
     pub config: SftConfig,
+    /// Server-owned ingestion evidence. HTTP request deserialization ignores
+    /// this field; admission creates it after parsing and tokenization, then
+    /// the worker verifies it before training.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub ingestion: Option<SftIngestionReceipt>,
     /// Optional auto-eval hook: when set, the training queue worker enqueues
     /// an eval against the produced adapter once training completes. Lets
     /// callers chain `train → eval` in a single API call.
@@ -332,6 +344,12 @@ pub fn learning_rate_band_warning(explicit: f64, resolved_default: f64) -> Optio
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SftConfig {
+    /// How SFT ingestion handles malformed, structurally invalid, or
+    /// untokenizable rows. `fail` is the default and rejects the entire
+    /// submission. `skip` trains only accepted rows and records stable hashes
+    /// for both accepted and rejected rows in the train receipt.
+    #[serde(default)]
+    pub invalid_row_policy: SftInvalidRowPolicy,
     #[serde(default = "default_epochs")]
     pub epochs: usize,
     /// Learning rate. `None` (the default) resolves per optimizer at run
@@ -423,6 +441,7 @@ impl SftConfig {
 impl Default for SftConfig {
     fn default() -> Self {
         Self {
+            invalid_row_policy: SftInvalidRowPolicy::default(),
             epochs: default_epochs(),
             learning_rate: None,
             lora_rank: default_rank(),
@@ -1562,6 +1581,21 @@ mod tests {
         let config = SftConfig::default();
         assert!(config.checkpoint_interval.is_none());
         assert!(config.resume_checkpoint.is_none());
+        assert_eq!(config.invalid_row_policy, SftInvalidRowPolicy::Fail);
+    }
+
+    #[test]
+    fn sft_invalid_row_policy_is_strict_and_server_ingestion_is_not_client_owned() {
+        let config: SftConfig = serde_json::from_str(r#"{"invalid_row_policy":"skip"}"#).unwrap();
+        assert_eq!(config.invalid_row_policy, SftInvalidRowPolicy::Skip);
+        assert!(serde_json::from_str::<SftConfig>(r#"{"invalid_row_policy":"drop"}"#).is_err());
+
+        let request: SftRequest = serde_json::from_value(serde_json::json!({
+            "examples": [{"messages": []}],
+            "ingestion": {"forged": true}
+        }))
+        .unwrap();
+        assert!(request.ingestion.is_none());
     }
 
     #[test]

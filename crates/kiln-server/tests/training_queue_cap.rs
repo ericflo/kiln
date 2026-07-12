@@ -80,6 +80,7 @@ fn fill_queue(state: &AppState, n: usize) {
                 dataset: None,
                 examples: Vec::new(),
                 config: Default::default(),
+                ingestion: None,
                 post_eval: None,
             }),
         });

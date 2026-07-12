@@ -651,8 +651,7 @@ fn run_sft(
     job_id: &str,
     gpu_step_coordination: Option<trainer::GpuStepCoordination>,
 ) -> std::result::Result<PathBuf, String> {
-    let loaded_examples;
-    let examples = if let Some(dataset_path) = req.dataset_path.as_deref() {
+    let prepared = if let Some(dataset_path) = req.dataset_path.as_deref() {
         if dataset_path.trim().is_empty() {
             return Err("SFT dataset_path training requires a non-empty path".to_string());
         }
@@ -661,19 +660,56 @@ fn run_sft(
                 "SFT request must use either examples or dataset_path, not both".to_string(),
             );
         }
-        loaded_examples =
-            crate::sft_dataset::load_sft_jsonl_examples(std::path::Path::new(dataset_path))
-                .map_err(|e| format!("load SFT dataset_path {dataset_path:?}: {e:#}"))?;
+        let loaded = crate::sft_dataset::prepare_sft_jsonl(
+            std::path::Path::new(dataset_path),
+            tokenizer,
+            req.config.invalid_row_policy,
+            "dataset_path",
+            Some(dataset_path.to_string()),
+        )
+        .map_err(|e| format!("load SFT dataset_path {dataset_path:?}: {e:#}"))?;
+        let expected = req.ingestion.as_ref().ok_or_else(|| {
+            "queued SFT dataset_path job has no submit-time ingestion receipt".to_string()
+        })?;
+        if loaded.ingestion != *expected {
+            return Err(format!(
+                "SFT dataset_path {dataset_path:?} changed after admission: submit kept/rejected={}/{}, worker kept/rejected={}/{}",
+                expected.rows_kept,
+                expected.rows_rejected,
+                loaded.ingestion.rows_kept,
+                loaded.ingestion.rows_rejected
+            ));
+        }
         tracing::info!(
             job_id = %job_id,
             dataset_path,
-            examples = loaded_examples.len(),
-            "loaded SFT dataset_path for exact per-example training"
+            examples = loaded.examples.len(),
+            kept_corpus_sha256 = %loaded.ingestion.kept_corpus_sha256,
+            "revalidated SFT dataset_path against submit-time row manifest"
         );
-        loaded_examples.as_slice()
+        loaded
+    } else if let Some(ingestion) = req.ingestion.as_ref() {
+        let (max_seq_len, max_supervised_tokens) =
+            kiln_train::verify_prepared_sft_examples(&req.examples, tokenizer, ingestion)
+                .map_err(|error| format!("verify queued SFT examples: {error:#}"))?;
+        kiln_train::SftPreparedDataset {
+            examples: req.examples.clone(),
+            ingestion: ingestion.clone(),
+            max_seq_len,
+            max_supervised_tokens,
+        }
     } else {
-        req.examples.as_slice()
+        kiln_train::prepare_sft_examples(
+            req.examples.iter().cloned(),
+            tokenizer,
+            req.config.invalid_row_policy,
+            "inline",
+            None,
+        )
+        .map_err(|error| format!("ingest queued SFT examples: {error:#}"))?
     };
+    let examples = prepared.examples.as_slice();
+    let ingestion = &prepared.ingestion;
 
     if native_route_enabled {
         #[cfg(feature = "cuda")]
@@ -684,8 +720,9 @@ fn run_sft(
                 native_route_env,
                 "backend native training route enabled - routing to cuda_native_sft_train"
             );
-            return kiln_train::cuda_train::cuda_native_sft_train_to_with_checkpoint_root(
+            return kiln_train::cuda_train::cuda_native_sft_train_to_with_checkpoint_root_and_ingestion(
                 examples,
+                ingestion,
                 &req.config,
                 model_config,
                 weights,
@@ -710,8 +747,9 @@ fn run_sft(
             );
         }
     }
-    trainer::sft_train_to_with_checkpoint_root(
+    trainer::sft_train_to_with_checkpoint_root_and_ingestion(
         examples,
+        ingestion,
         &req.config,
         model_config,
         weights,
@@ -2018,6 +2056,7 @@ fn run_distill_refresh(
 
     let midtrain_name = format!("{adapter_name}-midtrain");
     let midtrain_config = kiln_train::SftConfig {
+        invalid_row_policy: kiln_train::SftInvalidRowPolicy::Fail,
         epochs: 1,
         // Resolved per optimizer at run start (the request's optimizer is
         // forwarded below) — a pinned AdamW-era 1e-4 would train Muon cold.
@@ -4960,6 +4999,7 @@ mod tests {
             dataset_path: None,
             dataset: None,
             config: Default::default(),
+            ingestion: None,
             post_eval: None,
         })
     }
@@ -5495,6 +5535,7 @@ mod tests {
                 dataset: None,
                 examples: vec![],
                 config: Default::default(),
+                ingestion: None,
                 post_eval: None,
             }),
         });
@@ -5507,6 +5548,7 @@ mod tests {
                 dataset: None,
                 examples: vec![],
                 config: Default::default(),
+                ingestion: None,
                 post_eval: None,
             }),
         });
@@ -5519,6 +5561,7 @@ mod tests {
                 dataset: None,
                 examples: vec![],
                 config: Default::default(),
+                ingestion: None,
                 post_eval: None,
             }),
         });
@@ -5542,6 +5585,7 @@ mod tests {
                 dataset: None,
                 examples: vec![],
                 config: Default::default(),
+                ingestion: None,
                 post_eval: None,
             }),
         });
@@ -5554,6 +5598,7 @@ mod tests {
                 dataset: None,
                 examples: vec![],
                 config: Default::default(),
+                ingestion: None,
                 post_eval: None,
             }),
         });
@@ -5566,6 +5611,7 @@ mod tests {
                 dataset: None,
                 examples: vec![],
                 config: Default::default(),
+                ingestion: None,
                 post_eval: None,
             }),
         });

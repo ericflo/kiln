@@ -41,7 +41,9 @@ Required top-level fields:
   canonical `teacher_identity` used for scoring.
 - `echo`: ECHO settings in effect for the run.
 - `no_policy_loss`: verifier-free env-only GRPO flag.
-- `data`: examples/groups/completions read, filtered, and trained.
+- `data`: examples/groups/completions read, filtered, and trained. SFT receipts
+  additionally contain the validated `sft_ingestion` object with the explicit
+  invalid-row policy and stable kept/rejected row hashes.
 - `rewards`: reward count, mean, stdev, and group-variance histogram.
 - `token_counts`: action, env, and context token counts.
 - `phase_timings`: aggregate phase timings in milliseconds for tokenization,
@@ -53,6 +55,12 @@ Required top-level fields:
 - `config`: full serialized effective trainer config.
 
 Hashes are lowercase hex SHA-256 strings prefixed with `sha256:`.
+
+For SFT, `training_data.sha256` is the transport-independent ordered
+`data.sft_ingestion.kept_corpus_sha256`. The nested object uses schema
+`kiln.sft-ingestion.v1`; receipt reads validate its counts, hashes, rejected-row
+ordering, and aggregate. See
+[SFT Ingestion, Invalid Rows, and Row Identity](sft-ingestion.md).
 
 New successful model-backed runs record a validated
 `kiln.execution-provenance.v1` object at `runtime.execution_provenance`. It

@@ -612,6 +612,14 @@
                 <div class="form-help">Adapter capacity. 8 is plenty for corrections.</div>
               </div>
               <div class="form-group">
+                <label for="sft-invalid-row-policy">Invalid rows</label>
+                <select id="sft-invalid-row-policy" name="invalid_row_policy">
+                  <option value="fail" selected>Fail the submission</option>
+                  <option value="skip">Skip and record hashes</option>
+                </select>
+                <div class="form-help">Fail is safest. Skip leaves rejected rows out and identifies them in the receipt.</div>
+              </div>
+              <div class="form-group">
                 <label for="sft-checkpoint-interval">Checkpoint interval</label>
                 <input type="number" id="sft-checkpoint-interval" name="checkpoint_interval" value="" min="1" step="1" placeholder="off">
                 <div class="form-help">Optimizer steps between exact resume points. Blank disables periodic checkpoints.</div>

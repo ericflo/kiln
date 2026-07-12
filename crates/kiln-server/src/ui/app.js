@@ -3924,10 +3924,12 @@ wireAdvanced('sft', () => {
   const raw = id => document.getElementById(id)?.value || '';
   const lr = lrSummary('sft-learning-rate');
   const opt = optimizerLabel('sft-optimizer');
+  const invalidRows = v('sft-invalid-row-policy') === 'skip' ? 'skip invalid rows' : 'invalid rows fail';
   const isDefault = v('sft-epochs') === '3' && opt === 'Muon' && lr === 'auto' && v('sft-rank') === '8'
+    && v('sft-invalid-row-policy') === 'fail'
     && !raw('sft-checkpoint-interval') && !raw('sft-resume-checkpoint');
   if (typeof updateSftOverfitHint === 'function') updateSftOverfitHint();
-  return `${v('sft-epochs')} epochs · ${opt} · learning rate ${lr} · LoRA rank ${v('sft-rank')} · ${checkpointSummary('sft')}`
+  return `${v('sft-epochs')} epochs · ${opt} · learning rate ${lr} · LoRA rank ${v('sft-rank')} · ${invalidRows} · ${checkpointSummary('sft')}`
     + (isDefault ? ' — sensible defaults, no tuning needed' : ' — customized');
 });
 wireAdvanced('grpo', () => {
@@ -4304,6 +4306,7 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
     const rank = parsePositiveIntegerField(form.rank.value, 'SFT LoRA rank');
     const checkpointInterval = parseOptionalPositiveIntegerField(form.checkpoint_interval.value, 'SFT checkpoint interval');
     const resumeCheckpoint = parseResumeCheckpointField(form.resume_checkpoint.value, 'SFT resume checkpoint');
+    const invalidRowPolicy = form.invalid_row_policy.value === 'skip' ? 'skip' : 'fail';
     const config = {
       output_name: outputName,
       auto_load: form.auto_load.checked,
@@ -4313,6 +4316,7 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
       // default rank (8) trips the trainer's alpha/rank safety gate.
       lora_alpha: loraAlphaFor(rank),
       optimizer: readTrainingOptimizer('sft'),
+      invalid_row_policy: invalidRowPolicy,
     };
     // Blank lr is omitted so the server resolves the per-optimizer default.
     if (learningRate !== null) config.learning_rate = learningRate;
@@ -4333,7 +4337,7 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
         examples = parseTrainingText(form.examples.value);
         if (!examples.length) throw new Error('SFT examples cannot be empty. Drop a file, pick a dataset, paste JSON, or try a sample.');
       }
-      validateSftExamples(examples);
+      if (invalidRowPolicy === 'fail') validateSftExamples(examples);
       body = { examples, config };
     }
     const postEval = provePostEval('sft');
@@ -9671,6 +9675,7 @@ async function prepareTrainingResume(j, checkpoint) {
   setTrainingFormValue(kind + '-resume-checkpoint', checkpoint.resume_checkpoint);
   if (kind === 'sft') {
     setTrainingFormValue('sft-epochs', Number.isInteger(config.epochs) && config.epochs > 0 ? config.epochs : 3);
+    setTrainingFormValue('sft-invalid-row-policy', config.invalid_row_policy === 'skip' ? 'skip' : 'fail');
   } else {
     setTrainingFormValue('grpo-kl-coeff', Number.isFinite(config.kl_coeff) ? config.kl_coeff : 0.1);
   }

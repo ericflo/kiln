@@ -120,6 +120,8 @@ Prefer http://127.0.0.1:8420/ui/ for guided submission and status. See docs/GRPO
 
 const TRAIN_SFT_OVERVIEW: &str = r#"Train from SFT JSONL: one chat correction example per line with a messages array.
 
+Rows fail closed by default. Use --invalid-row-policy skip only when you intend to review the stable kept/rejected row hashes in train_receipt.json.
+
 Use --adapter-smoke-test to compare base vs trained adapter logits and short greedy outputs before running a full eval.
 
 Use --checkpoint-interval N to emit exact resumable checkpoints every N optimizer steps. Resume with the same file and configuration plus --resume-checkpoint BASENAME.
@@ -729,6 +731,10 @@ pub enum TrainCommands {
         /// LoRA rank for the trained adapter
         #[arg(long)]
         lora_rank: Option<usize>,
+
+        /// Invalid-row behavior: fail the submission or skip and receipt rows
+        #[arg(long, default_value = "fail", value_parser = ["fail", "skip"])]
+        invalid_row_policy: String,
 
         /// Run an adapter-effect smoke test after successful training
         #[arg(long)]
@@ -2158,11 +2164,15 @@ pub async fn run_train_sft(
     lr: Option<f64>,
     epochs: u32,
     lora_rank: Option<usize>,
+    invalid_row_policy: &str,
     adapter_smoke_test: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<()> {
-    let body = if is_sft_jsonl_path(file) {
+    // Skip must reach the server with raw JSONL intact so malformed rows can
+    // receive stable rejection hashes. Fail-mode legacy non-JSONL inputs keep
+    // the inline parsing behavior for compatibility.
+    let body = if is_sft_jsonl_path(file) || invalid_row_policy == "skip" {
         println!(
             "{} Submitting SFT JSONL dataset_path for adapter '{}'",
             style("→").cyan().bold(),
@@ -2174,6 +2184,7 @@ pub async fn run_train_sft(
             lr,
             epochs,
             lora_rank,
+            invalid_row_policy,
             adapter_smoke_test,
             checkpoint_interval,
             resume_checkpoint,
@@ -2206,6 +2217,7 @@ pub async fn run_train_sft(
             lr,
             epochs,
             lora_rank,
+            invalid_row_policy,
             adapter_smoke_test,
             checkpoint_interval,
             resume_checkpoint,
@@ -2369,6 +2381,7 @@ fn build_sft_jsonl_training_payload(
     lr: Option<f64>,
     epochs: u32,
     lora_rank: Option<usize>,
+    invalid_row_policy: &str,
     adapter_smoke_test: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
@@ -2382,6 +2395,7 @@ fn build_sft_jsonl_training_payload(
     let mut config = serde_json::json!({
         "output_name": adapter,
         "epochs": epochs,
+        "invalid_row_policy": invalid_row_policy,
     });
     if let Some(lr) = lr {
         config["learning_rate"] = serde_json::json!(lr);
@@ -2445,6 +2459,7 @@ fn build_sft_training_payload(
     lr: Option<f64>,
     epochs: u32,
     lora_rank: Option<usize>,
+    invalid_row_policy: &str,
     adapter_smoke_test: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
@@ -2452,6 +2467,7 @@ fn build_sft_training_payload(
     let mut config = serde_json::json!({
         "output_name": adapter,
         "epochs": epochs,
+        "invalid_row_policy": invalid_row_policy,
     });
     // Omitted --lr means "let the server resolve per optimizer".
     if let Some(lr) = lr {
@@ -3892,6 +3908,7 @@ mod tests {
             Some(2e-4),
             3,
             Some(8),
+            "fail",
             false,
             None,
             None,
@@ -3913,6 +3930,7 @@ mod tests {
             Some(1e-4),
             1,
             None,
+            "fail",
             false,
             None,
             None,
@@ -3927,8 +3945,17 @@ mod tests {
     fn build_sft_training_payload_omits_unset_learning_rate() {
         // No --lr → no learning_rate key, so the server resolves the
         // per-optimizer default instead of an AdamW-era pin.
-        let body =
-            build_sft_training_payload(vec![], "sft-adapter", None, 1, None, false, None, None);
+        let body = build_sft_training_payload(
+            vec![],
+            "sft-adapter",
+            None,
+            1,
+            None,
+            "fail",
+            false,
+            None,
+            None,
+        );
 
         assert!(body["config"].get("learning_rate").is_none());
         assert_eq!(body["config"]["epochs"], 1);
@@ -3942,6 +3969,7 @@ mod tests {
             Some(1e-4),
             1,
             None,
+            "fail",
             true,
             None,
             None,
@@ -3958,12 +3986,14 @@ mod tests {
             None,
             2,
             None,
+            "skip",
             false,
             Some(25),
             Some("sft-adapter-checkpoint-step-00000025.kiln-checkpoint"),
         );
 
         assert_eq!(body["config"]["checkpoint_interval"], 25);
+        assert_eq!(body["config"]["invalid_row_policy"], "skip");
         assert_eq!(
             body["config"]["resume_checkpoint"],
             "sft-adapter-checkpoint-step-00000025.kiln-checkpoint"
@@ -4411,6 +4441,39 @@ mod tests {
             }
             other => panic!("expected Train(Status), got {:?}", other.is_some()),
         }
+    }
+
+    #[test]
+    fn parses_sft_invalid_row_policy_and_rejects_unknown_values() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "kiln",
+            "train",
+            "sft",
+            "--file",
+            "rows.jsonl",
+            "--invalid-row-policy",
+            "skip",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Train(TrainCommands::Sft {
+                invalid_row_policy, ..
+            })) => assert_eq!(invalid_row_policy, "skip"),
+            other => panic!("expected Train(Sft), got {:?}", other.is_some()),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "kiln",
+                "train",
+                "sft",
+                "--file",
+                "rows.jsonl",
+                "--invalid-row-policy",
+                "drop",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

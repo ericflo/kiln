@@ -1,43 +1,8 @@
-use std::{
-    fs::File,
-    io::{BufRead, BufReader},
-    path::Path,
-};
+use std::{fs::File, io::BufReader, path::Path};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use kiln_core::tokenizer::KilnTokenizer;
-use kiln_train::SftExample;
-
-use crate::training_preflight;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SftJsonlStats {
-    pub examples: usize,
-    pub max_seq_len: usize,
-    pub max_supervised_tokens: usize,
-}
-
-fn parse_sft_jsonl_line(path: &Path, line_no: usize, line: &str) -> Result<Option<SftExample>> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let example: SftExample = serde_json::from_str(trimmed).with_context(|| {
-        format!(
-            "invalid SFT JSONL example at line {} in {}",
-            line_no,
-            path.display()
-        )
-    })?;
-    if example.messages.is_empty() {
-        return Err(anyhow!(
-            "SFT JSONL example at line {} in {} has no messages",
-            line_no,
-            path.display()
-        ));
-    }
-    Ok(Some(example))
-}
+use kiln_train::{SftInvalidRowPolicy, SftPreparedDataset};
 
 fn open_sft_jsonl(path: &Path) -> Result<BufReader<File>> {
     let file = File::open(path)
@@ -45,76 +10,24 @@ fn open_sft_jsonl(path: &Path) -> Result<BufReader<File>> {
     Ok(BufReader::new(file))
 }
 
-pub(crate) fn scan_sft_jsonl_stats(
+/// Parse and tokenize a complete SFT JSONL source through the shared
+/// `kiln-train` admission contract. The caller may retain only the receipt at
+/// submission time and repeat this operation in the worker to detect mutation.
+pub(crate) fn prepare_sft_jsonl(
     path: &Path,
-    tokenizer: Option<&KilnTokenizer>,
-) -> Result<SftJsonlStats> {
-    let reader = open_sft_jsonl(path)?;
-    let mut examples = 0usize;
-    let mut max_seq_len = 0usize;
-    let mut max_supervised_tokens = 0usize;
-
-    for (idx, line) in reader.lines().enumerate() {
-        let line_no = idx + 1;
-        let line = line.with_context(|| {
-            format!(
-                "failed to read SFT dataset_path {} line {}",
-                path.display(),
-                line_no
-            )
-        })?;
-        let Some(example) = parse_sft_jsonl_line(path, line_no, &line)? else {
-            continue;
-        };
-        examples += 1;
-        max_seq_len = max_seq_len.max(training_preflight::approximate_max_seq_len_sft(
-            std::slice::from_ref(&example),
-            tokenizer,
-        ));
-        max_supervised_tokens =
-            max_supervised_tokens.max(training_preflight::approximate_max_supervised_tokens_sft(
-                std::slice::from_ref(&example),
-                tokenizer,
-            ));
-    }
-
-    if examples == 0 {
-        return Err(anyhow!(
-            "SFT dataset_path {} contains no examples",
-            path.display()
-        ));
-    }
-
-    Ok(SftJsonlStats {
-        examples,
-        max_seq_len,
-        max_supervised_tokens,
-    })
-}
-
-pub(crate) fn load_sft_jsonl_examples(path: &Path) -> Result<Vec<SftExample>> {
-    let reader = open_sft_jsonl(path)?;
-    let mut examples = Vec::new();
-    for (idx, line) in reader.lines().enumerate() {
-        let line_no = idx + 1;
-        let line = line.with_context(|| {
-            format!(
-                "failed to read SFT dataset_path {} line {}",
-                path.display(),
-                line_no
-            )
-        })?;
-        if let Some(example) = parse_sft_jsonl_line(path, line_no, &line)? {
-            examples.push(example);
-        }
-    }
-    if examples.is_empty() {
-        return Err(anyhow!(
-            "SFT dataset_path {} contains no examples",
-            path.display()
-        ));
-    }
-    Ok(examples)
+    tokenizer: &KilnTokenizer,
+    policy: SftInvalidRowPolicy,
+    source: &str,
+    source_locator: Option<String>,
+) -> Result<SftPreparedDataset> {
+    kiln_train::prepare_sft_jsonl(
+        open_sft_jsonl(path)?,
+        tokenizer,
+        policy,
+        source,
+        source_locator,
+    )
+    .with_context(|| format!("ingest SFT JSONL {}", path.display()))
 }
 
 #[cfg(test)]
@@ -122,12 +35,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn jsonl_loader_preserves_agentic_message_fields() {
+    fn jsonl_ingestion_preserves_agentic_message_fields() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agentic.jsonl");
         let row = serde_json::json!({
             "messages": [
-                {"role": "user", "content": "calculate"},
+                {"role": "user", "content": "a"},
                 {
                     "role": "assistant",
                     "content": null,
@@ -139,26 +52,43 @@ mod tests {
                 },
                 {
                     "role": "tool",
-                    "content": [{"type": "text", "text": "1"}],
+                    "content": [{"type": "text", "text": "a"}],
                     "name": "calculator",
                     "tool_call_id": "call_1"
                 },
-                {"role": "assistant", "content": "done"}
+                {"role": "assistant", "content": "b"}
             ]
         });
         std::fs::write(&path, format!("{row}\n")).unwrap();
 
-        let examples = load_sft_jsonl_examples(&path).unwrap();
-        assert_eq!(examples.len(), 1);
-        assert_eq!(examples[0].messages[1].content, "");
+        let tokenizer = crate::api::test_tokenizer().with_chat_template(
+            "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
+        );
+        let prepared = prepare_sft_jsonl(
+            &path,
+            &tokenizer,
+            SftInvalidRowPolicy::Fail,
+            "dataset_path",
+            Some(path.display().to_string()),
+        )
+        .unwrap();
+        assert_eq!(prepared.examples.len(), 1);
+        assert_eq!(prepared.examples[0].messages[1].content, "");
         assert_eq!(
-            examples[0].messages[1].tool_calls.as_ref().unwrap().len(),
+            prepared.examples[0].messages[1]
+                .tool_calls
+                .as_ref()
+                .unwrap()
+                .len(),
             1
         );
-        assert_eq!(examples[0].messages[2].content, "1");
-        assert_eq!(examples[0].messages[2].name.as_deref(), Some("calculator"));
+        assert_eq!(prepared.examples[0].messages[2].content, "a");
         assert_eq!(
-            examples[0].messages[2].tool_call_id.as_deref(),
+            prepared.examples[0].messages[2].name.as_deref(),
+            Some("calculator")
+        );
+        assert_eq!(
+            prepared.examples[0].messages[2].tool_call_id.as_deref(),
             Some("call_1")
         );
     }

@@ -252,6 +252,49 @@ async fn list_recipes(State(_state): State<AppState>) -> Json<RecipesListRespons
     Json(RecipesListResponse { recipes: out })
 }
 
+fn training_step_name(step: &RecipeStep) -> Option<&str> {
+    match step {
+        RecipeStep::Sft { name, .. }
+        | RecipeStep::Opd { name, .. }
+        | RecipeStep::DistillMerge { name, .. }
+        | RecipeStep::DistillPump { name, .. }
+        | RecipeStep::DistillRefresh { name, .. }
+        | RecipeStep::DistillSelf { name, .. } => Some(name),
+        RecipeStep::PostEval { .. } => None,
+    }
+}
+
+fn validate_recipe_structure_and_names(
+    recipe_name: &str,
+    recipe: &Recipe,
+) -> Result<usize, ApiError> {
+    let mut previous_adapter: Option<&str> = None;
+    let mut training_steps = 0usize;
+    for step in &recipe.steps {
+        if let RecipeStep::PostEval { suite, adapter, .. } = step {
+            let Some(previous) = previous_adapter else {
+                return Err(ApiError::training_invalid_request(format!(
+                    "recipe '{recipe_name}': PostEval (suite={suite}) must follow a \
+                     training step -- it gates that step's output adapter"
+                )));
+            };
+            if adapter != previous {
+                return Err(ApiError::training_invalid_request(format!(
+                    "recipe '{recipe_name}': PostEval adapter '{adapter}' does not match \
+                     the preceding step's output adapter '{previous}'"
+                )));
+            }
+            continue;
+        }
+
+        let name = training_step_name(step).expect("non-PostEval step has an adapter name");
+        super::adapters::validate_adapter_name(name)?;
+        previous_adapter = Some(name);
+        training_steps = training_steps.saturating_add(1);
+    }
+    Ok(training_steps)
+}
+
 async fn run_recipe(
     State(state): State<AppState>,
     Json(req): Json<RecipeRunRequest>,
@@ -283,6 +326,12 @@ async fn run_recipe(
         )));
     }
 
+    // Validate the complete recipe before resolving any corpus. Capacity and
+    // mock-mode rejection then happen before tokenization while a hostile name
+    // on a later step still rejects the entire recipe atomically.
+    let training_steps = validate_recipe_structure_and_names(&recipe_name, &recipe)?;
+    super::training::enforce_queue_capacity_for(&state, training_steps)?;
+
     // Enqueue each step independently. Steps run in FIFO order via the
     // global training queue, so by the time step N+1 starts its base
     // adapter (step N's output) is already on disk. We auto-chain by
@@ -298,23 +347,7 @@ async fn run_recipe(
     let mut top_k_adjustments = Vec::new();
     let mut previous_adapter: Option<String> = None;
     for (idx, step) in recipe.steps.iter().enumerate() {
-        if let RecipeStep::PostEval { suite, adapter, .. } = step {
-            // A PostEval step is the §8.7 gate ON the preceding training
-            // step (attached via the lookahead below), never its own job.
-            // Validate placement here so a dangling/mismatched gate
-            // rejects the whole recipe before anything enqueues.
-            let Some(prev) = previous_adapter.as_deref() else {
-                return Err(ApiError::training_invalid_request(format!(
-                    "recipe '{recipe_name}': PostEval (suite={suite}) must follow a \
-                     training step — it gates that step's output adapter"
-                )));
-            };
-            if adapter != prev {
-                return Err(ApiError::training_invalid_request(format!(
-                    "recipe '{recipe_name}': PostEval adapter '{adapter}' does not match \
-                     the preceding step's output adapter '{prev}'"
-                )));
-            }
+        if matches!(step, RecipeStep::PostEval { .. }) {
             continue;
         }
         // Lookahead: a directly-following PostEval step becomes this
@@ -351,7 +384,6 @@ async fn run_recipe(
         prepared.push((job_id, adapter_name, queued));
     }
 
-    super::training::enforce_queue_capacity_for(&state, prepared.len())?;
     let job_ids: Vec<String> = prepared
         .iter()
         .map(|(job_id, _, _)| job_id.clone())
@@ -394,18 +426,10 @@ fn step_to_queued_job(
     post_eval: Option<kiln_eval::PostEvalConfig>,
 ) -> Result<(String, crate::training_queue::QueuedJob), ApiError> {
     use crate::training_queue::QueuedJob;
-    // Every training step's `name` becomes a directory under adapter_dir —
-    // same single-segment gate as the dedicated submission endpoints.
-    match step {
-        RecipeStep::Sft { name, .. }
-        | RecipeStep::Opd { name, .. }
-        | RecipeStep::DistillMerge { name, .. }
-        | RecipeStep::DistillPump { name, .. }
-        | RecipeStep::DistillRefresh { name, .. }
-        | RecipeStep::DistillSelf { name, .. } => {
-            super::adapters::validate_adapter_name(name)?;
-        }
-        RecipeStep::PostEval { .. } => {}
+    // Keep this helper safe for direct unit callers as well as the two-phase
+    // runner above.
+    if let Some(name) = training_step_name(step) {
+        super::adapters::validate_adapter_name(name)?;
     }
     match step {
         RecipeStep::Sft {
@@ -414,16 +438,42 @@ fn step_to_queued_job(
             examples_from,
             config,
         } => {
-            let examples = match examples_from {
-                ExamplesSource::Inline { examples } => examples.clone(),
+            let prepared = match examples_from {
+                ExamplesSource::Inline { examples } => kiln_train::prepare_sft_examples(
+                    examples.clone(),
+                    state.tokenizer.as_ref(),
+                    config.invalid_row_policy,
+                    "recipe",
+                    Some(name.clone()),
+                )
+                .map_err(|error| {
+                    ApiError::training_invalid_request(format!(
+                        "SFT recipe step {name:?} has invalid rows: {error:#}"
+                    ))
+                })?,
                 ExamplesSource::Dataset { dataset } => {
-                    crate::dataset_resolve::resolve_registry_sft_examples(
-                        state.dataset_registry.as_deref(),
-                        dataset,
+                    let registry = state
+                        .dataset_registry
+                        .as_ref()
+                        .ok_or_else(ApiError::dataset_registry_unavailable)?;
+                    let data_path = registry
+                        .dataset_dir(dataset)
+                        .map_err(|error| {
+                            ApiError::training_invalid_request(format!(
+                                "SFT step `dataset: {dataset}`: {error}"
+                            ))
+                        })?
+                        .join("data.jsonl");
+                    crate::sft_dataset::prepare_sft_jsonl(
+                        &data_path,
+                        state.tokenizer.as_ref(),
+                        config.invalid_row_policy,
+                        "named_dataset",
+                        Some(dataset.clone()),
                     )
-                    .map_err(|e| {
+                    .map_err(|error| {
                         ApiError::training_invalid_request(format!(
-                            "SFT step `dataset: {dataset}`: {e}"
+                            "SFT step `dataset: {dataset}`: {error:#}"
                         ))
                     })?
                 }
@@ -440,8 +490,9 @@ fn step_to_queued_job(
                 QueuedJob::Sft(SftRequest {
                     dataset_path: None,
                     dataset: None,
-                    examples,
+                    examples: prepared.examples,
                     config: sft_config,
+                    ingestion: Some(prepared.ingestion),
                     post_eval: post_eval.clone(),
                 }),
             ))

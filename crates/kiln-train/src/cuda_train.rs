@@ -135,6 +135,48 @@ pub fn cuda_native_sft_train_to_with_checkpoint_root(
     )
 }
 
+/// CUDA server entry for rows already admitted through the shared SFT
+/// ingestion contract.
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_native_sft_train_to_with_checkpoint_root_and_ingestion(
+    examples: &[SftExample],
+    ingestion: &crate::sft_ingestion::SftIngestionReceipt,
+    config: &SftConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
+) -> Result<PathBuf> {
+    tracing::info!(
+        num_examples = examples.len(),
+        rows_rejected = ingestion.rows_rejected,
+        invalid_row_policy = %ingestion.invalid_row_policy,
+        adapter_name,
+        path = "backend_runtime_via_sft_train",
+        "cuda_native_sft_train: routing admitted rows through the trainer BackendRuntime path"
+    );
+    crate::trainer::sft_train_to_with_checkpoint_root_and_ingestion(
+        examples,
+        ingestion,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        checkpoint_output_dir,
+        adapter_name,
+        progress_cb,
+        None,
+        gpu_step_coordination,
+    )
+}
+
 /// CUDA-native GRPO entry point. Delegates to [`crate::trainer::grpo_train`].
 ///
 /// The `cuda_train` module never had a separate GRPO step kernel of its

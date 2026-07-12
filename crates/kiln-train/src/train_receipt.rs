@@ -708,6 +708,9 @@ pub struct DataStatsReceipt {
     pub reward_groups_kept: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reward_filter_sidecar: Option<String>,
+    /// SFT-only admission evidence. Legacy receipts and non-SFT modes omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sft_ingestion: Option<crate::sft_ingestion::SftIngestionReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1123,6 +1126,13 @@ impl TrainReceipt {
     pub fn write_to_adapter_dir(&self, adapter_dir: &Path) -> Result<PathBuf> {
         self.validate_training_chat_template_identity()
             .context("validate train-receipt training chat template identity")?;
+        if let Some(ingestion) = self.data.sft_ingestion.as_ref() {
+            ingestion
+                .validate()
+                .context("validate train-receipt SFT ingestion evidence")?;
+        }
+        self.validate_sft_ingestion_binding()
+            .context("validate train-receipt SFT ingestion binding")?;
         if let Some(manifest) = self.model.base_weight_shard_manifest.as_ref() {
             manifest
                 .validate()
@@ -1172,6 +1182,20 @@ impl TrainReceipt {
                     path.display()
                 )
             })?;
+        if let Some(ingestion) = receipt.data.sft_ingestion.as_ref() {
+            ingestion.validate().with_context(|| {
+                format!(
+                    "validate SFT ingestion evidence in train receipt {}",
+                    path.display()
+                )
+            })?;
+        }
+        receipt.validate_sft_ingestion_binding().with_context(|| {
+            format!(
+                "validate SFT ingestion binding in train receipt {}",
+                path.display()
+            )
+        })?;
         if let Some(manifest) = receipt.model.base_weight_shard_manifest.as_ref() {
             manifest.validate().with_context(|| {
                 format!(
@@ -1246,6 +1270,49 @@ impl TrainReceipt {
                 bail!("{left_name} ({left}) differs from {right_name} ({right})");
             }
         }
+        Ok(())
+    }
+
+    fn validate_sft_ingestion_binding(&self) -> Result<()> {
+        let Some(ingestion) = self.data.sft_ingestion.as_ref() else {
+            return Ok(());
+        };
+        anyhow::ensure!(
+            self.hyperparameters.mode == "sft",
+            "SFT ingestion evidence is attached to mode {:?}",
+            self.hyperparameters.mode
+        );
+        anyhow::ensure!(
+            self.training_data.source == ingestion.source,
+            "training_data.source differs from SFT ingestion source"
+        );
+        anyhow::ensure!(
+            self.training_data.path == ingestion.source_locator,
+            "training_data.path differs from SFT ingestion source locator"
+        );
+        anyhow::ensure!(
+            self.training_data.sha256.as_deref() == Some(&ingestion.kept_corpus_sha256),
+            "training_data.sha256 differs from SFT kept-corpus identity"
+        );
+        anyhow::ensure!(
+            self.data.examples_read == ingestion.rows_read,
+            "data.examples_read differs from SFT ingestion rows_read"
+        );
+        anyhow::ensure!(
+            self.data.examples_filtered == ingestion.rows_rejected,
+            "data.examples_filtered differs from SFT ingestion rows_rejected"
+        );
+        let configured_policy = self
+            .config
+            .get("invalid_row_policy")
+            .context("SFT receipt config lacks invalid_row_policy")?;
+        let configured_policy: crate::SftInvalidRowPolicy =
+            serde_json::from_value(configured_policy.clone())
+                .context("parse SFT receipt config invalid_row_policy")?;
+        anyhow::ensure!(
+            configured_policy == ingestion.invalid_row_policy,
+            "receipt config invalid_row_policy differs from SFT ingestion evidence"
+        );
         Ok(())
     }
 }
@@ -2836,6 +2903,73 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("validate execution provenance"));
+        Ok(())
+    }
+
+    #[test]
+    fn sft_ingestion_binding_round_trips_and_rejects_cross_field_tampering() -> Result<()> {
+        let dir = tempdir()?;
+        let tokenizer = minimal_tokenizer()?.with_chat_template(
+            "{% for message in messages %}{{ message.content }} {% endfor %}".to_string(),
+        );
+        let prepared = crate::prepare_sft_examples(
+            vec![
+                crate::SftExample {
+                    messages: vec![
+                        crate::ChatMessage::new("user", "hello"),
+                        crate::ChatMessage::new("assistant", "hello"),
+                    ],
+                },
+                crate::SftExample { messages: vec![] },
+            ],
+            &tokenizer,
+            crate::SftInvalidRowPolicy::Skip,
+            "inline",
+            None,
+        )?;
+        let config = crate::SftConfig {
+            invalid_row_policy: crate::SftInvalidRowPolicy::Skip,
+            ..Default::default()
+        };
+        let mut receipt = TrainReceipt::new(
+            "adapter-ingestion",
+            "sft",
+            &ModelConfig::qwen3_5_4b(),
+            &tokenizer,
+            HyperparameterReceipt {
+                mode: "sft".to_string(),
+                rank: 8,
+                alpha: 16.0,
+                alpha_over_rank: Some(2.0),
+                learning_rate: 1e-4,
+                epochs: 1,
+                seed: Some(7),
+                shuffle: false,
+            },
+            serde_json::to_value(&config)?,
+        );
+        receipt.training_data = TrainingDataReceipt {
+            source: prepared.ingestion.source.clone(),
+            path: prepared.ingestion.source_locator.clone(),
+            sha256: Some(prepared.ingestion.kept_corpus_sha256.clone()),
+        };
+        receipt.data.examples_read = prepared.ingestion.rows_read;
+        receipt.data.examples_filtered = prepared.ingestion.rows_rejected;
+        receipt.data.examples_trained = prepared.ingestion.rows_kept;
+        receipt.data.sft_ingestion = Some(prepared.ingestion.clone());
+        receipt.write_to_adapter_dir(dir.path())?;
+        let loaded = TrainReceipt::read_from_adapter_dir(dir.path())?.unwrap();
+        assert_eq!(loaded.data.sft_ingestion, Some(prepared.ingestion));
+
+        let path = dir.path().join(TRAIN_RECEIPT_FILENAME);
+        let mut tampered = serde_json::to_value(&loaded)?;
+        tampered["training_data"]["sha256"] = serde_json::json!(full_sha256('f'));
+        std::fs::write(&path, serde_json::to_vec_pretty(&tampered)?)?;
+        let error = TrainReceipt::read_from_adapter_dir(dir.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("training_data.sha256 differs"),
+            "{error:#}"
+        );
         Ok(())
     }
 

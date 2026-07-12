@@ -681,6 +681,7 @@ fn enqueue_empty_sft_job(state: &AppState, job_id: &str) {
             dataset_path: None,
             dataset: None,
             config: Default::default(),
+            ingestion: None,
             post_eval: None,
         }),
     });

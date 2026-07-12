@@ -3079,6 +3079,7 @@ fn sft_checkpoint_auxiliary_state(
     execution_provenance: Option<&kiln_core::execution_provenance::ExecutionProvenanceV1>,
     backend_runtime: &str,
     gradient_checkpoint_plan_sha256: &str,
+    ingestion_receipt_sha256: &str,
 ) -> Result<serde_json::Value> {
     let hashes =
         kiln_core::config_hashes::ConfigHashes::from_model_tokenizer(model_config, tokenizer, None);
@@ -3096,6 +3097,7 @@ fn sft_checkpoint_auxiliary_state(
         "backend_runtime": backend_runtime,
         "kiln_train_version": env!("CARGO_PKG_VERSION"),
         "gradient_checkpoint_plan_sha256": gradient_checkpoint_plan_sha256,
+        "ingestion_receipt_sha256": ingestion_receipt_sha256,
         "training_precision_policy": precision_policy.name,
         "valid_indices_sha256": valid_indices_sha256,
     }))
@@ -4409,6 +4411,7 @@ fn write_sft_train_receipt_best_effort(
     base_adapter_dir: Option<&Path>,
     output_dir: &Path,
     training_data_sha256: Option<String>,
+    ingestion: &crate::sft_ingestion::SftIngestionReceipt,
     data: crate::train_receipt::DataStatsReceipt,
     token_counts: crate::train_receipt::TokenCountReceipt,
     wall_clock_ms: u64,
@@ -4428,8 +4431,8 @@ fn write_sft_train_receipt_best_effort(
     receipt.runtime.execution_provenance = execution_provenance.cloned();
     receipt.runtime.training_precision = training_precision;
     receipt.training_data = crate::train_receipt::TrainingDataReceipt {
-        source: "inline_sft_examples".to_string(),
-        path: None,
+        source: ingestion.source.clone(),
+        path: ingestion.source_locator.clone(),
         sha256: training_data_sha256,
     };
     receipt.adapters.base = crate::train_receipt::adapter_file_receipt(base_adapter_dir);
@@ -5227,15 +5230,102 @@ pub fn sft_train_to_with_checkpoint_root(
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    let prepared = crate::sft_ingestion::prepare_sft_examples(
+        examples.iter().cloned(),
+        tokenizer,
+        config.invalid_row_policy,
+        "rust_api",
+        None,
+    )?;
+    sft_train_to_with_checkpoint_root_and_ingestion(
+        &prepared.examples,
+        &prepared.ingestion,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        checkpoint_output_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+        gpu_step_coordination,
+    )
+}
+
+/// Train already-admitted SFT rows while binding the resulting checkpoint and
+/// receipt to their server-owned ingestion evidence.
+#[allow(clippy::too_many_arguments)]
+pub fn sft_train_to_with_checkpoint_root_and_ingestion(
+    examples: &[SftExample],
+    ingestion: &crate::sft_ingestion::SftIngestionReceipt,
+    config: &SftConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+    gpu_step_coordination: Option<GpuStepCoordination>,
+) -> Result<PathBuf> {
+    anyhow::ensure!(
+        ingestion.invalid_row_policy == config.invalid_row_policy,
+        "SFT ingestion policy {} differs from trainer config {}",
+        ingestion.invalid_row_policy,
+        config.invalid_row_policy
+    );
+    crate::sft_ingestion::verify_prepared_sft_examples(examples, tokenizer, ingestion)
+        .context("verify admitted SFT rows before training")?;
+    sft_train_prepared_to_with_checkpoint_root(
+        examples,
+        ingestion,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        checkpoint_output_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+        gpu_step_coordination,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sft_train_prepared_to_with_checkpoint_root(
+    examples: &[SftExample],
+    ingestion: &crate::sft_ingestion::SftIngestionReceipt,
+    config: &SftConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+    gpu_step_coordination: Option<GpuStepCoordination>,
+) -> Result<PathBuf> {
     let run_started = Instant::now();
     anyhow::ensure!(
         config.checkpoint_interval != Some(0),
         "SFT checkpoint_interval must be greater than zero"
     );
     let output_dir = output_adapter_dir.join(adapter_name);
-    let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&examples);
+    let training_data_sha256 = Some(ingestion.kept_corpus_sha256.clone());
+    let ingestion_receipt_sha256 = crate::train_receipt::sha256_json_serializable(ingestion)
+        .context("hash SFT ingestion receipt")?;
     let mut data_stats = crate::train_receipt::DataStatsReceipt {
-        examples_read: examples.len(),
+        examples_read: ingestion.rows_read,
+        examples_filtered: ingestion.rows_rejected,
+        sft_ingestion: Some(ingestion.clone()),
         ..Default::default()
     };
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
@@ -5332,6 +5422,7 @@ pub fn sft_train_to_with_checkpoint_root(
                 requested_base_adapter_dir.as_deref(),
                 &output_dir,
                 training_data_sha256,
+                ingestion,
                 data_stats,
                 token_counts,
                 run_started.elapsed().as_millis() as u64,
@@ -5434,6 +5525,7 @@ pub fn sft_train_to_with_checkpoint_root(
                 requested_base_adapter_dir.as_deref(),
                 &output_dir,
                 training_data_sha256,
+                ingestion,
                 data_stats,
                 token_counts,
                 run_started.elapsed().as_millis() as u64,
@@ -5545,16 +5637,20 @@ pub fn sft_train_to_with_checkpoint_root(
                     valid_indices.push(idx);
                     valid_seq_lens.push(input_ids.len());
                 }
-                Err(e) => {
-                    tracing::warn!("skipping example: {e}");
-                }
+                Err(e) => anyhow::bail!(
+                    "admitted SFT row {} failed repeat tokenization before training: {e:#}",
+                    idx + 1
+                ),
             }
         }
 
         if valid_indices.is_empty() {
             anyhow::bail!("no valid training examples after tokenization");
         }
-        data_stats.examples_filtered = examples.len().saturating_sub(valid_indices.len());
+        anyhow::ensure!(
+            valid_indices.len() == examples.len(),
+            "not every admitted SFT row reached the training set"
+        );
         data_stats.examples_trained = valid_indices.len().saturating_mul(config.epochs);
         token_counts.action_tokens = one_epoch_counts
             .action_tokens
@@ -5651,6 +5747,7 @@ pub fn sft_train_to_with_checkpoint_root(
                 weights.execution_provenance.as_ref(),
                 BackendIdentity::runtime_name(backend.as_ref()),
                 &gradient_checkpoint_plan_sha256,
+                &ingestion_receipt_sha256,
             )?,
         };
         if let (Some(checkpoint), Some(loop_state)) =
@@ -6158,6 +6255,7 @@ pub fn sft_train_to_with_checkpoint_root(
         base_adapter_dir.as_deref(),
         &output_dir,
         training_data_sha256,
+        ingestion,
         data_stats,
         token_counts,
         run_started.elapsed().as_millis() as u64,
