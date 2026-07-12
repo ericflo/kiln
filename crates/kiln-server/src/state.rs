@@ -3142,24 +3142,6 @@ impl AppState {
             );
         }
 
-        // Wire the device's memory-reclaim hook into the governor and start its
-        // continuous pressure monitor (once per process). Under memory pressure
-        // — e.g. a coexisting llama.cpp / vLLM job, or a training run, grabbing
-        // VRAM — the governor returns kiln's pooled-but-unused VRAM to the OS
-        // instead of hoarding it. Idempotent via the OnceLock guard.
-        if serving_policy.allocator_reclaim {
-            static GOVERNOR_WIRED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-            GOVERNOR_WIRED.get_or_init(|| {
-                register_backend_memory_reclaimer(gpu_memory_reclaim_policy, device_kt);
-                kiln_memory::MemoryGovernor::global().start_monitor();
-            });
-        } else {
-            tracing::info!(
-                serving_profile = %serving_profile.profile(),
-                "backend allocator reclaim hooks disabled by serving profile"
-            );
-        }
-
         let post_load_used_vram_info = runtime_used_vram_for_policy(gpu_memory_budget_policy);
         let post_load_used_vram = snap
             .map(|s| s.used_bytes)
@@ -3600,6 +3582,28 @@ impl AppState {
                 response_delivery_policy,
             )
         });
+        // Wire allocator reclaim only after the actor and GPU coordination lock
+        // exist. A periodic monitor must never synchronize or trim underneath a
+        // live request; the reclaimer below checks actor activity and takes the
+        // exclusive guard without queueing behind inference.
+        if serving_policy.allocator_reclaim {
+            static GOVERNOR_WIRED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            GOVERNOR_WIRED.get_or_init(|| {
+                register_backend_memory_reclaimer(
+                    gpu_memory_reclaim_policy,
+                    device_kt,
+                    gpu_lock.clone(),
+                    backend_health.clone(),
+                    batching_engine.clone(),
+                );
+                kiln_memory::MemoryGovernor::global().start_monitor();
+            });
+        } else {
+            tracing::info!(
+                serving_profile = %serving_profile.profile(),
+                "backend allocator reclaim hooks disabled by serving profile"
+            );
+        }
         // #24/#26: drive dynamic KV resize from live memory pressure on GPU
         // backends whose KV pools are device-resident (CUDA/ROCm) — that's where
         // inference and a coexisting training run / process actually contend for
@@ -4046,8 +4050,14 @@ struct AutoSizeFailure {
     attempts: Vec<(f64, usize, String)>,
 }
 
-fn register_backend_memory_reclaimer(policy: GpuMemoryReclaimPolicy, device: kiln_tensor::Device) {
-    let _ = device;
+fn register_backend_memory_reclaimer(
+    policy: GpuMemoryReclaimPolicy,
+    device: kiln_tensor::Device,
+    gpu_lock: GpuCoordinationLock,
+    backend_health: BackendHealthHandle,
+    batching_engine: Option<crate::batching_engine::BatchingEngineHandle>,
+) {
+    let _ = (&device, &gpu_lock, &backend_health, &batching_engine);
     match policy.reclaimer {
         GpuMemoryReclaimer::None => {}
         GpuMemoryReclaimer::RocmTrimPool => {
@@ -4055,15 +4065,146 @@ fn register_backend_memory_reclaimer(policy: GpuMemoryReclaimPolicy, device: kil
             {
                 if let kiln_tensor::Device::Rocm(idx) = device {
                     kiln_memory::MemoryGovernor::global().register_reclaimer(move |target| {
+                        let (observed_reserved, observed_used) =
+                            match kiln_tensor::rocm_pool_stats(idx) {
+                                Ok(stats) => stats,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        reason = "pool_statistics_unavailable",
+                                        target,
+                                        "ROCm pool reclaim skipped"
+                                    );
+                                    return 0;
+                                }
+                            };
+                        let (active_decode, active_prefill) = batching_engine
+                            .as_ref()
+                            .map(|engine| {
+                                let snapshot = engine.cached_snapshot();
+                                (snapshot.active_decode, snapshot.active_prefill)
+                            })
+                            .unwrap_or_default();
+                        if pool_trim_min_keep_if_idle(
+                            observed_reserved,
+                            observed_used,
+                            target,
+                            active_decode,
+                            active_prefill,
+                        )
+                        .is_none()
+                        {
+                            if active_decode > 0 || active_prefill > 0 {
+                                tracing::debug!(
+                                    reason = "active_requests",
+                                    target,
+                                    active_decode,
+                                    active_prefill,
+                                    reserved = observed_reserved,
+                                    used = observed_used,
+                                    "ROCm pool reclaim deferred"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    reason = "no_releasable_bytes",
+                                    target,
+                                    reserved = observed_reserved,
+                                    used = observed_used,
+                                    spare = observed_reserved.saturating_sub(observed_used),
+                                    "ROCm pool reclaim skipped"
+                                );
+                            }
+                            return 0;
+                        }
+
+                        if let Err(error) = backend_health.ensure_healthy() {
+                            tracing::warn!(
+                                %error,
+                                reason = "backend_unhealthy",
+                                target,
+                                "ROCm pool reclaim skipped"
+                            );
+                            return 0;
+                        }
+                        let coordination_started = std::time::Instant::now();
+                        let Ok(_gpu_guard) = gpu_lock.clone().try_write_owned() else {
+                            tracing::debug!(
+                                reason = "gpu_coordination_busy",
+                                target,
+                                reserved = observed_reserved,
+                                used = observed_used,
+                                coordination_acquire_ms =
+                                    coordination_started.elapsed().as_secs_f64() * 1000.0,
+                                "ROCm pool reclaim deferred"
+                            );
+                            return 0;
+                        };
+                        if let Err(error) = backend_health.ensure_healthy() {
+                            tracing::warn!(
+                                %error,
+                                reason = "backend_became_unhealthy",
+                                target,
+                                "ROCm pool reclaim skipped after coordination"
+                            );
+                            return 0;
+                        }
+                        let coordination_acquire_ms =
+                            coordination_started.elapsed().as_secs_f64() * 1000.0;
+
+                        // Activity can change between the preflight and the
+                        // lock acquisition. Refuse the maintenance operation
+                        // if the actor admitted work in that window.
+                        let (active_decode, active_prefill) = batching_engine
+                            .as_ref()
+                            .map(|engine| {
+                                let snapshot = engine.cached_snapshot();
+                                (snapshot.active_decode, snapshot.active_prefill)
+                            })
+                            .unwrap_or_default();
+
+                        // Re-read after exclusive acquisition. Allocations may
+                        // have changed between the cheap preflight and this
+                        // mutation boundary.
                         let (reserved, used) = match kiln_tensor::rocm_pool_stats(idx) {
                             Ok(stats) => stats,
                             Err(error) => {
-                                tracing::warn!(%error, "ROCm pool reclaim skipped: statistics unavailable");
+                                tracing::warn!(
+                                    %error,
+                                    reason = "locked_pool_statistics_unavailable",
+                                    target,
+                                    coordination_acquire_ms,
+                                    "ROCm pool reclaim skipped"
+                                );
                                 return 0;
                             }
                         };
-                        let Some(min_keep) = pool_trim_min_keep(reserved, used, target) else {
-                            tracing::debug!(reserved, used, target, "ROCm pool reclaim skipped: no releasable bytes");
+                        let Some(min_keep) = pool_trim_min_keep_if_idle(
+                            reserved,
+                            used,
+                            target,
+                            active_decode,
+                            active_prefill,
+                        ) else {
+                            if active_decode > 0 || active_prefill > 0 {
+                                tracing::debug!(
+                                    reason = "active_requests_after_coordination",
+                                    target,
+                                    active_decode,
+                                    active_prefill,
+                                    coordination_acquire_ms,
+                                    "ROCm pool reclaim deferred"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    reason = "no_releasable_bytes_after_coordination",
+                                    target,
+                                    reserved,
+                                    used,
+                                    spare = reserved.saturating_sub(used),
+                                    coordination_acquire_ms,
+                                    "ROCm pool reclaim skipped"
+                                );
+                            }
                             return 0;
                         };
                         let started = std::time::Instant::now();
@@ -4076,6 +4217,7 @@ fn register_backend_memory_reclaimer(policy: GpuMemoryReclaimPolicy, device: kil
                                     used_before = used,
                                     requested_min_keep = min_keep,
                                     reclaimed,
+                                    coordination_acquire_ms,
                                     duration_ms = started.elapsed().as_secs_f64() * 1000.0,
                                     "ROCm pool reclaim completed"
                                 );
@@ -4087,6 +4229,7 @@ fn register_backend_memory_reclaimer(policy: GpuMemoryReclaimPolicy, device: kil
                                     target,
                                     reserved_before = reserved,
                                     used_before = used,
+                                    coordination_acquire_ms,
                                     duration_ms = started.elapsed().as_secs_f64() * 1000.0,
                                     "ROCm pool reclaim failed"
                                 );
@@ -4131,12 +4274,27 @@ fn register_backend_memory_reclaimer(policy: GpuMemoryReclaimPolicy, device: kil
     }
 }
 
+#[cfg(any(feature = "rocm", test))]
 fn pool_trim_min_keep(reserved: u64, used: u64, target: u64) -> Option<usize> {
     let releasable = reserved.saturating_sub(used).min(target);
     if releasable == 0 {
         return None;
     }
     usize::try_from(reserved.saturating_sub(releasable)).ok()
+}
+
+#[cfg(any(feature = "rocm", test))]
+fn pool_trim_min_keep_if_idle(
+    reserved: u64,
+    used: u64,
+    target: u64,
+    active_decode: usize,
+    active_prefill: usize,
+) -> Option<usize> {
+    if active_decode > 0 || active_prefill > 0 {
+        return None;
+    }
+    pool_trim_min_keep(reserved, used, target)
 }
 
 /// Auto-size the KV cache by trying `configured_fraction` first and then each
@@ -4348,6 +4506,22 @@ mod tests {
         assert_eq!(pool_trim_min_keep(8_000, 4_000, 1_000), Some(7_000));
         assert_eq!(pool_trim_min_keep(8_000, 4_000, u64::MAX), Some(4_000));
         assert_eq!(pool_trim_min_keep(4_000, 8_000, u64::MAX), None);
+    }
+
+    #[test]
+    fn pool_trim_target_requires_an_idle_batching_actor() {
+        assert_eq!(
+            pool_trim_min_keep_if_idle(8_000, 4_000, u64::MAX, 1, 0),
+            None
+        );
+        assert_eq!(
+            pool_trim_min_keep_if_idle(8_000, 4_000, u64::MAX, 0, 1),
+            None
+        );
+        assert_eq!(
+            pool_trim_min_keep_if_idle(8_000, 4_000, 1_000, 0, 0),
+            Some(7_000)
+        );
     }
 
     /// Shared CPU device for tests. #1082: now emits a kt `Device::Cpu`
