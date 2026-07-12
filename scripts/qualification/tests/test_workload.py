@@ -96,6 +96,7 @@ class WorkloadTests(unittest.TestCase):
             "correctness-core-v1.json",
             "prefill-scheduling-v1.json",
             "serving-mixed-rocm-v1.json",
+            "serving-rocm-development-soak-v1.json",
             "serving-rocm-memory-pressure-v1.json",
         ):
             with self.subTest(name=name):
@@ -106,6 +107,16 @@ class WorkloadTests(unittest.TestCase):
 
     def test_valid_same_environment_performance_policy(self) -> None:
         self.assertEqual(workload_module.validate_workload(valid_performance_workload()), [])
+
+    def test_soak_is_a_non_comparative_gate(self) -> None:
+        value = valid_performance_workload()
+        value["kind"] = "soak"
+        value["comparison_policy"] = None
+        self.assertEqual(workload_module.validate_workload(value), [])
+
+        value["comparison_policy"] = valid_performance_workload()["comparison_policy"]
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("must be null for soak workloads" in error for error in errors))
 
     def test_unknown_and_missing_keys_are_rejected_at_nested_levels(self) -> None:
         value = valid_performance_workload()

@@ -214,6 +214,49 @@ The variant named `default` preserves the graph-on/autoscale-on A/B baseline,
 not the production serving default. The manifest intentionally applies one
 shared qualification transport envelope to every arm.
 
+### ROCm Development Soak
+
+After a material ROCm serving change, run the committed 30-minute development
+soak from a clean, pushed source tree:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" ROCM_PATH=/opt/rocm \
+python3 scripts/qualification/run.py \
+  --variant autoscale-off \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen3.5-4B \
+  qualification/workloads/serving-rocm-development-soak-v1.json
+```
+
+The driver builds once, starts one server process, warms ROCm graphs, and fills
+the bounded prefix cache to its declared entry/state capacity before recording
+the post-warmup memory baseline or starting the 30-minute measurement clock.
+It then keeps that process under fixed-output waves at concurrency 1, 8, and 12
+with prompt lengths spanning multiple sequence buckets. Every fifth wave also
+cancels a longer request. Slot prompts repeat across waves so prefix hits and
+cached-block reuse are measured. After each wave, it requires the engine to
+drain, every used KV block to be owned by the prefix cache, zero active cache
+leases or pending releases, stable cache residency, no graph to remain live,
+the process to remain alive, and runtime/debug policy attestations to remain
+consistent.
+
+The result fails on any request or cancellation error, graph capture/replay
+failure, typed eager fallback, backend synchronization failure or 100 ms slow
+sync, device-fault signature in either a log message or structured error,
+non-finite response error, unexplained ITL outlier, capacity change,
+unaccounted block, active cache lease, pending release, dirty shutdown,
+snapshot residue, or GPU/RSS peak more than 512 MiB above the post-warmup
+baseline. Attributed outliers remain counted for review. The receipt also
+records p50/p99/p99.9 TTFT and ITL, graph activity, prefix-cache reuse,
+external-yield synchronization, memory baselines/peaks, request/token counts,
+and cancellation count.
+
+This `kind: soak` workload is intentionally a non-comparative pass/fail gate,
+so its `comparison_policy` is null. Do not use it to claim relative throughput
+or latency; use the serving benchmark protocol for those claims. The 30-minute
+receipt also does not replace the final 24-hour ROCm phase soak.
+
 Never edit a receipt to make it pass. A failed receipt is useful evidence: keep
 it when it identifies a reproducible product defect, fix the defect in a new
 commit, and run a new receipt with a new ID.

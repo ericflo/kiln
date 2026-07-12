@@ -629,11 +629,13 @@ def _validate_comparison(
     variants: dict[str, dict[str, Any]],
 ) -> None:
     if value is None:
-        if kind != "environment":
-            errors.append(f"{context} may be null only for environment workloads")
+        if kind not in {"environment", "soak"}:
+            errors.append(
+                f"{context} may be null only for environment or soak workloads"
+            )
         return
-    if kind == "environment":
-        errors.append(f"{context} must be null for environment workloads")
+    if kind in {"environment", "soak"}:
+        errors.append(f"{context} must be null for {kind} workloads")
     comparison = _check_exact_keys(errors, value, COMPARISON_KEYS, context)
     mode = _check_enum(errors, comparison.get("mode"), COMPARISON_MODES, f"{context}.mode")
 

@@ -1165,6 +1165,26 @@ def classify_server_event(
     event_name = structured.get("event")
     lowered_event = event_name.strip().lower() if isinstance(event_name, str) else ""
     lowered_message = message.strip().lower()
+    structured_error = structured.get("error")
+    lowered_error = (
+        structured_error.strip().lower() if isinstance(structured_error, str) else ""
+    )
+    fault_text = f"{lowered_message}\n{lowered_error}"
+    if any(
+        marker in fault_text
+        for marker in (
+            "hiperrorillegaladdress",
+            "hiperrorlaunchfailure",
+            "hiperror 700",
+            "hiperror 719",
+            "illegal memory access",
+            "launch failure",
+            "memory access fault",
+            "hsa_status_error_exception",
+            "device lost",
+        )
+    ):
+        return "device_fault"
     if lowered_event == "gpu_memory_operation":
         operation = structured.get("operation")
         reason = structured.get("reason")

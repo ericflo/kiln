@@ -689,6 +689,13 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "ROCm HIP graph captured for decode (24 layers)": "graph_capture",
             "ROCm graph capture failed: bad launch": "graph_fallback",
             "slow_backend_external_yield_sync": "external_yield_sync",
+            "hipErrorLaunchFailure": "device_fault",
+            "ROCm graph replay failed: hipErrorIllegalAddress": "device_fault",
+            "GPU memory access fault on agent": "device_fault",
+            "an illegal memory access was encountered": "device_fault",
+            "hipMemcpy failed: unknown (hipError 700)": "device_fault",
+            "HSA_STATUS_ERROR_EXCEPTION": "device_fault",
+            "device lost while synchronizing": "device_fault",
             "response_channel_backpressure": "client_backpressure_start",
             "response_channel_backpressure_timeout": "client_backpressure_timeout",
             "stream_request_bound": "stream_request_bound",
@@ -713,6 +720,16 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "slow_batching_actor_phase",
                 {"event": "slow_batching_actor_phase", "phase": "unknown"},
             )
+        )
+        self.assertEqual(
+            serve.classify_server_event(
+                "batched real generation failed",
+                {
+                    "event": "generation_error",
+                    "error": "hipGraphLaunch failed: launch failure (hipError 719)",
+                },
+            ),
+            "device_fault",
         )
         structured_cases = [
             (
