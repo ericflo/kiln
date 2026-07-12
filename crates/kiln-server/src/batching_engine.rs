@@ -48,6 +48,10 @@ const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 /// staging lane are accounted independently so staged arrivals cannot consume
 /// or indefinitely postpone ordinary admission capacity.
 const MAX_PREFILL_STAGING_SLOTS: usize = 4;
+/// A full staging lane may consume this many priority turns before the actor
+/// forces one global round-robin prefill dispatch. Decode still runs before
+/// every prefill dispatch in the actor loop.
+const PREFILL_STAGING_ROUND_ROBIN_INTERVAL: usize = 5;
 /// Force one round-robin dispatch after two opportunities to accelerate a
 /// short prompt tail. This bounds long-prompt slowdown under continuous short
 /// arrivals without making interactive prompts wait a full active-set rotation
@@ -321,6 +325,8 @@ pub struct BatchingEngineSnapshot {
     pub max_prefill_staging_slots: usize,
     /// Total ordinary plus short-prefill staging capacity.
     pub max_active_requests: usize,
+    /// Maximum staged-priority turns before a mandatory global prefill turn.
+    pub max_prefill_staging_priority_burst: usize,
     /// Effective concurrent decode-row ceiling after the combined token budget
     /// has constrained the configured/backend-selected width.
     pub max_decode_batch: usize,
@@ -1889,6 +1895,7 @@ struct BatchingEngineActor {
     max_active_requests: usize,
     next_prefill_index: usize,
     short_prefill_priority_cursor: usize,
+    prefill_staging_priority_cursor: usize,
     next_staged_prefill_generation: u64,
     next_decode_generation: u64,
     prefix_aware_admission: bool,
@@ -1954,10 +1961,16 @@ impl BatchingEngineActor {
             0
         };
         let max_active_requests = max_decode_batch.saturating_add(max_prefill_staging_slots);
+        let max_prefill_staging_priority_burst = if max_prefill_staging_slots > 0 {
+            PREFILL_STAGING_ROUND_ROBIN_INTERVAL.saturating_sub(1)
+        } else {
+            0
+        };
         tracing::info!(
             max_decode_batch,
             max_prefill_staging_slots,
             max_active_requests,
+            max_prefill_staging_priority_burst,
             burst_refill,
             "batching active-set policy resolved"
         );
@@ -1987,6 +2000,7 @@ impl BatchingEngineActor {
             max_prefill_admission_quantum: max_prefill_admissions_per_cycle,
             max_prefill_staging_slots,
             max_active_requests,
+            max_prefill_staging_priority_burst,
             max_decode_batch,
             stream_stall_grace_ms: duration_millis_saturating(
                 response_delivery_policy.stream_stall_grace,
@@ -2013,6 +2027,7 @@ impl BatchingEngineActor {
             max_active_requests,
             next_prefill_index: 0,
             short_prefill_priority_cursor: 0,
+            prefill_staging_priority_cursor: 0,
             next_staged_prefill_generation: 0,
             next_decode_generation: 0,
             prefix_aware_admission,
@@ -2809,18 +2824,12 @@ impl BatchingEngineActor {
             .map(|offset| (round_robin_start + offset) % active_len)
             .find(|&idx| eligible(idx))?;
 
-        self.short_prefill_priority_cursor =
-            (self.short_prefill_priority_cursor + 1) % SHORT_PREFILL_ROUND_ROBIN_INTERVAL;
-        if self.short_prefill_priority_cursor == 0 {
-            return Some((round_robin, false));
-        }
-
         let short_tail_limit = self
             .max_prefill_tokens_per_cycle
             .saturating_mul(SHORT_PREFILL_PRIORITY_MAX_CHUNKS);
         // Staged rows already passed the bounded prompt-size gate at admission.
-        // Rotate them on priority turns; the forced global turn above still
-        // advances ordinary rows under a continuously full staging lane.
+        // Rotate them on priority turns; the staged cadence still forces a
+        // global turn that advances ordinary rows under a continuously full lane.
         let mut staged: Vec<(usize, u64)> = (0..active_len)
             .filter(|&idx| {
                 eligible(idx)
@@ -2834,6 +2843,11 @@ impl BatchingEngineActor {
             .collect();
         staged.sort_unstable_by_key(|&(_, generation)| generation);
         if !staged.is_empty() {
+            self.prefill_staging_priority_cursor =
+                (self.prefill_staging_priority_cursor + 1) % PREFILL_STAGING_ROUND_ROBIN_INTERVAL;
+            if self.prefill_staging_priority_cursor == 0 {
+                return Some((round_robin, false));
+            }
             let start = staged.partition_point(|&(_, generation)| {
                 generation < self.next_staged_prefill_generation
             });
@@ -2848,6 +2862,11 @@ impl BatchingEngineActor {
                 .total_prefill_staging_priority_forwards
                 .saturating_add(1);
             return Some((priority, true));
+        }
+        self.short_prefill_priority_cursor =
+            (self.short_prefill_priority_cursor + 1) % SHORT_PREFILL_ROUND_ROBIN_INTERVAL;
+        if self.short_prefill_priority_cursor == 0 {
+            return Some((round_robin, false));
         }
         let Some(largest_initial_work) = (0..active_len)
             .filter(|&idx| eligible(idx))
@@ -5669,6 +5688,7 @@ mod tests {
         );
         assert_eq!(actor.max_prefill_staging_slots, 2);
         assert_eq!(actor.max_active_requests, 4);
+        assert_eq!(actor.snapshot.max_prefill_staging_priority_burst, 4);
 
         let mut receivers = Vec::new();
         for key in [10, 20] {
@@ -5728,6 +5748,7 @@ mod tests {
             );
             assert_eq!(actor.max_prefill_staging_slots, 0);
             assert_eq!(actor.max_active_requests, max_decode_batch);
+            assert_eq!(actor.snapshot.max_prefill_staging_priority_burst, 0);
         }
     }
 
@@ -5821,7 +5842,7 @@ mod tests {
             receivers.push(response_rx);
         }
 
-        for _ in 0..9 {
+        for _ in 0..15 {
             assert!(actor.run_prefill_budget(64));
         }
 
@@ -5838,11 +5859,12 @@ mod tests {
         assert_eq!(
             layer_order,
             vec![
-                STAGED_A, STAGED_B, LONG_A, STAGED_C, STAGED_A, LONG_B, STAGED_B, STAGED_C, LONG_C,
+                STAGED_A, STAGED_B, STAGED_C, STAGED_A, LONG_A, STAGED_B, STAGED_C, STAGED_A,
+                STAGED_B, LONG_B, STAGED_C, STAGED_A, STAGED_B, STAGED_C, LONG_C,
             ]
         );
-        assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 6);
-        assert_eq!(actor.snapshot.total_prefill_staging_priority_forwards, 6);
+        assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 12);
+        assert_eq!(actor.snapshot.total_prefill_staging_priority_forwards, 12);
         assert_eq!(actor.snapshot.total_errors, 0);
 
         actor.fail_all("test complete");

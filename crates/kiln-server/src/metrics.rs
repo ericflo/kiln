@@ -884,6 +884,16 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_prefill_staging_priority_burst Maximum staged-priority turns before a mandatory global prefill turn.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefill_staging_priority_burst gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefill_staging_priority_burst {}",
+                gauges.batching_engine.max_prefill_staging_priority_burst
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_active_staged_requests Requests currently owning a short-prefill staging slot.\n");
         out.push_str("# TYPE kiln_batching_engine_active_staged_requests gauge\n");
         push_line(
@@ -1983,6 +1993,7 @@ mod tests {
                 max_prefill_admission_quantum: 2,
                 max_prefill_staging_slots: 2,
                 max_active_requests: 10,
+                max_prefill_staging_priority_burst: 4,
                 max_decode_batch: 8,
                 active_staged_requests: 2,
                 max_observed_active_requests: 10,
@@ -2091,6 +2102,7 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_prefill_admission_quantum 2"));
         assert!(output.contains("kiln_batching_engine_prefill_staging_slots 2"));
         assert!(output.contains("kiln_batching_engine_max_active_requests 10"));
+        assert!(output.contains("kiln_batching_engine_prefill_staging_priority_burst 4"));
         assert!(output.contains("kiln_batching_engine_active_staged_requests 2"));
         assert!(output.contains("kiln_batching_engine_max_observed_active_requests 10"));
         assert!(output.contains("kiln_batching_engine_max_decode_batch 8"));

@@ -406,6 +406,7 @@ struct BatchingEngineInfo {
     max_prefill_admission_quantum: usize,
     max_prefill_staging_slots: usize,
     max_active_requests: usize,
+    max_prefill_staging_priority_burst: usize,
     max_decode_batch: usize,
     active_staged_requests: usize,
     max_observed_active_requests: usize,
@@ -985,6 +986,7 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             max_prefill_admission_quantum: snapshot.max_prefill_admission_quantum,
             max_prefill_staging_slots: snapshot.max_prefill_staging_slots,
             max_active_requests: snapshot.max_active_requests,
+            max_prefill_staging_priority_burst: snapshot.max_prefill_staging_priority_burst,
             max_decode_batch: snapshot.max_decode_batch,
             active_staged_requests: snapshot.active_staged_requests,
             max_observed_active_requests: snapshot.max_observed_active_requests,
@@ -1130,6 +1132,7 @@ mod tests {
             max_prefill_layers_per_cycle_source: ConfigValueSource::ConfigFile,
             max_prefill_staging_slots: 4,
             max_active_requests: 20,
+            max_prefill_staging_priority_burst: 4,
             max_decode_batch: 16,
             active_staged_requests: 3,
             max_observed_active_requests: 19,
@@ -1174,6 +1177,7 @@ mod tests {
         assert_eq!(json["max_prefill_layers_per_cycle_source"], "config_file");
         assert_eq!(json["max_prefill_staging_slots"], 4);
         assert_eq!(json["max_active_requests"], 20);
+        assert_eq!(json["max_prefill_staging_priority_burst"], 4);
         assert_eq!(json["max_decode_batch"], 16);
         assert_eq!(json["active_staged_requests"], 3);
         assert_eq!(json["max_observed_active_requests"], 19);
