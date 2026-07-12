@@ -573,18 +573,32 @@ async fn main() -> Result<()> {
             .source_content_sha256
             .clone()
             .context("loaded model is missing its loader-owned source content revision")?;
+        let base_weight_shard_manifest = model_weights
+            .base_weight_shard_manifest()
+            .cloned()
+            .context("loaded model is missing its loader-owned base-weight shard manifest")?;
+        anyhow::ensure!(
+            base_weight_shard_manifest.aggregate_sha256 == base_model_source_sha256,
+            "base-weight shard manifest aggregate does not match the loader-owned source content revision"
+        );
         model_snapshot_cleanup = model_weights.snapshot_cleanup_handle();
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message("uploading weights to GPU");
         }
         let gpu_weights =
             GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)?;
+        anyhow::ensure!(
+            gpu_weights.base_weight_shard_manifest.as_ref() == Some(&base_weight_shard_manifest),
+            "GPU weights did not retain the verified base-weight shard manifest"
+        );
         model_weights
             .verify_source_content_unchanged()
             .context("model source changed between load and completed GPU upload")?;
         drop(model_weights);
         tracing::info!(
             base_model_source_sha256,
+            base_weight_shard_count = base_weight_shard_manifest.shards.len(),
+            base_weight_total_size_bytes = base_weight_shard_manifest.total_size_bytes,
             "CPU model weights dropped after verified GPU upload"
         );
 

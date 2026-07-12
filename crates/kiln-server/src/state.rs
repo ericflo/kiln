@@ -7,6 +7,7 @@ use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, wa
 use kiln_core::block::BlockManager;
 use kiln_core::config::ModelConfig;
 use kiln_core::config_hashes::ConfigHashes;
+use kiln_core::model_provenance::BaseWeightShardManifest;
 use kiln_core::prefix_cache::default_prefix_cache_max_blocks;
 use kiln_core::sampling::{SamplingParams, ThinkingBudgetStatus};
 use kiln_core::token::TokenId;
@@ -2335,6 +2336,10 @@ pub struct AppState {
     /// loader-owned model source survives its post-upload verification. Mock
     /// and synthetic test states intentionally leave it absent.
     pub base_teacher_identity: Option<Arc<kiln_train::TeacherIdentityV1>>,
+    /// Loader-verified identity of every safetensors shard behind the resident
+    /// base model. Production startup sets this once; mock and synthetic test
+    /// states may leave it absent.
+    pub base_weight_shard_manifest: Option<Arc<BaseWeightShardManifest>>,
     pub backend: Arc<ModelBackend>,
     pub tokenizer: Arc<KilnTokenizer>,
     /// Directory where LoRA adapter weights are stored on disk.
@@ -2841,6 +2846,7 @@ impl AppState {
             model_config,
             model_path: None,
             base_teacher_identity: None,
+            base_weight_shard_manifest: None,
             backend: Arc::new(ModelBackend::Mock {
                 scheduler: Arc::new(Mutex::new(scheduler)),
                 engine,
@@ -3004,6 +3010,11 @@ impl AppState {
         serving_profile: crate::config::ServingProfileSetting,
     ) -> Self {
         let serving_policy = serving_profile.runtime_policy();
+        let base_weight_shard_manifest = runner
+            .weights
+            .base_weight_shard_manifest
+            .clone()
+            .map(Arc::new);
         let block_size = DEFAULT_BLOCK_SIZE;
         // §3.2 teacher registry — loaded from `adapter_dir/teachers.json`
         // if present. Clone-able Arc so the AppState field below can
@@ -3613,6 +3624,7 @@ impl AppState {
             model_config,
             model_path: None,
             base_teacher_identity,
+            base_weight_shard_manifest,
             backend: Arc::new(ModelBackend::Real {
                 runner,
                 backend_health,

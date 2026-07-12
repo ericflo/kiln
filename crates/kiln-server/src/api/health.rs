@@ -4,6 +4,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use kiln_core::config_hashes::ConfigHashes;
+use kiln_core::model_provenance::BaseWeightShardManifest;
 use kiln_scheduler::PrefixCacheStats;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
@@ -33,6 +34,7 @@ struct HealthResponse {
     default_thinking_budget_ms: Option<u64>,
     fold_reasoning_into_content: bool,
     config_hashes: ConfigHashes,
+    base_weight_identity: Option<BaseWeightIdentitySummary>,
     active_adapter: Option<String>,
     loaded_adapter: Option<String>,
     loaded_adapter_revision: Option<String>,
@@ -60,6 +62,27 @@ struct BackendRuntimeInfo {
     reason: Option<String>,
     restart_required: bool,
     external_yield_sync: Vec<kiln_model::ExternalYieldSyncStats>,
+}
+
+#[derive(Serialize)]
+struct BaseWeightIdentitySummary {
+    manifest_type: String,
+    aggregate_algorithm: String,
+    aggregate_sha256: String,
+    shard_count: usize,
+    total_size_bytes: u64,
+}
+
+impl From<&BaseWeightShardManifest> for BaseWeightIdentitySummary {
+    fn from(manifest: &BaseWeightShardManifest) -> Self {
+        Self {
+            manifest_type: manifest.manifest_type.clone(),
+            aggregate_algorithm: manifest.aggregate_algorithm.clone(),
+            aggregate_sha256: manifest.aggregate_sha256.clone(),
+            shard_count: manifest.shards.len(),
+            total_size_bytes: manifest.total_size_bytes,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -667,6 +690,10 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         default_thinking_budget_ms: state.default_thinking_budget_ms,
         fold_reasoning_into_content: state.fold_reasoning_into_content,
         config_hashes: state.config_hashes.clone(),
+        base_weight_identity: state
+            .base_weight_shard_manifest
+            .as_deref()
+            .map(BaseWeightIdentitySummary::from),
         active_adapter,
         loaded_adapter,
         loaded_adapter_revision,
@@ -1093,7 +1120,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_returns_ok() {
-        let state = make_test_state();
+        let mut state = make_test_state();
+        let shard_manifest = BaseWeightShardManifest::new(vec![
+            kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                "model.safetensors",
+                123,
+                [0xab; 32],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        state.base_weight_shard_manifest = Some(Arc::new(shard_manifest.clone()));
         let app = routes().with_state(state);
 
         let resp = app
@@ -1178,6 +1215,20 @@ mod tests {
         );
         assert!(json["config_hashes"]["chat_template_hash"].is_null());
         assert!(json["config_hashes"]["kiln_env_config_hash"].is_null());
+        assert_eq!(
+            json["base_weight_identity"]["manifest_type"],
+            "kiln.base-weight-shards.v1"
+        );
+        assert_eq!(
+            json["base_weight_identity"]["aggregate_sha256"],
+            shard_manifest.aggregate_sha256
+        );
+        assert_eq!(
+            json["base_weight_identity"]["aggregate_algorithm"],
+            "kiln.base-model-content.v1"
+        );
+        assert_eq!(json["base_weight_identity"]["shard_count"], 1);
+        assert_eq!(json["base_weight_identity"]["total_size_bytes"], 123);
         assert!(json["active_adapter"].is_null());
         assert!(json["loaded_adapter"].is_null());
         assert!(json["loaded_adapter_revision"].is_null());

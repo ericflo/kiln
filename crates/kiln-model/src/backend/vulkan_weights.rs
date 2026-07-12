@@ -473,6 +473,7 @@ mod tests {
         };
         Ok(GpuWeights {
             source_content_sha256: None,
+            base_weight_shard_manifest: None,
             embed_tokens: patterned_bf16(&[vocab, hidden], 18, device)?,
             embed_tokens_t: patterned_bf16(&[hidden, vocab], 19, device)?,
             lm_head_w8: None,

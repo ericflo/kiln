@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use kiln_core::config_hashes::ConfigHashes;
+use kiln_core::model_provenance::BaseWeightShardManifest;
 use kiln_scheduler::PrefixCacheStats;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -46,6 +47,7 @@ struct ModelDebugState {
     num_attention_heads: usize,
     num_kv_heads: usize,
     max_position_embeddings: usize,
+    base_weight_shard_manifest: Option<BaseWeightShardManifest>,
     backend_runtime: BackendRuntimeDebugState,
 }
 
@@ -298,6 +300,7 @@ fn model_debug_state(state: &AppState) -> ModelDebugState {
         num_attention_heads: state.model_config.num_attention_heads,
         num_kv_heads: state.model_config.num_kv_heads,
         max_position_embeddings: state.model_config.max_position_embeddings,
+        base_weight_shard_manifest: state.base_weight_shard_manifest.as_deref().cloned(),
         backend_runtime,
     }
 }
@@ -679,6 +682,16 @@ mod tests {
         state.http_send_buffer_preflight_actual_bytes = Some(8192);
         state.http_send_buffer_preflight_effective_bytes = Some(4096);
         state.default_thinking_enabled = Some(false);
+        let shard_manifest = BaseWeightShardManifest::new(vec![
+            kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                "model.safetensors",
+                456,
+                [0xcd; 32],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        state.base_weight_shard_manifest = Some(Arc::new(shard_manifest.clone()));
         *state.active_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
         *state.loaded_adapter.write().unwrap() = Some(crate::state::LoadedAdapterIdentity {
             name: "eval-adapter".to_string(),
@@ -718,6 +731,18 @@ mod tests {
         assert_eq!(json["model"]["path"], "/models/Qwen3.5-4B");
         assert_eq!(json["model"]["served_model_id"], "Qwen3.5-4B");
         assert_eq!(json["model"]["defaults_profile"]["name"], "Qwen3.5-4B");
+        assert_eq!(
+            json["model"]["base_weight_shard_manifest"]["aggregate_sha256"],
+            shard_manifest.aggregate_sha256
+        );
+        assert_eq!(
+            json["model"]["base_weight_shard_manifest"]["shards"][0]["filename"],
+            "model.safetensors"
+        );
+        assert_eq!(
+            json["model"]["base_weight_shard_manifest"]["shards"][0]["size_bytes"],
+            456
+        );
         assert_eq!(json["adapters"]["active_adapter"], "eval-adapter");
         assert_eq!(json["adapters"]["loaded_adapter"], "eval-adapter");
         assert_eq!(json["adapters"]["loaded_adapter_revision"], "a".repeat(64));

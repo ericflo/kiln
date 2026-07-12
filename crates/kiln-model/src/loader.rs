@@ -182,7 +182,7 @@ fn load_model_dense(
     // Memory-map all shards and parse safetensors headers.
     let loaded_shards = mmap_shards(&shards)?;
     let source_content_guard =
-        loaded_shard_content_guard(&loaded_shards, Arc::clone(&snapshot_lease));
+        loaded_shard_content_guard(&loaded_shards, Arc::clone(&snapshot_lease))?;
     let source_content_sha256 = source_content_guard.initial_sha256().to_string();
     let parsed: Vec<SafeTensors<'_>> = loaded_shards
         .iter()
@@ -301,7 +301,7 @@ fn load_model_gptq(
     );
 
     let loaded_shards = mmap_shards(&shards)?;
-    let source_content_guard = loaded_shard_content_guard(&loaded_shards, snapshot_lease);
+    let source_content_guard = loaded_shard_content_guard(&loaded_shards, snapshot_lease)?;
     let source_content_sha256 = source_content_guard.initial_sha256().to_string();
     let parsed: Vec<SafeTensors<'_>> = loaded_shards
         .iter()
@@ -950,14 +950,30 @@ fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<LoadedShard>> {
 fn loaded_shard_content_guard(
     shards: &[LoadedShard],
     snapshot_lease: Arc<ModelSnapshotLease>,
-) -> SourceContentGuard {
-    SourceContentGuard::new(
-        shards
-            .iter()
-            .map(|shard| (Arc::clone(&shard.file), Arc::clone(&shard.mmap)))
-            .collect(),
-        snapshot_lease,
-    )
+) -> Result<SourceContentGuard> {
+    let retained = shards
+        .iter()
+        .map(|shard| {
+            let filename = shard
+                .meta
+                .path
+                .file_name()
+                .and_then(|filename| filename.to_str())
+                .with_context(|| {
+                    format!(
+                        "model shard must have a portable UTF-8 filename: {}",
+                        shard.meta.path.display()
+                    )
+                })?;
+            validate_shard_filename(filename)?;
+            Ok((
+                filename.to_string(),
+                Arc::clone(&shard.file),
+                Arc::clone(&shard.mmap),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    SourceContentGuard::new(retained, snapshot_lease)
 }
 
 #[cfg(test)]
@@ -965,6 +981,7 @@ fn loaded_shard_content_sha256(shards: &[LoadedShard]) -> String {
     let directory = tempfile::tempdir().unwrap();
     let lease = Arc::new(ModelSnapshotLease::new(directory));
     loaded_shard_content_guard(shards, lease)
+        .unwrap()
         .initial_sha256()
         .to_string()
 }
@@ -1904,14 +1921,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = dir.path().join("a.safetensors");
         let second = dir.path().join("b.safetensors");
+        let duplicate = dir.path().join("duplicate.safetensors");
         let changed = dir.path().join("changed.safetensors");
         fs::write(&first, b"first shard").unwrap();
         fs::write(&second, b"second shard").unwrap();
+        fs::write(&duplicate, b"second shard").unwrap();
         fs::write(&changed, b"second shard changed").unwrap();
 
         let base = mmap_shards(&[first.clone(), second.clone()]).unwrap();
         let changed_bytes = mmap_shards(&[first.clone(), changed]).unwrap();
-        let duplicated = mmap_shards(&[first, second.clone(), second]).unwrap();
+        let duplicated = mmap_shards(&[first, second, duplicate]).unwrap();
 
         let base_revision = loaded_shard_content_sha256(&base);
         assert_ne!(base_revision, loaded_shard_content_sha256(&changed_bytes));
@@ -2098,9 +2117,22 @@ mod tests {
 
     #[test]
     fn source_content_guard_accepts_unchanged_loaded_shards() {
-        let (_dir, _source, weights) = load_tiny_source_guard_fixture();
+        let (_dir, source, weights) = load_tiny_source_guard_fixture();
 
         weights.verify_source_content_unchanged().unwrap();
+        let manifest = weights.base_weight_shard_manifest().unwrap();
+        assert_eq!(
+            manifest.aggregate_sha256,
+            weights.source_content_sha256.as_ref().unwrap().as_str()
+        );
+        assert_eq!(manifest.shards.len(), 1);
+        assert_eq!(manifest.shards[0].filename, "model.safetensors");
+        let source_bytes = fs::read(source).unwrap();
+        assert_eq!(manifest.shards[0].size_bytes, source_bytes.len() as u64);
+        assert_eq!(
+            manifest.shards[0].sha256,
+            kiln_core::config_hashes::sha256_bytes(&source_bytes)
+        );
     }
 
     #[test]
@@ -2246,6 +2278,19 @@ mod tests {
 
         let weights = load_model(dir.path(), &tiny_model_config()).unwrap();
         weights.verify_source_content_unchanged().unwrap();
+        let manifest = weights.base_weight_shard_manifest().unwrap();
+        assert_eq!(manifest.shards.len(), 2);
+        assert_eq!(
+            manifest
+                .shards
+                .iter()
+                .map(|shard| shard.filename.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "model-00001-of-00002.safetensors",
+                "model-00002-of-00002.safetensors"
+            ]
+        );
 
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -2285,7 +2330,17 @@ mod tests {
         snapshot_file.seek(SeekFrom::End(-1)).unwrap();
         snapshot_file.write_all(&[0xa5]).unwrap();
         snapshot_file.sync_all().unwrap();
-        assert!(weights.verify_source_content_unchanged().is_err());
+        let error = weights.verify_source_content_unchanged().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("model-00002-of-00002.safetensors"),
+            "{error:#}"
+        );
+        assert!(
+            error.to_string().contains("changed after load"),
+            "{error:#}"
+        );
     }
 
     #[test]

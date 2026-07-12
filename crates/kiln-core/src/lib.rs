@@ -3,6 +3,7 @@ pub mod config;
 pub mod config_hashes;
 pub mod device_buffer;
 pub mod env_flag;
+pub mod model_provenance;
 pub mod prefix_cache;
 pub mod request;
 pub mod sampling;

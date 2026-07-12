@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use kiln_core::model_provenance::{BaseWeightShardIdentity, BaseWeightShardManifest};
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 
@@ -524,7 +525,7 @@ fn make_snapshot_tree_removable(path: &Path) {
 pub(crate) struct SourceContentGuard {
     shards: Vec<SourceContentShard>,
     initial_shard_count: usize,
-    initial_sha256: String,
+    initial_manifest: BaseWeightShardManifest,
     /// Declared after retained files so Windows closes mappings/handles before
     /// `TempDir` attempts recursive cleanup.
     _snapshot_lease: Arc<ModelSnapshotLease>,
@@ -532,38 +533,54 @@ pub(crate) struct SourceContentGuard {
 
 #[derive(Debug)]
 struct SourceContentShard {
+    identity: BaseWeightShardIdentity,
+    expected_digest: [u8; 32],
     file: Arc<File>,
-    mmap: Arc<Mmap>,
+    _mmap: Arc<Mmap>,
 }
 
 impl SourceContentGuard {
     pub(crate) fn new(
-        shards: Vec<(Arc<File>, Arc<Mmap>)>,
+        shards: Vec<(String, Arc<File>, Arc<Mmap>)>,
         snapshot_lease: Arc<ModelSnapshotLease>,
-    ) -> Self {
+    ) -> Result<Self> {
         let shards = shards
             .into_iter()
-            .map(|(file, mmap)| SourceContentShard { file, mmap })
-            .collect::<Vec<_>>();
-        let initial_shard_count = shards.len();
-        let records = shards
-            .iter()
-            .map(|shard| {
-                let digest: [u8; 32] = Sha256::digest(&shard.mmap[..]).into();
-                (digest, shard.mmap.len() as u64)
+            .map(|(filename, file, mmap)| {
+                let expected_digest: [u8; 32] = Sha256::digest(&mmap[..]).into();
+                let identity = BaseWeightShardIdentity::from_digest(
+                    filename,
+                    mmap.len() as u64,
+                    expected_digest,
+                )
+                .context("construct base-weight shard identity")?;
+                Ok(SourceContentShard {
+                    identity,
+                    expected_digest,
+                    file,
+                    _mmap: mmap,
+                })
             })
-            .collect();
-        let initial_sha256 = source_content_sha256_from_records(records);
-        Self {
+            .collect::<Result<Vec<_>>>()?;
+        let initial_shard_count = shards.len();
+        let initial_manifest = BaseWeightShardManifest::new(
+            shards.iter().map(|shard| shard.identity.clone()).collect(),
+        )
+        .context("construct base-weight shard manifest")?;
+        Ok(Self {
             shards,
             initial_shard_count,
-            initial_sha256,
+            initial_manifest,
             _snapshot_lease: snapshot_lease,
-        }
+        })
     }
 
     pub(crate) fn initial_sha256(&self) -> &str {
-        &self.initial_sha256
+        &self.initial_manifest.aggregate_sha256
+    }
+
+    pub(crate) fn initial_manifest(&self) -> &BaseWeightShardManifest {
+        &self.initial_manifest
     }
 
     #[cfg(test)]
@@ -580,41 +597,44 @@ impl SourceContentGuard {
             );
         }
 
-        let mut records = Vec::with_capacity(self.shards.len());
-        for (index, shard) in self.shards.iter().enumerate() {
-            let expected_len = shard.mmap.len() as u64;
+        for shard in &self.shards {
+            let filename = &shard.identity.filename;
+            let expected_len = shard.identity.size_bytes;
             let before_len = shard
                 .file
                 .metadata()
-                .with_context(|| format!("failed to stat retained model source shard {index}"))?
+                .with_context(|| format!("failed to stat retained model source shard {filename}"))?
                 .len();
             if before_len != expected_len {
                 bail!(
-                    "model source shard {index} length changed after load: expected {expected_len} bytes, observed {before_len}"
+                    "model source shard {filename} length changed after load: expected {expected_len} bytes, observed {before_len}"
                 );
             }
 
             let digest = hash_open_file_exact(&shard.file, expected_len)
-                .with_context(|| format!("failed to verify model source shard {index}"))?;
+                .with_context(|| format!("failed to verify model source shard {filename}"))?;
             let after_len = shard
                 .file
                 .metadata()
-                .with_context(|| format!("failed to restat retained model source shard {index}"))?
+                .with_context(|| {
+                    format!("failed to restat retained model source shard {filename}")
+                })?
                 .len();
             if after_len != expected_len {
                 bail!(
-                    "model source shard {index} length changed during verification: expected {expected_len} bytes, observed {after_len}"
+                    "model source shard {filename} length changed during verification: expected {expected_len} bytes, observed {after_len}"
                 );
             }
-            records.push((digest, expected_len));
-        }
-
-        let observed = source_content_sha256_from_records(records);
-        if observed != self.initial_sha256 {
-            bail!(
-                "model source content changed after load: expected {}, observed {observed}",
-                self.initial_sha256
-            );
+            if digest != shard.expected_digest {
+                let observed =
+                    BaseWeightShardIdentity::from_digest(filename.clone(), expected_len, digest)
+                        .context("construct observed base-weight shard identity")?;
+                bail!(
+                    "model source shard {filename} changed after load: expected {}, observed {}",
+                    shard.identity.sha256,
+                    observed.sha256
+                );
+            }
         }
         Ok(())
     }
@@ -668,26 +688,6 @@ fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize
     clone.read(buffer)
 }
 
-fn source_content_sha256_from_records(mut records: Vec<([u8; 32], u64)>) -> String {
-    records.sort_unstable();
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"kiln.base-model-content.v1\0");
-    hasher.update((records.len() as u64).to_le_bytes());
-    for (digest, byte_len) in records {
-        hasher.update(byte_len.to_le_bytes());
-        hasher.update(digest);
-    }
-    let digest = hasher.finalize();
-    format!(
-        "sha256:{}",
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    )
-}
-
 /// Complete Qwen3.5-4B language model weights.
 ///
 /// Note: lm_head is tied to embed_tokens (shared weight matrix),
@@ -718,6 +718,15 @@ pub struct ModelWeights {
 }
 
 impl ModelWeights {
+    /// Canonical identity of every safetensors shard read by the production
+    /// loader. Synthetic weights without a loader-owned source guard return
+    /// `None`.
+    pub fn base_weight_shard_manifest(&self) -> Option<&BaseWeightShardManifest> {
+        self.source_content_guard
+            .as_ref()
+            .map(SourceContentGuard::initial_manifest)
+    }
+
     /// Retain an explicit cleanup handle for server shutdown. The handle does
     /// not keep mapped weights alive and must only be invoked after model work
     /// has drained.
@@ -746,6 +755,10 @@ impl ModelWeights {
                 self.source_content_sha256.as_deref().unwrap_or("missing")
             );
         }
+        guard
+            .initial_manifest()
+            .validate()
+            .context("invalid loader-owned base-weight shard manifest")?;
         guard.verify_unchanged()
     }
 
