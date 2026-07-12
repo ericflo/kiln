@@ -38,6 +38,7 @@ pub mod diagnostics;
 // `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda` (the
 // SFT loss root) and `opd_tape_shim::try_tape_opd_scalar_mean_cuda` (OPD).
 pub mod grpo_tape_shim;
+pub mod hf_grpo_interop;
 pub mod hf_interop;
 pub mod hf_interop_bundle;
 pub mod logit_cache;
@@ -69,6 +70,11 @@ pub mod trajectory;
 pub mod trajectory_inspect;
 pub mod trajectory_mask;
 
+pub use hf_grpo_interop::{
+    HF_TRL_GRPO_CORPUS_IDENTITY_V1, HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP,
+    HF_TRL_GRPO_MAX_DATASET_BYTES, HF_TRL_GRPO_MAX_GROUPS, HF_TRL_GRPO_MAX_ROW_BYTES,
+    HfTrlGrpoCorpusSummary, ordered_grpo_corpus_sha256,
+};
 pub use hf_interop::{
     HF_TRL_ADAPTER_CONFIG_FILENAME, HF_TRL_ADAPTER_MODEL_FILENAME, HF_TRL_CHAT_TEMPLATE_FILENAME,
     HF_TRL_DATASET_FILENAME, HF_TRL_ENVIRONMENT_LOCK_FILENAME, HF_TRL_EXECUTED_SCRIPT_FILENAME,

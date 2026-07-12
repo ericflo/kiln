@@ -509,12 +509,21 @@ impl HfTrlExportManifestV1 {
     pub fn verify_files(&self, root: &Path) -> Result<()> {
         self.validate()?;
         self.model.verify_files(root)?;
-        self.data.verify_files(root, self.task)?;
-        self.reference_script.verify(root)?;
-        self.environment_lock.verify(root)?;
         if let Some(adapter) = self.input_adapter.as_ref() {
             adapter.verify_files(root)?;
         }
+        self.data.verify_files(root, self.task)?;
+        if self.task == HfTrlTask::Grpo {
+            crate::hf_grpo_interop::verify_hf_trl_grpo_corpus(
+                root,
+                &self.model,
+                &self.data,
+                self.input_adapter.as_ref(),
+            )
+            .context("verify HF/TRL GRPO corpus")?;
+        }
+        self.reference_script.verify(root)?;
+        self.environment_lock.verify(root)?;
         Ok(())
     }
 
@@ -1294,13 +1303,27 @@ mod tests {
     }
 
     fn export_bundle(root: &Path) -> HfTrlExportManifestV1 {
+        let tokenizer = kiln_core::tokenizer::KilnTokenizer::from_bytes(
+            br#"{
+                "version": "1.0",
+                "model": {
+                    "type": "WordLevel",
+                    "vocab": {"[UNK]": 0, "a": 1, "b": 2},
+                    "unk_token": "[UNK]"
+                },
+                "pre_tokenizer": {"type": "Whitespace"}
+            }"#,
+        )
+        .unwrap()
+        .with_chat_template(
+            "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
+        );
+        let tokenizer_bytes = tokenizer.tokenizer_config_json().unwrap();
+        let chat_template = tokenizer.chat_template().unwrap().as_bytes();
         for (path, bytes) in [
             (HF_TRL_MODEL_CONFIG_FILENAME, b"{}".as_slice()),
-            (
-                HF_TRL_TOKENIZER_FILENAME,
-                b"{\"version\":\"1.0\"}".as_slice(),
-            ),
-            (HF_TRL_CHAT_TEMPLATE_FILENAME, b"{{ messages }}".as_slice()),
+            (HF_TRL_TOKENIZER_FILENAME, tokenizer_bytes.as_bytes()),
+            (HF_TRL_CHAT_TEMPLATE_FILENAME, chat_template),
             (
                 HF_TRL_NATIVE_TRAINING_TEMPLATE_FILENAME,
                 b"{{ messages }}".as_slice(),
@@ -1317,10 +1340,6 @@ mod tests {
                 HF_TRL_ENVIRONMENT_LOCK_FILENAME,
                 b"transformers==5.13.1\ntrl==1.8.0\n".as_slice(),
             ),
-            (
-                HF_TRL_DATASET_FILENAME,
-                b"{\"messages\":[],\"completions\":[]}\n".as_slice(),
-            ),
         ] {
             write(root, path, bytes);
         }
@@ -1336,7 +1355,7 @@ mod tests {
         let model = HfTrlModelIdentity {
             served_model_id: "tiny-model".to_string(),
             base_weight_shard_manifest,
-            tokenizer_vocab_sha256: crate::train_receipt::sha256_bytes(b"vocab"),
+            tokenizer_vocab_sha256: tokenizer.vocab_identity_sha256(),
             model_config: artifact(root, HF_TRL_MODEL_CONFIG_FILENAME),
             tokenizer: artifact(root, HF_TRL_TOKENIZER_FILENAME),
             chat_template: artifact(root, HF_TRL_CHAT_TEMPLATE_FILENAME),
@@ -1344,11 +1363,78 @@ mod tests {
             trl_training_chat_template: artifact(root, HF_TRL_TRAINING_TEMPLATE_FILENAME),
         };
         let source_execution_provenance = source_execution(&model);
+        let messages = vec![crate::ChatMessage::new("user", "a")];
+        let prompt_text = tokenizer.apply_chat_template(&messages).unwrap();
+        let prompt_ids = tokenizer.encode(&prompt_text).unwrap();
+        let completion_token = tokenizer.encode("b").unwrap()[0];
+        let prompt_sha256 = crate::rollout_prompt_messages_sha256(&messages).unwrap();
+        let behavior_policy = crate::RolloutBehaviorPolicyIdentityV1 {
+            served_model_id: model.served_model_id.clone(),
+            base_model_sha256: model.base_weight_shard_manifest.aggregate_sha256.clone(),
+            adapter: None,
+            inference_config_sha256: crate::train_receipt::sha256_bytes(b"inference-config"),
+            implementation: "kiln-test/cpu".to_string(),
+        };
+        let rollout_tokenizer = crate::RolloutTokenizerIdentityV1 {
+            vocab_sha256: model.tokenizer_vocab_sha256.clone(),
+            config_sha256: model.tokenizer.sha256.clone(),
+            chat_template_sha256: model.chat_template.sha256.clone(),
+        };
+        let completions = [("b", 0.0, 7u64), ("b", 1.0, 8u64)]
+            .into_iter()
+            .map(|(text, reward, seed)| {
+                let mut rollout = crate::ScoredRollout::legacy(text.to_string(), reward);
+                let payload_sha256 = crate::scored_rollout_payload_sha256(&rollout).unwrap();
+                let mut input_token_ids = prompt_ids.clone();
+                input_token_ids.push(completion_token);
+                let provenance = crate::RolloutProvenanceV1::new(
+                    input_token_ids,
+                    prompt_ids.len(),
+                    prompt_sha256.clone(),
+                    payload_sha256,
+                    vec![crate::RolloutActionTokenV1::sampled(
+                        prompt_ids.len(),
+                        completion_token,
+                        -0.5,
+                    )],
+                    behavior_policy.clone(),
+                    rollout_tokenizer.clone(),
+                    crate::RolloutSamplingConfigV1 {
+                        temperature: 0.7,
+                        top_p: 0.95,
+                        top_k: 20,
+                        min_p: 0.0,
+                        max_tokens: 1,
+                        repetition_penalty: 1.0,
+                        presence_penalty: 0.0,
+                        frequency_penalty: 0.0,
+                        stop: Vec::new(),
+                        thinking_budget: None,
+                    },
+                    seed,
+                    "cpu",
+                )
+                .unwrap();
+                rollout.provenance = Some(provenance);
+                rollout
+            })
+            .collect();
+        let group = crate::GrpoGroup {
+            messages,
+            completions,
+        };
+        let canonical_row = serde_json::to_vec(&group).unwrap();
+        let mut dataset_bytes = canonical_row.clone();
+        dataset_bytes.push(b'\n');
+        write(root, HF_TRL_DATASET_FILENAME, &dataset_bytes);
         let data = HfTrlDataExport {
             source_name: "rollouts".to_string(),
             format: HfTrlDatasetFormat::GrpoGroupsJsonl,
             row_count: 1,
-            ordered_corpus_sha256: crate::train_receipt::sha256_bytes(b"ordered-rollouts"),
+            ordered_corpus_sha256: crate::hf_grpo_interop::ordered_grpo_corpus_sha256([
+                canonical_row.as_slice(),
+            ])
+            .unwrap(),
             dataset: artifact(root, HF_TRL_DATASET_FILENAME),
             sft_selection: None,
             rollout_provenance_schema: Some(ROLLOUT_PROVENANCE_SCHEMA_V1.to_string()),
@@ -1514,6 +1600,234 @@ mod tests {
         write(dir.path(), HF_TRL_ADAPTER_MODEL_FILENAME, b"tampered");
         let error = result.verify_files(dir.path()).unwrap_err();
         assert!(error.to_string().contains("differs"), "{error:#}");
+    }
+
+    fn rewrite_grpo_dataset(root: &Path, export: &mut HfTrlExportManifestV1, bytes: &[u8]) {
+        write(root, HF_TRL_DATASET_FILENAME, bytes);
+        export.data.dataset = artifact(root, HF_TRL_DATASET_FILENAME);
+        export.export_sha256 = export.compute_sha256().unwrap();
+    }
+
+    fn read_grpo_group(root: &Path) -> crate::GrpoGroup {
+        let bytes = std::fs::read(root.join(HF_TRL_DATASET_FILENAME)).unwrap();
+        serde_json::from_slice(bytes.strip_suffix(b"\n").unwrap()).unwrap()
+    }
+
+    fn canonical_grpo_dataset(group: &crate::GrpoGroup) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec(group).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    #[test]
+    fn grpo_corpus_replays_and_reports_exact_provenance_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let export = export_bundle(dir.path());
+        let summary = crate::hf_grpo_interop::verify_hf_trl_grpo_corpus(
+            dir.path(),
+            &export.model,
+            &export.data,
+            export.input_adapter.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(summary.row_count, 1);
+        assert_eq!(summary.completion_count, 2);
+        assert_eq!(summary.sampled_action_tokens, 2);
+        assert_eq!(summary.forced_action_tokens, 0);
+        assert!(summary.max_sequence_tokens >= 2);
+        assert_eq!(
+            summary.ordered_corpus_sha256,
+            export.data.ordered_corpus_sha256
+        );
+        assert_eq!(summary.behavior_policy.served_model_id, "tiny-model");
+    }
+
+    #[test]
+    fn grpo_corpus_rejects_noncanonical_or_unframed_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut export = export_bundle(dir.path());
+        let mut value = serde_json::to_value(read_grpo_group(dir.path())).unwrap();
+        value["ignored"] = json!(true);
+        let mut unknown = serde_json::to_vec(&value).unwrap();
+        unknown.push(b'\n');
+        rewrite_grpo_dataset(dir.path(), &mut export, &unknown);
+        let error = export.verify_files(dir.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("not canonical"), "{error:#}");
+
+        let mut export = export_bundle(dir.path());
+        let mut no_lf = std::fs::read(dir.path().join(HF_TRL_DATASET_FILENAME)).unwrap();
+        no_lf.pop();
+        rewrite_grpo_dataset(dir.path(), &mut export, &no_lf);
+        let error = export.verify_files(dir.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("final row"), "{error:#}");
+    }
+
+    #[test]
+    fn grpo_corpus_rejects_missing_or_mixed_behavior_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut export = export_bundle(dir.path());
+        let mut group = read_grpo_group(dir.path());
+        group.completions[0].provenance = None;
+        rewrite_grpo_dataset(dir.path(), &mut export, &canonical_grpo_dataset(&group));
+        let error = export.verify_files(dir.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("missing exact rollout provenance"),
+            "{error:#}"
+        );
+
+        let mut export = export_bundle(dir.path());
+        let mut group = read_grpo_group(dir.path());
+        group.completions[1]
+            .provenance
+            .as_mut()
+            .unwrap()
+            .behavior_policy
+            .inference_config_sha256 = crate::train_receipt::sha256_bytes(b"different");
+        rewrite_grpo_dataset(dir.path(), &mut export, &canonical_grpo_dataset(&group));
+        let error = export.verify_files(dir.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("mixes behavior-policy identities"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn grpo_corpus_rejects_model_tokenizer_and_adapter_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut export = export_bundle(dir.path());
+        let mut group = read_grpo_group(dir.path());
+        group.completions[0]
+            .provenance
+            .as_mut()
+            .unwrap()
+            .tokenizer
+            .config_sha256 = crate::train_receipt::sha256_bytes(b"different-tokenizer");
+        rewrite_grpo_dataset(dir.path(), &mut export, &canonical_grpo_dataset(&group));
+        let error = export.verify_files(dir.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("tokenizer identity differs"),
+            "{error:#}"
+        );
+
+        let mut export = export_bundle(dir.path());
+        let mut group = read_grpo_group(dir.path());
+        group.completions[0]
+            .provenance
+            .as_mut()
+            .unwrap()
+            .behavior_policy
+            .base_model_sha256 = crate::train_receipt::sha256_bytes(b"different-base");
+        rewrite_grpo_dataset(dir.path(), &mut export, &canonical_grpo_dataset(&group));
+        let error = export.verify_files(dir.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("base model differs"),
+            "{error:#}"
+        );
+
+        let mut export = export_bundle(dir.path());
+        let mut group = read_grpo_group(dir.path());
+        group.completions[0]
+            .provenance
+            .as_mut()
+            .unwrap()
+            .behavior_policy
+            .adapter = Some(crate::RolloutAdapterIdentityV1 {
+            name: "unexpected".to_string(),
+            content_sha256: crate::train_receipt::sha256_bytes(b"unexpected-adapter"),
+        });
+        rewrite_grpo_dataset(dir.path(), &mut export, &canonical_grpo_dataset(&group));
+        let error = export.verify_files(dir.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("behavior adapter differs"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn grpo_corpus_binds_the_exact_exported_input_adapter_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut export = export_bundle(dir.path());
+        write(
+            dir.path(),
+            "input_adapter/adapter_config.json",
+            br#"{"peft_type":"LORA","r":8}"#,
+        );
+        write(
+            dir.path(),
+            "input_adapter/adapter_model.safetensors",
+            b"adapter-weights",
+        );
+        let config = artifact(dir.path(), "input_adapter/adapter_config.json");
+        let model = artifact(dir.path(), "input_adapter/adapter_model.safetensors");
+        let identity = kiln_model::lora_loader::LoraSourceIdentity::from_verified_peft_digests(
+            model.size_bytes,
+            model.sha256.strip_prefix("sha256:").unwrap(),
+            config.sha256.strip_prefix("sha256:").unwrap(),
+        )
+        .unwrap();
+        let expected_adapter = crate::RolloutAdapterIdentityV1 {
+            name: "behavior-v1".to_string(),
+            content_sha256: format!("sha256:{}", identity.content_revision()),
+        };
+        export.input_adapter = Some(HfTrlInputAdapter {
+            name: expected_adapter.name.clone(),
+            config,
+            model,
+            kiln_manifest: None,
+        });
+        let mut group = read_grpo_group(dir.path());
+        for completion in &mut group.completions {
+            completion
+                .provenance
+                .as_mut()
+                .unwrap()
+                .behavior_policy
+                .adapter = Some(expected_adapter.clone());
+        }
+        let canonical = serde_json::to_vec(&group).unwrap();
+        export.data.ordered_corpus_sha256 =
+            crate::ordered_grpo_corpus_sha256([canonical.as_slice()]).unwrap();
+        let mut dataset = canonical;
+        dataset.push(b'\n');
+        rewrite_grpo_dataset(dir.path(), &mut export, &dataset);
+        export.verify_files(dir.path()).unwrap();
+
+        let mut group = read_grpo_group(dir.path());
+        group.completions[0]
+            .provenance
+            .as_mut()
+            .unwrap()
+            .behavior_policy
+            .adapter
+            .as_mut()
+            .unwrap()
+            .content_sha256 = crate::train_receipt::sha256_bytes(b"different-revision");
+        rewrite_grpo_dataset(dir.path(), &mut export, &canonical_grpo_dataset(&group));
+        let error = export.verify_files(dir.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("behavior adapter differs"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn grpo_corpus_rejects_reward_or_count_drift_after_manifest_rehash() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut export = export_bundle(dir.path());
+        let mut group = read_grpo_group(dir.path());
+        group.completions[0].reward = 0.25;
+        rewrite_grpo_dataset(dir.path(), &mut export, &canonical_grpo_dataset(&group));
+        let error = export.verify_files(dir.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("ordered corpus identity differs"),
+            "{error:#}"
+        );
+
+        let mut export = export_bundle(dir.path());
+        export.data.row_count = 2;
+        export.export_sha256 = export.compute_sha256().unwrap();
+        let error = export.verify_files(dir.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("row count"), "{error:#}");
     }
 
     #[test]

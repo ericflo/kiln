@@ -52,6 +52,31 @@ export manifest are cross-checked against the complete `sft_ingestion.json`
 receipt, including its source, row counts, invalid-row policy, ordered corpus
 digest, and internally validated per-row identities.
 
+### Strict GRPO corpus foundation
+
+A GRPO manifest is not accepted merely because it names
+`kiln.rollout-provenance.v1`. Its `train.jsonl` must contain one canonical
+compact JSON group per LF-terminated line, with no blank rows, aliases,
+unknown or duplicate fields, alternate whitespace, or missing final newline.
+The verifier streams at most 64 GiB, permits at most 10 million groups and 256
+MiB per row, and requires 2 to 1024 completions per group. The separate
+`kiln.hf-trl-grpo-corpus.v1` digest length-frames every canonical row in order;
+the dataset file identity also binds the exact newline bytes.
+
+Every completion must carry validated exact rollout provenance and a finite
+reward. The verifier recomputes prompt and scored-payload identities, requires
+the complete served-model and base-shard identity, binds either the base model
+or the exact exported input-adapter content revision, and rejects mixed
+behavior-policy identities. It reconstructs the exported tokenizer and
+inference template, then replays each group through Kiln's production
+tokenization and action/environment-mask path. Tokenizer bytes, vocabulary,
+template invocation, prompt boundary, complete token sequence, sampled versus
+forced action positions, and sampled behavior log-probabilities must agree.
+
+This is verifier foundation for the forthcoming GRPO bundle writer and pinned
+runner. There is no public GRPO export route or supported external GRPO command
+yet.
+
 ## Template Identities
 
 The three template artifacts are intentionally distinct:
