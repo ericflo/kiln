@@ -284,12 +284,23 @@ struct MemoryGovernorRuntimeInfo {
     automatic_monitor_enabled: bool,
     source: &'static str,
     disabled_by_serving_profile: bool,
+    automatic_attempts: u64,
+    automatic_successful_attempts: u64,
+    automatic_zero_yield_attempts: u64,
+    automatic_suppressed_attempts: u64,
+    automatic_reclaimed_bytes: u64,
+    automatic_last_target_bytes: u64,
+    automatic_last_reclaimed_bytes: u64,
+    automatic_last_duration_us: u64,
+    automatic_retry_after_ms: u64,
+    automatic_zero_yield_streak: u64,
 }
 
 fn memory_governor_runtime_info(policy: ServingRuntimePolicy) -> MemoryGovernorRuntimeInfo {
     let governor = kiln_memory::MemoryGovernor::global();
     let enabled = governor.monitor_started();
     let requested_reclaim_mode = governor.config().reclaim_mode.as_str();
+    let automatic = governor.automatic_reclaim_stats();
     MemoryGovernorRuntimeInfo {
         reclaim_mode: if policy.allocator_reclaim {
             requested_reclaim_mode
@@ -304,6 +315,16 @@ fn memory_governor_runtime_info(policy: ServingRuntimePolicy) -> MemoryGovernorR
             "default"
         },
         disabled_by_serving_profile: !policy.allocator_reclaim,
+        automatic_attempts: automatic.attempts,
+        automatic_successful_attempts: automatic.successful_attempts,
+        automatic_zero_yield_attempts: automatic.zero_yield_attempts,
+        automatic_suppressed_attempts: automatic.suppressed_attempts,
+        automatic_reclaimed_bytes: automatic.reclaimed_bytes,
+        automatic_last_target_bytes: automatic.last_target_bytes,
+        automatic_last_reclaimed_bytes: automatic.last_reclaimed_bytes,
+        automatic_last_duration_us: automatic.last_duration_us,
+        automatic_retry_after_ms: automatic.retry_after_ms,
+        automatic_zero_yield_streak: automatic.zero_yield_streak,
     }
 }
 
@@ -1402,6 +1423,23 @@ mod tests {
             json["decode_runtime"]["memory_governor"]["disabled_by_serving_profile"],
             true
         );
+        for counter in [
+            "automatic_attempts",
+            "automatic_successful_attempts",
+            "automatic_zero_yield_attempts",
+            "automatic_suppressed_attempts",
+            "automatic_reclaimed_bytes",
+            "automatic_last_target_bytes",
+            "automatic_last_reclaimed_bytes",
+            "automatic_last_duration_us",
+            "automatic_retry_after_ms",
+            "automatic_zero_yield_streak",
+        ] {
+            assert_eq!(
+                json["decode_runtime"]["memory_governor"][counter], 0,
+                "unexpected {counter}"
+            );
+        }
         assert!(json["training"].is_object());
         assert_eq!(json["training"]["queued"], 0);
         assert!(json["training"]["active_job"].is_null());

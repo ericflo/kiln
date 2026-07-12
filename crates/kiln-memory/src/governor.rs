@@ -100,6 +100,100 @@ impl MemoryPressure {
     }
 }
 
+const AUTOMATIC_RECLAIM_MIN_BACKOFF: Duration = Duration::from_secs(2);
+const AUTOMATIC_RECLAIM_SUCCESS_COOLDOWN: Duration = Duration::from_secs(8);
+const AUTOMATIC_RECLAIM_MAX_BACKOFF: Duration = Duration::from_secs(128);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AutomaticReclaimScheduleUpdate {
+    retry_after: Duration,
+    zero_yield_streak: u32,
+    report_zero_yield: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutomaticReclaimDecision {
+    Idle,
+    BackingOff,
+    Attempt,
+}
+
+/// Per-pressure-episode retry state for the automatic monitor. Tight or
+/// Critical pressure arms an episode; Moderate remains armed so reclaim does
+/// not chatter at the trigger threshold, and Comfortable is the sole reset.
+#[derive(Debug)]
+struct AutomaticReclaimSchedule {
+    armed: bool,
+    next_attempt_at: Option<Instant>,
+    zero_yield_backoff: Duration,
+    zero_yield_streak: u32,
+}
+
+impl AutomaticReclaimSchedule {
+    fn new() -> Self {
+        Self {
+            armed: false,
+            next_attempt_at: None,
+            zero_yield_backoff: AUTOMATIC_RECLAIM_MIN_BACKOFF,
+            zero_yield_streak: 0,
+        }
+    }
+
+    fn decision(&mut self, pressure: MemoryPressure, now: Instant) -> AutomaticReclaimDecision {
+        if pressure == MemoryPressure::Comfortable {
+            self.reset();
+            return AutomaticReclaimDecision::Idle;
+        }
+        if !self.armed {
+            if !pressure.should_reclaim() {
+                return AutomaticReclaimDecision::Idle;
+            }
+            self.armed = true;
+        }
+        if self
+            .next_attempt_at
+            .is_some_and(|next_attempt_at| now < next_attempt_at)
+        {
+            AutomaticReclaimDecision::BackingOff
+        } else {
+            AutomaticReclaimDecision::Attempt
+        }
+    }
+
+    fn record_result(
+        &mut self,
+        now: Instant,
+        reclaimed_bytes: u64,
+    ) -> AutomaticReclaimScheduleUpdate {
+        let (retry_after, report_zero_yield) = if reclaimed_bytes > 0 {
+            self.zero_yield_backoff = AUTOMATIC_RECLAIM_MIN_BACKOFF;
+            self.zero_yield_streak = 0;
+            (AUTOMATIC_RECLAIM_SUCCESS_COOLDOWN, false)
+        } else {
+            self.zero_yield_streak = self.zero_yield_streak.saturating_add(1);
+            let retry_after = self.zero_yield_backoff;
+            self.zero_yield_backoff = self
+                .zero_yield_backoff
+                .saturating_mul(2)
+                .min(AUTOMATIC_RECLAIM_MAX_BACKOFF);
+            (retry_after, self.zero_yield_streak == 1)
+        };
+        self.next_attempt_at = Some(now + retry_after);
+        AutomaticReclaimScheduleUpdate {
+            retry_after,
+            zero_yield_streak: self.zero_yield_streak,
+            report_zero_yield,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.armed = false;
+        self.next_attempt_at = None;
+        self.zero_yield_backoff = AUTOMATIC_RECLAIM_MIN_BACKOFF;
+        self.zero_yield_streak = 0;
+    }
+}
+
 /// Governor tuning. Defaults are conservative and env-overridable via
 /// [`GovernorConfig::from_env`].
 #[derive(Debug, Clone, Copy)]
@@ -166,6 +260,23 @@ struct State {
     sampled_at: Instant,
 }
 
+/// Bounded process-lifetime observability for the opt-in automatic reclaim
+/// monitor. Counters describe completed decisions; the last-attempt fields are
+/// overwritten rather than retaining an unbounded event history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AutomaticReclaimStats {
+    pub attempts: u64,
+    pub successful_attempts: u64,
+    pub zero_yield_attempts: u64,
+    pub suppressed_attempts: u64,
+    pub reclaimed_bytes: u64,
+    pub last_target_bytes: u64,
+    pub last_reclaimed_bytes: u64,
+    pub last_duration_us: u64,
+    pub retry_after_ms: u64,
+    pub zero_yield_streak: u64,
+}
+
 /// Continuous, shared memory-awareness for the whole process.
 ///
 /// Cheap to read (TTL-cached), backend-agnostic, and the single source every
@@ -184,6 +295,7 @@ pub struct MemoryGovernor {
     reclaimers: Mutex<Vec<Reclaimer>>,
     /// Guards [`Self::start_monitor`] against spawning more than one thread.
     monitor_started: AtomicBool,
+    automatic_reclaim_stats: Mutex<AutomaticReclaimStats>,
     /// Event wake-up for budget-change consumers (the KV autoscaler). The
     /// `u64` is a monotonically-increasing generation bumped on every
     /// [`notify_change`](Self::notify_change); waiters block on the `Condvar`
@@ -210,6 +322,7 @@ impl MemoryGovernor {
             soft_reserved: AtomicU64::new(0),
             reclaimers: Mutex::new(Vec::new()),
             monitor_started: AtomicBool::new(false),
+            automatic_reclaim_stats: Mutex::new(AutomaticReclaimStats::default()),
             wake: (Mutex::new(0), Condvar::new()),
         }
     }
@@ -274,7 +387,10 @@ impl MemoryGovernor {
 
     /// Current pressure level from the live free fraction.
     pub fn pressure(&self) -> MemoryPressure {
-        let s = self.snapshot();
+        self.pressure_for_snapshot(self.snapshot())
+    }
+
+    fn pressure_for_snapshot(&self, s: MemorySnapshot) -> MemoryPressure {
         if s.total_bytes == 0 {
             // No device detected — can't reason about pressure; treat as
             // comfortable so we never block on a detection gap.
@@ -290,6 +406,11 @@ impl MemoryGovernor {
         } else {
             MemoryPressure::Comfortable
         }
+    }
+
+    fn reclaim_target_to_comfortable(&self, s: MemorySnapshot) -> u64 {
+        let want_free = ((s.total_bytes as f64) * self.cfg.comfortable_frac) as u64;
+        want_free.saturating_sub(s.free_bytes).max(1)
     }
 
     /// Bytes a new allocation may safely claim right now: live free, minus the
@@ -334,6 +455,55 @@ impl MemoryGovernor {
         self.monitor_started.load(Ordering::Acquire)
     }
 
+    pub fn automatic_reclaim_stats(&self) -> AutomaticReclaimStats {
+        *self
+            .automatic_reclaim_stats
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn record_automatic_reclaim_suppressed(&self) {
+        let mut stats = self
+            .automatic_reclaim_stats
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        stats.suppressed_attempts = stats.suppressed_attempts.saturating_add(1);
+    }
+
+    fn record_automatic_reclaim_result(
+        &self,
+        target_bytes: u64,
+        reclaimed_bytes: u64,
+        duration: Duration,
+        update: AutomaticReclaimScheduleUpdate,
+    ) {
+        let mut stats = self
+            .automatic_reclaim_stats
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        stats.attempts = stats.attempts.saturating_add(1);
+        if reclaimed_bytes > 0 {
+            stats.successful_attempts = stats.successful_attempts.saturating_add(1);
+        } else {
+            stats.zero_yield_attempts = stats.zero_yield_attempts.saturating_add(1);
+        }
+        stats.reclaimed_bytes = stats.reclaimed_bytes.saturating_add(reclaimed_bytes);
+        stats.last_target_bytes = target_bytes;
+        stats.last_reclaimed_bytes = reclaimed_bytes;
+        stats.last_duration_us = duration.as_micros().min(u64::MAX as u128) as u64;
+        stats.retry_after_ms = update.retry_after.as_millis().min(u64::MAX as u128) as u64;
+        stats.zero_yield_streak = u64::from(update.zero_yield_streak);
+    }
+
+    fn clear_automatic_reclaim_backoff(&self) {
+        let mut stats = self
+            .automatic_reclaim_stats
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        stats.retry_after_ms = 0;
+        stats.zero_yield_streak = 0;
+    }
+
     /// Register a reclaim hook (the allocator layer's "return pooled VRAM to the
     /// OS" function). Invoked under memory pressure so kiln gives memory back to
     /// a coexisting process instead of hoarding it. Multiple hooks may register
@@ -372,13 +542,11 @@ impl MemoryGovernor {
     /// background monitor applies. Targets enough to climb back to the
     /// comfortable free fraction. Returns bytes freed (0 if not needed).
     pub fn maybe_reclaim(&self) -> u64 {
-        if !self.pressure().should_reclaim() {
+        let s = self.snapshot();
+        if !self.pressure_for_snapshot(s).should_reclaim() {
             return 0;
         }
-        let s = self.snapshot();
-        let want_free = ((s.total_bytes as f64) * self.cfg.comfortable_frac) as u64;
-        let target = want_free.saturating_sub(s.free_bytes).max(1);
-        self.reclaim(target)
+        self.reclaim(self.reclaim_target_to_comfortable(s))
     }
 
     /// Spawn a background thread that watches pressure and auto-reclaims, turning
@@ -405,18 +573,89 @@ impl MemoryGovernor {
         if let Err(err) = std::thread::Builder::new()
             .name("kiln-mem-governor".into())
             .spawn(move || {
+                let mut schedule = AutomaticReclaimSchedule::new();
                 loop {
                     std::thread::sleep(interval);
-                    let pressure = self.pressure();
-                    if pressure.should_reclaim() {
-                        let freed = self.maybe_reclaim();
-                        let s = self.snapshot();
+                    let before = self.snapshot();
+                    let pressure_before = self.pressure_for_snapshot(before);
+                    let now = Instant::now();
+                    match schedule.decision(pressure_before, now) {
+                        AutomaticReclaimDecision::Idle => {
+                            if pressure_before == MemoryPressure::Comfortable {
+                                self.clear_automatic_reclaim_backoff();
+                            }
+                            continue;
+                        }
+                        AutomaticReclaimDecision::BackingOff => {
+                            self.record_automatic_reclaim_suppressed();
+                            continue;
+                        }
+                        AutomaticReclaimDecision::Attempt => {}
+                    }
+
+                    // An armed episode remains eligible through Moderate
+                    // pressure and stops only at Comfortable. This separates
+                    // the trigger and recovery thresholds and avoids threshold
+                    // chatter.
+                    let target_bytes = self.reclaim_target_to_comfortable(before);
+                    let started = Instant::now();
+                    let reclaimed_bytes = self.reclaim(target_bytes);
+                    let duration = started.elapsed();
+                    let duration_ms = duration.as_secs_f64() * 1000.0;
+                    let after = self.snapshot();
+                    let pressure_after = self.pressure_for_snapshot(after);
+                    let update = schedule.record_result(Instant::now(), reclaimed_bytes);
+                    self.record_automatic_reclaim_result(
+                        target_bytes,
+                        reclaimed_bytes,
+                        duration,
+                        update,
+                    );
+                    let retry_after_ms = update.retry_after.as_millis() as u64;
+
+                    if reclaimed_bytes > 0 {
                         tracing::info!(
-                            ?pressure,
-                            freed_mb = freed / (1024 * 1024),
-                            free_gb = s.free_bytes as f64 / 1e9,
-                            total_gb = s.total_bytes as f64 / 1e9,
-                            "memory governor: reclaimed under pressure"
+                            reason = "automatic_pressure",
+                            ?pressure_before,
+                            ?pressure_after,
+                            target_bytes,
+                            reclaimed_bytes,
+                            free_before_bytes = before.free_bytes,
+                            free_after_bytes = after.free_bytes,
+                            total_bytes = after.total_bytes,
+                            duration_ms,
+                            retry_after_ms,
+                            "memory governor automatic reclaim completed"
+                        );
+                    } else if update.report_zero_yield {
+                        tracing::info!(
+                            reason = "automatic_pressure_zero_yield",
+                            ?pressure_before,
+                            ?pressure_after,
+                            target_bytes,
+                            reclaimed_bytes,
+                            free_before_bytes = before.free_bytes,
+                            free_after_bytes = after.free_bytes,
+                            total_bytes = after.total_bytes,
+                            duration_ms,
+                            retry_after_ms,
+                            zero_yield_streak = update.zero_yield_streak,
+                            "memory governor automatic reclaim yielded no bytes; backing off"
+                        );
+                    } else {
+                        tracing::debug!(
+                            reason = "automatic_pressure_zero_yield",
+                            ?pressure_before,
+                            ?pressure_after,
+                            target_bytes,
+                            reclaimed_bytes,
+                            free_before_bytes = before.free_bytes,
+                            free_after_bytes = after.free_bytes,
+                            total_bytes = after.total_bytes,
+                            duration_ms,
+                            retry_after_ms,
+                            zero_yield_streak = update.zero_yield_streak,
+                            "memory governor automatic reclaim still yielded no bytes"
                         );
                     }
                 }
@@ -539,6 +778,161 @@ mod tests {
         );
         assert!(MemoryReclaimMode::parse("true").is_err());
         assert!(MemoryReclaimMode::parse("").is_err());
+    }
+
+    #[test]
+    fn automatic_reclaim_hysteresis_stays_armed_until_comfortable() {
+        let mut schedule = AutomaticReclaimSchedule::new();
+        let start = Instant::now();
+
+        assert_eq!(
+            schedule.decision(MemoryPressure::Moderate, start),
+            AutomaticReclaimDecision::Idle
+        );
+        assert_eq!(
+            schedule.decision(MemoryPressure::Tight, start),
+            AutomaticReclaimDecision::Attempt
+        );
+        let first = schedule.record_result(start, 0);
+        assert_eq!(first.retry_after, Duration::from_secs(2));
+        assert!(first.report_zero_yield);
+
+        assert_eq!(
+            schedule.decision(MemoryPressure::Moderate, start + Duration::from_secs(1)),
+            AutomaticReclaimDecision::BackingOff
+        );
+        assert_eq!(
+            schedule.decision(MemoryPressure::Moderate, start + Duration::from_secs(2)),
+            AutomaticReclaimDecision::Attempt
+        );
+
+        assert_eq!(
+            schedule.decision(MemoryPressure::Comfortable, start + Duration::from_secs(2)),
+            AutomaticReclaimDecision::Idle
+        );
+        assert_eq!(
+            schedule.decision(MemoryPressure::Moderate, start + Duration::from_secs(3)),
+            AutomaticReclaimDecision::Idle
+        );
+    }
+
+    #[test]
+    fn automatic_reclaim_zero_yield_backoff_is_bounded_and_quiet() {
+        let mut schedule = AutomaticReclaimSchedule::new();
+        let mut now = Instant::now();
+        assert_eq!(
+            schedule.decision(MemoryPressure::Critical, now),
+            AutomaticReclaimDecision::Attempt
+        );
+
+        for (index, expected_secs) in [2, 4, 8, 16, 32, 64, 128, 128].into_iter().enumerate() {
+            let update = schedule.record_result(now, 0);
+            assert_eq!(update.retry_after, Duration::from_secs(expected_secs));
+            assert_eq!(update.zero_yield_streak, (index + 1) as u32);
+            assert_eq!(update.report_zero_yield, index == 0);
+            assert_eq!(
+                schedule.decision(
+                    MemoryPressure::Critical,
+                    now + update.retry_after - Duration::from_millis(1)
+                ),
+                AutomaticReclaimDecision::BackingOff
+            );
+            now += update.retry_after;
+            assert_eq!(
+                schedule.decision(MemoryPressure::Critical, now),
+                AutomaticReclaimDecision::Attempt
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_reclaim_success_applies_cooldown_and_resets_zero_yield_backoff() {
+        let mut schedule = AutomaticReclaimSchedule::new();
+        let start = Instant::now();
+        assert_eq!(
+            schedule.decision(MemoryPressure::Tight, start),
+            AutomaticReclaimDecision::Attempt
+        );
+
+        let zero = schedule.record_result(start, 0);
+        assert_eq!(zero.retry_after, Duration::from_secs(2));
+        let retry_at = start + zero.retry_after;
+        assert_eq!(
+            schedule.decision(MemoryPressure::Tight, retry_at),
+            AutomaticReclaimDecision::Attempt
+        );
+
+        let success = schedule.record_result(retry_at, GB);
+        assert_eq!(success.retry_after, Duration::from_secs(8));
+        assert_eq!(success.zero_yield_streak, 0);
+        assert!(!success.report_zero_yield);
+        assert_eq!(
+            schedule.decision(MemoryPressure::Tight, retry_at + Duration::from_secs(7)),
+            AutomaticReclaimDecision::BackingOff
+        );
+
+        let after_cooldown = retry_at + Duration::from_secs(8);
+        assert_eq!(
+            schedule.decision(MemoryPressure::Tight, after_cooldown),
+            AutomaticReclaimDecision::Attempt
+        );
+        let next_zero = schedule.record_result(after_cooldown, 0);
+        assert_eq!(next_zero.retry_after, Duration::from_secs(2));
+        assert_eq!(next_zero.zero_yield_streak, 1);
+        assert!(next_zero.report_zero_yield);
+    }
+
+    #[test]
+    fn automatic_reclaim_stats_report_actual_yield_and_suppression() {
+        let g = gov(24 * GB, 2 * GB);
+        assert_eq!(
+            g.automatic_reclaim_stats(),
+            AutomaticReclaimStats::default()
+        );
+
+        g.record_automatic_reclaim_suppressed();
+        g.record_automatic_reclaim_suppressed();
+        g.record_automatic_reclaim_result(
+            4 * GB,
+            GB,
+            Duration::from_micros(1_500),
+            AutomaticReclaimScheduleUpdate {
+                retry_after: Duration::from_secs(8),
+                zero_yield_streak: 0,
+                report_zero_yield: false,
+            },
+        );
+        g.record_automatic_reclaim_result(
+            3 * GB,
+            0,
+            Duration::from_micros(250),
+            AutomaticReclaimScheduleUpdate {
+                retry_after: Duration::from_secs(2),
+                zero_yield_streak: 1,
+                report_zero_yield: true,
+            },
+        );
+
+        assert_eq!(
+            g.automatic_reclaim_stats(),
+            AutomaticReclaimStats {
+                attempts: 2,
+                successful_attempts: 1,
+                zero_yield_attempts: 1,
+                suppressed_attempts: 2,
+                reclaimed_bytes: GB,
+                last_target_bytes: 3 * GB,
+                last_reclaimed_bytes: 0,
+                last_duration_us: 250,
+                retry_after_ms: 2_000,
+                zero_yield_streak: 1,
+            }
+        );
+        g.clear_automatic_reclaim_backoff();
+        let cleared = g.automatic_reclaim_stats();
+        assert_eq!(cleared.retry_after_ms, 0);
+        assert_eq!(cleared.zero_yield_streak, 0);
+        assert_eq!(cleared.reclaimed_bytes, GB);
     }
 
     #[test]

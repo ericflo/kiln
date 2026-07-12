@@ -1685,6 +1685,99 @@ impl Metrics {
                 };
                 push_line(&mut out, &format!("kiln_gpu_memory_pressure {level}"));
             }
+
+            let reclaim = g.automatic_reclaim_stats();
+            out.push_str(
+                "# HELP kiln_memory_reclaim_attempts_total Automatic memory reclaim attempts by outcome.\n",
+            );
+            out.push_str("# TYPE kiln_memory_reclaim_attempts_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_memory_reclaim_attempts_total{{outcome=\"reclaimed\"}} {}",
+                    reclaim.successful_attempts
+                ),
+            );
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_memory_reclaim_attempts_total{{outcome=\"zero_yield\"}} {}",
+                    reclaim.zero_yield_attempts
+                ),
+            );
+            out.push_str(
+                "# HELP kiln_memory_reclaim_suppressed_total Automatic reclaim actions suppressed by cooldown or backoff.\n",
+            );
+            out.push_str("# TYPE kiln_memory_reclaim_suppressed_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_memory_reclaim_suppressed_total {}",
+                    reclaim.suppressed_attempts
+                ),
+            );
+            out.push_str(
+                "# HELP kiln_memory_reclaimed_bytes_total Bytes actually returned by automatic reclaim.\n",
+            );
+            out.push_str("# TYPE kiln_memory_reclaimed_bytes_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_memory_reclaimed_bytes_total {}",
+                    reclaim.reclaimed_bytes
+                ),
+            );
+            out.push_str(
+                "# HELP kiln_memory_reclaim_last_bytes Target and actual bytes for the last automatic reclaim attempt.\n",
+            );
+            out.push_str("# TYPE kiln_memory_reclaim_last_bytes gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_memory_reclaim_last_bytes{{kind=\"target\"}} {}",
+                    reclaim.last_target_bytes
+                ),
+            );
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_memory_reclaim_last_bytes{{kind=\"reclaimed\"}} {}",
+                    reclaim.last_reclaimed_bytes
+                ),
+            );
+            out.push_str(
+                "# HELP kiln_memory_reclaim_last_duration_seconds Duration of the last automatic reclaim attempt.\n",
+            );
+            out.push_str("# TYPE kiln_memory_reclaim_last_duration_seconds gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_memory_reclaim_last_duration_seconds {}",
+                    reclaim.last_duration_us as f64 / 1_000_000.0
+                ),
+            );
+            out.push_str(
+                "# HELP kiln_memory_reclaim_retry_after_seconds Scheduled delay after the last automatic reclaim attempt.\n",
+            );
+            out.push_str("# TYPE kiln_memory_reclaim_retry_after_seconds gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_memory_reclaim_retry_after_seconds {}",
+                    reclaim.retry_after_ms as f64 / 1_000.0
+                ),
+            );
+            out.push_str(
+                "# HELP kiln_memory_reclaim_zero_yield_streak Consecutive automatic reclaim attempts returning zero bytes.\n",
+            );
+            out.push_str("# TYPE kiln_memory_reclaim_zero_yield_streak gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_memory_reclaim_zero_yield_streak {}",
+                    reclaim.zero_yield_streak
+                ),
+            );
         }
 
         out
@@ -2057,6 +2150,15 @@ mod tests {
         assert!(output.contains("kiln_vram_model_estimated_bytes 8000000000"));
         assert!(output.contains("kiln_vram_post_load_used_bytes 9000000000"));
         assert!(output.contains("kiln_vram_prefill_peak_used_bytes 19000000000"));
+        assert!(output.contains("kiln_memory_reclaim_attempts_total{outcome=\"reclaimed\"} 0"));
+        assert!(output.contains("kiln_memory_reclaim_attempts_total{outcome=\"zero_yield\"} 0"));
+        assert!(output.contains("kiln_memory_reclaim_suppressed_total 0"));
+        assert!(output.contains("kiln_memory_reclaimed_bytes_total 0"));
+        assert!(output.contains("kiln_memory_reclaim_last_bytes{kind=\"target\"} 0"));
+        assert!(output.contains("kiln_memory_reclaim_last_bytes{kind=\"reclaimed\"} 0"));
+        assert!(output.contains("kiln_memory_reclaim_last_duration_seconds 0"));
+        assert!(output.contains("kiln_memory_reclaim_retry_after_seconds 0"));
+        assert!(output.contains("kiln_memory_reclaim_zero_yield_streak 0"));
         assert!(output.contains("kiln_backend_quarantined 1"));
         assert!(output.contains(
             "kiln_backend_external_yield_sync_calls_total{boundary=\"batched decode step\"} 4"

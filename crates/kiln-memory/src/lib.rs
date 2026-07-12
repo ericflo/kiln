@@ -25,8 +25,8 @@ pub mod governor;
 pub mod vram;
 
 pub use governor::{
-    GovernorConfig, MEMORY_RECLAIM_MODE_ENV, MemoryGovernor, MemoryPressure, MemoryReclaimMode,
-    MemorySource, OsProbe, Reservation,
+    AutomaticReclaimStats, GovernorConfig, MEMORY_RECLAIM_MODE_ENV, MemoryGovernor, MemoryPressure,
+    MemoryReclaimMode, MemorySource, OsProbe, Reservation,
 };
 pub use vram::{MemorySnapshot, current_free_bytes, current_memory_snapshot};
 
