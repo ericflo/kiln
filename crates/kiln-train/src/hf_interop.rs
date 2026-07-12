@@ -1631,6 +1631,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(summary.row_count, 1);
+        assert_eq!(summary.completions_per_group, 2);
         assert_eq!(summary.completion_count, 2);
         assert_eq!(summary.sampled_action_tokens, 2);
         assert_eq!(summary.forced_action_tokens, 0);

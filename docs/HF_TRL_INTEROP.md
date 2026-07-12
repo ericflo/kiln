@@ -60,7 +60,9 @@ A GRPO manifest is not accepted merely because it names
 compact JSON group per LF-terminated line, with no blank rows, aliases,
 unknown or duplicate fields, alternate whitespace, or missing final newline.
 The verifier streams at most 64 GiB, permits at most 10 million groups and 256
-MiB per row, and requires 2 to 1024 completions per group. The separate
+MiB per row, requires 2 to 1024 completions per group, and requires one
+uniform group width so the pinned TRL runner cannot drop or reshape examples.
+The separate
 `kiln.hf-trl-grpo-corpus.v1` digest length-frames every canonical row in order;
 the dataset file identity also binds the exact newline bytes.
 
@@ -91,9 +93,14 @@ no-replace rename. It syncs the parent and verifies the published directory
 again. Failure cleans staging, existing targets are never replaced, and later
 source mutation cannot change the published bundle.
 
-This is a library API, not a public product route. There is no public GRPO
-export API/CLI or supported external GRPO command yet, and no pinned GRPO
-runner has been published.
+The same writer now backs `POST /v1/train/hf/grpo/exports`. The API accepts
+exactly one provenance-complete inline `groups` array or server-local canonical
+`dataset_path`, plus the same optional split manifest and revision-stable input
+adapter as SFT. Both forms enter the existing immutable registry and therefore
+share its verification, download, conditional deletion, capacity, locking, and
+crash-recovery behavior. The task-aware pinned runner supports recorded GRPO;
+the first-party GRPO export CLI and production-model numerical round trip are
+still pending.
 
 ## Template Identities
 
@@ -142,7 +149,7 @@ removes staging, and an existing final target is never replaced. Optional
 input-adapter files reject symlinks and are copied while the caller holds its
 adapter revision stable.
 
-## Public SFT Export API
+## Public Export API
 
 Create one server-owned immutable export with `POST
 /v1/train/hf/sft/exports`:
@@ -168,6 +175,30 @@ The request accepts exactly one of inline `examples`, a server-local
 marking them trained. `invalid_row_policy` has the same `fail`/`skip` behavior
 and canonical row identities as native SFT. `input_adapter` and the
 object-valued `split_manifest` are optional.
+
+Create a recorded-rollout GRPO export with `POST
+/v1/train/hf/grpo/exports`:
+
+```bash
+curl -s http://localhost:8420/v1/train/hf/grpo/exports \
+  -H 'content-type: application/json' \
+  -d '{
+    "name": "support_grpo_01",
+    "dataset_path": "/data/support-rollouts.jsonl",
+    "split_manifest": {"schema": "example.split.v1", "train": [0, 1]}
+  }'
+```
+
+The request accepts exactly one non-empty inline `groups` array or
+`dataset_path`. The path is read by the server and must already contain the
+canonical compact, final-LF JSONL emitted by Kiln's rollout tooling. Inline
+groups are canonically serialized by the server. In both forms, every
+completion must carry exact recorded rollout provenance matching the resident
+model, base shards, tokenizer, inference template, and optional input adapter;
+invalid or mixed behavior-policy data cannot publish an export.
+Admission failures return `hf_trl_invalid_request` before registry publication;
+filesystem, locking, or post-admission verification failures remain distinct
+`hf_trl_export_failed` server errors.
 
 Export names are 1 to 128 ASCII bytes, start with an alphanumeric character,
 and contain only alphanumerics, `-`, or `_`. They are immutable identities:
@@ -205,8 +236,10 @@ reused for different bytes.
 
 ## Verified CLI Handoff
 
-The CLI performs creation, download, local verification, atomic publication,
-and server cleanup as one fail-closed workflow:
+The SFT CLI performs creation, download, local verification, atomic
+publication, and server cleanup as one fail-closed workflow. GRPO currently
+uses the public API above plus the common management/download routes; the
+equivalent first-party `export-grpo` wrapper remains pending.
 
 ```bash
 mkdir -p ./handoffs

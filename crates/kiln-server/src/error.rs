@@ -470,7 +470,7 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "hf_trl_invalid_request",
             message: format!("Invalid HF/TRL handoff request: {detail}"),
-            hint: "Use one SFT source, a path-safe export name, an optional existing adapter, and an object-valued split manifest.",
+            hint: "Use exactly one task-appropriate source, a path-safe export name, an optional existing adapter, and an object-valued split manifest. GRPO sources require exact recorded rollout provenance.",
             retry_after_seconds: None,
         }
     }

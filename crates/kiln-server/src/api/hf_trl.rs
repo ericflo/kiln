@@ -3,6 +3,7 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -20,11 +21,15 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+use kiln_model::lora_loader::LoraSourceIdentity;
 use kiln_train::{
-    HF_TRL_BUNDLE_SUFFIX, HF_TRL_SFT_ENVIRONMENT_LOCK, HF_TRL_SFT_REFERENCE_SCRIPT,
-    HfTrlExportManifestV1, HfTrlInputAdapterSource, HfTrlSftBundleInput, SftExample,
-    SftInvalidRowPolicy, SftPreparedDataset, read_hf_trl_export_manifest,
-    verify_hf_trl_export_bundle, write_hf_trl_sft_bundle,
+    GrpoGroup, HF_TRL_BUNDLE_SUFFIX, HF_TRL_GRPO_ENVIRONMENT_LOCK, HF_TRL_GRPO_REFERENCE_SCRIPT,
+    HF_TRL_SFT_ENVIRONMENT_LOCK, HF_TRL_SFT_REFERENCE_SCRIPT, HfTrlExportManifestV1,
+    HfTrlGrpoBundleInput, HfTrlGrpoDatasetSource, HfTrlGrpoExportIdentity, HfTrlInputAdapterSource,
+    HfTrlSftBundleInput, RolloutAdapterIdentityV1, SftExample, SftInvalidRowPolicy,
+    SftPreparedDataset, read_hf_trl_export_manifest, validate_hf_trl_grpo_groups_for_export,
+    validate_hf_trl_grpo_jsonl_for_export, verify_hf_trl_export_bundle, write_hf_trl_grpo_bundle,
+    write_hf_trl_sft_bundle,
 };
 
 use crate::error::ApiError;
@@ -47,6 +52,20 @@ struct SftExportRequest {
     dataset: Option<String>,
     #[serde(default)]
     invalid_row_policy: SftInvalidRowPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_adapter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    split_manifest: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrpoExportRequest {
+    name: String,
+    #[serde(default)]
+    groups: Vec<GrpoGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dataset_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     input_adapter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,6 +285,41 @@ fn published_export_count(adapter_dir: &Path) -> io::Result<usize> {
     Ok(count)
 }
 
+fn validate_input_adapter(input_adapter: Option<&str>) -> Result<(), ApiError> {
+    let Some(adapter) = input_adapter else {
+        return Ok(());
+    };
+    if adapter.is_empty() || adapter.trim() != adapter {
+        return Err(ApiError::hf_trl_invalid_request(format!(
+            "input_adapter {adapter:?} must be non-empty and contain no leading or trailing whitespace"
+        )));
+    }
+    super::adapters::validate_adapter_name(adapter).map_err(|_| {
+        ApiError::hf_trl_invalid_request(format!(
+            "input_adapter {adapter:?} must be a path-safe adapter name"
+        ))
+    })
+}
+
+fn serialize_split_manifest(
+    split_manifest: Option<serde_json::Value>,
+) -> Result<Option<Vec<u8>>, ApiError> {
+    split_manifest
+        .map(|value| {
+            if !value.is_object() {
+                return Err(ApiError::hf_trl_invalid_request(
+                    "split_manifest must be a JSON object",
+                ));
+            }
+            serde_json::to_vec_pretty(&value).map_err(|error| {
+                ApiError::hf_trl_invalid_request(format!(
+                    "split_manifest cannot be serialized: {error}"
+                ))
+            })
+        })
+        .transpose()
+}
+
 fn prepare_sft_source(
     state: &AppState,
     mut request: SftExportRequest,
@@ -282,11 +336,7 @@ fn prepare_sft_source(
             "dataset must not be blank",
         ));
     }
-    if request.input_adapter.as_deref().is_some_and(str::is_empty) {
-        return Err(ApiError::hf_trl_invalid_request(
-            "input_adapter must not be blank",
-        ));
-    }
+    validate_input_adapter(request.input_adapter.as_deref())?;
 
     let source_count = usize::from(!request.examples.is_empty())
         + usize::from(request.dataset_path.is_some())
@@ -296,33 +346,7 @@ fn prepare_sft_source(
             "SFT export must use exactly one of examples, dataset_path, or dataset",
         ));
     }
-    if let Some(adapter) = request.input_adapter.as_deref() {
-        if adapter.trim() != adapter {
-            return Err(ApiError::hf_trl_invalid_request(format!(
-                "input_adapter {adapter:?} must not contain leading or trailing whitespace"
-            )));
-        }
-        super::adapters::validate_adapter_name(adapter).map_err(|_| {
-            ApiError::hf_trl_invalid_request(format!(
-                "input_adapter {adapter:?} must be a path-safe adapter name"
-            ))
-        })?;
-    }
-    let split_manifest = request
-        .split_manifest
-        .map(|value| {
-            if !value.is_object() {
-                return Err(ApiError::hf_trl_invalid_request(
-                    "split_manifest must be a JSON object",
-                ));
-            }
-            serde_json::to_vec_pretty(&value).map_err(|error| {
-                ApiError::hf_trl_invalid_request(format!(
-                    "split_manifest cannot be serialized: {error}"
-                ))
-            })
-        })
-        .transpose()?;
+    let split_manifest = serialize_split_manifest(request.split_manifest)?;
 
     let prepared = if let Some(dataset_name) = request.dataset {
         if dataset_name == "corrections:active" {
@@ -406,7 +430,43 @@ fn prepare_sft_source(
         name: request.name,
         input_adapter: request.input_adapter,
         split_manifest,
-        prepared,
+        data: PreparedExportData::Sft(prepared),
+    })
+}
+
+fn prepare_grpo_source(mut request: GrpoExportRequest) -> Result<PreparedExport, ApiError> {
+    validate_export_name(&request.name)?;
+    request.dataset_path = request
+        .dataset_path
+        .take()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty());
+    validate_input_adapter(request.input_adapter.as_deref())?;
+    let source_count =
+        usize::from(!request.groups.is_empty()) + usize::from(request.dataset_path.is_some());
+    if source_count != 1 {
+        return Err(ApiError::hf_trl_invalid_request(
+            "GRPO export must use exactly one of groups or dataset_path",
+        ));
+    }
+    let split_manifest = serialize_split_manifest(request.split_manifest)?;
+    let data = if let Some(path) = request.dataset_path {
+        let path = PathBuf::from(path);
+        PreparedExportData::GrpoJsonl {
+            source_name: path.display().to_string(),
+            path,
+        }
+    } else {
+        PreparedExportData::GrpoGroups {
+            source_name: "inline".to_string(),
+            groups: request.groups,
+        }
+    };
+    Ok(PreparedExport {
+        name: request.name,
+        input_adapter: request.input_adapter,
+        split_manifest,
+        data,
     })
 }
 
@@ -414,22 +474,53 @@ struct PreparedExport {
     name: String,
     input_adapter: Option<String>,
     split_manifest: Option<Vec<u8>>,
-    prepared: SftPreparedDataset,
+    data: PreparedExportData,
 }
 
-async fn create_sft_export(
-    State(state): State<AppState>,
-    payload: Result<Json<SftExportRequest>, JsonRejection>,
-) -> Result<Response, ApiError> {
-    let request = payload.map(|Json(request)| request).map_err(|error| {
-        ApiError::hf_trl_invalid_request(format!("invalid SFT export JSON: {}", error.body_text()))
-    })?;
-    validate_export_name(&request.name)?;
+enum PreparedExportData {
+    Sft(SftPreparedDataset),
+    GrpoGroups {
+        source_name: String,
+        groups: Vec<GrpoGroup>,
+    },
+    GrpoJsonl {
+        source_name: String,
+        path: PathBuf,
+    },
+}
+
+struct ExportPrerequisites {
+    base_weights: Arc<kiln_core::model_provenance::BaseWeightShardManifest>,
+    provenance: Arc<kiln_core::execution_provenance::ExecutionProvenanceV1>,
+}
+
+enum ExportWriteError {
+    InvalidGrpo(anyhow::Error),
+    Internal(anyhow::Error),
+}
+
+fn grpo_input_adapter_identity(
+    name: Option<&str>,
+    path: Option<&Path>,
+) -> anyhow::Result<Option<RolloutAdapterIdentityV1>> {
+    name.zip(path)
+        .map(|(name, path)| {
+            let identity = LoraSourceIdentity::from_adapter_dir(path)?;
+            Ok(RolloutAdapterIdentityV1 {
+                name: name.to_string(),
+                content_sha256: format!("sha256:{}", identity.content_revision()),
+            })
+        })
+        .transpose()
+}
+
+fn preflight_export(state: &AppState, name: &str) -> Result<ExportPrerequisites, ApiError> {
+    validate_export_name(name)?;
     if state.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
-    if fs::symlink_metadata(bundle_path(&state.adapter_dir, &request.name)).is_ok() {
-        return Err(ApiError::hf_trl_export_exists(&request.name));
+    if fs::symlink_metadata(bundle_path(&state.adapter_dir, name)).is_ok() {
+        return Err(ApiError::hf_trl_export_exists(name));
     }
     let base_weights = state
         .base_weight_shard_manifest
@@ -447,14 +538,17 @@ async fn create_sft_export(
     provenance.validate().map_err(|error| {
         ApiError::hf_trl_unavailable(format!("invalid execution provenance: {error}"))
     })?;
-    let preparation_state = state.clone();
-    let prepared =
-        tokio::task::spawn_blocking(move || prepare_sft_source(&preparation_state, request))
-            .await
-            .map_err(|error| {
-                ApiError::hf_trl_export_failed(format!("admission worker panicked: {error}"))
-            })??;
+    Ok(ExportPrerequisites {
+        base_weights,
+        provenance,
+    })
+}
 
+async fn publish_prepared_export(
+    state: AppState,
+    prepared: PreparedExport,
+    prerequisites: ExportPrerequisites,
+) -> Result<Response, ApiError> {
     let export_guard = state.hf_trl_export_lock.clone().lock_owned().await;
     let export_count =
         published_export_count(&state.adapter_dir).map_err(ApiError::hf_trl_export_failed)?;
@@ -483,10 +577,9 @@ async fn create_sft_export(
     let model_config = state.model_config.clone();
     let tokenizer = state.tokenizer.clone();
     let input_adapter = prepared.input_adapter.clone();
-    let manifest = tokio::task::spawn_blocking(move || {
+    let manifest = tokio::task::spawn_blocking(move || -> Result<_, ExportWriteError> {
         let _export_guard = export_guard;
         let _adapter_guard = adapter_guard;
-        ensure_private_registry(&adapter_dir)?;
         // Keep the owned adapter path alive for the complete synchronous copy.
         let adapter_path = input_adapter
             .as_ref()
@@ -499,27 +592,98 @@ async fn create_sft_export(
                     name: adapter.as_str(),
                     directory: path.as_path(),
                 });
-        write_hf_trl_sft_bundle(
-            &target,
-            HfTrlSftBundleInput {
-                served_model_id: &served_model_id,
-                model_config: &model_config,
-                tokenizer: tokenizer.as_ref(),
-                base_weight_shard_manifest: base_weights.as_ref(),
-                source_execution_provenance: provenance.as_ref(),
-                prepared: &prepared.prepared,
-                reference_script: HF_TRL_SFT_REFERENCE_SCRIPT,
-                environment_lock: HF_TRL_SFT_ENVIRONMENT_LOCK,
-                split_manifest: prepared.split_manifest.as_deref(),
-                input_adapter: adapter_source,
-            },
-        )
+        let grpo_adapter = if matches!(
+            &prepared.data,
+            PreparedExportData::GrpoGroups { .. } | PreparedExportData::GrpoJsonl { .. }
+        ) {
+            grpo_input_adapter_identity(input_adapter.as_deref(), adapter_path.as_deref())
+                .map_err(ExportWriteError::InvalidGrpo)?
+        } else {
+            None
+        };
+        let grpo_identity = HfTrlGrpoExportIdentity {
+            served_model_id: &served_model_id,
+            base_model_sha256: &prerequisites.base_weights.aggregate_sha256,
+            input_adapter: grpo_adapter.as_ref(),
+        };
+        match &prepared.data {
+            PreparedExportData::Sft(_) => {}
+            PreparedExportData::GrpoGroups { groups, .. } => {
+                validate_hf_trl_grpo_groups_for_export(groups, grpo_identity, tokenizer.as_ref())
+                    .map_err(ExportWriteError::InvalidGrpo)?;
+            }
+            PreparedExportData::GrpoJsonl { path, .. } => {
+                validate_hf_trl_grpo_jsonl_for_export(path, grpo_identity, tokenizer.as_ref())
+                    .map_err(ExportWriteError::InvalidGrpo)?;
+            }
+        }
+        ensure_private_registry(&adapter_dir)
+            .map_err(|error| ExportWriteError::Internal(error.into()))?;
+        let result = match &prepared.data {
+            PreparedExportData::Sft(dataset) => write_hf_trl_sft_bundle(
+                &target,
+                HfTrlSftBundleInput {
+                    served_model_id: &served_model_id,
+                    model_config: &model_config,
+                    tokenizer: tokenizer.as_ref(),
+                    base_weight_shard_manifest: prerequisites.base_weights.as_ref(),
+                    source_execution_provenance: prerequisites.provenance.as_ref(),
+                    prepared: dataset,
+                    reference_script: HF_TRL_SFT_REFERENCE_SCRIPT,
+                    environment_lock: HF_TRL_SFT_ENVIRONMENT_LOCK,
+                    split_manifest: prepared.split_manifest.as_deref(),
+                    input_adapter: adapter_source,
+                },
+            ),
+            PreparedExportData::GrpoGroups {
+                source_name,
+                groups,
+            } => write_hf_trl_grpo_bundle(
+                &target,
+                HfTrlGrpoBundleInput {
+                    served_model_id: &served_model_id,
+                    model_config: &model_config,
+                    tokenizer: tokenizer.as_ref(),
+                    base_weight_shard_manifest: prerequisites.base_weights.as_ref(),
+                    source_execution_provenance: prerequisites.provenance.as_ref(),
+                    dataset: HfTrlGrpoDatasetSource::Groups {
+                        source_name,
+                        groups,
+                    },
+                    reference_script: HF_TRL_GRPO_REFERENCE_SCRIPT,
+                    environment_lock: HF_TRL_GRPO_ENVIRONMENT_LOCK,
+                    split_manifest: prepared.split_manifest.as_deref(),
+                    input_adapter: adapter_source,
+                },
+            ),
+            PreparedExportData::GrpoJsonl { source_name, path } => write_hf_trl_grpo_bundle(
+                &target,
+                HfTrlGrpoBundleInput {
+                    served_model_id: &served_model_id,
+                    model_config: &model_config,
+                    tokenizer: tokenizer.as_ref(),
+                    base_weight_shard_manifest: prerequisites.base_weights.as_ref(),
+                    source_execution_provenance: prerequisites.provenance.as_ref(),
+                    dataset: HfTrlGrpoDatasetSource::Jsonl { source_name, path },
+                    reference_script: HF_TRL_GRPO_REFERENCE_SCRIPT,
+                    environment_lock: HF_TRL_GRPO_ENVIRONMENT_LOCK,
+                    split_manifest: prepared.split_manifest.as_deref(),
+                    input_adapter: adapter_source,
+                },
+            ),
+        };
+        result.map_err(ExportWriteError::Internal)
     })
     .await
     .map_err(|error| ApiError::hf_trl_export_failed(format!("export worker panicked: {error}")))?
-    .map_err(|error| ApiError::hf_trl_export_failed(format!("{error:#}")))?;
+    .map_err(|error| match error {
+        ExportWriteError::InvalidGrpo(error) => {
+            ApiError::hf_trl_invalid_request(format!("invalid GRPO export source: {error:#}"))
+        }
+        ExportWriteError::Internal(error) => ApiError::hf_trl_export_failed(format!("{error:#}")),
+    })?;
 
-    tracing::info!(export = %name, export_sha256 = %manifest.export_sha256, rows = manifest.data.row_count, "published immutable HF/TRL SFT export");
+    tracing::info!(export = %name, task = ?manifest.task, export_sha256 = %manifest.export_sha256, rows = manifest.data.row_count, "published immutable HF/TRL export");
     let etag = export_etag(&manifest.export_sha256)?;
     Ok((
         StatusCode::CREATED,
@@ -527,6 +691,36 @@ async fn create_sft_export(
         Json(ExportSummary::from_manifest(&name, &manifest)),
     )
         .into_response())
+}
+
+async fn create_sft_export(
+    State(state): State<AppState>,
+    payload: Result<Json<SftExportRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let request = payload.map(|Json(request)| request).map_err(|error| {
+        ApiError::hf_trl_invalid_request(format!("invalid SFT export JSON: {}", error.body_text()))
+    })?;
+    let prerequisites = preflight_export(&state, &request.name)?;
+    let preparation_state = state.clone();
+    let prepared =
+        tokio::task::spawn_blocking(move || prepare_sft_source(&preparation_state, request))
+            .await
+            .map_err(|error| {
+                ApiError::hf_trl_export_failed(format!("admission worker panicked: {error}"))
+            })??;
+    publish_prepared_export(state, prepared, prerequisites).await
+}
+
+async fn create_grpo_export(
+    State(state): State<AppState>,
+    payload: Result<Json<GrpoExportRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let request = payload.map(|Json(request)| request).map_err(|error| {
+        ApiError::hf_trl_invalid_request(format!("invalid GRPO export JSON: {}", error.body_text()))
+    })?;
+    let prerequisites = preflight_export(&state, &request.name)?;
+    let prepared = prepare_grpo_source(request)?;
+    publish_prepared_export(state, prepared, prerequisites).await
 }
 
 fn list_exports_sync(adapter_dir: &Path) -> anyhow::Result<Vec<ExportSummary>> {
@@ -773,6 +967,10 @@ pub fn routes() -> Router<AppState> {
             "/v1/train/hf/sft/exports",
             post(create_sft_export).layer(DefaultBodyLimit::max(MAX_INLINE_EXPORT_BODY_BYTES)),
         )
+        .route(
+            "/v1/train/hf/grpo/exports",
+            post(create_grpo_export).layer(DefaultBodyLimit::max(MAX_INLINE_EXPORT_BODY_BYTES)),
+        )
         .route("/v1/train/hf/exports", get(list_exports))
         .route(
             "/v1/train/hf/exports/{name}",
@@ -941,6 +1139,78 @@ pub(crate) mod tests {
             "input_adapter": "source.adapter",
             "split_manifest": {"schema": "test.split.v1", "train": [0]}
         })
+    }
+
+    fn grpo_groups(fixture: &TestState) -> Vec<GrpoGroup> {
+        let messages = vec![kiln_train::ChatMessage::new("user", "a")];
+        let prompt = fixture
+            .state
+            .tokenizer
+            .apply_chat_template(&messages)
+            .unwrap();
+        let prompt_ids = fixture.state.tokenizer.encode(&prompt).unwrap();
+        let completion_token = fixture.state.tokenizer.encode("b").unwrap()[0];
+        let prompt_sha256 = kiln_train::rollout_prompt_messages_sha256(&messages).unwrap();
+        let behavior_policy = kiln_train::RolloutBehaviorPolicyIdentityV1 {
+            served_model_id: fixture.state.served_model_id.clone(),
+            base_model_sha256: fixture
+                .state
+                .base_weight_shard_manifest
+                .as_ref()
+                .unwrap()
+                .aggregate_sha256
+                .clone(),
+            adapter: None,
+            inference_config_sha256: kiln_core::config_hashes::sha256_bytes(b"test-inference"),
+            implementation: "kiln-test/cpu".to_string(),
+        };
+        let tokenizer = kiln_train::RolloutTokenizerIdentityV1 {
+            vocab_sha256: fixture.state.tokenizer.vocab_identity_sha256(),
+            config_sha256: fixture.state.tokenizer.tokenizer_config_sha256().unwrap(),
+            chat_template_sha256: fixture.state.tokenizer.chat_template_sha256().unwrap(),
+        };
+        let completions = [(0.0, 11), (1.0, 12)]
+            .into_iter()
+            .map(|(reward, seed)| {
+                let rollout = kiln_train::ScoredRollout::legacy("b".to_string(), reward);
+                let payload_sha256 = kiln_train::scored_rollout_payload_sha256(&rollout).unwrap();
+                let mut input_token_ids = prompt_ids.clone();
+                input_token_ids.push(completion_token);
+                let provenance = kiln_train::RolloutProvenanceV1::new(
+                    input_token_ids,
+                    prompt_ids.len(),
+                    prompt_sha256.clone(),
+                    payload_sha256,
+                    vec![kiln_train::RolloutActionTokenV1::sampled(
+                        prompt_ids.len(),
+                        completion_token,
+                        -0.5,
+                    )],
+                    behavior_policy.clone(),
+                    tokenizer.clone(),
+                    kiln_train::RolloutSamplingConfigV1 {
+                        temperature: 0.7,
+                        top_p: 0.95,
+                        top_k: 20,
+                        min_p: 0.0,
+                        max_tokens: 1,
+                        repetition_penalty: 1.0,
+                        presence_penalty: 0.0,
+                        frequency_penalty: 0.0,
+                        stop: Vec::new(),
+                        thinking_budget: None,
+                    },
+                    seed,
+                    "test",
+                )
+                .unwrap();
+                rollout.with_provenance(provenance)
+            })
+            .collect();
+        vec![GrpoGroup {
+            messages,
+            completions,
+        }]
     }
 
     #[test]
@@ -1203,6 +1473,159 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn grpo_inline_and_jsonl_exports_share_the_verified_lifecycle() {
+        let fixture = test_state(true);
+        let groups = grpo_groups(&fixture);
+        let source = fixture
+            .state
+            .adapter_dir
+            .parent()
+            .unwrap()
+            .join("recorded-rollouts.jsonl");
+        let mut source_bytes = serde_json::to_vec(&groups[0]).unwrap();
+        source_bytes.push(b'\n');
+        fs::write(&source, source_bytes).unwrap();
+        let app = routes().with_state(fixture.state.clone());
+
+        let inline = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/v1/train/hf/grpo/exports",
+                serde_json::json!({
+                    "name": "inline_grpo",
+                    "groups": groups,
+                    "split_manifest": {"schema": "test.split.v1", "train": [0]}
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(inline.status(), StatusCode::CREATED);
+        let inline = response_json(inline).await;
+        assert_eq!(inline["task"], "grpo");
+        assert_eq!(inline["source_name"], "inline");
+        assert_eq!(inline["row_count"], 1);
+        let inline_manifest =
+            verify_hf_trl_export_bundle(&bundle_path(&fixture.state.adapter_dir, "inline_grpo"))
+                .unwrap();
+        assert_eq!(inline_manifest.task, kiln_train::HfTrlTask::Grpo);
+        assert!(inline_manifest.data.sft_selection.is_none());
+        assert!(inline_manifest.data.split_manifest.is_some());
+
+        let jsonl = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/v1/train/hf/grpo/exports",
+                serde_json::json!({
+                    "name": "jsonl_grpo",
+                    "dataset_path": source.to_string_lossy()
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(jsonl.status(), StatusCode::CREATED);
+        let jsonl = response_json(jsonl).await;
+        assert_eq!(jsonl["task"], "grpo");
+        assert_eq!(jsonl["source_name"], source.to_string_lossy().as_ref());
+        assert_eq!(
+            jsonl["ordered_corpus_sha256"],
+            inline["ordered_corpus_sha256"]
+        );
+        let jsonl_manifest =
+            verify_hf_trl_export_bundle(&bundle_path(&fixture.state.adapter_dir, "jsonl_grpo"))
+                .unwrap();
+        assert_eq!(
+            jsonl_manifest.data.ordered_corpus_sha256,
+            inline_manifest.data.ordered_corpus_sha256
+        );
+
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/train/hf/exports")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed = response_json(listed).await;
+        assert_eq!(listed["data"].as_array().unwrap().len(), 2);
+
+        for body in [
+            serde_json::json!({"name": "missing_source"}),
+            serde_json::json!({
+                "name": "ambiguous_source",
+                "groups": grpo_groups(&fixture),
+                "dataset_path": source.to_string_lossy()
+            }),
+        ] {
+            let invalid = app
+                .clone()
+                .oneshot(json_request("POST", "/v1/train/hf/grpo/exports", body))
+                .await
+                .unwrap();
+            assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response_json(invalid).await["error"]["code"],
+                "hf_trl_invalid_request"
+            );
+        }
+
+        let mut missing_provenance = grpo_groups(&fixture);
+        missing_provenance[0].completions[0].provenance = None;
+        let invalid = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/v1/train/hf/grpo/exports",
+                serde_json::json!({
+                    "name": "missing_provenance",
+                    "groups": missing_provenance
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        let invalid = response_json(invalid).await;
+        assert_eq!(invalid["error"]["code"], "hf_trl_invalid_request");
+        assert!(
+            invalid["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("missing exact rollout provenance")
+        );
+        assert!(!bundle_path(&fixture.state.adapter_dir, "missing_provenance").exists());
+
+        let mut heterogeneous = grpo_groups(&fixture);
+        heterogeneous.push(heterogeneous[0].clone());
+        let extra_completion = heterogeneous[1].completions[0].clone();
+        heterogeneous[1].completions.push(extra_completion);
+        let invalid = app
+            .oneshot(json_request(
+                "POST",
+                "/v1/train/hf/grpo/exports",
+                serde_json::json!({
+                    "name": "heterogeneous_width",
+                    "groups": heterogeneous
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        let invalid = response_json(invalid).await;
+        assert!(
+            invalid["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("uniform group width")
+        );
+        assert!(!bundle_path(&fixture.state.adapter_dir, "heterogeneous_width").exists());
     }
 
     #[tokio::test]

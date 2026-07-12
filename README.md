@@ -422,6 +422,10 @@ kiln train hf import-peft \
   --name support-v2
 ```
 
+Provenance-complete recorded GRPO corpora can use the same immutable handoff
+and pinned runner through `POST /v1/train/hf/grpo/exports`; the first-party
+`export-grpo` CLI wrapper is still pending.
+
 `--file` is read by the running server, not uploaded by the CLI. Use
 `--dataset corrections:active` for the active corrections snapshot, or another
 named server dataset. The CLI streams to a same-directory temporary file,
@@ -524,6 +528,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/completions/batch` | Text-only batch generation (up to 64 prompts per request), with the same thinking-budget controls but no recorded behavior-policy probabilities |
 | POST | `/v1/train/sft` | Submit bounded `native_online_lora_v1` SFT examples and return the exact effective seed under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`) |
 | POST | `/v1/train/hf/sft/exports` | Atomically publish an immutable, identity-bound SFT bundle with the pinned HF/TRL runner |
+| POST | `/v1/train/hf/grpo/exports` | Atomically publish an immutable recorded-GRPO bundle from inline groups or server-local canonical JSONL |
 | GET | `/v1/train/hf/exports` | List server-owned HF/TRL export summaries |
 | GET | `/v1/train/hf/exports/{name}` | Revalidate and return one complete export manifest |
 | GET | `/v1/train/hf/exports/{name}/download` | Revalidate and stream one `.kiln-hf` bundle as tar.gz |

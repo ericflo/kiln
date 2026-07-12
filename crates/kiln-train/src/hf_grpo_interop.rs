@@ -29,12 +29,22 @@ const MAX_CHAT_TEMPLATE_BYTES: u64 = 16 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HfTrlGrpoCorpusSummary {
     pub row_count: u64,
+    pub completions_per_group: u64,
     pub completion_count: u64,
     pub sampled_action_tokens: u64,
     pub forced_action_tokens: u64,
     pub max_sequence_tokens: u64,
     pub ordered_corpus_sha256: String,
     pub behavior_policy: RolloutBehaviorPolicyIdentityV1,
+}
+
+/// Resident identities used to admit a GRPO source before immutable bundle
+/// publication. The published bundle is independently verified again.
+#[derive(Debug, Clone, Copy)]
+pub struct HfTrlGrpoExportIdentity<'a> {
+    pub served_model_id: &'a str,
+    pub base_model_sha256: &'a str,
+    pub input_adapter: Option<&'a RolloutAdapterIdentityV1>,
 }
 
 pub(crate) struct GrpoCorpusDigest {
@@ -76,6 +86,126 @@ pub fn ordered_grpo_corpus_sha256<'a>(rows: impl IntoIterator<Item = &'a [u8]>) 
         digest.observe(row)?;
     }
     Ok(digest.finish())
+}
+
+/// Validate already-deserialized groups against the exact resident identities
+/// and the recorded-policy tokenizer/mask contract before publication.
+pub fn validate_hf_trl_grpo_groups_for_export(
+    groups: &[GrpoGroup],
+    identity: HfTrlGrpoExportIdentity<'_>,
+    tokenizer: &KilnTokenizer,
+) -> Result<()> {
+    ensure!(
+        !groups.is_empty()
+            && u64::try_from(groups.len())
+                .ok()
+                .is_some_and(|count| count <= HF_TRL_GRPO_MAX_GROUPS),
+        "HF/TRL GRPO group source must contain 1..={HF_TRL_GRPO_MAX_GROUPS} groups"
+    );
+    let mut total_bytes = 0u64;
+    let mut behavior_policy = None;
+    let mut completions_per_group = None;
+    let expected_tokenizer = export_tokenizer_identity(tokenizer)?;
+    for (index, group) in groups.iter().enumerate() {
+        let row_index = u64::try_from(index)
+            .context("HF/TRL GRPO row index exceeds u64")?
+            .checked_add(1)
+            .context("HF/TRL GRPO row index overflow")?;
+        let row_bytes = u64::try_from(
+            serde_json::to_vec(group)
+                .with_context(|| format!("serialize HF/TRL GRPO row {row_index}"))?
+                .len(),
+        )
+        .context("HF/TRL GRPO row size exceeds u64")?
+        .checked_add(1)
+        .context("HF/TRL GRPO row size overflow")?;
+        ensure!(
+            row_bytes <= HF_TRL_GRPO_MAX_ROW_BYTES,
+            "HF/TRL GRPO row {row_index} exceeds {HF_TRL_GRPO_MAX_ROW_BYTES} bytes"
+        );
+        total_bytes = total_bytes
+            .checked_add(row_bytes)
+            .context("HF/TRL GRPO dataset-size overflow")?;
+        ensure!(
+            total_bytes <= HF_TRL_GRPO_MAX_DATASET_BYTES,
+            "HF/TRL GRPO dataset exceeds {HF_TRL_GRPO_MAX_DATASET_BYTES} bytes"
+        );
+        observe_export_group(
+            group,
+            row_index,
+            identity,
+            &expected_tokenizer,
+            tokenizer,
+            &mut behavior_policy,
+            &mut completions_per_group,
+        )?;
+    }
+    Ok(())
+}
+
+/// Stream and validate a canonical server-local GRPO JSONL source before
+/// publication. The writer reopens and revalidates the source while copying.
+pub fn validate_hf_trl_grpo_jsonl_for_export(
+    path: &Path,
+    identity: HfTrlGrpoExportIdentity<'_>,
+    tokenizer: &KilnTokenizer,
+) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect HF/TRL GRPO source {}", path.display()))?;
+    ensure!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "HF/TRL GRPO JSONL source must be a regular file"
+    );
+    ensure!(
+        metadata.len() > 0 && metadata.len() <= HF_TRL_GRPO_MAX_DATASET_BYTES,
+        "HF/TRL GRPO JSONL source must contain 1..={HF_TRL_GRPO_MAX_DATASET_BYTES} bytes"
+    );
+    let file =
+        File::open(path).with_context(|| format!("open HF/TRL GRPO source {}", path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspect opened HF/TRL GRPO source {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        ensure!(
+            metadata.dev() == opened.dev() && metadata.ino() == opened.ino(),
+            "HF/TRL GRPO JSONL source changed while being opened"
+        );
+    }
+    ensure!(
+        opened.is_file() && opened.len() == metadata.len(),
+        "HF/TRL GRPO JSONL source changed while being opened"
+    );
+    let mut reader = BufReader::with_capacity(256 * 1024, file);
+    let mut row = Vec::new();
+    let mut row_count = 0u64;
+    let mut behavior_policy = None;
+    let mut completions_per_group = None;
+    let expected_tokenizer = export_tokenizer_identity(tokenizer)?;
+    loop {
+        let Some(group) = read_canonical_grpo_row(&mut reader, row_count + 1, &mut row)? else {
+            break;
+        };
+        row_count = row_count
+            .checked_add(1)
+            .context("GRPO row-count overflow")?;
+        ensure!(
+            row_count <= HF_TRL_GRPO_MAX_GROUPS,
+            "HF/TRL GRPO dataset exceeds {HF_TRL_GRPO_MAX_GROUPS} groups"
+        );
+        observe_export_group(
+            &group,
+            row_count,
+            identity,
+            &expected_tokenizer,
+            tokenizer,
+            &mut behavior_policy,
+            &mut completions_per_group,
+        )?;
+    }
+    ensure!(row_count > 0, "HF/TRL GRPO dataset contains no groups");
+    Ok(())
 }
 
 pub(crate) fn read_canonical_grpo_row<R: BufRead>(
@@ -202,6 +332,7 @@ pub(crate) fn verify_hf_trl_grpo_corpus(
     let mut forced_action_tokens = 0u64;
     let mut max_sequence_tokens = 0u64;
     let mut behavior_policy: Option<RolloutBehaviorPolicyIdentityV1> = None;
+    let mut completions_per_group = None;
 
     loop {
         let Some(group) = read_canonical_grpo_row(&mut reader, row_count + 1, &mut row)? else {
@@ -222,6 +353,11 @@ pub(crate) fn verify_hf_trl_grpo_corpus(
             model,
             expected_adapter.as_ref(),
             &tokenizer,
+        )?;
+        observe_uniform_group_width(
+            &mut completions_per_group,
+            group.completions.len(),
+            row_count,
         )?;
         completion_count = completion_count
             .checked_add(group_summary.completion_count)
@@ -257,6 +393,10 @@ pub(crate) fn verify_hf_trl_grpo_corpus(
 
     Ok(HfTrlGrpoCorpusSummary {
         row_count,
+        completions_per_group: u64::try_from(
+            completions_per_group.context("HF/TRL GRPO corpus has no completion width")?,
+        )
+        .context("GRPO completion width exceeds u64")?,
         completion_count,
         sampled_action_tokens,
         forced_action_tokens,
@@ -274,11 +414,94 @@ struct GroupSummary {
     behavior_policy: RolloutBehaviorPolicyIdentityV1,
 }
 
+fn observe_uniform_group_width(
+    expected: &mut Option<usize>,
+    actual: usize,
+    row_index: u64,
+) -> Result<()> {
+    match expected {
+        Some(expected) => ensure!(
+            *expected == actual,
+            "HF/TRL GRPO row {row_index} has {actual} completions; expected uniform group width {expected}"
+        ),
+        None => *expected = Some(actual),
+    }
+    Ok(())
+}
+
+fn observe_export_group(
+    group: &GrpoGroup,
+    row_index: u64,
+    identity: HfTrlGrpoExportIdentity<'_>,
+    expected_tokenizer: &RolloutTokenizerIdentityV1,
+    tokenizer: &KilnTokenizer,
+    behavior_policy: &mut Option<RolloutBehaviorPolicyIdentityV1>,
+    completions_per_group: &mut Option<usize>,
+) -> Result<()> {
+    observe_uniform_group_width(completions_per_group, group.completions.len(), row_index)?;
+    let summary = validate_group_against_identity(
+        group,
+        row_index,
+        identity.served_model_id,
+        identity.base_model_sha256,
+        identity.input_adapter,
+        expected_tokenizer,
+        tokenizer,
+    )?;
+    match behavior_policy.as_ref() {
+        Some(expected) => ensure!(
+            expected == &summary.behavior_policy,
+            "HF/TRL GRPO row {row_index} uses a different behavior-policy identity"
+        ),
+        None => *behavior_policy = Some(summary.behavior_policy),
+    }
+    Ok(())
+}
+
+fn export_tokenizer_identity(tokenizer: &KilnTokenizer) -> Result<RolloutTokenizerIdentityV1> {
+    Ok(RolloutTokenizerIdentityV1 {
+        vocab_sha256: tokenizer.vocab_identity_sha256(),
+        config_sha256: tokenizer
+            .tokenizer_config_sha256()
+            .map_err(anyhow::Error::msg)
+            .context("hash HF/TRL GRPO tokenizer configuration")?,
+        chat_template_sha256: tokenizer
+            .chat_template_sha256()
+            .context("HF/TRL GRPO tokenizer has no chat template")?,
+    })
+}
+
 fn validate_group(
     group: &GrpoGroup,
     row_index: u64,
     model: &HfTrlModelIdentity,
     expected_adapter: Option<&RolloutAdapterIdentityV1>,
+    tokenizer: &KilnTokenizer,
+) -> Result<GroupSummary> {
+    let expected_tokenizer = RolloutTokenizerIdentityV1 {
+        vocab_sha256: model.tokenizer_vocab_sha256.clone(),
+        config_sha256: model.tokenizer.sha256.clone(),
+        chat_template_sha256: model.chat_template.sha256.clone(),
+    };
+    validate_group_against_identity(
+        group,
+        row_index,
+        &model.served_model_id,
+        &model.base_weight_shard_manifest.aggregate_sha256,
+        expected_adapter,
+        &expected_tokenizer,
+        tokenizer,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_group_against_identity(
+    group: &GrpoGroup,
+    row_index: u64,
+    served_model_id: &str,
+    base_model_sha256: &str,
+    expected_adapter: Option<&RolloutAdapterIdentityV1>,
+    expected_tokenizer: &RolloutTokenizerIdentityV1,
     tokenizer: &KilnTokenizer,
 ) -> Result<GroupSummary> {
     ensure!(
@@ -292,11 +515,6 @@ fn validate_group(
     let prompt_sha256 = rollout_prompt_messages_sha256(&group.messages)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("hash HF/TRL GRPO row {row_index} prompt"))?;
-    let expected_tokenizer = RolloutTokenizerIdentityV1 {
-        vocab_sha256: model.tokenizer_vocab_sha256.clone(),
-        config_sha256: model.tokenizer.sha256.clone(),
-        chat_template_sha256: model.chat_template.sha256.clone(),
-    };
     let mut behavior_policy: Option<RolloutBehaviorPolicyIdentityV1> = None;
     let mut sampled_action_tokens = 0u64;
     let mut forced_action_tokens = 0u64;
@@ -334,16 +552,15 @@ fn validate_group(
             "HF/TRL GRPO row {row_index} completion {completion_index} scored payload differs from its provenance"
         );
         ensure!(
-            provenance.tokenizer == expected_tokenizer,
+            &provenance.tokenizer == expected_tokenizer,
             "HF/TRL GRPO row {row_index} completion {completion_index} tokenizer identity differs from the export"
         );
         ensure!(
-            provenance.behavior_policy.served_model_id == model.served_model_id,
+            provenance.behavior_policy.served_model_id == served_model_id,
             "HF/TRL GRPO row {row_index} completion {completion_index} served model differs from the export"
         );
         ensure!(
-            provenance.behavior_policy.base_model_sha256
-                == model.base_weight_shard_manifest.aggregate_sha256,
+            provenance.behavior_policy.base_model_sha256 == base_model_sha256,
             "HF/TRL GRPO row {row_index} completion {completion_index} base model differs from the export"
         );
         ensure!(

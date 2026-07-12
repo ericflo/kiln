@@ -73,7 +73,8 @@ pub mod trajectory_mask;
 pub use hf_grpo_interop::{
     HF_TRL_GRPO_CORPUS_IDENTITY_V1, HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP,
     HF_TRL_GRPO_MAX_DATASET_BYTES, HF_TRL_GRPO_MAX_GROUPS, HF_TRL_GRPO_MAX_ROW_BYTES,
-    HfTrlGrpoCorpusSummary, ordered_grpo_corpus_sha256,
+    HfTrlGrpoCorpusSummary, HfTrlGrpoExportIdentity, ordered_grpo_corpus_sha256,
+    validate_hf_trl_grpo_groups_for_export, validate_hf_trl_grpo_jsonl_for_export,
 };
 pub use hf_interop::{
     HF_TRL_ADAPTER_CONFIG_FILENAME, HF_TRL_ADAPTER_MODEL_FILENAME, HF_TRL_CHAT_TEMPLATE_FILENAME,

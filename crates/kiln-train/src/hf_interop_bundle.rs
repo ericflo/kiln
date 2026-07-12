@@ -1508,6 +1508,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(summary.row_count, 1);
+        assert_eq!(summary.completions_per_group, 2);
         assert_eq!(summary.completion_count, 2);
         assert_eq!(summary.sampled_action_tokens, 2);
         assert_eq!(summary.forced_action_tokens, 0);
@@ -1583,6 +1584,27 @@ mod tests {
             jsonl_manifest
         );
         assert!(incomplete_entries(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn grpo_bundle_rejects_group_width_the_pinned_runner_cannot_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = fixture();
+        let mut groups = grpo_groups(&fixture);
+        groups.push(groups[0].clone());
+        let extra_completion = groups[1].completions[0].clone();
+        groups[1].completions.push(extra_completion);
+        let target = directory.path().join("heterogeneous.kiln-hf");
+        let error = write_hf_trl_grpo_bundle(
+            &target,
+            fixture.grpo_input(HfTrlGrpoDatasetSource::Groups {
+                source_name: "heterogeneous",
+                groups: &groups,
+            }),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("uniform group width"));
+        assert!(!target.exists());
     }
 
     #[test]
