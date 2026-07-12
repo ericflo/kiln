@@ -65,6 +65,8 @@ SLO_E2E_MS = 120_000.0
 STREAM_READ_POLL_SECONDS = 0.25
 SERVER_SHUTDOWN_GRACE_SECONDS = 60.0
 SERVER_KILL_WAIT_SECONDS = 10.0
+PROMPT_IDENTITY = "variant_invariant_v1"
+PROMPT_MARKER_FORMAT = "QUAL-{seed}-{role}"
 
 
 def _variant_config(
@@ -125,6 +127,8 @@ def _variant_config(
             "pressure_peer_max_tokens": PRESSURE_PEER_MAX_TOKENS,
             "pressure_peer_prompt_words": PRESSURE_PEER_PROMPT_WORDS,
             "pressure_peer_seed_offset": PRESSURE_PEER_SEED_OFFSET,
+            "prompt_identity": PROMPT_IDENTITY,
+            "prompt_marker_format": PROMPT_MARKER_FORMAT,
             "request_timeout_seconds": int(REQUEST_TIMEOUT_SECONDS),
             "slow_socket_buffer_bytes": SLOW_SOCKET_BUFFER_BYTES,
             "slow_max_tokens": SLOW_MAX_TOKENS,
@@ -538,6 +542,15 @@ def deterministic_prompt(marker: str, words: int) -> str:
         f"{marker} Read the deterministic sequence and then answer with concise numbered facts. "
         f"Do not repeat the sequence. Sequence: {payload}"
     )
+
+
+def workload_marker(seed: int, role: str) -> str:
+    """Return a traceable marker whose model-visible bytes are A/B invariant."""
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise QualificationError("workload marker seed must be a nonnegative integer")
+    if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", role) is None:
+        raise QualificationError(f"invalid workload marker role {role!r}")
+    return PROMPT_MARKER_FORMAT.format(seed=seed, role=role)
 
 
 def slow_consumer_prompt(marker: str) -> str:
@@ -2347,7 +2360,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             warmup = run_stream(
                 port,
                 name=f"warmup-{attempt + 1}",
-                marker=f"QUAL-{variant}-{seed}-warmup-{attempt + 1}",
+                marker=workload_marker(seed, f"warmup-{attempt + 1}"),
                 prompt_words=16 + attempt * 8,
                 max_tokens=WARMUP_MAX_TOKENS,
                 seed=seed + attempt,
@@ -2386,8 +2399,8 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         first_token = threading.Event()
         normal_word_counts = (16, 32, 64, 128, 256, 384, 512, 768)
         measured: list[StreamResult] = []
-        cancellation_marker = f"QUAL-{variant}-{seed}-cancel"
-        slow_marker = f"QUAL-{variant}-{seed}-slow"
+        cancellation_marker = workload_marker(seed, "cancel")
+        slow_marker = workload_marker(seed, "slow")
         pressure_window: DeliveryPressureWindow | None = None
         delivery_pressure_observed = False
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=12)
@@ -2399,7 +2412,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                     run_stream,
                     port,
                     name=f"normal-{index:02d}",
-                    marker=f"QUAL-{variant}-{seed}-normal-{index:02d}",
+                    marker=workload_marker(seed, f"normal-{index:02d}"),
                     prompt_words=normal_word_counts[index],
                     max_tokens=NORMAL_MAX_TOKENS,
                     seed=seed + 10 + index,
@@ -2420,7 +2433,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 run_stream,
                 port,
                 name="long-prefill",
-                marker=f"QUAL-{variant}-{seed}-long",
+                marker=workload_marker(seed, "long"),
                 prompt_words=LONG_PREFILL_WORDS,
                 max_tokens=LONG_PREFILL_MAX_TOKENS,
                 seed=seed + 100,
@@ -2456,7 +2469,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 run_stream,
                 port,
                 name="pressure-peer",
-                marker=f"QUAL-{variant}-{seed}-pressure-peer",
+                marker=workload_marker(seed, "pressure-peer"),
                 prompt_words=PRESSURE_PEER_PROMPT_WORDS,
                 max_tokens=PRESSURE_PEER_MAX_TOKENS,
                 seed=seed + PRESSURE_PEER_SEED_OFFSET,

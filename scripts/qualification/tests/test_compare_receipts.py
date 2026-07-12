@@ -388,6 +388,62 @@ class ReceiptComparisonTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertEqual(report["metric_evaluations"][0]["status"], "failed")
 
+    def test_required_ab_prompt_token_identity_drift_returns_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            value = performance_manifest("declared_ab_variants")
+            prompt_rule = {
+                "scope": "result",
+                "result_id": "main-case",
+                "metric": "prompt_token_count",
+                "metric_class": "performance",
+                "unit": "tokens",
+                "aggregation": "sum",
+                "lower_is_better": False,
+                "operator": "equal",
+                "absolute_tolerance": 0,
+                "relative_tolerance": 0,
+                "required": True,
+            }
+            value["comparison_policy"]["metric_rules"].append(prompt_rule)
+            for variant_value in value["variants"]:
+                variant_value["cases"][0]["result_protocol"]["declared_metrics"].append(
+                    "prompt_token_count"
+                )
+                variant_value["cases"][0]["result_protocol"]["declared_metrics"].sort()
+            manifest = commit_manifest(root, value)
+            baseline_value = receipt(
+                "baseline-run", manifest, variant_id="graphs-off", backend="rocm"
+            )
+            candidate_value = receipt(
+                "candidate-run", manifest, variant_id="graphs-on", backend="rocm"
+            )
+            for receipt_value, count in ((baseline_value, 100), (candidate_value, 101)):
+                receipt_value["results"][0]["metrics"].append(
+                    {
+                        "name": "prompt_token_count",
+                        "value": count,
+                        "unit": "tokens",
+                        "aggregation": "sum",
+                        "lower_is_better": False,
+                    }
+                )
+                receipt_value["results"][0]["metrics"].sort(key=lambda item: item["name"])
+            baseline = write_receipt(root, "baseline.json", baseline_value)
+            candidate = write_receipt(root, "candidate.json", candidate_value)
+            report = compare_module.compare_receipts(
+                baseline, candidate, manifest=manifest
+            )
+
+        self.assertTrue(report["compatible"])
+        self.assertFalse(report["ok"])
+        prompt_evaluation = next(
+            item
+            for item in report["metric_evaluations"]
+            if item["scope"].endswith("prompt_token_count")
+        )
+        self.assertEqual(prompt_evaluation["status"], "failed")
+
     def test_immutable_identity_differences_are_rejected_before_deltas(self) -> None:
         mutations = {
             "source": lambda value: value["source"].__setitem__("tree_hash", HASH_B),

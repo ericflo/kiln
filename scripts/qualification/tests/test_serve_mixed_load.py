@@ -428,6 +428,8 @@ class ServeMixedLoadTests(unittest.TestCase):
             "pressure_peer_max_tokens": serve.PRESSURE_PEER_MAX_TOKENS,
             "pressure_peer_prompt_words": serve.PRESSURE_PEER_PROMPT_WORDS,
             "pressure_peer_seed_offset": serve.PRESSURE_PEER_SEED_OFFSET,
+            "prompt_identity": serve.PROMPT_IDENTITY,
+            "prompt_marker_format": serve.PROMPT_MARKER_FORMAT,
             "request_timeout_seconds": int(serve.REQUEST_TIMEOUT_SECONDS),
             "slow_socket_buffer_bytes": serve.SLOW_SOCKET_BUFFER_BYTES,
             "slow_max_tokens": serve.SLOW_MAX_TOKENS,
@@ -1400,6 +1402,23 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(body["max_tokens"], 12)
         self.assertTrue(body["stream_options"]["include_usage"])
         self.assertFalse(body["chat_template_kwargs"]["enable_thinking"])
+
+    def test_workload_markers_are_variant_invariant_and_path_safe(self) -> None:
+        markers = {
+            variant: serve.workload_marker(20260709, "normal-00")
+            for variant in serve.VARIANT_CONFIGS
+        }
+        self.assertEqual(set(markers.values()), {"QUAL-20260709-normal-00"})
+        self.assertTrue(
+            all(
+                config["workload"]["prompt_identity"] == "variant_invariant_v1"
+                for config in serve.VARIANT_CONFIGS.values()
+            )
+        )
+        with self.assertRaisesRegex(serve.QualificationError, "marker role"):
+            serve.workload_marker(20260709, "../../default")
+        with self.assertRaisesRegex(serve.QualificationError, "marker seed"):
+            serve.workload_marker(-1, "normal-00")
 
     def test_slow_consumer_prompt_demands_generation_until_the_token_limit(self) -> None:
         prompt = serve.slow_consumer_prompt("marker")
