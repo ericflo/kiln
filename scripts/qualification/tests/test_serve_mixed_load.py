@@ -417,6 +417,8 @@ class ServeMixedLoadTests(unittest.TestCase):
             "long_prefill_max_tokens": serve.LONG_PREFILL_MAX_TOKENS,
             "long_prefill_words": serve.LONG_PREFILL_WORDS,
             "max_warmup_requests": serve.MAX_WARMUP_REQUESTS,
+            "measured_expected_completion_tokens": serve.MEASURED_EXPECTED_COMPLETION_TOKENS,
+            "measured_finish_reason": "length",
             "memory_poll_interval_ms": int(serve.MEMORY_POLL_INTERVAL_SECONDS * 1000),
             "normal_max_tokens": serve.NORMAL_MAX_TOKENS,
             "normal_requests": serve.NORMAL_REQUESTS,
@@ -1357,6 +1359,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(values["graph_measured_capture_deferral_count"], 1)
         self.assertEqual(values["graph_measured_replay_success_count"], 8)
         self.assertEqual(values["graph_measured_live_count_end"], 1)
+        self.assertEqual(values["length_terminated_request_count"], 1)
         self.assertEqual(values["external_yield_sync_call_count"], 5)
         self.assertEqual(values["external_yield_sync_failure_count"], 0)
         self.assertEqual(values["external_yield_sync_total_ms"], 75.0)
@@ -1411,7 +1414,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(set(markers.values()), {"QUAL-20260709-normal-00"})
         self.assertTrue(
             all(
-                config["workload"]["prompt_identity"] == "variant_invariant_v1"
+                config["workload"]["prompt_identity"] == serve.PROMPT_IDENTITY
                 for config in serve.VARIANT_CONFIGS.values()
             )
         )
@@ -1419,6 +1422,57 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             serve.workload_marker(20260709, "../../default")
         with self.assertRaisesRegex(serve.QualificationError, "marker seed"):
             serve.workload_marker(-1, "normal-00")
+
+    def test_measured_prompts_and_results_require_a_fixed_output_denominator(self) -> None:
+        prompt = serve.deterministic_prompt("marker", 3)
+        self.assertIn("ascending zero-padded integers", prompt)
+        self.assertIn("until the response token limit", prompt)
+        self.assertIn("item00 item01 item02", prompt)
+
+        def completed(name: str, token_limit: int) -> serve.StreamResult:
+            return serve.StreamResult(
+                name=name,
+                marker="marker",
+                started=0.0,
+                finished=1.0,
+                semantic_times=[0.5],
+                token_ready_times=[0.5] * token_limit,
+                token_queue_delays_ms=[0.0] * token_limit,
+                prompt_tokens=1,
+                completion_tokens=token_limit,
+                usage_records=1,
+                finish_reason="length",
+                done=True,
+                cancelled=False,
+                error=None,
+            )
+
+        measured = [
+            completed(f"normal-{index:02d}", serve.NORMAL_MAX_TOKENS)
+            for index in range(serve.NORMAL_REQUESTS)
+        ]
+        measured.extend(
+            [
+                completed("long-prefill", serve.LONG_PREFILL_MAX_TOKENS),
+                completed("pressure-peer", serve.PRESSURE_PEER_MAX_TOKENS),
+            ]
+        )
+        self.assertEqual(serve.fixed_output_contract_failures(measured), [])
+        self.assertEqual(
+            sum(result.completion_tokens for result in measured),
+            serve.MEASURED_EXPECTED_COMPLETION_TOKENS,
+        )
+
+        measured[0] = serve.dataclasses.replace(
+            measured[0],
+            completion_tokens=serve.NORMAL_MAX_TOKENS - 1,
+            token_ready_times=measured[0].token_ready_times[:-1],
+            token_queue_delays_ms=measured[0].token_queue_delays_ms[:-1],
+            finish_reason="stop",
+        )
+        failures = serve.fixed_output_contract_failures(measured)
+        self.assertTrue(any("normal-00 must finish by length" in item for item in failures))
+        self.assertTrue(any("completion total" in item for item in failures))
 
     def test_slow_consumer_prompt_demands_generation_until_the_token_limit(self) -> None:
         prompt = serve.slow_consumer_prompt("marker")

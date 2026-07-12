@@ -45,7 +45,7 @@ NORMAL_MAX_TOKENS = 128
 LONG_PREFILL_WORDS = 1536
 LONG_PREFILL_MAX_TOKENS = 32
 PRESSURE_PEER_PROMPT_WORDS = 64
-PRESSURE_PEER_MAX_TOKENS = 512
+PRESSURE_PEER_MAX_TOKENS = 128
 PRESSURE_PEER_SEED_OFFSET = 103
 WARMUP_MAX_TOKENS = 32
 MAX_WARMUP_REQUESTS = 4
@@ -65,7 +65,12 @@ SLO_E2E_MS = 120_000.0
 STREAM_READ_POLL_SECONDS = 0.25
 SERVER_SHUTDOWN_GRACE_SECONDS = 60.0
 SERVER_KILL_WAIT_SECONDS = 10.0
-PROMPT_IDENTITY = "variant_invariant_v1"
+MEASURED_EXPECTED_COMPLETION_TOKENS = (
+    NORMAL_REQUESTS * NORMAL_MAX_TOKENS
+    + LONG_PREFILL_MAX_TOKENS
+    + PRESSURE_PEER_MAX_TOKENS
+)
+PROMPT_IDENTITY = "variant_invariant_fixed_output_v2"
 PROMPT_MARKER_FORMAT = "QUAL-{seed}-{role}"
 
 
@@ -116,6 +121,8 @@ def _variant_config(
             "long_prefill_max_tokens": LONG_PREFILL_MAX_TOKENS,
             "long_prefill_words": LONG_PREFILL_WORDS,
             "max_warmup_requests": MAX_WARMUP_REQUESTS,
+            "measured_expected_completion_tokens": MEASURED_EXPECTED_COMPLETION_TOKENS,
+            "measured_finish_reason": "length",
             "memory_poll_interval_ms": int(MEMORY_POLL_INTERVAL_SECONDS * 1000),
             "normal_max_tokens": NORMAL_MAX_TOKENS,
             "normal_requests": NORMAL_REQUESTS,
@@ -263,6 +270,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "kv_blocks_end": ("blocks", "exact", False),
     "kv_blocks_start": ("blocks", "exact", False),
     "kv_resize_event_count": ("count", "sum", True),
+    "length_terminated_request_count": ("count", "sum", False),
     "long_prefill_prompt_tokens": ("tokens", "exact", False),
     "memory_reclaim_event_count": ("count", "sum", True),
     "output_token_throughput_per_second": ("tokens/s", "rate", False),
@@ -539,8 +547,10 @@ def request_body(prompt: str, max_tokens: int, seed: int) -> dict[str, Any]:
 def deterministic_prompt(marker: str, words: int) -> str:
     payload = " ".join(f"item{index % 97:02d}" for index in range(words))
     return (
-        f"{marker} Read the deterministic sequence and then answer with concise numbered facts. "
-        f"Do not repeat the sequence. Sequence: {payload}"
+        f"{marker} Read the deterministic input sequence without repeating it. Then emit one "
+        "continuous plain-text sequence of ascending zero-padded integers, starting at 000000 "
+        "and separated only by spaces. Continue without commentary, a summary, or an early "
+        f"stop until the response token limit terminates generation. Input sequence: {payload}"
     )
 
 
@@ -2109,6 +2119,9 @@ def metric_values(
     finish = max((result.finished for result in measured), default=start)
     window = max(finish - start, 1e-9)
     completion_tokens = sum(result.completion_tokens for result in successes)
+    length_terminated_requests = sum(
+        result.finish_reason == "length" for result in successes
+    )
     prompt_tokens = sum(result.prompt_tokens for result in successes)
     failures = len(measured) - len(successes)
     zero_tokens = sum(result.completion_tokens == 0 for result in measured)
@@ -2234,6 +2247,7 @@ def metric_values(
         "kv_blocks_end": batching_end["blocks_total"],
         "kv_blocks_start": batching_start["blocks_total"],
         "kv_resize_event_count": categories.count("kv_resize"),
+        "length_terminated_request_count": length_terminated_requests,
         "long_prefill_prompt_tokens": long_prefill.prompt_tokens,
         "memory_reclaim_event_count": categories.count("memory_reclaim"),
         "output_token_throughput_per_second": completion_tokens / window,
@@ -2278,6 +2292,40 @@ def metrics_from_values(values: dict[str, float | int]) -> list[dict[str, Any]]:
             }
         )
     return metrics
+
+
+def fixed_output_contract_failures(measured: list[StreamResult]) -> list[str]:
+    expected_limits = {
+        **{f"normal-{index:02d}": NORMAL_MAX_TOKENS for index in range(NORMAL_REQUESTS)},
+        "long-prefill": LONG_PREFILL_MAX_TOKENS,
+        "pressure-peer": PRESSURE_PEER_MAX_TOKENS,
+    }
+    observed = {result.name: result for result in measured}
+    failures: list[str] = []
+    if len(observed) != len(measured):
+        failures.append("measured fixed-output requests contain duplicate names")
+    missing = sorted(set(expected_limits) - set(observed))
+    extra = sorted(set(observed) - set(expected_limits))
+    if missing or extra:
+        failures.append(
+            f"measured fixed-output request set drifted: missing={missing}, extra={extra}"
+        )
+    for name in sorted(set(expected_limits) & set(observed)):
+        result = observed[name]
+        expected = expected_limits[name]
+        if result.finish_reason != "length" or result.completion_tokens != expected:
+            failures.append(
+                f"{name} must finish by length with {expected} completion tokens, got "
+                f"finish_reason={result.finish_reason!r} and {result.completion_tokens} tokens"
+            )
+    if sum(result.completion_tokens for result in measured if result.success) != (
+        MEASURED_EXPECTED_COMPLETION_TOKENS
+    ):
+        failures.append(
+            "measured completion total must equal "
+            f"{MEASURED_EXPECTED_COMPLETION_TOKENS} tokens"
+        )
+    return failures
 
 
 def zero_metrics() -> list[dict[str, Any]]:
@@ -2581,6 +2629,11 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             status_failures.append(f"{values['request_failure_count']} measured requests failed")
         if values["zero_token_response_count"] != 0:
             status_failures.append(f"{values['zero_token_response_count']} responses had zero tokens")
+        status_failures.extend(fixed_output_contract_failures(measured))
+        if values["length_terminated_request_count"] != values["request_count"]:
+            status_failures.append(
+                "not every measured request reported finish_reason='length'"
+            )
         if values["batching_batched_decode_forward_count"] < 1:
             status_failures.append("measured load executed no batched decode forward")
         if values["batching_decode_row_count"] <= values["batching_decode_forward_count"]:
