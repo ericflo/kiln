@@ -107,7 +107,13 @@ def health_fixture(
                 "max_prefill_layers_per_cycle": serve.MAX_PREFILL_LAYERS_PER_CYCLE,
                 "max_prefill_layers_per_cycle_source": "default",
                 "active_decode": 0,
+                "active_prefill": 0,
+                "active_staged_requests": 0,
                 "queue_depth": 0,
+                "max_decode_batch": serve.MAX_DECODE_BATCH,
+                "max_prefill_staging_slots": serve.MAX_PREFILL_STAGING_SLOTS,
+                "max_active_requests": serve.MAX_ACTIVE_REQUESTS,
+                "max_observed_active_requests": serve.MAX_DECODE_BATCH,
                 "max_observed_batch_size": 8,
                 "total_errors": 0,
                 "total_decode_forwards": 0,
@@ -120,6 +126,7 @@ def health_fixture(
                 "total_prefill_layers": 0,
                 "total_prefill_layer_yields": 0,
                 "total_short_prefill_priority_forwards": 0,
+                "total_prefill_staging_admissions": 0,
                 "total_prefill_forward_ms": 0.0,
                 "max_prefill_forward_ms": 0.0,
                 "slow_prefill_forward_count": 0,
@@ -158,6 +165,9 @@ def debug_fixture(
                 "max_prefill_tokens_per_cycle_source": "default",
                 "max_prefill_layers_per_cycle": serve.MAX_PREFILL_LAYERS_PER_CYCLE,
                 "max_prefill_layers_per_cycle_source": "default",
+                "max_decode_batch": serve.MAX_DECODE_BATCH,
+                "max_prefill_staging_slots": serve.MAX_PREFILL_STAGING_SLOTS,
+                "max_active_requests": serve.MAX_ACTIVE_REQUESTS,
             },
         },
         "env_flags": {
@@ -1091,6 +1101,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         health["decode_runtime"]["batching_engine"][
             "stream_stall_grace_source"
         ] = "default"
+        health["decode_runtime"]["batching_engine"]["max_active_requests"] = 99
+        debug["batching_engine"]["snapshot"]["max_prefill_staging_slots"] = 0
         debug["env_flags"]["KILN_STREAM_STALL_GRACE_MS"]["value"] = "10"
         failures = serve.attest_runtime("default", health, debug)
         self.assertTrue(any("ROCm graph enabled" in failure for failure in failures))
@@ -1098,6 +1110,15 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertTrue(any("disagree exactly" in failure for failure in failures))
         self.assertTrue(any("grace source" in failure for failure in failures))
         self.assertTrue(any("grace debug flag" in failure for failure in failures))
+        self.assertTrue(
+            any("health batching max_active_requests" in failure for failure in failures)
+        )
+        self.assertTrue(
+            any(
+                "debug batching max_prefill_staging_slots" in failure
+                for failure in failures
+            )
+        )
 
     def test_runtime_execution_requires_capture_and_replay_only_when_enabled(self) -> None:
         warmup = health_fixture(kv_autoscale=True, rocm_graphs=True)
@@ -1231,22 +1252,30 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         ]
         self.assertTrue(serve.cancellation_recorded(records, "marker-b"))
         self.assertFalse(serve.cancellation_recorded(records, "marker-a"))
+        drained = {
+            "active_decode": 0,
+            "active_prefill": 0,
+            "active_staged_requests": 0,
+            "queue_depth": 0,
+        }
         self.assertFalse(
-            serve.batching_engine_drained({"active_decode": 1, "queue_depth": 0})
+            serve.batching_engine_drained({**drained, "active_decode": 1})
         )
         self.assertFalse(
-            serve.batching_engine_drained({"active_decode": 0, "queue_depth": 1})
+            serve.batching_engine_drained({**drained, "active_prefill": 1})
         )
-        self.assertTrue(
-            serve.batching_engine_drained({"active_decode": 0, "queue_depth": 0})
+        self.assertFalse(
+            serve.batching_engine_drained({**drained, "active_staged_requests": 1})
         )
+        self.assertFalse(serve.batching_engine_drained({**drained, "queue_depth": 1}))
+        self.assertTrue(serve.batching_engine_drained(drained))
         for malformed in (
             None,
             {},
             {"active_decode": 0},
-            {"active_decode": "0", "queue_depth": 0},
-            {"active_decode": False, "queue_depth": 0},
-            {"active_decode": -1, "queue_depth": 0},
+            {**drained, "active_decode": "0"},
+            {**drained, "active_decode": False},
+            {**drained, "active_decode": -1},
         ):
             with self.subTest(malformed=malformed):
                 with self.assertRaises(serve.QualificationError):
@@ -1349,6 +1378,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "response_backpressure_wait_ms": 100,
                 "response_stall_evictions": 2,
                 "total_short_prefill_priority_forwards": 2,
+                "total_prefill_staging_admissions": 1,
+                "max_observed_active_requests": serve.MAX_DECODE_BATCH,
             }
         )
         measurement_start["backend_runtime"]["external_yield_sync"] = [
@@ -1402,6 +1433,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "response_backpressure_wait_ms": 850,
                 "response_stall_evictions": 3,
                 "total_short_prefill_priority_forwards": 7,
+                "total_prefill_staging_admissions": 4,
+                "max_observed_active_requests": serve.MAX_ACTIVE_REQUESTS - 1,
             }
         )
 
@@ -1442,6 +1475,19 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(values["batching_batched_decode_forward_count"], 4)
         self.assertEqual(values["batching_decode_row_count"], 15)
         self.assertEqual(values["batching_mean_rows_per_forward"], 3.0)
+        self.assertEqual(values["batching_max_decode_batch"], serve.MAX_DECODE_BATCH)
+        self.assertEqual(
+            values["batching_prefill_staging_slot_count"],
+            serve.MAX_PREFILL_STAGING_SLOTS,
+        )
+        self.assertEqual(
+            values["batching_max_active_requests"], serve.MAX_ACTIVE_REQUESTS
+        )
+        self.assertEqual(
+            values["batching_max_observed_active_requests"],
+            serve.MAX_ACTIVE_REQUESTS - 1,
+        )
+        self.assertEqual(values["batching_prefill_staging_admission_count"], 3)
         self.assertEqual(
             values["batching_max_prefill_tokens_per_cycle"],
             serve.MAX_PREFILL_TOKENS_PER_CYCLE,
@@ -1476,6 +1522,36 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
 
         with self.assertRaises(serve.QualificationError):
             serve.counter_delta({"counter": 2}, {"counter": 1}, "counter")
+
+    def test_staging_contract_requires_exact_capacity_and_measured_execution(self) -> None:
+        good = {
+            "batching_max_decode_batch": serve.MAX_DECODE_BATCH,
+            "batching_prefill_staging_slot_count": serve.MAX_PREFILL_STAGING_SLOTS,
+            "batching_max_active_requests": serve.MAX_ACTIVE_REQUESTS,
+            "batching_max_observed_active_requests": serve.MAX_DECODE_BATCH + 1,
+            "batching_prefill_staging_admission_count": 1,
+        }
+        self.assertEqual(serve.batching_staging_contract_failures(good), [])
+
+        mutations = {
+            "batching_max_decode_batch": serve.MAX_DECODE_BATCH + 1,
+            "batching_prefill_staging_slot_count": 0,
+            "batching_max_active_requests": serve.MAX_ACTIVE_REQUESTS + 1,
+            "batching_max_observed_active_requests": serve.MAX_DECODE_BATCH,
+            "batching_prefill_staging_admission_count": 0,
+        }
+        for name, value in mutations.items():
+            with self.subTest(name=name):
+                failures = serve.batching_staging_contract_failures(
+                    {**good, name: value}
+                )
+                self.assertTrue(failures)
+
+        too_wide = {
+            **good,
+            "batching_max_observed_active_requests": serve.MAX_ACTIVE_REQUESTS + 1,
+        }
+        self.assertTrue(serve.batching_staging_contract_failures(too_wide))
 
     def test_metric_contract_is_sorted_closed_and_finite(self) -> None:
         metrics = serve.zero_metrics()

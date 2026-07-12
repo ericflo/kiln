@@ -61,6 +61,9 @@ HTTP_SEND_BUFFER_BYTES = 4096
 STREAM_STALL_GRACE_MS = 2000
 MAX_PREFILL_TOKENS_PER_CYCLE = 64
 MAX_PREFILL_LAYERS_PER_CYCLE = 4
+MAX_DECODE_BATCH = 8
+MAX_PREFILL_STAGING_SLOTS = 4
+MAX_ACTIVE_REQUESTS = MAX_DECODE_BATCH + MAX_PREFILL_STAGING_SLOTS
 SLO_TTFT_MS = 30_000.0
 SLO_E2E_MS = 120_000.0
 STREAM_READ_POLL_SECONDS = 0.25
@@ -114,6 +117,9 @@ def _variant_config(
             "log_format": "json",
             "request_timeout_seconds": 180,
             "stream_stall_grace_ms": STREAM_STALL_GRACE_MS,
+            "max_decode_batch": MAX_DECODE_BATCH,
+            "max_prefill_staging_slots": MAX_PREFILL_STAGING_SLOTS,
+            "max_active_requests": MAX_ACTIVE_REQUESTS,
             "max_prefill_tokens_per_cycle": MAX_PREFILL_TOKENS_PER_CYCLE,
             "max_prefill_layers_per_cycle": MAX_PREFILL_LAYERS_PER_CYCLE,
         },
@@ -228,6 +234,9 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "batching_decode_forward_ms_max": ("ms", "max", True),
     "batching_decode_forward_ms_total": ("ms", "sum", True),
     "batching_decode_row_count": ("rows", "sum", False),
+    "batching_max_active_requests": ("requests", "exact", False),
+    "batching_max_decode_batch": ("rows", "exact", False),
+    "batching_max_observed_active_requests": ("requests", "max", False),
     "batching_max_observed_batch_size": ("rows", "max", False),
     "batching_max_prefill_tokens_per_cycle": ("tokens", "exact", True),
     "batching_max_prefill_layers_per_cycle": ("layers", "exact", True),
@@ -237,6 +246,8 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "batching_prefill_forward_ms_total": ("ms", "sum", True),
     "batching_prefill_layer_count": ("layers", "sum", True),
     "batching_prefill_layer_yield_count": ("count", "sum", True),
+    "batching_prefill_staging_admission_count": ("count", "sum", False),
+    "batching_prefill_staging_slot_count": ("slots", "exact", False),
     "batching_short_prefill_priority_forward_count": ("count", "sum", False),
     "batching_slow_admission_count": ("count", "sum", True),
     "batching_slow_decode_forward_count": ("count", "sum", True),
@@ -1781,6 +1792,21 @@ def attest_runtime(
             failures.append("health batching stream-stall grace does not match config")
         if batching.get("stream_stall_grace_source") != "environment":
             failures.append("health batching stream-stall grace source is not environment")
+        expected_active_policy = {
+            "max_decode_batch": VARIANT_CONFIGS[variant]["server"]["max_decode_batch"],
+            "max_prefill_staging_slots": VARIANT_CONFIGS[variant]["server"][
+                "max_prefill_staging_slots"
+            ],
+            "max_active_requests": VARIANT_CONFIGS[variant]["server"][
+                "max_active_requests"
+            ],
+        }
+        for field, expected_value in expected_active_policy.items():
+            if batching.get(field) != expected_value:
+                failures.append(
+                    f"health batching {field}={batching.get(field)!r}, "
+                    f"expected {expected_value}"
+                )
         expected_prefill_ceiling = VARIANT_CONFIGS[variant]["server"][
             "max_prefill_tokens_per_cycle"
         ]
@@ -1813,6 +1839,12 @@ def attest_runtime(
                 or debug_snapshot.get("stream_stall_grace_source") != "environment"
             ):
                 failures.append("debug batching stream-stall policy does not match environment")
+            for field, expected_value in expected_active_policy.items():
+                if debug_snapshot.get(field) != expected_value:
+                    failures.append(
+                        f"debug batching {field}={debug_snapshot.get(field)!r}, "
+                        f"expected {expected_value}"
+                    )
             if (
                 debug_snapshot.get("max_prefill_tokens_per_cycle")
                 != expected_prefill_ceiling
@@ -1888,6 +1920,11 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int]:
         raise QualificationError("health scheduler snapshot is missing")
     snapshot: dict[str, float | int] = {}
     for field in (
+        "max_decode_batch",
+        "max_prefill_staging_slots",
+        "max_active_requests",
+        "active_staged_requests",
+        "max_observed_active_requests",
         "max_observed_batch_size",
         "max_prefill_tokens_per_cycle",
         "max_prefill_layers_per_cycle",
@@ -1899,6 +1936,7 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int]:
         "total_prefill_layers",
         "total_prefill_layer_yields",
         "total_short_prefill_priority_forwards",
+        "total_prefill_staging_admissions",
         "total_admission_calls",
         "slow_admission_count",
         "slow_prefill_forward_count",
@@ -2168,7 +2206,12 @@ def batching_engine_drained(batching: Any) -> bool:
     if not isinstance(batching, dict):
         raise QualificationError("health batching-engine drain snapshot is missing")
     values: dict[str, int] = {}
-    for field in ("active_decode", "queue_depth"):
+    for field in (
+        "active_decode",
+        "active_prefill",
+        "active_staged_requests",
+        "queue_depth",
+    ):
         value = batching.get(field)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise QualificationError(
@@ -2176,7 +2219,7 @@ def batching_engine_drained(batching: Any) -> bool:
                 f"got {value!r}"
             )
         values[field] = value
-    return values["active_decode"] == 0 and values["queue_depth"] == 0
+    return all(value == 0 for value in values.values())
 
 
 def cancellation_recorded(records: list[Any], marker: str) -> bool:
@@ -2349,6 +2392,12 @@ def metric_values(
             batching_start, batching_end, "total_decode_forward_ms"
         ),
         "batching_decode_row_count": decode_rows,
+        "batching_max_active_requests": batching_end["max_active_requests"],
+        "batching_max_decode_batch": batching_end["max_decode_batch"],
+        "batching_max_observed_active_requests": max(
+            batching_start["max_observed_active_requests"],
+            batching_end["max_observed_active_requests"],
+        ),
         "batching_max_observed_batch_size": max(
             batching_start["max_observed_batch_size"],
             batching_end["max_observed_batch_size"],
@@ -2371,6 +2420,12 @@ def metric_values(
         "batching_prefill_layer_yield_count": counter_delta(
             batching_start, batching_end, "total_prefill_layer_yields"
         ),
+        "batching_prefill_staging_admission_count": counter_delta(
+            batching_start, batching_end, "total_prefill_staging_admissions"
+        ),
+        "batching_prefill_staging_slot_count": batching_end[
+            "max_prefill_staging_slots"
+        ],
         "batching_short_prefill_priority_forward_count": counter_delta(
             batching_start, batching_end, "total_short_prefill_priority_forwards"
         ),
@@ -2454,6 +2509,42 @@ def metric_values(
     values.update(external_yield_sync)
     values.update(pressure_peer_timing_values(pressure_peer, pressure_window))
     return values
+
+
+def batching_staging_contract_failures(
+    values: dict[str, float | int],
+) -> list[str]:
+    failures: list[str] = []
+    expected = {
+        "batching_max_decode_batch": MAX_DECODE_BATCH,
+        "batching_prefill_staging_slot_count": MAX_PREFILL_STAGING_SLOTS,
+        "batching_max_active_requests": MAX_ACTIVE_REQUESTS,
+    }
+    for name, expected_value in expected.items():
+        if values.get(name) != expected_value:
+            failures.append(
+                f"{name}={values.get(name)!r}, expected exact value {expected_value}"
+            )
+    admissions = values.get("batching_prefill_staging_admission_count")
+    if (
+        not isinstance(admissions, (int, float))
+        or isinstance(admissions, bool)
+        or admissions < 1
+    ):
+        failures.append("measured load admitted no request through prefill staging")
+    observed = values.get("batching_max_observed_active_requests")
+    if not isinstance(observed, (int, float)) or isinstance(observed, bool):
+        failures.append("measured maximum active-request width is not numeric")
+    else:
+        if observed <= MAX_DECODE_BATCH:
+            failures.append(
+                "measured active-request width never exceeded the ordinary decode slots"
+            )
+        if observed > MAX_ACTIVE_REQUESTS:
+            failures.append(
+                f"measured active-request width {observed} exceeded bound {MAX_ACTIVE_REQUESTS}"
+            )
+    return failures
 
 
 def metrics_from_values(values: dict[str, float | int]) -> list[dict[str, Any]]:
@@ -2833,6 +2924,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             status_failures.append(
                 "measured load exercised no bounded short-prefill service opportunity"
             )
+        status_failures.extend(batching_staging_contract_failures(values))
         if values["external_yield_sync_call_count"] < 1:
             status_failures.append(
                 "measured load exercised no attributed backend synchronization boundary"

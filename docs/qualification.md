@@ -165,6 +165,14 @@ other two may accelerate the shortest tail of at most four token chunks.
 The receipt records this bounded-priority count and fails when the mixed
 workload does not exercise it. Any ITL outlier remains a failure even when its
 phase is explained.
+The same run attests an effective decode width of eight, four bounded
+short-prefill staging slots, and a total active-request ceiling of twelve in
+both health and debug state. Measurement must record at least one staging
+admission and an observed active width above eight without ever exceeding
+twelve. The final cancellation drain now requires ordinary decode, prefill,
+staged occupancy, and the waiting queue all to reach zero. This proves that the
+latency path ran without treating the staging capacity as a wider backend
+decode batch or accepting an active prefill as drained.
 The pressure peer also requires terminal request-scoped performance metadata.
 Its actor queue, slot-admission, and admission-to-first-ready wall durations are
 recorded separately and must fit inside TTFT; accumulated model prefill must fit
