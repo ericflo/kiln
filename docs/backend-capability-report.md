@@ -181,7 +181,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `InferenceRecurrentStatePolicy` | 2 | `bf16`, `f16` |
 | `DecodeCapabilities` | 8 | `resident_decode`, `paged_decode_graph_outputs`, `mtp_speculative_generation`, `speculative_policy`, `linear_argmax`, `linear_argmax_batch`, `linear_sample`, `linear_sample_batch` |
 | `SpeculativeDecodePolicy` | 3 | `mtp_max_prompt_tokens`, `long_prompt_skip_layer_min_prompt_tokens`, `long_prompt_skip_layer_min_output_tokens` |
-| `DecodeBatcherPolicy` | 18 | `max_batch`, `engine_max_decode_batch`, `wait_micros`, `allow_mixed_seq_lens`, `rowwise_retry_env`, `require_native_decode_attention`, `prefer_direct_paged_decode_attention`, `direct_paged_decode_attention_env_gate`, `allow_prefix_cache_split_snapshot`, `paged_decode_requires_contiguous_kv_chunks`, `use_greedy_token_decode`, `use_native_sampled_contiguous_decode`, `sampled_contiguous_decode_requires_resident_decode`, `partition_noncontiguous_gdn_kv_tiles`, `use_decode_width_prefill_admission`, `burst_prefill_admission`, `batching_engine_default_enabled`, `warm_resident_decode_pool_on_startup` |
+| `DecodeBatcherPolicy` | 19 | `max_batch`, `engine_max_decode_batch`, `wait_micros`, `allow_mixed_seq_lens`, `rowwise_retry_env`, `require_native_decode_attention`, `allow_portable_lora_decode`, `prefer_direct_paged_decode_attention`, `direct_paged_decode_attention_env_gate`, `allow_prefix_cache_split_snapshot`, `paged_decode_requires_contiguous_kv_chunks`, `use_greedy_token_decode`, `use_native_sampled_contiguous_decode`, `sampled_contiguous_decode_requires_resident_decode`, `partition_noncontiguous_gdn_kv_tiles`, `use_decode_width_prefill_admission`, `burst_prefill_admission`, `batching_engine_default_enabled`, `warm_resident_decode_pool_on_startup` |
 | `BackendTrainingCapabilities` | 4 | `hooks`, `precision`, `server_dispatch`, `acceleration_profile` |
 | `ServerTrainingDispatchPolicy` | 3 | `native_route`, `native_training_env`, `native_training_default_enabled` |
 | `TrainingAccelerationProfilePolicy` | 8 | `log_message`, `linear`, `sdpa`, `rmsnorm_inference`, `rmsnorm_training`, `flce_provider`, `resident_activation`, `sgd_step_on_device` |
@@ -232,7 +232,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `cuda` | `CorrectnessAllowed` | `not required` | CUDA native misses remain device-visible/errors rather than silent host staging |
 | `rocm` | `NativeRequired` | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK=1` | batched decode errors before generic fallback when no ROCm native path produced tokens |
 | `metal` | `NativeRequired` | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK=1` | batched/sample decode errors before generic fallback when no Metal native path produced tokens |
-| `vulkan` | `NativeRequired` | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1` | keeps the existing Vulkan no-generic-fallback default and routes it through FallbackPolicy |
+| `vulkan` | `NativeRequired` | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1` | ordinary batched decode errors before generic fallback; active LoRA may use the capability-gated portable paged-attention route, with sparse vulkan_lora_paged_decode_fallback warnings |
 
 ## Training Optimizer Fallback
 

@@ -837,7 +837,11 @@ def decode_hot_path_policy_report() -> dict[str, Any]:
         "vulkan": {
             "default_policy": "NativeRequired",
             "debug_opt_in": "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1",
-            "enforcement": "keeps the existing Vulkan no-generic-fallback default and routes it through FallbackPolicy",
+            "enforcement": (
+                "ordinary batched decode errors before generic fallback; active LoRA may use the "
+                "capability-gated portable paged-attention route, with sparse "
+                "vulkan_lora_paged_decode_fallback warnings"
+            ),
         },
     }
 

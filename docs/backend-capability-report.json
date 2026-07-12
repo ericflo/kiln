@@ -1541,7 +1541,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "DecodeBatcherPolicy": {
-      "field_count": 18,
+      "field_count": 19,
       "fields": [
         {
           "name": "max_batch",
@@ -1565,6 +1565,10 @@
         },
         {
           "name": "require_native_decode_attention",
+          "type": "bool"
+        },
+        {
+          "name": "allow_portable_lora_decode",
           "type": "bool"
         },
         {
@@ -2600,7 +2604,7 @@
     "vulkan": {
       "debug_opt_in": "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1",
       "default_policy": "NativeRequired",
-      "enforcement": "keeps the existing Vulkan no-generic-fallback default and routes it through FallbackPolicy"
+      "enforcement": "ordinary batched decode errors before generic fallback; active LoRA may use the capability-gated portable paged-attention route, with sparse vulkan_lora_paged_decode_fallback warnings"
     }
   },
   "fallback_policy": {

@@ -1710,6 +1710,10 @@ fn generated_capability_report_lists_request_descriptors() {
         "DecodeBatcherPolicy should own native decode-attention fallback requirements"
     );
     assert!(
+        decode_batcher_policy_fields.contains(&"allow_portable_lora_decode"),
+        "DecodeBatcherPolicy should own the correctness-qualified LoRA decode route"
+    );
+    assert!(
         decode_batcher_policy_fields.contains(&"partition_noncontiguous_gdn_kv_tiles"),
         "DecodeBatcherPolicy should own GDN KV contiguity partition routing"
     );
@@ -5010,6 +5014,38 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !embedding_activation_cast_section.contains("TrainingPrecisionPolicy::for_device_family"),
         "embedding activation cast should not call the device-family compatibility helper"
     );
+    let embedding_lookup_section = source_between(
+        &forward_source,
+        "fn embedding_lookup_from_weights(",
+        "fn raw_embedding_lookup_from_weights_with_index(",
+    );
+    assert!(
+        embedding_lookup_section.contains("cast_embedding_output_to_policy_activation("),
+        "every weight-aware host-index embedding lookup must apply activation precision policy"
+    );
+    let indexed_embedding_lookup_section = source_between(
+        &forward_source,
+        "fn embedding_lookup_from_weights_with_index(",
+        "fn embedding_lookup_from_transposed(",
+    );
+    assert!(
+        indexed_embedding_lookup_section.contains("cast_embedding_output_to_policy_activation("),
+        "every weight-aware device-index embedding lookup must apply activation precision policy"
+    );
+    assert_eq!(
+        forward_source
+            .matches("raw_embedding_lookup_from_weights(")
+            .count(),
+        2,
+        "raw host-index embedding lookup must remain private to its policy wrapper"
+    );
+    assert_eq!(
+        forward_source
+            .matches("raw_embedding_lookup_from_weights_with_index(")
+            .count(),
+        2,
+        "raw device-index embedding lookup must remain private to its policy wrapper"
+    );
     for forbidden in [
         "vulkan_cast_activation_to_f32",
         "matches!(hidden.device(), Device::Vulkan(_))",
@@ -7744,6 +7780,25 @@ fn every_backend_allows_prefix_cache_split_snapshot() {
             "backend `{name}` disables the prefix-cache split snapshot, which kills \
              multi-turn prefix caching (every turn fully re-prefills its history); \
              see the field comment on allow_prefix_cache_split_snapshot"
+        );
+    }
+}
+
+#[test]
+fn portable_lora_decode_is_an_explicit_vulkan_only_capability() {
+    use kiln_model::backend::capability::DecodeBatcherPolicy;
+
+    for (name, device, expected) in [
+        ("cuda", kiln_tensor::Device::Cuda(0), false),
+        ("rocm", kiln_tensor::Device::Rocm(0), false),
+        ("metal", kiln_tensor::Device::Metal(0), false),
+        ("vulkan", kiln_tensor::Device::Vulkan(0), true),
+        ("cpu", kiln_tensor::Device::Cpu, false),
+    ] {
+        assert_eq!(
+            DecodeBatcherPolicy::for_backend(name, device).allow_portable_lora_decode,
+            expected,
+            "backend `{name}` portable LoRA decode policy drifted"
         );
     }
 }

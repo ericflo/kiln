@@ -274,6 +274,27 @@ fn native_decode_attention_required(backend: &dyn BackendRuntime) -> bool {
         .require_native_decode_attention
 }
 
+fn portable_lora_decode_allowed(backend: &dyn BackendRuntime) -> bool {
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .decode_batcher
+        .allow_portable_lora_decode
+}
+
+#[cfg(feature = "vulkan")]
+fn record_vulkan_lora_paged_decode_fallback(full_attn_layer_idx: usize, total_seq_len: usize) {
+    static FALLBACKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if count.is_power_of_two() {
+        tracing::warn!(
+            event = "vulkan_lora_paged_decode_fallback",
+            fallback_count = count,
+            full_attn_layer = full_attn_layer_idx,
+            total_seq_len,
+            "Vulkan LoRA decode is using the correctness-qualified portable paged-attention route"
+        );
+    }
+}
+
 fn paged_decode_requires_contiguous_kv_chunks(backend: &dyn BackendRuntime) -> bool {
     BackendCapabilityQueries::backend_capabilities(backend)
         .decode_batcher
@@ -7985,7 +8006,7 @@ fn try_kt_embedding_lookup_from_weights(
     promote_cpu_activation(out_kt).map(Some)
 }
 
-fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Result<Tensor> {
+fn raw_embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Result<Tensor> {
     let t_dims = weights.embed_tokens_t.dims();
     if t_dims.len() == 2 {
         let expected_embed_dims = [t_dims[1], t_dims[0]];
@@ -8028,7 +8049,17 @@ fn cast_embedding_output_to_policy_activation(hidden: Tensor) -> Result<Tensor> 
     Ok(hidden)
 }
 
-fn embedding_lookup_from_weights_with_index(
+/// Weight-aware embedding lookup at the model activation boundary.
+///
+/// Keep the precision-policy cast here rather than at forward call sites so
+/// paged prefill, batched decode, graph-stable decode, and MTP cannot drift.
+fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Result<Tensor> {
+    cast_embedding_output_to_policy_activation(raw_embedding_lookup_from_weights(
+        token_ids, weights,
+    )?)
+}
+
+fn raw_embedding_lookup_from_weights_with_index(
     index: &Tensor,
     weights: &GpuWeights,
 ) -> Result<Tensor> {
@@ -8049,6 +8080,15 @@ fn embedding_lookup_from_weights_with_index(
     }
 
     embedding_lookup_with_index(index, &weights.embed_tokens)
+}
+
+fn embedding_lookup_from_weights_with_index(
+    index: &Tensor,
+    weights: &GpuWeights,
+) -> Result<Tensor> {
+    cast_embedding_output_to_policy_activation(raw_embedding_lookup_from_weights_with_index(
+        index, weights,
+    )?)
 }
 
 fn embedding_lookup_from_transposed(token_ids: &[u32], embed_tokens_t: &Tensor) -> Result<Tensor> {
@@ -8560,6 +8600,24 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
     // Qwen3.5 RMSNorm stores weights centered around 0 and applies as (1 + w) * x_normed.
     // Keep everything in F32 for precision (matches HF: `output * (1.0 + self.weight.float())`),
     // then cast back to input dtype at the end.
+    // Vulkan's hybrid residency keeps some decode activations on the kt CPU
+    // sentinel while small frozen weights may be materialized as Vulkan
+    // tensors. The composite fallback must align the weight before its final
+    // broadcast multiply, just as the projection and residual fallbacks do.
+    #[cfg(feature = "vulkan")]
+    let weight_aligned;
+    #[cfg(feature = "vulkan")]
+    let weight = if x_f32.device() != weight.device()
+        && matches!(x_f32.device(), Device::Cpu | Device::Vulkan(_))
+        && matches!(weight.device(), Device::Cpu | Device::Vulkan(_))
+    {
+        weight_aligned = weight
+            .to_device(x_f32.device())
+            .context("align Vulkan/CPU RMSNorm weight to activation device")?;
+        &weight_aligned
+    } else {
+        weight
+    };
     let w_f32 = weight.to_dtype(DType::F32)?;
     let w_plus_one = (w_f32.ones_like()? + w_f32)?;
     let out = normed.broadcast_mul(&w_plus_one)?;
@@ -13964,6 +14022,20 @@ fn causal_conv1d_decode(
     // rebinding `conv_state` to a newly allocated tensor during capture leaves
     // replay with a dangling pointer. Keep the caller-owned storage stable.
     let next_state = window.narrow(2, 1, kernel_size - 1)?.contiguous()?;
+    // Vulkan's portable adapter path can cross the hybrid-residency boundary
+    // between prefill and decode: prefill may leave this state on the CPU while
+    // the first LoRA decode projection produces a Vulkan activation. Vulkan
+    // decode is not graph-captured, so adopt the newly computed state instead
+    // of forcing an invalid in-place write across devices. Same-device CUDA and
+    // ROCm paths retain the stable buffer identity required by graph capture.
+    #[cfg(feature = "vulkan")]
+    if conv_state.device() != next_state.device()
+        && matches!(conv_state.device(), Device::Cpu | Device::Vulkan(_))
+        && matches!(next_state.device(), Device::Cpu | Device::Vulkan(_))
+    {
+        *conv_state = next_state;
+        return Ok(output);
+    }
     conv_state
         .slice_set(&next_state, 0, 0)
         .context("update decode conv_state in place")?;
@@ -20206,6 +20278,41 @@ fn try_rocm_gqa_sdpa_f32_materialized(
     Ok(Some(out))
 }
 
+fn align_gqa_kv_to_query(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<(Tensor, Tensor)> {
+    let k = if k.dtype() == q.dtype() {
+        k.clone()
+    } else {
+        k.to_dtype(q.dtype())?
+    };
+    let v = if v.dtype() == q.dtype() {
+        v.clone()
+    } else {
+        v.to_dtype(q.dtype())?
+    };
+    // Vulkan LoRA decode keeps the projected query on-device while the
+    // portable paged-cache reader materializes K/V on the CPU. Normalize that
+    // hybrid boundary before either grouped decode or materialized SDPA.
+    #[cfg(feature = "vulkan")]
+    let (k, v) = {
+        let mut k = k;
+        let mut v = v;
+        if matches!(q.device(), Device::Cpu | Device::Vulkan(_)) {
+            if k.device() != q.device() && matches!(k.device(), Device::Cpu | Device::Vulkan(_)) {
+                k = k
+                    .to_device(q.device())
+                    .context("align Vulkan/CPU SDPA key to query device")?;
+            }
+            if v.device() != q.device() && matches!(v.device(), Device::Cpu | Device::Vulkan(_)) {
+                v = v
+                    .to_device(q.device())
+                    .context("align Vulkan/CPU SDPA value to query device")?;
+            }
+        }
+        (k, v)
+    };
+    Ok((k, v))
+}
+
 fn gqa_sdpa_materialized_default(
     q: &Tensor,
     k: &Tensor,
@@ -20215,7 +20322,8 @@ fn gqa_sdpa_materialized_default(
     scale: f64,
     debug_finite: bool,
 ) -> Result<Tensor> {
-    let attn_scores = kiln_tensor::ops::matmul_rhs_transposed(q, k)?;
+    let (k, v) = align_gqa_kv_to_query(q, k, v)?;
+    let attn_scores = kiln_tensor::ops::matmul_rhs_transposed(q, &k)?;
     ensure_full_attn_debug_finite(debug_finite, "gqa sdpa raw scores", &attn_scores)?;
     let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
     ensure_full_attn_debug_finite(debug_finite, "gqa sdpa scaled scores", &attn_scores)?;
@@ -20224,7 +20332,7 @@ fn gqa_sdpa_materialized_default(
     ensure_full_attn_debug_no_nan(debug_finite, "gqa sdpa masked scores", &attn_scores)?;
     let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
     ensure_full_attn_debug_finite(debug_finite, "gqa sdpa softmax", &attn_weights_softmax)?;
-    let out = attn_weights_softmax.broadcast_matmul(v)?; // [B, nq, T, hd]
+    let out = attn_weights_softmax.broadcast_matmul(&v)?; // [B, nq, T, hd]
     ensure_full_attn_debug_finite(debug_finite, "gqa sdpa value matmul", &out)?;
     synchronize_tensor_ready_for_full_attn_handoff("gqa sdpa fallback value matmul", &out)?;
     Ok(out)
@@ -24083,14 +24191,20 @@ fn gqa_attention_paged_with_rope_tables(
         if let Some(out) = out_opt {
             return Ok(out);
         }
+        let portable_lora_fallback = lora_layer.is_some() && portable_lora_decode_allowed(backend);
         if native_decode_attention_required(backend)
             && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
+            && !portable_lora_fallback
         {
             let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
             anyhow::bail!(
                 "native paged decode declined native paged-attention path; \
                  generic fallback disabled (set {fallback_env}=1 to opt in)"
             );
+        }
+        #[cfg(feature = "vulkan")]
+        if portable_lora_fallback {
+            record_vulkan_lora_paged_decode_fallback(full_attn_layer_idx, total_seq_len);
         }
     }
 
@@ -24381,16 +24495,12 @@ fn gqa_attention_paged_with_rope_tables(
 
     // (#1082 Vulkan) The paged-cache read returns K/V in the pool dtype (BF16),
     // but the Vulkan attention computes in F32 (q comes from F32 projections)
-    // and the kt matmul requires equal operand dtypes. Cast K/V to q's dtype so
-    // the manual GQA SDPA (Q@Kᵀ and probs@V below) doesn't trip the strict-kt
-    // "dtype mismatch: a=f32, b=bf16" bail. No-op on CUDA (q/k/v all BF16) and
-    // whenever the dtypes already match. This is the cross-length prefill /
-    // split-tail fallback the self-attention flash kernel declines.
-    let (k, v) = if k.dtype() != q.dtype() {
-        (k.to_dtype(q.dtype())?, v.to_dtype(q.dtype())?)
-    } else {
-        (k, v)
-    };
+    // and the kt matmul requires equal operand dtype and device. Normalize K/V
+    // against q so the manual GQA SDPA (Q@Kᵀ and probs@V below) remains
+    // coherent. No-op on CUDA when q/k/v already match. This is the
+    // cross-length prefill / split-tail fallback the self-attention flash
+    // kernel declines.
+    let (k, v) = align_gqa_kv_to_query(&q, &k, &v)?;
 
     // Optimized decode path (seq_len == 1): reshape Q instead of expanding K/V.
     // Q is [batch, num_heads, 1, head_dim] (1 token) while K/V is
@@ -27489,11 +27599,8 @@ pub fn model_forward_kt(
     let seq_len = token_ids.len();
 
     // 1. Embedding lookup: [seq_len, hidden_size]
-    // (#1443 step 3) Backend precision policy owns any embedding-output cast
-    // needed before transformer-layer activations.
-    let mut hidden = cast_embedding_output_to_policy_activation(embedding_lookup_from_weights(
-        token_ids, weights,
-    )?)?;
+    // The weight-aware lookup applies the backend activation precision policy.
+    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
 
     // Add batch dimension: [1, seq_len, hidden_size]
     hidden = hidden.unsqueeze(0)?;
@@ -28025,11 +28132,8 @@ pub fn model_forward_segment(
 /// and position indices for RoPE (starting from position 0, no KV cache offset).
 pub fn model_forward_embed(token_ids: &[u32], weights: &GpuWeights) -> Result<(Tensor, Vec<u32>)> {
     let seq_len = token_ids.len();
-    // (#1443 step 3) Backend precision policy owns any embedding-output cast
-    // needed before transformer-layer activations.
-    let mut hidden = cast_embedding_output_to_policy_activation(embedding_lookup_from_weights(
-        token_ids, weights,
-    )?)?;
+    // The weight-aware lookup applies the backend activation precision policy.
+    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
     hidden = hidden.unsqueeze(0)?;
     let positions: Vec<u32> = (0..seq_len).map(|p| p as u32).collect();
     Ok((hidden, positions))
@@ -31704,6 +31808,85 @@ mod tests {
             host.flatten_all()?.to_vec1::<f32>()?,
             vec![2.0, -4.0, 6.0, -8.0]
         );
+        Ok(())
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn rms_norm_fallback_aligns_vulkan_weight_to_cpu_activation() -> Result<()> {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            return Ok(());
+        }
+        assert!(
+            crate::backend::vulkan::vulkan_is_available(),
+            "KILN_TENSOR_VULKAN_TEST=1 requires a working Vulkan device"
+        );
+        let x = Tensor::from_vec(vec![0.5_f32, -1.0, 2.0, -4.0], (1, 1, 4))?;
+        let weight_cpu =
+            Tensor::from_vec(vec![0.125_f32, -0.25, 0.5, -0.75], (4,))?.to_dtype(DType::BF16)?;
+        let expected = rms_norm_fallback(&x, &weight_cpu, 1e-6)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let weight_vulkan = weight_cpu.to_device(Device::Vulkan(0))?;
+
+        let actual = rms_norm_fallback(&x, &weight_vulkan, 1e-6)?;
+        assert_eq!(actual.device(), Device::Cpu);
+        assert_eq!(actual.dtype(), DType::F32);
+        let actual = actual.flatten_all()?.to_vec1::<f32>()?;
+        for (index, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
+            assert!(
+                (got - want).abs() <= 1e-6,
+                "RMSNorm lane {index}: got={got} want={want}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn materialized_sdpa_aligns_cpu_cache_to_vulkan_query() -> Result<()> {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            return Ok(());
+        }
+        assert!(
+            crate::backend::vulkan::vulkan_is_available(),
+            "KILN_TENSOR_VULKAN_TEST=1 requires a working Vulkan device"
+        );
+        let q_cpu = Tensor::from_slice(
+            &[0.25_f32, -0.5, 0.75, 1.0, -0.25, 0.5, -0.75, -1.0],
+            (1, 2, 1, 4),
+        )?;
+        let k_cpu = Tensor::from_slice(
+            &[
+                0.5_f32, 0.25, -0.5, 1.0, -0.25, 0.75, 0.5, -1.0, 1.0, -0.5, 0.25, 0.75, -0.5,
+                -0.25, 1.0, 0.5, 0.75, -1.0, 0.25, 0.5, 0.25, 0.5, -0.75, 1.0,
+            ],
+            (1, 2, 3, 4),
+        )?;
+        let v_cpu = Tensor::from_slice(
+            &[
+                1.0_f32, 0.0, -0.5, 0.25, 0.5, -1.0, 0.75, 0.0, -0.25, 0.5, 1.0, -0.75, 0.0, 1.0,
+                0.5, -0.5, -1.0, 0.25, 0.0, 0.75, 0.5, -0.25, 1.0, 0.0,
+            ],
+            (1, 2, 3, 4),
+        )?;
+        let expected = gqa_sdpa_materialized_default(&q_cpu, &k_cpu, &v_cpu, 1, 3, 2.0, false)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let q_vulkan = q_cpu.to_device(Device::Vulkan(0))?;
+
+        let actual = gqa_sdpa_materialized_default(&q_vulkan, &k_cpu, &v_cpu, 1, 3, 2.0, false)?;
+        assert_eq!(actual.device(), Device::Vulkan(0));
+        let actual = actual
+            .to_device(Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        for (index, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
+            assert!(
+                (got - want).abs() <= 1e-5,
+                "materialized SDPA lane {index}: got={got} want={want}"
+            );
+        }
         Ok(())
     }
 
@@ -38434,6 +38617,56 @@ mod tests {
             "metal recurrent kernel state mean drift exceeds tolerance: mean_abs_diff = {s_mean:e}"
         );
 
+        Ok(())
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn causal_conv1d_decode_migrates_cpu_state_to_vulkan_activation() -> Result<()> {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            return Ok(());
+        }
+        assert!(
+            crate::backend::vulkan::vulkan_is_available(),
+            "KILN_TENSOR_VULKAN_TEST=1 requires a working Vulkan device"
+        );
+        let kernel_size = 4usize;
+        let x_cpu = Tensor::from_slice(&[0.5_f32, -0.25], (1, 2, 1))?.to_dtype(DType::BF16)?;
+        let weight_cpu = Tensor::from_slice(
+            &[0.125_f32, -0.25, 0.5, 0.75, -0.5, 0.25, 0.125, -0.75],
+            (2, 1, kernel_size),
+        )?
+        .to_dtype(DType::BF16)?;
+        let state_values = [0.25_f32, -0.5, 1.0, -1.0, 0.75, 0.5];
+        let mut expected_state = Tensor::from_slice(&state_values, (1, 2, kernel_size - 1))?;
+        let expected = causal_conv1d_decode(&x_cpu, &weight_cpu, &mut expected_state, kernel_size)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        let x_vulkan = x_cpu.to_device(Device::Vulkan(0))?;
+        let weight_vulkan = weight_cpu.to_device(Device::Vulkan(0))?;
+        let mut actual_state = Tensor::from_slice(&state_values, (1, 2, kernel_size - 1))?;
+        let actual =
+            causal_conv1d_decode(&x_vulkan, &weight_vulkan, &mut actual_state, kernel_size)?;
+
+        assert_eq!(actual.device(), Device::Vulkan(0));
+        assert_eq!(actual_state.device(), Device::Vulkan(0));
+        let actual = actual
+            .to_device(Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        for (index, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
+            assert!(
+                (got - want).abs() <= 1e-6,
+                "causal conv output lane {index}: got={got} want={want}"
+            );
+        }
+        let expected_state = expected_state.flatten_all()?.to_vec1::<f32>()?;
+        let actual_state = actual_state
+            .to_device(Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(actual_state, expected_state);
         Ok(())
     }
 

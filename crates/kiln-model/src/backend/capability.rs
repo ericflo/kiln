@@ -1012,6 +1012,11 @@ pub struct DecodeBatcherPolicy {
     pub allow_mixed_seq_lens: bool,
     pub rowwise_retry_env: Option<&'static str>,
     pub require_native_decode_attention: bool,
+    /// Permit the portable paged-attention route while a LoRA adapter is
+    /// active. This is separate from the general hot-path fallback policy:
+    /// ordinary decode can remain native-required while a backend exposes a
+    /// correctness-qualified adapter route that is warned and counted.
+    pub allow_portable_lora_decode: bool,
     pub prefer_direct_paged_decode_attention: bool,
     pub direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate,
     pub allow_prefix_cache_split_snapshot: bool,
@@ -1718,6 +1723,7 @@ impl DecodeBatcherPolicy {
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
                 require_native_decode_attention: false,
+                allow_portable_lora_decode: false,
                 prefer_direct_paged_decode_attention: true,
                 direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::DisabledWhenSet(
                     "KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE",
@@ -1740,6 +1746,7 @@ impl DecodeBatcherPolicy {
                 allow_mixed_seq_lens: true,
                 rowwise_retry_env: None,
                 require_native_decode_attention: false,
+                allow_portable_lora_decode: false,
                 prefer_direct_paged_decode_attention: false,
                 direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::None,
                 allow_prefix_cache_split_snapshot: true,
@@ -1760,6 +1767,7 @@ impl DecodeBatcherPolicy {
                 allow_mixed_seq_lens: true,
                 rowwise_retry_env: Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
                 require_native_decode_attention: true,
+                allow_portable_lora_decode: true,
                 prefer_direct_paged_decode_attention: true,
                 direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::None,
                 allow_prefix_cache_split_snapshot: true,
@@ -1780,6 +1788,7 @@ impl DecodeBatcherPolicy {
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
                 require_native_decode_attention: false,
+                allow_portable_lora_decode: false,
                 prefer_direct_paged_decode_attention: true,
                 direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::EnabledUnlessOff(
                     "KILN_ROCM_PAGED_DECODE",
@@ -1811,6 +1820,7 @@ impl DecodeBatcherPolicy {
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
                 require_native_decode_attention: false,
+                allow_portable_lora_decode: false,
                 prefer_direct_paged_decode_attention: false,
                 direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::None,
                 allow_prefix_cache_split_snapshot: true,

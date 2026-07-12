@@ -476,6 +476,12 @@ This made backend bring-up easier. It now needs a more formal policy:
 - Correctness tests and rare ops: host fallback allowed and counted.
 - CPU reference: always available for parity.
 
+Vulkan keeps the native-required default for ordinary decode. Active LoRA is a
+typed exception through `allow_portable_lora_decode`: it may use the qualified
+portable paged-attention route and emits power-of-two
+`vulkan_lora_paged_decode_fallback` warnings until resident adapter decode is
+implemented.
+
 Phase 2 encodes this as a typed `FallbackPolicy` per operation family and mode.
 
 ### Capability Encoding

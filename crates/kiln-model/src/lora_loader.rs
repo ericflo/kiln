@@ -454,11 +454,10 @@ impl LoraWeights {
         self.source_identity.as_ref()
     }
 
-    /// Phase 4.1: register every LoRA A and B tensor in the backend's
-    /// resident activation registry. After this, the inference path's
-    /// `add_lora_delta_to_base` will dispatch through
-    /// `lora_delta_resident` (on-device LoRA matmul) instead of
-    /// candle CPU `compute_lora_delta`.
+    /// Register every LoRA A and B tensor in the backend's resident activation
+    /// registry. Backends that implement resident LoRA dispatch may consume
+    /// these buffers directly; other backends may decline and use the portable
+    /// device-aligned [`compute_lora_delta`] path.
     ///
     /// Caller invokes this once after [`Self::load`], typically at
     /// adapter-load time. No-op on backends without registry support.
@@ -877,8 +876,8 @@ pub fn compute_lora_delta(
     // Phase 10: cast A/B to x's dtype (BF16 typically; F32 when MTP fp32-head is
     // armed) and let cuBLAS run BF16-input + FP32-accumulate on tensor cores.
     // See docs/audits/PHASE10_LORA_PRECISION_STUDY.md §5.
-    let a = proj.a.to_dtype(x.dtype())?;
-    let b = proj.b.to_dtype(x.dtype())?;
+    let a = proj.a.to_device(x.device())?.to_dtype(x.dtype())?;
+    let b = proj.b.to_device(x.device())?.to_dtype(x.dtype())?;
 
     let hidden = matmul_last_dim_rhs_transposed(x, &a)?; // [..., rank]
     let delta = matmul_last_dim_rhs_transposed(&hidden, &b)?; // [..., out_features]
@@ -1292,6 +1291,44 @@ mod tests {
         assert!((vals[1][1] - 2.0).abs() < 1e-5);
         assert!((vals[1][2] - 2.0).abs() < 1e-5);
 
+        Ok(())
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn compute_lora_delta_aligns_cpu_rank_one_adapter_to_vulkan_activation() -> Result<()> {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            return Ok(());
+        }
+        assert!(
+            crate::backend::vulkan::vulkan_is_available(),
+            "KILN_TENSOR_VULKAN_TEST=1 requires a working Vulkan device"
+        );
+        let x_cpu = KtTensor::from_slice(
+            &[1.0_f32, -2.0, 0.5, 3.0, -1.0, 0.25, 2.0, -0.5],
+            (1usize, 2usize, 4usize),
+        )?;
+        let projection = LoraProjectionWeights {
+            a: KtTensor::from_slice(&[0.5_f32, -0.25, 1.0, 0.125], (1usize, 4usize))?,
+            b: KtTensor::from_slice(&[1.0_f32, -0.5, 0.25], (3usize, 1usize))?,
+        };
+        let expected = compute_lora_delta(&x_cpu, &projection, 0.75)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let x_vulkan = x_cpu.to_device(Device::Vulkan(0))?;
+
+        let actual = compute_lora_delta(&x_vulkan, &projection, 0.75)?;
+        assert_eq!(actual.device(), Device::Vulkan(0));
+        let actual = actual
+            .to_device(Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        for (index, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
+            assert!(
+                (got - want).abs() <= 1e-5,
+                "LoRA delta lane {index}: got={got} want={want}"
+            );
+        }
         Ok(())
     }
 
