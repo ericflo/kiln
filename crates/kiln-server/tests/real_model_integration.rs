@@ -5169,18 +5169,33 @@ async fn rocm_eager_and_graph_decode_survive_active_shrink_and_grow() {
     assert!(final_graph_stats.capture_successes > after_grow_graph_stats.capture_successes);
     assert!(final_graph_stats.replay_successes > after_grow_graph_stats.replay_successes);
     assert_eq!(final_graph_stats.failures, 0);
+    assert_eq!(final_graph_stats.fallbacks.warmup_forward_failure, 0);
+    assert_eq!(final_graph_stats.fallbacks.persistent_host_round_trip, 0);
+    assert_eq!(final_graph_stats.fallbacks.graph_cache_capacity, 0);
+    assert_eq!(final_graph_stats.fallbacks.critical_memory_pressure, 0);
+    assert_eq!(final_graph_stats.fallbacks.capture_failure, 0);
+    assert_eq!(final_graph_stats.fallbacks.replay_failure, 0);
+    assert_eq!(
+        final_graph_stats.fallbacks.total,
+        final_graph_stats.fallbacks.cold_cache_host_round_trip
+    );
+    assert_eq!(
+        final_graph_stats.capture_deferrals,
+        final_graph_stats.fallbacks.cold_cache_host_round_trip
+    );
     assert_eq!(paged_cache.pool_identity(), grown_identity);
 
     block_manager.lock().unwrap().free_all(&held_low_blocks);
     assert_eq!(block_manager.lock().unwrap().num_used(), 0);
     eprintln!(
-        "[rocm-kv-resize-decode] generations={} -> {} -> {}; captures={}; replays={}; failures={}",
+        "[rocm-kv-resize-decode] generations={} -> {} -> {}; captures={}; replays={}; failures={}; fallbacks={:?}",
         initial_identity.generation,
         shrunk_identity.generation,
         grown_identity.generation,
         final_graph_stats.capture_successes,
         final_graph_stats.replay_successes,
         final_graph_stats.failures,
+        final_graph_stats.fallbacks,
     );
 }
 

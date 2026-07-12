@@ -330,6 +330,22 @@ GRAPH_MONOTONIC_FIELDS = (
     "failures",
 )
 GRAPH_GAUGE_FIELDS = ("captured_graph_count",)
+GRAPH_FALLBACK_REASON_FIELDS = (
+    "warmup_forward_failure",
+    "cold_cache_host_round_trip",
+    "persistent_host_round_trip",
+    "graph_cache_capacity",
+    "critical_memory_pressure",
+    "capture_failure",
+    "replay_failure",
+)
+GRAPH_FALLBACK_FIELDS = (
+    "total",
+    *GRAPH_FALLBACK_REASON_FIELDS,
+    "slow",
+    "total_duration_micros",
+    "max_duration_micros",
+)
 EXTERNAL_YIELD_SYNC_MONOTONIC_FIELDS = (
     "calls",
     "failures",
@@ -1166,6 +1182,8 @@ def classify_server_event(
             return "graph_sync"
         return None
     lowered = lowered_event or lowered_message
+    if lowered == "rocm_graph_fallback":
+        return "graph_fallback"
     if lowered == "background inference prewarm complete":
         return "prewarm_complete"
     if lowered in {
@@ -2048,6 +2066,29 @@ def graph_snapshot(health: dict[str, Any]) -> dict[str, int]:
         snapshot["capture_failures"] + snapshot["replay_failures"]
     ):
         raise QualificationError("ROCm graph aggregate failure counter is inconsistent")
+    fallbacks = graph.get("fallbacks")
+    if not isinstance(fallbacks, dict):
+        raise QualificationError("health.decode_runtime.rocm_graphs.fallbacks is missing")
+    for field in GRAPH_FALLBACK_FIELDS:
+        value = fallbacks.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise QualificationError(
+                f"ROCm graph fallback field {field} must be a nonnegative integer, got {value!r}"
+            )
+        snapshot[f"fallback_{field}"] = value
+    if snapshot["fallback_total"] != sum(
+        snapshot[f"fallback_{field}"] for field in GRAPH_FALLBACK_REASON_FIELDS
+    ):
+        raise QualificationError("ROCm graph fallback reason counts do not sum to total")
+    if snapshot["fallback_slow"] > snapshot["fallback_total"]:
+        raise QualificationError("ROCm graph slow fallback count exceeds total")
+    if snapshot["fallback_max_duration_micros"] > snapshot["fallback_total_duration_micros"]:
+        raise QualificationError("ROCm graph max fallback duration exceeds total duration")
+    if snapshot["fallback_total"] == 0 and (
+        snapshot["fallback_total_duration_micros"] != 0
+        or snapshot["fallback_max_duration_micros"] != 0
+    ):
+        raise QualificationError("zero ROCm graph fallbacks carry nonzero latency")
     return snapshot
 
 

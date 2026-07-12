@@ -60,6 +60,19 @@ def health_fixture(
         "replay_failures": 0,
         "failures": 0,
         "captured_graph_count": 0,
+        "fallbacks": {
+            "total": 0,
+            "warmup_forward_failure": 0,
+            "cold_cache_host_round_trip": 0,
+            "persistent_host_round_trip": 0,
+            "graph_cache_capacity": 0,
+            "critical_memory_pressure": 0,
+            "capture_failure": 0,
+            "replay_failure": 0,
+            "slow": 0,
+            "total_duration_micros": 0,
+            "max_duration_micros": 0,
+        },
     }
     return {
         "backend": "model",
@@ -729,6 +742,14 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "graph_sync",
             ),
             (
+                "ROCm graph eager fallback activated",
+                {
+                    "event": "rocm_graph_fallback",
+                    "reason": "critical_memory_pressure",
+                },
+                "graph_fallback",
+            ),
+            (
                 "KV pool allocation completed",
                 {
                     "event": "gpu_memory_operation",
@@ -1297,6 +1318,42 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         health["decode_runtime"]["rocm_graphs"]["capture_attempts"] = 1
         with self.assertRaises(serve.QualificationError):
             serve.graph_snapshot(health)
+
+        health = health_fixture(kv_autoscale=True, rocm_graphs=True)
+        del health["decode_runtime"]["rocm_graphs"]["fallbacks"]
+        with self.assertRaisesRegex(serve.QualificationError, "fallbacks is missing"):
+            serve.graph_snapshot(health)
+
+        health = health_fixture(kv_autoscale=True, rocm_graphs=True)
+        health["decode_runtime"]["rocm_graphs"]["fallbacks"].update(
+            {
+                "total": 1,
+                "replay_failure": 1,
+                "slow": 1,
+                "total_duration_micros": 120_000,
+                "max_duration_micros": 120_000,
+            }
+        )
+        snapshot = serve.graph_snapshot(health)
+        self.assertEqual(snapshot["fallback_total"], 1)
+        self.assertEqual(snapshot["fallback_replay_failure"], 1)
+
+        inconsistent = json.loads(json.dumps(health))
+        inconsistent["decode_runtime"]["rocm_graphs"]["fallbacks"]["total"] = 2
+        with self.assertRaisesRegex(serve.QualificationError, "do not sum"):
+            serve.graph_snapshot(inconsistent)
+
+        inconsistent = json.loads(json.dumps(health))
+        inconsistent["decode_runtime"]["rocm_graphs"]["fallbacks"]["slow"] = 2
+        with self.assertRaisesRegex(serve.QualificationError, "slow fallback"):
+            serve.graph_snapshot(inconsistent)
+
+        inconsistent = json.loads(json.dumps(health))
+        inconsistent["decode_runtime"]["rocm_graphs"]["fallbacks"][
+            "max_duration_micros"
+        ] = 120_001
+        with self.assertRaisesRegex(serve.QualificationError, "max fallback"):
+            serve.graph_snapshot(inconsistent)
 
     def test_external_yield_sync_snapshot_is_strict_and_reports_deltas(self) -> None:
         before = health_fixture(kv_autoscale=True, rocm_graphs=True)

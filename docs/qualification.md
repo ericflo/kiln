@@ -151,6 +151,17 @@ call/failure/slow count, total time, and maximum duration. A failed sync, a sync
 lasting at least 100 ms, any physical resize/reclaim/graph event, or any
 unexplained ITL outlier fails the stable arm.
 
+Experimental ROCm graph runs expose a closed fallback contract at
+`/health.decode_runtime.rocm_graphs.fallbacks`. It reports the total and the
+seven reason counts (`warmup_forward_failure`, `cold_cache_host_round_trip`,
+`persistent_host_round_trip`, `graph_cache_capacity`,
+`critical_memory_pressure`, `capture_failure`, and `replay_failure`) plus slow,
+total-duration, and maximum-duration counters. The first occurrence of each
+reason, every fallback lasting at least 100 ms, and every failed eager fallback
+also emits `event=rocm_graph_fallback` with attempt, eager, and total duration.
+Qualification validates the health invariants and attributes these events to
+the exact ITL window; unknown reason strings do not receive graph attribution.
+
 The stable serving run also attests the default 64-token prompt-work ceiling
 (`server.max_prefill_tokens_per_cycle`), the default four-layer yield ceiling
 (`server.max_prefill_layers_per_cycle`), and both startup provenances. Admission

@@ -364,6 +364,7 @@ struct RocmGraphInfo {
     decode_owner_graph_release_count: Option<u64>,
     captured_graph_count: Option<usize>,
     tracked_decode_owner_count: Option<usize>,
+    fallbacks: Option<kiln_model::RocmGraphFallbackStats>,
 }
 
 fn rocm_graph_info(stats: Option<kiln_model::RocmGraphStats>) -> RocmGraphInfo {
@@ -391,6 +392,7 @@ fn rocm_graph_info(stats: Option<kiln_model::RocmGraphStats>) -> RocmGraphInfo {
             .map(|snapshot| snapshot.decode_owner_graph_release_count),
         captured_graph_count: stats.map(|snapshot| snapshot.captured_graph_count),
         tracked_decode_owner_count: stats.map(|snapshot| snapshot.tracked_decode_owner_count),
+        fallbacks: stats.map(|snapshot| snapshot.fallbacks),
     }
 }
 
@@ -1116,6 +1118,19 @@ mod tests {
             decode_owner_graph_release_count: 4,
             captured_graph_count: 0,
             tracked_decode_owner_count: 1,
+            fallbacks: kiln_model::RocmGraphFallbackStats {
+                total: 7,
+                warmup_forward_failure: 1,
+                cold_cache_host_round_trip: 1,
+                persistent_host_round_trip: 1,
+                graph_cache_capacity: 1,
+                critical_memory_pressure: 1,
+                capture_failure: 1,
+                replay_failure: 1,
+                slow: 2,
+                total_duration_micros: 123_000,
+                max_duration_micros: 101_000,
+            },
         }));
         let json = serde_json::to_value(info).unwrap();
 
@@ -1136,6 +1151,11 @@ mod tests {
         assert_eq!(json["decode_owner_graph_release_count"], 4);
         assert_eq!(json["captured_graph_count"], 0);
         assert_eq!(json["tracked_decode_owner_count"], 1);
+        assert_eq!(json["fallbacks"]["total"], 7);
+        assert_eq!(json["fallbacks"]["replay_failure"], 1);
+        assert_eq!(json["fallbacks"]["slow"], 2);
+        assert_eq!(json["fallbacks"]["total_duration_micros"], 123_000);
+        assert_eq!(json["fallbacks"]["max_duration_micros"], 101_000);
     }
 
     #[test]
@@ -1401,6 +1421,24 @@ mod tests {
             "tracked_decode_owner_count",
         ] {
             assert_eq!(rocm_graphs[counter], 0, "unexpected {counter}");
+        }
+        for counter in [
+            "total",
+            "warmup_forward_failure",
+            "cold_cache_host_round_trip",
+            "persistent_host_round_trip",
+            "graph_cache_capacity",
+            "critical_memory_pressure",
+            "capture_failure",
+            "replay_failure",
+            "slow",
+            "total_duration_micros",
+            "max_duration_micros",
+        ] {
+            assert_eq!(
+                rocm_graphs["fallbacks"][counter], 0,
+                "unexpected fallback {counter}"
+            );
         }
         assert_eq!(json["decode_runtime"]["kv_autoscaler"]["enabled"], false);
         assert_eq!(

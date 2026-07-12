@@ -22,6 +22,7 @@
 //! or replay failures trip a runner-local circuit breaker and fall back to eager.
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 use tracing;
 
 use kiln_core::block::BlockTable;
@@ -371,7 +372,7 @@ impl ReplayPlan for RocmDecodeReplayPlan<'_> {
 #[cfg(feature = "rocm")]
 enum RocmCaptureStep {
     CapturedHidden(Tensor),
-    FallbackEager,
+    FallbackEager(RocmGraphFallbackReason),
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -385,6 +386,7 @@ struct RocmGraphCounters {
     replay_failures: u64,
     decode_owner_release_count: u64,
     decode_owner_graph_release_count: u64,
+    fallbacks: RocmGraphFallbackStats,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -392,6 +394,75 @@ enum RocmGraphCaptureOutcome {
     Succeeded,
     Deferred,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RocmGraphFallbackReason {
+    WarmupForwardFailure,
+    ColdCacheHostRoundTrip,
+    PersistentHostRoundTrip,
+    GraphCacheCapacity,
+    CriticalMemoryPressure,
+    CaptureFailure,
+    ReplayFailure,
+}
+
+impl RocmGraphFallbackReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::WarmupForwardFailure => "warmup_forward_failure",
+            Self::ColdCacheHostRoundTrip => "cold_cache_host_round_trip",
+            Self::PersistentHostRoundTrip => "persistent_host_round_trip",
+            Self::GraphCacheCapacity => "graph_cache_capacity",
+            Self::CriticalMemoryPressure => "critical_memory_pressure",
+            Self::CaptureFailure => "capture_failure",
+            Self::ReplayFailure => "replay_failure",
+        }
+    }
+}
+
+/// Bounded ROCm graph fallback counts and end-to-end eager-fallback latency.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct RocmGraphFallbackStats {
+    pub total: u64,
+    pub warmup_forward_failure: u64,
+    pub cold_cache_host_round_trip: u64,
+    pub persistent_host_round_trip: u64,
+    pub graph_cache_capacity: u64,
+    pub critical_memory_pressure: u64,
+    pub capture_failure: u64,
+    pub replay_failure: u64,
+    pub slow: u64,
+    pub total_duration_micros: u64,
+    pub max_duration_micros: u64,
+}
+
+impl RocmGraphFallbackStats {
+    const SLOW_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
+
+    fn record(&mut self, reason: RocmGraphFallbackReason, duration: std::time::Duration) -> u64 {
+        self.total = self.total.saturating_add(1);
+        let reason_count = match reason {
+            RocmGraphFallbackReason::WarmupForwardFailure => &mut self.warmup_forward_failure,
+            RocmGraphFallbackReason::ColdCacheHostRoundTrip => &mut self.cold_cache_host_round_trip,
+            RocmGraphFallbackReason::PersistentHostRoundTrip => {
+                &mut self.persistent_host_round_trip
+            }
+            RocmGraphFallbackReason::GraphCacheCapacity => &mut self.graph_cache_capacity,
+            RocmGraphFallbackReason::CriticalMemoryPressure => &mut self.critical_memory_pressure,
+            RocmGraphFallbackReason::CaptureFailure => &mut self.capture_failure,
+            RocmGraphFallbackReason::ReplayFailure => &mut self.replay_failure,
+        };
+        *reason_count = reason_count.saturating_add(1);
+        let occurrence = *reason_count;
+        let duration_micros = duration.as_micros().min(u64::MAX as u128) as u64;
+        self.total_duration_micros = self.total_duration_micros.saturating_add(duration_micros);
+        self.max_duration_micros = self.max_duration_micros.max(duration_micros);
+        if duration >= Self::SLOW_DURATION {
+            self.slow = self.slow.saturating_add(1);
+        }
+        occurrence
+    }
 }
 
 impl RocmGraphCounters {
@@ -424,6 +495,14 @@ impl RocmGraphCounters {
         self.decode_owner_graph_release_count = self
             .decode_owner_graph_release_count
             .saturating_add(released_graphs as u64);
+    }
+
+    fn record_fallback(
+        &mut self,
+        reason: RocmGraphFallbackReason,
+        duration: std::time::Duration,
+    ) -> u64 {
+        self.fallbacks.record(reason, duration)
     }
 }
 
@@ -469,6 +548,8 @@ pub struct RocmGraphStats {
     pub captured_graph_count: usize,
     /// Decode owners whose continuity timeline is currently retained.
     pub tracked_decode_owner_count: usize,
+    /// Closed-reason eager fallback counts and latency.
+    pub fallbacks: RocmGraphFallbackStats,
 }
 
 /// Runs decode steps through captured HIP graphs when enabled, falling back to
@@ -593,6 +674,7 @@ impl RocmGraphRunner {
             decode_owner_graph_release_count: self.counters.decode_owner_graph_release_count,
             captured_graph_count,
             tracked_decode_owner_count,
+            fallbacks: self.counters.fallbacks,
         }
     }
 
@@ -689,6 +771,77 @@ impl RocmGraphRunner {
             .unwrap_or(8)
     }
 
+    #[cfg(feature = "rocm")]
+    fn run_eager_fallback<T>(
+        &mut self,
+        reason: RocmGraphFallbackReason,
+        seq_len: usize,
+        attempt_duration: std::time::Duration,
+        eager: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let eager_started = std::time::Instant::now();
+        let result = eager();
+        let eager_duration = eager_started.elapsed();
+        let duration = attempt_duration.saturating_add(eager_duration);
+        let occurrence = self.counters.record_fallback(reason, duration);
+        let attempt_duration_ms = attempt_duration.as_secs_f64() * 1000.0;
+        let eager_duration_ms = eager_duration.as_secs_f64() * 1000.0;
+        let duration_ms = duration.as_secs_f64() * 1000.0;
+        let slow = duration >= RocmGraphFallbackStats::SLOW_DURATION;
+        match &result {
+            Err(error) => tracing::warn!(
+                event = "rocm_graph_fallback",
+                reason = reason.as_str(),
+                outcome = "eager_failed",
+                %error,
+                occurrence,
+                seq_len,
+                attempt_duration_ms,
+                eager_duration_ms,
+                duration_ms,
+                slow,
+                "ROCm graph eager fallback failed"
+            ),
+            Ok(_) if slow => tracing::warn!(
+                event = "rocm_graph_fallback",
+                reason = reason.as_str(),
+                outcome = "eager_completed",
+                occurrence,
+                seq_len,
+                attempt_duration_ms,
+                eager_duration_ms,
+                duration_ms,
+                slow,
+                "slow ROCm graph eager fallback completed"
+            ),
+            Ok(_) if occurrence == 1 => tracing::info!(
+                event = "rocm_graph_fallback",
+                reason = reason.as_str(),
+                outcome = "eager_completed",
+                occurrence,
+                seq_len,
+                attempt_duration_ms,
+                eager_duration_ms,
+                duration_ms,
+                slow,
+                "ROCm graph eager fallback activated"
+            ),
+            Ok(_) => tracing::debug!(
+                event = "rocm_graph_fallback",
+                reason = reason.as_str(),
+                outcome = "eager_completed",
+                occurrence,
+                seq_len,
+                attempt_duration_ms,
+                eager_duration_ms,
+                duration_ms,
+                slow,
+                "ROCm graph eager fallback completed"
+            ),
+        }
+        result
+    }
+
     /// Run one bs=1 paged decode step, returning kt logits `[1, 1, vocab]`.
     #[allow(clippy::too_many_arguments)]
     pub fn decode_step_paged(
@@ -737,6 +890,7 @@ impl RocmGraphRunner {
             if !self.warmup_done {
                 self.warmup_done = true;
                 tracing::info!("ROCm graph runner: warmup decode step (KILN_ROCM_GRAPHS active)");
+                let warmup_started = std::time::Instant::now();
                 match Self::eager_forward_with_position_buffer(
                     backend,
                     token_id,
@@ -753,19 +907,26 @@ impl RocmGraphRunner {
                         tracing::warn!(
                             "ROCm graph-shaped warmup failed: {e:#}, plain eager decode"
                         );
+                        return self.run_eager_fallback(
+                            RocmGraphFallbackReason::WarmupForwardFailure,
+                            seq_len,
+                            warmup_started.elapsed(),
+                            || {
+                                Self::eager_forward(
+                                    backend,
+                                    token_id,
+                                    weights,
+                                    config,
+                                    paged_cache,
+                                    block_table,
+                                    seq_len,
+                                    linear_state,
+                                    lora,
+                                )
+                            },
+                        );
                     }
                 }
-                return Self::eager_forward(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
-                    seq_len,
-                    linear_state,
-                    lora,
-                );
             }
 
             // Native capture defaults on with the primary graph runner. The
@@ -791,22 +952,30 @@ impl RocmGraphRunner {
             // Geometry previously found non-capture-safe (host round-trip in its
             // forward) — skip the warm pass + capture attempt and run eager.
             if self.non_capture_safe.contains(&requested_key) {
-                return Self::eager_forward(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
+                return self.run_eager_fallback(
+                    RocmGraphFallbackReason::PersistentHostRoundTrip,
                     seq_len,
-                    linear_state,
-                    lora,
+                    std::time::Duration::ZERO,
+                    || {
+                        Self::eager_forward(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    },
                 );
             }
 
             // Replay if we have a valid captured graph for this geometry.
             if let Some(captured) = self.captured.get(&cache_key) {
                 if captured.adapter_gen == self.adapter_generation {
+                    let replay_started = std::time::Instant::now();
                     match self.replay(
                         &cache_key,
                         token_id,
@@ -827,16 +996,23 @@ impl RocmGraphRunner {
                             );
                             self.enabled = false;
                             self.captured.clear();
-                            return Self::eager_forward(
-                                backend,
-                                token_id,
-                                weights,
-                                config,
-                                paged_cache,
-                                block_table,
+                            return self.run_eager_fallback(
+                                RocmGraphFallbackReason::ReplayFailure,
                                 seq_len,
-                                linear_state,
-                                lora,
+                                replay_started.elapsed(),
+                                || {
+                                    Self::eager_forward(
+                                        backend,
+                                        token_id,
+                                        weights,
+                                        config,
+                                        paged_cache,
+                                        block_table,
+                                        seq_len,
+                                        linear_state,
+                                        lora,
+                                    )
+                                },
                             );
                         }
                     }
@@ -853,16 +1029,23 @@ impl RocmGraphRunner {
                         "ROCm graph capture skipped: paged metadata shape cache full"
                     );
                 }
-                return Self::eager_forward(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
+                return self.run_eager_fallback(
+                    RocmGraphFallbackReason::GraphCacheCapacity,
                     seq_len,
-                    linear_state,
-                    lora,
+                    std::time::Duration::ZERO,
+                    || {
+                        Self::eager_forward(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    },
                 );
             }
 
@@ -875,20 +1058,28 @@ impl RocmGraphRunner {
             if kiln_memory::MemoryGovernor::global().pressure()
                 == kiln_memory::MemoryPressure::Critical
             {
-                return Self::eager_forward(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
+                return self.run_eager_fallback(
+                    RocmGraphFallbackReason::CriticalMemoryPressure,
                     seq_len,
-                    linear_state,
-                    lora,
+                    std::time::Duration::ZERO,
+                    || {
+                        Self::eager_forward(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    },
                 );
             }
 
             // Capture.
+            let capture_started = std::time::Instant::now();
             match self.try_capture(
                 backend,
                 owner,
@@ -910,16 +1101,23 @@ impl RocmGraphRunner {
                     // a second failure. Capture-stream failures trip the runner
                     // circuit breaker and are settled at external yield.
                     synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device());
-                    return Self::eager_forward(
-                        backend,
-                        token_id,
-                        weights,
-                        config,
-                        paged_cache,
-                        block_table,
+                    return self.run_eager_fallback(
+                        RocmGraphFallbackReason::CaptureFailure,
                         seq_len,
-                        linear_state,
-                        lora,
+                        capture_started.elapsed(),
+                        || {
+                            Self::eager_forward(
+                                backend,
+                                token_id,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                lora,
+                            )
+                        },
                     );
                 }
             }
@@ -981,6 +1179,7 @@ impl RocmGraphRunner {
             if !self.warmup_done {
                 self.warmup_done = true;
                 tracing::info!("ROCm graph runner: warmup decode step (KILN_ROCM_GRAPHS active)");
+                let warmup_started = std::time::Instant::now();
                 match Self::eager_forward_hidden_with_position_buffer(
                     backend,
                     token_id,
@@ -997,19 +1196,26 @@ impl RocmGraphRunner {
                         tracing::warn!(
                             "ROCm graph-shaped warmup failed: {e:#}, plain eager decode"
                         );
+                        return self.run_eager_fallback(
+                            RocmGraphFallbackReason::WarmupForwardFailure,
+                            seq_len,
+                            warmup_started.elapsed(),
+                            || {
+                                Self::eager_forward_hidden(
+                                    backend,
+                                    token_id,
+                                    weights,
+                                    config,
+                                    paged_cache,
+                                    block_table,
+                                    seq_len,
+                                    linear_state,
+                                    lora,
+                                )
+                            },
+                        );
                     }
                 }
-                return Self::eager_forward_hidden(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
-                    seq_len,
-                    linear_state,
-                    lora,
-                );
             }
 
             if !self.capture_requested {
@@ -1030,21 +1236,29 @@ impl RocmGraphRunner {
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
 
             if self.non_capture_safe.contains(&requested_key) {
-                return Self::eager_forward_hidden(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
+                return self.run_eager_fallback(
+                    RocmGraphFallbackReason::PersistentHostRoundTrip,
                     seq_len,
-                    linear_state,
-                    lora,
+                    std::time::Duration::ZERO,
+                    || {
+                        Self::eager_forward_hidden(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    },
                 );
             }
 
             if let Some(captured) = self.captured.get(&cache_key) {
                 if captured.adapter_gen == self.adapter_generation {
+                    let replay_started = std::time::Instant::now();
                     match self.replay_hidden(
                         &cache_key,
                         token_id,
@@ -1063,16 +1277,23 @@ impl RocmGraphRunner {
                             );
                             self.enabled = false;
                             self.captured.clear();
-                            return Self::eager_forward_hidden(
-                                backend,
-                                token_id,
-                                weights,
-                                config,
-                                paged_cache,
-                                block_table,
+                            return self.run_eager_fallback(
+                                RocmGraphFallbackReason::ReplayFailure,
                                 seq_len,
-                                linear_state,
-                                lora,
+                                replay_started.elapsed(),
+                                || {
+                                    Self::eager_forward_hidden(
+                                        backend,
+                                        token_id,
+                                        weights,
+                                        config,
+                                        paged_cache,
+                                        block_table,
+                                        seq_len,
+                                        linear_state,
+                                        lora,
+                                    )
+                                },
                             );
                         }
                     }
@@ -1089,35 +1310,50 @@ impl RocmGraphRunner {
                         "ROCm graph capture skipped: paged metadata shape cache full"
                     );
                 }
-                return Self::eager_forward_hidden(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
+                return self.run_eager_fallback(
+                    RocmGraphFallbackReason::GraphCacheCapacity,
                     seq_len,
-                    linear_state,
-                    lora,
+                    std::time::Duration::ZERO,
+                    || {
+                        Self::eager_forward_hidden(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    },
                 );
             }
 
             if kiln_memory::MemoryGovernor::global().pressure()
                 == kiln_memory::MemoryPressure::Critical
             {
-                return Self::eager_forward_hidden(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
+                return self.run_eager_fallback(
+                    RocmGraphFallbackReason::CriticalMemoryPressure,
                     seq_len,
-                    linear_state,
-                    lora,
+                    std::time::Duration::ZERO,
+                    || {
+                        Self::eager_forward_hidden(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    },
                 );
             }
 
+            let capture_started = std::time::Instant::now();
             match self.try_capture_hidden(
                 backend,
                 owner,
@@ -1131,33 +1367,47 @@ impl RocmGraphRunner {
                 lora,
             ) {
                 Ok(RocmCaptureStep::CapturedHidden(hidden)) => return Ok(hidden),
-                Ok(RocmCaptureStep::FallbackEager) => {
-                    return Self::eager_forward_hidden(
-                        backend,
-                        token_id,
-                        weights,
-                        config,
-                        paged_cache,
-                        block_table,
+                Ok(RocmCaptureStep::FallbackEager(reason)) => {
+                    return self.run_eager_fallback(
+                        reason,
                         seq_len,
-                        linear_state,
-                        lora,
+                        capture_started.elapsed(),
+                        || {
+                            Self::eager_forward_hidden(
+                                backend,
+                                token_id,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                lora,
+                            )
+                        },
                     );
                 }
                 Err(e) => {
                     tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
                     self.enabled = false;
                     synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device());
-                    return Self::eager_forward_hidden(
-                        backend,
-                        token_id,
-                        weights,
-                        config,
-                        paged_cache,
-                        block_table,
+                    return self.run_eager_fallback(
+                        RocmGraphFallbackReason::CaptureFailure,
                         seq_len,
-                        linear_state,
-                        lora,
+                        capture_started.elapsed(),
+                        || {
+                            Self::eager_forward_hidden(
+                                backend,
+                                token_id,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                lora,
+                            )
+                        },
                     );
                 }
             }
@@ -1223,6 +1473,7 @@ impl RocmGraphRunner {
             if !self.warmup_done {
                 self.warmup_done = true;
                 tracing::info!("ROCm graph runner: warmup decode step (KILN_ROCM_GRAPHS active)");
+                let warmup_started = std::time::Instant::now();
                 match Self::eager_forward_greedy_with_position_buffer(
                     backend,
                     token_id,
@@ -1239,19 +1490,26 @@ impl RocmGraphRunner {
                         tracing::warn!(
                             "ROCm graph-shaped warmup failed: {e:#}, plain eager decode"
                         );
+                        return self.run_eager_fallback(
+                            RocmGraphFallbackReason::WarmupForwardFailure,
+                            seq_len,
+                            warmup_started.elapsed(),
+                            || {
+                                Self::eager_forward_greedy(
+                                    backend,
+                                    token_id,
+                                    weights,
+                                    config,
+                                    paged_cache,
+                                    block_table,
+                                    seq_len,
+                                    linear_state,
+                                    lora,
+                                )
+                            },
+                        );
                     }
                 }
-                return Self::eager_forward_greedy(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
-                    seq_len,
-                    linear_state,
-                    lora,
-                );
             }
 
             if !self.capture_requested {
@@ -1272,21 +1530,29 @@ impl RocmGraphRunner {
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
 
             if self.non_capture_safe.contains(&requested_key) {
-                return Self::eager_forward_greedy(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
+                return self.run_eager_fallback(
+                    RocmGraphFallbackReason::PersistentHostRoundTrip,
                     seq_len,
-                    linear_state,
-                    lora,
+                    std::time::Duration::ZERO,
+                    || {
+                        Self::eager_forward_greedy(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    },
                 );
             }
 
             if let Some(captured) = self.captured.get(&cache_key) {
                 if captured.adapter_gen == self.adapter_generation {
+                    let replay_started = std::time::Instant::now();
                     match self.replay_greedy(
                         &cache_key,
                         token_id,
@@ -1307,16 +1573,23 @@ impl RocmGraphRunner {
                             );
                             self.enabled = false;
                             self.captured.clear();
-                            return Self::eager_forward_greedy(
-                                backend,
-                                token_id,
-                                weights,
-                                config,
-                                paged_cache,
-                                block_table,
+                            return self.run_eager_fallback(
+                                RocmGraphFallbackReason::ReplayFailure,
                                 seq_len,
-                                linear_state,
-                                lora,
+                                replay_started.elapsed(),
+                                || {
+                                    Self::eager_forward_greedy(
+                                        backend,
+                                        token_id,
+                                        weights,
+                                        config,
+                                        paged_cache,
+                                        block_table,
+                                        seq_len,
+                                        linear_state,
+                                        lora,
+                                    )
+                                },
                             );
                         }
                     }
@@ -1333,35 +1606,50 @@ impl RocmGraphRunner {
                         "ROCm graph capture skipped: paged metadata shape cache full"
                     );
                 }
-                return Self::eager_forward_greedy(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
+                return self.run_eager_fallback(
+                    RocmGraphFallbackReason::GraphCacheCapacity,
                     seq_len,
-                    linear_state,
-                    lora,
+                    std::time::Duration::ZERO,
+                    || {
+                        Self::eager_forward_greedy(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    },
                 );
             }
 
             if kiln_memory::MemoryGovernor::global().pressure()
                 == kiln_memory::MemoryPressure::Critical
             {
-                return Self::eager_forward_greedy(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
+                return self.run_eager_fallback(
+                    RocmGraphFallbackReason::CriticalMemoryPressure,
                     seq_len,
-                    linear_state,
-                    lora,
+                    std::time::Duration::ZERO,
+                    || {
+                        Self::eager_forward_greedy(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    },
                 );
             }
 
+            let capture_started = std::time::Instant::now();
             match self.try_capture_greedy(
                 backend,
                 owner,
@@ -1379,16 +1667,23 @@ impl RocmGraphRunner {
                     tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
                     self.enabled = false;
                     synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device());
-                    return Self::eager_forward_greedy(
-                        backend,
-                        token_id,
-                        weights,
-                        config,
-                        paged_cache,
-                        block_table,
+                    return self.run_eager_fallback(
+                        RocmGraphFallbackReason::CaptureFailure,
                         seq_len,
-                        linear_state,
-                        lora,
+                        capture_started.elapsed(),
+                        || {
+                            Self::eager_forward_greedy(
+                                backend,
+                                token_id,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                lora,
+                            )
+                        },
                     );
                 }
             }
@@ -2027,6 +2322,7 @@ impl RocmGraphRunner {
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
     ) -> Result<Tensor> {
+        let capture_started = std::time::Instant::now();
         match self.try_capture_hidden(
             backend,
             owner,
@@ -2043,17 +2339,21 @@ impl RocmGraphRunner {
                 crate::forward::lm_head_from_hidden_eager(backend, &hidden, weights, config)
                     .context("eager lm_head on captured hidden (first launch)")
             }
-            RocmCaptureStep::FallbackEager => Self::eager_forward(
-                backend,
-                token_id,
-                weights,
-                config,
-                paged_cache,
-                block_table,
-                seq_len,
-                linear_state,
-                lora,
-            ),
+            RocmCaptureStep::FallbackEager(reason) => {
+                self.run_eager_fallback(reason, seq_len, capture_started.elapsed(), || {
+                    Self::eager_forward(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                })
+            }
         }
     }
 
@@ -2073,6 +2373,7 @@ impl RocmGraphRunner {
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
     ) -> Result<u32> {
+        let capture_started = std::time::Instant::now();
         match self.try_capture_hidden(
             backend,
             owner,
@@ -2089,17 +2390,21 @@ impl RocmGraphRunner {
                 crate::forward::lm_head_argmax_from_hidden_eager(backend, &hidden, weights, config)
                     .context("eager lm_head argmax on captured hidden (first launch)")
             }
-            RocmCaptureStep::FallbackEager => Self::eager_forward_greedy(
-                backend,
-                token_id,
-                weights,
-                config,
-                paged_cache,
-                block_table,
-                seq_len,
-                linear_state,
-                lora,
-            ),
+            RocmCaptureStep::FallbackEager(reason) => {
+                self.run_eager_fallback(reason, seq_len, capture_started.elapsed(), || {
+                    Self::eager_forward_greedy(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                })
+            }
         }
     }
 
@@ -2133,7 +2438,7 @@ impl RocmGraphRunner {
         );
         let outcome = match &result {
             Ok(RocmCaptureStep::CapturedHidden(_)) => RocmGraphCaptureOutcome::Succeeded,
-            Ok(RocmCaptureStep::FallbackEager) => RocmGraphCaptureOutcome::Deferred,
+            Ok(RocmCaptureStep::FallbackEager(_)) => RocmGraphCaptureOutcome::Deferred,
             Err(_) => RocmGraphCaptureOutcome::Failed,
         };
         self.counters.record_capture_outcome(outcome);
@@ -2343,7 +2648,7 @@ impl RocmGraphRunner {
             // never called, so the device stays clean either way.
             let attempts = self.capture_retry.entry(key.clone()).or_insert(0);
             *attempts += 1;
-            if *attempts >= Self::CAPTURE_RETRY_LIMIT {
+            let fallback_reason = if *attempts >= Self::CAPTURE_RETRY_LIMIT {
                 tracing::debug!(
                     htod = htod_after - htod_before,
                     attempts = *attempts,
@@ -2352,6 +2657,7 @@ impl RocmGraphRunner {
                 );
                 self.non_capture_safe.insert(key.clone());
                 self.capture_retry.remove(&key);
+                RocmGraphFallbackReason::PersistentHostRoundTrip
             } else {
                 tracing::debug!(
                     htod = htod_after - htod_before,
@@ -2359,8 +2665,9 @@ impl RocmGraphRunner {
                     "ROCm graph: warm pass did a host round-trip (likely cold cache fill); \
                      running eager, will retry capture next step"
                 );
-            }
-            return Ok(RocmCaptureStep::FallbackEager);
+                RocmGraphFallbackReason::ColdCacheHostRoundTrip
+            };
+            return Ok(RocmCaptureStep::FallbackEager(fallback_reason));
         }
         // Capture-safe: clear any retry bookkeeping for this geometry.
         self.capture_retry.remove(&key);
@@ -2862,6 +3169,11 @@ mod tests {
         assert_eq!(after.replay_attempts, before.replay_attempts + 1);
         assert_eq!(after.replay_successes, before.replay_successes);
         assert_eq!(after.replay_failures, before.replay_failures + 1);
+        assert_eq!(after.fallbacks.total, before.fallbacks.total + 1);
+        assert_eq!(
+            after.fallbacks.replay_failure,
+            before.fallbacks.replay_failure + 1
+        );
         assert_eq!(after.failures, before.failures + 1);
         assert_eq!(native_launches_after, native_launches_before);
         assert!(
@@ -2914,6 +3226,18 @@ mod tests {
         counters.record_replay_outcome(false);
         counters.record_decode_owner_release(2);
         counters.record_decode_owner_release(1);
+        counters.record_fallback(
+            RocmGraphFallbackReason::CaptureFailure,
+            std::time::Duration::from_millis(50),
+        );
+        counters.record_fallback(
+            RocmGraphFallbackReason::ReplayFailure,
+            std::time::Duration::from_millis(120),
+        );
+        counters.record_fallback(
+            RocmGraphFallbackReason::ReplayFailure,
+            std::time::Duration::from_millis(10),
+        );
 
         assert_eq!(counters.capture_attempts, 3);
         assert_eq!(counters.capture_successes, 1);
@@ -2924,5 +3248,29 @@ mod tests {
         assert_eq!(counters.replay_failures, 1);
         assert_eq!(counters.decode_owner_release_count, 2);
         assert_eq!(counters.decode_owner_graph_release_count, 3);
+        assert_eq!(counters.fallbacks.total, 3);
+        assert_eq!(counters.fallbacks.capture_failure, 1);
+        assert_eq!(counters.fallbacks.replay_failure, 2);
+        assert_eq!(counters.fallbacks.slow, 1);
+        assert_eq!(counters.fallbacks.total_duration_micros, 180_000);
+        assert_eq!(counters.fallbacks.max_duration_micros, 120_000);
+    }
+
+    #[test]
+    fn fallback_reason_labels_are_closed_and_distinct() {
+        let labels = [
+            RocmGraphFallbackReason::WarmupForwardFailure,
+            RocmGraphFallbackReason::ColdCacheHostRoundTrip,
+            RocmGraphFallbackReason::PersistentHostRoundTrip,
+            RocmGraphFallbackReason::GraphCacheCapacity,
+            RocmGraphFallbackReason::CriticalMemoryPressure,
+            RocmGraphFallbackReason::CaptureFailure,
+            RocmGraphFallbackReason::ReplayFailure,
+        ]
+        .map(RocmGraphFallbackReason::as_str);
+        let mut distinct = labels.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), labels.len());
     }
 }
