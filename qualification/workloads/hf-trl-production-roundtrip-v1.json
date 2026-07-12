@@ -1,0 +1,298 @@
+{
+  "schema_version": 1,
+  "workload_id": "hf-trl-production-roundtrip-v1",
+  "kind": "correctness",
+  "description": "Run real Qwen production-model SFT and recorded-GRPO exports through the pinned offline HF/TRL/PEFT trainer, import both nonzero adapters, and require public inference, paired eval, identity, and drained-backend evidence.",
+  "determinism": {
+    "seed": 42,
+    "seed_delivery": "argv",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [
+    {
+      "name": "trainer_python",
+      "description": "Python executable containing the exact requirements.lock Torch, Transformers, TRL, and PEFT environment.",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "constraints": {
+        "allowed_values": [],
+        "minimum": null,
+        "maximum": null,
+        "pattern": "^.+$"
+      }
+    }
+  ],
+  "variants": [
+    {
+      "id": "rocm",
+      "description": "Serve twice through the production ROCm backend and train both external adapters with an offline Torch accelerator environment.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "external_accelerator": "torch_cuda",
+        "external_trainer": "hf_trl_peft",
+        "lora_rank": 1,
+        "lora_target": "q_proj",
+        "network": "loopback_only",
+        "server_eval_mode": true,
+        "training_updates_per_task": 1
+      },
+      "cases": [
+        {
+          "id": "hf-trl-production-roundtrip",
+          "description": "Export SFT plus exact real-model recorded GRPO data, stop Kiln, run one pinned nonzero HF/TRL/PEFT update for each task, restart Kiln, import both adapters, and prove verifier, paired-eval, registry, provenance, health, and resource-drain contracts.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/hf_trl_roundtrip.py",
+            "--backend",
+            "rocm",
+            "--model",
+            "${model_path}",
+            "--seed",
+            "${seed}",
+            "--trainer-python",
+            "${trainer_python}",
+            "--kiln",
+            "target/release/kiln"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[HF/TRL ROUNDTRIP PASS\\] backend=rocm tasks=sft,grpo imports=2 eval_pairs=2"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(traceback|roundtrip failed)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "adapter_imports",
+              "eval_pairs",
+              "grpo_nonzero_tensors",
+              "grpo_weight_bytes",
+              "http_errors",
+              "sft_nonzero_tensors",
+              "sft_weight_bytes",
+              "training_tasks"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "vulkan",
+      "description": "Serve twice through the production Vulkan backend while using the same offline Torch accelerator environment for both external training steps.",
+      "backend": "vulkan",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "external_accelerator": "torch_cuda",
+        "external_trainer": "hf_trl_peft",
+        "lora_rank": 1,
+        "lora_target": "q_proj",
+        "network": "loopback_only",
+        "server_eval_mode": true,
+        "training_updates_per_task": 1
+      },
+      "cases": [
+        {
+          "id": "hf-trl-production-roundtrip",
+          "description": "Repeat the same export, exclusive external-training, import, inference, eval, provenance, health, and resource-drain contract through a Vulkan server binary.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/hf_trl_roundtrip.py",
+            "--backend",
+            "vulkan",
+            "--model",
+            "${model_path}",
+            "--seed",
+            "${seed}",
+            "--trainer-python",
+            "${trainer_python}",
+            "--kiln",
+            "target/release/kiln"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[HF/TRL ROUNDTRIP PASS\\] backend=vulkan tasks=sft,grpo imports=2 eval_pairs=2"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(traceback|roundtrip failed)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "adapter_imports",
+              "eval_pairs",
+              "grpo_nonzero_tensors",
+              "grpo_weight_bytes",
+              "http_errors",
+              "sft_nonzero_tensors",
+              "sft_weight_bytes",
+              "training_tasks"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "cross_backend_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [
+      {
+        "backend_a": "rocm",
+        "variant_a_id": "rocm",
+        "backend_b": "vulkan",
+        "variant_b_id": "vulkan",
+        "allowed_environment_differences": [
+          "compiler.hipcc",
+          "compiler.shader",
+          "device.architecture",
+          "device.driver",
+          "device.name",
+          "runtime.driver",
+          "runtime.hipcc",
+          "runtime.hsa",
+          "runtime.rocm",
+          "runtime.vulkan_device",
+          "runtime.vulkan_instance"
+        ]
+      }
+    ],
+    "metric_rules": [
+      {
+        "scope": "result",
+        "result_id": "hf-trl-production-roundtrip",
+        "metric": "adapter_imports",
+        "metric_class": "correctness",
+        "unit": "count",
+        "aggregation": "single_run",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "hf-trl-production-roundtrip",
+        "metric": "eval_pairs",
+        "metric_class": "correctness",
+        "unit": "count",
+        "aggregation": "single_run",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "hf-trl-production-roundtrip",
+        "metric": "grpo_nonzero_tensors",
+        "metric_class": "correctness",
+        "unit": "count",
+        "aggregation": "single_run",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "hf-trl-production-roundtrip",
+        "metric": "grpo_weight_bytes",
+        "metric_class": "correctness",
+        "unit": "bytes",
+        "aggregation": "single_run",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "hf-trl-production-roundtrip",
+        "metric": "http_errors",
+        "metric_class": "correctness",
+        "unit": "count",
+        "aggregation": "single_run",
+        "lower_is_better": true,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "hf-trl-production-roundtrip",
+        "metric": "sft_nonzero_tensors",
+        "metric_class": "correctness",
+        "unit": "count",
+        "aggregation": "single_run",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "hf-trl-production-roundtrip",
+        "metric": "sft_weight_bytes",
+        "metric_class": "correctness",
+        "unit": "bytes",
+        "aggregation": "single_run",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "hf-trl-production-roundtrip",
+        "metric": "training_tasks",
+        "metric_class": "correctness",
+        "unit": "count",
+        "aggregation": "single_run",
+        "lower_is_better": false,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      }
+    ]
+  }
+}

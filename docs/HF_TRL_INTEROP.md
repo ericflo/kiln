@@ -7,12 +7,12 @@ Transformers, TRL, and PEFT. The interoperability route moves data and
 adapters between those systems without discarding the identities needed to
 audit the handoff.
 
-The version-1 manifests, validation library, atomic SFT and GRPO library bundle
+The version-1 manifests, validation library, atomic SFT and GRPO bundle
 writers, atomic import-envelope writer, task-aware pinned SFT/recorded-GRPO
-reference runner, public SFT export/download CLI and API, and
-resident-validated PEFT import API and CLI are implemented. The public GRPO
-exporter is not yet available. A PEFT directory installed through the generic
-adapter upload route has not passed this contract.
+reference runner, public export/download API and CLI for both tasks,
+resident-validated PEFT import API and CLI, and local production-model
+round-trip qualification workload are implemented. A PEFT directory installed
+through the generic adapter upload route has not passed this contract.
 
 ## Bundle Model
 
@@ -99,8 +99,9 @@ exactly one provenance-complete inline `groups` array or server-local canonical
 adapter as SFT. Both forms enter the existing immutable registry and therefore
 share its verification, download, conditional deletion, capacity, locking, and
 crash-recovery behavior. The task-aware pinned runner and first-party
-`export-grpo` CLI support recorded GRPO. The production-model numerical round
-trip is still pending.
+`export-grpo` CLI support recorded GRPO. The production-model round-trip
+workload described below is the required local hardware gate for proving that
+this complete route composes.
 
 ## Template Identities
 
@@ -544,14 +545,57 @@ and the adapter content revision. The first-party command that derives,
 archives, streams, predicts, and verifies this API transaction is
 `kiln train hf import-peft`.
 
+## Production-Model Qualification
+
+The committed `hf-trl-production-roundtrip-v1` workload is the end-to-end
+correctness gate. It runs with external network access disabled and loopback
+enabled. For both SFT and recorded GRPO it:
+
+1. starts the selected production Kiln backend against the real model;
+2. generates two exact scored GRPO completions and exports both task bundles;
+3. drains and stops Kiln before the external process acquires the accelerator;
+4. verifies each bundle and runs one BF16 rank-1 `q_proj` update through the
+   bundle's pinned HF/TRL/PEFT script;
+5. restarts the same Kiln binary and requires identical execution provenance;
+6. imports both completed bundles through `kiln train hf import-peft`;
+7. requires nonzero adapter tensors, a measurable LoRA delta, successful
+   server load, hash-bound paired base/adapter evals, a healthy unquarantined
+   backend, zero HTTP errors, a drained scheduler, and zero live KV blocks; and
+8. stops the server cleanly so its private model snapshot must be removed.
+
+The external environment must already contain the exact versions from
+`scripts/hf_trl/requirements-sft.lock`, with PyTorch installed from the index
+for the machine. Build `target/release/kiln` for the selected backend, commit
+the workload and source first, then run it from a clean tree:
+
+```bash
+python3 scripts/qualification/run.py \
+  qualification/workloads/hf-trl-production-roundtrip-v1.json \
+  --variant rocm \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen/Qwen3.5-4B \
+  --var trainer_python=/absolute/path/to/pinned-venv/bin/python
+```
+
+Use `--variant vulkan` with a Vulkan-built server binary for the paired Strix
+Halo receipt. The workload's cross-backend comparison policy requires exact
+agreement on import/eval counts, nonzero tensor counts, adapter byte sizes,
+HTTP error count, and task count while allowing only declared backend
+environment differences. CUDA and Metal need explicit workload variants before
+they can claim this gate; a compile check or manually assembled transcript is
+not a substitute for a strict receipt.
+
 ## Validation Boundary
 
-This contract proves byte and identity continuity across an explicitly
-provided handoff. It does not prove that an external process executed the
-reported script, that package version strings are trustworthy, or that the
-trainer produced a correct optimization result. The pinned runner and oracle
-fixtures provide narrower behavioral evidence; real cross-stack round-trip
-tests remain required before the route is declared complete.
+The bundle contract proves byte and identity continuity across an explicitly
+provided handoff. By itself it does not prove that an external process executed
+the reported script, that package version strings are trustworthy, or that the
+trainer produced a correct optimization result. The pinned scalar/tensor
+oracles cover the update equations; the local production-model workload adds
+process, package-lock, accelerator, import, and inference evidence bound to a
+specific source tree, binary, backend, model, and host. Neither claim extends
+to a backend that lacks its own passed receipt.
 
 Import validates both self-digests, the result-to-export link, every transported
 file, trainer/task consistency, current resident base/tokenizer/template
