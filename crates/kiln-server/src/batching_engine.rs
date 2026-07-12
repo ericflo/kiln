@@ -1420,6 +1420,11 @@ impl DecodeForward for RealDecodeForward {
         // (governor-driven under pressure), so the brief decode stall is fine.
         let _gpu =
             gpu_coordination_write_guard_while_healthy(&self.gpu_lock, &self.backend_health)?;
+        let runner = self.runner.write().map_err(|error| {
+            anyhow::anyhow!("model runner lock poisoned during KV resize: {error}")
+        })?;
+        runner.ensure_backend_healthy()?;
+        runner.invalidate_decode_graphs_for_kv_pool_change()?;
         if target_blocks < cur {
             // SHRINK. Logical first: lower the ceiling + retire free high blocks.
             // We can only physically drop to the live high-water mark right now;

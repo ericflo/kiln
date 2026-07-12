@@ -199,6 +199,9 @@ struct CapturedDecodeGraphRocm {
     /// each launch so `output_hidden` is visible before the eager lm_head.
     capture_stream: std::sync::Arc<kiln_hip::RocmStream>,
     adapter_gen: u64,
+    /// Exact paged-KV allocation/generation whose pool pointers are embedded in
+    /// the captured kernels.
+    kv_pool_identity: crate::KvPoolIdentity,
     token_buffer: Tensor,
     position_buffer: Tensor,
     block_table_buffer: Option<Tensor>,
@@ -1589,6 +1592,10 @@ impl RocmGraphRunner {
             .get(key)
             .ok_or_else(|| anyhow::anyhow!("replay: key vanished"))?;
 
+        paged_cache
+            .ensure_pool_identity(captured.kv_pool_identity)
+            .context("refuse ROCm graph replay after paged-KV pool replacement")?;
+
         Self::update_token_buffer(&captured.token_buffer, token_id)?;
         Self::update_position_buffer(&captured.position_buffer, seq_len)?;
         Self::update_rotary_buffers(
@@ -2331,6 +2338,7 @@ impl RocmGraphRunner {
                 output_hidden,
                 capture_stream: stream,
                 adapter_gen: self.adapter_generation,
+                kv_pool_identity: paged_cache.pool_identity(),
                 token_buffer,
                 position_buffer,
                 block_table_buffer,

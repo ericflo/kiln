@@ -406,6 +406,17 @@ impl PagedKvCacheKt {
         }
     }
 
+    /// Fail before a native graph launch when its captured paged-pool pointers
+    /// no longer name this cache generation.
+    pub fn ensure_pool_identity(&self, expected: KvPoolIdentity) -> Result<()> {
+        let actual = self.pool_identity();
+        anyhow::ensure!(
+            actual == expected,
+            "paged KV pool identity changed: expected {expected:?}, actual {actual:?}"
+        );
+        Ok(())
+    }
+
     /// The device the pools live on (layer 0's k pool), or `None` if the cache
     /// has no layers. Needed by [`Self::physical_resize_to`] callers that don't
     /// otherwise carry the device.
@@ -1910,6 +1921,13 @@ mod tests {
         cache.physical_resize_to(5, dev).expect("noop");
         assert_eq!(cache.num_blocks(), 5);
         assert_eq!(cache.pool_identity(), grown_identity);
+        assert!(
+            cache.ensure_pool_identity(initial_identity).is_err(),
+            "a graph-captured pre-resize identity must be rejected"
+        );
+        cache
+            .ensure_pool_identity(grown_identity)
+            .expect("current pool identity");
     }
 
     #[test]

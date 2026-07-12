@@ -345,6 +345,9 @@ struct CapturedDecodeGraph {
     capture_stream: std::sync::Arc<cudarc::driver::CudaStream>,
     /// Adapter generation when captured (invalidate on mismatch).
     adapter_gen: u64,
+    /// Exact paged-KV allocation/generation whose pool pointers are embedded in
+    /// the captured kernels.
+    kv_pool_identity: crate::KvPoolIdentity,
     /// Pre-allocated token-id buffer on GPU (u32, shape [1]).
     /// Updated before each replay so embedding lookup reads the current token
     /// from a graph-stable device pointer.
@@ -497,6 +500,9 @@ struct CapturedBatchedDecodeGraph {
     capture_stream: std::sync::Arc<cudarc::driver::CudaStream>,
     /// Adapter generation when captured (invalidate on mismatch).
     adapter_gen: u64,
+    /// Exact paged-KV allocation/generation whose pool pointers are embedded in
+    /// the captured kernels.
+    kv_pool_identity: crate::KvPoolIdentity,
     /// `[batch]` u32 token-id buffer; updated before replay.
     token_buffer: Tensor,
     /// `[batch]` f32 per-row decode position; updated before replay.
@@ -884,17 +890,21 @@ impl CudaGraphRunner {
         // We use disjoint field borrows by going through the
         // HashMaps directly instead of via `self.persistent_batched_state(...)`.
         let adapter_gen_now = self.adapter_generation;
-        let captured_exists_with_match = self
-            .captured_batched
-            .get(&key)
-            .map(|c| c.adapter_gen == adapter_gen_now)
-            .unwrap_or(false);
+        let live_kv_pool_identity = paged_cache.pool_identity();
         if let Some(captured) = self.captured_batched.get(&key) {
             if captured.adapter_gen != adapter_gen_now {
                 // Adapter changed since capture; drop the cached graph.
                 self.captured_batched.remove(&key);
+            } else if captured.kv_pool_identity != live_kv_pool_identity {
+                tracing::warn!(
+                    expected = ?captured.kv_pool_identity,
+                    actual = ?live_kv_pool_identity,
+                    "batched CUDA graph replay refused after paged-KV pool replacement"
+                );
+                self.captured_batched.remove(&key);
             }
         }
+        let captured_exists_with_match = self.captured_batched.contains_key(&key);
         if captured_exists_with_match {
             // Step (2): refresh GDN persistent state via direct
             // HashMap access. Either-or with the captured map borrow
@@ -1205,6 +1215,25 @@ impl CudaGraphRunner {
             // Phase 3: replay if we have a valid captured graph
             if let Some(captured) = self.captured.get(&cache_key) {
                 if captured.adapter_gen == self.adapter_generation {
+                    if let Err(error) = paged_cache.ensure_pool_identity(captured.kv_pool_identity)
+                    {
+                        tracing::warn!(
+                            error = %error,
+                            "CUDA graph replay refused after paged-KV pool replacement"
+                        );
+                        self.captured.remove(&cache_key);
+                        return Self::eager_forward(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        );
+                    }
                     // Update position buffer BEFORE graph replay.
                     // The graph's RoPE kernels read from the same GPU pointer,
                     // so updating the data here gives them the correct position.
@@ -2159,6 +2188,7 @@ impl CudaGraphRunner {
                         output_hidden,
                         capture_stream: stream.clone(),
                         adapter_gen: self.adapter_generation,
+                        kv_pool_identity: paged_cache.pool_identity(),
                         token_buffer,
                         position_buffer,
                         block_table_buffer,
@@ -2536,6 +2566,7 @@ impl CudaGraphRunner {
                 output_hidden,
                 capture_stream: stream.clone(),
                 adapter_gen,
+                kv_pool_identity: paged_cache.pool_identity(),
                 token_buffer,
                 position_buffer,
                 block_table_buffer,

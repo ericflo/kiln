@@ -2791,6 +2791,26 @@ impl ModelRunner {
             .stats())
     }
 
+    /// Destroy every decode graph before a paged-KV pool replacement can free
+    /// the allocation whose pointers were captured. The graph runners also
+    /// validate pool identity at replay, but eager invalidation keeps native
+    /// graph handles from retaining obsolete allocation state across resize.
+    pub fn invalidate_decode_graphs_for_kv_pool_change(&self) -> Result<()> {
+        self.cuda_graph
+            .lock()
+            .map_err(|error| anyhow::anyhow!("failed to lock CUDA graph runner: {error}"))?
+            .invalidate();
+        self.rocm_graph
+            .lock()
+            .map_err(|error| anyhow::anyhow!("failed to lock ROCm graph runner: {error}"))?
+            .invalidate();
+        self.metal_graph
+            .lock()
+            .map_err(|error| anyhow::anyhow!("failed to lock Metal graph runner: {error}"))?
+            .invalidate();
+        Ok(())
+    }
+
     pub fn metal_graph_enabled(&self) -> Result<bool> {
         Ok(self
             .metal_graph
