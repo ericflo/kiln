@@ -19,7 +19,7 @@ pub enum BlockError {
 /// Each block holds `block_size` tokens worth of KV cache data.
 /// Blocks are identified by integer IDs that index into the pre-allocated
 /// GPU KV cache tensor: `[2, num_layers, num_blocks, block_size, num_kv_heads, head_dim]`
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockManager {
     block_size: usize,
     num_blocks: usize,

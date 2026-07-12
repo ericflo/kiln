@@ -106,6 +106,46 @@ fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
     num_tokens.div_ceil(block_size)
 }
 
+/// Replace the physical KV pool and publish its logical block space as one
+/// transaction. `physical_resize` must leave the physical pool unchanged on
+/// error; this function provides the matching guarantee for `block_manager`.
+fn resize_block_manager_transaction<F>(
+    block_manager: &mut BlockManager,
+    current_physical_blocks: usize,
+    target_blocks: usize,
+    physical_resize: F,
+) -> Result<usize>
+where
+    F: FnOnce(usize) -> Result<()>,
+{
+    anyhow::ensure!(
+        block_manager.num_blocks() == current_physical_blocks,
+        "KV capacity mismatch before resize: block manager has {} blocks, physical pool has {current_physical_blocks}",
+        block_manager.num_blocks()
+    );
+    if target_blocks == current_physical_blocks {
+        return Ok(current_physical_blocks);
+    }
+
+    let mut staged = block_manager.clone();
+    let achieved = if target_blocks < current_physical_blocks {
+        staged.set_target_usable(target_blocks);
+        let achieved = target_blocks.max(staged.physical_floor());
+        staged
+            .physical_truncate(achieved)
+            .map_err(|error| anyhow::anyhow!("kv shrink truncate to {achieved}: {error}"))?;
+        achieved
+    } else {
+        staged.physical_grow(target_blocks);
+        staged.set_target_usable(target_blocks);
+        target_blocks
+    };
+
+    physical_resize(achieved)?;
+    *block_manager = staged;
+    Ok(achieved)
+}
+
 /// Resolve the actor's `max_decode_batch` from the reproducibility envelope,
 /// typed startup configuration, or active backend policy. Deterministic inference stays
 /// single-row even when an operator also configured a wider batch: changing
@@ -1426,35 +1466,21 @@ impl DecodeForward for RealDecodeForward {
         runner.ensure_backend_healthy()?;
         runner.invalidate_decode_graphs_for_kv_pool_change()?;
         let mut block_manager = self.block_manager_guard()?;
-        let mut staged_block_manager = block_manager.clone();
+        let achieved =
+            resize_block_manager_transaction(&mut block_manager, cur, target_blocks, |achieved| {
+                self.paged_cache.physical_resize_to(achieved, device)
+            })?;
         if target_blocks < cur {
-            // Prepare the logical shrink on a private copy. The drained actor
-            // barrier should make the live floor zero, but retaining the floor
-            // calculation keeps this path correct for direct test callers.
-            staged_block_manager.set_target_usable(target_blocks);
-            let achievable = target_blocks.max(staged_block_manager.physical_floor());
-            staged_block_manager
-                .physical_truncate(achievable)
-                .map_err(|e| anyhow::anyhow!("kv shrink truncate to {achievable}: {e}"))?;
-            self.paged_cache.physical_resize_to(achievable, device)?;
-            *block_manager = staged_block_manager;
             tracing::info!(
                 from = cur,
-                to = achievable,
+                to = achieved,
                 target = target_blocks,
                 "KV cache physically shrunk (VRAM returned to pool for reuse)"
             );
-            Ok(achievable)
         } else {
-            // Prepare the logical grow privately, replace the physical pools,
-            // then publish the infallible BlockManager assignment.
-            staged_block_manager.physical_grow(target_blocks);
-            staged_block_manager.set_target_usable(target_blocks);
-            self.paged_cache.physical_resize_to(target_blocks, device)?;
-            *block_manager = staged_block_manager;
-            tracing::info!(from = cur, to = target_blocks, "KV cache physically grown");
-            Ok(target_blocks)
+            tracing::info!(from = cur, to = achieved, "KV cache physically grown");
         }
+        Ok(achieved)
     }
 }
 
@@ -5478,6 +5504,92 @@ mod tests {
         assert_eq!(blocks_needed_for_tokens(1, 16), 1);
         assert_eq!(blocks_needed_for_tokens(16, 16), 1);
         assert_eq!(blocks_needed_for_tokens(17, 16), 2);
+    }
+
+    #[test]
+    fn kv_shrink_failure_leaves_block_manager_unchanged() {
+        let mut block_manager = BlockManager::new(8, 16);
+        let before = block_manager.clone();
+        let mut attempted = None;
+
+        let error = resize_block_manager_transaction(&mut block_manager, 8, 4, |achieved| {
+            attempted = Some(achieved);
+            anyhow::bail!("injected physical shrink failure")
+        })
+        .expect_err("injected shrink must fail");
+
+        assert_eq!(attempted, Some(4));
+        assert!(
+            error
+                .to_string()
+                .contains("injected physical shrink failure")
+        );
+        assert_eq!(block_manager, before);
+    }
+
+    #[test]
+    fn kv_grow_failure_leaves_block_manager_unchanged() {
+        let mut block_manager = BlockManager::new(4, 16);
+        let before = block_manager.clone();
+        let mut attempted = None;
+
+        let error = resize_block_manager_transaction(&mut block_manager, 4, 8, |achieved| {
+            attempted = Some(achieved);
+            anyhow::bail!("injected physical grow failure")
+        })
+        .expect_err("injected grow must fail");
+
+        assert_eq!(attempted, Some(8));
+        assert!(error.to_string().contains("injected physical grow failure"));
+        assert_eq!(block_manager, before);
+    }
+
+    #[test]
+    fn successful_kv_resize_publishes_matching_logical_capacity() {
+        let mut block_manager = BlockManager::new(8, 16);
+        let mut physical_blocks = 8;
+
+        let shrunk = resize_block_manager_transaction(&mut block_manager, 8, 4, |achieved| {
+            physical_blocks = achieved;
+            Ok(())
+        })
+        .expect("shrink transaction");
+        assert_eq!(shrunk, 4);
+        assert_eq!(physical_blocks, 4);
+        assert_eq!(block_manager.num_blocks(), physical_blocks);
+        assert_eq!(block_manager.target_usable(), physical_blocks);
+
+        let grown =
+            resize_block_manager_transaction(&mut block_manager, physical_blocks, 10, |achieved| {
+                physical_blocks = achieved;
+                Ok(())
+            })
+            .expect("grow transaction");
+        assert_eq!(grown, 10);
+        assert_eq!(physical_blocks, 10);
+        assert_eq!(block_manager.num_blocks(), physical_blocks);
+        assert_eq!(block_manager.target_usable(), physical_blocks);
+    }
+
+    #[test]
+    fn kv_resize_rejects_preexisting_capacity_mismatch_before_physical_work() {
+        let mut block_manager = BlockManager::new(8, 16);
+        let before = block_manager.clone();
+        let mut physical_called = false;
+
+        let error = resize_block_manager_transaction(&mut block_manager, 7, 4, |_| {
+            physical_called = true;
+            Ok(())
+        })
+        .expect_err("capacity mismatch must fail");
+
+        assert!(!physical_called);
+        assert!(
+            error
+                .to_string()
+                .contains("KV capacity mismatch before resize")
+        );
+        assert_eq!(block_manager, before);
     }
 
     #[test]

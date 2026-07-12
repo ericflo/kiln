@@ -71,11 +71,15 @@ use kiln_core::block::BlockTable;
 // `write_native` on CPU as well as the CUDA fast paths.
 use kiln_core::block::contiguous_slot_run_start;
 use kiln_core::block::contiguous_slot_run_starts;
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+use kiln_tensor::Layout;
+#[cfg(any(test, feature = "cuda", feature = "rocm"))]
+use kiln_tensor::TensorId;
 #[cfg(feature = "cuda")]
 use kiln_tensor::{
     CudaStorage, cuda_fp8_dequantize_direct, cuda_fp8_quantize_direct, cuda_zeros_ctx,
 };
-use kiln_tensor::{DType as KtDType, Layout, Tensor as KtTensor, TensorId};
+use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 
 static NEXT_KV_POOL_ALLOCATION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -132,9 +136,75 @@ fn fp8_dequantize_direct_dev(t: &KtTensor, target: KtDType) -> Result<KtTensor> 
     }
 }
 
+#[derive(Clone, Copy)]
+enum KvPoolKind {
+    Key,
+    Value,
+}
+
+impl KvPoolKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Key => "k_pool",
+            Self::Value => "v_pool",
+        }
+    }
+}
+
+/// Allocate one zero-filled pool tensor of shape `shape` on `device`, using the
+/// exact per-backend routing shared by construction and resize.
+fn alloc_pool_tensor(
+    device: kiln_tensor::Device,
+    shape: &[usize],
+    n_elements: usize,
+    storage_dtype: KtDType,
+    layer_idx: usize,
+    kind: KvPoolKind,
+) -> Result<KtTensor> {
+    let label = kind.label();
+    let _ = (label, layer_idx);
+    let shape = shape.to_vec();
+    match device {
+        kiln_tensor::Device::Cpu => {
+            let _ = n_elements;
+            Ok(KtTensor::zeros_cpu(shape, storage_dtype))
+        }
+        #[cfg(feature = "cuda")]
+        kiln_tensor::Device::Cuda(i) => {
+            let storage = cuda_zeros_ctx(i, storage_dtype, n_elements)
+                .with_context(|| format!("kt paged-kv: alloc {label} layer {layer_idx}"))?;
+            KtTensor::from_parts(storage, Layout::contiguous(shape), TensorId::next())
+                .with_context(|| format!("kt paged-kv: wrap {label} layer {layer_idx}"))
+        }
+        #[cfg(feature = "rocm")]
+        kiln_tensor::Device::Rocm(i) if crate::forward::rocm_paged_decode_enabled() => {
+            let storage =
+                kiln_tensor::rocm_zeros_ctx(i, storage_dtype, n_elements).map_err(|e| {
+                    anyhow::anyhow!("kt paged-kv: alloc {label} (rocm) layer {layer_idx}: {e}")
+                })?;
+            KtTensor::from_parts(storage, Layout::contiguous(shape), TensorId::next()).map_err(
+                |e| anyhow::anyhow!("kt paged-kv: wrap {label} (rocm) layer {layer_idx}: {e}"),
+            )
+        }
+        #[cfg(feature = "metal")]
+        kiln_tensor::Device::Metal(i) => {
+            KtTensor::zeros_on(kiln_tensor::Device::Metal(i), shape, storage_dtype).map_err(|e| {
+                anyhow::anyhow!("kt paged-kv: alloc {label} (metal) layer {layer_idx}: {e}")
+            })
+        }
+        // Vulkan and any backend whose feature is not compiled in use the same
+        // host-resident pool placement as construction.
+        other => {
+            let _ = other;
+            let _ = n_elements;
+            Ok(KtTensor::zeros_cpu(shape, storage_dtype))
+        }
+    }
+}
+
 /// Allocate one zero-filled `(k_pool, v_pool)` pair of shape `shape`
 /// (`= [total_slots, num_kv_heads, head_dim]`, `n_elements` elements total) on
-/// `device`, using the exact per-backend routing the cache constructor uses.
+/// `device`.
 /// Shared by [`PagedKvCacheKt::new_with_fp8`] and
 /// [`PagedKvCacheKt::physical_resize_to`] so the device matrix lives in ONE
 /// place — a divergence between construct-time and resize-time allocation would
@@ -147,83 +217,24 @@ fn alloc_pool_pair(
     storage_dtype: KtDType,
     layer_idx: usize,
 ) -> Result<(KtTensor, KtTensor)> {
-    let _i = layer_idx;
-    let shape = shape.to_vec();
-    let (k, v) = match device {
-        kiln_tensor::Device::Cpu => {
-            let _ = n_elements;
-            let k = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
-            let v = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
-            (k, v)
-        }
-        #[cfg(feature = "cuda")]
-        kiln_tensor::Device::Cuda(i) => {
-            let k_storage = cuda_zeros_ctx(i, storage_dtype, n_elements)
-                .with_context(|| format!("kt paged-kv: alloc k_pool layer {_i}"))?;
-            let v_storage = cuda_zeros_ctx(i, storage_dtype, n_elements)
-                .with_context(|| format!("kt paged-kv: alloc v_pool layer {_i}"))?;
-            let k = KtTensor::from_parts(
-                k_storage,
-                Layout::contiguous(shape.clone()),
-                TensorId::next(),
-            )
-            .with_context(|| format!("kt paged-kv: wrap k_pool layer {_i}"))?;
-            let v = KtTensor::from_parts(
-                v_storage,
-                Layout::contiguous(shape.clone()),
-                TensorId::next(),
-            )
-            .with_context(|| format!("kt paged-kv: wrap v_pool layer {_i}"))?;
-            (k, v)
-        }
-        // #1082 ROCm: device-resident KV pools (mirror the CUDA arm),
-        // gated by the same backend decode policy as native sq=1 paged-decode
-        // routing in forward.rs. When off, ROCm falls to the `other` => CPU
-        // pool + the correct contiguous-decode path.
-        #[cfg(feature = "rocm")]
-        kiln_tensor::Device::Rocm(i) if crate::forward::rocm_paged_decode_enabled() => {
-            let k_storage = kiln_tensor::rocm_zeros_ctx(i, storage_dtype, n_elements)
-                .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc k_pool (rocm) layer {_i}: {e}"))?;
-            let v_storage = kiln_tensor::rocm_zeros_ctx(i, storage_dtype, n_elements)
-                .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc v_pool (rocm) layer {_i}: {e}"))?;
-            let k = KtTensor::from_parts(
-                k_storage,
-                Layout::contiguous(shape.clone()),
-                TensorId::next(),
-            )
-            .map_err(|e| anyhow::anyhow!("kt paged-kv: wrap k_pool (rocm) layer {_i}: {e}"))?;
-            let v = KtTensor::from_parts(
-                v_storage,
-                Layout::contiguous(shape.clone()),
-                TensorId::next(),
-            )
-            .map_err(|e| anyhow::anyhow!("kt paged-kv: wrap v_pool (rocm) layer {_i}: {e}"))?;
-            (k, v)
-        }
-        #[cfg(feature = "metal")]
-        kiln_tensor::Device::Metal(i) => {
-            let _ = n_elements;
-            let k = KtTensor::zeros_on(kiln_tensor::Device::Metal(i), shape.clone(), storage_dtype)
-                .map_err(|e| {
-                    anyhow::anyhow!("kt paged-kv: alloc k_pool (metal) layer {_i}: {e}")
-                })?;
-            let v = KtTensor::zeros_on(kiln_tensor::Device::Metal(i), shape.clone(), storage_dtype)
-                .map_err(|e| {
-                    anyhow::anyhow!("kt paged-kv: alloc v_pool (metal) layer {_i}: {e}")
-                })?;
-            (k, v)
-        }
-        // Vulkan and any backend whose feature isn't compiled in → host-resident
-        // CPU pools (matches the cache constructor's `other` arm exactly).
-        other => {
-            let _ = other;
-            let _ = n_elements;
-            let k = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
-            let v = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
-            (k, v)
-        }
-    };
-    Ok((k, v))
+    Ok((
+        alloc_pool_tensor(
+            device,
+            shape,
+            n_elements,
+            storage_dtype,
+            layer_idx,
+            KvPoolKind::Key,
+        )?,
+        alloc_pool_tensor(
+            device,
+            shape,
+            n_elements,
+            storage_dtype,
+            layer_idx,
+            KvPoolKind::Value,
+        )?,
+    ))
 }
 
 /// Block until all device work completes, so a subsequent pool drop can't free
@@ -240,6 +251,19 @@ fn sync_device_for_resize(device: kiln_tensor::Device) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("physical_resize_to: rocm sync: {e}")),
         _ => Ok(()),
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum KvResizeFaultPoint {
+    InitialSync,
+    AllocateKey { layer: usize },
+    AllocateValue { layer: usize },
+    ZeroFillSync { layer: usize },
+    CopyKey { layer: usize },
+    CopyValue { layer: usize },
+    LayerStaged { layer: usize },
+    FinalSync,
+    Commit,
 }
 
 /// Paged KV cache backed by `kiln_tensor::Tensor`. Twin of
@@ -510,6 +534,18 @@ impl PagedKvCacheKt {
         new_num_blocks: usize,
         device: kiln_tensor::Device,
     ) -> Result<()> {
+        self.physical_resize_to_with_fault(new_num_blocks, device, |_| Ok(()))
+    }
+
+    fn physical_resize_to_with_fault<F>(
+        &self,
+        new_num_blocks: usize,
+        device: kiln_tensor::Device,
+        mut checkpoint: F,
+    ) -> Result<()>
+    where
+        F: FnMut(KvResizeFaultPoint) -> Result<()>,
+    {
         // The write lock covers the complete transaction and serializes an
         // accidental second resizer even if an outer caller violates the actor
         // barrier contract.
@@ -525,6 +561,7 @@ impl PagedKvCacheKt {
         // C2: flush any in-flight kernel before we drop the old pools. The caller
         // guarantees no NEW launches during the resize (actor barrier); this
         // covers a kernel already submitted on another stream (graph replay).
+        checkpoint(KvResizeFaultPoint::InitialSync)?;
         sync_device_for_resize(device)?;
 
         let storage_dtype = if self.fp8 {
@@ -536,54 +573,68 @@ impl PagedKvCacheKt {
         let old_total_slots = cur * self.block_size;
         let copy_slots = new_total_slots.min(old_total_slots);
 
-        // Allocate the new pool for layer `i` and copy its surviving prefix from
-        // the current (old) pool at `pools[i]`. Pure: does not mutate `pools`.
-        let make_resized =
-            |pools: &Vec<(KtTensor, KtTensor)>, layer_idx: usize| -> Result<(KtTensor, KtTensor)> {
-                let dims = pools[layer_idx].0.dims().to_vec();
-                anyhow::ensure!(
-                    dims.len() == 3,
-                    "physical_resize_to: layer {layer_idx} pool has rank {} (want 3)",
-                    dims.len()
-                );
-                let shape = vec![new_total_slots, dims[1], dims[2]];
-                let n_elements = new_total_slots * dims[1] * dims[2];
-                let (new_k, new_v) =
-                    alloc_pool_pair(device, &shape, n_elements, storage_dtype, layer_idx)?;
-                // The new pool's async zero-fill must COMPLETE before we copy the
-                // surviving prefix over it — otherwise a large (grow) zero-fill
-                // can land AFTER the copy and wipe it. Same-stream ordering is not
-                // sufficient in practice here, so synchronize explicitly. Resize
-                // is rare, so this is cheap relative to the multi-layer realloc.
-                if copy_slots > 0 {
-                    sync_device_for_resize(device)?;
-                    let (old_k, old_v) = &pools[layer_idx];
-                    let src_k = old_k.narrow(0, 0, copy_slots).map_err(|e| {
-                        anyhow::anyhow!("physical_resize_to: narrow k l{layer_idx}: {e}")
-                    })?;
-                    let src_v = old_v.narrow(0, 0, copy_slots).map_err(|e| {
-                        anyhow::anyhow!("physical_resize_to: narrow v l{layer_idx}: {e}")
-                    })?;
-                    new_k.slice_set(&src_k, 0, 0).map_err(|e| {
-                        anyhow::anyhow!("physical_resize_to: copy k l{layer_idx}: {e}")
-                    })?;
-                    new_v.slice_set(&src_v, 0, 0).map_err(|e| {
-                        anyhow::anyhow!("physical_resize_to: copy v l{layer_idx}: {e}")
-                    })?;
-                }
-                Ok((new_k, new_v))
-            };
-
         let mut staged: Vec<(KtTensor, KtTensor)> = Vec::with_capacity(layers.len());
         for layer_idx in 0..layers.len() {
-            staged.push(make_resized(&layers, layer_idx)?);
+            let dims = layers[layer_idx].0.dims().to_vec();
+            anyhow::ensure!(
+                dims.len() == 3,
+                "physical_resize_to: layer {layer_idx} pool has rank {} (want 3)",
+                dims.len()
+            );
+            let shape = vec![new_total_slots, dims[1], dims[2]];
+            let n_elements = new_total_slots * dims[1] * dims[2];
+
+            checkpoint(KvResizeFaultPoint::AllocateKey { layer: layer_idx })?;
+            let new_k = alloc_pool_tensor(
+                device,
+                &shape,
+                n_elements,
+                storage_dtype,
+                layer_idx,
+                KvPoolKind::Key,
+            )?;
+            checkpoint(KvResizeFaultPoint::AllocateValue { layer: layer_idx })?;
+            let new_v = alloc_pool_tensor(
+                device,
+                &shape,
+                n_elements,
+                storage_dtype,
+                layer_idx,
+                KvPoolKind::Value,
+            )?;
+
+            // Complete async zero-fill before copying the surviving prefix;
+            // otherwise a late fill can erase copied KV.
+            if copy_slots > 0 {
+                checkpoint(KvResizeFaultPoint::ZeroFillSync { layer: layer_idx })?;
+                sync_device_for_resize(device)?;
+                let (old_k, old_v) = &layers[layer_idx];
+                let src_k = old_k.narrow(0, 0, copy_slots).map_err(|e| {
+                    anyhow::anyhow!("physical_resize_to: narrow k l{layer_idx}: {e}")
+                })?;
+                let src_v = old_v.narrow(0, 0, copy_slots).map_err(|e| {
+                    anyhow::anyhow!("physical_resize_to: narrow v l{layer_idx}: {e}")
+                })?;
+                checkpoint(KvResizeFaultPoint::CopyKey { layer: layer_idx })?;
+                new_k
+                    .slice_set(&src_k, 0, 0)
+                    .map_err(|e| anyhow::anyhow!("physical_resize_to: copy k l{layer_idx}: {e}"))?;
+                checkpoint(KvResizeFaultPoint::CopyValue { layer: layer_idx })?;
+                new_v
+                    .slice_set(&src_v, 0, 0)
+                    .map_err(|e| anyhow::anyhow!("physical_resize_to: copy v l{layer_idx}: {e}"))?;
+            }
+            staged.push((new_k, new_v));
+            checkpoint(KvResizeFaultPoint::LayerStaged { layer: layer_idx })?;
         }
 
         // Copies may be asynchronous. Complete them while every old pool is
         // still owned so a failed synchronization cannot publish or free a
         // partially initialized generation.
+        checkpoint(KvResizeFaultPoint::FinalSync)?;
         sync_device_for_resize(device)?;
 
+        checkpoint(KvResizeFaultPoint::Commit)?;
         *layers = staged;
         self.num_blocks.store(new_num_blocks, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
@@ -1928,6 +1979,119 @@ mod tests {
         cache
             .ensure_pool_identity(grown_identity)
             .expect("current pool identity");
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct CacheSnapshot {
+        identity: KvPoolIdentity,
+        layers: Vec<(TensorId, TensorId, Vec<usize>, Vec<f32>, Vec<f32>)>,
+    }
+
+    fn fault_test_cache() -> PagedKvCacheKt {
+        let cache = PagedKvCacheKt::new(3, 4, 2, 1, 2, KtDType::F32, kiln_tensor::Device::Cpu)
+            .expect("fault-test cache");
+        for layer in 0..cache.num_layers() {
+            let (k, v) = cache.pool_tensors(layer).expect("layer pools");
+            let values: Vec<f32> = (0..16).map(|index| (layer * 100 + index) as f32).collect();
+            let shifted_values: Vec<f32> = values.iter().map(|value| value + 1000.0).collect();
+            let source = KtTensor::from_vec(values, vec![8, 1, 2]).expect("source tensor");
+            k.slice_set(&source, 0, 0).expect("seed key pool");
+            let shifted =
+                KtTensor::from_vec(shifted_values, vec![8, 1, 2]).expect("value source tensor");
+            v.slice_set(&shifted, 0, 0).expect("seed value pool");
+        }
+        cache
+    }
+
+    fn snapshot_cache(cache: &PagedKvCacheKt) -> CacheSnapshot {
+        CacheSnapshot {
+            identity: cache.pool_identity(),
+            layers: (0..cache.num_layers())
+                .map(|layer| {
+                    let (k, v) = cache.pool_tensors(layer).expect("layer pools");
+                    (
+                        k.id(),
+                        v.id(),
+                        k.dims().to_vec(),
+                        k.to_vec::<f32>().expect("key values"),
+                        v.to_vec::<f32>().expect("value values"),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn assert_every_resize_fault_is_atomic(target_blocks: usize) {
+        let discovery = fault_test_cache();
+        let mut points = Vec::new();
+        discovery
+            .physical_resize_to_with_fault(target_blocks, kiln_tensor::Device::Cpu, |point| {
+                points.push(point);
+                Ok(())
+            })
+            .expect("discover resize checkpoints");
+        let unique: std::collections::HashSet<_> = points.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            points.len(),
+            "every checkpoint must identify one exact boundary: {points:?}"
+        );
+        assert_eq!(points.len(), 3 + 6 * 3, "unexpected checkpoint coverage");
+
+        for fault in points {
+            let cache = fault_test_cache();
+            let before = snapshot_cache(&cache);
+            let mut fired = false;
+            let error = cache
+                .physical_resize_to_with_fault(target_blocks, kiln_tensor::Device::Cpu, |point| {
+                    if point == fault {
+                        fired = true;
+                        anyhow::bail!("injected resize failure at {point:?}");
+                    }
+                    Ok(())
+                })
+                .expect_err("injected checkpoint must fail");
+            assert!(fired, "checkpoint was not reached: {fault:?}");
+            assert!(error.to_string().contains("injected resize failure"));
+            assert_eq!(
+                snapshot_cache(&cache),
+                before,
+                "resize mutated cache after failure at {fault:?}"
+            );
+            cache
+                .ensure_pool_identity(before.identity)
+                .expect("old pool remains authoritative");
+
+            cache
+                .physical_resize_to(target_blocks, kiln_tensor::Device::Cpu)
+                .unwrap_or_else(|error| panic!("retry after {fault:?} failed: {error:#}"));
+            let committed = cache.pool_identity();
+            assert_eq!(committed.allocation_id, before.identity.allocation_id);
+            assert_eq!(committed.generation, before.identity.generation + 1);
+            assert_eq!(committed.num_blocks, target_blocks);
+        }
+    }
+
+    #[test]
+    fn shrink_is_failure_atomic_at_every_transaction_boundary() {
+        assert_every_resize_fault_is_atomic(2);
+    }
+
+    #[test]
+    fn grow_is_failure_atomic_at_every_transaction_boundary() {
+        assert_every_resize_fault_is_atomic(6);
+    }
+
+    #[test]
+    fn no_op_resize_reaches_no_transaction_boundary() {
+        let cache = fault_test_cache();
+        let before = snapshot_cache(&cache);
+        cache
+            .physical_resize_to_with_fault(4, kiln_tensor::Device::Cpu, |point| {
+                panic!("no-op resize reached {point:?}")
+            })
+            .expect("no-op resize");
+        assert_eq!(snapshot_cache(&cache), before);
     }
 
     #[test]
