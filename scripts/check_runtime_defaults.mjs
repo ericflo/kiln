@@ -57,9 +57,28 @@ requireText(serverConfig, 'host: DEFAULT_SERVER_HOST.into()', 'server config def
 requireText(serverConfig, 'port: DEFAULT_SERVER_PORT', 'server config default');
 
 const serverCli = read(files.serverCli);
-const cliDefaultCount = (serverCli.match(/default_value_t = default_server_url\(\)/g) || []).length;
-if (cliDefaultCount !== 16) {
-  throw new Error(`server CLI has ${cliDefaultCount} centralized URL defaults; expected 16`);
+const serverCliLines = serverCli.split('\n');
+const cliUrlFields = [];
+for (let index = 0; index < serverCliLines.length; index += 1) {
+  if (!/^\s*url:\s+String,\s*$/.test(serverCliLines[index])) {
+    continue;
+  }
+  cliUrlFields.push(index + 1);
+  const precedingAttributes = [];
+  for (let attrIndex = index - 1; attrIndex >= 0; attrIndex -= 1) {
+    const line = serverCliLines[attrIndex].trim();
+    if (!line || line.startsWith('///') || line.startsWith('#[')) {
+      precedingAttributes.unshift(line);
+      continue;
+    }
+    break;
+  }
+  if (!precedingAttributes.join('\n').includes('default_value_t = default_server_url()')) {
+    throw new Error(`server CLI url field at line ${index + 1} does not use default_server_url()`);
+  }
+}
+if (cliUrlFields.length === 0) {
+  throw new Error('server CLI exposes no centralized URL fields');
 }
 rejectText(serverCli, 'default_value = "http://localhost:', 'server CLI');
 
@@ -112,4 +131,6 @@ const phase2Validation = read(files.phase2Validation);
 requireText(phase2Validation, `KILN_URL:-http://${clientHost}:${port}`, 'phase 2 validation default URL');
 rejectText(phase2Validation, 'http://localhost:8080', 'phase 2 validation script');
 
-console.log(`runtime defaults v${contract.contract_version} passed (${bindHost}:${port})`);
+console.log(
+  `runtime defaults v${contract.contract_version} passed (${bindHost}:${port}; ${cliUrlFields.length} server CLI URL fields)`,
+);
