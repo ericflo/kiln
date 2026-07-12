@@ -1037,16 +1037,19 @@ fn rocm_graph_warm_pass_prewarms_capture_stream() {
     );
 
     assert!(
-        capture.contains("ROCm graph capture: sync kt default stream before warm pass"),
-        "ROCm graph capture must make default-stream input fills visible before warming the capture stream"
+        capture.contains("attributed_rocm_graph_synchronize(")
+            && capture.contains("\"default_inputs_before_warmup\"")
+            && capture.contains("kiln_tensor::rocm_synchronize_default_stream(device_idx)"),
+        "ROCm graph capture must attribute and drain default-stream input fills before warming the capture stream"
     );
     assert!(
         warm_pass.contains("kiln_tensor::with_active_rocm_stream(stream.clone(), ||"),
         "ROCm graph warm pass must run on the same stream that will be captured, so hipBLASLt per-stream workspace is preallocated before begin_capture"
     );
     assert!(
-        capture.contains("sync capture stream after ROCm graph warm pass"),
-        "ROCm graph capture must wait for the warm pass before restoring state or falling back"
+        capture.contains("\"capture_stream_warmup_completion\"")
+            && capture.contains("stream\n                    .synchronize()"),
+        "ROCm graph capture must attribute and wait for the warm pass before restoring state or falling back"
     );
 
     let warm_stream = capture
