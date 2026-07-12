@@ -331,6 +331,28 @@ async fn main() -> Result<()> {
                     )
                     .await;
                 }
+                HfTrainCommands::ExportGrpo {
+                    file,
+                    name,
+                    output,
+                    input_adapter,
+                    split_manifest,
+                    keep_server_copy,
+                    url,
+                } => {
+                    return kiln_server::hf_train_cli::run_export_grpo(
+                        kiln_server::hf_train_cli::ExportGrpoOptions {
+                            url: url.clone(),
+                            file: file.clone(),
+                            name: name.clone(),
+                            output: output.clone(),
+                            input_adapter: input_adapter.clone(),
+                            split_manifest: split_manifest.clone(),
+                            keep_server_copy: *keep_server_copy,
+                        },
+                    )
+                    .await;
+                }
                 HfTrainCommands::ImportPeft { bundle, name, url } => {
                     return kiln_server::hf_train_cli::run_import_peft(
                         kiln_server::hf_train_cli::ImportPeftOptions {

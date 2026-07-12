@@ -1303,6 +1303,25 @@ pub(crate) mod tests {
             .unwrap_err();
         assert!(collision.to_string().contains("refusing to overwrite"));
 
+        let cli_grpo_dataset = cli_output_dir.path().join("recorded.jsonl");
+        let mut cli_grpo_bytes = serde_json::to_vec(&grpo_groups(&fixture)[0]).unwrap();
+        cli_grpo_bytes.push(b'\n');
+        fs::write(&cli_grpo_dataset, cli_grpo_bytes).unwrap();
+        let cli_grpo_output = cli_output_dir.path().join("cli_grpo.tar.gz");
+        crate::hf_train_cli::run_export_grpo(crate::hf_train_cli::ExportGrpoOptions {
+            url: format!("http://{address}"),
+            file: cli_grpo_dataset.to_string_lossy().into_owned(),
+            name: "cli_grpo".to_string(),
+            output: Some(cli_grpo_output.clone()),
+            input_adapter: None,
+            split_manifest: None,
+            keep_server_copy: false,
+        })
+        .await
+        .unwrap();
+        assert!(cli_grpo_output.is_file());
+        assert!(!bundle_path(&fixture.state.adapter_dir, "cli_grpo").exists());
+
         let created = app
             .clone()
             .oneshot(json_request(

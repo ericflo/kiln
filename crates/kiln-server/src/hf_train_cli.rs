@@ -55,6 +55,17 @@ pub struct ExportSftOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct ExportGrpoOptions {
+    pub url: String,
+    pub file: String,
+    pub name: String,
+    pub output: Option<PathBuf>,
+    pub input_adapter: Option<String>,
+    pub split_manifest: Option<PathBuf>,
+    pub keep_server_copy: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct ImportPeftOptions {
     pub url: String,
     pub bundle: PathBuf,
@@ -921,6 +932,7 @@ async fn download_and_publish(
     })
     .await
     .context("archive verification worker panicked")??;
+    validate_downloaded_manifest(summary, &manifest)?;
 
     let digest = archive_hasher.finalize();
     let archive_sha256 = format!("sha256:{}", hex_digest(digest.as_slice()));
@@ -989,15 +1001,155 @@ fn shell_quote_text(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn default_export_output(name: &str) -> PathBuf {
+    PathBuf::from(format!("{name}{HF_TRL_BUNDLE_SUFFIX}.tar.gz"))
+}
+
+fn add_common_export_fields(
+    request: &mut serde_json::Map<String, serde_json::Value>,
+    input_adapter: Option<&str>,
+    split_manifest: Option<serde_json::Value>,
+) -> Result<()> {
+    if let Some(input_adapter) = input_adapter {
+        ensure!(
+            !input_adapter.is_empty() && input_adapter.trim() == input_adapter,
+            "input adapter must be non-blank and contain no leading or trailing whitespace"
+        );
+        request.insert("input_adapter".to_string(), input_adapter.into());
+    }
+    if let Some(split_manifest) = split_manifest {
+        request.insert("split_manifest".to_string(), split_manifest);
+    }
+    Ok(())
+}
+
+fn validate_created_export(
+    summary: &ExportSummary,
+    headers: &reqwest::header::HeaderMap,
+    name: &str,
+    task: HfTrlTask,
+) -> Result<()> {
+    validate_export_sha256(&summary.export_sha256)?;
+    validate_export_etag(headers, &summary.export_sha256)?;
+    ensure!(
+        summary.name == name
+            && summary.task == task
+            && summary.bundle_filename == format!("{name}{HF_TRL_BUNDLE_SUFFIX}")
+            && summary.download_url == format!("/v1/train/hf/exports/{name}/download"),
+        "server returned an inconsistent HF/TRL export summary"
+    );
+    Ok(())
+}
+
+fn validate_downloaded_manifest(
+    summary: &ExportSummary,
+    manifest: &HfTrlExportManifestV1,
+) -> Result<()> {
+    ensure!(
+        manifest.task == summary.task
+            && manifest.data.source_name == summary.source_name
+            && manifest.data.row_count == summary.row_count
+            && manifest.data.ordered_corpus_sha256 == summary.ordered_corpus_sha256
+            && manifest
+                .input_adapter
+                .as_ref()
+                .map(|adapter| adapter.name.as_str())
+                == summary.input_adapter.as_deref(),
+        "downloaded HF/TRL manifest contradicts its creation summary"
+    );
+    Ok(())
+}
+
+async fn download_verify_and_finish_export(
+    client: &reqwest::Client,
+    base_url: &str,
+    name: &str,
+    output: &Path,
+    keep_server_copy: bool,
+    summary: ExportSummary,
+) -> Result<()> {
+    println!(
+        "{} Streaming and verifying {} row(s) into {}",
+        style("→").cyan().bold(),
+        summary.row_count,
+        output.display()
+    );
+    let downloaded = download_and_publish(client, base_url, &summary, output)
+        .await
+        .with_context(|| {
+            format!(
+                "server export '{name}' remains available; retry the download or remove only identity {} with: kiln train hf delete --name {name} --export-sha256 {} --url {}",
+                summary.export_sha256,
+                summary.export_sha256,
+                shell_quote_text(base_url),
+            )
+        })?;
+    let server_copy_removed = if keep_server_copy {
+        false
+    } else {
+        match delete_export(client, base_url, name, Some(&summary.export_sha256), true).await {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!(
+                    "{} verified local archive is safe, but server cleanup failed: {error:#}",
+                    style("warning:").yellow().bold()
+                );
+                eprintln!(
+                    "  retry safely with: kiln train hf delete --name {name} --export-sha256 {} --url {}",
+                    summary.export_sha256,
+                    shell_quote_text(base_url)
+                );
+                false
+            }
+        }
+    };
+
+    println!(
+        "{} Published verified HF/TRL export {}",
+        style("✓").green().bold(),
+        output.display()
+    );
+    println!("export_sha256: {}", downloaded.manifest.export_sha256);
+    println!("archive_sha256: {}", downloaded.archive_sha256);
+    println!("archive_bytes: {}", downloaded.archive_bytes);
+    println!("rows: {}", downloaded.manifest.data.row_count);
+    println!(
+        "server_copy: {}",
+        if keep_server_copy {
+            "retained"
+        } else if server_copy_removed {
+            "removed"
+        } else {
+            "cleanup required"
+        }
+    );
+
+    let parent = destination_parent(output);
+    let bundle = parent.join(format!("{name}{HF_TRL_BUNDLE_SUFFIX}"));
+    println!("next:");
+    println!(
+        "  tar -xzf {} -C {}",
+        shell_quote(output),
+        shell_quote(parent)
+    );
+    println!(
+        "  python {} {} --base-model /absolute/path/to/hf-model",
+        shell_quote(&bundle.join("train.py")),
+        shell_quote(&bundle)
+    );
+    Ok(())
+}
+
 pub async fn run_export_sft(options: ExportSftOptions) -> Result<()> {
     validate_export_name(&options.name)?;
     ensure!(
         matches!(options.invalid_row_policy.as_str(), "fail" | "skip"),
         "invalid row policy must be fail or skip"
     );
-    let output = options.output.clone().unwrap_or_else(|| {
-        PathBuf::from(format!("{}{}.tar.gz", options.name, HF_TRL_BUNDLE_SUFFIX))
-    });
+    let output = options
+        .output
+        .clone()
+        .unwrap_or_else(|| default_export_output(&options.name));
     ensure_available_destination(&output)?;
 
     let file = options
@@ -1032,13 +1184,11 @@ pub async fn run_export_sft(options: ExportSftOptions) -> Result<()> {
     if let Some(dataset) = dataset {
         request.insert("dataset".to_string(), dataset.into());
     }
-    if let Some(input_adapter) = options.input_adapter.as_deref() {
-        ensure!(!input_adapter.is_empty(), "input adapter must not be blank");
-        request.insert("input_adapter".to_string(), input_adapter.into());
-    }
-    if let Some(split_manifest) = split_manifest {
-        request.insert("split_manifest".to_string(), split_manifest);
-    }
+    add_common_export_fields(
+        &mut request,
+        options.input_adapter.as_deref(),
+        split_manifest,
+    )?;
 
     let client = build_client()?;
     println!(
@@ -1054,98 +1204,66 @@ pub async fn run_export_sft(options: ExportSftOptions) -> Result<()> {
         .context("creating server HF/TRL SFT export")?;
     let response_headers = response.headers().clone();
     let summary: ExportSummary = decode_json_response(response).await?;
-    validate_export_sha256(&summary.export_sha256)?;
-    validate_export_etag(&response_headers, &summary.export_sha256)?;
-    ensure!(
-        summary.name == options.name
-            && summary.task == HfTrlTask::Sft
-            && summary.bundle_filename == format!("{}{}", options.name, HF_TRL_BUNDLE_SUFFIX)
-            && summary.download_url == format!("/v1/train/hf/exports/{}/download", options.name),
-        "server returned an inconsistent HF/TRL export summary"
-    );
+    validate_created_export(&summary, &response_headers, &options.name, HfTrlTask::Sft)?;
+    download_verify_and_finish_export(
+        &client,
+        &options.url,
+        &options.name,
+        &output,
+        options.keep_server_copy,
+        summary,
+    )
+    .await
+}
 
+pub async fn run_export_grpo(options: ExportGrpoOptions) -> Result<()> {
+    validate_export_name(&options.name)?;
+    let file = options.file.trim();
+    ensure!(!file.is_empty(), "a non-blank --file is required");
+    let output = options
+        .output
+        .clone()
+        .unwrap_or_else(|| default_export_output(&options.name));
+    ensure_available_destination(&output)?;
+    let split_manifest = options
+        .split_manifest
+        .as_deref()
+        .map(read_split_manifest)
+        .transpose()?;
+
+    let mut request = serde_json::Map::new();
+    request.insert("name".to_string(), options.name.clone().into());
+    request.insert("dataset_path".to_string(), file.into());
+    add_common_export_fields(
+        &mut request,
+        options.input_adapter.as_deref(),
+        split_manifest,
+    )?;
+
+    let client = build_client()?;
     println!(
-        "{} Streaming and verifying {} row(s) into {}",
+        "{} Creating immutable HF/TRL GRPO export '{}'",
         style("→").cyan().bold(),
-        summary.row_count,
-        output.display()
+        style(&options.name).white().bold()
     );
-    let downloaded = download_and_publish(&client, &options.url, &summary, &output)
+    let response = client
+        .post(endpoint(&options.url, "/v1/train/hf/grpo/exports")?)
+        .json(&serde_json::Value::Object(request))
+        .send()
         .await
-        .with_context(|| {
-            format!(
-                "server export '{}' remains available; retry the download or remove only identity {} with: kiln train hf delete --name {} --export-sha256 {} --url {}",
-                options.name,
-                summary.export_sha256,
-                options.name,
-                summary.export_sha256,
-                shell_quote_text(&options.url),
-            )
-        })?;
-
-    let server_copy_removed = if options.keep_server_copy {
-        false
-    } else {
-        match delete_export(
-            &client,
-            &options.url,
-            &options.name,
-            Some(&summary.export_sha256),
-            true,
-        )
-        .await
-        {
-            Ok(()) => true,
-            Err(error) => {
-                eprintln!(
-                    "{} verified local archive is safe, but server cleanup failed: {error:#}",
-                    style("warning:").yellow().bold()
-                );
-                eprintln!(
-                    "  retry safely with: kiln train hf delete --name {} --export-sha256 {} --url {}",
-                    options.name,
-                    summary.export_sha256,
-                    shell_quote_text(&options.url)
-                );
-                false
-            }
-        }
-    };
-
-    println!(
-        "{} Published verified HF/TRL export {}",
-        style("✓").green().bold(),
-        output.display()
-    );
-    println!("export_sha256: {}", downloaded.manifest.export_sha256);
-    println!("archive_sha256: {}", downloaded.archive_sha256);
-    println!("archive_bytes: {}", downloaded.archive_bytes);
-    println!("rows: {}", downloaded.manifest.data.row_count);
-    println!(
-        "server_copy: {}",
-        if options.keep_server_copy {
-            "retained"
-        } else if server_copy_removed {
-            "removed"
-        } else {
-            "cleanup required"
-        }
-    );
-
-    let parent = destination_parent(&output);
-    let bundle = parent.join(format!("{}{}", options.name, HF_TRL_BUNDLE_SUFFIX));
-    println!("next:");
-    println!(
-        "  tar -xzf {} -C {}",
-        shell_quote(&output),
-        shell_quote(parent)
-    );
-    println!(
-        "  python {} {} --base-model /absolute/path/to/hf-model",
-        shell_quote(&bundle.join("train.py")),
-        shell_quote(&bundle)
-    );
-    Ok(())
+        .context("creating server HF/TRL GRPO export")?;
+    let response_headers = response.headers().clone();
+    let summary: ExportSummary = decode_json_response(response).await?;
+    validate_created_export(&summary, &response_headers, &options.name, HfTrlTask::Grpo)?;
+    download_verify_and_finish_export(
+        &client,
+        &options.url,
+        &options.name,
+        &output,
+        options.keep_server_copy,
+        summary,
+    )
+    .await
 }
 
 pub async fn run_import_peft(options: ImportPeftOptions) -> Result<()> {

@@ -264,6 +264,7 @@ kiln health --json</code></pre>
 <pre class="text-xs"><code>kiln train sft --file corrections.jsonl --adapter support-bot
 kiln train grpo --file grpo-batch.json --adapter support-bot
 kiln train hf export-sft --file /data/corrections.jsonl --name support-hf-01
+kiln train hf export-grpo --file /data/recorded.jsonl --name support-grpo-01
 kiln train hf import-peft --bundle ./support-hf-01.kiln-hf --name support-v2
 kiln train status</code></pre>
           </div>
@@ -414,7 +415,7 @@ kiln train grpo \
           <p class="text-sm mt-4" style="color: var(--fg-mute);">Use <code>/v1/completions/batch</code> or another generator to create prompts and candidate completions first, score them, then submit the scored <code>groups</code>. A <code>.jsonl</code> file selects the memory-bounded streamed route; JSON containing <code>groups</code> selects inline training. Exact resume requires the identical file, route, adapter, and options. See the <a href="grpo.html" class="link">GRPO Guide</a>.</p>
         </div>
         <div class="card p-5 lg:col-span-2">
-          <h3 class="font-semibold mb-2">Verified HF/TRL SFT handoff</h3>
+          <h3 class="font-semibold mb-2">Verified HF/TRL SFT and GRPO handoff</h3>
 <pre class="text-sm"><code>kiln train hf export-sft \
   --file /data/corrections.jsonl \
   --name support-hf-01
@@ -430,6 +431,12 @@ kiln train hf export-sft \
   --dataset corrections:active \
   --name corrections-hf-01
 
+# Recorded GRPO: canonical final-LF JSONL with exact rollout provenance
+kiln train hf export-grpo \
+  --file /data/recorded-rollouts.jsonl \
+  --name support-grpo-01 \
+  --output ./handoffs/support-grpo-01.tar.gz
+
 # After extracting and running the embedded trainer
 kiln train hf import-peft \
   --bundle ./support-hf-01.kiln-hf \
@@ -440,7 +447,7 @@ kiln train hf list --json
 kiln train hf delete \
   --name retained-export \
   --export-sha256 sha256:&lt;64-hex-from-list&gt;</code></pre>
-          <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>--file</code> is read by the server process; it is not uploaded from the CLI host. Exactly one of <code>--file</code> or <code>--dataset</code> is required. Add <code>--input-adapter NAME</code>, <code>--split-manifest FILE</code>, <code>--invalid-row-policy skip</code>, or <code>--keep-server-copy</code> when needed. Export refuses redirects and existing outputs, requires response <code>ETag</code> identity agreement, bounds idle reads and compressed/expanded bytes, streams into a sibling temporary file, rejects links, special entries, duplicate paths, trailing gzip data, and any root other than <code>{name}.kiln-hf</code>, verifies every manifest-bound byte, then publishes atomically. Automatic cleanup and safe manual retry use identity-conditional <code>If-Match</code> through <code>--export-sha256</code>, so a concurrently reused server name is never deleted; omit that flag only for deliberate operator cleanup of the current name or a damaged bundle. Import takes the completed extracted <code>.kiln-hf</code> directory, fails local verification before connecting, streams a deterministic ten-file envelope through bounded memory, and requires HTTP 201 plus exact locally predicted receipt, <code>ETag</code>, PEFT revision, installed size, and file count. It never changes or removes the source bundle; an existing target is rejected without replacement.</p>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>--file</code> is read by the server process; it is not uploaded from the CLI host. SFT requires exactly one <code>--file</code> or <code>--dataset</code>; GRPO requires canonical compact, final-LF <code>--file</code> input whose uniform-width groups carry exact recorded provenance. Add <code>--input-adapter NAME</code>, <code>--split-manifest FILE</code>, or <code>--keep-server-copy</code> to either route; <code>--invalid-row-policy skip</code> is SFT-only. Both exports refuse redirects and existing outputs, require response <code>ETag</code> identity agreement, bound idle reads and compressed/expanded bytes, stream into a sibling temporary file, reject links, special entries, duplicate paths, trailing gzip data, and any root other than <code>{name}.kiln-hf</code>, verify every manifest-bound byte, then publish atomically. Automatic cleanup and safe manual retry use identity-conditional <code>If-Match</code> through <code>--export-sha256</code>, so a concurrently reused server name is never deleted; omit that flag only for deliberate operator cleanup of the current name or a damaged bundle. Import takes the completed extracted <code>.kiln-hf</code> directory, fails local verification before connecting, streams a deterministic ten-file envelope through bounded memory, and requires HTTP 201 plus exact locally predicted receipt, <code>ETag</code>, PEFT revision, installed size, and file count. It never changes or removes the source bundle; an existing target is rejected without replacement.</p>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">OPD teacher distillation</h3>

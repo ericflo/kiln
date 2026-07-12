@@ -490,7 +490,7 @@ desktop configuration with identical effective semantics and provenance.
 - [ ] Add microbatch/gradient-accumulation semantics, scheduler/warmup, gradient
   clipping, and a documented precision/optimizer-state contract if the native
   trainer continues to expose general SFT configuration.
-- [ ] Otherwise, deliberately narrow the native API to a microtrainer profile
+- [x] Otherwise, deliberately narrow the native API to a microtrainer profile
   and route general SFT to HF/TRL. Remove broader claims in the same commit.
   - Progress: native SFT now exposes only the versioned
     `native_online_lora_v1` profile. Its one-conversation/one-update shape,
@@ -499,22 +499,22 @@ desktop configuration with identical effective semantics and provenance.
     exact-resume contract are explicit and fail closed on unknown or invalid
     request fields. The CLI, browser UI, API examples, architecture guide, and
     permanent profile reference use the same name and scope.
-  - Remaining: ship the first-class HF/TRL dataset/provenance export and
-    validated PEFT import route before checking this item. Documentation
-    currently says plainly that the handoff is not shipped rather than
-    presenting a raw external command as an integrated route.
+  - Completed: the first-class SFT and recorded-GRPO export/API/CLI routes,
+    task-aware pinned runner, and resident-validated PEFT import/API/CLI route
+    now provide the broader-training handoff. The external production-model
+    numerical round trip remains a separate Phase 3.5 gate.
 - [ ] Compare low-gradient and ordinary N-step AdamW updates with PyTorch,
   including the chosen master-parameter and moment precision.
 
 ### 3.5 First-class HF/TRL route
 
-- [ ] Export Kiln datasets, chat-template configuration, adapters, rollout
+- [x] Export Kiln datasets, chat-template configuration, adapters, rollout
   provenance, and eval split manifests into documented HF/TRL-compatible forms.
 - [x] Import resulting PEFT adapters with full base/tokenizer/template hash
   validation.
 - [ ] Provide pinned reference scripts for SFT and GRPO that reproduce the
   oracle fixtures.
-- [ ] Document native Kiln training as bounded single-GPU online LoRA and
+- [x] Document native Kiln training as bounded single-GPU online LoRA and
   HF/TRL as the path for distributed, broad-method, and highly configurable
   training.
 - [ ] Add round-trip tests: Kiln export -> pinned HF/TRL step -> Kiln import ->
@@ -640,9 +640,15 @@ desktop configuration with identical effective semantics and provenance.
     rejects missing provenance and heterogeneous group widths as request errors
     before publication; the Rust verifier now enforces the same uniform-width
     contract as the pinned runner.
-  - Remaining: build the first-party GRPO CLI transport, then run the actual
-    external SFT and GRPO training/inference round trips before checking the
-    pinned oracle-script and broader Phase 3.5 items.
+  - Progress: `kiln train hf export-grpo` now applies the same redirect-free,
+    bounded, ETag-bound create/download, strict single-root archive
+    verification, no-clobber local publication, and identity-conditional
+    cleanup implementation as `export-sft`. It accepts one server-local
+    canonical JSONL path plus optional split and matching behavior adapter. A
+    real TCP loopback covers GRPO creation, streamed download, local manifest
+    verification, publication, server cleanup, and source retention.
+  - Remaining: run the actual external SFT and GRPO training/inference round
+    trips before checking the pinned oracle-script and broader Phase 3.5 items.
 
 **Acceptance:** The oracle ladder covers tokenization/masks, scalar losses,
 tiny-model logits/log-probs, one-step gradients/updates, 10-step trajectories,
@@ -1126,6 +1132,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-10 | Atomic immutable HF/TRL GRPO bundle writer | `sha256:179fe2168739` | this commit | portable; Strix Halo ROCm/Vulkan compile gates | 480 train library tests with one existing documented ignore; 903 server library tests; 12 focused shared bundle tests including four new GRPO publication/bounds cases; default/ROCm gfx1151/Vulkan server all-target checks; contract/release/local-link guards; formatting and diff hygiene | passed | The synchronous library writer snapshots provenance-complete in-memory groups or an already-canonical real JSONL file into the same private, fsynced, no-replace publication state machine as SFT. File input is bounded, must be compact and final-LF, and rejects symlinks, special files, path replacement while opening, blank rows, alternate whitespace, and truncation instead of silently normalizing them; in-memory serialization also fails before allocating past the row ceiling. Both source forms produce the same manifest identity for the same groups. The complete exact file set and deep production-tokenizer/provenance verifier run before rename and again after parent sync; existing targets are preserved, failures remove staging, and later source mutation cannot alter the immutable bundle. Tests also cover missing provenance, tampering, source retention, and SFT publication/import regressions. This is a backend-independent library checkpoint; the public GRPO API/CLI, pinned runner, and external numerical round trip remain open. |
 | 2026-07-10 | Pinned recorded-rollout HF/TRL GRPO runner | `sha256:549ed1e82375` | this commit | portable + pinned Torch CPU smoke; Strix Halo ROCm/Vulkan compile gates | 18 focused standard-library runner tests; 10,000 random Rust/Python finite-float serialization comparisons; 479/480 train tests with one documented ignore; 903 server tests; 275 qualification tests; one real pinned TRL 1.8.0 tiny-Llama optimizer step; default/ROCm gfx1151/Vulkan server all-target checks; contract/release/runtime guards; Python compilation, formatting, and diff hygiene | passed | One task-aware embedded script now verifies SFT and GRPO before importing Torch. GRPO verification streams typed canonical JSON with serde-compatible f32/f64 formatting, exact corpus framing and identity, recomputed base-model aggregate, prompt/payload/model/tokenizer/template/adapter/behavior/sampling/thinking-budget provenance, strict sampled/forced actions, one behavior policy, and a uniform group width. Training snapshots the corpus privately, rechecks it per epoch, rejects TRL's silent incomplete-batch drop, and replays exact prompt/suffix IDs without vLLM or resampling. Only sampled tokens receive `env_mask=1`; recorded behavior log-probabilities become `old_per_token_logps` for PPO, while the frozen initial/base adapter remains the independent K3 KL reference. Results record task-correct trainer identity and the complete effective policy configuration. The real pinned CPU step produced nonzero loss/gradient, recorded reward statistics, clipping from current/behavior mismatch, a PEFT safetensors adapter, and a self-verifying GRPO result. That smoke proves runner plumbing, not the still-open native-versus-TRL numerical oracle or production-model inference/import round trip. |
 | 2026-07-10 | Public immutable HF/TRL GRPO export API | `sha256:06481f6da2dc` | this commit | portable; Strix Halo ROCm/Vulkan compile gates | 480/481 train tests with one documented ignore; 904 server tests; six focused registry/API tests plus a direct heterogeneous-width writer regression; default/ROCm gfx1151/Vulkan server all-target checks; Chrome 148 docs smoke; release/runtime-default/thinking-budget/local-link guards; formatting and diff hygiene | passed | `POST /v1/train/hf/grpo/exports` accepts exactly one provenance-complete inline group array or server-local canonical JSONL path, with the shared optional split and revision-stable input adapter. A task-neutral publication function now owns SFT and GRPO resident-identity preflight, registry capacity, lock ordering, adapter barrier, staging, no-replace publication, verification, response identity, and lifecycle. GRPO admission streams or bounds the source, recomputes resident adapter identity, replays exact recorded-policy tokenizer/mask semantics, and returns malformed provenance or group shape as `hf_trl_invalid_request` before registry creation; post-admission publication failures remain distinct. Router tests construct, publish, verify, list, and compare both source forms and reject ambiguous sources, missing provenance, and heterogeneous group widths without residue. The width test exposed that Rust previously admitted a corpus the pinned runner could not batch; the deep bundle verifier now requires the same uniform width as the runner. The public GRPO CLI and production external round trip remain open. |
+| 2026-07-10 | Verified first-party HF/TRL GRPO CLI handoff | `sha256:7c0b44814c92` | this commit | portable; Strix Halo ROCm/Vulkan compile gates | 905 server tests; focused nested-command parser coverage; real TCP SFT regression plus GRPO create/download/verify/publish/conditional-delete loopback; default/ROCm gfx1151/Vulkan server all-target checks; Chrome 148 docs smoke; release/runtime-default/thinking-budget/local-link guards; formatting and diff hygiene | passed | `kiln train hf export-grpo` accepts one server-local canonical recorded-rollout JSONL path, a path-safe immutable name, optional behavior adapter/split, optional no-clobber output, and explicit server-copy retention. SFT and GRPO now share one redirect-free client, creation ETag validation, bounded idle download, compressed/expanded/archive-entry limits, safe single-root extraction, complete bundle verification, atomic local publication, identity-conditional default cleanup, and retry guidance. Before local publication the downloaded manifest must agree with the creation summary's task, source, row count, ordered corpus identity, and input adapter, closing a response-consistency gap for both task routes. The real router loopback proves GRPO task identity, archive publication, source retention, and exact server cleanup while retaining the existing SFT regression. CLI help, README, API/CLI sites, and the permanent interoperability contract now describe both routes, so the general native-training scope and first-class export/documentation checklist items are closed. Actual external SFT/GRPO optimizer, import, and inference/eval round trips remain open. |
 
 ## Known Starting Defects
 

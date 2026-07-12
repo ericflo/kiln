@@ -98,9 +98,9 @@ exactly one provenance-complete inline `groups` array or server-local canonical
 `dataset_path`, plus the same optional split manifest and revision-stable input
 adapter as SFT. Both forms enter the existing immutable registry and therefore
 share its verification, download, conditional deletion, capacity, locking, and
-crash-recovery behavior. The task-aware pinned runner supports recorded GRPO;
-the first-party GRPO export CLI and production-model numerical round trip are
-still pending.
+crash-recovery behavior. The task-aware pinned runner and first-party
+`export-grpo` CLI support recorded GRPO. The production-model numerical round
+trip is still pending.
 
 ## Template Identities
 
@@ -236,10 +236,8 @@ reused for different bytes.
 
 ## Verified CLI Handoff
 
-The SFT CLI performs creation, download, local verification, atomic
-publication, and server cleanup as one fail-closed workflow. GRPO currently
-uses the public API above plus the common management/download routes; the
-equivalent first-party `export-grpo` wrapper remains pending.
+The SFT and GRPO CLIs perform creation, download, local verification, atomic
+publication, and server cleanup through one fail-closed workflow:
 
 ```bash
 mkdir -p ./handoffs
@@ -250,6 +248,12 @@ kiln train hf export-sft \
   --invalid-row-policy fail \
   --input-adapter support-base \
   --split-manifest ./support-split.json
+
+kiln train hf export-grpo \
+  --file /data/support-recorded-rollouts.jsonl \
+  --name support_grpo_01 \
+  --output ./handoffs/support_grpo_01.tar.gz \
+  --split-manifest ./support-grpo-split.json
 ```
 
 `--file` is a path in the running server's filesystem. It intentionally has
@@ -258,6 +262,11 @@ the CLI host. Use `--dataset corrections:active` to snapshot active
 corrections without marking them trained, or pass another named server
 dataset. Exactly one of `--file` and `--dataset` is required. The optional
 split file is read by the CLI and must contain a JSON object.
+
+`export-grpo --file` has the same server-local path semantics and requires the
+canonical, final-LF, provenance-complete JSONL contract described above. It
+does not accept a named SFT dataset or an invalid-row policy; malformed rows
+fail the whole export before publication.
 
 The default local output is `{name}.kiln-hf.tar.gz`. Before creating anything
 on the server, the CLI rejects an existing output, a missing output directory,

@@ -54,6 +54,9 @@ const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
   kiln train hf export-sft --file /data/examples.jsonl --name my-task-hf
       Create, download, and verify an immutable bundle for the pinned HF/TRL runner.
 
+  kiln train hf export-grpo --file /data/recorded.jsonl --name my-task-grpo
+      Create the same verified handoff from provenance-complete recorded GRPO JSONL.
+
   kiln train hf import-peft --bundle ./my-task-hf.kiln-hf --name my-task
       Verify a completed external-training bundle and stream its PEFT adapter into Kiln.
 
@@ -122,7 +125,7 @@ SFT reads JSONL: one chat correction example per line with a messages array. GRP
 
 Add --adapter-smoke-test to record a small base-vs-adapter canary check in train_receipt.json after successful training.
 
-Use `kiln train hf export-sft` to create, download, and verify an immutable handoff bundle for the pinned Hugging Face TRL/PEFT correctness runner. The export source path is read by the server process, not uploaded by the CLI. After external training, use `kiln train hf import-peft` to verify the completed local bundle and stream only its model-identity and PEFT result envelope back to the server.
+Use `kiln train hf export-sft` or `kiln train hf export-grpo` to create, download, and verify an immutable handoff bundle for the pinned Hugging Face TRL/PEFT correctness runner. Export source paths are read by the server process, not uploaded by the CLI. After external training, use `kiln train hf import-peft` to verify the completed local bundle and stream only its model-identity and PEFT result envelope back to the server.
 
 Prefer http://127.0.0.1:8420/ui/ for guided submission and status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
@@ -141,6 +144,8 @@ Open http://127.0.0.1:8420/ui/ for guided submission and training status.
 "#;
 
 const TRAIN_GRPO_OVERVIEW: &str = r#"Train from GRPO data: either one JSON request/batch with groups, or JSONL with one group per line.
+
+Use `kiln train hf export-grpo` for a provenance-complete recorded-rollout corpus that should run through the pinned external TRL/PEFT route instead of the bounded native trainer.
 
 Use --adapter-smoke-test to compare base vs trained adapter logits and short greedy outputs before running a full eval.
 
@@ -183,6 +188,9 @@ const TRAIN_EXAMPLES: &str = r#"Examples:
   kiln train hf export-sft --file /data/corrections.jsonl --name support-hf-01
       Export a server-local SFT corpus, download and fully verify its immutable HF/TRL bundle, then remove the server copy.
 
+  kiln train hf export-grpo --file /data/recorded-rollouts.jsonl --name support-grpo-01
+      Export canonical provenance-complete GRPO JSONL through the same verified handoff lifecycle.
+
   kiln train hf list
       List immutable HF/TRL exports still retained by the running server.
 
@@ -201,6 +209,8 @@ const TRAIN_HF_OVERVIEW: &str = r#"Create and manage immutable Hugging Face TRL/
 
 `export-sft` asks the running server to snapshot a canonical SFT corpus and optional input adapter, streams the resulting tar.gz into a sibling temporary file, verifies its exact archive shape and every manifest-bound byte, and only then publishes the requested local output without overwriting an existing path.
 
+`export-grpo` applies the same transport and publication workflow to server-local canonical JSONL containing exact recorded rollout provenance. The server validates resident model, base-shard, tokenizer, template, optional adapter, behavior-policy, token, and mask identities before publication.
+
 `import-peft` takes the completed extracted `.kiln-hf` directory after external training. It verifies the unchanged export plus the result manifest and PEFT files locally, derives the expected server receipt, streams a minimal bounded envelope, and requires exact response identity agreement. It never modifies or removes the completed source bundle.
 
 The `--file` path is server-local: the running Kiln process must be able to read it. Use `--dataset corrections:active` to snapshot active corrections or another named server dataset. Successful local verification removes the server copy by default; pass `--keep-server-copy` when another client still needs it.
@@ -211,6 +221,13 @@ const TRAIN_HF_EXPORT_SFT_OVERVIEW: &str = r#"Create and download a verified imm
 Exactly one of `--file` or `--dataset` is required. `--file` names JSONL visible to the server process; it is not uploaded from the CLI machine. `--dataset` names a server-side eval dataset, including the special `corrections:active` snapshot.
 
 The output defaults to `{name}.kiln-hf.tar.gz` in the current directory. Existing output paths are never replaced. The CLI refuses redirects, streams rather than buffering the archive, rejects links and unsafe tar paths, requires exactly one `{name}.kiln-hf` root, and verifies the pristine Kiln manifest before atomic publication.
+"#;
+
+const TRAIN_HF_EXPORT_GRPO_OVERVIEW: &str = r#"Create and download a verified immutable recorded-GRPO handoff bundle.
+
+`--file` names canonical compact JSONL visible to the server process; it is not uploaded from the CLI machine. Every LF-terminated group must contain a uniform number of scored completions with exact recorded rollout provenance matching the resident model, base shards, tokenizer, inference template, and optional input adapter.
+
+The output defaults to `{name}.kiln-hf.tar.gz` in the current directory. Existing outputs are never replaced. Creation, bounded streaming, ETag binding, strict archive verification, atomic local publication, and identity-conditional server cleanup use the same implementation as `export-sft`.
 "#;
 
 const TRAIN_HF_IMPORT_PEFT_OVERVIEW: &str = r#"Verify and import a completed external-training PEFT result.
@@ -911,6 +928,37 @@ pub enum HfTrainCommands {
         invalid_row_policy: String,
 
         /// Existing server adapter to snapshot and continue training
+        #[arg(long)]
+        input_adapter: Option<String>,
+
+        /// Local JSON file containing an object-valued split manifest
+        #[arg(long)]
+        split_manifest: Option<PathBuf>,
+
+        /// Retain the verified export in the server registry after download
+        #[arg(long)]
+        keep_server_copy: bool,
+
+        /// Server URL; defaults to the local kiln serve instance
+        #[arg(long, default_value_t = default_server_url())]
+        url: String,
+    },
+    /// Create, download, and verify an immutable recorded-GRPO handoff bundle
+    #[command(name = "export-grpo", long_about = TRAIN_HF_EXPORT_GRPO_OVERVIEW)]
+    ExportGrpo {
+        /// Server-local canonical GRPO JSONL path; the CLI does not upload it
+        #[arg(long, short)]
+        file: String,
+
+        /// Immutable server export name
+        #[arg(long)]
+        name: String,
+
+        /// Local tar.gz destination; defaults to {name}.kiln-hf.tar.gz
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+
+        /// Existing server adapter matching the recorded behavior policy
         #[arg(long)]
         input_adapter: Option<String>,
 
@@ -4709,6 +4757,61 @@ mod tests {
                 "corrections:active",
                 "--name",
                 "two-sources",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_hf_grpo_export_and_requires_a_file() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "kiln",
+            "train",
+            "hf",
+            "export-grpo",
+            "--file",
+            "/srv/data/recorded.jsonl",
+            "--name",
+            "recorded-run",
+            "--output",
+            "artifacts/recorded.tar.gz",
+            "--input-adapter",
+            "behavior-adapter",
+            "--split-manifest",
+            "split.json",
+            "--keep-server-copy",
+        ])
+        .expect("parse failed");
+        match cli.command {
+            Some(Commands::Train(TrainCommands::Hf(HfTrainCommands::ExportGrpo {
+                file,
+                name,
+                output,
+                input_adapter,
+                split_manifest,
+                keep_server_copy,
+                url,
+            }))) => {
+                assert_eq!(file, "/srv/data/recorded.jsonl");
+                assert_eq!(name, "recorded-run");
+                assert_eq!(output, Some(PathBuf::from("artifacts/recorded.tar.gz")));
+                assert_eq!(input_adapter.as_deref(), Some("behavior-adapter"));
+                assert_eq!(split_manifest, Some(PathBuf::from("split.json")));
+                assert!(keep_server_copy);
+                assert_eq!(url, "http://localhost:8420");
+            }
+            other => panic!("expected Train(Hf(ExportGrpo)), got {:?}", other.is_some()),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "kiln",
+                "train",
+                "hf",
+                "export-grpo",
+                "--name",
+                "missing-file",
             ])
             .is_err()
         );

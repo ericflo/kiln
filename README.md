@@ -413,6 +413,11 @@ kiln train hf export-sft \
   --file /data/corrections.jsonl \
   --name support-hf-01
 
+# Recorded GRPO uses canonical provenance-complete JSONL.
+kiln train hf export-grpo \
+  --file /data/recorded-rollouts.jsonl \
+  --name support-grpo-01
+
 tar -xzf support-hf-01.kiln-hf.tar.gz
 python support-hf-01.kiln-hf/train.py support-hf-01.kiln-hf \
   --base-model /absolute/path/to/the/hf-model
@@ -422,18 +427,17 @@ kiln train hf import-peft \
   --name support-v2
 ```
 
-Provenance-complete recorded GRPO corpora can use the same immutable handoff
-and pinned runner through `POST /v1/train/hf/grpo/exports`; the first-party
-`export-grpo` CLI wrapper is still pending.
-
 `--file` is read by the running server, not uploaded by the CLI. Use
 `--dataset corrections:active` for the active corrections snapshot, or another
-named server dataset. The CLI streams to a same-directory temporary file,
+named server dataset for SFT. `export-grpo` requires canonical compact,
+final-LF JSONL with exact recorded provenance and uniform group width. Both
+export commands stream to a same-directory temporary file,
 rejects redirects, links, unsafe/multiple archive roots, identity drift, and
 existing outputs, and publishes only after complete manifest verification.
 It removes the server copy after success unless `--keep-server-copy` is set;
 `kiln train hf list` and `kiln train hf delete --name NAME` manage retained
-exports. After the embedded runner publishes its result, `import-peft` verifies
+exports. After the embedded runner publishes its SFT or GRPO result,
+`import-peft` verifies
 the completed extracted directory before connecting, derives and streams only
 the bounded ten-file result envelope, and requires the server's HTTP 201,
 strong ETag, import digest, content revision, installed size, and file count to
