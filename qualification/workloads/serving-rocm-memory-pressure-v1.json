@@ -75,7 +75,7 @@
           "request_max_tokens": 384,
           "request_prompt_words": 48,
           "request_timeout_seconds": 180,
-          "target_free_fraction": 0.08
+          "target_free_fraction": 0.0975
         }
       },
       "cases": [
