@@ -1138,20 +1138,6 @@ impl Metrics {
             ),
         );
 
-        out.push_str("# HELP kiln_batching_engine_short_waiting_priority_selections_total Bounded short-request selections ahead of a long FIFO admission head.\n");
-        out.push_str(
-            "# TYPE kiln_batching_engine_short_waiting_priority_selections_total counter\n",
-        );
-        push_line(
-            &mut out,
-            &format!(
-                "kiln_batching_engine_short_waiting_priority_selections_total {}",
-                gauges
-                    .batching_engine
-                    .total_short_waiting_priority_selections
-            ),
-        );
-
         out.push_str(
             "# HELP kiln_batching_engine_errors_total Real-model batching engine errors.\n",
         );
@@ -1959,7 +1945,6 @@ mod tests {
                 total_prefill_layers: 48,
                 total_prefill_layer_yields: 36,
                 total_short_prefill_priority_forwards: 9,
-                total_short_waiting_priority_selections: 4,
                 total_errors: 1,
                 response_delivery_in_flight: 3,
                 response_delivery_backpressured: 2,
@@ -2067,7 +2052,6 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_prefill_layers_total 48"));
         assert!(output.contains("kiln_batching_engine_prefill_layer_yields_total 36"));
         assert!(output.contains("kiln_batching_engine_short_prefill_priority_forwards_total 9"));
-        assert!(output.contains("kiln_batching_engine_short_waiting_priority_selections_total 4"));
         assert!(output.contains("kiln_batching_engine_errors_total 1"));
         assert!(output.contains("# TYPE kiln_batching_engine_response_delivery_in_flight gauge"));
         assert!(output.contains("kiln_batching_engine_response_delivery_in_flight 3"));

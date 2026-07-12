@@ -75,8 +75,6 @@ max_prefill_layers_per_cycle = 4         # Transformer layers processed before a
                                         # strictly with KILN_MAX_PREFILL_LAYERS_PER_CYCLE.
                                         # Two dispatches remain round-robin; every third may
                                         # accelerate the shortest tail of at most four token chunks.
-                                        # Non-burst admission permits at most two bounded short-row
-                                        # overtakes before the long FIFO head must run.
 max_decode_batch = "auto"                # Concurrent decode-row ceiling. "auto" selects the active
                                         # backend policy; an integer in 1..=65536 sets an operator
                                         # ceiling. Deterministic mode and max_batch_tokens may lower

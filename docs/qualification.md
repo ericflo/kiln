@@ -158,12 +158,9 @@ times; a run that exercises no inter-layer yield fails. A chunk is charged to
 the new-token ceiling exactly once when selected, not again when its retained
 final layer completes. Two of three prefill dispatches remain round-robin;
 every third may accelerate the shortest tail of at most four token chunks.
-Non-burst admission may also inspect at most eight entries beyond a long FIFO
-head and select a short row, with FIFO forced after two consecutive overtakes;
-CUDA burst-refill admission remains FIFO. The receipt records both bounded
-priority counts and fails when the mixed workload does not exercise active
-short-tail service. Any ITL outlier remains a failure even when its phase is
-explained.
+The receipt records this bounded-priority count and fails when the mixed
+workload does not exercise it. Any ITL outlier remains a failure even when its
+phase is explained.
 
 For the historical dynamic-runtime A/B, run each of `default`,
 `autoscale-off`, `graphs-off`, and `both-off` separately. These four arms now
