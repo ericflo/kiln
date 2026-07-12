@@ -16114,12 +16114,12 @@ pub(crate) mod tests {
                 .is_some_and(|reason| reason.contains("injected sync failure"))
         );
         assert!(
-            lock.try_write().is_ok(),
-            "the process lock must not leak even though quarantine blocks reuse"
-        );
-        assert!(
             inference_waiter.join().unwrap(),
             "a waiting inference owner must observe quarantine before the writer releases"
+        );
+        assert!(
+            lock.try_write().is_ok(),
+            "the process lock must not leak after the waiting inference owner exits"
         );
     }
 
