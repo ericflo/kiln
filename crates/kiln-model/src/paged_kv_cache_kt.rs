@@ -142,6 +142,21 @@ enum KvPoolKind {
     Value,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KvPoolAllocationReason {
+    InitialCache,
+    PhysicalResize,
+}
+
+impl KvPoolAllocationReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::InitialCache => "initial_kv_cache",
+            Self::PhysicalResize => "kv_physical_resize",
+        }
+    }
+}
+
 impl KvPoolKind {
     const fn label(self) -> &'static str {
         match self {
@@ -226,6 +241,80 @@ fn alloc_pool_tensor(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn alloc_pool_tensor_attributed(
+    device: kiln_tensor::Device,
+    shape: &[usize],
+    n_elements: usize,
+    storage_dtype: KtDType,
+    layer_idx: usize,
+    kind: KvPoolKind,
+    zero_initialize: bool,
+    reason: KvPoolAllocationReason,
+) -> Result<KtTensor> {
+    let requested_bytes = n_elements.saturating_mul(storage_dtype.size_in_bytes().max(1));
+    let started = std::time::Instant::now();
+    let result = alloc_pool_tensor(
+        device,
+        shape,
+        n_elements,
+        storage_dtype,
+        layer_idx,
+        kind,
+        zero_initialize,
+    );
+    let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+    match (&result, reason) {
+        (Ok(_), KvPoolAllocationReason::InitialCache) => tracing::debug!(
+            event = "gpu_memory_operation",
+            operation = "allocation",
+            reason = reason.as_str(),
+            outcome = "completed",
+            ?device,
+            layer = layer_idx,
+            pool = kind.label(),
+            requested_bytes,
+            actual_bytes = requested_bytes,
+            wait_ms = 0.0,
+            duration_ms,
+            zero_initialize,
+            "KV pool allocation completed"
+        ),
+        (Ok(_), KvPoolAllocationReason::PhysicalResize) => tracing::info!(
+            event = "gpu_memory_operation",
+            operation = "allocation",
+            reason = reason.as_str(),
+            outcome = "completed",
+            ?device,
+            layer = layer_idx,
+            pool = kind.label(),
+            requested_bytes,
+            actual_bytes = requested_bytes,
+            wait_ms = 0.0,
+            duration_ms,
+            zero_initialize,
+            "KV pool allocation completed"
+        ),
+        (Err(error), _) => tracing::warn!(
+            event = "gpu_memory_operation",
+            operation = "allocation",
+            reason = reason.as_str(),
+            outcome = "failed",
+            %error,
+            ?device,
+            layer = layer_idx,
+            pool = kind.label(),
+            requested_bytes,
+            actual_bytes = 0,
+            wait_ms = 0.0,
+            duration_ms,
+            zero_initialize,
+            "KV pool allocation failed"
+        ),
+    }
+    result
+}
+
 /// Allocate one zero-filled `(k_pool, v_pool)` pair of shape `shape`
 /// (`= [total_slots, num_kv_heads, head_dim]`, `n_elements` elements total) on
 /// `device`.
@@ -242,7 +331,7 @@ fn alloc_pool_pair(
     layer_idx: usize,
 ) -> Result<(KtTensor, KtTensor)> {
     Ok((
-        alloc_pool_tensor(
+        alloc_pool_tensor_attributed(
             device,
             shape,
             n_elements,
@@ -250,8 +339,9 @@ fn alloc_pool_pair(
             layer_idx,
             KvPoolKind::Key,
             true,
+            KvPoolAllocationReason::InitialCache,
         )?,
-        alloc_pool_tensor(
+        alloc_pool_tensor_attributed(
             device,
             shape,
             n_elements,
@@ -259,6 +349,7 @@ fn alloc_pool_pair(
             layer_idx,
             KvPoolKind::Value,
             true,
+            KvPoolAllocationReason::InitialCache,
         )?,
     ))
 }
@@ -267,8 +358,14 @@ fn alloc_pool_pair(
 /// storage a still-running kernel reads. No-op on CPU (synchronous) and on
 /// backends whose feature isn't compiled in. Used by
 /// [`PagedKvCacheKt::physical_resize_to`] (#26) as the C2 use-after-free guard.
-fn sync_device_for_resize(device: kiln_tensor::Device) -> Result<()> {
-    match device {
+fn sync_device_for_resize(
+    device: kiln_tensor::Device,
+    phase: &'static str,
+    layer: Option<usize>,
+    affected_bytes: u64,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    let result = match device {
         #[cfg(feature = "cuda")]
         kiln_tensor::Device::Cuda(i) => kiln_tensor::cuda_synchronize_default_stream(i)
             .map_err(|e| anyhow::anyhow!("physical_resize_to: cuda sync: {e}")),
@@ -276,7 +373,38 @@ fn sync_device_for_resize(device: kiln_tensor::Device) -> Result<()> {
         kiln_tensor::Device::Rocm(i) => kiln_tensor::rocm_synchronize_default_stream(i)
             .map_err(|e| anyhow::anyhow!("physical_resize_to: rocm sync: {e}")),
         _ => Ok(()),
+    };
+    let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+    match &result {
+        Ok(()) => tracing::info!(
+            event = "gpu_memory_operation",
+            operation = "synchronize",
+            reason = "kv_physical_resize",
+            outcome = "completed",
+            ?device,
+            phase,
+            ?layer,
+            affected_bytes,
+            wait_ms = duration_ms,
+            duration_ms,
+            "KV resize device synchronization completed"
+        ),
+        Err(error) => tracing::warn!(
+            event = "gpu_memory_operation",
+            operation = "synchronize",
+            reason = "kv_physical_resize",
+            outcome = "failed",
+            %error,
+            ?device,
+            phase,
+            ?layer,
+            affected_bytes,
+            wait_ms = duration_ms,
+            duration_ms,
+            "KV resize device synchronization failed"
+        ),
     }
+    result
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -480,6 +608,10 @@ impl PagedKvCacheKt {
     /// into a block-count target. `0` if the cache has no layers.
     pub fn bytes_per_block(&self) -> usize {
         let layers = self.layers_read();
+        self.bytes_per_block_for_layers(&layers)
+    }
+
+    fn bytes_per_block_for_layers(&self, layers: &[(KtTensor, KtTensor)]) -> usize {
         let Some((k, _)) = layers.first() else {
             return 0;
         };
@@ -593,11 +725,14 @@ impl PagedKvCacheKt {
             self.generation.load(Ordering::Acquire) < u64::MAX,
             "physical_resize_to: pool generation exhausted"
         );
+        let replacement_bytes = (new_num_blocks as u64).saturating_mul(
+            u64::try_from(self.bytes_per_block_for_layers(&layers)).unwrap_or(u64::MAX),
+        );
         // C2: flush any in-flight kernel before we drop the old pools. The caller
         // guarantees no NEW launches during the resize (actor barrier); this
         // covers a kernel already submitted on another stream (graph replay).
         checkpoint(KvResizeFaultPoint::InitialSync)?;
-        sync_device_for_resize(device)?;
+        sync_device_for_resize(device, "initial_drain", None, replacement_bytes)?;
 
         let storage_dtype = if self.fp8 {
             KtDType::U8
@@ -620,7 +755,7 @@ impl PagedKvCacheKt {
             let n_elements = new_total_slots * dims[1] * dims[2];
 
             checkpoint(KvResizeFaultPoint::AllocateKey { layer: layer_idx })?;
-            let new_k = alloc_pool_tensor(
+            let new_k = alloc_pool_tensor_attributed(
                 device,
                 &shape,
                 n_elements,
@@ -628,9 +763,10 @@ impl PagedKvCacheKt {
                 layer_idx,
                 KvPoolKind::Key,
                 false,
+                KvPoolAllocationReason::PhysicalResize,
             )?;
             checkpoint(KvResizeFaultPoint::AllocateValue { layer: layer_idx })?;
-            let new_v = alloc_pool_tensor(
+            let new_v = alloc_pool_tensor_attributed(
                 device,
                 &shape,
                 n_elements,
@@ -638,6 +774,7 @@ impl PagedKvCacheKt {
                 layer_idx,
                 KvPoolKind::Value,
                 false,
+                KvPoolAllocationReason::PhysicalResize,
             )?;
 
             // Complete asynchronous allocation/initialization before copying
@@ -645,7 +782,12 @@ impl PagedKvCacheKt {
             // initialization; other backends retain their zero-fill behavior.
             if copy_slots > 0 {
                 checkpoint(KvResizeFaultPoint::ZeroFillSync { layer: layer_idx })?;
-                sync_device_for_resize(device)?;
+                sync_device_for_resize(
+                    device,
+                    "allocation_completion",
+                    Some(layer_idx),
+                    replacement_bytes,
+                )?;
                 let (old_k, old_v) = &layers[layer_idx];
                 let src_k = old_k.narrow(0, 0, copy_slots).map_err(|e| {
                     anyhow::anyhow!("physical_resize_to: narrow k l{layer_idx}: {e}")
@@ -670,7 +812,7 @@ impl PagedKvCacheKt {
         // still owned so a failed synchronization cannot publish or free a
         // partially initialized generation.
         checkpoint(KvResizeFaultPoint::FinalSync)?;
-        sync_device_for_resize(device)?;
+        sync_device_for_resize(device, "copy_completion", None, replacement_bytes)?;
 
         checkpoint(KvResizeFaultPoint::Commit)?;
         *layers = staged;
