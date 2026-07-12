@@ -709,6 +709,10 @@ pub struct SuiteResult {
 pub struct EvalResult {
     pub job_id: String,
     pub state: EvalJobState,
+    /// Exact base-weight artifacts resident when the job was admitted. Absent
+    /// only for mock/synthetic generators and legacy archived jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_weight_shard_manifest: Option<kiln_core::model_provenance::BaseWeightShardManifest>,
     /// One immutable seed materialized before the job enters the queue.
     /// Example/completion seeds are derived from it with `seed_derivation`.
     /// Both fields are absent only on legacy archived jobs.
@@ -1021,6 +1025,7 @@ mod tests {
         let result = EvalResult {
             job_id: "j1".into(),
             state: EvalJobState::Completed,
+            base_weight_shard_manifest: None,
             effective_seed: None,
             seed_derivation: None,
             runs: vec![baseline, candidate],
@@ -1041,6 +1046,7 @@ mod tests {
         let result = EvalResult {
             job_id: "j2".into(),
             state: EvalJobState::Completed,
+            base_weight_shard_manifest: None,
             effective_seed: None,
             seed_derivation: None,
             runs: vec![mk_run(

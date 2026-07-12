@@ -26,6 +26,8 @@ Optional provenance fields:
 - `parent_adapter`: base/parent adapter name or path when training continued
   from an adapter.
 - `model_config_hash`: model config hash from `train_receipt.json`.
+- `base_weight_shard_manifest`: strict `kiln.base-weight-shards.v1` identity
+  copied from `train_receipt.json`, including every shard SHA-256 and byte size.
 - `kiln_commit`: kiln git commit recorded by training.
 - `training_data_hash`: training data hash from `train_receipt.json`.
 - `training_data_source`: training data source label.
@@ -43,6 +45,20 @@ Example:
   "receipt_hash": "sha256:...",
   "parent_adapter": "support-bot-v2",
   "model_config_hash": "sha256:...",
+  "base_weight_shard_manifest": {
+    "schema_version": 1,
+    "manifest_type": "kiln.base-weight-shards.v1",
+    "aggregate_algorithm": "kiln.base-model-content.v1",
+    "aggregate_sha256": "sha256:...",
+    "total_size_bytes": 123456,
+    "shards": [
+      {
+        "filename": "model.safetensors",
+        "size_bytes": 123456,
+        "sha256": "sha256:..."
+      }
+    ]
+  },
   "kiln_commit": "abc123",
   "training_data_hash": "sha256:...",
   "training_data_source": "jsonl_grpo_groups",
@@ -71,3 +87,7 @@ paths are not replaced unless `--overwrite` is passed.
 The restore command copies `adapter_config.json`, `adapter_model.safetensors`,
 `train_receipt.json` when listed, and `adapter_manifest.json`, then verifies the
 copied config, safetensors, and receipt hashes before reporting success.
+Manifest reads also validate the complete base-weight shard identity when
+present. Legacy adapter manifests may omit it. See
+[Base-Weight Provenance](BASE_WEIGHT_PROVENANCE.md) for content-equivalence and
+exact-resume semantics.

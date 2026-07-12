@@ -135,6 +135,7 @@ async fn main() -> Result<()> {
     let result = EvalResult {
         job_id: format!("trace-api-{}", uuid::Uuid::new_v4()),
         state: EvalJobState::Completed,
+        base_weight_shard_manifest: None,
         effective_seed: Some(effective_seed),
         seed_derivation: Some(kiln_eval::EVAL_SEED_DERIVATION_V1.to_string()),
         runs,

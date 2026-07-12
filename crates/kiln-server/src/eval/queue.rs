@@ -115,6 +115,9 @@ pub struct EvalJobInfo {
     pub suite_name: String,
     pub adapters: Vec<Option<String>>,
     pub submission_kind: EvalSubmissionKind,
+    /// Immutable snapshot of the resident base-weight artifacts at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_weight_shard_manifest: Option<kiln_core::model_provenance::BaseWeightShardManifest>,
     /// Immutable job seed. `None` is reserved for archives written before
     /// eval seed materialization was introduced.
     #[serde(
@@ -172,6 +175,7 @@ impl EvalJobInfo {
             suite_name,
             adapters,
             submission_kind,
+            base_weight_shard_manifest: None,
             effective_seed: Some(effective_seed),
             state: EvalJobState::Queued,
             progress: EvalProgress::default(),
@@ -195,6 +199,7 @@ impl EvalJobInfo {
         EvalResult {
             job_id: self.job_id.clone(),
             state: self.state,
+            base_weight_shard_manifest: self.base_weight_shard_manifest.clone(),
             effective_seed: self.effective_seed,
             seed_derivation: self
                 .effective_seed

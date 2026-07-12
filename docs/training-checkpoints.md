@@ -82,6 +82,29 @@ build, backend, device, driver/runtime, precision, kernels, or effective
 environment differ. Exact checkpoint continuation is guaranteed only inside
 the deterministic envelope recorded and validated by the checkpoint contract.
 
+## Base-weight binding
+
+Every new exact SFT, GRPO, and OPD checkpoint embeds the loader-owned
+`kiln.base-weight-shards.v1` manifest in
+`auxiliary_state.base_weight_shard_manifest`. The existing
+`base_model_weights_sha256` field must equal that manifest's validated aggregate.
+Capture fails before publication if either value is absent or inconsistent.
+
+Resume validates both full manifests before GPU ownership and compares their
+byte-content identity. A changed shard digest, size, or multiplicity is
+incompatible. Paths, safetensors index order, and audit filenames do not affect
+content identity, so relocating or renaming otherwise identical shards remains
+valid. The filenames are still persisted to identify the audited source files.
+
+Legacy exact checkpoints that recorded only the aggregate fail closed because
+they cannot prove the constituent shards. Use them only as non-resumable
+serving or weights-only artifacts; start a new run to publish a checkpoint with
+the complete binding. Successful `train_receipt.json` and
+`adapter_manifest.json` files retain the same full manifest, and their readers
+reject internal tampering. See
+[Base-Weight Provenance](BASE_WEIGHT_PROVENANCE.md) for the strict JSON schema
+and aggregate algorithm.
+
 ## Integration status
 
 Native SFT, inline and streamed-JSONL GRPO, and OPD support exact resume. A

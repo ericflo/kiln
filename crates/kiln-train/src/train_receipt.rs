@@ -147,6 +147,8 @@ pub struct KilnSourceReceipt {
 pub struct ModelReceipt {
     pub path: Option<String>,
     pub config_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_weight_shard_manifest: Option<kiln_core::model_provenance::BaseWeightShardManifest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1048,6 +1050,7 @@ impl TrainReceipt {
             model: ModelReceipt {
                 path: detect_model_path(),
                 config_hash: config_hashes.model_config_hash.clone(),
+                base_weight_shard_manifest: None,
             },
             tokenizer: TokenizerReceipt {
                 config_hash: tokenizer.config_sha256().ok(),
@@ -1102,6 +1105,11 @@ impl TrainReceipt {
     }
 
     pub fn write_to_adapter_dir(&self, adapter_dir: &Path) -> Result<PathBuf> {
+        if let Some(manifest) = self.model.base_weight_shard_manifest.as_ref() {
+            manifest
+                .validate()
+                .context("validate train-receipt base-weight shard manifest")?;
+        }
         std::fs::create_dir_all(adapter_dir).with_context(|| {
             format!(
                 "create adapter dir {} for train receipt",
@@ -1126,8 +1134,16 @@ impl TrainReceipt {
         }
         let bytes = std::fs::read(&path)
             .with_context(|| format!("read train receipt {}", path.display()))?;
-        let receipt = serde_json::from_slice(&bytes)
+        let receipt: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("deserialize train receipt {}", path.display()))?;
+        if let Some(manifest) = receipt.model.base_weight_shard_manifest.as_ref() {
+            manifest.validate().with_context(|| {
+                format!(
+                    "validate base-weight shard manifest in train receipt {}",
+                    path.display()
+                )
+            })?;
+        }
         Ok(Some(receipt))
     }
 }
@@ -2286,6 +2302,18 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn base_weight_manifest() -> kiln_core::model_provenance::BaseWeightShardManifest {
+        kiln_core::model_provenance::BaseWeightShardManifest::new(vec![
+            kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                "model.safetensors",
+                11,
+                [0x42; 32],
+            )
+            .unwrap(),
+        ])
+        .unwrap()
+    }
+
     fn full_sha256(fill: char) -> String {
         format!("sha256:{}", fill.to_string().repeat(64))
     }
@@ -2542,7 +2570,7 @@ mod tests {
         let dir = tempdir()?;
         let model = ModelConfig::qwen3_5_4b();
         let tokenizer = minimal_tokenizer()?;
-        let receipt = TrainReceipt::new(
+        let mut receipt = TrainReceipt::new(
             "adapter-a",
             "sft",
             &model,
@@ -2559,6 +2587,8 @@ mod tests {
             },
             serde_json::json!({"epochs": 1}),
         );
+        let base_weights = base_weight_manifest();
+        receipt.model.base_weight_shard_manifest = Some(base_weights.clone());
         let path = receipt.write_to_adapter_dir(dir.path())?;
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
@@ -2569,6 +2599,10 @@ mod tests {
         assert_eq!(loaded.status, TrainReceiptStatus::Success);
         assert_eq!(loaded.adapter_name, "adapter-a");
         assert_eq!(loaded.hyperparameters.rank, 8);
+        assert_eq!(
+            loaded.model.base_weight_shard_manifest.as_ref(),
+            Some(&base_weights)
+        );
         assert!(loaded.config_hashes.model_config_hash.is_some());
         assert_eq!(
             loaded.model.config_hash,
@@ -2587,6 +2621,43 @@ mod tests {
         );
         assert!(loaded.lora_grad_norms.is_empty());
         assert!(loaded.adapter_smoke_test.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn train_receipt_read_rejects_tampered_base_weight_manifest() -> Result<()> {
+        let dir = tempdir()?;
+        let model = ModelConfig::qwen3_5_4b();
+        let tokenizer = minimal_tokenizer()?;
+        let mut receipt = TrainReceipt::new(
+            "adapter-tampered",
+            "sft",
+            &model,
+            &tokenizer,
+            HyperparameterReceipt {
+                mode: "sft".to_string(),
+                rank: 2,
+                alpha: 4.0,
+                alpha_over_rank: Some(2.0),
+                learning_rate: 1e-4,
+                epochs: 1,
+                seed: Some(1),
+                shuffle: false,
+            },
+            serde_json::json!({}),
+        );
+        receipt.model.base_weight_shard_manifest = Some(base_weight_manifest());
+        let mut value = serde_json::to_value(receipt)?;
+        value["model"]["base_weight_shard_manifest"]["total_size_bytes"] = serde_json::json!(12);
+        std::fs::write(
+            dir.path().join(TRAIN_RECEIPT_FILENAME),
+            serde_json::to_vec_pretty(&value)?,
+        )?;
+
+        let error = TrainReceipt::read_from_adapter_dir(dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("validate base-weight shard manifest"));
         Ok(())
     }
 

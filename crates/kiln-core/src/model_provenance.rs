@@ -142,6 +142,18 @@ impl BaseWeightShardManifest {
         }
         Ok(())
     }
+
+    /// Whether two valid manifests identify the same multiset of shard bytes.
+    ///
+    /// Filenames are retained for auditability but deliberately excluded from
+    /// content identity so relocating or renaming identical shards does not
+    /// invalidate an exact training resume.
+    pub fn content_equivalent(&self, other: &Self) -> Result<bool, ModelProvenanceError> {
+        self.validate()?;
+        other.validate()?;
+        Ok(self.aggregate_algorithm == other.aggregate_algorithm
+            && self.aggregate_sha256 == other.aggregate_sha256)
+    }
 }
 
 fn validate_shards(shards: &[BaseWeightShardIdentity]) -> Result<(), ModelProvenanceError> {
@@ -294,7 +306,37 @@ mod tests {
             "sha256:813979f1d3dd938e49874427651a97344cd1af5409e75aceaa741707616cd7a5"
         );
         assert_eq!(manifest.aggregate_sha256, renamed.aggregate_sha256);
+        assert!(manifest.content_equivalent(&renamed).unwrap());
         manifest.validate().unwrap();
+    }
+
+    #[test]
+    fn content_equivalence_rejects_byte_size_and_multiplicity_changes() {
+        let original = BaseWeightShardManifest::new(vec![
+            shard("first.safetensors", 11, 0x11),
+            shard("second.safetensors", 22, 0x22),
+        ])
+        .unwrap();
+        let changed_bytes = BaseWeightShardManifest::new(vec![
+            shard("first.safetensors", 11, 0x11),
+            shard("second.safetensors", 22, 0x23),
+        ])
+        .unwrap();
+        let changed_size = BaseWeightShardManifest::new(vec![
+            shard("first.safetensors", 12, 0x11),
+            shard("second.safetensors", 22, 0x22),
+        ])
+        .unwrap();
+        let duplicate = BaseWeightShardManifest::new(vec![
+            shard("first.safetensors", 11, 0x11),
+            shard("copy.safetensors", 11, 0x11),
+            shard("second.safetensors", 22, 0x22),
+        ])
+        .unwrap();
+
+        assert!(!original.content_equivalent(&changed_bytes).unwrap());
+        assert!(!original.content_equivalent(&changed_size).unwrap());
+        assert!(!original.content_equivalent(&duplicate).unwrap());
     }
 
     #[test]

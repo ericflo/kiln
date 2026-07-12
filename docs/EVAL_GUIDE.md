@@ -569,6 +569,27 @@ This contract makes sampling inputs inspectable and paired. It is not, by
 itself, a claim that outputs are byte-identical across different binaries,
 drivers, devices, kernels, precision policies, or model revisions.
 
+## Base-weight provenance
+
+Eval admission also snapshots the resident `kiln.base-weight-shards.v1`
+manifest before queue publication. `base_weight_shard_manifest` therefore
+identifies every exact safetensors shard behind the job even if the server later
+restarts or another model directory is selected. The job list/detail API,
+terminal archive, raw result JSON, and `kiln-eval --json` preserve the full
+manifest. Human CLI output and the dashboard show its aggregate, shard count,
+and total bytes; the dashboard offers an exact-copy control. Downloaded outcome
+JSONL repeats the full manifest on every standalone outcome row.
+
+Archive load validates the aggregate, each shard digest and size, total bytes,
+ordering, and schema. Corrupt new archives are skipped rather than reported as
+valid provenance. A missing field is accepted only for legacy archives or
+synthetic/mock generation; a newly admitted production job always receives the
+loader-owned manifest. This binds base weights only. Adapter revision,
+tokenizer/template, executable/source, backend/runtime, and generation settings
+remain separate replay inputs. See
+[Base-Weight Provenance](BASE_WEIGHT_PROVENANCE.md) for the canonical schema and
+content-identity rules.
+
 ## API reference
 
 ### `POST /v1/eval/suites`

@@ -90,6 +90,7 @@ async fn worker_runs_inline_suite_with_mock_generator() {
             adapters: vec![None],
             submission_kind: EvalSubmissionKind::OnDemand,
             effective_seed: Some(17),
+            base_weight_shard_manifest: None,
             state: EvalJobState::Queued,
             progress: EvalProgress::default(),
             finished_runs: vec![],

@@ -2725,7 +2725,7 @@ impl AppState {
         let effective_seed = forced_effective_seed
             .or(requested_seed)
             .unwrap_or_else(rand::random);
-        let info = crate::eval::queue::EvalJobInfo::queued(
+        let mut info = crate::eval::queue::EvalJobInfo::queued(
             job_id.clone(),
             suite_name,
             adapters,
@@ -2733,6 +2733,7 @@ impl AppState {
             source_training_job_id,
             effective_seed,
         );
+        info.base_weight_shard_manifest = self.base_weight_shard_manifest.as_deref().cloned();
         self.eval_jobs.write().unwrap().insert(job_id.clone(), info);
         self.eval_queue
             .lock()

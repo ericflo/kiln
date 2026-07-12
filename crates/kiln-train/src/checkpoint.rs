@@ -24,11 +24,60 @@ pub const TRAINING_CHECKPOINT_MANIFEST_TYPE: &str = "kiln.training-checkpoint.v1
 pub const TRAINING_CHECKPOINT_MANIFEST_FILENAME: &str = "checkpoint_manifest.json";
 pub const TRAINING_CHECKPOINT_INCOMPLETE_SENTINEL: &str = ".incomplete";
 pub const TRAINING_CHECKPOINT_DIRECTORY_SUFFIX: &str = ".kiln-checkpoint";
+pub(crate) const BASE_WEIGHT_SHARD_MANIFEST_AUXILIARY_KEY: &str = "base_weight_shard_manifest";
 
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ARTIFACTS: usize = 64;
 const MAX_IDENTIFIER_BYTES: usize = 255;
 const MAX_RELATIVE_PATH_BYTES: usize = 1024;
+
+/// Parse and verify the base-weight provenance embedded in an exact checkpoint.
+/// Legacy checkpoints that recorded only one aggregate are deliberately not
+/// accepted for exact resume because they cannot identify the constituent
+/// shard artifacts.
+pub(crate) fn validated_checkpoint_base_weight_manifest(
+    auxiliary_state: &Value,
+) -> Result<kiln_core::model_provenance::BaseWeightShardManifest> {
+    let value = auxiliary_state
+        .get(BASE_WEIGHT_SHARD_MANIFEST_AUXILIARY_KEY)
+        .with_context(|| {
+            format!(
+                "checkpoint has no {BASE_WEIGHT_SHARD_MANIFEST_AUXILIARY_KEY}; exact resume requires per-shard base-weight provenance"
+            )
+        })?;
+    let manifest: kiln_core::model_provenance::BaseWeightShardManifest =
+        serde_json::from_value(value.clone())
+            .context("parse checkpoint base-weight shard manifest")?;
+    manifest
+        .validate()
+        .context("validate checkpoint base-weight shard manifest")?;
+    let aggregate = auxiliary_state
+        .get("base_model_weights_sha256")
+        .and_then(Value::as_str)
+        .context("checkpoint has no base_model_weights_sha256 aggregate")?;
+    ensure!(
+        aggregate == manifest.aggregate_sha256,
+        "checkpoint base-model aggregate {aggregate} differs from its shard manifest {}",
+        manifest.aggregate_sha256
+    );
+    Ok(manifest)
+}
+
+pub(crate) fn validate_checkpoint_base_weight_resume_binding(
+    checkpoint_auxiliary_state: &Value,
+    current_auxiliary_state: &Value,
+) -> Result<()> {
+    let checkpoint = validated_checkpoint_base_weight_manifest(checkpoint_auxiliary_state)?;
+    let current = validated_checkpoint_base_weight_manifest(current_auxiliary_state)
+        .context("current run has no valid base-weight shard provenance")?;
+    ensure!(
+        checkpoint
+            .content_equivalent(&current)
+            .context("compare checkpoint and current base-weight shard manifests")?,
+        "resume checkpoint base-weight shard content differs from this run"
+    );
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -986,6 +1035,28 @@ impl Drop for StagingGuard {
 mod tests {
     use super::*;
 
+    fn base_weight_manifest(
+        filename: &str,
+        byte: u8,
+    ) -> kiln_core::model_provenance::BaseWeightShardManifest {
+        kiln_core::model_provenance::BaseWeightShardManifest::new(vec![
+            kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                filename, 11, [byte; 32],
+            )
+            .unwrap(),
+        ])
+        .unwrap()
+    }
+
+    fn base_weight_auxiliary_state(
+        manifest: &kiln_core::model_provenance::BaseWeightShardManifest,
+    ) -> Value {
+        serde_json::json!({
+            "base_model_weights_sha256": manifest.aggregate_sha256,
+            BASE_WEIGHT_SHARD_MANIFEST_AUXILIARY_KEY: manifest,
+        })
+    }
+
     fn hash(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
     }
@@ -1062,6 +1133,52 @@ mod tests {
                 role: CheckpointFileRole::LossHistory,
             },
         ]
+    }
+
+    #[test]
+    fn exact_resume_requires_valid_per_shard_base_weight_provenance() {
+        let manifest = base_weight_manifest("model.safetensors", 0x11);
+        let valid = base_weight_auxiliary_state(&manifest);
+        assert_eq!(
+            validated_checkpoint_base_weight_manifest(&valid).unwrap(),
+            manifest
+        );
+
+        let aggregate_only = serde_json::json!({
+            "base_model_weights_sha256": manifest.aggregate_sha256,
+        });
+        let error = validated_checkpoint_base_weight_manifest(&aggregate_only)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exact resume requires per-shard"));
+
+        let mut inconsistent = valid;
+        inconsistent["base_model_weights_sha256"] =
+            Value::String(format!("sha256:{}", "0".repeat(64)));
+        let error = validated_checkpoint_base_weight_manifest(&inconsistent)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("differs from its shard manifest"));
+    }
+
+    #[test]
+    fn exact_resume_compares_shard_content_not_audit_filenames() {
+        let original = base_weight_manifest("model.safetensors", 0x11);
+        let renamed = base_weight_manifest("relocated.safetensors", 0x11);
+        validate_checkpoint_base_weight_resume_binding(
+            &base_weight_auxiliary_state(&original),
+            &base_weight_auxiliary_state(&renamed),
+        )
+        .unwrap();
+
+        let changed = base_weight_manifest("model.safetensors", 0x12);
+        let error = validate_checkpoint_base_weight_resume_binding(
+            &base_weight_auxiliary_state(&original),
+            &base_weight_auxiliary_state(&changed),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("shard content differs"));
     }
 
     fn write_artifacts(root: &Path) -> Result<()> {

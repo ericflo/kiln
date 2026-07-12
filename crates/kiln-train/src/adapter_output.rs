@@ -34,6 +34,8 @@ pub struct AdapterManifest {
     pub receipt_hash: Option<String>,
     pub parent_adapter: Option<String>,
     pub model_config_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_weight_shard_manifest: Option<kiln_core::model_provenance::BaseWeightShardManifest>,
     pub kiln_commit: Option<String>,
     pub training_data_hash: Option<String>,
     pub training_data_source: Option<String>,
@@ -269,6 +271,7 @@ pub fn build_adapter_manifest_from_train_receipt(
             .config_hash
             .clone()
             .or_else(|| receipt.config_hashes.model_config_hash.clone()),
+        base_weight_shard_manifest: receipt.model.base_weight_shard_manifest.clone(),
         kiln_commit: receipt.kiln.git_commit.clone(),
         training_data_hash: receipt.training_data.sha256.clone(),
         training_data_source: Some(receipt.training_data.source.clone()),
@@ -285,7 +288,14 @@ pub fn build_adapter_manifest_from_train_receipt(
 
 pub fn read_adapter_manifest(path: &Path) -> Result<AdapterManifest> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+    let manifest: AdapterManifest =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    if let Some(base_weights) = manifest.base_weight_shard_manifest.as_ref() {
+        base_weights
+            .validate()
+            .with_context(|| format!("validate base-weight provenance in {}", path.display()))?;
+    }
+    Ok(manifest)
 }
 
 pub fn read_adapter_manifest_from_adapter_dir(
@@ -679,6 +689,17 @@ mod tests {
         );
         receipt.kiln.git_commit = Some("abc123".to_string());
         receipt.model.config_hash = Some("sha256:model-config".to_string());
+        receipt.model.base_weight_shard_manifest = Some(
+            kiln_core::model_provenance::BaseWeightShardManifest::new(vec![
+                kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                    "model.safetensors",
+                    11,
+                    [0x42; 32],
+                )
+                .unwrap(),
+            ])
+            .unwrap(),
+        );
         receipt.training_data = crate::train_receipt::TrainingDataReceipt {
             source: "jsonl_grpo_groups".to_string(),
             path: Some("/data/groups.jsonl".to_string()),
@@ -751,6 +772,10 @@ mod tests {
             Some("sha256:model-config")
         );
         assert_eq!(
+            manifest.base_weight_shard_manifest,
+            receipt.model.base_weight_shard_manifest
+        );
+        assert_eq!(
             manifest.training_data_hash.as_deref(),
             Some("sha256:training-data")
         );
@@ -769,6 +794,28 @@ mod tests {
                 .unwrap()
                 .starts_with("sha256:")
         );
+    }
+
+    #[test]
+    fn adapter_manifest_read_rejects_tampered_base_weight_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let adapter = tmp.path().join("actual");
+        write_minimal_adapter(&adapter);
+        let receipt = manifest_test_receipt("actual");
+        write_train_receipt(&adapter, &receipt);
+        let manifest_path = write_adapter_manifest_from_train_receipt(&adapter, &receipt)
+            .unwrap()
+            .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        value["base_weight_shard_manifest"]["aggregate_sha256"] =
+            serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = read_adapter_manifest(&manifest_path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("validate base-weight provenance"));
     }
 
     #[test]

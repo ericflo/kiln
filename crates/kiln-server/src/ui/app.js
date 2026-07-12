@@ -7044,6 +7044,34 @@ function jobStateFigure(stateClass) {
   return `<span class="job-statefig ${stateClass}" aria-hidden="true">${icon(g)}</span>`;
 }
 
+function renderBaseWeightSummary(manifest) {
+  if (!manifest || typeof manifest.aggregate_sha256 !== 'string') return '';
+  const digest = manifest.aggregate_sha256;
+  const shortDigest = digest.length > 28 ? `${digest.slice(0, 18)}…${digest.slice(-8)}` : digest;
+  const shardCount = Array.isArray(manifest.shards) ? manifest.shards.length : 0;
+  const shardLabel = `${shardCount} shard${shardCount === 1 ? '' : 's'}`;
+  const byteLabel = Number.isFinite(manifest.total_size_bytes) ? ` · ${fmtBytes(manifest.total_size_bytes)}` : '';
+  return `<div class="hint" style="display:flex; align-items:center; gap:6px; min-width:0; flex-wrap:wrap; font-size:11px;">
+    <strong style="color:var(--text);">Base weights</strong>
+    <code title="${escapeHtml(digest)}" style="overflow-wrap:anywhere;">${escapeHtml(shortDigest)}</code>
+    <button class="btn btn-sm btn-ghost" type="button" data-copy-base-weight="${escapeHtml(digest)}" title="Copy exact base-weight aggregate" aria-label="Copy exact base-weight aggregate"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg></button>
+    <span>${escapeHtml(shardLabel + byteLabel)}</span>
+  </div>`;
+}
+
+function wireBaseWeightCopy(root) {
+  root?.querySelectorAll('[data-copy-base-weight]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const value = btn.dataset.copyBaseWeight;
+      if (!value) return;
+      copyText(value, btn).then(() => {
+        if (Object.prototype.hasOwnProperty.call(window, '__copiedText')) window.__copiedText = value;
+        toast('Base-weight identity copied', 'ok');
+      });
+    });
+  });
+}
+
 function renderJobCard(j) {
   const acc = j.headline_accuracy;
   const adapters = (j.adapters || []).map(a => a == null ? '<span class="hint">base</span>' : escapeHtml(a)).join(' vs ');
@@ -7288,7 +7316,9 @@ function renderDrillModal(preserveSelection) {
   if (runs.length === 0) {
     headerEl.innerHTML = `
       <div class="hint">${j.state === 'queued' ? 'Job is queued. Will start shortly.' : (j.state === 'running' ? 'Job is running. Live progress streaming…' : 'No completed runs yet.')}</div>
-      ${j.progress && j.progress.examples_total > 0 ? `<div style="flex:1;"><div class="progress-bar-wrap" style="height:8px;"><div class="progress-bar-fill" style="width:${(j.progress.examples_completed / j.progress.examples_total * 100).toFixed(1)}%;"></div></div><div class="hint" style="font-size:11px; margin-top:4px;">${j.progress.examples_completed}/${j.progress.examples_total} · running ${(j.progress.running_accuracy*100).toFixed(0)}%</div></div>` : ''}`;
+      ${j.progress && j.progress.examples_total > 0 ? `<div style="flex:1;"><div class="progress-bar-wrap" style="height:8px;"><div class="progress-bar-fill" style="width:${(j.progress.examples_completed / j.progress.examples_total * 100).toFixed(1)}%;"></div></div><div class="hint" style="font-size:11px; margin-top:4px;">${j.progress.examples_completed}/${j.progress.examples_total} · running ${(j.progress.running_accuracy*100).toFixed(0)}%</div></div>` : ''}
+      ${renderBaseWeightSummary(j.base_weight_shard_manifest)}`;
+    wireBaseWeightCopy(headerEl);
     compareEl.hidden = true;
     tagsEl.hidden = true;
     document.getElementById('drill-outcomes').innerHTML = '<div class="eval-empty"><div class="eval-empty-body">Outcomes will appear here as they complete.</div></div>';
@@ -7313,7 +7343,9 @@ function renderDrillModal(preserveSelection) {
         ${m.latency && m.latency.p50_ms > 0 ? `<div class="count-cell"><span class="count-num">${m.latency.p50_ms.toFixed(0)}ms</span><span class="count-label">p50</span></div>` : ''}
         ${m.total_completion_tokens ? `<div class="count-cell"><span class="count-num">${(m.total_completion_tokens/1000).toFixed(1)}k</span><span class="count-label">tok out</span></div>` : ''}
       </div>
-    </div>`;
+    </div>
+    ${renderBaseWeightSummary(j.base_weight_shard_manifest)}`;
+  wireBaseWeightCopy(headerEl);
 
   // Compare matrix when multi-run
   if (isCompare && runs.length >= 2) {
@@ -7621,6 +7653,7 @@ function buildDrillOutcomesJsonl(j) {
       };
       if (j.effective_seed != null) line.effective_seed = String(j.effective_seed);
       if (j.seed_derivation != null) line.seed_derivation = j.seed_derivation;
+      if (j.base_weight_shard_manifest != null) line.base_weight_shard_manifest = j.base_weight_shard_manifest;
       if (o.generation_seed != null) line.generation_seed = String(o.generation_seed);
       if (o.detail != null) line.detail = o.detail;
       if (o.latency_ms != null) line.latency_ms = o.latency_ms;
@@ -9682,6 +9715,13 @@ function renderTrainDrillBody(j) {
       <span class="hint">Materialized before queue publication</span>
     </div>
   </div>`;
+  const baseWeightManifest = j.train_receipt?.model?.base_weight_shard_manifest
+    || j.adapter_manifest?.base_weight_shard_manifest
+    || null;
+  const baseWeightSection = baseWeightManifest == null ? '' : `<div class="detail-section">
+    <h4>Base weights</h4>
+    ${renderBaseWeightSummary(baseWeightManifest)}
+  </div>`;
   const html = `<div style="padding: var(--space-4) var(--space-5); border-bottom:1px solid var(--border);">
     <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
       <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing: var(--tracking-caps);">Progress</div>
@@ -9702,6 +9742,7 @@ function renderTrainDrillBody(j) {
     <div id="train-drill-curve-host"></div>
   </div>
   ${seedSection}
+  ${baseWeightSection}
   ${renderTrainMetadata(j)}
   ${renderTrainCheckpoint(j)}
   <div class="detail-section">
@@ -9718,6 +9759,7 @@ function renderTrainDrillBody(j) {
   </div>`;
   // Defer wiring to after innerHTML set
   setTimeout(() => {
+    wireBaseWeightCopy(document.getElementById('train-drill-content'));
     document.querySelectorAll('[data-linked-eval]').forEach(b => {
       b.addEventListener('click', () => {
         closeTrainDrillModal();

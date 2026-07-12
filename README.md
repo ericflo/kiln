@@ -475,7 +475,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/train/opd` | Submit on-policy or off-policy distillation against a registered, identity-bound teacher, return the exact effective seed, and default exact checkpoints to every 25 committed optimizer steps |
 | GET | `/v1/train/status` | Training queue, job status, and exact effective seeds |
 | GET | `/v1/train/status/{job_id}` | Inspect one training job and its exact effective seed |
-| GET | `/v1/train/jobs/{job_id}` | Rich training job detail (effective seed, loss curve, linked evals, and latest exact SFT/GRPO/OPD checkpoint metadata) |
+| GET | `/v1/train/jobs/{job_id}` | Rich training job detail (effective seed, base-weight shard identity, loss curve, linked evals, and latest exact SFT/GRPO/OPD checkpoint metadata) |
 | GET | `/v1/train/queue` | List queued training jobs |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a job (queued: dequeued; running: stops at the next step boundary) |
 | GET | `/v1/stats/mtp-acceptance` | Per-adapter MTP draft acceptance (live alpha) |
@@ -514,8 +514,8 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET / DELETE | `/v1/eval/suites/{name}` | Fetch / delete one suite |
 | POST | `/v1/eval/run` | Submit an eval and materialize one effective seed (registered suite or inline) |
 | POST | `/v1/eval/compare` | Run a suite head-to-head with identical derived seeds across adapters |
-| GET | `/v1/eval/jobs` | List eval jobs, effective seeds, and headline results |
-| GET / DELETE | `/v1/eval/jobs/{job_id}` | Per-job seed/status/outcomes or cancel/delete |
+| GET | `/v1/eval/jobs` | List eval jobs, effective seeds, base-weight shard identities, and headline results |
+| GET / DELETE | `/v1/eval/jobs/{job_id}` | Per-job seed/base-weight identity/status/outcomes or cancel/delete |
 | POST | `/v1/eval/jobs/{job_id}/rerun` | Re-run failures with the original effective seed by default |
 | POST | `/v1/eval/datasets/upload` | Multipart upload of an SFT/GRPO JSONL dataset |
 | GET / DELETE | `/v1/eval/datasets/{name}` | Dataset manifest / delete |
@@ -531,11 +531,11 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/judgments/render_prompt` | Render the canonical pairwise judging prompt (debug aid) |
 | GET | `/v1/models` | List available models |
 | GET | `/v1/config` | Current server configuration, serving-profile source, and every effective profile policy |
-| GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of active model, adapters, config hashes, env flags, batching, thinking defaults, and cache counts; enabled only with `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
+| GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of the complete base-weight shard manifest, active model/adapters, config hashes, env flags, batching, thinking defaults, and cache counts; enabled only with `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
 | GET | `/ui/` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
 | GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history, including effective thinking-budget provenance and outcomes, for the dashboard's request panel |
-| GET | `/health` | Server readiness and diagnostics; maintenance intentionally returns 503 |
+| GET | `/health` | Server readiness and diagnostics, including the bounded base-weight aggregate/count/byte summary; maintenance intentionally returns 503 |
 | GET | `/v1/health` | `/v1` compatibility alias for readiness and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 
@@ -583,6 +583,15 @@ Mutating the original checkpoint after startup cannot change loaded bytes or
 their revision. A user
 with the same UID (or root) can still discover and rewrite process-owned files;
 Kiln treats that as part of the trusted host boundary.
+
+That startup hash pass also retains a strict manifest for every safetensors
+shard: portable filename, exact byte length, complete SHA-256, and one
+relocation-independent aggregate. `/health` exposes its bounded digest/count/
+byte summary; gated `/v1/debug/model-state` exposes the full list. Exact
+checkpoints, training receipts, adapter manifests, and eval results persist the
+same identity without re-reading weights during inference. See
+[Base-Weight Provenance](docs/BASE_WEIGHT_PROVENANCE.md) for the schema,
+aggregate algorithm, legacy behavior, and exact-resume rules.
 
 The response is additionally capped at 65,536 candidate entries. Real scoring
 uses the runner's resident backend and inference recurrent-state policy, omits
@@ -969,7 +978,8 @@ Adapters are easy to revert if a bad training run lands. `POST /v1/adapters/unlo
 
 Completed training runs also write `adapter_manifest.json` beside the adapter
 weights. The manifest records adapter/config/receipt hashes, parent adapter,
-model config hash, kiln commit, and training data hash. Use
+model config hash, the exact base-weight shard manifest, kiln commit, and
+training data hash. Use
 `kiln adapters restore <path>/adapter_manifest.json --adapter-dir <registry>`
 to copy an adapter into a registry and verify hashes after copy. See
 [`docs/ADAPTER_MANIFEST.md`](docs/ADAPTER_MANIFEST.md) for the schema.

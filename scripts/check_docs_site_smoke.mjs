@@ -87,6 +87,7 @@ const expectedQuickstartSections = [
   { label: 'GRPO next step', terms: ['grpo guide', 'generate', 'score', 'train'] },
   { label: 'training payload shapes', terms: ['sft jsonl', 'one chat correction per line', 'messages array', 'grpo json request/batch', 'jsonl with one group per line', 'groups', 'candidate completions', 'reward scores', 'opd request object', 'kiln train sft', 'kiln train grpo', 'kiln train opd', 'registered exact teacher identity'] },
   { label: 'exact training resume', terms: ['checkpoint-interval', '.kiln-checkpoint', 'resume-checkpoint', 'identical source', 'exact optimizer and loop state', 'opd defaults to 25', 'exact registered teacher revision'] },
+  { label: 'base-weight provenance', terms: ['base-weight shard manifest', 'changed shard bytes', 'legacy aggregate-only checkpoints', 'base-weight provenance contract'] },
   { label: 'Where to go next', terms: ['where to go next'] },
 ];
 
@@ -150,6 +151,7 @@ const expectedApiEndpoints = [
   '/ui',
   '/v1/models',
   '/v1/config',
+  '/v1/debug/model-state',
   '/v1/chat/completions',
   '/v1/completions/batch',
   '/v1/adapters',
@@ -194,6 +196,7 @@ const expectedApiSections = [
   { label: 'adapter lifecycle', terms: ['lora lifecycle'] },
   { label: 'training', terms: ['training'] },
   { label: 'exact SFT/GRPO/OPD resume', terms: ['latest exact sft/grpo/opd resume checkpoint', '/v1/train/opd', 'checkpoint_interval', 'resume_checkpoint', 'training_kind', 'data_source_kind', 'candidate cursor', 'teacher content revision', 'peft snapshots remain serving-only'] },
+  { label: 'base-weight provenance', terms: ['kiln.base-weight-shards.v1', 'base-weight aggregate', 'complete base-weight shard manifest', 'legacy aggregate-only checkpoints'] },
   { label: 'training data safety', terms: ['training data changes', 'adapter'] },
   { label: 'response shapes', terms: ['response shapes'] },
 ];

@@ -291,6 +291,8 @@ struct EvalRunResponse {
 struct EvalResultPayload {
     job_id: String,
     state: String,
+    #[serde(default)]
+    base_weight_shard_manifest: Option<kiln_core::model_provenance::BaseWeightShardManifest>,
     #[serde(default, with = "kiln_eval::result::optional_u64_decimal")]
     effective_seed: Option<u64>,
     #[serde(default)]
@@ -1337,6 +1339,9 @@ fn print_human(result: &EvalResultPayload) {
                 .unwrap_or(kiln_eval::EVAL_SEED_DERIVATION_V1)
         );
     }
+    if let Some(line) = base_weight_provenance_line(result) {
+        println!("{line}");
+    }
     for r in &result.runs {
         let adapter_label = r
             .adapter
@@ -1484,6 +1489,9 @@ fn print_compare(result: &EvalResultPayload) {
     if let Some(seed) = result.effective_seed {
         println!("Effective seed: {seed}");
     }
+    if let Some(line) = base_weight_provenance_line(result) {
+        println!("{line}");
+    }
     println!(
         "{:<24}  {:>10}  {:>10}  {:>10}",
         "adapter", "accuracy", "mean", "p50 ms"
@@ -1568,6 +1576,18 @@ fn print_compare(result: &EvalResultPayload) {
     }
 }
 
+fn base_weight_provenance_line(result: &EvalResultPayload) -> Option<String> {
+    result.base_weight_shard_manifest.as_ref().map(|manifest| {
+        format!(
+            "Base weights: {} ({} shard{}, {} bytes)",
+            manifest.aggregate_sha256,
+            manifest.shards.len(),
+            if manifest.shards.len() == 1 { "" } else { "s" },
+            manifest.total_size_bytes
+        )
+    })
+}
+
 fn compute_flip_diff(result: &EvalResultPayload) -> Option<kiln_eval::FlipDiff> {
     // Reuse the canonical flip-diff logic by reshaping into the real
     // EvalResult type via a JSON round-trip. Cheap (the payload is
@@ -1575,6 +1595,7 @@ fn compute_flip_diff(result: &EvalResultPayload) -> Option<kiln_eval::FlipDiff> 
     let synthetic = kiln_eval::EvalResult {
         job_id: result.job_id.clone(),
         state: kiln_eval::EvalJobState::Completed,
+        base_weight_shard_manifest: result.base_weight_shard_manifest.clone(),
         effective_seed: result.effective_seed,
         seed_derivation: result.seed_derivation.clone(),
         runs: result.runs.clone(),
@@ -1601,6 +1622,35 @@ mod tests {
         assert!(err.contains("anthropic_jsonl"), "{err}");
         assert!(parse_trace_format("anthropic_jsonl").is_ok());
         assert!(parse_trace_format("auto").is_ok());
+    }
+
+    #[test]
+    fn eval_provenance_line_reports_exact_base_weight_identity() {
+        let manifest = kiln_core::model_provenance::BaseWeightShardManifest::new(vec![
+            kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                "model.safetensors",
+                11,
+                [0x42; 32],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let result: EvalResultPayload = serde_json::from_value(serde_json::json!({
+            "job_id": "eval-1",
+            "state": "completed",
+            "base_weight_shard_manifest": manifest,
+            "runs": [],
+        }))
+        .unwrap();
+
+        let expected = format!(
+            "Base weights: {} (1 shard, 11 bytes)",
+            manifest.aggregate_sha256
+        );
+        assert_eq!(
+            base_weight_provenance_line(&result).as_deref(),
+            Some(expected.as_str())
+        );
     }
 
     #[test]

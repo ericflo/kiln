@@ -379,6 +379,9 @@
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           <code>POST /v1/eval/run</code> queues the job and returns immediately with a <code>job_id</code> and exact <code>effective_seed</code>. The eval worker resolves the suite from disk (or uses an inline copy), drives the in-process inference path through the requested adapter, and writes per-example outcomes plus a headline accuracy as it goes. Drill into <code>/ui</code> &rsaquo; Evals to watch progress and copy the job or per-completion seeds.
         </p>
+        <p class="text-sm mb-5" style="color: var(--fg-mute);">
+          Admission also snapshots the resident <code>kiln.base-weight-shards.v1</code> manifest. Job detail and raw JSON retain every shard filename, exact size, and SHA-256; the dashboard and <code>kiln-eval</code> show the aggregate/count/byte summary with an exact-copy action. Downloaded outcome JSONL carries the complete manifest on every standalone row, and terminal archives validate it again on restart. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/BASE_WEIGHT_PROVENANCE.md">base-weight provenance contract</a>.
+        </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">Run a registered suite against an adapter</h3>
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/run \

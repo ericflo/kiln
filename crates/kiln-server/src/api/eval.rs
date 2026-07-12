@@ -1359,7 +1359,17 @@ mod tests {
 
     #[tokio::test]
     async fn list_jobs_empty_then_one_after_submit() {
-        let state = mk_state();
+        let mut state = mk_state();
+        let base_weights = kiln_core::model_provenance::BaseWeightShardManifest::new(vec![
+            kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                "model.safetensors",
+                11,
+                [0x42; 32],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        state.base_weight_shard_manifest = Some(std::sync::Arc::new(base_weights.clone()));
         let router = routes().with_state(state.clone());
         let res = router
             .clone()
@@ -1410,6 +1420,14 @@ mod tests {
         assert_eq!(
             resp["jobs"][0]["effective_seed"],
             effective_seed.to_string()
+        );
+        assert_eq!(
+            resp["jobs"][0]["base_weight_shard_manifest"]["aggregate_sha256"],
+            base_weights.aggregate_sha256
+        );
+        assert_eq!(
+            resp["jobs"][0]["base_weight_shard_manifest"]["shards"][0]["filename"],
+            "model.safetensors"
         );
     }
 

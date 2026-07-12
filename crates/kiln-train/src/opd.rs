@@ -3437,6 +3437,10 @@ impl OpdCheckpointDescriptor {
             manifest.state_files == self.state_files(),
             "resume checkpoint OPD artifact contract differs from this runtime"
         );
+        crate::checkpoint::validate_checkpoint_base_weight_resume_binding(
+            &manifest.auxiliary_state,
+            &self.auxiliary_state,
+        )?;
         anyhow::ensure!(
             manifest.auxiliary_state == self.auxiliary_state,
             "resume checkpoint model/tokenizer/teacher/runtime identity differs from this run"
@@ -3460,6 +3464,7 @@ impl OpdCheckpointDescriptor {
             self.base_model_weights_sha256.is_some(),
             "exact OPD checkpointing requires base-model weights loaded with a content identity"
         );
+        crate::checkpoint::validated_checkpoint_base_weight_manifest(&self.auxiliary_state)?;
         anyhow::ensure!(
             self.teacher_content_revision.is_some(),
             "exact OPD checkpointing requires an authoritative teacher content identity"
@@ -3636,6 +3641,7 @@ fn opd_checkpoint_auxiliary_state(
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     training_precision_policy: kiln_model::backend::TrainingPrecisionPolicy,
     base_model_weights_sha256: Option<&str>,
+    base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
     backend_runtime: &str,
     prepared_source_indices: &[usize],
     teacher_caps: &LogitSourceCaps,
@@ -3653,6 +3659,7 @@ fn opd_checkpoint_auxiliary_state(
         "tokenizer_config_sha256": hashes.tokenizer_config_hash,
         "chat_template_sha256": hashes.chat_template_hash,
         "base_model_weights_sha256": base_model_weights_sha256,
+        "base_weight_shard_manifest": base_weight_shard_manifest,
         "backend_runtime": backend_runtime,
         "kiln_train_version": env!("CARGO_PKG_VERSION"),
         "prepared_source_indices": prepared_source_indices,
@@ -3812,6 +3819,7 @@ pub fn opd_train_to_with_checkpoint_root(
             adapter_name,
             model_config,
             tokenizer,
+            weights.base_weight_shard_manifest.as_ref(),
             config,
             effective_top_k,
             config.seed,
@@ -3945,10 +3953,7 @@ pub fn opd_train_to_with_checkpoint_root(
         );
     }
     if config.checkpoint_interval.is_some() || resume_checkpoint.is_some() {
-        crate::trainer::checkpoint_sha256_hex(
-            weights.source_content_sha256.as_deref(),
-            "base-model weights content identity",
-        )?;
+        crate::trainer::validate_exact_base_weight_provenance(weights)?;
     }
     let resume_init_seed = resume_checkpoint
         .as_ref()
@@ -3986,6 +3991,7 @@ pub fn opd_train_to_with_checkpoint_root(
                 adapter_name,
                 model_config,
                 tokenizer,
+                weights.base_weight_shard_manifest.as_ref(),
                 config,
                 effective_top_k,
                 Some(effective_seed),
@@ -4080,6 +4086,7 @@ pub fn opd_train_to_with_checkpoint_root(
             adapter_name,
             model_config,
             tokenizer,
+            weights.base_weight_shard_manifest.as_ref(),
             config,
             effective_top_k,
             Some(effective_seed),
@@ -4281,6 +4288,7 @@ pub fn opd_train_to_with_checkpoint_root(
             tokenizer,
             training_precision_policy,
             weights.source_content_sha256.as_deref(),
+            weights.base_weight_shard_manifest.as_ref(),
             backend_rt.runtime_name(),
             &prepared_source_indices,
             &teacher_caps,
@@ -4883,6 +4891,7 @@ pub fn opd_train_to_with_checkpoint_root(
             adapter_name,
             model_config,
             tokenizer,
+            weights.base_weight_shard_manifest.as_ref(),
             config,
             effective_top_k,
             Some(effective_seed),
@@ -5529,6 +5538,7 @@ fn write_opd_train_receipt(
     adapter_name: &str,
     model_config: &kiln_core::config::ModelConfig,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
     config: &OpdConfig,
     effective_top_k: usize,
     effective_seed: Option<u64>,
@@ -5573,6 +5583,7 @@ fn write_opd_train_receipt(
         },
         effective_config_json,
     );
+    receipt.model.base_weight_shard_manifest = base_weight_shard_manifest.cloned();
     receipt.training_data = crate::train_receipt::TrainingDataReceipt {
         source: "inline_opd_prompts".to_string(),
         path: None,
@@ -6850,6 +6861,14 @@ mod tests {
             &crate::train_receipt::LoraGradNormAccumulator::default(),
             &crate::diagnostics::LengthInflationGuardrail::default(),
         );
+        let base_weight_shard_manifest =
+            kiln_core::model_provenance::BaseWeightShardManifest::new(vec![
+                kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                    "model.safetensors",
+                    16,
+                    [0x22; 32],
+                )?,
+            ])?;
         let descriptor = OpdCheckpointDescriptor {
             adapter_name: "exact-opd".into(),
             effective_config: serde_json::json!({"seed": 17}),
@@ -6876,9 +6895,13 @@ mod tests {
             candidates_per_epoch: 4,
             total_epochs: 2,
             on_policy: true,
-            base_model_weights_sha256: Some(format!("sha256:{}", "2".repeat(64))),
+            base_model_weights_sha256: Some(base_weight_shard_manifest.aggregate_sha256.clone()),
             teacher_content_revision: Some(format!("sha256:{}", "3".repeat(64))),
-            auxiliary_state: serde_json::json!({"identity": "bound"}),
+            auxiliary_state: serde_json::json!({
+                "identity": "bound",
+                "base_model_weights_sha256": base_weight_shard_manifest.aggregate_sha256,
+                "base_weight_shard_manifest": base_weight_shard_manifest,
+            }),
         };
         let manifest = descriptor.manifest(&state)?;
         assert_eq!(manifest.training_kind, crate::checkpoint::TrainingKind::Opd);

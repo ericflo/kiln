@@ -2835,6 +2835,10 @@ impl SftCheckpointDescriptor {
             manifest.rng_states == self.rng_states(manifest.progress.epoch_index),
             "resume checkpoint RNG streams differ from this request"
         );
+        crate::checkpoint::validate_checkpoint_base_weight_resume_binding(
+            &manifest.auxiliary_state,
+            &self.auxiliary_state,
+        )?;
         anyhow::ensure!(
             manifest.auxiliary_state == self.auxiliary_state,
             "resume checkpoint model/tokenizer/runtime identity differs from this run"
@@ -2887,6 +2891,7 @@ impl SftCheckpointDescriptor {
             self.base_model_weights_sha256.is_some(),
             "exact SFT checkpointing requires base-model weights loaded with a content identity"
         );
+        crate::checkpoint::validated_checkpoint_base_weight_manifest(&self.auxiliary_state)?;
         let progress = crate::checkpoint::TrainingCheckpointProgress {
             global_step: loop_state.global_step,
             total_steps: self.total_steps as u64,
@@ -3058,6 +3063,7 @@ fn sft_checkpoint_auxiliary_state(
     precision_policy: TrainingPrecisionPolicy,
     valid_indices: &[usize],
     base_model_weights_sha256: Option<&str>,
+    base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
     backend_runtime: &str,
     gradient_checkpoint_plan_sha256: &str,
 ) -> Result<serde_json::Value> {
@@ -3071,6 +3077,7 @@ fn sft_checkpoint_auxiliary_state(
         "tokenizer_config_sha256": hashes.tokenizer_config_hash,
         "chat_template_sha256": hashes.chat_template_hash,
         "base_model_weights_sha256": base_model_weights_sha256,
+        "base_weight_shard_manifest": base_weight_shard_manifest,
         "backend_runtime": backend_runtime,
         "kiln_train_version": env!("CARGO_PKG_VERSION"),
         "gradient_checkpoint_plan_sha256": gradient_checkpoint_plan_sha256,
@@ -3085,6 +3092,26 @@ pub(crate) fn checkpoint_sha256_hex(prefixed: Option<&str>, label: &str) -> Resu
         .strip_prefix("sha256:")
         .map(ToOwned::to_owned)
         .with_context(|| format!("{label} SHA-256 lacks sha256: prefix"))
+}
+
+pub(crate) fn validate_exact_base_weight_provenance(weights: &GpuWeights) -> Result<()> {
+    let aggregate = weights
+        .source_content_sha256
+        .as_deref()
+        .context("exact checkpointing requires a loader-owned base-model content identity")?;
+    let manifest = weights
+        .base_weight_shard_manifest
+        .as_ref()
+        .context("exact checkpointing requires a loader-owned base-weight shard manifest")?;
+    manifest
+        .validate()
+        .context("validate resident base-weight shard manifest")?;
+    anyhow::ensure!(
+        aggregate == manifest.aggregate_sha256,
+        "resident base-model aggregate {aggregate} differs from its shard manifest {}",
+        manifest.aggregate_sha256
+    );
+    Ok(())
 }
 
 fn load_sft_checkpoint_loop_state(
@@ -3523,6 +3550,10 @@ impl GrpoCheckpointDescriptor {
             manifest.state_files == self.state_files(),
             "resume checkpoint GRPO artifact contract differs from this runtime"
         );
+        crate::checkpoint::validate_checkpoint_base_weight_resume_binding(
+            &manifest.auxiliary_state,
+            &self.auxiliary_state,
+        )?;
         anyhow::ensure!(
             manifest.auxiliary_state == self.auxiliary_state,
             "resume checkpoint model/tokenizer/runtime identity differs from this run"
@@ -3555,6 +3586,7 @@ impl GrpoCheckpointDescriptor {
             self.base_model_weights_sha256.is_some(),
             "exact GRPO checkpointing requires base-model weights loaded with a content identity"
         );
+        crate::checkpoint::validated_checkpoint_base_weight_manifest(&self.auxiliary_state)?;
         anyhow::ensure!(
             self.ema_refresh_every.is_some() == ema_ref_state.is_some(),
             "GRPO checkpoint EMA tensor state differs from its manifest contract"
@@ -3721,6 +3753,7 @@ fn grpo_checkpoint_auxiliary_state(
     tokenizer: &KilnTokenizer,
     precision_policy: TrainingPrecisionPolicy,
     base_model_weights_sha256: Option<&str>,
+    base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
     backend_runtime: &str,
     trainable_order_sha256: &str,
     gradient_checkpoint_plan_sha256: &str,
@@ -3734,6 +3767,7 @@ fn grpo_checkpoint_auxiliary_state(
         "tokenizer_config_sha256": hashes.tokenizer_config_hash,
         "chat_template_sha256": hashes.chat_template_hash,
         "base_model_weights_sha256": base_model_weights_sha256,
+        "base_weight_shard_manifest": base_weight_shard_manifest,
         "backend_runtime": backend_runtime,
         "kiln_train_version": env!("CARGO_PKG_VERSION"),
         "trainable_order_sha256": trainable_order_sha256,
@@ -4337,6 +4371,7 @@ fn write_sft_train_receipt_best_effort(
     adapter_name: &str,
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,
+    base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
     config: &SftConfig,
     effective_seed: Option<u64>,
     alpha_over_rank: Option<f32>,
@@ -4358,6 +4393,7 @@ fn write_sft_train_receipt_best_effort(
         sft_hyperparameters(config, effective_seed, alpha_over_rank),
         serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
     );
+    receipt.model.base_weight_shard_manifest = base_weight_shard_manifest.cloned();
     receipt.training_data = crate::train_receipt::TrainingDataReceipt {
         source: "inline_sft_examples".to_string(),
         path: None,
@@ -4401,6 +4437,7 @@ fn build_grpo_train_receipt(
     adapter_name: &str,
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,
+    base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
     config: &GrpoConfig,
     effective_seed: Option<u64>,
     alpha_over_rank: Option<f32>,
@@ -4427,6 +4464,7 @@ fn build_grpo_train_receipt(
         grpo_hyperparameters(config, effective_seed, alpha_over_rank),
         serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
     );
+    receipt.model.base_weight_shard_manifest = base_weight_shard_manifest.cloned();
     receipt.training_data = training_data;
     receipt.adapters.base = crate::train_receipt::adapter_file_receipt(base_adapter_dir);
     receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
@@ -4484,6 +4522,7 @@ fn write_grpo_train_receipt_best_effort(
     adapter_name: &str,
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,
+    base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
     config: &GrpoConfig,
     effective_seed: Option<u64>,
     alpha_over_rank: Option<f32>,
@@ -4531,6 +4570,7 @@ fn write_grpo_train_receipt_best_effort(
         adapter_name,
         model_config,
         tokenizer,
+        base_weight_shard_manifest,
         config,
         effective_seed,
         alpha_over_rank,
@@ -5205,10 +5245,7 @@ pub fn sft_train_to_with_checkpoint_root(
         .transpose()
         .context("load SFT resume checkpoint")?;
     if config.checkpoint_interval.is_some() || resume_checkpoint.is_some() {
-        checkpoint_sha256_hex(
-            weights.source_content_sha256.as_deref(),
-            "base-model weights content identity",
-        )?;
+        validate_exact_base_weight_provenance(weights)?;
     }
     let resume_init_seed = resume_checkpoint
         .as_ref()
@@ -5245,6 +5282,7 @@ pub fn sft_train_to_with_checkpoint_root(
                 adapter_name,
                 model_config,
                 tokenizer,
+                weights.base_weight_shard_manifest.as_ref(),
                 config,
                 config.seed,
                 None,
@@ -5344,6 +5382,7 @@ pub fn sft_train_to_with_checkpoint_root(
                 adapter_name,
                 model_config,
                 tokenizer,
+                weights.base_weight_shard_manifest.as_ref(),
                 config,
                 effective_seed,
                 Some(alpha_over_rank),
@@ -5563,6 +5602,7 @@ pub fn sft_train_to_with_checkpoint_root(
                 training_precision_policy,
                 &valid_indices,
                 weights.source_content_sha256.as_deref(),
+                weights.base_weight_shard_manifest.as_ref(),
                 BackendIdentity::runtime_name(backend.as_ref()),
                 &gradient_checkpoint_plan_sha256,
             )?,
@@ -6063,6 +6103,7 @@ pub fn sft_train_to_with_checkpoint_root(
         adapter_name,
         model_config,
         tokenizer,
+        weights.base_weight_shard_manifest.as_ref(),
         config,
         effective_seed,
         Some(alpha_over_rank),
@@ -6260,10 +6301,7 @@ pub fn grpo_train_to_with_checkpoint_root(
         );
     }
     if config.checkpoint_interval.is_some() || resume_checkpoint.is_some() {
-        checkpoint_sha256_hex(
-            weights.source_content_sha256.as_deref(),
-            "base-model weights content identity",
-        )?;
+        validate_exact_base_weight_provenance(weights)?;
     }
     let resume_init_seed = resume_checkpoint
         .as_ref()
@@ -6383,6 +6421,7 @@ pub fn grpo_train_to_with_checkpoint_root(
                 adapter_name,
                 model_config,
                 tokenizer,
+                weights.base_weight_shard_manifest.as_ref(),
                 config,
                 config.seed,
                 None,
@@ -6470,6 +6509,7 @@ pub fn grpo_train_to_with_checkpoint_root(
                 adapter_name,
                 model_config,
                 tokenizer,
+                weights.base_weight_shard_manifest.as_ref(),
                 config,
                 effective_seed,
                 Some(alpha_over_rank),
@@ -6842,6 +6882,7 @@ pub fn grpo_train_to_with_checkpoint_root(
                 tokenizer,
                 training_precision_policy,
                 weights.source_content_sha256.as_deref(),
+                weights.base_weight_shard_manifest.as_ref(),
                 BackendIdentity::runtime_name(backend.as_ref()),
                 &trainable_order_sha256,
                 &gradient_checkpoint_plan_sha256,
@@ -7267,6 +7308,7 @@ pub fn grpo_train_to_with_checkpoint_root(
         adapter_name,
         model_config,
         tokenizer,
+        weights.base_weight_shard_manifest.as_ref(),
         config,
         effective_seed,
         Some(alpha_over_rank),
@@ -7510,6 +7552,7 @@ pub fn grpo_dry_run_jsonl(
         adapter_name,
         model_config,
         tokenizer,
+        None,
         config,
         config.seed,
         alpha_over_rank,
@@ -8081,10 +8124,7 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
         );
     }
     if config.checkpoint_interval.is_some() || resume_checkpoint.is_some() {
-        checkpoint_sha256_hex(
-            weights.source_content_sha256.as_deref(),
-            "base-model weights content identity",
-        )?;
+        validate_exact_base_weight_provenance(weights)?;
     }
     let resume_init_seed = resume_checkpoint
         .as_ref()
@@ -8165,6 +8205,7 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
                 adapter_name,
                 model_config,
                 tokenizer,
+                weights.base_weight_shard_manifest.as_ref(),
                 config,
                 Some(effective_seed_value),
                 None,
@@ -8213,6 +8254,7 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
                 adapter_name,
                 model_config,
                 tokenizer,
+                weights.base_weight_shard_manifest.as_ref(),
                 config,
                 Some(effective_seed_value),
                 Some(alpha_over_rank),
@@ -8253,6 +8295,7 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
                 adapter_name,
                 model_config,
                 tokenizer,
+                weights.base_weight_shard_manifest.as_ref(),
                 config,
                 Some(effective_seed_value),
                 Some(alpha_over_rank),
@@ -8451,6 +8494,7 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
                 tokenizer,
                 training_precision_policy,
                 weights.source_content_sha256.as_deref(),
+                weights.base_weight_shard_manifest.as_ref(),
                 BackendIdentity::runtime_name(backend.as_ref()),
                 &preflight.trainable_order_sha256,
                 &preflight.gradient_checkpoint_plan_sha256,
@@ -9019,6 +9063,7 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
         adapter_name,
         model_config,
         tokenizer,
+        weights.base_weight_shard_manifest.as_ref(),
         config,
         effective_seed,
         Some(alpha_over_rank),
@@ -16960,6 +17005,7 @@ pub(crate) mod tests {
             "audit-receipt",
             &ModelConfig::qwen3_5_4b(),
             &tokenizer,
+            None,
             &config,
             Some(7),
             Some(2.0),
@@ -19750,6 +19796,14 @@ pub(crate) mod tests {
             decay: 0.8,
         };
         let loop_state = grpo_checkpoint_loop_fixture();
+        let base_weight_shard_manifest =
+            kiln_core::model_provenance::BaseWeightShardManifest::new(vec![
+                kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                    "model.safetensors",
+                    16,
+                    [0x11; 32],
+                )?,
+            ])?;
         let descriptor = GrpoCheckpointDescriptor {
             route: GrpoCheckpointRoute::Inline,
             adapter_name: "exact-grpo".to_string(),
@@ -19764,8 +19818,12 @@ pub(crate) mod tests {
             optimizer,
             learning_rate,
             total_steps: 2,
-            base_model_weights_sha256: Some(format!("sha256:{}", "1".repeat(64))),
-            auxiliary_state: serde_json::json!({"fixture": true}),
+            base_model_weights_sha256: Some(base_weight_shard_manifest.aggregate_sha256.clone()),
+            auxiliary_state: serde_json::json!({
+                "fixture": true,
+                "base_model_weights_sha256": base_weight_shard_manifest.aggregate_sha256,
+                "base_weight_shard_manifest": base_weight_shard_manifest,
+            }),
             ema_refresh_every: Some(2),
         };
 

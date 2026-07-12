@@ -28,6 +28,15 @@ fn job_path(adapter_dir: &Path, job_id: &str) -> PathBuf {
     archive_dir(adapter_dir).join(format!("{job_id}.json"))
 }
 
+fn validate_base_weight_provenance(job: &EvalJobInfo) -> io::Result<()> {
+    if let Some(manifest) = job.base_weight_shard_manifest.as_ref() {
+        manifest
+            .validate()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    }
+    Ok(())
+}
+
 pub fn save(adapter_dir: &Path, job: &EvalJobInfo) -> io::Result<()> {
     if !matches!(
         job.state,
@@ -35,6 +44,7 @@ pub fn save(adapter_dir: &Path, job: &EvalJobInfo) -> io::Result<()> {
     ) {
         return Ok(());
     }
+    validate_base_weight_provenance(job)?;
     let dir = archive_dir(adapter_dir);
     fs::create_dir_all(&dir)?;
     let path = job_path(adapter_dir, &job.job_id);
@@ -63,8 +73,10 @@ pub fn load_all(adapter_dir: &Path) -> Vec<EvalJobInfo> {
             continue;
         }
         match fs::read(&path).and_then(|b| {
-            serde_json::from_slice::<EvalJobInfo>(&b)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            let job: EvalJobInfo = serde_json::from_slice(&b)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            validate_base_weight_provenance(&job)?;
+            Ok(job)
         }) {
             Ok(job) => out.push(job),
             Err(e) => {
@@ -105,5 +117,58 @@ pub fn prune_to_max(adapter_dir: &Path, max: usize) {
         if let Err(e) = fs::remove_file(&path) {
             tracing::warn!(error = %e, file = %path.display(), "failed to prune archived eval job");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::queue::EvalSubmissionKind;
+
+    fn base_weight_manifest() -> kiln_core::model_provenance::BaseWeightShardManifest {
+        kiln_core::model_provenance::BaseWeightShardManifest::new(vec![
+            kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                "model.safetensors",
+                11,
+                [0x42; 32],
+            )
+            .unwrap(),
+        ])
+        .unwrap()
+    }
+
+    fn completed_job() -> EvalJobInfo {
+        let mut job = EvalJobInfo::queued(
+            "eval-provenance".to_string(),
+            "suite".to_string(),
+            vec![None],
+            EvalSubmissionKind::OnDemand,
+            None,
+            17,
+        );
+        job.state = EvalJobState::Completed;
+        job.base_weight_shard_manifest = Some(base_weight_manifest());
+        job
+    }
+
+    #[test]
+    fn eval_archive_round_trips_and_validates_base_weight_provenance() {
+        let temp = tempfile::tempdir().unwrap();
+        let job = completed_job();
+        save(temp.path(), &job).unwrap();
+
+        let loaded = load_all(temp.path());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].base_weight_shard_manifest,
+            job.base_weight_shard_manifest
+        );
+
+        let path = job_path(temp.path(), &job.job_id);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["base_weight_shard_manifest"]["total_size_bytes"] = serde_json::json!(12);
+        std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        assert!(load_all(temp.path()).is_empty());
     }
 }

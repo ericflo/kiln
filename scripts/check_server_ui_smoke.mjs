@@ -648,12 +648,25 @@ async function startServer({
       suite_hash: 'smoke-suite-hash',
     };
   };
+  const smokeBaseWeightManifest = {
+    schema_version: 1,
+    manifest_type: 'kiln.base-weight-shards.v1',
+    aggregate_algorithm: 'kiln.base-model-content.v1',
+    aggregate_sha256: 'sha256:c62f9f56234c61c943716ae3b8783c851fb41a2551e31f17d15f1b0c346339b5',
+    total_size_bytes: 11,
+    shards: [{
+      filename: 'model.safetensors',
+      size_bytes: 11,
+      sha256: `sha256:${'42'.repeat(32)}`,
+    }],
+  };
   const smokeEvalJobs = [
     {
       job_id: 'smoke-eval-full',
       suite_name: 'smoke-suite',
       adapters: [null, 'smoke-tuned'],
       submission_kind: 'compare',
+      base_weight_shard_manifest: smokeBaseWeightManifest,
       effective_seed: '18446744073709551615',
       state: 'completed',
       progress: { examples_completed: 3, examples_total: 3, running_accuracy: 2 / 3, running_mean_score: 2 / 3 },
@@ -1134,6 +1147,17 @@ async function startServer({
         progress: 1,
         adapter_name: body.config.output_name,
         elapsed_secs: 1,
+        train_receipt: {
+          model: {
+            path: '/models/qwen3.5-4b',
+            config_hash: `sha256:${'3'.repeat(64)}`,
+            base_weight_shard_manifest: smokeBaseWeightManifest,
+          },
+          hyperparameters: {
+            mode: 'grpo',
+            seed: '18446744073709551614',
+          },
+        },
         replay_request: {
           kind: 'grpo',
           request_body: {
@@ -1252,6 +1276,7 @@ async function startServer({
       json(res, {
         job_id: job.job_id,
         state: job.state,
+        base_weight_shard_manifest: job.base_weight_shard_manifest,
         effective_seed: job.effective_seed,
         seed_derivation: 'kiln.eval-seed.v1',
         runs: job.finished_runs,
@@ -3200,6 +3225,14 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     const copyLossTitle = await page.$eval('#train-drill-copy-loss', (el) => el.title);
     if (!/No loss samples recorded yet/.test(copyLossTitle)) fail(`Disabled Copy loss CSV should explain what unlocks it, got: ${JSON.stringify(copyLossTitle)}`);
     await waitForPanelText(page, '#train-drill-content', /GRPO JSONL · next group cursor 3/, 'GRPO checkpoint status should use route-aware group cursor wording');
+    await waitForPanelText(page, '#train-drill-content', /Base weights[\s\S]*1 shard/, 'Training drill should show the persisted base-weight identity');
+    await page.evaluate(() => { window.__copiedText = ''; });
+    await clickAndWait(page, '#train-drill-content [data-copy-base-weight]', 'Could not copy the training base-weight identity');
+    await page.waitForFunction(
+      () => window.__copiedText === 'sha256:c62f9f56234c61c943716ae3b8783c851fb41a2551e31f17d15f1b0c346339b5',
+      { timeout: 5000 },
+    ).catch(() => fail('Training base-weight copy should preserve the complete aggregate digest'));
+    await expectTrainingToast(page, 'Base-weight identity copied');
     await page.evaluate(() => { window.__copiedText = ''; });
     await clickAndWait(page, '[data-copy-resume-checkpoint]', 'Could not copy the GRPO resume checkpoint');
     await page.waitForFunction(
@@ -3839,6 +3872,14 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       { timeout: 5000 },
     ).catch(() => fail('Eval drill modal did not open on the completed compare job'));
     await waitForPanelText(page, '#drill-meta', /seed 18446744073709551615/, 'Eval drill metadata should expose the exact effective seed');
+    await waitForPanelText(page, '#drill-headline', /Base weights[\s\S]*1 shard/, 'Eval drill should show the compact base-weight identity');
+    await page.evaluate(() => { window.__copiedText = ''; });
+    await clickAndWait(page, '#drill-headline [data-copy-base-weight]', 'Could not copy the eval base-weight identity');
+    await page.waitForFunction(
+      () => window.__copiedText === 'sha256:c62f9f56234c61c943716ae3b8783c851fb41a2551e31f17d15f1b0c346339b5',
+      { timeout: 5000 },
+    ).catch(() => fail('Eval base-weight copy should preserve the complete aggregate digest'));
+    await expectTrainingToast(page, 'Base-weight identity copied');
     // The drill defaults to the first failure (ex-2), not the first outcome.
     await waitForPanelText(page, '#drill-detail', /seed 18446744073709551613/, 'Eval outcome detail should expose the exact derived decoder seed');
     await page.waitForSelector('#drill-detail [data-outcome-copy="seed"]', { timeout: 5000 })
@@ -3864,6 +3905,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     try { parsedRaw = JSON.parse(rawPayload); } catch { fail('Eval drill raw JSON block should contain valid JSON'); }
     if (parsedRaw.job_id !== 'smoke-eval-full') fail(`Raw JSON should show the drilled job, got job_id ${JSON.stringify(parsedRaw.job_id)}`);
     if (parsedRaw.effective_seed !== '18446744073709551615') fail(`Raw JSON should preserve the exact decimal effective seed, got ${JSON.stringify(parsedRaw.effective_seed)}`);
+    if (parsedRaw.base_weight_shard_manifest?.shards?.[0]?.filename !== 'model.safetensors') fail('Raw JSON should preserve the complete per-shard base-weight manifest');
     if (!Array.isArray(parsedRaw.runs) || parsedRaw.runs.length !== 2) fail('Raw JSON should carry both runs of the compare job');
     if (!rawPayload.includes('\n  "runs"')) fail('Raw JSON should be pretty-printed with 2-space indentation');
     if (!rawPayload.includes('"detail": "expected 42, got 41"')) fail('Raw JSON should surface per-outcome fields like detail');
@@ -3921,6 +3963,9 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     }
     if (firstLine.effective_seed !== '18446744073709551615' || firstLine.seed_derivation !== 'kiln.eval-seed.v1') {
       fail(`Outcomes JSONL should preserve job-level seed provenance, got ${JSON.stringify(firstLine)}`);
+    }
+    if (firstLine.base_weight_shard_manifest?.aggregate_sha256 !== 'sha256:c62f9f56234c61c943716ae3b8783c851fb41a2551e31f17d15f1b0c346339b5') {
+      fail(`Outcomes JSONL should preserve exact base-weight provenance, got ${JSON.stringify(firstLine.base_weight_shard_manifest)}`);
     }
     if (firstLine.generation_seed !== '18446744073709551614') fail(`Outcomes JSONL should preserve the exact per-completion seed, got ${JSON.stringify(firstLine.generation_seed)}`);
     if (!parsedLines.some((line) => line.adapter === 'smoke-tuned')) fail('Outcomes JSONL should include the second run, tagged with its adapter');
