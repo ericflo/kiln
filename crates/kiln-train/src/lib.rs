@@ -83,9 +83,10 @@ pub use hf_interop::{
     HfTrlTrainingResultV1, read_hf_trl_export_manifest, read_hf_trl_training_result,
 };
 pub use hf_interop_bundle::{
-    HF_TRL_BUNDLE_SUFFIX, HF_TRL_SFT_ENVIRONMENT_LOCK, HF_TRL_SFT_REFERENCE_SCRIPT,
-    HfTrlInputAdapterSource, HfTrlSftBundleInput, verify_hf_trl_export_bundle,
-    write_hf_trl_sft_bundle,
+    HF_TRL_BUNDLE_SUFFIX, HF_TRL_IMPORT_ENVELOPE_SUFFIX, HF_TRL_SFT_ENVIRONMENT_LOCK,
+    HF_TRL_SFT_REFERENCE_SCRIPT, HfTrlInputAdapterSource, HfTrlSftBundleInput,
+    verify_hf_trl_completed_bundle, verify_hf_trl_export_bundle, verify_hf_trl_import_envelope,
+    write_hf_trl_import_envelope, write_hf_trl_sft_bundle,
 };
 pub use logit_cache::{CacheEntry, CacheStats, CachedLogitSource, LogitCache, hash_prefix};
 pub use receipt::{

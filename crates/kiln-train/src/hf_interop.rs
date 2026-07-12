@@ -515,6 +515,14 @@ impl HfTrlExportManifestV1 {
         Ok(())
     }
 
+    /// Verify only the model, tokenizer, and three template artifacts needed
+    /// to bind an import envelope to a resident Kiln model. The complete
+    /// export verifier remains authoritative for dataset and runner bytes.
+    pub fn verify_model_files(&self, root: &Path) -> Result<()> {
+        self.validate()?;
+        self.model.verify_files(root)
+    }
+
     fn validate_fields(&self) -> Result<()> {
         ensure!(
             self.schema_version == HF_TRL_EXPORT_SCHEMA_VERSION,

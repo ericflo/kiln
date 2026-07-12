@@ -13,16 +13,18 @@ use uuid::Uuid;
 
 use crate::adapter_output::{ADAPTER_MANIFEST_FILENAME, read_adapter_manifest};
 use crate::{
-    HF_TRL_CHAT_TEMPLATE_FILENAME, HF_TRL_DATASET_FILENAME, HF_TRL_ENVIRONMENT_LOCK_FILENAME,
+    HF_TRL_ADAPTER_CONFIG_FILENAME, HF_TRL_ADAPTER_MODEL_FILENAME, HF_TRL_CHAT_TEMPLATE_FILENAME,
+    HF_TRL_DATASET_FILENAME, HF_TRL_ENVIRONMENT_LOCK_FILENAME, HF_TRL_EXECUTED_SCRIPT_FILENAME,
     HF_TRL_EXPORT_MANIFEST_FILENAME, HF_TRL_MODEL_CONFIG_FILENAME,
     HF_TRL_NATIVE_TRAINING_TEMPLATE_FILENAME, HF_TRL_REFERENCE_SCRIPT_FILENAME,
-    HF_TRL_SFT_INGESTION_FILENAME, HF_TRL_SPLIT_MANIFEST_FILENAME, HF_TRL_TOKENIZER_FILENAME,
-    HF_TRL_TRAINING_TEMPLATE_FILENAME, HfTrlDataExport, HfTrlDatasetFormat, HfTrlExportManifestV1,
-    HfTrlFileIdentity, HfTrlInputAdapter, HfTrlModelIdentity, HfTrlSftSelection, HfTrlTask,
-    SftPreparedDataset,
+    HF_TRL_RESULT_MANIFEST_FILENAME, HF_TRL_SFT_INGESTION_FILENAME, HF_TRL_SPLIT_MANIFEST_FILENAME,
+    HF_TRL_TOKENIZER_FILENAME, HF_TRL_TRAINING_TEMPLATE_FILENAME, HfTrlDataExport,
+    HfTrlDatasetFormat, HfTrlExportManifestV1, HfTrlFileIdentity, HfTrlInputAdapter,
+    HfTrlModelIdentity, HfTrlSftSelection, HfTrlTask, HfTrlTrainingResultV1, SftPreparedDataset,
 };
 
 pub const HF_TRL_BUNDLE_SUFFIX: &str = ".kiln-hf";
+pub const HF_TRL_IMPORT_ENVELOPE_SUFFIX: &str = ".kiln-hf-import";
 pub const HF_TRL_SFT_REFERENCE_SCRIPT: &[u8] =
     include_bytes!("../../../scripts/hf_trl/train_sft.py");
 pub const HF_TRL_SFT_ENVIRONMENT_LOCK: &[u8] =
@@ -208,6 +210,89 @@ pub fn verify_hf_trl_export_bundle(root: &Path) -> Result<HfTrlExportManifestV1>
     Ok(manifest)
 }
 
+/// Validate a completed external-training copy of a Kiln export.
+///
+/// The original export remains closed and byte-identical. Exactly four result
+/// artifacts are added at its root: the preserved executed script, PEFT
+/// configuration and weights, and the result manifest published last.
+pub fn verify_hf_trl_completed_bundle(
+    root: &Path,
+) -> Result<(HfTrlExportManifestV1, HfTrlTrainingResultV1)> {
+    let export = crate::read_hf_trl_export_manifest(root)?;
+    let result = crate::read_hf_trl_training_result(root)?;
+    result.validate_against_export(&export)?;
+    let mut expected = expected_export_files(&export);
+    expected.extend(expected_result_files());
+    ensure_exact_files(root, &expected, "completed bundle")?;
+    export.verify_files(root)?;
+    result.verify_files(root)?;
+    Ok((export, result))
+}
+
+/// Validate the minimal upload envelope used by the PEFT import API.
+///
+/// This deliberately excludes dataset, split, environment-lock, reference
+/// runner, and input-adapter bytes. The source export/result identities remain
+/// self-verifying, while the included model/tokenizer/template files let the
+/// receiving server compare exact bytes to its resident model.
+pub fn verify_hf_trl_import_envelope(
+    root: &Path,
+) -> Result<(HfTrlExportManifestV1, HfTrlTrainingResultV1)> {
+    let export = crate::read_hf_trl_export_manifest(root)?;
+    let result = crate::read_hf_trl_training_result(root)?;
+    result.validate_against_export(&export)?;
+    let expected = expected_import_envelope_files(&export);
+    ensure_exact_files(root, &expected, "import envelope")?;
+    export.verify_model_files(root)?;
+    result.verify_files(root)?;
+    Ok((export, result))
+}
+
+/// Materialize a minimal, immutable import envelope from a fully verified
+/// completed bundle. The target must be new and end in
+/// `.kiln-hf-import`; publication is a same-filesystem atomic rename.
+pub fn write_hf_trl_import_envelope(
+    source: &Path,
+    target: &Path,
+) -> Result<(HfTrlExportManifestV1, HfTrlTrainingResultV1)> {
+    let (export, result) = verify_hf_trl_completed_bundle(source)?;
+    let (parent, target, basename) =
+        prepare_target_with_suffix(target, HF_TRL_IMPORT_ENVELOPE_SUFFIX, "import envelope")?;
+    let staging = parent.join(format!(".{basename}.incomplete-{}", Uuid::new_v4()));
+    create_private_directory(&staging).with_context(|| {
+        format!(
+            "create HF/TRL import-envelope staging directory {}",
+            staging.display()
+        )
+    })?;
+    let mut guard = StagingGuard::new(staging.clone());
+
+    for relative in expected_import_envelope_files(&export) {
+        copy_regular_file(&source.join(&relative), &staging.join(&relative))?;
+    }
+    let verified = verify_hf_trl_import_envelope(&staging)?;
+    ensure!(
+        verified.0 == export && verified.1 == result,
+        "HF/TRL import envelope identity changed during materialization"
+    );
+    sync_directory_tree(&staging)?;
+    fs::rename(&staging, &target).with_context(|| {
+        format!(
+            "publish HF/TRL import envelope {} -> {}",
+            staging.display(),
+            target.display()
+        )
+    })?;
+    sync_directory(&parent)?;
+    guard.disarm();
+    let published = verify_hf_trl_import_envelope(&target)?;
+    ensure!(
+        published.0 == export && published.1 == result,
+        "published HF/TRL import envelope identity differs"
+    );
+    Ok(published)
+}
+
 fn create_private_directory(path: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -292,16 +377,24 @@ fn contains_generation_tag(template: &str, end: bool) -> bool {
 }
 
 fn prepare_target(target: &Path) -> Result<(PathBuf, PathBuf, String)> {
+    prepare_target_with_suffix(target, HF_TRL_BUNDLE_SUFFIX, "bundle")
+}
+
+fn prepare_target_with_suffix(
+    target: &Path,
+    suffix: &str,
+    kind: &str,
+) -> Result<(PathBuf, PathBuf, String)> {
     let basename = target
         .file_name()
         .and_then(|name| name.to_str())
         .context("HF/TRL target must have a UTF-8 basename")?;
     ensure!(
-        basename.ends_with(HF_TRL_BUNDLE_SUFFIX)
-            && basename.len() > HF_TRL_BUNDLE_SUFFIX.len()
+        basename.ends_with(suffix)
+            && basename.len() > suffix.len()
             && !basename.chars().any(char::is_control)
             && !basename.contains('\\'),
-        "HF/TRL target basename must be non-empty and end in {HF_TRL_BUNDLE_SUFFIX}"
+        "HF/TRL {kind} target basename must be non-empty and end in {suffix}"
     );
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)
@@ -311,11 +404,11 @@ fn prepare_target(target: &Path) -> Result<(PathBuf, PathBuf, String)> {
         .with_context(|| format!("resolve HF/TRL target parent {}", parent.display()))?;
     let target = parent.join(basename);
     match fs::symlink_metadata(&target) {
-        Ok(_) => bail!("refusing to overwrite HF/TRL bundle {}", target.display()),
+        Ok(_) => bail!("refusing to overwrite HF/TRL {kind} {}", target.display()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("stat HF/TRL bundle target {}", target.display()));
+                .with_context(|| format!("stat HF/TRL {kind} target {}", target.display()));
         }
     }
     Ok((parent, target, basename.to_string()))
@@ -452,6 +545,10 @@ fn create_new_file(path: &Path) -> Result<File> {
 }
 
 fn ensure_exact_file_set(root: &Path, manifest: &HfTrlExportManifestV1) -> Result<()> {
+    ensure_exact_files(root, &expected_export_files(manifest), "export bundle")
+}
+
+fn expected_export_files(manifest: &HfTrlExportManifestV1) -> BTreeSet<String> {
     let mut expected = BTreeSet::from([
         HF_TRL_EXPORT_MANIFEST_FILENAME.to_string(),
         manifest.model.model_config.relative_path.clone(),
@@ -484,10 +581,46 @@ fn ensure_exact_file_set(root: &Path, manifest: &HfTrlExportManifestV1) -> Resul
             expected.insert(kiln_manifest.relative_path.clone());
         }
     }
+    expected
+}
+
+fn expected_result_files() -> BTreeSet<String> {
+    BTreeSet::from([
+        HF_TRL_RESULT_MANIFEST_FILENAME.to_string(),
+        HF_TRL_EXECUTED_SCRIPT_FILENAME.to_string(),
+        HF_TRL_ADAPTER_CONFIG_FILENAME.to_string(),
+        HF_TRL_ADAPTER_MODEL_FILENAME.to_string(),
+    ])
+}
+
+fn expected_import_envelope_files(export: &HfTrlExportManifestV1) -> BTreeSet<String> {
+    BTreeSet::from([
+        HF_TRL_EXPORT_MANIFEST_FILENAME.to_string(),
+        HF_TRL_RESULT_MANIFEST_FILENAME.to_string(),
+        export.model.model_config.relative_path.clone(),
+        export.model.tokenizer.relative_path.clone(),
+        export.model.chat_template.relative_path.clone(),
+        export
+            .model
+            .native_training_chat_template
+            .relative_path
+            .clone(),
+        export
+            .model
+            .trl_training_chat_template
+            .relative_path
+            .clone(),
+        HF_TRL_EXECUTED_SCRIPT_FILENAME.to_string(),
+        HF_TRL_ADAPTER_CONFIG_FILENAME.to_string(),
+        HF_TRL_ADAPTER_MODEL_FILENAME.to_string(),
+    ])
+}
+
+fn ensure_exact_files(root: &Path, expected: &BTreeSet<String>, kind: &str) -> Result<()> {
     let actual = collect_relative_files(root)?;
     ensure!(
-        actual == expected,
-        "HF/TRL staging file set differs: expected {expected:?}, found {actual:?}"
+        actual == *expected,
+        "HF/TRL {kind} file set differs: expected {expected:?}, found {actual:?}"
     );
     Ok(())
 }
@@ -595,7 +728,10 @@ mod tests {
     use kiln_core::tokenizer::KilnTokenizer;
 
     use super::*;
-    use crate::{ChatMessage, SftExample, SftInvalidRowPolicy, prepare_sft_examples};
+    use crate::{
+        ChatMessage, HfTrlConfigValue, HfTrlOutputAdapter, HfTrlTrainerIdentity, HfTrlTrainerKind,
+        SftExample, SftInvalidRowPolicy, prepare_sft_examples,
+    };
 
     #[test]
     fn embedded_sft_reference_assets_are_pinned_and_executable_text() {
@@ -725,6 +861,46 @@ mod tests {
             provenance,
             prepared,
         }
+    }
+
+    fn add_completed_result(root: &Path, export: &HfTrlExportManifestV1) -> HfTrlTrainingResultV1 {
+        fs::write(
+            root.join(HF_TRL_EXECUTED_SCRIPT_FILENAME),
+            b"print('executed')\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join(HF_TRL_ADAPTER_CONFIG_FILENAME),
+            br#"{"peft_type":"LORA","r":8,"lora_alpha":16,"target_modules":["q_proj"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(HF_TRL_ADAPTER_MODEL_FILENAME),
+            b"test-adapter-weights",
+        )
+        .unwrap();
+        let trainer = HfTrlTrainerIdentity {
+            kind: HfTrlTrainerKind::TrlSftTrainer,
+            python_version: "3.13.5".to_string(),
+            torch_version: "2.13.0".to_string(),
+            transformers_version: "5.13.1".to_string(),
+            trl_version: "1.8.0".to_string(),
+            peft_version: "0.19.1".to_string(),
+            script: HfTrlFileIdentity::from_file(root, HF_TRL_EXECUTED_SCRIPT_FILENAME).unwrap(),
+        };
+        let result = HfTrlTrainingResultV1::new(
+            export.export_sha256.clone(),
+            HfTrlTask::Sft,
+            trainer,
+            BTreeMap::from([("seed".to_string(), HfTrlConfigValue::Unsigned(42))]),
+            HfTrlOutputAdapter {
+                config: HfTrlFileIdentity::from_file(root, HF_TRL_ADAPTER_CONFIG_FILENAME).unwrap(),
+                model: HfTrlFileIdentity::from_file(root, HF_TRL_ADAPTER_MODEL_FILENAME).unwrap(),
+            },
+        )
+        .unwrap();
+        write_pretty_json(&root.join(HF_TRL_RESULT_MANIFEST_FILENAME), &result).unwrap();
+        result
     }
 
     fn incomplete_entries(parent: &Path) -> Vec<String> {
@@ -866,5 +1042,75 @@ mod tests {
         fs::write(target.join("undeclared.txt"), b"not in the manifest").unwrap();
         let error = verify_hf_trl_export_bundle(&target).unwrap_err();
         assert!(error.to_string().contains("file set differs"), "{error:#}");
+    }
+
+    #[test]
+    fn completed_bundle_materializes_a_minimal_atomic_import_envelope() {
+        let fixture = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let completed = directory.path().join("completed.kiln-hf");
+        let export = write_hf_trl_sft_bundle(&completed, fixture.input()).unwrap();
+        let result = add_completed_result(&completed, &export);
+
+        assert!(verify_hf_trl_export_bundle(&completed).is_err());
+        assert_eq!(
+            verify_hf_trl_completed_bundle(&completed).unwrap(),
+            (export.clone(), result.clone())
+        );
+
+        let envelope = directory.path().join("completed.kiln-hf-import");
+        assert_eq!(
+            write_hf_trl_import_envelope(&completed, &envelope).unwrap(),
+            (export.clone(), result.clone())
+        );
+        assert_eq!(
+            verify_hf_trl_import_envelope(&envelope).unwrap(),
+            (export, result)
+        );
+        assert!(envelope.join(HF_TRL_MODEL_CONFIG_FILENAME).is_file());
+        assert!(envelope.join(HF_TRL_ADAPTER_MODEL_FILENAME).is_file());
+        for excluded in [
+            HF_TRL_DATASET_FILENAME,
+            HF_TRL_SFT_INGESTION_FILENAME,
+            HF_TRL_SPLIT_MANIFEST_FILENAME,
+            HF_TRL_ENVIRONMENT_LOCK_FILENAME,
+            HF_TRL_REFERENCE_SCRIPT_FILENAME,
+        ] {
+            assert!(
+                !envelope.join(excluded).exists(),
+                "import envelope leaked {excluded}"
+            );
+        }
+        assert!(incomplete_entries(directory.path()).is_empty());
+        let error = write_hf_trl_import_envelope(&completed, &envelope).unwrap_err();
+        assert!(error.to_string().contains("overwrite"), "{error:#}");
+    }
+
+    #[test]
+    fn completed_and_import_verifiers_reject_drift_and_extra_files() {
+        let fixture = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let completed = directory.path().join("drift.kiln-hf");
+        let export = write_hf_trl_sft_bundle(&completed, fixture.input()).unwrap();
+        add_completed_result(&completed, &export);
+        let envelope = directory.path().join("drift.kiln-hf-import");
+        write_hf_trl_import_envelope(&completed, &envelope).unwrap();
+
+        fs::write(
+            envelope.join(HF_TRL_ADAPTER_MODEL_FILENAME),
+            b"different adapter",
+        )
+        .unwrap();
+        let error = verify_hf_trl_import_envelope(&envelope).unwrap_err();
+        assert!(error.to_string().contains("differs"), "{error:#}");
+
+        let envelope = directory.path().join("extra.kiln-hf-import");
+        write_hf_trl_import_envelope(&completed, &envelope).unwrap();
+        fs::write(envelope.join("dataset.jsonl"), b"private row\n").unwrap();
+        let error = verify_hf_trl_import_envelope(&envelope).unwrap_err();
+        assert!(error.to_string().contains("file set differs"), "{error:#}");
+
+        fs::remove_file(completed.join(HF_TRL_RESULT_MANIFEST_FILENAME)).unwrap();
+        assert!(verify_hf_trl_completed_bundle(&completed).is_err());
     }
 }

@@ -290,6 +290,37 @@ publication for a complete result. In-process failures clean partial result
 files; a later invocation can recover a result carrying the explicit
 incomplete sentinel, while unattributed output files fail closed.
 
+## Completed Bundle And Import Envelope
+
+A completed training directory is an exact closed superset of the pristine
+export. It contains every original export artifact plus exactly these four
+root files:
+
+- `executed_train.py`
+- `adapter_config.json`
+- `adapter_model.safetensors`
+- `kiln_hf_result.json`
+
+`verify_hf_trl_completed_bundle` validates both self-digests, the
+result-to-export link, the complete original export, every result byte, and the
+exact recursive file set. A partial result, stale sentinel, extra log/checkpoint
+file, symlink, or changed source artifact is not a completed bundle.
+
+The import transport uses a derived `.kiln-hf-import` envelope rather than
+uploading the training corpus. Its exact ten files are both manifests, the
+executed script, PEFT configuration and weights, and the exported model
+configuration, tokenizer, inference template, native training template, and
+TRL training template. Dataset, ingestion receipt, split, input-adapter,
+environment-lock, and reference-runner bytes are intentionally excluded. The
+export manifest still binds their identities, while the receiving server gets
+the exact model-side bytes needed for resident identity comparison.
+
+`write_hf_trl_import_envelope` first verifies the complete source, copies only
+that allowlist into a private sibling staging directory, revalidates the
+envelope, fsyncs it, and publishes with a no-clobber atomic rename. The public
+upload/import endpoint and CLI command are the next integration checkpoint;
+the presence of these library contracts alone is not an import claim.
+
 ## Validation Boundary
 
 This contract proves byte and identity continuity across an explicitly
