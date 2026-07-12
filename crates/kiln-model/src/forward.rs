@@ -21718,6 +21718,34 @@ pub(crate) struct PagedDecodeGraphInputs<'a> {
     pub softmax_lse: &'a [Tensor],
 }
 
+/// Marker returned when a ROCm graph-backed decode would fall through to the
+/// sequence-length-shaped attention implementation. Capturing that fallback
+/// bakes the current K/V length into tensor shapes, so replaying it for a later
+/// token is incorrect even though the HIP graph launch itself succeeds.
+#[cfg(feature = "rocm")]
+#[derive(Debug)]
+pub(crate) struct RocmGraphShapeDependentAttention;
+
+#[cfg(feature = "rocm")]
+impl std::fmt::Display for RocmGraphShapeDependentAttention {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "ROCm graph capture requires graph-stable native paged attention; \
+             the current decode geometry reached shape-dependent attention",
+        )
+    }
+}
+
+#[cfg(feature = "rocm")]
+impl std::error::Error for RocmGraphShapeDependentAttention {}
+
+#[cfg(feature = "rocm")]
+pub(crate) fn is_rocm_graph_shape_dependent_attention(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RocmGraphShapeDependentAttention>()
+        .is_some()
+}
+
 /// Stable per-step inputs threaded through the batched CUDA graph
 /// capture/replay path. Mirrors [`PagedDecodeGraphInputs`] but every
 /// tensor is shaped for `[batch, …]`. The CUDA graph runner pre-allocates
@@ -24206,6 +24234,11 @@ fn gqa_attention_paged_with_rope_tables(
         if portable_lora_fallback {
             record_vulkan_lora_paged_decode_fallback(full_attn_layer_idx, total_seq_len);
         }
+    }
+
+    #[cfg(feature = "rocm")]
+    if graph_inputs.is_some() {
+        return Err(RocmGraphShapeDependentAttention.into());
     }
 
     // Open the fallback-decode range BEFORE the paged_cache.read so the read's

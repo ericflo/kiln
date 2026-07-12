@@ -153,8 +153,8 @@ unexplained ITL outlier fails the stable arm.
 
 Experimental ROCm graph runs expose a closed fallback contract at
 `/health.decode_runtime.rocm_graphs.fallbacks`. It reports the total and the
-seven reason counts (`warmup_forward_failure`, `cold_cache_host_round_trip`,
-`persistent_host_round_trip`, `graph_cache_capacity`,
+eight reason counts (`warmup_forward_failure`, `cold_cache_host_round_trip`,
+`persistent_host_round_trip`, `shape_dependent_attention`, `graph_cache_capacity`,
 `critical_memory_pressure`, `capture_failure`, and `replay_failure`) plus slow,
 total-duration, and maximum-duration counters. The first occurrence of each
 reason, every fallback lasting at least 100 ms, and every failed eager fallback

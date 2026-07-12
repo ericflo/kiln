@@ -401,6 +401,7 @@ enum RocmGraphFallbackReason {
     WarmupForwardFailure,
     ColdCacheHostRoundTrip,
     PersistentHostRoundTrip,
+    ShapeDependentAttention,
     GraphCacheCapacity,
     CriticalMemoryPressure,
     CaptureFailure,
@@ -413,6 +414,7 @@ impl RocmGraphFallbackReason {
             Self::WarmupForwardFailure => "warmup_forward_failure",
             Self::ColdCacheHostRoundTrip => "cold_cache_host_round_trip",
             Self::PersistentHostRoundTrip => "persistent_host_round_trip",
+            Self::ShapeDependentAttention => "shape_dependent_attention",
             Self::GraphCacheCapacity => "graph_cache_capacity",
             Self::CriticalMemoryPressure => "critical_memory_pressure",
             Self::CaptureFailure => "capture_failure",
@@ -428,6 +430,7 @@ pub struct RocmGraphFallbackStats {
     pub warmup_forward_failure: u64,
     pub cold_cache_host_round_trip: u64,
     pub persistent_host_round_trip: u64,
+    pub shape_dependent_attention: u64,
     pub graph_cache_capacity: u64,
     pub critical_memory_pressure: u64,
     pub capture_failure: u64,
@@ -448,6 +451,7 @@ impl RocmGraphFallbackStats {
             RocmGraphFallbackReason::PersistentHostRoundTrip => {
                 &mut self.persistent_host_round_trip
             }
+            RocmGraphFallbackReason::ShapeDependentAttention => &mut self.shape_dependent_attention,
             RocmGraphFallbackReason::GraphCacheCapacity => &mut self.graph_cache_capacity,
             RocmGraphFallbackReason::CriticalMemoryPressure => &mut self.critical_memory_pressure,
             RocmGraphFallbackReason::CaptureFailure => &mut self.capture_failure,
@@ -563,13 +567,12 @@ pub struct RocmGraphRunner {
     warmup_done: bool,
     #[cfg(feature = "rocm")]
     captured: HashMap<RocmGraphCacheKey, CapturedDecodeGraphRocm>,
-    /// Geometries whose decode forward does a host round-trip (a non-capture-safe
-    /// fallback, e.g. GDN gates softplus) and so cannot be captured. Cached so we
-    /// skip the warm pass + capture attempt for them on every subsequent step and
-    /// go straight to eager — without disabling capture for OTHER (capture-safe)
-    /// geometries.
+    /// Geometries whose decode forward is not capture-safe and the typed eager
+    /// fallback reason to reuse on subsequent steps. This includes persistent
+    /// host round-trips and attention paths whose tensor shapes depend on the
+    /// current sequence length.
     #[cfg(feature = "rocm")]
-    non_capture_safe: std::collections::HashSet<RocmGraphKey>,
+    non_capture_safe: std::collections::HashMap<RocmGraphKey, RocmGraphFallbackReason>,
     /// Per-geometry count of consecutive capture attempts whose warm pass did a
     /// host round-trip. The first attempt in a `max_seqlen_k` bucket fills the
     /// shape-keyed global caches (broadcast gather indices, gqa-expand indices)
@@ -619,7 +622,7 @@ impl RocmGraphRunner {
             #[cfg(feature = "rocm")]
             captured: HashMap::new(),
             #[cfg(feature = "rocm")]
-            non_capture_safe: std::collections::HashSet::new(),
+            non_capture_safe: std::collections::HashMap::new(),
             #[cfg(feature = "rocm")]
             capture_retry: std::collections::HashMap::new(),
             #[cfg(feature = "rocm")]
@@ -949,27 +952,22 @@ impl RocmGraphRunner {
             let requested_key = RocmGraphKey::new(block_table, paged_cache, seq_len);
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
 
-            // Geometry previously found non-capture-safe (host round-trip in its
-            // forward) — skip the warm pass + capture attempt and run eager.
-            if self.non_capture_safe.contains(&requested_key) {
-                return self.run_eager_fallback(
-                    RocmGraphFallbackReason::PersistentHostRoundTrip,
-                    seq_len,
-                    std::time::Duration::ZERO,
-                    || {
-                        Self::eager_forward(
-                            backend,
-                            token_id,
-                            weights,
-                            config,
-                            paged_cache,
-                            block_table,
-                            seq_len,
-                            linear_state,
-                            lora,
-                        )
-                    },
-                );
+            // Geometry previously found non-capture-safe: skip the warm pass +
+            // capture attempt and reuse its typed eager-fallback reason.
+            if let Some(reason) = self.non_capture_safe.get(&requested_key).copied() {
+                return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
+                    Self::eager_forward(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                });
             }
 
             // Replay if we have a valid captured graph for this geometry.
@@ -1235,25 +1233,20 @@ impl RocmGraphRunner {
             let requested_key = RocmGraphKey::new(block_table, paged_cache, seq_len);
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
 
-            if self.non_capture_safe.contains(&requested_key) {
-                return self.run_eager_fallback(
-                    RocmGraphFallbackReason::PersistentHostRoundTrip,
-                    seq_len,
-                    std::time::Duration::ZERO,
-                    || {
-                        Self::eager_forward_hidden(
-                            backend,
-                            token_id,
-                            weights,
-                            config,
-                            paged_cache,
-                            block_table,
-                            seq_len,
-                            linear_state,
-                            lora,
-                        )
-                    },
-                );
+            if let Some(reason) = self.non_capture_safe.get(&requested_key).copied() {
+                return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
+                    Self::eager_forward_hidden(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                });
             }
 
             if let Some(captured) = self.captured.get(&cache_key) {
@@ -1529,25 +1522,20 @@ impl RocmGraphRunner {
             let requested_key = RocmGraphKey::new(block_table, paged_cache, seq_len);
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
 
-            if self.non_capture_safe.contains(&requested_key) {
-                return self.run_eager_fallback(
-                    RocmGraphFallbackReason::PersistentHostRoundTrip,
-                    seq_len,
-                    std::time::Duration::ZERO,
-                    || {
-                        Self::eager_forward_greedy(
-                            backend,
-                            token_id,
-                            weights,
-                            config,
-                            paged_cache,
-                            block_table,
-                            seq_len,
-                            linear_state,
-                            lora,
-                        )
-                    },
-                );
+            if let Some(reason) = self.non_capture_safe.get(&requested_key).copied() {
+                return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
+                    Self::eager_forward_greedy(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                });
             }
 
             if let Some(captured) = self.captured.get(&cache_key) {
@@ -2621,10 +2609,19 @@ impl RocmGraphRunner {
             },
         );
         if let Err(err) = warm_result {
+            *linear_state = gdn_snapshot;
             if let Err(sync_err) = warm_sync_result {
                 tracing::warn!("post-warm-failure capture stream sync failed: {sync_err:#}");
+                return Err(sync_err)
+                    .context("capture stream synchronization failed after warm-forward failure");
             }
-            *linear_state = gdn_snapshot;
+            if crate::forward::is_rocm_graph_shape_dependent_attention(&err) {
+                self.non_capture_safe
+                    .insert(key, RocmGraphFallbackReason::ShapeDependentAttention);
+                return Ok(RocmCaptureStep::FallbackEager(
+                    RocmGraphFallbackReason::ShapeDependentAttention,
+                ));
+            }
             return Err(err).context("freeze-pointers warm (Record) pass failed");
         }
         if let Err(sync_err) = warm_sync_result {
@@ -2655,7 +2652,10 @@ impl RocmGraphRunner {
                     "ROCm graph: geometry not capture-safe (persistent host round-trip); \
                      caching skip + running eager"
                 );
-                self.non_capture_safe.insert(key.clone());
+                self.non_capture_safe.insert(
+                    key.clone(),
+                    RocmGraphFallbackReason::PersistentHostRoundTrip,
+                );
                 self.capture_retry.remove(&key);
                 RocmGraphFallbackReason::PersistentHostRoundTrip
             } else {
@@ -2835,18 +2835,23 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "rocm")]
-    fn stale_generation_test_fixture(device: &Device) -> (ModelConfig, GpuWeights) {
+    fn rocm_graph_test_fixture(
+        device: &Device,
+        num_attention_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) -> (ModelConfig, GpuWeights) {
         use crate::forward::{
             GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
         };
 
         let config = ModelConfig {
-            hidden_size: 64,
+            hidden_size: num_attention_heads * head_dim,
             num_layers: 1,
-            num_attention_heads: 1,
-            num_kv_heads: 1,
-            head_dim: 64,
-            intermediate_size: 128,
+            num_attention_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size: num_attention_heads * head_dim * 2,
             vocab_size: 32,
             max_position_embeddings: 128,
             rms_norm_eps: 1e-6,
@@ -2877,10 +2882,22 @@ mod tests {
         };
 
         let embed_tokens = random_bf16(vec![config.vocab_size, config.hidden_size]);
-        let q_proj = random_bf16(vec![config.head_dim, config.hidden_size]);
-        let k_proj = random_bf16(vec![config.head_dim, config.hidden_size]);
-        let v_proj = random_bf16(vec![config.head_dim, config.hidden_size]);
-        let o_proj = random_bf16(vec![config.hidden_size, config.head_dim]);
+        let q_proj = random_bf16(vec![
+            config.num_attention_heads * config.head_dim,
+            config.hidden_size,
+        ]);
+        let k_proj = random_bf16(vec![
+            config.num_kv_heads * config.head_dim,
+            config.hidden_size,
+        ]);
+        let v_proj = random_bf16(vec![
+            config.num_kv_heads * config.head_dim,
+            config.hidden_size,
+        ]);
+        let o_proj = random_bf16(vec![
+            config.hidden_size,
+            config.num_attention_heads * config.head_dim,
+        ]);
         let gate_proj = random_bf16(vec![config.intermediate_size, config.hidden_size]);
         let up_proj = random_bf16(vec![config.intermediate_size, config.hidden_size]);
         let down_proj = random_bf16(vec![config.hidden_size, config.intermediate_size]);
@@ -2943,6 +2960,11 @@ mod tests {
             mtp: None,
         };
         (config, weights)
+    }
+
+    #[cfg(feature = "rocm")]
+    fn stale_generation_test_fixture(device: &Device) -> (ModelConfig, GpuWeights) {
+        rocm_graph_test_fixture(device, 2, 1, 128)
     }
 
     #[cfg(feature = "rocm")]
@@ -3046,6 +3068,299 @@ mod tests {
 
         runner.release_decode_row(42);
         assert!(!runner.prepare_owner_decode(second, &recycled_table, 67));
+    }
+
+    /// A decode geometry that cannot use graph-stable native attention must
+    /// remain eager. Capturing its sequence-length-shaped fallback would appear
+    /// to succeed but would silently reuse the captured K/V length on replay.
+    #[cfg(feature = "rocm")]
+    #[test]
+    #[ignore = "requires an explicit real-ROCm qualification run"]
+    fn shape_dependent_attention_is_cached_as_typed_eager_fallback() {
+        assert_eq!(
+            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
+            Some("1"),
+            "set KILN_QUALIFICATION=1 for the explicit hardware run"
+        );
+        assert!(kiln_tensor::rocm_is_available());
+
+        let device = Device::Rocm(0);
+        let backend = crate::backend::for_device_kt(&device);
+        let (config, weights) = rocm_graph_test_fixture(&device, 1, 1, 64);
+        let graph_cache = PagedKvCacheKt::new(
+            1,
+            4,
+            16,
+            config.num_kv_heads,
+            config.head_dim,
+            kiln_tensor::DType::BF16,
+            device,
+        )
+        .expect("shape-dependent graph cache");
+        let eager_cache = PagedKvCacheKt::new(
+            1,
+            4,
+            16,
+            config.num_kv_heads,
+            config.head_dim,
+            kiln_tensor::DType::BF16,
+            device,
+        )
+        .expect("shape-dependent eager cache");
+        let table = BlockTable { blocks: vec![0] };
+        let mut graph_state =
+            LinearAttentionState::new_for_inference(&config, &device).expect("graph state");
+        let mut eager_state =
+            LinearAttentionState::new_for_inference(&config, &device).expect("eager state");
+        let mut graph_runner = RocmGraphRunner::new(&device, true);
+
+        for seq_len in 1..=4 {
+            let token_id = (seq_len % config.vocab_size) as u32;
+            let guarded = graph_runner
+                .decode_step_paged_hidden(
+                    backend.as_ref(),
+                    token_id,
+                    &weights,
+                    &config,
+                    &graph_cache,
+                    &table,
+                    seq_len,
+                    &mut graph_state,
+                    None,
+                    811,
+                )
+                .expect("guarded graph decode");
+            let eager = RocmGraphRunner::eager_forward_hidden(
+                backend.as_ref(),
+                token_id,
+                &weights,
+                &config,
+                &eager_cache,
+                &table,
+                seq_len,
+                &mut eager_state,
+                None,
+            )
+            .expect("shape-dependent eager oracle");
+            assert_eq!(hidden_f32(&guarded), hidden_f32(&eager));
+        }
+
+        let stats = graph_runner.stats();
+        assert!(stats.enabled);
+        assert_eq!(stats.capture_attempts, 1);
+        assert_eq!(stats.capture_deferrals, 1);
+        assert_eq!(stats.capture_successes, 0);
+        assert_eq!(stats.replay_attempts, 0);
+        assert_eq!(stats.failures, 0);
+        assert_eq!(stats.captured_graph_count, 0);
+        assert_eq!(stats.fallbacks.total, 3);
+        assert_eq!(stats.fallbacks.shape_dependent_attention, 3);
+    }
+
+    /// Real gfx1151 parity over the graph lifecycle that serving exercises:
+    /// bucket transitions, growing metadata, retained-prefix reuse, cancelled
+    /// owner cleanup, and adapter-generation invalidation.
+    #[cfg(feature = "rocm")]
+    #[test]
+    #[ignore = "requires an explicit real-ROCm qualification run"]
+    fn graph_parity_across_buckets_prefix_cancellation_and_adapter_boundary() {
+        assert_eq!(
+            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
+            Some("1"),
+            "set KILN_QUALIFICATION=1 for the explicit hardware run"
+        );
+        assert_eq!(
+            std::env::var("KILN_ROCM_GRAPH_KBLOCK_BUCKET_TOKENS")
+                .ok()
+                .as_deref(),
+            Some("64"),
+            "qualification must force 64-token graph buckets"
+        );
+        assert!(kiln_tensor::rocm_is_available());
+
+        let device = Device::Rocm(0);
+        let backend = crate::backend::for_device_kt(&device);
+        let (config, weights) = stale_generation_test_fixture(&device);
+        let graph_cache = PagedKvCacheKt::new(
+            1,
+            16,
+            16,
+            config.num_kv_heads,
+            config.head_dim,
+            kiln_tensor::DType::BF16,
+            device,
+        )
+        .expect("graph parity paged cache");
+        let eager_cache = PagedKvCacheKt::new(
+            1,
+            16,
+            16,
+            config.num_kv_heads,
+            config.head_dim,
+            kiln_tensor::DType::BF16,
+            device,
+        )
+        .expect("eager parity paged cache");
+        let mut graph_state =
+            LinearAttentionState::new_for_inference(&config, &device).expect("graph state");
+        let mut eager_state =
+            LinearAttentionState::new_for_inference(&config, &device).expect("eager state");
+        let mut graph_runner = RocmGraphRunner::new(&device, true);
+        assert!(graph_runner.stats().capture_enabled);
+
+        let mut assert_hidden_step = |runner: &mut RocmGraphRunner, row_id: u64, seq_len: usize| {
+            let block_count = (seq_len + 1).div_ceil(graph_cache.block_size());
+            let table = BlockTable {
+                blocks: (0..block_count as u32).collect(),
+            };
+            let token_id = (seq_len % config.vocab_size) as u32;
+            let graph_hidden = runner
+                .decode_step_paged_hidden(
+                    backend.as_ref(),
+                    token_id,
+                    &weights,
+                    &config,
+                    &graph_cache,
+                    &table,
+                    seq_len,
+                    &mut graph_state,
+                    None,
+                    row_id,
+                )
+                .expect("graph hidden");
+            let eager_hidden = RocmGraphRunner::eager_forward_hidden(
+                backend.as_ref(),
+                token_id,
+                &weights,
+                &config,
+                &eager_cache,
+                &table,
+                seq_len,
+                &mut eager_state,
+                None,
+            )
+            .expect("eager hidden");
+            let graph_values = hidden_f32(&graph_hidden);
+            let eager_values = hidden_f32(&eager_hidden);
+            assert_eq!(
+                graph_values, eager_values,
+                "hidden mismatch at row {row_id}, sequence {seq_len}"
+            );
+        };
+
+        const FIRST_OWNER: u64 = 901;
+        for seq_len in 1..=80 {
+            assert_hidden_step(&mut graph_runner, FIRST_OWNER, seq_len);
+        }
+        let before_cancel = graph_runner.stats();
+        assert!(before_cancel.capture_successes >= 2);
+        assert!(before_cancel.replay_successes > 0);
+        assert!(before_cancel.captured_graph_count >= 2);
+
+        // Cancellation releases the first owner's graphs. A new row then
+        // starts from already-populated KV pages, matching prefix-cache reuse.
+        graph_runner.release_decode_row(FIRST_OWNER);
+        let after_cancel = graph_runner.stats();
+        assert_eq!(after_cancel.captured_graph_count, 0);
+        assert_eq!(after_cancel.decode_owner_release_count, 1);
+        assert!(after_cancel.decode_owner_graph_release_count >= 2);
+
+        const PREFIX_OWNER: u64 = 902;
+        for seq_len in 64..=72 {
+            assert_hidden_step(&mut graph_runner, PREFIX_OWNER, seq_len);
+        }
+        let before_adapter_boundary = graph_runner.stats();
+        assert!(before_adapter_boundary.captured_graph_count > 0);
+        let captures_before_adapter_boundary = before_adapter_boundary.capture_successes;
+
+        // Adapter swaps invalidate pointer-bearing graph state before the next
+        // request quantum. The fixture keeps weights numerically unchanged so
+        // eager equality remains an exact oracle for lifecycle behavior.
+        graph_runner.invalidate();
+        assert_eq!(graph_runner.stats().captured_graph_count, 0);
+        for seq_len in 73..=78 {
+            assert_hidden_step(&mut graph_runner, PREFIX_OWNER, seq_len);
+        }
+        drop(assert_hidden_step);
+
+        let seq_len = 79usize;
+        let table = BlockTable {
+            blocks: (0..(seq_len + 1).div_ceil(graph_cache.block_size()) as u32).collect(),
+        };
+        let token_id = (seq_len % config.vocab_size) as u32;
+        let graph_logits = graph_runner
+            .decode_step_paged(
+                backend.as_ref(),
+                token_id,
+                &weights,
+                &config,
+                &graph_cache,
+                &table,
+                seq_len,
+                &mut graph_state,
+                None,
+                PREFIX_OWNER,
+            )
+            .expect("graph logits");
+        let eager_logits = RocmGraphRunner::eager_forward(
+            backend.as_ref(),
+            token_id,
+            &weights,
+            &config,
+            &eager_cache,
+            &table,
+            seq_len,
+            &mut eager_state,
+            None,
+        )
+        .expect("eager logits");
+        assert_eq!(hidden_f32(&graph_logits), hidden_f32(&eager_logits));
+
+        let seq_len = 80usize;
+        let table = BlockTable {
+            blocks: (0..(seq_len + 1).div_ceil(graph_cache.block_size()) as u32).collect(),
+        };
+        let token_id = (seq_len % config.vocab_size) as u32;
+        let graph_token = graph_runner
+            .decode_step_paged_greedy(
+                backend.as_ref(),
+                token_id,
+                &weights,
+                &config,
+                &graph_cache,
+                &table,
+                seq_len,
+                &mut graph_state,
+                None,
+                PREFIX_OWNER,
+            )
+            .expect("graph greedy token");
+        let eager_token = RocmGraphRunner::eager_forward_greedy(
+            backend.as_ref(),
+            token_id,
+            &weights,
+            &config,
+            &eager_cache,
+            &table,
+            seq_len,
+            &mut eager_state,
+            None,
+        )
+        .expect("eager greedy token");
+        assert_eq!(graph_token, eager_token);
+
+        let final_stats = graph_runner.stats();
+        assert!(final_stats.capture_successes > captures_before_adapter_boundary);
+        assert_eq!(final_stats.failures, 0);
+        assert_eq!(final_stats.fallbacks.total, 0);
+        eprintln!(
+            "[rocm-graph-parity] captures={}; replays={}; owner_releases={}; graph_releases={}; fallbacks={}",
+            final_stats.capture_successes,
+            final_stats.replay_successes,
+            final_stats.decode_owner_release_count,
+            final_stats.decode_owner_graph_release_count,
+            final_stats.fallbacks.total,
+        );
     }
 
     /// Deliberately corrupt only the generation retained by a live graph. The
@@ -3262,6 +3577,7 @@ mod tests {
             RocmGraphFallbackReason::WarmupForwardFailure,
             RocmGraphFallbackReason::ColdCacheHostRoundTrip,
             RocmGraphFallbackReason::PersistentHostRoundTrip,
+            RocmGraphFallbackReason::ShapeDependentAttention,
             RocmGraphFallbackReason::GraphCacheCapacity,
             RocmGraphFallbackReason::CriticalMemoryPressure,
             RocmGraphFallbackReason::CaptureFailure,

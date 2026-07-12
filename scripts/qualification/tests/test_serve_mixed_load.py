@@ -65,6 +65,7 @@ def health_fixture(
             "warmup_forward_failure": 0,
             "cold_cache_host_round_trip": 0,
             "persistent_host_round_trip": 0,
+            "shape_dependent_attention": 0,
             "graph_cache_capacity": 0,
             "critical_memory_pressure": 0,
             "capture_failure": 0,

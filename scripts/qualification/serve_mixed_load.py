@@ -334,6 +334,7 @@ GRAPH_FALLBACK_REASON_FIELDS = (
     "warmup_forward_failure",
     "cold_cache_host_round_trip",
     "persistent_host_round_trip",
+    "shape_dependent_attention",
     "graph_cache_capacity",
     "critical_memory_pressure",
     "capture_failure",

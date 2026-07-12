@@ -1119,10 +1119,11 @@ mod tests {
             captured_graph_count: 0,
             tracked_decode_owner_count: 1,
             fallbacks: kiln_model::RocmGraphFallbackStats {
-                total: 7,
+                total: 8,
                 warmup_forward_failure: 1,
                 cold_cache_host_round_trip: 1,
                 persistent_host_round_trip: 1,
+                shape_dependent_attention: 1,
                 graph_cache_capacity: 1,
                 critical_memory_pressure: 1,
                 capture_failure: 1,
@@ -1151,7 +1152,8 @@ mod tests {
         assert_eq!(json["decode_owner_graph_release_count"], 4);
         assert_eq!(json["captured_graph_count"], 0);
         assert_eq!(json["tracked_decode_owner_count"], 1);
-        assert_eq!(json["fallbacks"]["total"], 7);
+        assert_eq!(json["fallbacks"]["total"], 8);
+        assert_eq!(json["fallbacks"]["shape_dependent_attention"], 1);
         assert_eq!(json["fallbacks"]["replay_failure"], 1);
         assert_eq!(json["fallbacks"]["slow"], 2);
         assert_eq!(json["fallbacks"]["total_duration_micros"], 123_000);
@@ -1427,6 +1429,7 @@ mod tests {
             "warmup_forward_failure",
             "cold_cache_host_round_trip",
             "persistent_host_round_trip",
+            "shape_dependent_attention",
             "graph_cache_capacity",
             "critical_memory_pressure",
             "capture_failure",
