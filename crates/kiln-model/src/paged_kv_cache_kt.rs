@@ -50,6 +50,7 @@
 #[cfg(feature = "cuda")]
 use anyhow::Context;
 use anyhow::Result;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // #1082: cudarc imported directly instead of through
 // candle_core::cuda_backend::cudarc::*. The candle re-export is a pure
@@ -75,6 +76,28 @@ use kiln_tensor::{
     CudaStorage, cuda_fp8_dequantize_direct, cuda_fp8_quantize_direct, cuda_zeros_ctx,
 };
 use kiln_tensor::{DType as KtDType, Layout, Tensor as KtTensor, TensorId};
+
+static NEXT_KV_POOL_ALLOCATION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Stable identity for the physical tensors backing one paged-KV cache.
+///
+/// `allocation_id` distinguishes separately constructed caches. `generation`
+/// advances only after a failure-atomic physical resize commits, so graph
+/// runners can reject replay against pointers from an older pool.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct KvPoolIdentity {
+    pub allocation_id: u64,
+    pub generation: u64,
+    pub num_blocks: usize,
+}
+
+fn next_kv_pool_allocation_id() -> Result<u64> {
+    NEXT_KV_POOL_ALLOCATION_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| anyhow::anyhow!("paged KV pool allocation identity exhausted"))
+}
 
 /// Device-dispatched FP8 (E4M3FN, scale=1.0 "direct") quantize for the paged-KV
 /// write path. CUDA and ROCm both route to their on-device kernel (the shared
@@ -242,8 +265,13 @@ pub struct PagedKvCacheKt {
     block_size: usize,
     /// Logical block count = `layers[i]` slot count / `block_size`. Atomic so
     /// `physical_resize_to` can update it through `&self` in lockstep with the
-    /// `layers` swap. Read relaxed in the decode path.
+    /// `layers` swap. Acquire/release ordering publishes it with the pool
+    /// generation.
     num_blocks: std::sync::atomic::AtomicUsize,
+    /// Process-unique cache allocation plus a generation advanced at each
+    /// successful physical pool replacement.
+    allocation_id: u64,
+    generation: AtomicU64,
     /// Whether FP8 quantization is enabled. When true, pool dtype is U8.
     fp8: bool,
     /// Per-layer FP8 scale factors `(k_scale, v_scale)`. Updated on
@@ -328,6 +356,8 @@ impl PagedKvCacheKt {
             layers: std::sync::RwLock::new(layers),
             block_size,
             num_blocks: std::sync::atomic::AtomicUsize::new(num_blocks),
+            allocation_id: next_kv_pool_allocation_id()?,
+            generation: AtomicU64::new(0),
             fp8,
             fp8_scales,
             compute_dtype: dtype,
@@ -361,7 +391,19 @@ impl PagedKvCacheKt {
     }
 
     pub fn num_blocks(&self) -> usize {
-        self.num_blocks.load(std::sync::atomic::Ordering::Relaxed)
+        self.num_blocks.load(Ordering::Acquire)
+    }
+
+    /// Return a consistent physical-pool identity while excluding a resize
+    /// commit. Tensor clones do not change this identity; replacing any pool
+    /// does.
+    pub fn pool_identity(&self) -> KvPoolIdentity {
+        let _layers = self.layers_read();
+        KvPoolIdentity {
+            allocation_id: self.allocation_id,
+            generation: self.generation.load(Ordering::Acquire),
+            num_blocks: self.num_blocks.load(Ordering::Acquire),
+        }
     }
 
     /// The device the pools live on (layer 0's k pool), or `None` if the cache
@@ -445,21 +487,11 @@ impl PagedKvCacheKt {
     /// `slot = block_id*block_size + off` is preserved, so existing `BlockTable`s
     /// stay valid with NO remapping.
     ///
-    /// SHRINK vs GROW commit strategy:
-    /// - SHRINK swaps pools ONE LAYER AT A TIME, dropping each old pool the
-    ///   instant its data is copied so the next layer's (smaller) alloc reuses
-    ///   the freed bytes. Peak transient VRAM is bounded to `old + one_layer`,
-    ///   NOT `old + new` — a SHRINK runs when memory is tight, so a
-    ///   build-all-then-swap would spike VRAM exactly when we can least afford
-    ///   it. SHRINK is effectively atomic: only the layer-0 alloc can fail, and
-    ///   it fails before any mutation (every later, smaller alloc reuses freed
-    ///   bytes), so `self` is untouched on `Err`.
-    /// - GROW stages all new pools into a local vec and swaps them in only after
-    ///   every layer succeeds (ATOMIC: `Err` leaves `self` wholly on the old
-    ///   pools). A growing per-layer swap could fail mid-loop and leave the cache
-    ///   with mixed-size layers — corrupting the slot mapping. GROW peak is
-    ///   `old + new`, which is fine: GROW only runs when memory is NOT tight (the
-    ///   caller pre-checks `available_bytes`).
+    /// Both shrink and grow stage every new pool before one commit. This costs a
+    /// temporary `old + new` allocation, but it is the only portable way to make
+    /// allocation, copy, and synchronization failures leave every layer, the
+    /// published capacity, and the pool generation unchanged. Callers must
+    /// reserve that transient headroom before requesting a physical resize.
     ///
     /// No-op (returns `Ok`) when `new_num_blocks == num_blocks`.
     pub fn physical_resize_to(
@@ -467,10 +499,18 @@ impl PagedKvCacheKt {
         new_num_blocks: usize,
         device: kiln_tensor::Device,
     ) -> Result<()> {
-        let cur = self.num_blocks();
+        // The write lock covers the complete transaction and serializes an
+        // accidental second resizer even if an outer caller violates the actor
+        // barrier contract.
+        let mut layers = self.layers.write().unwrap_or_else(|e| e.into_inner());
+        let cur = self.num_blocks.load(Ordering::Acquire);
         if new_num_blocks == cur {
             return Ok(());
         }
+        anyhow::ensure!(
+            self.generation.load(Ordering::Acquire) < u64::MAX,
+            "physical_resize_to: pool generation exhausted"
+        );
         // C2: flush any in-flight kernel before we drop the old pools. The caller
         // guarantees no NEW launches during the resize (actor barrier); this
         // covers a kernel already submitted on another stream (graph replay).
@@ -484,13 +524,6 @@ impl PagedKvCacheKt {
         let new_total_slots = new_num_blocks * self.block_size;
         let old_total_slots = cur * self.block_size;
         let copy_slots = new_total_slots.min(old_total_slots);
-        let growing = new_num_blocks > cur;
-
-        // Exclusive access for the structural swap. The caller's barrier (no
-        // forward in flight) guarantees this write lock is never contended
-        // against a live decode read, and that no kernel is mid-read of a pool we
-        // are about to drop.
-        let mut layers = self.layers.write().unwrap_or_else(|e| e.into_inner());
 
         // Allocate the new pool for layer `i` and copy its surviving prefix from
         // the current (old) pool at `pools[i]`. Pure: does not mutate `pools`.
@@ -530,67 +563,19 @@ impl PagedKvCacheKt {
                 Ok((new_k, new_v))
             };
 
-        if growing {
-            // ATOMIC: stage all, then commit. `?` on any layer leaves self intact.
-            let mut staged: Vec<(KtTensor, KtTensor)> = Vec::with_capacity(layers.len());
-            for layer_idx in 0..layers.len() {
-                staged.push(make_resized(&layers, layer_idx)?);
-            }
-            *layers = staged;
-        } else if copy_slots == 0 {
-            // Degenerate shrink-to-zero (no surviving KV): just allocate the new
-            // (empty/tiny) pools per layer.
-            for layer_idx in 0..layers.len() {
-                layers[layer_idx] = make_resized(&layers, layer_idx)?;
-            }
-        } else {
-            // SHRINK — HOST-STAGED so device VRAM is STRICTLY NON-INCREASING (#38).
-            // For a shrink the surviving prefix `[0, copy_slots)` IS the entire new
-            // pool (copy_slots == new_total_slots), so per layer we: (1) D2H the
-            // K/V prefix into host RAM, (2) DROP the old pool — freeing its VRAM
-            // NOW, (3) H2D the prefix back as the new, smaller device pool. Peak
-            // device VRAM per layer never exceeds the OLD layer size — no one-layer
-            // overshoot, unlike the D2D alloc-then-drop which transiently held
-            // `old + new`. Cost: one D2H + H2D per layer; resize is rare.
-            debug_assert_eq!(
-                copy_slots, new_total_slots,
-                "shrink: surviving prefix must be the whole new pool"
-            );
-            let cpu = kiln_tensor::Device::Cpu;
-            for layer_idx in 0..layers.len() {
-                sync_device_for_resize(device)?;
-                // 1. D2H the surviving K/V prefix (independent host copies).
-                let host_k = layers[layer_idx]
-                    .0
-                    .narrow(0, 0, copy_slots)
-                    .and_then(|p| p.contiguous())
-                    .and_then(|p| p.to_device(cpu))
-                    .map_err(|e| anyhow::anyhow!("physical_resize_to: D2H k l{layer_idx}: {e}"))?;
-                let host_v = layers[layer_idx]
-                    .1
-                    .narrow(0, 0, copy_slots)
-                    .and_then(|p| p.contiguous())
-                    .and_then(|p| p.to_device(cpu))
-                    .map_err(|e| anyhow::anyhow!("physical_resize_to: D2H v l{layer_idx}: {e}"))?;
-                // 2. Drop the old layer's VRAM by overwriting with the host copies.
-                layers[layer_idx] = (host_k, host_v);
-                sync_device_for_resize(device)?;
-                // 3. H2D the prefix back as the new (smaller) device pool.
-                let new_k = layers[layer_idx]
-                    .0
-                    .to_device(device)
-                    .and_then(|t| t.contiguous())
-                    .map_err(|e| anyhow::anyhow!("physical_resize_to: H2D k l{layer_idx}: {e}"))?;
-                let new_v = layers[layer_idx]
-                    .1
-                    .to_device(device)
-                    .and_then(|t| t.contiguous())
-                    .map_err(|e| anyhow::anyhow!("physical_resize_to: H2D v l{layer_idx}: {e}"))?;
-                layers[layer_idx] = (new_k, new_v);
-            }
+        let mut staged: Vec<(KtTensor, KtTensor)> = Vec::with_capacity(layers.len());
+        for layer_idx in 0..layers.len() {
+            staged.push(make_resized(&layers, layer_idx)?);
         }
-        self.num_blocks
-            .store(new_num_blocks, std::sync::atomic::Ordering::Relaxed);
+
+        // Copies may be asynchronous. Complete them while every old pool is
+        // still owned so a failed synchronization cannot publish or free a
+        // partially initialized generation.
+        sync_device_for_resize(device)?;
+
+        *layers = staged;
+        self.num_blocks.store(new_num_blocks, Ordering::Release);
+        self.generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -1820,6 +1805,8 @@ mod tests {
             layers: std::sync::RwLock::new(Vec::new()),
             block_size: 16,
             num_blocks: std::sync::atomic::AtomicUsize::new(1024),
+            allocation_id: 7,
+            generation: AtomicU64::new(3),
             fp8: true,
             fp8_scales: Vec::new(),
             compute_dtype: KtDType::BF16,
@@ -1830,6 +1817,14 @@ mod tests {
         assert!(cache.is_fp8());
         assert_eq!(cache.compute_dtype(), KtDType::BF16);
         assert!(cache.pool_tensors(0).is_none());
+        assert_eq!(
+            cache.pool_identity(),
+            KvPoolIdentity {
+                allocation_id: 7,
+                generation: 3,
+                num_blocks: 1024,
+            }
+        );
     }
 
     // Physical resize correctness on CPU pools (device-agnostic copy logic; the
@@ -1848,6 +1843,8 @@ mod tests {
         let cache = PagedKvCacheKt::new(1, 4, block_size, kv_heads, head_dim, KtDType::F32, dev)
             .expect("construct cpu cache");
         assert_eq!(cache.num_blocks(), 4);
+        let initial_identity = cache.pool_identity();
+        assert_eq!(initial_identity.generation, 0);
 
         // Write a known pattern into the first 6 slots of layer 0's K and V pools
         // (slots 6,7 stay zero). Pattern: k[slot,i] = slot*10 + i ; v = k + 100.
@@ -1875,6 +1872,13 @@ mod tests {
         // survives verbatim and the (zero) tail is dropped.
         cache.physical_resize_to(3, dev).expect("shrink");
         assert_eq!(cache.num_blocks(), 3);
+        let shrunk_identity = cache.pool_identity();
+        assert_eq!(
+            shrunk_identity.allocation_id,
+            initial_identity.allocation_id
+        );
+        assert_eq!(shrunk_identity.generation, 1);
+        assert_eq!(shrunk_identity.num_blocks, 3);
         let (k_pool, v_pool) = cache.pool_tensors(0).unwrap();
         assert_eq!(k_pool.dims(), &[6, kv_heads, head_dim]);
         let k_after: Vec<f32> = k_pool.to_vec().unwrap();
@@ -1885,6 +1889,10 @@ mod tests {
         // GROW 3 -> 5 blocks (6 -> 10 slots). Prefix preserved, new tail zeroed.
         cache.physical_resize_to(5, dev).expect("grow");
         assert_eq!(cache.num_blocks(), 5);
+        let grown_identity = cache.pool_identity();
+        assert_eq!(grown_identity.allocation_id, initial_identity.allocation_id);
+        assert_eq!(grown_identity.generation, 2);
+        assert_eq!(grown_identity.num_blocks, 5);
         let (k_pool, _) = cache.pool_tensors(0).unwrap();
         assert_eq!(k_pool.dims(), &[10, kv_heads, head_dim]);
         let k_grown: Vec<f32> = k_pool.to_vec().unwrap();
@@ -1901,6 +1909,19 @@ mod tests {
         // No-op resize returns Ok and changes nothing.
         cache.physical_resize_to(5, dev).expect("noop");
         assert_eq!(cache.num_blocks(), 5);
+        assert_eq!(cache.pool_identity(), grown_identity);
+    }
+
+    #[test]
+    fn separately_constructed_pools_have_distinct_allocation_identities() {
+        let first = PagedKvCacheKt::new(1, 2, 2, 1, 2, KtDType::F32, kiln_tensor::Device::Cpu)
+            .expect("first cache");
+        let second = PagedKvCacheKt::new(1, 2, 2, 1, 2, KtDType::F32, kiln_tensor::Device::Cpu)
+            .expect("second cache");
+        assert_ne!(
+            first.pool_identity().allocation_id,
+            second.pool_identity().allocation_id
+        );
     }
 
     #[test]

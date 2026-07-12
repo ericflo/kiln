@@ -93,7 +93,7 @@ pub use loader::{
     LoadModelOptions, load_model, load_model_with_options, load_model_with_options_and_snapshot_dir,
 };
 pub use lora_loader::LoraWeights;
-pub use paged_kv_cache_kt::PagedKvCacheKt;
+pub use paged_kv_cache_kt::{KvPoolIdentity, PagedKvCacheKt};
 pub use rocm_graph::RocmGraphStats;
 pub use speculative::SpeculativeConfig;
 pub use weights::{ModelSnapshotCleanup, ModelWeights};
