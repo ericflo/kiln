@@ -3282,6 +3282,7 @@ impl AppState {
         // constructor zero-fills the pools; the old `new_uninit_*` left them
         // uninitialized — a one-time startup memset, not a correctness change
         // (paged writes overwrite slots before they are read).
+        let allocation_attempt = std::cell::Cell::new(0u64);
         let allocate_cache = |n: usize| -> anyhow::Result<PagedKvCacheKt> {
             validate_kv_allocation_against_live_allocator(
                 &device_kt,
@@ -3293,7 +3294,11 @@ impl AppState {
                 kiln_memory::MemoryGovernor::global(),
             )?;
             let attempt = || {
-                PagedKvCacheKt::new_with_fp8(
+                let attempt_number = allocation_attempt.get().saturating_add(1);
+                allocation_attempt.set(attempt_number);
+                let requested_bytes = (n as u64).saturating_mul(bytes_per_block);
+                let started = std::time::Instant::now();
+                let result = PagedKvCacheKt::new_with_fp8(
                     model_config.num_full_attention_layers,
                     n,
                     block_size,
@@ -3302,7 +3307,46 @@ impl AppState {
                     kv_dtype,
                     device_kt,
                     fp8_enabled,
-                )
+                );
+                let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+                match &result {
+                    Ok(_) => tracing::info!(
+                        event = "gpu_memory_operation",
+                        operation = "allocation",
+                        reason = "initial_kv_cache",
+                        outcome = "completed",
+                        ?device_kt,
+                        attempt = attempt_number,
+                        num_blocks = n,
+                        block_size,
+                        requested_bytes,
+                        actual_bytes = requested_bytes,
+                        wait_ms = 0.0,
+                        duration_ms,
+                        ?kv_dtype,
+                        fp8_enabled,
+                        "paged KV cache allocation completed"
+                    ),
+                    Err(error) => tracing::warn!(
+                        event = "gpu_memory_operation",
+                        operation = "allocation",
+                        reason = "initial_kv_cache",
+                        outcome = "failed",
+                        error = %format!("{error:#}"),
+                        ?device_kt,
+                        attempt = attempt_number,
+                        num_blocks = n,
+                        block_size,
+                        requested_bytes,
+                        actual_bytes = 0,
+                        wait_ms = 0.0,
+                        duration_ms,
+                        ?kv_dtype,
+                        fp8_enabled,
+                        "paged KV cache allocation failed"
+                    ),
+                }
+                result
             };
             match attempt() {
                 Ok(c) => Ok(c),
@@ -3316,9 +3360,19 @@ impl AppState {
                     if serving_policy.allocator_reclaim
                         && gpu_memory_budget_policy.retry_kv_allocation_after_reclaim =>
                 {
+                    let reclaim_started = std::time::Instant::now();
                     let freed = kiln_memory::MemoryGovernor::global().reclaim(u64::MAX);
+                    let reclaim_duration_ms = reclaim_started.elapsed().as_secs_f64() * 1000.0;
                     tracing::warn!(
+                        event = "gpu_memory_operation",
+                        operation = "reclaim",
+                        reason = "initial_kv_allocation_retry",
+                        outcome = if freed > 0 { "reclaimed" } else { "zero_yield" },
                         num_blocks = n,
+                        target_bytes = u64::MAX,
+                        actual_bytes = freed,
+                        wait_ms = 0.0,
+                        duration_ms = reclaim_duration_ms,
                         reclaimed_mb = freed / (1024 * 1024),
                         "KV cache allocation failed; reclaimed pooled VRAM and retrying at same size"
                     );
@@ -4211,13 +4265,23 @@ fn register_backend_memory_reclaimer(
                         match kiln_tensor::rocm_trim_pool(idx, min_keep) {
                             Ok(reclaimed) => {
                                 tracing::info!(
+                                    event = "gpu_memory_operation",
+                                    operation = "trim",
                                     reason = "memory_governor",
+                                    outcome = if reclaimed > 0 {
+                                        "reclaimed"
+                                    } else {
+                                        "zero_yield"
+                                    },
                                     target,
+                                    target_bytes = target,
+                                    actual_bytes = reclaimed,
                                     reserved_before = reserved,
                                     used_before = used,
                                     requested_min_keep = min_keep,
                                     reclaimed,
                                     coordination_acquire_ms,
+                                    wait_ms = coordination_acquire_ms,
                                     duration_ms = started.elapsed().as_secs_f64() * 1000.0,
                                     "ROCm pool reclaim completed"
                                 );
@@ -4225,11 +4289,19 @@ fn register_backend_memory_reclaimer(
                             }
                             Err(error) => {
                                 tracing::warn!(
+                                    event = "gpu_memory_operation",
+                                    operation = "trim",
+                                    reason = "memory_governor",
+                                    outcome = "failed",
                                     %error,
                                     target,
+                                    target_bytes = target,
+                                    actual_bytes = 0,
                                     reserved_before = reserved,
                                     used_before = used,
+                                    requested_min_keep = min_keep,
                                     coordination_acquire_ms,
+                                    wait_ms = coordination_acquire_ms,
                                     duration_ms = started.elapsed().as_secs_f64() * 1000.0,
                                     "ROCm pool reclaim failed"
                                 );

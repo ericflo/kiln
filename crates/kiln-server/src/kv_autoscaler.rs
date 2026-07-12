@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use kiln_memory::{MemoryGovernor, MemoryPressure};
 use kiln_model::{GpuAllocatorMemoryProbePolicy, PagedKvCacheKt};
 
-use crate::batching_engine::BatchingEngineHandle;
+use crate::batching_engine::{BatchingEngineHandle, KvResizeReason};
 
 /// Startup state exposed through `/health`. This distinguishes an operator
 /// request from a control loop that actually owns a usable device KV pool.
@@ -254,7 +254,8 @@ fn run(
                 );
             }
             let _staging_reservation = gov.reserve(plan.replacement_bytes);
-            match engine.resize_kv_blocking(plan.target_blocks) {
+            match engine.resize_kv_blocking(plan.target_blocks, KvResizeReason::ForcedConfiguration)
+            {
                 Ok(achieved) => {
                     next_attempt = Instant::now() + COOLDOWN;
                     retry_backoff = COOLDOWN;
@@ -357,7 +358,7 @@ fn run(
         }
 
         let _staging_reservation = gov.reserve(plan.replacement_bytes);
-        match engine.resize_kv_blocking(plan.target_blocks) {
+        match engine.resize_kv_blocking(plan.target_blocks, KvResizeReason::AutomaticMemoryPolicy) {
             Ok(achieved) => {
                 next_attempt = Instant::now() + COOLDOWN;
                 retry_backoff = COOLDOWN;

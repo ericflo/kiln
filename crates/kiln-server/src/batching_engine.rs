@@ -505,6 +505,26 @@ fn collect_ready_decode_indices(
     Ok((decode_indices, decode_params))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum KvResizeReason {
+    AutomaticMemoryPolicy,
+    ForcedConfiguration,
+    TrainingMemoryPreparation,
+    Maintenance,
+}
+
+impl KvResizeReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AutomaticMemoryPolicy => "automatic_memory_policy",
+            Self::ForcedConfiguration => "forced_configuration",
+            Self::TrainingMemoryPreparation => "training_memory_preparation",
+            Self::Maintenance => "maintenance",
+        }
+    }
+}
+
 pub trait DecodeForward: Send + Sync + 'static {
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot>;
     fn supports_resumable_prefill(&self) -> bool {
@@ -623,6 +643,16 @@ pub trait DecodeForward: Send + Sync + 'static {
     /// still hold high blocks). Default: no-op (mock/non-paged backends).
     fn resize_kv(&self, _target_blocks: usize) -> Result<usize> {
         Ok(0)
+    }
+
+    #[doc(hidden)]
+    fn resize_kv_with_context(
+        &self,
+        target_blocks: usize,
+        _reason: KvResizeReason,
+        _barrier_wait: Duration,
+    ) -> Result<usize> {
+        self.resize_kv(target_blocks)
     }
 
     /// Current usable KV block count, for the governor's resize policy. `None`
@@ -1437,6 +1467,15 @@ impl DecodeForward for RealDecodeForward {
     }
 
     fn resize_kv(&self, target_blocks: usize) -> Result<usize> {
+        self.resize_kv_with_context(target_blocks, KvResizeReason::Maintenance, Duration::ZERO)
+    }
+
+    fn resize_kv_with_context(
+        &self,
+        target_blocks: usize,
+        reason: KvResizeReason,
+        barrier_wait: Duration,
+    ) -> Result<usize> {
         anyhow::ensure!(
             self.allow_dynamic_kv_resize,
             "physical KV resize is prohibited by the active serving profile"
@@ -1452,35 +1491,99 @@ impl DecodeForward for RealDecodeForward {
         if target_blocks == cur || target_blocks == 0 {
             return Ok(cur);
         }
-        // EXCLUSIVE GPU access for the pool swap: the write guard blocks BOTH
-        // decode actors (they hold the read guard) and any training step (also a
-        // write guard) until the resize completes — so no kernel is reading a
-        // pool we are about to drop. Combined with the device-sync inside
-        // `physical_resize_to`, the swap is race-free. Resize is rare
-        // (governor-driven under pressure), so the brief decode stall is fine.
-        let _gpu =
-            gpu_coordination_write_guard_while_healthy(&self.gpu_lock, &self.backend_health)?;
-        let runner = self.runner.write().map_err(|error| {
-            anyhow::anyhow!("model runner lock poisoned during KV resize: {error}")
-        })?;
-        runner.ensure_backend_healthy()?;
-        runner.invalidate_decode_graphs_for_kv_pool_change()?;
-        let mut block_manager = self.block_manager_guard()?;
-        let achieved =
+        let bytes_per_block = self.paged_cache.bytes_per_block() as u64;
+        let previous_bytes = (cur as u64).saturating_mul(bytes_per_block);
+        let requested_bytes = (target_blocks as u64).saturating_mul(bytes_per_block);
+        let started = Instant::now();
+        let mut gpu_coordination_wait = Duration::ZERO;
+        let mut model_lock_wait = Duration::ZERO;
+        let result = (|| {
+            // EXCLUSIVE GPU access for the pool swap: the write guard blocks
+            // decode actors and training until the transaction commits.
+            let gpu_wait_started = Instant::now();
+            let gpu_guard =
+                gpu_coordination_write_guard_while_healthy(&self.gpu_lock, &self.backend_health);
+            gpu_coordination_wait = gpu_wait_started.elapsed();
+            let _gpu = gpu_guard?;
+
+            let model_wait_started = Instant::now();
+            let runner = self.runner.write().map_err(|error| {
+                anyhow::anyhow!("model runner lock poisoned during KV resize: {error}")
+            });
+            model_lock_wait = model_wait_started.elapsed();
+            let runner = runner?;
+            runner.ensure_backend_healthy()?;
+            runner.invalidate_decode_graphs_for_kv_pool_change()?;
+            let mut block_manager = self.block_manager_guard()?;
             resize_block_manager_transaction(&mut block_manager, cur, target_blocks, |achieved| {
                 self.paged_cache.physical_resize_to(achieved, device)
-            })?;
-        if target_blocks < cur {
-            tracing::info!(
-                from = cur,
-                to = achieved,
-                target = target_blocks,
-                "KV cache physically shrunk (VRAM returned to pool for reuse)"
-            );
+            })
+        })();
+        let mutation_duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let barrier_wait_ms = barrier_wait.as_secs_f64() * 1000.0;
+        let gpu_coordination_wait_ms = gpu_coordination_wait.as_secs_f64() * 1000.0;
+        let model_lock_wait_ms = model_lock_wait.as_secs_f64() * 1000.0;
+        let wait_ms = barrier_wait_ms + gpu_coordination_wait_ms + model_lock_wait_ms;
+        let duration_ms = barrier_wait_ms + mutation_duration_ms;
+        let direction = if target_blocks < cur {
+            "shrink"
         } else {
-            tracing::info!(from = cur, to = achieved, "KV cache physically grown");
+            "grow"
+        };
+        match result {
+            Ok(achieved) => {
+                let actual_bytes = (achieved as u64).saturating_mul(bytes_per_block);
+                tracing::info!(
+                    event = "gpu_memory_operation",
+                    operation = "resize",
+                    reason = reason.as_str(),
+                    outcome = "completed",
+                    direction,
+                    from_blocks = cur,
+                    requested_blocks = target_blocks,
+                    actual_blocks = achieved,
+                    previous_bytes,
+                    requested_bytes,
+                    actual_bytes,
+                    released_bytes = previous_bytes.saturating_sub(actual_bytes),
+                    added_bytes = actual_bytes.saturating_sub(previous_bytes),
+                    barrier_wait_ms,
+                    gpu_coordination_wait_ms,
+                    model_lock_wait_ms,
+                    wait_ms,
+                    mutation_duration_ms,
+                    duration_ms,
+                    "KV cache physical resize completed"
+                );
+                Ok(achieved)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "gpu_memory_operation",
+                    operation = "resize",
+                    reason = reason.as_str(),
+                    outcome = "failed",
+                    direction,
+                    error = %format!("{error:#}"),
+                    from_blocks = cur,
+                    requested_blocks = target_blocks,
+                    actual_blocks = cur,
+                    previous_bytes,
+                    requested_bytes,
+                    actual_bytes = previous_bytes,
+                    released_bytes = 0,
+                    added_bytes = 0,
+                    barrier_wait_ms,
+                    gpu_coordination_wait_ms,
+                    model_lock_wait_ms,
+                    wait_ms,
+                    mutation_duration_ms,
+                    duration_ms,
+                    "KV cache physical resize failed"
+                );
+                Err(error)
+            }
         }
-        Ok(achieved)
     }
 }
 
@@ -1684,10 +1787,21 @@ impl BatchingEngineHandle {
     /// Physically resize the KV cache to `target_blocks` (#26). Returns the
     /// achieved block count. Async variant for request-handler / API callers.
     pub async fn resize_kv(&self, target_blocks: usize) -> Result<usize> {
+        self.resize_kv_with_reason(target_blocks, KvResizeReason::Maintenance)
+            .await
+    }
+
+    async fn resize_kv_with_reason(
+        &self,
+        target_blocks: usize,
+        reason: KvResizeReason,
+    ) -> Result<usize> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::ResizeKv {
                 target_blocks,
+                reason,
+                enqueued_at: Instant::now(),
                 reply,
             })
             .await
@@ -1699,11 +1813,17 @@ impl BatchingEngineHandle {
 
     /// Blocking variant of [`Self::resize_kv`] for the memory governor's
     /// (non-async) monitor thread.
-    pub fn resize_kv_blocking(&self, target_blocks: usize) -> Result<usize> {
+    pub(crate) fn resize_kv_blocking(
+        &self,
+        target_blocks: usize,
+        reason: KvResizeReason,
+    ) -> Result<usize> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .blocking_send(EngineCommand::ResizeKv {
                 target_blocks,
+                reason,
+                enqueued_at: Instant::now(),
                 reply,
             })
             .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
@@ -1821,6 +1941,8 @@ enum EngineCommand {
     /// graph, recurrent state, or block-table reference to the old pool.
     ResizeKv {
         target_blocks: usize,
+        reason: KvResizeReason,
+        enqueued_at: Instant,
         reply: oneshot::Sender<std::result::Result<usize, String>>,
     },
     /// Swap adapter weights at the between-REQUESTS barrier: queued until
@@ -1837,6 +1959,8 @@ enum EngineCommand {
 enum PendingExclusiveMutation {
     ResizeKv {
         target_blocks: usize,
+        reason: KvResizeReason,
+        enqueued_at: Instant,
         reply: oneshot::Sender<std::result::Result<usize, String>>,
     },
     SwapAdapter {
@@ -2565,11 +2689,15 @@ impl BatchingEngineActor {
             }
             EngineCommand::ResizeKv {
                 target_blocks,
+                reason,
+                enqueued_at,
                 reply,
             } => {
                 self.pending_exclusive_mutations
                     .push_back(PendingExclusiveMutation::ResizeKv {
                         target_blocks,
+                        reason,
+                        enqueued_at,
                         reply,
                     });
             }
@@ -2590,11 +2718,14 @@ impl BatchingEngineActor {
             match pending {
                 PendingExclusiveMutation::ResizeKv {
                     target_blocks,
+                    reason,
+                    enqueued_at,
                     reply,
                 } => {
+                    let barrier_wait = enqueued_at.elapsed();
                     let result = self
                         .forward
-                        .resize_kv(target_blocks)
+                        .resize_kv_with_context(target_blocks, reason, barrier_wait)
                         .map_err(|error| format!("{error:#}"));
                     let _ = reply.send(result);
                 }
@@ -4511,11 +4642,23 @@ mod tests {
             })
         }
 
-        fn resize_kv(&self, target_blocks: usize) -> Result<usize> {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("resize:{target_blocks}"));
+        fn resize_kv_with_context(
+            &self,
+            target_blocks: usize,
+            reason: KvResizeReason,
+            barrier_wait: Duration,
+        ) -> Result<usize> {
+            let mut events = self.events.lock().unwrap();
+            events.push(format!("resize:{target_blocks}"));
+            events.push(format!("resize_reason:{}", reason.as_str()));
+            events.push(format!(
+                "resize_barrier_wait:{}",
+                if barrier_wait.is_zero() {
+                    "zero"
+                } else {
+                    "positive"
+                }
+            ));
             Ok(target_blocks)
         }
     }
@@ -4764,6 +4907,15 @@ mod tests {
             .iter()
             .position(|event| event == "resize:17")
             .expect("resize ran");
+        assert!(
+            log.iter().any(|event| event == "resize_reason:maintenance"),
+            "public resize must carry a bounded maintenance reason: {log:?}"
+        );
+        assert!(
+            log.iter()
+                .any(|event| event == "resize_barrier_wait:positive"),
+            "resize must carry its actor-barrier wait: {log:?}"
+        );
         let waiting_prepare_idx = log
             .iter()
             .position(|event| event == "prepare:200")

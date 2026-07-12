@@ -1148,7 +1148,10 @@ def classify_server_event(
     lowered = (event_name if isinstance(event_name, str) else message).strip().lower()
     if lowered == "background inference prewarm complete":
         return "prewarm_complete"
-    if lowered == "kv autoscaler resized cache":
+    if lowered in {
+        "kv autoscaler resized cache",
+        "kv cache physical resize completed",
+    }:
         return "kv_resize"
     if lowered in {
         "memory governor: reclaimed under pressure",

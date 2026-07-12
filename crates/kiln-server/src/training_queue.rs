@@ -16,6 +16,7 @@ use kiln_train::{
 };
 use serde::Serialize;
 
+use crate::batching_engine::KvResizeReason;
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::recent_requests::now_unix_ms;
 use crate::state::{AppState, ModelBackend, TrainingJobType};
@@ -2967,7 +2968,10 @@ fn prepare_training_memory_for_job(
                     state.clear_real_prefix_cache();
                     let _staging_reservation =
                         kiln_memory::MemoryGovernor::global().reserve(plan.replacement_bytes);
-                    match engine.resize_kv_blocking(plan.target_blocks) {
+                    match engine.resize_kv_blocking(
+                        plan.target_blocks,
+                        KvResizeReason::TrainingMemoryPreparation,
+                    ) {
                         Ok(achieved) => tracing::info!(
                             from_blocks = current_blocks,
                             requested_target_blocks,
@@ -2999,13 +3003,24 @@ fn prepare_training_memory_for_job(
                 }
             }
         }
+        let reclaim_started = std::time::Instant::now();
         let reclaimed = kiln_memory::MemoryGovernor::global().reclaim(u64::MAX);
-        if reclaimed > 0 {
-            tracing::info!(
-                reclaimed_mb = reclaimed / (1024 * 1024),
-                "training worker reclaimed pooled memory before allocation"
-            );
-        }
+        tracing::info!(
+            event = "gpu_memory_operation",
+            operation = "reclaim",
+            reason = "training_memory_preparation",
+            outcome = if reclaimed > 0 {
+                "reclaimed"
+            } else {
+                "zero_yield"
+            },
+            target_bytes = u64::MAX,
+            actual_bytes = reclaimed,
+            wait_ms = 0.0,
+            duration_ms = reclaim_started.elapsed().as_secs_f64() * 1000.0,
+            reclaimed_mb = reclaimed / (1024 * 1024),
+            "training worker reclaimed pooled memory before allocation"
+        );
     }
 
     let after = current_training_safe_bytes(runtime.as_ref(), current_reservation_bytes);

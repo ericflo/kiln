@@ -669,6 +669,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         cases = {
             "background inference prewarm complete": "prewarm_complete",
             "KV autoscaler resized cache": "kv_resize",
+            "KV cache physical resize completed": "kv_resize",
             "ROCm pool reclaim completed": "memory_reclaim",
             "memory governor automatic reclaim completed": "memory_reclaim",
             "ROCm HIP graph captured for decode (24 layers)": "graph_capture",
