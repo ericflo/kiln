@@ -922,6 +922,14 @@ all-equal cohort aligned instead of creating an artificial readiness staircase,
 while a genuinely shorter interactive request can receive the bounded extra
 service even on its ordinary turn; the round-robin lane retains one third of
 dispatch capacity while shorter work is continuously eligible.
+Latency-oriented actors also keep a separate staging lane of at most four
+short prefills beyond the decode-width ordinary slots. A request is staging
+eligible only when its prompt can enter the four-chunk short-tail class after
+one prefill quantum. Ordinary FIFO capacity is counted independently, so staged
+arrivals cannot take a long prompt's ordinary slot; when staged rows become
+decode-ready, request-generation round robin prevents a decode-width cohort
+from hiding them. Staging is disabled for deterministic width one and for
+CUDA's throughput-oriented burst-refill policy.
 Cancellation and
 shutdown release partial KV ownership
 only after the backend synchronization boundary; an unsettled device failure is
@@ -935,7 +943,10 @@ Prometheus exports the corresponding `kiln_batching_engine_active_prefill`,
 `kiln_batching_engine_last_prefill_tokens`, and
 `kiln_batching_engine_{last_prefill_layers,prefill_layers_total,prefill_layer_yields_total}`
 series. Bounded short-tail service is counted by
-`kiln_batching_engine_short_prefill_priority_forwards_total`. Admission,
+`kiln_batching_engine_short_prefill_priority_forwards_total`; staging capacity,
+occupancy, observed active width, and admissions use the
+`kiln_batching_engine_{prefill_staging_slots,max_active_requests,active_staged_requests,max_observed_active_requests,prefill_staging_admissions_total}`
+series. Admission,
 bounded-prefill, and decode-forward wall time is also
 available as cumulative, process-maximum, and 100 ms slow-phase counters under
 `kiln_batching_engine_{admission,prefill_forward,decode_forward}_*`.

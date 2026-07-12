@@ -120,7 +120,11 @@ struct BatchingEngineSnapshotDebug {
     max_prefill_layers_per_cycle: usize,
     max_prefill_layers_per_cycle_source: ConfigValueSource,
     max_prefill_admission_quantum: usize,
+    max_prefill_staging_slots: usize,
+    max_active_requests: usize,
     max_decode_batch: usize,
+    active_staged_requests: usize,
+    max_observed_active_requests: usize,
     current_batch_size: usize,
     last_batch_size: usize,
     max_observed_batch_size: usize,
@@ -149,6 +153,7 @@ struct BatchingEngineSnapshotDebug {
     total_prefill_layers: u64,
     total_prefill_layer_yields: u64,
     total_short_prefill_priority_forwards: u64,
+    total_prefill_staging_admissions: u64,
     total_errors: u64,
     response_delivery_in_flight: usize,
     response_delivery_backpressured: usize,
@@ -577,7 +582,11 @@ impl From<BatchingEngineSnapshot> for BatchingEngineSnapshotDebug {
             max_prefill_layers_per_cycle: snapshot.max_prefill_layers_per_cycle,
             max_prefill_layers_per_cycle_source: snapshot.max_prefill_layers_per_cycle_source,
             max_prefill_admission_quantum: snapshot.max_prefill_admission_quantum,
+            max_prefill_staging_slots: snapshot.max_prefill_staging_slots,
+            max_active_requests: snapshot.max_active_requests,
             max_decode_batch: snapshot.max_decode_batch,
+            active_staged_requests: snapshot.active_staged_requests,
+            max_observed_active_requests: snapshot.max_observed_active_requests,
             current_batch_size: snapshot.current_batch_size,
             last_batch_size: snapshot.last_batch_size,
             max_observed_batch_size: snapshot.max_observed_batch_size,
@@ -606,6 +615,7 @@ impl From<BatchingEngineSnapshot> for BatchingEngineSnapshotDebug {
             total_prefill_layers: snapshot.total_prefill_layers,
             total_prefill_layer_yields: snapshot.total_prefill_layer_yields,
             total_short_prefill_priority_forwards: snapshot.total_short_prefill_priority_forwards,
+            total_prefill_staging_admissions: snapshot.total_prefill_staging_admissions,
             total_errors: snapshot.total_errors,
             response_delivery_in_flight: snapshot.response_delivery_in_flight,
             response_delivery_backpressured: snapshot.response_delivery_backpressured,
@@ -863,7 +873,11 @@ mod tests {
             max_prefill_tokens_per_cycle_source: ConfigValueSource::ConfigFile,
             max_prefill_layers_per_cycle: 3,
             max_prefill_layers_per_cycle_source: ConfigValueSource::Environment,
+            max_prefill_staging_slots: 4,
+            max_active_requests: 16,
             max_decode_batch: 12,
+            active_staged_requests: 2,
+            max_observed_active_requests: 15,
             last_prefill_tokens: 124,
             last_prefill_layers: 3,
             max_decode_forward_ms: 115.0,
@@ -880,6 +894,7 @@ mod tests {
             total_prefill_layers: 33,
             total_prefill_layer_yields: 22,
             total_short_prefill_priority_forwards: 6,
+            total_prefill_staging_admissions: 5,
             response_delivery_in_flight: 4,
             response_delivery_backpressured: 2,
             response_delivery_pending_terminal: 1,
@@ -896,7 +911,11 @@ mod tests {
         assert_eq!(json["max_prefill_tokens_per_cycle_source"], "config_file");
         assert_eq!(json["max_prefill_layers_per_cycle"], 3);
         assert_eq!(json["max_prefill_layers_per_cycle_source"], "environment");
+        assert_eq!(json["max_prefill_staging_slots"], 4);
+        assert_eq!(json["max_active_requests"], 16);
         assert_eq!(json["max_decode_batch"], 12);
+        assert_eq!(json["active_staged_requests"], 2);
+        assert_eq!(json["max_observed_active_requests"], 15);
         assert_eq!(json["last_prefill_tokens"], 124);
         assert_eq!(json["last_prefill_layers"], 3);
         assert_eq!(json["max_decode_forward_ms"], 115.0);
@@ -913,6 +932,7 @@ mod tests {
         assert_eq!(json["total_prefill_layers"], 33);
         assert_eq!(json["total_prefill_layer_yields"], 22);
         assert_eq!(json["total_short_prefill_priority_forwards"], 6);
+        assert_eq!(json["total_prefill_staging_admissions"], 5);
         assert_eq!(json["response_delivery_in_flight"], 4);
         assert_eq!(json["response_delivery_backpressured"], 2);
         assert_eq!(json["response_delivery_pending_terminal"], 1);

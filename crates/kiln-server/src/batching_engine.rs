@@ -43,6 +43,11 @@ const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
 const DEFAULT_PREFILL_ADMISSION_QUANTUM: usize = 4;
 const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
+/// Latency-oriented actors may prepare a small number of interactive prompts
+/// without widening the backend's decode cohort. Ordinary FIFO slots and this
+/// staging lane are accounted independently so staged arrivals cannot consume
+/// or indefinitely postpone ordinary admission capacity.
+const MAX_PREFILL_STAGING_SLOTS: usize = 4;
 /// Force one round-robin dispatch after two opportunities to accelerate a
 /// short prompt tail. This bounds long-prompt slowdown under continuous short
 /// arrivals without making interactive prompts wait a full active-set rotation
@@ -101,9 +106,9 @@ fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
 /// typed startup configuration, or active backend policy. Deterministic inference stays
 /// single-row even when an operator also configured a wider batch: changing
 /// the request cohort can otherwise select a different BF16 GEMM shape and
-/// change a greedy token at a close logit boundary. The actor caps
-/// `active.len()` at this value, so it is the effective concurrent-decode
-/// width reported through health and metrics.
+/// change a greedy token at a close logit boundary. This remains the effective
+/// concurrent-decode width reported through health and metrics even when a
+/// latency-oriented actor exposes additional bounded prefill staging slots.
 pub fn resolve_decode_runtime_config(
     deterministic: DeterministicInference,
     configured: MaxDecodeBatch,
@@ -312,9 +317,15 @@ pub struct BatchingEngineSnapshot {
     pub max_prefill_layers_per_cycle: usize,
     pub max_prefill_layers_per_cycle_source: ConfigValueSource,
     pub max_prefill_admission_quantum: usize,
+    /// Bounded short-prefill slots beyond the ordinary decode-width slots.
+    pub max_prefill_staging_slots: usize,
+    /// Total ordinary plus short-prefill staging capacity.
+    pub max_active_requests: usize,
     /// Effective concurrent decode-row ceiling after the combined token budget
     /// has constrained the configured/backend-selected width.
     pub max_decode_batch: usize,
+    pub active_staged_requests: usize,
+    pub max_observed_active_requests: usize,
     pub current_batch_size: usize,
     pub last_batch_size: usize,
     pub max_observed_batch_size: usize,
@@ -341,6 +352,7 @@ pub struct BatchingEngineSnapshot {
     pub total_prefill_layers: u64,
     pub total_prefill_layer_yields: u64,
     pub total_short_prefill_priority_forwards: u64,
+    pub total_prefill_staging_admissions: u64,
     pub total_decode_tokens: u64,
     pub total_prefill_tokens: u64,
     pub total_errors: u64,
@@ -1802,11 +1814,18 @@ enum ActiveDeliveryState {
     InFlight { sequence: u64 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveAdmissionLane {
+    Ordinary,
+    PrefillStaging,
+}
+
 struct ActiveRequest {
     req: EngineRequest,
     delivery_key: DeliveryKey,
     delivery_state: ActiveDeliveryState,
     next_delivery_sequence: u64,
+    admission_lane: ActiveAdmissionLane,
     /// Actual prompt work remaining when this request entered the active set.
     /// This is immutable so the short-prefill lane compares request classes,
     /// not mutable progress that would split an equal-work cohort.
@@ -1865,8 +1884,11 @@ struct BatchingEngineActor {
     max_batch_tokens: usize,
     max_prefill_tokens_per_cycle: usize,
     max_prefill_layers_per_cycle: usize,
+    max_prefill_staging_slots: usize,
+    max_active_requests: usize,
     next_prefill_index: usize,
     short_prefill_priority_cursor: usize,
+    next_decode_generation: u64,
     prefix_aware_admission: bool,
     max_prefill_admissions_per_cycle: usize,
     // #1082 CUDA concurrency regression: when true, admit_waiting refills the
@@ -1924,6 +1946,19 @@ impl BatchingEngineActor {
             );
         }
         let max_prefill_admissions_per_cycle = prefill_admission_quantum.clamp(1, max_decode_batch);
+        let max_prefill_staging_slots = if max_decode_batch > 1 && !burst_refill {
+            max_prefill_admissions_per_cycle.min(MAX_PREFILL_STAGING_SLOTS)
+        } else {
+            0
+        };
+        let max_active_requests = max_decode_batch.saturating_add(max_prefill_staging_slots);
+        tracing::info!(
+            max_decode_batch,
+            max_prefill_staging_slots,
+            max_active_requests,
+            burst_refill,
+            "batching active-set policy resolved"
+        );
         let max_prefill_tokens_per_cycle_source = max_prefill_tokens_per_cycle.source();
         let configured_max_prefill_tokens_per_cycle = max_prefill_tokens_per_cycle.tokens();
         let max_prefill_tokens_per_cycle = configured_max_prefill_tokens_per_cycle
@@ -1948,6 +1983,8 @@ impl BatchingEngineActor {
             max_prefill_layers_per_cycle,
             max_prefill_layers_per_cycle_source,
             max_prefill_admission_quantum: max_prefill_admissions_per_cycle,
+            max_prefill_staging_slots,
+            max_active_requests,
             max_decode_batch,
             stream_stall_grace_ms: duration_millis_saturating(
                 response_delivery_policy.stream_stall_grace,
@@ -1970,8 +2007,11 @@ impl BatchingEngineActor {
             max_batch_tokens: max_batch_tokens.tokens(),
             max_prefill_tokens_per_cycle,
             max_prefill_layers_per_cycle,
+            max_prefill_staging_slots,
+            max_active_requests,
             next_prefill_index: 0,
             short_prefill_priority_cursor: 0,
+            next_decode_generation: 0,
             prefix_aware_admission,
             max_prefill_admissions_per_cycle,
             burst_refill,
@@ -2543,6 +2583,24 @@ impl BatchingEngineActor {
         }
     }
 
+    fn active_admission_lane_counts(&self) -> (usize, usize) {
+        let staging = self
+            .active
+            .iter()
+            .filter(|active| active.admission_lane == ActiveAdmissionLane::PrefillStaging)
+            .count();
+        (self.active.len().saturating_sub(staging), staging)
+    }
+
+    fn prefill_staging_candidate(&self, queued: &QueuedRequest, token_budget: usize) -> bool {
+        let prompt_limit = self
+            .max_prefill_tokens_per_cycle
+            .saturating_mul(SHORT_PREFILL_PRIORITY_MAX_CHUNKS.saturating_add(1));
+        queued.req.prompt_tokens.len() <= prompt_limit
+            && (self.forward.supports_resumable_prefill()
+                || queued.req.prompt_tokens.len() <= token_budget)
+    }
+
     /// Admit queued requests and report whether this cycle submitted one or
     /// more prefill-produced first tokens to the delivery worker.
     fn admit_waiting_with_budget(&mut self, mut token_budget: usize) -> AdmissionOutcome {
@@ -2561,18 +2619,26 @@ impl BatchingEngineActor {
         // that sustained a wide decode batch and scaled to ~498 tok/s @ bs=64.
         // Vulkan/Metal keep yielding to ready decode rows (admit 1 prefill/cycle
         // once any row is decoding) — their tuned latency behavior. The while
-        // loop below still caps total active at max_decode_batch, so burst_refill
-        // only ever fills the deficit, never over-admits.
+        // Burst refill only fills ordinary decode-width slots. Latency-oriented
+        // actors may additionally use their separately bounded short-prefill
+        // staging lane without changing the backend decode width.
         let admission_limit = if self.has_ready_decode_row() && !self.burst_refill {
             1
         } else {
             self.max_prefill_admissions_per_cycle
         };
-        while self.active.len() < self.max_decode_batch
-            && admitted < admission_limit
-            && !self.waiting.is_empty()
-            && token_budget > 0
-        {
+        while admitted < admission_limit && !self.waiting.is_empty() && token_budget > 0 {
+            if self.active.len() >= self.max_active_requests {
+                break;
+            }
+            let (ordinary_active, staging_active) = self.active_admission_lane_counts();
+            let admission_lane = if ordinary_active < self.max_decode_batch {
+                ActiveAdmissionLane::Ordinary
+            } else if staging_active < self.max_prefill_staging_slots {
+                ActiveAdmissionLane::PrefillStaging
+            } else {
+                break;
+            };
             // Count deferrals during the admission scan itself — when every
             // waiting row is deferred, position() has already evaluated the
             // predicate for all of them, so a second full filter pass would
@@ -2582,6 +2648,8 @@ impl BatchingEngineActor {
                 let defer = self.should_defer_for_active_prefix(queued);
                 deferred_seen += u64::from(defer);
                 !defer
+                    && (admission_lane == ActiveAdmissionLane::Ordinary
+                        || self.prefill_staging_candidate(queued, token_budget))
             }) else {
                 self.snapshot.prefix_admission_deferrals = self
                     .snapshot
@@ -2644,6 +2712,12 @@ impl BatchingEngineActor {
                         .saturating_add(tokens_processed as u64);
                     token_budget -= tokens_scheduled;
                     admitted += 1;
+                    if admission_lane == ActiveAdmissionLane::PrefillStaging {
+                        self.snapshot.total_prefill_staging_admissions = self
+                            .snapshot
+                            .total_prefill_staging_admissions
+                            .saturating_add(1);
+                    }
                     let active_idx = self.active.len();
                     let admitted_at = Instant::now();
                     let actor_queue_duration =
@@ -2659,6 +2733,7 @@ impl BatchingEngineActor {
                         delivery_key: queued.delivery_key,
                         delivery_state: ActiveDeliveryState::Ready,
                         next_delivery_sequence: 0,
+                        admission_lane,
                         initial_prefill_work_tokens,
                         actor_queue_duration,
                         actor_admission_duration,
@@ -2814,6 +2889,7 @@ impl BatchingEngineActor {
                 delivery_key,
                 delivery_state,
                 next_delivery_sequence,
+                admission_lane,
                 initial_prefill_work_tokens,
                 actor_queue_duration,
                 actor_admission_duration,
@@ -2943,6 +3019,7 @@ impl BatchingEngineActor {
                         delivery_key,
                         delivery_state,
                         next_delivery_sequence,
+                        admission_lane,
                         initial_prefill_work_tokens,
                         actor_queue_duration,
                         actor_admission_duration,
@@ -2970,6 +3047,7 @@ impl BatchingEngineActor {
                     delivery_key,
                     delivery_state,
                     next_delivery_sequence,
+                    admission_lane,
                     initial_prefill_work_tokens,
                     actor_queue_duration,
                     actor_admission_duration,
@@ -3173,7 +3251,8 @@ impl BatchingEngineActor {
     }
 
     fn run_decode_batch_with_budget(&mut self, max_rows: usize) -> usize {
-        let mut ready_indices = self.ready_decode_indices_with_limit(max_rows);
+        let (mut ready_indices, mut next_decode_generation) =
+            self.ready_decode_selection_with_limit(max_rows);
         if ready_indices.is_empty() {
             return 0;
         }
@@ -3200,23 +3279,26 @@ impl BatchingEngineActor {
                         .collect();
                     starved_indices.sort_unstable();
                     starved_indices.dedup();
-                    for idx in starved_indices.into_iter().rev() {
-                        if idx >= self.active.len()
-                            || self.active[idx].delivery_state != ActiveDeliveryState::Ready
-                        {
-                            continue;
+                    if !starved_indices.is_empty() {
+                        for idx in starved_indices.into_iter().rev() {
+                            if idx >= self.active.len()
+                                || self.active[idx].delivery_state != ActiveDeliveryState::Ready
+                            {
+                                continue;
+                            }
+                            tracing::warn!(
+                                request_id = %self.active[idx].req.request_id,
+                                "KV block pool exhausted for this request — finishing it as \
+                                 `length`; other requests keep decoding"
+                            );
+                            self.finish_active(idx, FinishReason::MaxTokens, None);
                         }
-                        tracing::warn!(
-                            request_id = %self.active[idx].req.request_id,
-                            "KV block pool exhausted for this request — finishing it as \
-                             `length`; other requests keep decoding"
-                        );
-                        self.finish_active(idx, FinishReason::MaxTokens, None);
-                    }
-                    ready_indices = self.ready_decode_indices_with_limit(max_rows);
-                    if ready_indices.is_empty() {
-                        self.refresh_snapshot();
-                        return 0;
+                        (ready_indices, next_decode_generation) =
+                            self.ready_decode_selection_with_limit(max_rows);
+                        if ready_indices.is_empty() {
+                            self.refresh_snapshot();
+                            return 0;
+                        }
                     }
                 }
                 Err(err) => {
@@ -3287,6 +3369,9 @@ impl BatchingEngineActor {
                 return 0;
             }
         };
+        if let Some(next_decode_generation) = next_decode_generation {
+            self.next_decode_generation = next_decode_generation;
+        }
 
         debug_assert!(!self.defer_delivery_flush);
         self.defer_delivery_flush = true;
@@ -3313,7 +3398,12 @@ impl BatchingEngineActor {
     }
 
     fn ready_decode_indices_with_limit(&self, max_rows: usize) -> Vec<usize> {
-        self.active
+        self.ready_decode_selection_with_limit(max_rows).0
+    }
+
+    fn ready_decode_selection_with_limit(&self, max_rows: usize) -> (Vec<usize>, Option<u64>) {
+        let mut ready: Vec<(usize, u64)> = self
+            .active
             .iter()
             .enumerate()
             .filter_map(|(idx, active)| {
@@ -3329,11 +3419,33 @@ impl BatchingEngineActor {
                         ..
                     } if *first_token_pending => None,
                     DecodeSlot::RealPrefill { .. } => None,
-                    DecodeSlot::Real { .. } | DecodeSlot::Mock { .. } => Some(idx),
+                    DecodeSlot::Real { .. } | DecodeSlot::Mock { .. } => {
+                        Some((idx, active.delivery_key.generation))
+                    }
                 }
             })
-            .take(self.max_decode_batch.min(max_rows))
-            .collect()
+            .collect();
+        ready.sort_unstable_by_key(|&(_, generation)| generation);
+        let limit = self.max_decode_batch.min(max_rows).min(ready.len());
+        if limit == 0 {
+            return (Vec::new(), None);
+        }
+        let start =
+            ready.partition_point(|&(_, generation)| generation < self.next_decode_generation);
+        let selected: Vec<(usize, u64)> = ready[start..]
+            .iter()
+            .chain(ready[..start].iter())
+            .take(limit)
+            .copied()
+            .collect();
+        let next_generation = selected
+            .last()
+            .map(|&(_, generation)| generation.checked_add(1).unwrap_or(0));
+        let mut indices: Vec<usize> = selected.into_iter().map(|(idx, _)| idx).collect();
+        // Slot and sampling vectors are materialized in active-index order.
+        // Keep that order independent of the circular cohort's cursor.
+        indices.sort_unstable();
+        (indices, next_generation)
     }
 
     fn generated_tokens_for(&self, idx: usize) -> &[TokenId] {
@@ -3471,6 +3583,15 @@ impl BatchingEngineActor {
             .active
             .len()
             .saturating_sub(self.snapshot.active_prefill);
+        self.snapshot.active_staged_requests = self
+            .active
+            .iter()
+            .filter(|active| active.admission_lane == ActiveAdmissionLane::PrefillStaging)
+            .count();
+        self.snapshot.max_observed_active_requests = self
+            .snapshot
+            .max_observed_active_requests
+            .max(self.active.len());
         self.snapshot.response_delivery_in_flight = self
             .active
             .iter()
@@ -4110,6 +4231,7 @@ mod tests {
             delivery_key,
             delivery_state: ActiveDeliveryState::Ready,
             next_delivery_sequence: 0,
+            admission_lane: ActiveAdmissionLane::Ordinary,
             initial_prefill_work_tokens,
             actor_queue_duration: Duration::ZERO,
             actor_admission_duration: Duration::ZERO,
@@ -5496,6 +5618,128 @@ mod tests {
         assert_eq!(actor.waiting.len(), 2);
         assert_eq!(actor.snapshot.total_prefill_admission_cycles, 2);
         assert_eq!(actor.snapshot.total_prefill_tokens, 12);
+    }
+
+    #[test]
+    fn short_prefill_staging_is_bounded_and_preserves_ordinary_fifo_capacity() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(SyntheticPrefillForward::default());
+        let mut actor = test_actor(
+            rx,
+            forward.clone(),
+            2,
+            false,
+            2,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        assert_eq!(actor.max_prefill_staging_slots, 2);
+        assert_eq!(actor.max_active_requests, 4);
+
+        let mut receivers = Vec::new();
+        for key in [10, 20] {
+            let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
+            let mut prompt = vec![1; 400];
+            *prompt.last_mut().unwrap() = key;
+            queue_test_request(&mut actor, request_with_tokens(prompt, 4), response_tx);
+            receivers.push(response_rx);
+        }
+        actor.admit_waiting();
+        assert_eq!(actor.active_admission_lane_counts(), (2, 0));
+
+        for (key, prompt_len) in [(30, 400), (40, 276), (50, 100)] {
+            let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
+            let mut prompt = vec![1; prompt_len];
+            *prompt.last_mut().unwrap() = key;
+            queue_test_request(&mut actor, request_with_tokens(prompt, 4), response_tx);
+            receivers.push(response_rx);
+        }
+        actor.admit_waiting();
+
+        assert_eq!(actor.active_admission_lane_counts(), (2, 2));
+        assert_eq!(actor.active.len(), 4);
+        assert_eq!(actor.waiting.len(), 1);
+        assert_eq!(actor.waiting[0].req.prompt_tokens.last(), Some(&30));
+        assert_eq!(actor.snapshot.total_prefill_staging_admissions, 2);
+        assert_eq!(actor.snapshot.max_observed_active_requests, 4);
+
+        let ordinary = actor.active.remove(0);
+        forward.discard_request(ordinary.slot);
+        actor.admit_waiting();
+        assert_eq!(actor.active_admission_lane_counts(), (2, 2));
+        assert!(actor.waiting.is_empty());
+        let admitted_long = actor
+            .active
+            .iter()
+            .find(|active| active.req.prompt_tokens.last() == Some(&30))
+            .expect("a freed ordinary slot must admit the FIFO long prompt");
+        assert_eq!(admitted_long.admission_lane, ActiveAdmissionLane::Ordinary);
+
+        actor.fail_all("test complete");
+        drop(receivers);
+    }
+
+    #[test]
+    fn prefill_staging_is_disabled_for_burst_refill_and_width_one() {
+        for (max_decode_batch, burst_refill) in [(8, true), (1, false)] {
+            let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+            let actor = test_actor(
+                rx,
+                Arc::new(MockForward::default()),
+                max_decode_batch,
+                false,
+                4,
+                burst_refill,
+                ResponseDeliveryPolicy::default(),
+            );
+            assert_eq!(actor.max_prefill_staging_slots, 0);
+            assert_eq!(actor.max_active_requests, max_decode_batch);
+        }
+    }
+
+    #[test]
+    fn decode_cohorts_rotate_across_staged_ready_rows() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(MockForward::default());
+        let mut actor = test_actor(
+            rx,
+            forward.clone(),
+            2,
+            false,
+            2,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let mut receivers = Vec::new();
+        for key in 1..=4 {
+            let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
+            push_test_active(
+                &mut actor,
+                request(key, 3),
+                response_tx,
+                DecodeSlot::Mock {
+                    next_token: key,
+                    generated_tokens: Vec::new(),
+                },
+            );
+            receivers.push(response_rx);
+        }
+        for active in &mut actor.active[2..] {
+            active.admission_lane = ActiveAdmissionLane::PrefillStaging;
+        }
+        actor.refresh_snapshot();
+
+        assert_eq!(actor.run_decode_batch(), 2);
+        settle_active_deliveries(&mut actor);
+        assert_eq!(actor.run_decode_batch(), 2);
+        assert_eq!(
+            forward.calls.lock().unwrap().as_slice(),
+            &[vec![1, 2], vec![3, 4]]
+        );
+        assert_eq!(actor.snapshot.max_observed_batch_size, 2);
+
+        actor.fail_all("test complete");
+        drop(receivers);
     }
 
     #[test]

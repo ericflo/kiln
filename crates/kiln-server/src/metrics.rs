@@ -864,6 +864,46 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_prefill_staging_slots Bounded short-prefill slots beyond the ordinary decode-width slots.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefill_staging_slots gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefill_staging_slots {}",
+                gauges.batching_engine.max_prefill_staging_slots
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_max_active_requests Total ordinary plus short-prefill staging capacity.\n");
+        out.push_str("# TYPE kiln_batching_engine_max_active_requests gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_max_active_requests {}",
+                gauges.batching_engine.max_active_requests
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_active_staged_requests Requests currently owning a short-prefill staging slot.\n");
+        out.push_str("# TYPE kiln_batching_engine_active_staged_requests gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_active_staged_requests {}",
+                gauges.batching_engine.active_staged_requests
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_max_observed_active_requests Largest total active set observed since process start.\n");
+        out.push_str("# TYPE kiln_batching_engine_max_observed_active_requests gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_max_observed_active_requests {}",
+                gauges.batching_engine.max_observed_active_requests
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_max_decode_batch Effective concurrent decode-row ceiling after startup policy and token-budget constraints.\n");
         out.push_str("# TYPE kiln_batching_engine_max_decode_batch gauge\n");
         push_line(
@@ -1135,6 +1175,16 @@ impl Metrics {
             &format!(
                 "kiln_batching_engine_short_prefill_priority_forwards_total {}",
                 gauges.batching_engine.total_short_prefill_priority_forwards
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_prefill_staging_admissions_total Requests admitted through the bounded short-prefill staging lane.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefill_staging_admissions_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefill_staging_admissions_total {}",
+                gauges.batching_engine.total_prefill_staging_admissions
             ),
         );
 
@@ -1917,7 +1967,11 @@ mod tests {
                 max_prefill_tokens_per_cycle: 64,
                 max_prefill_layers_per_cycle: 4,
                 max_prefill_admission_quantum: 2,
+                max_prefill_staging_slots: 2,
+                max_active_requests: 10,
                 max_decode_batch: 8,
+                active_staged_requests: 2,
+                max_observed_active_requests: 10,
                 last_batch_size: 3,
                 max_observed_batch_size: 4,
                 last_forward_ms: 12.5,
@@ -1945,6 +1999,7 @@ mod tests {
                 total_prefill_layers: 48,
                 total_prefill_layer_yields: 36,
                 total_short_prefill_priority_forwards: 9,
+                total_prefill_staging_admissions: 4,
                 total_errors: 1,
                 response_delivery_in_flight: 3,
                 response_delivery_backpressured: 2,
@@ -2019,6 +2074,10 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_max_prefill_tokens_per_cycle 64"));
         assert!(output.contains("kiln_batching_engine_max_prefill_layers_per_cycle 4"));
         assert!(output.contains("kiln_batching_engine_prefill_admission_quantum 2"));
+        assert!(output.contains("kiln_batching_engine_prefill_staging_slots 2"));
+        assert!(output.contains("kiln_batching_engine_max_active_requests 10"));
+        assert!(output.contains("kiln_batching_engine_active_staged_requests 2"));
+        assert!(output.contains("kiln_batching_engine_max_observed_active_requests 10"));
         assert!(output.contains("kiln_batching_engine_max_decode_batch 8"));
         assert!(output.contains("kiln_batching_engine_last_batch_size 3"));
         assert!(output.contains("kiln_batching_engine_max_observed_batch 4"));
@@ -2046,6 +2105,7 @@ mod tests {
         assert!(output.contains("kiln_decode_batcher_runner_call_budget_per_token 2"));
         assert!(output.contains("kiln_decode_batcher_runner_call_budget_exceeded 0"));
         assert!(output.contains("kiln_batching_engine_prefill_admission_cycles_total 6"));
+        assert!(output.contains("kiln_batching_engine_prefill_staging_admissions_total 4"));
         assert!(output.contains("kiln_batching_engine_prefill_forwards_total 12"));
         assert!(output.contains("kiln_batching_engine_decode_tokens_total 128"));
         assert!(output.contains("kiln_batching_engine_prefill_tokens_total 8192"));
