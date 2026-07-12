@@ -331,6 +331,12 @@ impl RocmContext {
         RocmStream::create(self.ordinal, Some(priority))
     }
 
+    /// Create a reusable ordering-only event on this device.
+    pub fn new_event(&self) -> Result<Arc<RocmEvent>> {
+        self.bind_to_thread()?;
+        RocmEvent::create(self.ordinal)
+    }
+
     /// Block until all work on the device completes (`hipDeviceSynchronize`).
     pub fn synchronize(&self) -> Result<()> {
         self.bind_to_thread()?;
@@ -366,6 +372,45 @@ pub fn stream_priority_range() -> Result<(i32, i32)> {
 pub struct RocmStream {
     handle: sys::hipStream_t,
     ordinal: c_int,
+}
+
+/// RAII owner of a reusable HIP event configured for ordering only.
+#[derive(Debug)]
+pub struct RocmEvent {
+    handle: sys::hipEvent_t,
+    ordinal: c_int,
+}
+
+// SAFETY: a hipEvent_t is an opaque runtime handle bound to one device. HIP
+// permits recording and waiting on it from different host threads/streams;
+// every operation below rebinds the owning device first.
+unsafe impl Send for RocmEvent {}
+unsafe impl Sync for RocmEvent {}
+
+impl RocmEvent {
+    fn create(ordinal: c_int) -> Result<Arc<Self>> {
+        check(unsafe { sys::hipSetDevice(ordinal) }, "hipSetDevice")?;
+        let mut handle: sys::hipEvent_t = ptr::null_mut();
+        check(
+            unsafe { sys::hipEventCreateWithFlags(&mut handle, sys::HIP_EVENT_DISABLE_TIMING) },
+            "hipEventCreateWithFlags",
+        )?;
+        Ok(Arc::new(Self { handle, ordinal }))
+    }
+
+    fn ensure_same_device(&self, stream: &RocmStream) -> Result<()> {
+        if self.ordinal != stream.ordinal {
+            return Err(HipError {
+                code: -1,
+                api: "RocmEvent device validation",
+                message: format!(
+                    "event belongs to device {} but stream belongs to device {}",
+                    self.ordinal, stream.ordinal
+                ),
+            });
+        }
+        Ok(())
+    }
 }
 
 // SAFETY: a hipStream_t is a raw handle bound to one device; it is safe to move
@@ -422,6 +467,27 @@ impl RocmStream {
         check(
             unsafe { sys::hipStreamSynchronize(self.handle) },
             "hipStreamSynchronize",
+        )
+    }
+
+    /// Record `event` after all work currently queued on this stream.
+    pub fn record_event(&self, event: &RocmEvent) -> Result<()> {
+        event.ensure_same_device(self)?;
+        self.bind()?;
+        check(
+            unsafe { sys::hipEventRecord(event.handle, self.handle) },
+            "hipEventRecord",
+        )
+    }
+
+    /// Queue a dependency on the most recent recording of `event` without
+    /// blocking the host thread.
+    pub fn wait_event(&self, event: &RocmEvent) -> Result<()> {
+        event.ensure_same_device(self)?;
+        self.bind()?;
+        check(
+            unsafe { sys::hipStreamWaitEvent(self.handle, event.handle, 0) },
+            "hipStreamWaitEvent",
         )
     }
 
@@ -685,6 +751,20 @@ impl Drop for RocmStream {
     }
 }
 
+impl Drop for RocmEvent {
+    fn drop(&mut self) {
+        if self.handle.is_null() {
+            return;
+        }
+        let _ = unsafe { sys::hipSetDevice(self.ordinal) };
+        let rc = unsafe { sys::hipEventDestroy(self.handle) };
+        if rc != sys::HIP_SUCCESS {
+            eprintln!("RocmEvent::drop: hipEventDestroy failed (hipError {rc})");
+        }
+        self.handle = ptr::null_mut();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Slice (device allocation)
 // ---------------------------------------------------------------------------
@@ -936,6 +1016,44 @@ mod tests {
         stream.synchronize().expect("sync");
         let back = stream.memcpy_dtoh(&b).expect("dtoh");
         assert_eq!(src_host, back, "D2D copy must preserve bytes");
+    }
+
+    #[test]
+    fn event_orders_work_across_streams() {
+        let Some(ctx) = try_ctx() else { return };
+        let producer = ctx.default_stream();
+        let consumer = ctx.new_stream().expect("consumer stream");
+        let input_ready = ctx.new_event().expect("input-ready event");
+        let copy_ready = ctx.new_event().expect("copy-ready event");
+        let expected: Vec<u8> = (0..4096u32).map(|i| (i * 13 % 251) as u8).collect();
+        let mut src = producer.alloc(expected.len()).expect("source allocation");
+        let dst = producer
+            .alloc_zeros(expected.len())
+            .expect("destination allocation");
+
+        producer
+            .memcpy_htod(&mut src, &expected)
+            .expect("source upload");
+        producer
+            .record_event(&input_ready)
+            .expect("record source readiness");
+        consumer
+            .wait_event(&input_ready)
+            .expect("wait for source readiness");
+        unsafe {
+            consumer
+                .memcpy_dtod_raw_async(dst.device_ptr(), src.device_ptr(), expected.len())
+                .expect("cross-stream copy");
+        }
+        consumer
+            .record_event(&copy_ready)
+            .expect("record copy readiness");
+        producer
+            .wait_event(&copy_ready)
+            .expect("wait for copy readiness");
+
+        let actual = producer.memcpy_dtoh(&dst).expect("ordered download");
+        assert_eq!(actual, expected);
     }
 
     #[test]

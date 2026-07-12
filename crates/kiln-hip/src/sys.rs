@@ -24,6 +24,8 @@ pub const HIP_SUCCESS: hipError_t = 0;
 
 /// Opaque stream handle (`hipStream_t == ihipStream_t*`).
 pub type hipStream_t = *mut c_void;
+/// Opaque event handle (`hipEvent_t`).
+pub type hipEvent_t = *mut c_void;
 /// Opaque graph handle (`hipGraph_t`).
 pub type hipGraph_t = *mut c_void;
 /// Opaque executable-graph handle (`hipGraphExec_t`).
@@ -32,6 +34,10 @@ pub type hipGraphExec_t = *mut c_void;
 /// Stream-creation flag: non-blocking with respect to the NULL stream
 /// (`hipStreamNonBlocking`). Matches CUDA's `CU_STREAM_NON_BLOCKING`.
 pub const HIP_STREAM_NON_BLOCKING: c_uint = 0x01;
+
+/// Event-creation flag: do not collect timestamps. Ordering-only events avoid
+/// timing overhead and are valid inputs to `hipStreamWaitEvent`.
+pub const HIP_EVENT_DISABLE_TIMING: c_uint = 0x02;
 
 /// `hipStreamCaptureModeRelaxed` — least-restrictive capture mode. Matches the
 /// `CU_STREAM_CAPTURE_MODE_RELAXED` the CUDA graph path uses.
@@ -120,6 +126,12 @@ unsafe extern "C" {
     ) -> hipError_t;
     pub fn hipStreamDestroy(stream: hipStream_t) -> hipError_t;
     pub fn hipStreamSynchronize(stream: hipStream_t) -> hipError_t;
+    pub fn hipStreamWaitEvent(stream: hipStream_t, event: hipEvent_t, flags: c_uint) -> hipError_t;
+
+    // --- events ---------------------------------------------------------
+    pub fn hipEventCreateWithFlags(event: *mut hipEvent_t, flags: c_uint) -> hipError_t;
+    pub fn hipEventRecord(event: hipEvent_t, stream: hipStream_t) -> hipError_t;
+    pub fn hipEventDestroy(event: hipEvent_t) -> hipError_t;
 
     // --- graphs (HIP graph capture; wired in Phase R.9) ------------------
     pub fn hipStreamBeginCapture(stream: hipStream_t, mode: c_uint) -> hipError_t;
