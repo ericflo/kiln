@@ -926,8 +926,9 @@ dispatch capacity while shorter work is continuously eligible.
 Latency-oriented actors also keep a separate staging lane of at most four
 short prefills beyond the decode-width ordinary slots. A request is staging
 eligible only when its prompt can enter the four-chunk short-tail class after
-one prefill quantum. Ordinary FIFO capacity is counted independently, so staged
-arrivals cannot take a long prompt's ordinary slot. Eligible staged prefills
+one prefill quantum, and staged priority owns that entry quantum. Ordinary FIFO
+capacity is counted independently, so staged arrivals cannot take a long
+prompt's ordinary slot. Eligible staged prefills
 rotate by request generation for at most four priority turns before a mandatory
 global round-robin prefill turn; decode still runs before each of those prefill
 dispatches. Once staged rows become decode-ready, a separate request-generation

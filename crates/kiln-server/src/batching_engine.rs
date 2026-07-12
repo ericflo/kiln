@@ -2610,11 +2610,13 @@ impl BatchingEngineActor {
         (self.active.len().saturating_sub(staging), staging)
     }
 
+    fn prefill_staging_entry_token_limit(&self) -> usize {
+        self.max_prefill_tokens_per_cycle
+            .saturating_mul(SHORT_PREFILL_PRIORITY_MAX_CHUNKS.saturating_add(1))
+    }
+
     fn prefill_staging_candidate(&self, queued: &QueuedRequest, token_budget: usize) -> bool {
-        let prompt_limit = self
-            .max_prefill_tokens_per_cycle
-            .saturating_mul(SHORT_PREFILL_PRIORITY_MAX_CHUNKS.saturating_add(1));
-        queued.req.prompt_tokens.len() <= prompt_limit
+        queued.req.prompt_tokens.len() <= self.prefill_staging_entry_token_limit()
             && (self.forward.supports_resumable_prefill()
                 || queued.req.prompt_tokens.len() <= token_budget)
     }
@@ -2827,6 +2829,7 @@ impl BatchingEngineActor {
         let short_tail_limit = self
             .max_prefill_tokens_per_cycle
             .saturating_mul(SHORT_PREFILL_PRIORITY_MAX_CHUNKS);
+        let staging_entry_limit = self.prefill_staging_entry_token_limit();
         // Staged rows already passed the bounded prompt-size gate at admission.
         // Rotate them on priority turns; the staged cadence still forces a
         // global turn that advances ordinary rows under a continuously full lane.
@@ -2837,7 +2840,7 @@ impl BatchingEngineActor {
                     && self
                         .forward
                         .remaining_prefill_tokens(&self.active[idx].slot)
-                        .is_some_and(|remaining| remaining <= short_tail_limit)
+                        .is_some_and(|remaining| remaining <= staging_entry_limit)
             })
             .map(|idx| (idx, self.active[idx].delivery_key.generation))
             .collect();
@@ -5866,6 +5869,56 @@ mod tests {
         assert_eq!(actor.snapshot.total_short_prefill_priority_forwards, 12);
         assert_eq!(actor.snapshot.total_prefill_staging_priority_forwards, 12);
         assert_eq!(actor.snapshot.total_errors, 0);
+
+        actor.fail_all("test complete");
+        drop(receivers);
+    }
+
+    #[test]
+    fn staged_priority_owns_the_entry_quantum_beyond_the_ordinary_short_tail() {
+        const LONG_A: TokenId = 62_001;
+        const LONG_B: TokenId = 62_002;
+        const BOUNDARY: TokenId = 62_003;
+
+        let forward = Arc::new(SyntheticPrefillForward::default());
+        let (_command_tx, command_rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let mut actor = test_actor(
+            command_rx,
+            forward.clone(),
+            2,
+            false,
+            2,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let mut receivers = Vec::new();
+        for (key, tokens, lane) in [
+            (LONG_A, 1_024, ActiveAdmissionLane::Ordinary),
+            (LONG_B, 1_024, ActiveAdmissionLane::Ordinary),
+            (BOUNDARY, 276, ActiveAdmissionLane::PrefillStaging),
+        ] {
+            let req = request_with_tokens(vec![key; tokens], 1);
+            let RequestPreparation::Prefilling { slot, .. } = forward
+                .prepare_request_chunked(&req, 64)
+                .expect("initialize synthetic staging-boundary prefill")
+            else {
+                panic!("synthetic prompt unexpectedly became ready")
+            };
+            let (response_tx, response_rx) = mpsc::channel(8);
+            push_test_active(&mut actor, req, response_tx, slot);
+            actor.active.last_mut().unwrap().admission_lane = lane;
+            receivers.push(response_rx);
+        }
+
+        assert_eq!(actor.prefill_staging_entry_token_limit(), 320);
+        assert_eq!(actor.select_prefill_index(64), Some((2, true)));
+        assert_eq!(actor.snapshot.total_prefill_staging_priority_forwards, 1);
+
+        actor.active[2].admission_lane = ActiveAdmissionLane::Ordinary;
+        actor.next_prefill_index = 0;
+        actor.short_prefill_priority_cursor = 0;
+        assert_eq!(actor.select_prefill_index(64), Some((0, false)));
+        assert_eq!(actor.snapshot.total_prefill_staging_priority_forwards, 1);
 
         actor.fail_all("test complete");
         drop(receivers);
