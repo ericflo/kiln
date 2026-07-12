@@ -656,15 +656,16 @@ desktop configuration with identical effective semantics and provenance.
     verification, publication, server cleanup, and source retention.
   - Completed: the pinned scalar/tensor SFT and GRPO oracles, task-aware
     embedded runner, and exact package lock now feed one committed offline
-    production-model workload. On Strix Halo ROCm it started and drained the
-    real server twice, generated provenance-complete scored GRPO data, exported
-    both tasks, released the GPU, ran one BF16 HF/TRL/PEFT update per task,
-    imported both results, and passed offline/server adapter verification plus
-    hash-bound paired eval. The strict receipt records two imports, two eval
-    pairs, 16 nonzero tensors per adapter, zero HTTP errors, stable execution
-    provenance across restart, no unsupported cases, and clean shutdown. The
-    workload has a separate Vulkan variant and exact cross-backend comparison
-    policy; that receipt remains required before claiming Vulkan coverage.
+    production-model workload. Source-bound Strix Halo ROCm and Vulkan runs each
+    started and drained the real server twice, generated provenance-complete
+    scored GRPO data, exported both tasks, released the GPU, ran one pinned
+    HF/TRL/PEFT update per task, imported both results, and passed offline/server
+    adapter verification plus hash-bound paired eval. Each strict receipt
+    records two imports, two eval pairs, 16 nonzero tensors per adapter, zero
+    HTTP errors, stable execution provenance across restart, no unsupported
+    cases, and clean shutdown. The Vulkan arm exposed and closed five
+    mixed-residency defects. A ROCm rerun at the repaired source tree remains
+    required for the workload's exact cross-backend comparison policy.
 
 **Acceptance:** The oracle ladder covers tokenization/masks, scalar losses,
 tiny-model logits/log-probs, one-step gradients/updates, 10-step trajectories,
@@ -754,7 +755,9 @@ and exact resume. Cross-backend agreement alone is insufficient.
 
 - [ ] Run the same tokenizer, logit, sampling, cache, cancellation, and eval
   correctness corpus under Vulkan.
-- [ ] Run SFT and GRPO oracle fixtures supported by the declared Vulkan scope.
+- [x] Run SFT and GRPO oracle fixtures supported by the declared Vulkan scope.
+  The source-pinned AdamW fixture and complete pinned HF/TRL SFT plus recorded-
+  GRPO production round trip have clean Strix Halo Vulkan receipts.
 - [ ] Run the same short/mixed/long prompt serving workload and phase metrics.
 - [ ] Run a 30-minute development soak after each Vulkan fix.
 - [ ] Run a final 8-hour Vulkan mixed-load soak.
@@ -1154,7 +1157,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-12 | Production HF/TRL SFT and recorded-GRPO round trip | `sha256:b00acd14ba42` | `57472c4e` | Strix Halo ROCm/gfx1151 + Torch ROCm 7.2 | `qualification/receipts/rocm/strix-halo/20260712t123220110075z-rocm-strix-halo-hf-trl-production-roundt-0be7b6a1e5-v1.json` | passed | The committed loopback-only workload exported canonical SFT plus two real provenance-complete GRPO completions, stopped Kiln before external GPU ownership, ran one pinned BF16 rank-1 `q_proj` HF/TRL/PEFT update per task, restarted the same binary with identical execution provenance, imported both self-verifying results, and passed structural/nonzero/server adapter verification plus hash-bound paired eval. The receipt binds the clean source tree, workload, two exact Qwen shards, binary, ROCm environment, Torch 2.13.0+rocm7.2, Transformers 5.13.1, TRL 1.8.0, every export/result/import/weight identity, two imports, two eval pairs, 16 nonzero tensors per adapter, zero HTTP errors, a drained scheduler, and no unsupported cases. The harness also passed 285 qualification tests and a separate real dry run; Vulkan remains an explicit paired rerun. |
 | 2026-07-12 | Source-pinned N-step AdamW numerical oracle | `sha256:1ad4fd75f808` | `aa885140` | Strix Halo ROCm/gfx1151 | `qualification/receipts/rocm/strix-halo/20260712t130202426843z-rocm-strix-halo-adamw-pytorch-oracle-v1-e4da535e10-v1.json` | passed | PyTorch 2.13.0 source and eager implementation hashes, seed 0, four canonical F32/BF16 cases, all parameters and both moment trajectories, and the no-hidden-master precision contract are committed. The portable F32 reference and real ROCm BF16 fused kernel passed every lane of 20 updates; BF16 bounds are 1 parameter, 4 first-moment, and 3 second-moment ULPs. The fail-closed receipt records three required passes, zero assertion failures, no unsupported cases, ROCm 7.2.4, and a clean exact source tree. Vulkan and the off-machine CUDA/Metal executions remain final-platform gates rather than being inferred from this receipt. |
 | 2026-07-12 | Vulkan N-step AdamW numerical oracle | `sha256:1ad4fd75f808` | `c7fe0cbe` | Vulkan/Strix Halo | `qualification/receipts/vulkan/strix-halo/20260712t130347515845z-vulkan-strix-halo-adamw-pytorch-oracle-v1-322470bf50-v1.json` | passed | The real RADV Vulkan F32 fused kernel passed every lane of both ten-step ordinary and epsilon-dominated trajectories under the source-pinned PyTorch mixed tolerance. The receipt has three required passes, no assertion failures or unsupported cases, Mesa 26.1.3 and Vulkan 1.4.348 device identity. `compare_receipts.py` accepted the ROCm/Vulkan pair under the committed cross-backend policy: all three exact correctness metrics matched and every environment difference was explicitly allowlisted, with no rejected or unexplained difference. CUDA and Metal remain off-machine hardware gates. |
-| 2026-07-12 | Vulkan mixed-residency LoRA round-trip repair | `sha256:a1f19c8d0f53` | this commit | portable + Vulkan/Strix Halo; ROCm compile; toolkit-free CUDA compile | exact workspace test; 378 model tests; 56 capability contracts; 292 qualification tests; four real Vulkan device regressions; portable, ROCm, Vulkan, and CUDA model all-target checks; default-environment dry production SFT/GRPO round trip | passed | The real Qwen3.5-4B round trip exposed five independent mixed-residency failures in sequence: embedding activation precision, RMSNorm weight placement, portable LoRA A/B placement, recurrent conv-state migration, and materialized K/V placement. Each boundary is now centralized and has a focused real-Vulkan regression. Ordinary Vulkan decode remains native-required, while active LoRA has one typed `allow_portable_lora_decode` exception with sparse power-of-two `vulkan_lora_paged_decode_fallback` warnings. With no debug fallback environment, both pinned SFT and recorded-GRPO adapters trained, imported, verified, and passed paired eval in the dry harness. The CUDA check validates Rust feature wiring only because this host has no CUDA toolkit; a clean committed-tree Vulkan receipt is the next checkpoint. |
+| 2026-07-12 | Vulkan mixed-residency LoRA round-trip repair | `sha256:a1f19c8d0f53` | `66f4a04c` | portable + Vulkan/Strix Halo; ROCm compile; toolkit-free CUDA compile | exact workspace test; 378 model tests; 56 capability contracts; 292 qualification tests; four real Vulkan device regressions; portable, ROCm, Vulkan, and CUDA model all-target checks; default-environment dry production SFT/GRPO round trip | passed | The real Qwen3.5-4B round trip exposed five independent mixed-residency failures in sequence: embedding activation precision, RMSNorm weight placement, portable LoRA A/B placement, recurrent conv-state migration, and materialized K/V placement. Each boundary is now centralized and has a focused real-Vulkan regression. Ordinary Vulkan decode remains native-required, while active LoRA has one typed `allow_portable_lora_decode` exception with sparse power-of-two `vulkan_lora_paged_decode_fallback` warnings. With no debug fallback environment, both pinned SFT and recorded-GRPO adapters trained, imported, verified, and passed paired eval in the dry harness. The CUDA check validates Rust feature wiring only because this host has no CUDA toolkit; the clean committed-tree Vulkan receipt follows separately. Cheap CI run `29195651428` passed formatting, dependency policy, the full CPU workspace, substrate and determinism checks, CUDA dependency-tree policy, and portable qualification evidence with accelerator jobs skipped. |
+| 2026-07-12 | Vulkan production HF/TRL SFT and recorded-GRPO round trip | `sha256:a1f19c8d0f53` | `66f4a04c` | Strix Halo Vulkan/RADV + Torch ROCm 7.2 | `qualification/receipts/vulkan/strix-halo/20260712t140855954401z-vulkan-strix-halo-hf-trl-production-roundt-af0c916883-v1.json` | passed | The clean committed-tree run completed both pinned external optimizer steps, imported and structurally verified both adapters, and passed two hash-bound paired evals with 16 nonzero tensors per adapter, zero HTTP errors, no unsupported cases, stable execution provenance, and clean snapshot/server teardown. Sparse `vulkan_lora_paged_decode_fallback` warnings make the correctness-qualified adapter route visible; it remains a performance target rather than a silent native-path claim. A same-source ROCm rerun is required before exact cross-backend comparison. |
 
 ## Known Starting Defects
 

@@ -1,0 +1,213 @@
+{
+  "artifacts": [
+    {
+      "bytes": 6320,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t140855954401z-vulkan-strix-halo-hf-trl-production-roundt-af0c916883-v1/environment.json",
+      "sha256": "sha256:ddf3513b3c81bb0603b2656bdbf10e569a8f629dce1dd164ff2fecf8a298b9b8"
+    },
+    {
+      "bytes": 77,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t140855954401z-vulkan-strix-halo-hf-trl-production-roundt-af0c916883-v1/cases/001-hf-trl-production-roundtrip-r001/stdout.log",
+      "sha256": "sha256:a5fcb0ace5ef73eec67ba2ed3e3be0aa6e63ee13756cefebee74cba1b8bed778"
+    },
+    {
+      "bytes": 0,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t140855954401z-vulkan-strix-halo-hf-trl-production-roundt-af0c916883-v1/cases/001-hf-trl-production-roundtrip-r001/stderr.log",
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 2856,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t140855954401z-vulkan-strix-halo-hf-trl-production-roundt-af0c916883-v1/cases/001-hf-trl-production-roundtrip-r001/case-result.json",
+      "sha256": "sha256:772ca0aeabeebe8bb62fcbcadc0c026e92aa97cc4eead63db83b2fae61c1cca5"
+    },
+    {
+      "bytes": 2856,
+      "kind": "command_case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t140855954401z-vulkan-strix-halo-hf-trl-production-roundt-af0c916883-v1/cases/001-hf-trl-production-roundtrip-r001/command-result.json",
+      "sha256": "sha256:61b8975522d6edb5e395afe37ded7701ad78d9f9e58d162e01c6a2d4c80d966f"
+    },
+    {
+      "bytes": 18631,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260712t140855954401z-vulkan-strix-halo-hf-trl-production-roundt-af0c916883-v1/run-config.json",
+      "sha256": "sha256:354e6148e5c7ab5aa351d6019cd7b0d818a586f7e4f6e3654ecb3692b83d82bf"
+    }
+  ],
+  "created_at_utc": "2026-07-12T14:12:17.299Z",
+  "effective_config": {
+    "external_accelerator": "torch_cuda",
+    "external_trainer": "hf_trl_peft",
+    "lora_rank": 1,
+    "lora_target": "q_proj",
+    "network": "loopback_only",
+    "server_eval_mode": true,
+    "training_updates_per_task": 1
+  },
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+      "shader": "2026.2"
+    },
+    "device": {
+      "architecture": "strix_halo",
+      "driver": "radv Mesa 26.1.3-arch1.2",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "driver": "Mesa 26.1.3-arch1.2",
+      "execution_environment_sha256": "sha256:8e1ad1077a8aaf2a76367b88fa4922090d5088a5a20893e0dce475cc4511c57b",
+      "vulkan_device": "1.4.348",
+      "vulkan_instance": "1.4.350"
+    }
+  },
+  "metrics": [],
+  "model": {
+    "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+    "id": "Qwen/Qwen3.5-4B",
+    "path": "/home/ericflo/Development/kiln/Qwen3.5-4B",
+    "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "weight_files": [
+      {
+        "bytes": 5329398688,
+        "path": "model.safetensors-00001-of-00002.safetensors",
+        "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+      },
+      {
+        "bytes": 3990429408,
+        "path": "model.safetensors-00002-of-00002.safetensors",
+        "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+      }
+    ]
+  },
+  "notes": [],
+  "qualification": {
+    "backend": "vulkan",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "qualification/workloads/hf-trl-production-roundtrip-v1.json",
+      "--variant",
+      "vulkan",
+      "--host-id",
+      "strix-halo",
+      "--model",
+      "/home/ericflo/Development/kiln/Qwen3.5-4B",
+      "--model-id",
+      "Qwen/Qwen3.5-4B",
+      "--var",
+      "trainer_python=/home/ericflo/Development/kiln/target/qualification/hf-trl-roundtrip/.venv/bin/python"
+    ],
+    "duration_seconds": 201.34496808200493,
+    "finished_at_utc": "2026-07-12T14:12:17.299Z",
+    "kind": "correctness",
+    "profile": "hf-trl-production-roundtrip-v1",
+    "started_at_utc": "2026-07-12T14:08:55.954Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260712t140855954401z-vulkan-strix-halo-hf-trl-production-roundt-af0c916883-v1",
+  "results": [
+    {
+      "details": "{\"execution_provenance\":\"sha256:4cbee09b4cc08811cdb2d2ba8a0b01bc017259ac9c8d89848c00e3fc8a1dbe2c\",\"grpo_export\":\"sha256:0a2253c95746b855f979847f56de9eedeb676fabdadcaf961636fdccaf6f8785\",\"grpo_import\":\"sha256:b5191717bf84563e6783fc98fb65ce5c6848f9a82e091c6fbf06ef5a71970f61\",\"grpo_result\":\"sha256:5cd2de3d55857b5dc67950b8a7a942d61173c8dbc976d15ab7602d4ae077714a\",\"grpo_weights\":\"sha256:14de740ee889126b4f321543e819f674865ee3f5e0be61917a156f6514650641\",\"kiln_binary\":\"sha256:9c91040a7a37c9e554937327bc5a39498edbaeb57c27119ffbb042fb167f2d14\",\"model_base_weights\":\"sha256:4545d2c029879310d9ece27ba9dd431a8b282abf7a39a955fb6b5c7a0df2e281\",\"sft_export\":\"sha256:5bb29b3f8f9a7d493838490496217b838990cef7b5458e9643028baf70749c5c\",\"sft_import\":\"sha256:72c88398f525de265e6178a239495c49ead3cdc82b978cfd317426f6795201c9\",\"sft_result\":\"sha256:7e02ae6d8ab161f6aadca3aa95708ebf4fe8a86afe77c7dcd2a47ff748da1f6d\",\"sft_weights\":\"sha256:e2d7454eb963408ece2ced41aaad964f36e91a0ceae8a231b362039cdfe1a259\",\"torch_device\":\"AMD Radeon 8060S Graphics\",\"torch_version\":\"2.13.0+rocm7.2\",\"transformers_version\":\"5.13.1\",\"trl_version\":\"1.8.0\"}",
+      "duration_seconds": 188.52145988101256,
+      "id": "hf-trl-production-roundtrip",
+      "metrics": [
+        {
+          "aggregation": "single_run",
+          "lower_is_better": false,
+          "name": "adapter_imports",
+          "unit": "count",
+          "value": 2
+        },
+        {
+          "aggregation": "single_run",
+          "lower_is_better": false,
+          "name": "eval_pairs",
+          "unit": "count",
+          "value": 2
+        },
+        {
+          "aggregation": "single_run",
+          "lower_is_better": false,
+          "name": "grpo_nonzero_tensors",
+          "unit": "count",
+          "value": 16
+        },
+        {
+          "aggregation": "single_run",
+          "lower_is_better": false,
+          "name": "grpo_weight_bytes",
+          "unit": "bytes",
+          "value": 346168
+        },
+        {
+          "aggregation": "single_run",
+          "lower_is_better": true,
+          "name": "http_errors",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "single_run",
+          "lower_is_better": false,
+          "name": "sft_nonzero_tensors",
+          "unit": "count",
+          "value": 16
+        },
+        {
+          "aggregation": "single_run",
+          "lower_is_better": false,
+          "name": "sft_weight_bytes",
+          "unit": "bytes",
+          "value": 346168
+        },
+        {
+          "aggregation": "single_run",
+          "lower_is_better": false,
+          "name": "training_tasks",
+          "unit": "count",
+          "value": 2
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "66f4a04c9d9abb4f821bccf12662f43180d95577",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:a1f19c8d0f53f61b2e347c8b35f8298743085edf5d31213c21e79a8f04b04d81",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "hf-trl-production-roundtrip-v1",
+    "parameters": {
+      "trainer_python": "/home/ericflo/Development/kiln/target/qualification/hf-trl-roundtrip/.venv/bin/python",
+      "variant_id": "vulkan"
+    },
+    "seed": 42,
+    "sha256": "sha256:5becc4b3d8d183a94b18fbcad697229ba147e261856e470309e9d8d1426136d1"
+  }
+}
