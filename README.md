@@ -406,7 +406,9 @@ Native SFT is deliberately the fixed
 conversation and one optimizer update at a time, constant learning rate, no
 gradient accumulation, warmup, decay, or clipping. Unsupported general-trainer
 fields fail closed. Use HF/TRL directly for broader training today; Kiln's
-first-class export/import handoff is not shipped yet.
+first-class export/import handoff is not shipped yet. Its versioned identity
+and validation model is documented in the
+[HF/TRL Interoperability Contract](docs/HF_TRL_INTEROP.md).
 
 SFT row admission is also identical across inline examples, server-local
 JSONL, named datasets, corrections, recipes, and direct Rust calls. The default

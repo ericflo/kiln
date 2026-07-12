@@ -149,4 +149,6 @@ PEFT methods, distributed execution, or broad model-family support. Kiln's
 first-class dataset/provenance export and validated adapter import workflow is
 not shipped yet; it remains a separate interoperability deliverable. Until it
 lands, do not assume a raw external training command preserves Kiln's row,
-template, split, or artifact-identity contracts automatically.
+template, split, or artifact-identity contracts automatically. The versioned
+handoff schema and its validation boundary are defined in
+[HF/TRL Interoperability Contract](HF_TRL_INTEROP.md).

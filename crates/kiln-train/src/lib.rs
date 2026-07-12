@@ -38,6 +38,7 @@ pub mod diagnostics;
 // `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda` (the
 // SFT loss root) and `opd_tape_shim::try_tape_opd_scalar_mean_cuda` (OPD).
 pub mod grpo_tape_shim;
+pub mod hf_interop;
 pub mod logit_cache;
 pub mod logit_source;
 pub mod long_context_fixture;
@@ -67,6 +68,18 @@ pub mod trajectory;
 pub mod trajectory_inspect;
 pub mod trajectory_mask;
 
+pub use hf_interop::{
+    HF_TRL_ADAPTER_CONFIG_FILENAME, HF_TRL_ADAPTER_MODEL_FILENAME, HF_TRL_CHAT_TEMPLATE_FILENAME,
+    HF_TRL_DATASET_FILENAME, HF_TRL_EXECUTED_SCRIPT_FILENAME, HF_TRL_EXPORT_MANIFEST_FILENAME,
+    HF_TRL_EXPORT_SCHEMA_VERSION, HF_TRL_EXPORT_TYPE, HF_TRL_MODEL_CONFIG_FILENAME,
+    HF_TRL_NATIVE_TRAINING_TEMPLATE_FILENAME, HF_TRL_REFERENCE_SCRIPT_FILENAME,
+    HF_TRL_RESULT_MANIFEST_FILENAME, HF_TRL_RESULT_SCHEMA_VERSION, HF_TRL_RESULT_TYPE,
+    HF_TRL_SPLIT_MANIFEST_FILENAME, HF_TRL_TOKENIZER_FILENAME, HF_TRL_TRAINING_TEMPLATE_FILENAME,
+    HfTrlConfigValue, HfTrlDataExport, HfTrlDatasetFormat, HfTrlExportManifestV1,
+    HfTrlFileIdentity, HfTrlInputAdapter, HfTrlModelIdentity, HfTrlOutputAdapter,
+    HfTrlSftSelection, HfTrlTask, HfTrlTrainerIdentity, HfTrlTrainerKind, HfTrlTrainingResultV1,
+    read_hf_trl_export_manifest, read_hf_trl_training_result,
+};
 pub use logit_cache::{CacheEntry, CacheStats, CachedLogitSource, LogitCache, hash_prefix};
 pub use receipt::{
     AdapterReceipt, DiagnosticSummary, PromptSourceDescriptor, RECEIPT_SCHEMA_VERSION,

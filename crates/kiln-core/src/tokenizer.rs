@@ -344,6 +344,48 @@ impl KilnTokenizer {
             .map(|template| crate::config_hashes::sha256_bytes(template.as_bytes()))
     }
 
+    /// Exact configured inference chat-template bytes, when present.
+    ///
+    /// Interoperability exports use this accessor instead of reaching into
+    /// tokenizer configuration files and guessing which template Kiln loaded.
+    pub fn chat_template(&self) -> Option<&str> {
+        self.chat_template.as_deref()
+    }
+
+    /// Exact supervised-training template selected by Kiln.
+    ///
+    /// The official Qwen3.5 inference template maps to TRL's
+    /// prefix-preserving training template. Other templates are returned
+    /// unchanged and are rendered with `add_generation_prompt=false` by the
+    /// training path.
+    pub fn training_chat_template(&self) -> Option<&str> {
+        self.chat_template.as_deref().map(|template| {
+            if template == QWEN35_OFFICIAL_CHAT_TEMPLATE {
+                qwen35_trl_sft_template_for_minijinja()
+            } else {
+                template
+            }
+        })
+    }
+
+    /// Exact supervised-training template an HF/TRL trainer must receive.
+    ///
+    /// Qwen3.5's TRL template retains the `{% generation %}` blocks used by
+    /// `SFTTrainer` for assistant-only labels. Kiln's native minijinja path
+    /// cannot parse that extension and exposes its marker-stripped effective
+    /// template separately through [`Self::training_chat_template`].
+    pub fn trl_training_chat_template(&self) -> Option<&str> {
+        self.chat_template.as_deref().map(|template| {
+            if template == QWEN35_OFFICIAL_CHAT_TEMPLATE {
+                QWEN35_TRL_SFT_CHAT_TEMPLATE
+                    .strip_suffix('\n')
+                    .unwrap_or(QWEN35_TRL_SFT_CHAT_TEMPLATE)
+            } else {
+                template
+            }
+        })
+    }
+
     /// SHA-256 digest of the effective supervised-training template.
     ///
     /// The pinned Qwen3.5 inference template maps to TRL's prefix-preserving
@@ -351,14 +393,14 @@ impl KilnTokenizer {
     /// bytes and differ only through `add_generation_prompt=false` at render
     /// time.
     pub fn training_chat_template_sha256(&self) -> Option<String> {
-        self.chat_template.as_ref().map(|template| {
-            let effective = if template == QWEN35_OFFICIAL_CHAT_TEMPLATE {
-                qwen35_trl_sft_template_for_minijinja()
-            } else {
-                template
-            };
-            crate::config_hashes::sha256_bytes(effective.as_bytes())
-        })
+        self.training_chat_template()
+            .map(|template| crate::config_hashes::sha256_bytes(template.as_bytes()))
+    }
+
+    /// SHA-256 digest of the exact template exported to HF/TRL.
+    pub fn trl_training_chat_template_sha256(&self) -> Option<String> {
+        self.trl_training_chat_template()
+            .map(|template| crate::config_hashes::sha256_bytes(template.as_bytes()))
     }
 
     /// Encode text into token IDs.
@@ -1141,6 +1183,10 @@ mod tests {
         assert_ne!(tokenizer_hash, combined_without_template);
         assert!(tok.chat_template_sha256().is_none());
         assert!(tok.training_chat_template_sha256().is_none());
+        assert!(tok.chat_template().is_none());
+        assert!(tok.training_chat_template().is_none());
+        assert!(tok.trl_training_chat_template().is_none());
+        assert!(tok.trl_training_chat_template_sha256().is_none());
 
         let templated = tok.with_chat_template("{{ messages | length }}".to_string());
         assert_eq!(
@@ -1158,6 +1204,18 @@ mod tests {
             templated.training_chat_template_sha256(),
             templated.chat_template_sha256()
         );
+        assert_eq!(
+            templated.training_chat_template(),
+            templated.chat_template()
+        );
+        assert_eq!(
+            templated.trl_training_chat_template(),
+            templated.chat_template()
+        );
+        assert_eq!(
+            templated.trl_training_chat_template_sha256(),
+            templated.chat_template_sha256()
+        );
         assert_ne!(
             templated.config_sha256().unwrap(),
             combined_without_template
@@ -1167,6 +1225,23 @@ mod tests {
         assert_ne!(
             qwen.training_chat_template_sha256(),
             qwen.chat_template_sha256()
+        );
+        assert_eq!(qwen.chat_template(), Some(QWEN35_OFFICIAL_CHAT_TEMPLATE));
+        assert_eq!(
+            qwen.training_chat_template(),
+            Some(qwen35_trl_sft_template_for_minijinja())
+        );
+        assert_eq!(
+            qwen.trl_training_chat_template(),
+            Some(
+                QWEN35_TRL_SFT_CHAT_TEMPLATE
+                    .strip_suffix('\n')
+                    .unwrap_or(QWEN35_TRL_SFT_CHAT_TEMPLATE)
+            )
+        );
+        assert_ne!(
+            qwen.trl_training_chat_template_sha256(),
+            qwen.training_chat_template_sha256()
         );
         assert_eq!(
             qwen.training_chat_template_sha256().as_deref(),
