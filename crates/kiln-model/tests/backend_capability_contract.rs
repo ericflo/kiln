@@ -2342,22 +2342,25 @@ fn generated_capability_report_lists_training_precision_policy() {
         policies["cuda"]["exact_gdn_backward_tile_tokens"], 1024,
         "CUDA should own its exact-GDN backward tile default in the training policy"
     );
-    assert_eq!(
-        policies["cuda"]["streaming_prefill_tile_tokens"], 1024,
-        "CUDA should own its streaming-prefill tile default in the training policy"
-    );
-    assert_eq!(
-        policies["rocm"]["paged_prefill_medium_tile_tokens"], 1024,
-        "ROCm should own its medium-sequence paged-prefill tile default in the training policy"
-    );
-    assert_eq!(
-        policies["rocm"]["paged_prefill_medium_tile_max_tokens"], 20_000,
-        "ROCm should own its medium-sequence paged-prefill ceiling in the training policy"
-    );
-    assert_eq!(
-        policies["metal"]["tape_streaming_tile_tokens"], 2048,
-        "Metal should own its tape streaming tile default in the training policy"
-    );
+    for policy in policies.values() {
+        let policy = policy
+            .as_object()
+            .expect("training precision policy entry should be an object");
+        for field in [
+            "streaming_prefill_tile_tokens",
+            "tape_streaming_tile_tokens",
+            "detached_full_attn_tile_tokens",
+            "detached_full_attn_boundary_tile_tokens",
+            "detached_full_attn_tape_replay_tile_tokens",
+            "paged_prefill_medium_tile_tokens",
+            "paged_prefill_medium_tile_max_tokens",
+        ] {
+            assert!(
+                !policy.contains_key(field),
+                "prefill execution field {field} must not appear in training_precision_policy"
+            );
+        }
+    }
     assert_eq!(
         policies["metal"]["exact_gdn_backward_tile_tokens"],
         Value::Null,
@@ -5136,6 +5139,25 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !streaming_tile_section.contains("match streaming_prefill_device_kind"),
         "streaming tile defaults should not keep a local backend device table"
     );
+    let training_precision_fields = source_between(
+        &backend_source,
+        "pub struct TrainingPrecisionPolicy {",
+        "impl TrainingPrecisionPolicy {",
+    );
+    for field in [
+        "streaming_prefill_tile_tokens",
+        "tape_streaming_tile_tokens",
+        "detached_full_attn_tile_tokens",
+        "detached_full_attn_boundary_tile_tokens",
+        "detached_full_attn_tape_replay_tile_tokens",
+        "paged_prefill_medium_tile_tokens",
+        "paged_prefill_medium_tile_max_tokens",
+    ] {
+        assert!(
+            !training_precision_fields.contains(field),
+            "prefill execution field {field} must not appear in TrainingPrecisionPolicy"
+        );
+    }
     let embedding_activation_cast_section = source_between(
         &forward_source,
         "fn cast_embedding_output_to_policy_activation(",

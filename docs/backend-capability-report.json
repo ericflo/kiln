@@ -4667,9 +4667,6 @@
       "base_weight_dtypes": [
         "F32"
       ],
-      "detached_full_attn_boundary_tile_tokens": 8192,
-      "detached_full_attn_tape_replay_tile_tokens": 8192,
-      "detached_full_attn_tile_tokens": 8192,
       "exact_gdn_backward_tile_tokens": null,
       "lora_parameter_dtypes": [
         "F32"
@@ -4681,11 +4678,7 @@
       "notes": "CPU reference training uses F32 tensors and portable optimizer math.",
       "optimizer_parameter_dtypes": [
         "F32"
-      ],
-      "paged_prefill_medium_tile_max_tokens": null,
-      "paged_prefill_medium_tile_tokens": null,
-      "streaming_prefill_tile_tokens": 8192,
-      "tape_streaming_tile_tokens": 8192
+      ]
     },
     "cuda": {
       "activation_dtypes": [
@@ -4698,9 +4691,6 @@
         "BF16",
         "F16"
       ],
-      "detached_full_attn_boundary_tile_tokens": 65536,
-      "detached_full_attn_tape_replay_tile_tokens": 65536,
-      "detached_full_attn_tile_tokens": 8192,
       "exact_gdn_backward_tile_tokens": 1024,
       "lora_parameter_dtypes": [
         "F32",
@@ -4714,11 +4704,7 @@
       "optimizer_parameter_dtypes": [
         "F32",
         "BF16"
-      ],
-      "paged_prefill_medium_tile_max_tokens": null,
-      "paged_prefill_medium_tile_tokens": null,
-      "streaming_prefill_tile_tokens": 1024,
-      "tape_streaming_tile_tokens": 1024
+      ]
     },
     "metal": {
       "activation_dtypes": [
@@ -4727,9 +4713,6 @@
       "base_weight_dtypes": [
         "BF16"
       ],
-      "detached_full_attn_boundary_tile_tokens": 8192,
-      "detached_full_attn_tape_replay_tile_tokens": 8192,
-      "detached_full_attn_tile_tokens": 8192,
       "exact_gdn_backward_tile_tokens": null,
       "lora_parameter_dtypes": [
         "F32",
@@ -4743,11 +4726,7 @@
       "optimizer_parameter_dtypes": [
         "F32",
         "BF16"
-      ],
-      "paged_prefill_medium_tile_max_tokens": null,
-      "paged_prefill_medium_tile_tokens": null,
-      "streaming_prefill_tile_tokens": 2048,
-      "tape_streaming_tile_tokens": 2048
+      ]
     },
     "rocm": {
       "activation_dtypes": [
@@ -4760,9 +4739,6 @@
         "BF16",
         "F16"
       ],
-      "detached_full_attn_boundary_tile_tokens": 8192,
-      "detached_full_attn_tape_replay_tile_tokens": 8192,
-      "detached_full_attn_tile_tokens": 8192,
       "exact_gdn_backward_tile_tokens": null,
       "lora_parameter_dtypes": [
         "F32",
@@ -4772,15 +4748,11 @@
       "mixed_precision": true,
       "mixed_rms_norm_weight_dtype": null,
       "name": "rocm_native_float",
-      "notes": "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available; materializing SDPA paths dynamically shrink exact full-attention tiles to fit live memory.",
+      "notes": "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
       "optimizer_parameter_dtypes": [
         "F32",
         "BF16"
-      ],
-      "paged_prefill_medium_tile_max_tokens": 20000,
-      "paged_prefill_medium_tile_tokens": 1024,
-      "streaming_prefill_tile_tokens": 1024,
-      "tape_streaming_tile_tokens": 1024
+      ]
     },
     "vulkan": {
       "activation_dtypes": [
@@ -4790,9 +4762,6 @@
         "F32",
         "BF16"
       ],
-      "detached_full_attn_boundary_tile_tokens": 8192,
-      "detached_full_attn_tape_replay_tile_tokens": 8192,
-      "detached_full_attn_tile_tokens": 8192,
       "exact_gdn_backward_tile_tokens": null,
       "lora_parameter_dtypes": [
         "F32"
@@ -4805,11 +4774,7 @@
       "optimizer_parameter_dtypes": [
         "F32",
         "BF16"
-      ],
-      "paged_prefill_medium_tile_max_tokens": null,
-      "paged_prefill_medium_tile_tokens": null,
-      "streaming_prefill_tile_tokens": 2048,
-      "tape_streaming_tile_tokens": 2048
+      ]
     }
   },
   "trait_method_count": 3

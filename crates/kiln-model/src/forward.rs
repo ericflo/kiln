@@ -40998,11 +40998,11 @@ mod tests {
             STREAMING_PREFILL_ROCM_DEFAULT_TILE
         );
         assert_eq!(
-            crate::backend::TrainingPrecisionPolicy::cuda().detached_full_attn_tile_tokens,
+            cuda_default.detached_full_attn_tile_tokens(),
             DETACHED_FULL_ATTN_CUDA_DEFAULT_TILE
         );
         assert_eq!(
-            crate::backend::TrainingPrecisionPolicy::rocm().detached_full_attn_tile_tokens,
+            rocm_default.detached_full_attn_tile_tokens(),
             DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE
         );
         assert_eq!(

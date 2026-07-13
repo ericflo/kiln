@@ -942,13 +942,6 @@ def training_precision_policy_report() -> dict[str, Any]:
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32"],
             "mixed_rms_norm_weight_dtype": None,
-            "streaming_prefill_tile_tokens": 8192,
-            "detached_full_attn_tile_tokens": 8192,
-            "detached_full_attn_boundary_tile_tokens": 8192,
-            "detached_full_attn_tape_replay_tile_tokens": 8192,
-            "tape_streaming_tile_tokens": 8192,
-            "paged_prefill_medium_tile_tokens": None,
-            "paged_prefill_medium_tile_max_tokens": None,
             "exact_gdn_backward_tile_tokens": None,
             "mixed_precision": False,
             "notes": "CPU reference training uses F32 tensors and portable optimizer math.",
@@ -961,13 +954,6 @@ def training_precision_policy_report() -> dict[str, Any]:
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
             "mixed_rms_norm_weight_dtype": None,
-            "streaming_prefill_tile_tokens": 1024,
-            "detached_full_attn_tile_tokens": 8192,
-            "detached_full_attn_boundary_tile_tokens": 65536,
-            "detached_full_attn_tape_replay_tile_tokens": 65536,
-            "tape_streaming_tile_tokens": 1024,
-            "paged_prefill_medium_tile_tokens": None,
-            "paged_prefill_medium_tile_max_tokens": None,
             "exact_gdn_backward_tile_tokens": 1024,
             "mixed_precision": True,
             "notes": "CUDA keeps kt tape authoritative and routes BF16/F16/F32 leaves through CUDA-native kernels where available.",
@@ -980,16 +966,9 @@ def training_precision_policy_report() -> dict[str, Any]:
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
             "mixed_rms_norm_weight_dtype": None,
-            "streaming_prefill_tile_tokens": 1024,
-            "detached_full_attn_tile_tokens": 8192,
-            "detached_full_attn_boundary_tile_tokens": 8192,
-            "detached_full_attn_tape_replay_tile_tokens": 8192,
-            "tape_streaming_tile_tokens": 1024,
-            "paged_prefill_medium_tile_tokens": 1024,
-            "paged_prefill_medium_tile_max_tokens": 20000,
             "exact_gdn_backward_tile_tokens": None,
             "mixed_precision": True,
-            "notes": "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available; materializing SDPA paths dynamically shrink exact full-attention tiles to fit live memory.",
+            "notes": "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
         },
         "metal": {
             "name": "metal_bf16_uma",
@@ -999,13 +978,6 @@ def training_precision_policy_report() -> dict[str, Any]:
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
             "mixed_rms_norm_weight_dtype": None,
-            "streaming_prefill_tile_tokens": 2048,
-            "detached_full_attn_tile_tokens": 8192,
-            "detached_full_attn_boundary_tile_tokens": 8192,
-            "detached_full_attn_tape_replay_tile_tokens": 8192,
-            "tape_streaming_tile_tokens": 2048,
-            "paged_prefill_medium_tile_tokens": None,
-            "paged_prefill_medium_tile_max_tokens": None,
             "exact_gdn_backward_tile_tokens": None,
             "mixed_precision": True,
             "notes": "Metal training is BF16-focused on UMA buffers, with F32 loss accumulation and F32/BF16 AdamW residency.",
@@ -1018,13 +990,6 @@ def training_precision_policy_report() -> dict[str, Any]:
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
             "mixed_rms_norm_weight_dtype": "BF16",
-            "streaming_prefill_tile_tokens": 2048,
-            "detached_full_attn_tile_tokens": 8192,
-            "detached_full_attn_boundary_tile_tokens": 8192,
-            "detached_full_attn_tape_replay_tile_tokens": 8192,
-            "tape_streaming_tile_tokens": 2048,
-            "paged_prefill_medium_tile_tokens": None,
-            "paged_prefill_medium_tile_max_tokens": None,
             "exact_gdn_backward_tile_tokens": None,
             "mixed_precision": True,
             "notes": "Vulkan keeps training activations and LoRA parameters F32 while allowing BF16 base weights through explicit VkTensor buffer bridges.",
@@ -2909,21 +2874,14 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Training Precision Policy")
     lines.append("")
-    lines.append("| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed RMSNorm Weight | Streaming Tile | Detached Full-Attn Tile | Detached Boundary Tile | Detached Tape Tile | Tape Tile | Paged Medium Tile | Exact GDN Backward Tile | Mixed |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed RMSNorm Weight | Exact GDN Backward Tile | Mixed |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
     for backend, info in data["training_precision_policy"].items():
         exact_gdn_tile = info["exact_gdn_backward_tile_tokens"]
         exact_gdn_tile_display = (
             str(exact_gdn_tile)
             if exact_gdn_tile is not None
-            else "streaming_tile_tokens_for(device)"
-        )
-        paged_medium_tile = info["paged_prefill_medium_tile_tokens"]
-        paged_medium_max_tokens = info["paged_prefill_medium_tile_max_tokens"]
-        paged_medium_tile_display = (
-            f"{paged_medium_tile} <= {paged_medium_max_tokens}"
-            if paged_medium_tile is not None and paged_medium_max_tokens is not None
-            else "none"
+            else "streaming_prefill.base_tile_tokens"
         )
         mixed_rms_norm_weight_dtype = info["mixed_rms_norm_weight_dtype"] or "none"
         lines.append(
@@ -2934,12 +2892,6 @@ def markdown(data: dict[str, Any]) -> str:
             f"`{info['loss_accumulation_dtype']}` | "
             f"`{','.join(info['optimizer_parameter_dtypes'])}` | "
             f"`{mixed_rms_norm_weight_dtype}` | "
-            f"`{info['streaming_prefill_tile_tokens']}` | "
-            f"`{info['detached_full_attn_tile_tokens']}` | "
-            f"`{info['detached_full_attn_boundary_tile_tokens']}` | "
-            f"`{info['detached_full_attn_tape_replay_tile_tokens']}` | "
-            f"`{info['tape_streaming_tile_tokens']}` | "
-            f"`{paged_medium_tile_display}` | "
             f"`{exact_gdn_tile_display}` | "
             f"{'yes' if info['mixed_precision'] else 'no'} |"
         )

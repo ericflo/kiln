@@ -392,13 +392,6 @@ pub struct TrainingPrecisionPolicy {
     pub loss_accumulation_dtype: kiln_tensor::DType,
     pub optimizer_parameter_dtypes: &'static [kiln_tensor::DType],
     pub mixed_rms_norm_weight_dtype: Option<kiln_tensor::DType>,
-    pub streaming_prefill_tile_tokens: usize,
-    pub detached_full_attn_tile_tokens: usize,
-    pub detached_full_attn_boundary_tile_tokens: usize,
-    pub detached_full_attn_tape_replay_tile_tokens: usize,
-    pub tape_streaming_tile_tokens: usize,
-    pub paged_prefill_medium_tile_tokens: Option<usize>,
-    pub paged_prefill_medium_tile_max_tokens: Option<usize>,
     pub exact_gdn_backward_tile_tokens: Option<usize>,
     pub mixed_precision: bool,
     pub notes: &'static str,
@@ -414,13 +407,6 @@ impl TrainingPrecisionPolicy {
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32,
             mixed_rms_norm_weight_dtype: None,
-            streaming_prefill_tile_tokens: 8192,
-            detached_full_attn_tile_tokens: 8192,
-            detached_full_attn_boundary_tile_tokens: 8192,
-            detached_full_attn_tape_replay_tile_tokens: 8192,
-            tape_streaming_tile_tokens: 8192,
-            paged_prefill_medium_tile_tokens: None,
-            paged_prefill_medium_tile_max_tokens: None,
             exact_gdn_backward_tile_tokens: None,
             mixed_precision: false,
             notes: "CPU reference training uses F32 tensors and portable optimizer math.",
@@ -436,15 +422,6 @@ impl TrainingPrecisionPolicy {
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             mixed_rms_norm_weight_dtype: None,
-            streaming_prefill_tile_tokens: 1024,
-            detached_full_attn_tile_tokens: 8192,
-            detached_full_attn_boundary_tile_tokens:
-                crate::forward::DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE,
-            detached_full_attn_tape_replay_tile_tokens:
-                crate::forward::DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE,
-            tape_streaming_tile_tokens: 1024,
-            paged_prefill_medium_tile_tokens: None,
-            paged_prefill_medium_tile_max_tokens: None,
             exact_gdn_backward_tile_tokens: Some(1024),
             mixed_precision: true,
             notes: "CUDA keeps kt tape authoritative and routes BF16/F16/F32 leaves through CUDA-native kernels where available.",
@@ -460,19 +437,9 @@ impl TrainingPrecisionPolicy {
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             mixed_rms_norm_weight_dtype: None,
-            streaming_prefill_tile_tokens: 1024,
-            detached_full_attn_tile_tokens:
-                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
-            detached_full_attn_boundary_tile_tokens:
-                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
-            detached_full_attn_tape_replay_tile_tokens:
-                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
-            tape_streaming_tile_tokens: 1024,
-            paged_prefill_medium_tile_tokens: Some(1024),
-            paged_prefill_medium_tile_max_tokens: Some(20_000),
             exact_gdn_backward_tile_tokens: None,
             mixed_precision: true,
-            notes: "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available; materializing SDPA paths dynamically shrink exact full-attention tiles to fit live memory.",
+            notes: "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
         }
     }
 
@@ -485,16 +452,6 @@ impl TrainingPrecisionPolicy {
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             mixed_rms_norm_weight_dtype: None,
-            streaming_prefill_tile_tokens: 2048,
-            detached_full_attn_tile_tokens:
-                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
-            detached_full_attn_boundary_tile_tokens:
-                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
-            detached_full_attn_tape_replay_tile_tokens:
-                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
-            tape_streaming_tile_tokens: 2048,
-            paged_prefill_medium_tile_tokens: None,
-            paged_prefill_medium_tile_max_tokens: None,
             exact_gdn_backward_tile_tokens: None,
             mixed_precision: true,
             notes: "Metal training is BF16-focused on UMA buffers, with F32 loss accumulation and F32/BF16 AdamW residency.",
@@ -510,16 +467,6 @@ impl TrainingPrecisionPolicy {
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             mixed_rms_norm_weight_dtype: Some(kiln_tensor::DType::BF16),
-            streaming_prefill_tile_tokens: 2048,
-            detached_full_attn_tile_tokens:
-                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
-            detached_full_attn_boundary_tile_tokens:
-                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
-            detached_full_attn_tape_replay_tile_tokens:
-                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
-            tape_streaming_tile_tokens: 2048,
-            paged_prefill_medium_tile_tokens: None,
-            paged_prefill_medium_tile_max_tokens: None,
             exact_gdn_backward_tile_tokens: None,
             mixed_precision: true,
             notes: "Vulkan keeps training activations and LoRA parameters F32 while allowing BF16 base weights through explicit VkTensor buffer bridges.",
@@ -605,16 +552,6 @@ impl TrainingPrecisionPolicy {
 
     pub fn exact_gdn_backward_tile_tokens_or(&self, fallback: usize) -> usize {
         self.exact_gdn_backward_tile_tokens.unwrap_or(fallback)
-    }
-
-    pub fn streaming_prefill_tile_tokens_for_seq_len(&self, seq_len: usize) -> usize {
-        match (
-            self.paged_prefill_medium_tile_tokens,
-            self.paged_prefill_medium_tile_max_tokens,
-        ) {
-            (Some(tile), Some(max_tokens)) if seq_len <= max_tokens => tile,
-            _ => self.streaming_prefill_tile_tokens,
-        }
     }
 }
 
@@ -2253,55 +2190,14 @@ mod tests {
         assert!(cuda.activation_dtypes.contains(&kiln_tensor::DType::BF16));
         assert!(cuda.activation_dtypes.contains(&kiln_tensor::DType::F16));
         assert_eq!(cuda.exact_gdn_backward_tile_tokens, Some(1024));
-        assert_eq!(cuda.streaming_prefill_tile_tokens, 1024);
-        assert_eq!(cuda.detached_full_attn_tile_tokens, 8192);
-        assert_eq!(
-            cuda.detached_full_attn_boundary_tile_tokens,
-            crate::forward::DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE
-        );
-        assert_eq!(
-            cuda.detached_full_attn_tape_replay_tile_tokens,
-            crate::forward::DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE
-        );
-        assert_eq!(cuda.tape_streaming_tile_tokens, 1024);
         assert!(cuda.mixed_precision);
 
         let rocm = TrainingPrecisionPolicy::rocm();
-        assert_eq!(rocm.streaming_prefill_tile_tokens, 1024);
-        assert_eq!(
-            rocm.detached_full_attn_tile_tokens,
-            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
-        );
-        assert_eq!(
-            rocm.detached_full_attn_boundary_tile_tokens,
-            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
-        );
-        assert_eq!(
-            rocm.detached_full_attn_tape_replay_tile_tokens,
-            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
-        );
-        assert_eq!(rocm.tape_streaming_tile_tokens, 1024);
-        assert_eq!(rocm.paged_prefill_medium_tile_tokens, Some(1024));
-        assert_eq!(rocm.paged_prefill_medium_tile_max_tokens, Some(20_000));
-        assert_eq!(rocm.streaming_prefill_tile_tokens_for_seq_len(20_000), 1024);
+        assert!(rocm.mixed_precision);
 
         let metal = TrainingPrecisionPolicy::metal();
         assert_eq!(metal.activation_dtypes, &[kiln_tensor::DType::BF16]);
         assert_eq!(metal.loss_accumulation_dtype, kiln_tensor::DType::F32);
-        assert_eq!(metal.streaming_prefill_tile_tokens, 2048);
-        assert_eq!(
-            metal.detached_full_attn_tile_tokens,
-            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
-        );
-        assert_eq!(
-            metal.detached_full_attn_boundary_tile_tokens,
-            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
-        );
-        assert_eq!(
-            metal.detached_full_attn_tape_replay_tile_tokens,
-            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
-        );
-        assert_eq!(metal.tape_streaming_tile_tokens, 2048);
         assert!(metal.notes.contains("UMA"));
 
         let vulkan = TrainingPrecisionPolicy::vulkan();
@@ -2312,20 +2208,6 @@ mod tests {
             Some(kiln_tensor::DType::BF16)
         );
         assert_eq!(vulkan.exact_gdn_backward_tile_tokens, None);
-        assert_eq!(vulkan.streaming_prefill_tile_tokens, 2048);
-        assert_eq!(
-            vulkan.detached_full_attn_tile_tokens,
-            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
-        );
-        assert_eq!(
-            vulkan.detached_full_attn_boundary_tile_tokens,
-            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
-        );
-        assert_eq!(
-            vulkan.detached_full_attn_tape_replay_tile_tokens,
-            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
-        );
-        assert_eq!(vulkan.tape_streaming_tile_tokens, 2048);
         assert!(
             vulkan
                 .base_weight_dtypes
