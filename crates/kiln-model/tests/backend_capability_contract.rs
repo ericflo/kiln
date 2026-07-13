@@ -6177,7 +6177,7 @@ fn training_optimizer_capability_is_bound_before_admission_and_allocation() {
             source_between(
                 &trainer,
                 "pub fn grpo_train_to_with_checkpoint_root_and_runtime(",
-                "/// Standalone streamed GRPO training from a JSONL file.",
+                "pub fn grpo_train_jsonl_to_with_checkpoint_root(",
             ),
             "ensure_memory_governor_for_runtime(",
         ),
