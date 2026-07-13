@@ -1963,7 +1963,8 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         }
         h.update(&buf[..n]);
     }
-    Ok(format!("sha256:{}", hex_digest(h.finalize().as_slice())))
+    let digest: [u8; 32] = h.finalize().into();
+    Ok(format_sha256_digest(&digest))
 }
 
 pub(crate) fn validate_prefixed_sha256(field: &str, value: &str) -> Result<()> {
@@ -1981,14 +1982,18 @@ pub(crate) fn validate_prefixed_sha256(field: &str, value: &str) -> Result<()> {
 }
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    format!("sha256:{}", hex_digest(digest.as_slice()))
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    format_sha256_digest(&digest)
 }
 
 pub fn sha256_json_value(value: &serde_json::Value) -> String {
     let bytes = serde_json::to_vec(value).unwrap_or_default();
-    let digest = Sha256::digest(&bytes);
-    format!("sha256:{}", hex_digest(digest.as_slice()))
+    sha256_bytes(&bytes)
+}
+
+/// Encode an already-computed SHA-256 digest in the receipt wire format.
+pub fn format_sha256_digest(digest: &[u8; 32]) -> String {
+    format!("sha256:{}", hex_digest(digest))
 }
 
 pub fn sha256_json_serializable<T: Serialize>(value: &T) -> Option<String> {

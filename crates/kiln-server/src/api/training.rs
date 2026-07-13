@@ -651,7 +651,8 @@ fn validate_grpo_jsonl_submission(
         .map_err(|(current, requested)| {
             ApiError::training_prepared_data_full(current, requested)
         })?;
-    let source_sha256 = format!("sha256:{:x}", hasher.finalize());
+    let digest: [u8; 32] = hasher.finalize().into();
+    let source_sha256 = kiln_train::train_receipt::format_sha256_digest(&digest);
     let receipt = crate::training_queue::GrpoJsonlAdmissionReceipt::new_server_owned(
         snapshot_path,
         snapshot_reader,

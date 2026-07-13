@@ -8474,7 +8474,8 @@ impl PinnedGrpoJsonlSource {
             }
             hasher.update(&buffer[..read]);
         }
-        Ok(format!("sha256:{:x}", hasher.finalize()))
+        let digest: [u8; 32] = hasher.finalize().into();
+        Ok(crate::train_receipt::format_sha256_digest(&digest))
     }
 
     fn reader_from_start(&self) -> Result<std::fs::File> {
@@ -8546,7 +8547,8 @@ impl StreamingJsonArraySha256 {
     fn finish(mut self) -> String {
         use sha2::Digest as _;
         self.hasher.update(b"]");
-        format!("sha256:{:x}", self.hasher.finalize())
+        let digest: [u8; 32] = self.hasher.finalize().into();
+        crate::train_receipt::format_sha256_digest(&digest)
     }
 }
 
