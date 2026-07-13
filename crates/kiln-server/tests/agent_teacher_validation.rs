@@ -199,10 +199,6 @@ async fn judge_distill_registered_teacher_proceeds_past_resolution() {
     let (state, _dir) = make_state();
     let app = api::router(state.clone());
     register_teacher(&app, "fixture@t").await;
-    // Isolate from the developer's real ~/.pi sessions: auto-discovery
-    // (ensure_agent_trace_index) would otherwise build a populated index
-    // and sail past the corpus-resolution 400 this test asserts.
-    unsafe { std::env::set_var("KILN_PI_SESSIONS_DIR", "/nonexistent/pi/sessions") };
     let (status, response) = post(
         &app,
         "/v1/agent/judge_distill",
@@ -213,12 +209,12 @@ async fn judge_distill_registered_teacher_proceeds_past_resolution() {
         response["error"]["code"], "teacher_not_registered",
         "registered teacher must pass resolution: {response}"
     );
-    // Past the teacher gate, the next stop is §10.6.1 corpus resolution —
-    // with no trace index on this fresh state that's the actionable 400.
-    // (agent_traces_bridge.rs covers the populated-index path.)
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    let message = response["error"]["message"].as_str().unwrap();
-    assert!(message.contains("agent-trace index"), "{message}");
+    // Cheap backend admission intentionally precedes corpus discovery. A mock
+    // state therefore proves the registered teacher passed resolution without
+    // reading the developer's session tree.
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+    assert_eq!(response["error"]["code"], "mock_mode", "{response}");
+    assert_no_jobs(&state, "judge_distill mock backend");
 }
 
 #[tokio::test]
@@ -253,7 +249,6 @@ async fn self_improve_registered_judge_proceeds_past_resolution() {
     let (state, _dir) = make_state();
     let app = api::router(state.clone());
     register_teacher(&app, "judge-pi-v1").await;
-    unsafe { std::env::set_var("KILN_PI_SESSIONS_DIR", "/nonexistent/pi/sessions") };
     let (status, response) = post(
         &app,
         "/v1/agent/self_improve",
@@ -264,12 +259,9 @@ async fn self_improve_registered_judge_proceeds_past_resolution() {
         response["error"]["code"], "teacher_not_registered",
         "registered judge must pass resolution: {response}"
     );
-    // Past the judge gate, the next stop is §10.6.2 task resolution —
-    // with no trace index on this fresh state that's the actionable 400.
-    // (agent_traces_bridge.rs covers the populated-index path.)
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    let message = response["error"]["message"].as_str().unwrap();
-    assert!(message.contains("agent-trace index"), "{message}");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+    assert_eq!(response["error"]["code"], "mock_mode", "{response}");
+    assert_no_jobs(&state, "self_improve mock backend");
 }
 
 // ── judge_drift_check honesty ────────────────────────────────────────
