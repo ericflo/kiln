@@ -3837,9 +3837,9 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "decode buffer max-batch default should not rebuild policy from a backend name"
     );
     assert!(
-        generate_source
-            .contains("decode_buffer_max_batch(backend.as_ref(), options.max_decode_batch)")
-            && generate_source.contains("self.decode_buffer_max_batch"),
+        generate_source.contains(
+            "decode_buffer_max_batch(selected_backend.as_ref(), options.max_decode_batch)",
+        ) && generate_source.contains("self.decode_buffer_max_batch"),
         "decode buffer config should resolve the active backend under the injected hard ceiling once at construction"
     );
     let decode_debug_policy_section = source_between(
@@ -3902,7 +3902,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "fn default_prefix_cache_max_entries(",
     );
     assert!(
-        server_startup_policy_section.contains("inference_recurrent_state_policy")
+        server_state_source.contains("runner.backend_capabilities().gdn.inference_recurrent_state")
             && server_prefix_cache_state_section.contains("InferenceRecurrentStatePolicy")
             && server_prefix_cache_state_section.contains("policy.supports_dtype"),
         "kiln-server prefix-cache state sizing should consume the backend-owned inference recurrent-state policy"
@@ -3991,16 +3991,17 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "kiln-server KV FP8 routing should not keep a local backend/env policy table: {forbidden}"
         );
     }
-    let server_gpu_memory_detection_section = source_between(
+    let server_gpu_memory_capacity_section = source_between(
         &server_state_source,
-        "fn detected_gpu_total_memory(",
-        "/// Successful auto-sizer outcome.",
+        "pub fn ensure_accelerator_memory_capacity(",
+        "pub fn ensure_accelerator_memory_floor(",
     );
     assert!(
-        server_state_source.contains("gpu_memory_detection_policy")
-            && server_gpu_memory_detection_section.contains("GpuMemoryDetectionPolicy")
-            && server_gpu_memory_detection_section.contains("policy.total_memory_bytes"),
-        "kiln-server GPU memory detection should consume StorageCapabilities.gpu_memory_detection_policy"
+        server_state_source
+            .contains("resolve_vram_capacity(physical_vram, memory_cfg.gpu_memory_gb)")
+            && server_gpu_memory_capacity_section.contains("capacity.total_bytes")
+            && server_gpu_memory_capacity_section.contains("cap-only"),
+        "kiln-server GPU memory capacity should come from the typed physical-probe/configured-cap resolution"
     );
     for forbidden in [
         "Device::Cuda",
@@ -4013,14 +4014,14 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "assuming 16GB",
     ] {
         assert!(
-            !server_gpu_memory_detection_section.contains(forbidden),
+            !server_gpu_memory_capacity_section.contains(forbidden),
             "kiln-server GPU memory detection should not keep backend fallback policy locally: {forbidden}"
         );
     }
     let server_memory_snapshot_section = source_between(
         &server_state_source,
         "let snap = if",
-        "let total_vram = snap",
+        "let total_vram = vram_info.total_bytes;",
     );
     assert!(
         server_memory_snapshot_section.contains("gpu_memory_budget_policy")
@@ -4084,7 +4085,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         server_kv_autoscaler_source.contains("GpuAllocatorMemoryProbePolicy")
             && server_kv_autoscaler_source.contains("gpu_allocator_memory_probe_policy")
             && compact_server_kv_autoscaler_source
-                .contains("allocator_safe_available_bytes(gpu_allocator_memory_probe_policy,"),
+                .contains("live_resize_memory_snapshot(gpu_allocator_memory_probe_policy,"),
         "KV autoscaler should receive and consume the backend-owned allocator probe policy"
     );
     for forbidden in [
@@ -4189,8 +4190,8 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     }
     let server_training_acceleration_profile_call_section = source_between(
         &server_state_source,
-        "\"GPU memory budget\"",
-        "let inference_recurrent_state_policy = backend_capabilities.gdn.inference_recurrent_state;",
+        "let backend_name = runner.backend_name();",
+        "let prefix_cache_max_blocks = if prefix_cache_cfg.enabled {",
     );
     assert!(
         server_training_acceleration_profile_call_section
@@ -4661,8 +4662,12 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "kiln-bench ROCm graph routing should use replay primitive policy"
     );
     assert!(
-        !server_bench_source.contains("Device::Rocm")
-            && !server_bench_source.contains("matches!(device_kt, kiln_tensor::Device::Rocm(_))"),
+        !bench_graph_replay_helper.contains("Device::Rocm")
+            && !bench_latency_graph_section.contains("Device::Rocm")
+            && !bench_graph_replay_helper
+                .contains("matches!(device_kt, kiln_tensor::Device::Rocm(_))")
+            && !bench_latency_graph_section
+                .contains("matches!(device_kt, kiln_tensor::Device::Rocm(_))"),
         "kiln-bench graph routing should not branch on ROCm device identity"
     );
     let bench_paged_latency_section = source_between(
