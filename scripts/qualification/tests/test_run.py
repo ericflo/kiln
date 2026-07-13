@@ -373,6 +373,7 @@ class RunnerTests(unittest.TestCase):
         receipt_id: str = "runner-test-receipt-v1",
         assignments: list[str] | None = None,
         output: Path | None = None,
+        termination_grace_seconds: float = 0.1,
     ) -> run_module.RunOutcome:
         return run_module.run_qualification(
             repository.workload_path,
@@ -384,7 +385,7 @@ class RunnerTests(unittest.TestCase):
             root=repository.root,
             invocation=["qualification-runner-test"],
             hooks=self.hooks(),
-            termination_grace_seconds=0.1,
+            termination_grace_seconds=termination_grace_seconds,
         )
 
     def assert_valid(self, outcome: run_module.RunOutcome, root: Path) -> None:
@@ -512,7 +513,7 @@ class RunnerTests(unittest.TestCase):
             environment_workload([sys.executable, "-c", code])
         )
         self.addCleanup(repository.close)
-        outcome = self.execute(repository)
+        outcome = self.execute(repository, termination_grace_seconds=0.0)
 
         self.assertEqual(outcome.exit_code, 0)
         self.assertEqual(outcome.receipt["results"][0]["status"], "passed")

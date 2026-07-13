@@ -72,6 +72,7 @@ CASE_OUTPUT_LIMIT_BYTES = 16 * 1024 * 1024
 MAX_RUN_CAPTURE_BYTES = 256 * 1024 * 1024
 MAX_RUN_STRUCTURED_BYTES = 64 * 1024 * 1024
 MAX_TERMINATION_GRACE_SECONDS = 60.0
+SUCCESS_DESCENDANT_SETTLEMENT_SECONDS = 1.0
 
 
 class QualificationRunError(RuntimeError):
@@ -1027,7 +1028,7 @@ def execute_argv(
                     errors.append(str(exc))
             if not timed_out and not limit_reached.is_set() and _group_exists(process.pid):
                 settled = _wait_for_process_group_exit(
-                    process.pid, min(1.0, termination_grace_seconds)
+                    process.pid, SUCCESS_DESCENDANT_SETTLEMENT_SECONDS
                 )
                 if not settled:
                     _terminate_process_group(process, termination_grace_seconds)
