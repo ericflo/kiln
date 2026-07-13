@@ -84,6 +84,36 @@ fn production_source_before_tests(source: &str) -> &str {
         .unwrap_or(source)
 }
 
+fn rust_char_literal_end(bytes: &[u8], quote: usize) -> Option<usize> {
+    let first = *bytes.get(quote + 1)?;
+    if first == b'\\' {
+        let escape = *bytes.get(quote + 2)?;
+        let closing_quote = match escape {
+            b'x' => quote + 5,
+            b'u' if bytes.get(quote + 3) == Some(&b'{') => {
+                quote
+                    + 5
+                    + bytes
+                        .get(quote + 4..)?
+                        .iter()
+                        .position(|byte| *byte == b'}')?
+            }
+            _ => quote + 3,
+        };
+        return (bytes.get(closing_quote) == Some(&b'\'')).then_some(closing_quote);
+    }
+
+    let utf8_width = match first {
+        0x00..=0x7f => 1,
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return None,
+    };
+    let end = quote + 1 + utf8_width;
+    (bytes.get(end) == Some(&b'\'')).then_some(end)
+}
+
 fn find_matching_brace(source: &str, open_idx: usize) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut depth = 0usize;
@@ -129,7 +159,7 @@ fn find_matching_brace(source: &str, open_idx: usize) -> Option<usize> {
             i += 1;
         } else if ch == '"' {
             in_string = true;
-        } else if ch == '\'' {
+        } else if ch == '\'' && rust_char_literal_end(bytes, i).is_some() {
             in_char = true;
         } else if ch == '{' {
             depth += 1;
@@ -183,7 +213,27 @@ fn parse_functions(path: &Path) -> HashMap<String, FunctionDef> {
     let source = fs::read_to_string(path).expect("backend source should be readable");
     let mut out = HashMap::new();
     let mut offset = 0usize;
-    while let Some(relative_fn) = source[offset..].find("fn ") {
+    while offset < source.len() {
+        let line_end = source[offset..]
+            .find('\n')
+            .map_or(source.len(), |relative| offset + relative + 1);
+        let line = &source[offset..line_end];
+        let Some(relative_fn) = line.match_indices("fn ").find_map(|(relative, _)| {
+            let prefix = line[..relative].trim();
+            let token_boundary = relative == 0
+                || !line.as_bytes()[relative - 1].is_ascii_alphanumeric()
+                    && line.as_bytes()[relative - 1] != b'_';
+            let declaration_prefix = prefix.split_ascii_whitespace().all(|token| {
+                matches!(
+                    token,
+                    "pub" | "async" | "const" | "unsafe" | "extern" | "\"C\"" | "default"
+                ) || token.starts_with("pub(") && token.ends_with(')')
+            });
+            (token_boundary && declaration_prefix).then_some(relative)
+        }) else {
+            offset = line_end;
+            continue;
+        };
         let fn_start = offset + relative_fn;
         let name_start = fn_start + 3;
         let Some(first_non_name) =
@@ -201,6 +251,10 @@ fn parse_functions(path: &Path) -> HashMap<String, FunctionDef> {
             break;
         };
         let open = name_end + open_relative;
+        if source[name_end..open].contains(';') {
+            offset = line_end;
+            continue;
+        }
         let Some(close) = find_matching_brace(&source, open) else {
             break;
         };
