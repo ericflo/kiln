@@ -11,6 +11,7 @@
 use kiln_core::config::{DType, ModelConfig};
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_memory::vram::{GpuVramInfo, VramSource};
+use kiln_model::backend::SftFlceLossRoute;
 use kiln_train::{CheckpointBoundaryPolicy, GrpoGroup, Optimizer, SftExample};
 
 /// What the trainer can rely on being deduplicated across CPU and GPU.
@@ -110,7 +111,7 @@ pub struct Breakdown {
     pub base_weights: u64,
     pub per_segment_activations: u64,
     pub boundary_states: u64,
-    pub flce_intermediates: u64,
+    pub loss_workspace: u64,
     pub lora_param_grad: u64,
     pub lora_optimizer_state: u64,
     pub lora_registry_scratch: u64,
@@ -122,7 +123,7 @@ impl Breakdown {
         self.base_weights
             .saturating_add(self.per_segment_activations)
             .saturating_add(self.boundary_states)
-            .saturating_add(self.flce_intermediates)
+            .saturating_add(self.loss_workspace)
             .saturating_add(self.lora_param_grad)
             .saturating_add(self.lora_optimizer_state)
             .saturating_add(self.lora_registry_scratch)
@@ -134,7 +135,7 @@ impl Breakdown {
         self.base_weights
             .saturating_add(self.per_segment_activations)
             .saturating_add(self.boundary_states)
-            .saturating_add(self.flce_intermediates)
+            .saturating_add(self.loss_workspace)
             .saturating_add(self.safety_margin)
     }
 }
@@ -144,16 +145,26 @@ impl Breakdown {
 pub struct WorkingSet {
     pub total_bytes: u64,
     pub max_seq_len: usize,
+    pub sft_loss_route: Option<SftFlceLossRoute>,
     pub breakdown: Breakdown,
+}
+
+/// SFT-only inputs that must remain bound to the backend's loss route.
+///
+/// Keeping these values together prevents admission from applying a sparse
+/// active-token estimate to an unknown or different runtime loss path.
+#[derive(Debug, Clone, Copy)]
+pub struct SftEstimateOptions {
+    pub max_active_tokens: usize,
+    pub loss_route: SftFlceLossRoute,
+    pub checkpoint_boundary_policy: CheckpointBoundaryPolicy,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EstimateOptions {
-    pub max_supervised_tokens: Option<usize>,
-    /// SFT's startup-resolved sparse-boundary policy. GRPO and OPD leave this
-    /// as `None` because they retain every checkpoint boundary during reverse
-    /// replay.
-    pub sft_checkpoint_boundary_policy: Option<CheckpointBoundaryPolicy>,
+    /// SFT-specific loss and sparse-boundary inputs. GRPO and OPD leave this
+    /// as `None` and retain every checkpoint boundary during reverse replay.
+    pub sft: Option<SftEstimateOptions>,
     pub activation_bytes_per_elem: Option<usize>,
     pub streaming_gdn_tile_tokens: Option<usize>,
     /// Persistent optimizer state that must coexist with params and grads.
@@ -309,7 +320,8 @@ pub fn checkpoint_boundary_anchor_count(num_segments: usize, anchor_stride: usiz
     (num_segments / anchor_stride).saturating_add(1)
 }
 
-/// Peak working-set bytes for the FLCE chunked-head pass.
+/// Legacy generic chunked-loss estimate used by non-SFT workloads until their
+/// loss routes are represented explicitly.
 ///
 /// The vk-native FLCE chunks the LM-head matmul along the VOCAB axis
 /// (shape-aware columns per chunk, processed sequentially).
@@ -363,6 +375,85 @@ fn active_flce_chunk_len(cfg: &ModelConfig, max_active_tokens: usize) -> usize {
     };
     let safe = rounded.max(1).min(cfg.vocab_size.max(1));
     forced.map(|v| v.clamp(1, safe)).unwrap_or(safe)
+}
+
+fn sft_loss_workspace_bytes(cfg: &ModelConfig, max_seq_len: usize, sft: SftEstimateOptions) -> u64 {
+    let elem = dtype_bytes(cfg.dtype);
+    let t = usize_to_u64_saturating(max_seq_len.max(1));
+    let active = usize_to_u64_saturating(sft.max_active_tokens.max(1));
+    let hidden = usize_to_u64_saturating(cfg.hidden_size.max(1));
+    let vocab = usize_to_u64_saturating(cfg.vocab_size.max(1));
+    let chunk = usize_to_u64_saturating(cfg.vocab_size.max(1).min(FLCE_MAX_AUTO_CHUNK));
+
+    match sft.loss_route {
+        SftFlceLossRoute::KtTapeFlce => {
+            // CUDA/ROCm kt FLCE promotes a BF16/FP16 tied head to one full F32
+            // [H,V] tensor. The remaining terms cover the raw active gather,
+            // one F32 head chunk, generic ROCm chunk temporaries, active hidden
+            // accumulators, the scattered full hidden gradient, and metadata.
+            let head_promotion = if elem < 4 {
+                4u64.saturating_mul(hidden).saturating_mul(vocab)
+            } else {
+                0
+            };
+            let raw_active_hidden = elem.saturating_mul(active).saturating_mul(hidden);
+            let f32_elements = hidden
+                .saturating_mul(chunk)
+                .saturating_add(5u64.saturating_mul(active).saturating_mul(chunk))
+                .saturating_add(5u64.saturating_mul(active).saturating_mul(hidden))
+                .saturating_add(t.saturating_mul(hidden))
+                .saturating_add(8u64.saturating_mul(active));
+            head_promotion
+                .saturating_add(raw_active_hidden)
+                .saturating_add(4u64.saturating_mul(f32_elements))
+        }
+        SftFlceLossRoute::VulkanActiveRows => {
+            // Vulkan caps both automatic and forced chunks at min(V, 4096).
+            // Charge the F32 weight slice plus transpose, active-row logits,
+            // active/gradient hidden buffers, full hidden output, and metadata.
+            let f32_elements = 2u64
+                .saturating_mul(hidden)
+                .saturating_mul(chunk)
+                .saturating_add(active.saturating_mul(chunk))
+                .saturating_add(5u64.saturating_mul(active).saturating_mul(hidden))
+                .saturating_add(t.saturating_mul(hidden))
+                .saturating_add(8u64.saturating_mul(active));
+            4u64.saturating_mul(f32_elements)
+        }
+        SftFlceLossRoute::FullLogits => {
+            // The standard tape route retains model-dtype [T,V] logits. Its CE
+            // forward/backward also owns an active-row gather, five active F32
+            // buffers, and five dense F32 shifted/full-gradient buffers. BF16
+            // and FP16 add a model-dtype cast-back gradient.
+            let model_dtype_elements = t
+                .saturating_mul(vocab)
+                .saturating_add(active.saturating_mul(vocab));
+            let cast_back_gradient = if elem < 4 {
+                elem.saturating_mul(t).saturating_mul(vocab)
+            } else {
+                0
+            };
+            let f32_elements = 5u64
+                .saturating_mul(active)
+                .saturating_mul(vocab)
+                .saturating_add(5u64.saturating_mul(t).saturating_mul(vocab))
+                .saturating_add(8u64.saturating_mul(active));
+            elem.saturating_mul(model_dtype_elements)
+                .saturating_add(cast_back_gradient)
+                .saturating_add(4u64.saturating_mul(f32_elements))
+        }
+    }
+}
+
+fn loss_workspace_bytes(
+    cfg: &ModelConfig,
+    max_seq_len: usize,
+    sft: Option<SftEstimateOptions>,
+) -> u64 {
+    match sft {
+        Some(sft) => sft_loss_workspace_bytes(cfg, max_seq_len, sft),
+        None => flce_chunk_intermediate_bytes(cfg, max_seq_len.max(1)),
+    }
 }
 
 /// Shape-derived rank-linear upper bound for trainable LoRA elements.
@@ -616,7 +707,6 @@ pub fn estimate_step_working_set_with_options(
         approximate_base_weight_bytes(cfg).saturating_mul(residency.weight_multiplier())
     };
     let activation_bytes_per_elem = estimate_activation_bytes_per_elem(cfg, options);
-    let flce_tokens = options.max_supervised_tokens.unwrap_or(max_seq_len).max(1);
     let per_segment_activations = options
         .streaming_gdn_tile_tokens
         .filter(|&tile| tile > 0 && tile < max_seq_len)
@@ -633,10 +723,10 @@ pub fn estimate_step_working_set_with_options(
             cfg,
             max_seq_len,
             num_segments,
-            options.sft_checkpoint_boundary_policy,
+            options.sft.map(|sft| sft.checkpoint_boundary_policy),
             activation_bytes_per_elem,
         ),
-        flce_intermediates: flce_chunk_intermediate_bytes(cfg, flce_tokens),
+        loss_workspace: loss_workspace_bytes(cfg, max_seq_len, options.sft),
         lora_param_grad: lora_param_and_grad_bytes(cfg, lora_rank, options.lora_residency),
         lora_optimizer_state: lora_optimizer_state_bytes_for_residency(
             cfg,
@@ -650,6 +740,7 @@ pub fn estimate_step_working_set_with_options(
     WorkingSet {
         total_bytes: bd.total(),
         max_seq_len,
+        sft_loss_route: options.sft.map(|sft| sft.loss_route),
         breakdown: bd,
     }
 }
@@ -675,6 +766,15 @@ pub fn auto_fit_checkpoint_segments(
         options,
     );
     if last.total_bytes <= available_bytes {
+        return (1, last);
+    }
+    if options
+        .sft
+        .is_some_and(|sft| sft.loss_route == SftFlceLossRoute::FullLogits)
+    {
+        // The checkpoint tail runs outside an active tape, so FullLogits has
+        // no executable checkpointed loss-value path. Never manufacture an
+        // admission plan the trainer must reject.
         return (1, last);
     }
     for num_segments in 2..=max_segments {
@@ -892,7 +992,7 @@ pub fn estimate_vk_native_recompute_working_set_with_residency(
         base_weights,
         per_segment_activations: vk_native_recompute_activation_bytes(cfg, max_seq_len),
         boundary_states: 0,
-        flce_intermediates: flce_chunk_intermediate_bytes(cfg, max_seq_len),
+        loss_workspace: flce_chunk_intermediate_bytes(cfg, max_seq_len),
         lora_param_grad: lora_param_and_grad_bytes(cfg, lora_rank, lora_residency),
         lora_optimizer_state: lora_optimizer_state_bytes_for_residency(
             cfg,
@@ -910,6 +1010,7 @@ pub fn estimate_vk_native_recompute_working_set_with_residency(
     WorkingSet {
         total_bytes: bd.total(),
         max_seq_len,
+        sft_loss_route: None,
         breakdown: bd,
     }
 }
@@ -1174,7 +1275,11 @@ pub fn format_oom_message_with_source(
         .per_segment_activations
         .saturating_add(bd.boundary_states) as f64
         / BYTES_PER_GB as f64;
-    let flce_gb = bd.flce_intermediates as f64 / BYTES_PER_GB as f64;
+    let loss_workspace_gb = bd.loss_workspace as f64 / BYTES_PER_GB as f64;
+    let loss_route = estimate
+        .sft_loss_route
+        .map(SftFlceLossRoute::as_str)
+        .unwrap_or("generic_chunked");
     let lora_gb = bd.lora_param_grad as f64 / BYTES_PER_GB as f64;
     let optimizer_gb = bd.lora_optimizer_state as f64 / BYTES_PER_GB as f64;
     let registry_scratch_gb = bd.lora_registry_scratch as f64 / BYTES_PER_GB as f64;
@@ -1186,7 +1291,8 @@ pub fn format_oom_message_with_source(
         "Estimated training step working set is {est_gb:.2} GB but only \
          {avail_gb:.2} GB is available{source_clause}. Breakdown: weights {bw_gb:.2} GB, \
          activations {act_gb:.2} GB (max_seq_len={msl}, num_segments={num_segments}), \
-         FLCE chunk {flce_gb:.2} GB, LoRA params+grads {lora_gb:.2} GB, \
+         loss workspace {loss_workspace_gb:.2} GB (route={loss_route}), \
+         LoRA params+grads {lora_gb:.2} GB, \
          optimizer state {optimizer_gb:.2} GB, residency scratch {registry_scratch_gb:.2} GB \
          (lora_rank={lora_rank}). Dynamic checkpointing already tried up to \
          this segment count. To fit, shrink lora_rank, send fewer/shorter \
@@ -1208,6 +1314,26 @@ mod tests {
 
     fn adamw() -> Optimizer {
         serde_json::from_str(r#"{"kind":"adam_w"}"#).unwrap()
+    }
+
+    fn sft_estimate(
+        max_active_tokens: usize,
+        loss_route: SftFlceLossRoute,
+        checkpoint_boundary_policy: CheckpointBoundaryPolicy,
+    ) -> SftEstimateOptions {
+        SftEstimateOptions {
+            max_active_tokens,
+            loss_route,
+            checkpoint_boundary_policy,
+        }
+    }
+
+    fn vulkan_sft(max_active_tokens: usize) -> SftEstimateOptions {
+        sft_estimate(
+            max_active_tokens,
+            SftFlceLossRoute::VulkanActiveRows,
+            CheckpointBoundaryPolicy::default(),
+        )
     }
 
     #[test]
@@ -1554,8 +1680,7 @@ mod tests {
             WeightResidency::DualResidentCpuAndVulkan,
             true,
             EstimateOptions {
-                max_supervised_tokens: Some(512),
-                sft_checkpoint_boundary_policy: Some(CheckpointBoundaryPolicy::default()),
+                sft: Some(vulkan_sft(512)),
                 activation_bytes_per_elem: Some(2),
                 ..Default::default()
             },
@@ -1573,8 +1698,7 @@ mod tests {
             WeightResidency::DualResidentCpuAndVulkan,
             true,
             EstimateOptions {
-                max_supervised_tokens: Some(512),
-                sft_checkpoint_boundary_policy: Some(CheckpointBoundaryPolicy::default()),
+                sft: Some(vulkan_sft(512)),
                 activation_bytes_per_elem: Some(2),
                 ..Default::default()
             },
@@ -1597,8 +1721,7 @@ mod tests {
         let max_seq_len = 104_412;
         let available = 21 * BYTES_PER_GB;
         let options = EstimateOptions {
-            max_supervised_tokens: Some(512),
-            sft_checkpoint_boundary_policy: Some(CheckpointBoundaryPolicy::default()),
+            sft: Some(vulkan_sft(512)),
             activation_bytes_per_elem: Some(10),
             ..Default::default()
         };
@@ -1626,8 +1749,7 @@ mod tests {
         let max_seq_len = 104_412;
         let available = 30 * BYTES_PER_GB;
         let options = EstimateOptions {
-            max_supervised_tokens: Some(512),
-            sft_checkpoint_boundary_policy: Some(CheckpointBoundaryPolicy::default()),
+            sft: Some(vulkan_sft(512)),
             activation_bytes_per_elem: Some(10),
             streaming_gdn_tile_tokens: Some(1024),
             ..Default::default()
@@ -1662,26 +1784,110 @@ mod tests {
     }
 
     #[test]
-    fn estimator_uses_supervised_tokens_for_flce() {
+    fn estimator_uses_active_tokens_for_sft_loss_workspace() {
         let cfg = qwen_4b();
-        let full_prompt =
-            estimate_step_working_set(&cfg, 8192, 16, 8, WeightResidency::SingleCopy, false);
-        let sparse_labels = estimate_step_working_set_with_options(
+        let estimate = |max_active_tokens| {
+            estimate_step_working_set_with_options(
+                &cfg,
+                8192,
+                16,
+                8,
+                WeightResidency::SingleCopy,
+                false,
+                EstimateOptions {
+                    sft: Some(vulkan_sft(max_active_tokens)),
+                    ..Default::default()
+                },
+            )
+        };
+        let full_prompt = estimate(8192);
+        let sparse_labels = estimate(512);
+        assert!(
+            sparse_labels.breakdown.loss_workspace < full_prompt.breakdown.loss_workspace,
+            "SFT loss estimate should scale with active tokens"
+        );
+    }
+
+    #[test]
+    fn sft_loss_workspace_matches_route_specific_upper_bounds() {
+        let mut cfg = qwen_4b();
+        cfg.hidden_size = 8;
+        cfg.vocab_size = 16;
+        cfg.dtype = DType::BF16;
+        let policy = CheckpointBoundaryPolicy::default();
+        let workspace =
+            |loss_route| sft_loss_workspace_bytes(&cfg, 4, sft_estimate(2, loss_route, policy));
+
+        assert_eq!(workspace(SftFlceLossRoute::KtTapeFlce), 2_208);
+        assert_eq!(workspace(SftFlceLossRoute::VulkanActiveRows), 1_664);
+        assert_eq!(workspace(SftFlceLossRoute::FullLogits), 2_304);
+    }
+
+    #[test]
+    fn full_logits_keeps_dense_sequence_workspace_when_labels_are_sparse() {
+        let mut cfg = qwen_4b();
+        cfg.hidden_size = 8;
+        cfg.vocab_size = 16;
+        let policy = CheckpointBoundaryPolicy::default();
+        let sparse = sft_loss_workspace_bytes(
+            &cfg,
+            32,
+            sft_estimate(1, SftFlceLossRoute::FullLogits, policy),
+        );
+        let dense = sft_loss_workspace_bytes(
+            &cfg,
+            32,
+            sft_estimate(32, SftFlceLossRoute::FullLogits, policy),
+        );
+
+        assert!(sparse < dense);
+        assert!(sparse >= 32 * 16 * dtype_bytes(cfg.dtype));
+    }
+
+    #[test]
+    fn every_sft_loss_route_saturates_toward_rejection() {
+        let mut cfg = qwen_4b();
+        cfg.hidden_size = usize::MAX;
+        cfg.vocab_size = usize::MAX;
+        let policy = CheckpointBoundaryPolicy::default();
+        for route in [
+            SftFlceLossRoute::KtTapeFlce,
+            SftFlceLossRoute::VulkanActiveRows,
+            SftFlceLossRoute::FullLogits,
+        ] {
+            assert_eq!(
+                sft_loss_workspace_bytes(&cfg, usize::MAX, sft_estimate(usize::MAX, route, policy),),
+                u64::MAX,
+                "route {} must saturate instead of wrapping",
+                route.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn full_logits_auto_fit_never_selects_checkpointing() {
+        let cfg = qwen_4b();
+        let (segments, estimate) = auto_fit_checkpoint_segments(
             &cfg,
             8192,
             16,
-            8,
+            cfg.num_layers,
             WeightResidency::SingleCopy,
-            false,
+            true,
             EstimateOptions {
-                max_supervised_tokens: Some(512),
+                sft: Some(sft_estimate(
+                    512,
+                    SftFlceLossRoute::FullLogits,
+                    CheckpointBoundaryPolicy::default(),
+                )),
                 ..Default::default()
             },
+            0,
         );
-        assert!(
-            sparse_labels.breakdown.flce_intermediates < full_prompt.breakdown.flce_intermediates,
-            "FLCE estimate should scale with supervised tokens"
-        );
+
+        assert_eq!(segments, 1);
+        assert_eq!(estimate.sft_loss_route, Some(SftFlceLossRoute::FullLogits));
+        assert!(estimate.total_bytes > 0);
     }
 
     #[test]
@@ -1733,8 +1939,7 @@ mod tests {
             WeightResidency::SingleCopy,
             false,
             EstimateOptions {
-                max_supervised_tokens: None,
-                sft_checkpoint_boundary_policy: Some(CheckpointBoundaryPolicy::default()),
+                sft: Some(vulkan_sft(seq_len)),
                 ..Default::default()
             },
         );
@@ -1774,7 +1979,9 @@ mod tests {
             WeightResidency::SingleCopy,
             true,
             EstimateOptions {
-                sft_checkpoint_boundary_policy: Some(
+                sft: Some(sft_estimate(
+                    seq_len,
+                    SftFlceLossRoute::VulkanActiveRows,
                     CheckpointBoundaryPolicy::from_parts(
                         kiln_train::CheckpointBoundaryRecomputeMode::Disabled,
                         1,
@@ -1782,7 +1989,7 @@ mod tests {
                         1,
                     )
                     .expect("disabled SFT boundary policy"),
-                ),
+                )),
                 ..Default::default()
             },
         );
@@ -1796,7 +2003,7 @@ mod tests {
             WeightResidency::SingleCopy,
             true,
             EstimateOptions {
-                sft_checkpoint_boundary_policy: Some(CheckpointBoundaryPolicy::default()),
+                sft: Some(vulkan_sft(seq_len)),
                 ..Default::default()
             },
         );
@@ -1826,8 +2033,11 @@ mod tests {
             WeightResidency::SingleCopy,
             true,
             EstimateOptions {
-                max_supervised_tokens: None,
-                sft_checkpoint_boundary_policy: Some(policy),
+                sft: Some(sft_estimate(
+                    seq_len,
+                    SftFlceLossRoute::VulkanActiveRows,
+                    policy,
+                )),
                 ..Default::default()
             },
         );

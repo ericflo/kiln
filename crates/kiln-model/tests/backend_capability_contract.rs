@@ -5309,6 +5309,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && trainer_source.contains("SftFlceLossRoute::VulkanActiveRows"),
         "trainer SFT FLCE routing should match on typed backend-owned loss routes"
     );
+    assert!(
+        !trainer_source.contains("KILN_USE_FLCE") && !trainer_source.contains("fn use_flce("),
+        "the retired process-global SFT loss-route gate must not return"
+    );
     let checkpointed_sft_section = source_between(
         &trainer_source,
         "fn checkpointed_forward_backward_tape_authoritative_kt(",
@@ -5317,6 +5321,23 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         checkpointed_sft_section.contains("final_rmsnorm_backward_route_for_backend(backend)"),
         "checkpointed SFT tail should route final RMSNorm backward through TrainingLossBackend"
+    );
+    let checkpointed_sft_entry = source_between(
+        checkpointed_sft_section,
+        "fn checkpointed_forward_backward_tape_authoritative_kt(",
+        "let trace_timings = trace_sft_timings();",
+    );
+    assert!(
+        checkpointed_sft_entry.contains("ensure_tape_forward_backward_supported(")
+            && checkpointed_sft_entry.contains("ensure_sft_loss_route_supports_checkpointing(")
+            && checkpointed_sft_entry
+                .contains("TrainingLossBackend::runtime_sft_flce_loss_route(backend)"),
+        "checkpointed SFT must reject unsupported tape and loss routes before forward work"
+    );
+    assert!(
+        !checkpointed_sft_section.contains("model_forward_head(")
+            && !checkpointed_sft_section.contains("cross_entropy_loss("),
+        "checkpointed SFT must not retain the outside-tape FullLogits execution path"
     );
     for forbidden in [
         "use_sft_flce && is_cuda_device",

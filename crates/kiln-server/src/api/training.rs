@@ -25,8 +25,8 @@ use crate::error::ApiError;
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_preflight::{
-    self, EstimateOptions, LoraResidency, WeightResidency, auto_fit_checkpoint_segments,
-    estimate_step_working_set_with_options,
+    self, EstimateOptions, LoraResidency, SftEstimateOptions, WeightResidency,
+    auto_fit_checkpoint_segments, estimate_step_working_set_with_options,
     estimate_vk_native_recompute_working_set_with_residency, format_oom_message_with_source,
 };
 use crate::training_queue::{QueueEntry, QueuedJob};
@@ -218,12 +218,43 @@ fn training_activation_estimate_for_state(
     )
 }
 
+fn sft_loss_route_for_state(
+    state: &AppState,
+) -> Result<kiln_model::backend::SftFlceLossRoute, ApiError> {
+    let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
+        return Ok(kiln_model::backend::SftFlceLossRoute::FullLogits);
+    };
+    runner
+        .read()
+        .map_err(|_| {
+            ApiError::internal("model runner lock poisoned while resolving SFT loss route")
+        })
+        .map(|runner| runner.sft_flce_loss_route())
+}
+
 fn effective_checkpoint_segments(config: kiln_train::CheckpointConfig) -> usize {
     if config.enabled {
         config.num_segments
     } else {
         1
     }
+}
+
+fn ensure_sft_checkpoint_plan_supported(
+    sft: Option<SftEstimateOptions>,
+    num_segments: usize,
+) -> Result<(), ApiError> {
+    if num_segments > 1
+        && sft
+            .is_some_and(|sft| sft.loss_route == kiln_model::backend::SftFlceLossRoute::FullLogits)
+    {
+        return Err(ApiError::training_invalid_request(
+            "checkpointed SFT does not support backend loss route `full_logits`: \
+             checkpoint tails run outside an active kt tape; disable gradient \
+             checkpointing or use a backend with a checkpoint-compatible SFT loss route",
+        ));
+    }
+    Ok(())
 }
 
 fn combine_training_available_bytes(
@@ -824,6 +855,7 @@ fn enforce_training_preflight(
             available.bytes,
         )
     };
+    ensure_sft_checkpoint_plan_supported(options.sft, num_segments)?;
     let rank_ceiling = training_preflight::lora_rank_ceiling_for_budget(
         &state.model_config,
         options.optimizer,
@@ -2896,7 +2928,6 @@ fn opd_preflight_admission(
         state,
         max_seq_len,
         EstimateOptions {
-            max_supervised_tokens: None,
             optimizer: config.optimizer,
             ..Default::default()
         },
@@ -3214,10 +3245,13 @@ fn prepare_training_entry_admission(
                 state,
                 prepared.max_seq_len,
                 EstimateOptions {
-                    max_supervised_tokens: Some(prepared.max_supervised_tokens),
-                    sft_checkpoint_boundary_policy: Some(
-                        state.training_runtime.checkpoint_boundary_policy(),
-                    ),
+                    sft: Some(SftEstimateOptions {
+                        max_active_tokens: prepared.max_supervised_tokens,
+                        loss_route: sft_loss_route_for_state(state)?,
+                        checkpoint_boundary_policy: state
+                            .training_runtime
+                            .checkpoint_boundary_policy(),
+                    }),
                     optimizer: req.config.optimizer,
                     ..Default::default()
                 },
@@ -5670,8 +5704,11 @@ mod tests {
             unified: true,
         };
         let options = EstimateOptions {
-            max_supervised_tokens: Some(512),
-            sft_checkpoint_boundary_policy: Some(kiln_train::CheckpointBoundaryPolicy::default()),
+            sft: Some(SftEstimateOptions {
+                max_active_tokens: 512,
+                loss_route: kiln_model::backend::SftFlceLossRoute::VulkanActiveRows,
+                checkpoint_boundary_policy: kiln_train::CheckpointBoundaryPolicy::default(),
+            }),
             activation_bytes_per_elem: Some(10),
             streaming_gdn_tile_tokens: Some(1024),
             optimizer: kiln_train::Optimizer::default(),
@@ -5711,6 +5748,20 @@ mod tests {
             "live-tight admission should resolve a checkpointed plan"
         );
         assert!(one_segment.total_bytes > admitted.total_bytes);
+    }
+
+    #[test]
+    fn full_logits_checkpoint_plan_is_rejected_before_queueing() {
+        let sft = SftEstimateOptions {
+            max_active_tokens: 32,
+            loss_route: kiln_model::backend::SftFlceLossRoute::FullLogits,
+            checkpoint_boundary_policy: kiln_train::CheckpointBoundaryPolicy::default(),
+        };
+        ensure_sft_checkpoint_plan_supported(Some(sft), 1).unwrap();
+        let error = ensure_sft_checkpoint_plan_supported(Some(sft), 2).unwrap_err();
+        assert_eq!(error.code, "training_invalid_request");
+        assert!(error.message.contains("full_logits"));
+        assert!(error.message.contains("outside an active kt tape"));
     }
 
     #[test]

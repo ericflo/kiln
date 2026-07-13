@@ -2688,6 +2688,10 @@ impl ModelRunner {
         TrainingLossBackend::runtime_training_precision_policy(self.backend.as_ref())
     }
 
+    pub fn sft_flce_loss_route(&self) -> crate::backend::SftFlceLossRoute {
+        TrainingLossBackend::runtime_sft_flce_loss_route(self.backend.as_ref())
+    }
+
     /// Eagerly allocate the backend-resident decode scratch ring when the
     /// backend supports it. This keeps the first live decode request from
     /// paying the pool feasibility/allocation cost on the request path.

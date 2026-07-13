@@ -72,18 +72,11 @@ use kiln_model::backend::GrpoLossRoute;
     feature = "vulkan",
     feature = "rocm"
 ))]
-use kiln_model::backend::SftFlceLossRoute;
-#[cfg(any(
-    feature = "cuda",
-    feature = "metal",
-    feature = "vulkan",
-    feature = "rocm"
-))]
 use kiln_model::backend::TrainingTapeRoute;
 use kiln_model::backend::{
     self, BackendIdentity, BackendRuntime, ExternalYieldBackend, FallbackPolicy,
     FinalRmsNormBackwardRoute, GrpoKlAuxiliaryRoute, OptimizerBackend, ResidencyBackend,
-    TrainingLossBackend, TrainingPrecisionPolicy,
+    SftFlceLossRoute, TrainingLossBackend, TrainingPrecisionPolicy,
 };
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
@@ -5568,6 +5561,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
     let resident_weights = resident_training_weights(weights, &device)?;
     let weights = resident_weights.as_ref().unwrap_or(weights);
     let backend = training_backend_for_device(device);
+    let sft_loss_route = TrainingLossBackend::runtime_sft_flce_loss_route(backend.as_ref());
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
     let checkpoint_boundary_policy = runtime.checkpoint_boundary_policy();
     let streaming_prefill = runtime.resolved_streaming_prefill_policy(device);
@@ -5923,6 +5917,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
             }
             None => effective_seed_value,
         };
+        let mut has_checkpointed_step = false;
         let gradient_checkpoint_plan: Vec<_> = valid_seq_lens
             .iter()
             .map(|&seq_len| {
@@ -5946,6 +5941,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                     config_for_step,
                     streaming_prefill,
                 );
+                has_checkpointed_step |= boundaries.is_some();
                 serde_json::json!({
                     "seq_len": seq_len,
                     "enabled": config_for_step.enabled,
@@ -5955,6 +5951,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                 })
             })
             .collect();
+        ensure_sft_loss_route_supports_checkpointing(sft_loss_route, has_checkpointed_step)?;
         let gradient_checkpoint_plan_sha256 =
             crate::train_receipt::sha256_json_serializable(&gradient_checkpoint_plan)
                 .context("hash SFT gradient-checkpoint plan")?;
@@ -13392,22 +13389,6 @@ pub(crate) fn rms_norm_backward_pre_final_norm(
     Ok((u.broadcast_mul(&rms_inv)? - correction)?.detach())
 }
 
-/// Read `KILN_USE_FLCE` env var. When enabled, SFT training takes the
-/// Fused Linear Cross-Entropy path: the LM head matmul is fused into a
-/// chunked log-sum-exp + gather reduction so the `[T, V]` logits tensor
-/// is never materialized. With Qwen3.5-4B (V=248320) this saves ~1 GB
-/// per 1k tokens forward and a similar amount in the backward graph —
-/// the difference between fitting and OOM on a 30 GB host (Vulkan
-/// stores autograd tensors in CPU RAM, so the saving applies to system
-/// RAM, not just GPU VRAM).
-///
-/// Default: enabled. Set `KILN_USE_FLCE=0` (or `false`/`no`) to opt back
-/// into the naive `model_forward_head` + `cross_entropy_loss` path —
-/// useful for parity debugging only.
-fn use_flce() -> bool {
-    kiln_core::env_flag::env_flag("KILN_USE_FLCE", true)
-}
-
 fn trace_sft_timings() -> bool {
     kiln_core::env_flag::env_flag("KILN_TRACE_SFT_TIMINGS", false)
 }
@@ -15331,6 +15312,21 @@ fn base_dtype_supports_tape_for_policy(
     }
 }
 
+fn ensure_sft_loss_route_supports_checkpointing(
+    route: SftFlceLossRoute,
+    checkpointed: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        !checkpointed || route != SftFlceLossRoute::FullLogits,
+        "checkpointed SFT does not support loss route `{}`: its loss-value path \
+         requires an active kt tape, while checkpoint tails run outside segment \
+         tapes; disable gradient checkpointing or use a backend with a \
+         checkpoint-compatible SFT loss route",
+        route.as_str()
+    );
+    Ok(())
+}
+
 #[cfg(any(
     feature = "cuda",
     feature = "metal",
@@ -15426,6 +15422,8 @@ fn standard_forward_backward_tape_authoritative_kt(
     );
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
+    let sft_flce_loss_route = TrainingLossBackend::runtime_sft_flce_loss_route(backend);
+    ensure_sft_loss_route_supports_checkpointing(sft_flce_loss_route, false)?;
 
     let (loss_val, _loss_kt, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
@@ -15436,11 +15434,6 @@ fn standard_forward_backward_tape_authoritative_kt(
                 1,
             );
             let closure_start = Instant::now();
-            let sft_flce_loss_route = if use_flce() {
-                TrainingLossBackend::runtime_sft_flce_loss_route(backend)
-            } else {
-                SftFlceLossRoute::FullLogits
-            };
             let loss_kt = match sft_flce_loss_route {
                 SftFlceLossRoute::KtTapeFlce => {
                     log_sft_timing_begin(
@@ -15695,6 +15688,9 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         has_supervised_shifted_labels(label_mask),
         "checkpointed (kt-tape) SFT called with no supervised shifted-label positions"
     );
+    ensure_tape_forward_backward_supported("checkpointed SFT", weights, backend)?;
+    let sft_flce_loss_route = TrainingLossBackend::runtime_sft_flce_loss_route(backend);
+    ensure_sft_loss_route_supports_checkpointing(sft_flce_loss_route, true)?;
 
     let trace_timings = trace_sft_timings();
     let debug_finite = debug_sft_finite_checks();
@@ -15911,11 +15907,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let mut normed_for_tail = None;
     let mut flce_active_metadata_for_tail = None;
     let tail_grad_override: Option<Tensor>;
-    let sft_flce_loss_route = if use_flce() {
-        TrainingLossBackend::runtime_sft_flce_loss_route(backend)
-    } else {
-        SftFlceLossRoute::FullLogits
-    };
     let tail_loss_start = Instant::now();
     let loss_val = match sft_flce_loss_route {
         SftFlceLossRoute::KtTapeFlce => {
@@ -16019,12 +16010,10 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             }
         }
         SftFlceLossRoute::FullLogits => {
-            tail_grad_override = None;
-            synchronize_training_tensor_ready("tail_pre_lm_head_hidden", &final_hidden_kt)?;
-            let logits = model_forward_head(&final_hidden_kt, weights, model_config)?;
-            ensure_sft_debug_finite(debug_finite, "tail_full_logits", &logits)?;
-            synchronize_training_tensor_ready("tail_full_logits", &logits)?;
-            cross_entropy_loss(&logits, input_ids, label_mask, device)?
+            anyhow::bail!(
+                "checkpointed SFT reached unsupported loss route `{}` after its entry guard",
+                sft_flce_loss_route.as_str()
+            )
         }
     };
     anyhow::ensure!(
@@ -22543,6 +22532,24 @@ pub(crate) mod tests {
         assert_eq!(gdn_only[0].1, 0..4);
 
         Ok(())
+    }
+
+    #[test]
+    fn sft_loss_route_rejects_only_checkpointed_full_logits() {
+        for route in [
+            SftFlceLossRoute::KtTapeFlce,
+            SftFlceLossRoute::VulkanActiveRows,
+        ] {
+            ensure_sft_loss_route_supports_checkpointing(route, false).unwrap();
+            ensure_sft_loss_route_supports_checkpointing(route, true).unwrap();
+        }
+        ensure_sft_loss_route_supports_checkpointing(SftFlceLossRoute::FullLogits, false).unwrap();
+        let error =
+            ensure_sft_loss_route_supports_checkpointing(SftFlceLossRoute::FullLogits, true)
+                .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("full_logits"));
+        assert!(message.contains("outside segment tapes"));
     }
 
     #[test]

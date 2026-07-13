@@ -45,6 +45,14 @@
   through one shared guard before resident setup and again before each direct
   group step. Nine unscoped test mutations, including two leaked false values,
   are removed.
+- SFT loss authority and admission: removed the process-global
+  `KILN_USE_FLCE` route override. SFT now consumes the selected backend's typed
+  loss route for every step, and admission carries that same route together
+  with the active-token and checkpoint-boundary estimates. Route-specific
+  upper bounds charge CUDA/ROCm F32 head promotion, Vulkan's maximum legal
+  chunk workspace, or full-logits CE forward/backward residency. Full-logits
+  checkpoint plans are rejected before queue publication and again before any
+  trainer forward because checkpoint tails do not run inside an active tape.
 
 - inference: chat, streaming chat, multi-choice chat, and batch generation now
   accept `thinking_budget_tokens` and `thinking_budget_ms`. Kiln closes an open
