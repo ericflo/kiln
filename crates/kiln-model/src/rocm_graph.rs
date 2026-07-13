@@ -840,6 +840,17 @@ impl RocmGraphRunner {
                 .all(|(left, right)| left.id() == right.id())
     }
 
+    #[cfg(any(feature = "rocm", test))]
+    fn restore_linear_state_in_place(
+        state: &mut LinearAttentionState,
+        snapshot: &LinearAttentionState,
+        context: &'static str,
+    ) -> Result<()> {
+        state
+            .refresh_batched_state_from_rows_in_place(&[snapshot])
+            .with_context(|| context)
+    }
+
     #[cfg(feature = "rocm")]
     fn bind_decode_row_to_slot(
         &mut self,
@@ -2761,12 +2772,16 @@ impl RocmGraphRunner {
             },
         );
         if let Err(err) = warm_result {
-            *linear_state = gdn_snapshot;
             if let Err(sync_err) = warm_sync_result {
                 tracing::warn!("post-warm-failure capture stream sync failed: {sync_err:#}");
                 return Err(sync_err)
                     .context("capture stream synchronization failed after warm-forward failure");
             }
+            Self::restore_linear_state_in_place(
+                linear_state,
+                &gdn_snapshot,
+                "restore graph-slot GDN state after warm-forward failure",
+            )?;
             if crate::forward::is_rocm_graph_shape_dependent_attention(&err) {
                 self.non_capture_safe
                     .insert(key, RocmGraphFallbackReason::ShapeDependentAttention);
@@ -2777,11 +2792,15 @@ impl RocmGraphRunner {
             return Err(err).context("freeze-pointers warm (Record) pass failed");
         }
         if let Err(sync_err) = warm_sync_result {
-            *linear_state = gdn_snapshot;
             return Err(sync_err);
         }
-        // Restore the GDN recurrent state so the captured pass advances it once.
-        *linear_state = gdn_snapshot;
+        // Restore values without replacing the graph slot's tensor handles.
+        // Captured graphs retain these exact addresses across request reuse.
+        Self::restore_linear_state_in_place(
+            linear_state,
+            &gdn_snapshot,
+            "restore graph-slot GDN state after warm pass",
+        )?;
         let htod_after = kiln_tensor::rocm_htod_count();
         if htod_after > htod_before {
             // The warm forward did a host round-trip. This is EITHER a one-time
@@ -2880,7 +2899,11 @@ impl RocmGraphRunner {
         });
         let graph_result = stream.end_capture();
         if let Err(err) = capture_result {
-            *linear_state = capture_snapshot;
+            Self::restore_linear_state_in_place(
+                linear_state,
+                &capture_snapshot,
+                "restore graph-slot GDN state after capture-forward failure",
+            )?;
             return Err(err).context("forward pass failed during graph capture");
         }
         drop(graph_inputs);
@@ -2888,14 +2911,22 @@ impl RocmGraphRunner {
         let graph = match graph_result {
             Ok(graph) => graph,
             Err(err) => {
-                *linear_state = capture_snapshot;
+                Self::restore_linear_state_in_place(
+                    linear_state,
+                    &capture_snapshot,
+                    "restore graph-slot GDN state after end-capture failure",
+                )?;
                 return Err(anyhow::anyhow!("end_capture failed: {err}"));
             }
         };
         let exec = match graph.instantiate() {
             Ok(exec) => exec,
             Err(err) => {
-                *linear_state = capture_snapshot;
+                Self::restore_linear_state_in_place(
+                    linear_state,
+                    &capture_snapshot,
+                    "restore graph-slot GDN state after graph-instantiation failure",
+                )?;
                 return Err(anyhow::anyhow!("instantiate captured graph: {err}"));
             }
         };
@@ -2907,7 +2938,11 @@ impl RocmGraphRunner {
         // Stream capture only RECORDED the forward; launch once now to actually
         // compute this step + advance state, then sync so output_hidden is valid.
         if let Err(err) = exec.launch(&stream) {
-            *linear_state = capture_snapshot;
+            Self::restore_linear_state_in_place(
+                linear_state,
+                &capture_snapshot,
+                "restore graph-slot GDN state after first-launch failure",
+            )?;
             return Err(anyhow::anyhow!(
                 "execute captured decode graph (first run): {err}"
             ));
@@ -2923,7 +2958,6 @@ impl RocmGraphRunner {
                     .map_err(|error| anyhow::anyhow!("{error}"))
             },
         ) {
-            *linear_state = capture_snapshot;
             return Err(anyhow::anyhow!(
                 "sync after first captured-graph launch: {err}"
             ));
@@ -2985,6 +3019,38 @@ impl RocmGraphRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_slot_restore_preserves_tensor_handles() {
+        let mut state = LinearAttentionState {
+            recurrent_states: vec![Tensor::from_vec(vec![1.0f32, 2.0], vec![1, 2]).unwrap()],
+            conv_states: vec![Tensor::from_vec(vec![3.0f32, 4.0], vec![1, 2]).unwrap()],
+        };
+        let snapshot = LinearAttentionState {
+            recurrent_states: vec![Tensor::from_vec(vec![5.0f32, 6.0], vec![1, 2]).unwrap()],
+            conv_states: vec![Tensor::from_vec(vec![7.0f32, 8.0], vec![1, 2]).unwrap()],
+        };
+        let recurrent_id = state.recurrent_states[0].id();
+        let conv_id = state.conv_states[0].id();
+
+        RocmGraphRunner::restore_linear_state_in_place(
+            &mut state,
+            &snapshot,
+            "test graph-slot restore",
+        )
+        .unwrap();
+
+        assert_eq!(state.recurrent_states[0].id(), recurrent_id);
+        assert_eq!(state.conv_states[0].id(), conv_id);
+        assert_eq!(
+            state.recurrent_states[0].to_vec2::<f32>().unwrap(),
+            vec![vec![5.0, 6.0]]
+        );
+        assert_eq!(
+            state.conv_states[0].to_vec2::<f32>().unwrap(),
+            vec![vec![7.0, 8.0]]
+        );
+    }
 
     #[cfg(feature = "rocm")]
     fn rocm_graph_test_fixture(
