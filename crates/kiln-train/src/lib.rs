@@ -77,6 +77,182 @@ pub const fn retained_checkpoint_boundary_count(num_segments: usize) -> usize {
     num_segments.saturating_add(1)
 }
 
+/// Default sequence length at which SFT starts replaying sparse checkpoint
+/// boundaries instead of retaining every segment input.
+pub const DEFAULT_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS: usize = 8192;
+
+/// Default memory target for sparse SFT checkpoint-boundary anchors (6 GiB).
+pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES: u64 = 6 * 1024 * 1024 * 1024;
+
+/// Immutable sparse-boundary dispatch for checkpointed SFT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointBoundaryRecomputeMode {
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+impl CheckpointBoundaryRecomputeMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+impl std::fmt::Display for CheckpointBoundaryRecomputeMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Process-lifetime policy for retaining or replaying checkpointed SFT
+/// segment boundaries.
+///
+/// Configuration resolves GiB and optional values before constructing this
+/// type. The runtime stores only validated integral values so admission,
+/// execution, and exact-resume identity cannot disagree because of parsing or
+/// floating-point conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CheckpointBoundaryPolicy {
+    #[serde(rename = "recompute_mode")]
+    recompute_mode: CheckpointBoundaryRecomputeMode,
+    #[serde(rename = "recompute_threshold_tokens")]
+    recompute_threshold_tokens: usize,
+    #[serde(rename = "anchor_stride")]
+    anchor_stride: Option<usize>,
+    #[serde(rename = "cache_target_bytes")]
+    cache_target_bytes: u64,
+}
+
+impl CheckpointBoundaryPolicy {
+    pub const DEFAULT: Self = Self {
+        recompute_mode: CheckpointBoundaryRecomputeMode::Auto,
+        recompute_threshold_tokens: DEFAULT_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS,
+        anchor_stride: None,
+        cache_target_bytes: DEFAULT_CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES,
+    };
+
+    /// Construct a policy after validating every numeric invariant.
+    pub fn from_parts(
+        recompute_mode: CheckpointBoundaryRecomputeMode,
+        recompute_threshold_tokens: usize,
+        anchor_stride: Option<usize>,
+        cache_target_bytes: u64,
+    ) -> Result<Self, InvalidCheckpointBoundaryPolicy> {
+        if recompute_threshold_tokens == 0 {
+            return Err(InvalidCheckpointBoundaryPolicy::RecomputeThresholdTokens);
+        }
+        if anchor_stride == Some(0) {
+            return Err(InvalidCheckpointBoundaryPolicy::AnchorStride);
+        }
+        if cache_target_bytes == 0 {
+            return Err(InvalidCheckpointBoundaryPolicy::CacheTargetBytes);
+        }
+        Ok(Self {
+            recompute_mode,
+            recompute_threshold_tokens,
+            anchor_stride,
+            cache_target_bytes,
+        })
+    }
+
+    pub const fn recompute_mode(self) -> CheckpointBoundaryRecomputeMode {
+        self.recompute_mode
+    }
+
+    pub const fn recompute_threshold_tokens(self) -> usize {
+        self.recompute_threshold_tokens
+    }
+
+    /// Explicit boundary stride, or `None` when the cache target selects it.
+    pub const fn anchor_stride(self) -> Option<usize> {
+        self.anchor_stride
+    }
+
+    pub const fn cache_target_bytes(self) -> u64 {
+        self.cache_target_bytes
+    }
+
+    /// Decide whether a sequence uses sparse replay instead of retaining every
+    /// checkpoint boundary.
+    pub const fn recompute_for(self, seq_len: usize) -> bool {
+        match self.recompute_mode {
+            CheckpointBoundaryRecomputeMode::Auto => seq_len >= self.recompute_threshold_tokens,
+            CheckpointBoundaryRecomputeMode::Enabled => true,
+            CheckpointBoundaryRecomputeMode::Disabled => false,
+        }
+    }
+
+    /// Resolve the sparse anchor stride for one checkpointed SFT shape.
+    ///
+    /// This preserves the historical policy exactly: an explicit positive
+    /// stride wins; a single segment uses stride one; otherwise the cache
+    /// target reserves one slot for replay and spreads the remaining anchors
+    /// evenly across the segment boundaries.
+    pub fn anchor_stride_for_shape(
+        self,
+        seq_len: usize,
+        num_segments: usize,
+        hidden_size: usize,
+        boundary_bytes_per_elem: usize,
+    ) -> usize {
+        if let Some(explicit) = self.anchor_stride {
+            return explicit;
+        }
+        if num_segments <= 1 {
+            return 1;
+        }
+
+        let boundary_bytes = usize_to_u64_saturating(seq_len)
+            .saturating_mul(usize_to_u64_saturating(hidden_size))
+            .saturating_mul(usize_to_u64_saturating(boundary_bytes_per_elem.max(1)))
+            .max(1);
+        let max_anchors = usize::try_from((self.cache_target_bytes / boundary_bytes).max(2))
+            .unwrap_or(usize::MAX);
+        let replay_anchor_slots = max_anchors.saturating_sub(1).max(1);
+        num_segments.div_ceil(replay_anchor_slots).max(1)
+    }
+}
+
+impl Default for CheckpointBoundaryPolicy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+fn usize_to_u64_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidCheckpointBoundaryPolicy {
+    RecomputeThresholdTokens,
+    AnchorStride,
+    CacheTargetBytes,
+}
+
+impl std::fmt::Display for InvalidCheckpointBoundaryPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::RecomputeThresholdTokens => {
+                "checkpoint boundary recompute threshold tokens must be greater than zero"
+            }
+            Self::AnchorStride => {
+                "checkpoint boundary anchor stride must be greater than zero when set"
+            }
+            Self::CacheTargetBytes => {
+                "checkpoint boundary cache target bytes must be greater than zero"
+            }
+        })
+    }
+}
+
+impl std::error::Error for InvalidCheckpointBoundaryPolicy {}
+
 /// Immutable gradient-checkpoint behavior for one native training run.
 ///
 /// `Disabled` retains an optional explicit segment count so resolving both
@@ -166,6 +342,7 @@ impl std::error::Error for InvalidGradientCheckpointSegments {}
 pub struct TrainingRuntimeContext {
     effective_vram: kiln_memory::vram::GpuVramInfo,
     gradient_checkpoint_policy: GradientCheckpointPolicy,
+    checkpoint_boundary_policy: CheckpointBoundaryPolicy,
     runtime_device: Option<kiln_tensor::Device>,
     streaming_prefill_policy: Option<kiln_model::forward::StreamingPrefillExecutionPolicy>,
 }
@@ -182,6 +359,7 @@ impl TrainingRuntimeContext {
         Self {
             effective_vram,
             gradient_checkpoint_policy,
+            checkpoint_boundary_policy: CheckpointBoundaryPolicy::DEFAULT,
             runtime_device: None,
             streaming_prefill_policy: None,
         }
@@ -199,9 +377,19 @@ impl TrainingRuntimeContext {
         Self {
             effective_vram,
             gradient_checkpoint_policy,
+            checkpoint_boundary_policy: CheckpointBoundaryPolicy::DEFAULT,
             runtime_device: Some(runtime_device),
             streaming_prefill_policy: None,
         }
+    }
+
+    /// Install the startup-resolved SFT checkpoint-boundary policy.
+    pub const fn with_checkpoint_boundary_policy(
+        mut self,
+        policy: CheckpointBoundaryPolicy,
+    ) -> Self {
+        self.checkpoint_boundary_policy = policy;
+        self
     }
 
     /// Install the startup-resolved streaming-prefill policy for this run.
@@ -251,6 +439,10 @@ impl TrainingRuntimeContext {
 
     pub const fn gradient_checkpoint_policy(&self) -> GradientCheckpointPolicy {
         self.gradient_checkpoint_policy
+    }
+
+    pub const fn checkpoint_boundary_policy(&self) -> CheckpointBoundaryPolicy {
+        self.checkpoint_boundary_policy
     }
 
     /// Backend device selected by the owning runtime, when one was bound.
@@ -322,13 +514,14 @@ impl TrainingRuntimeContext {
             })
             .map(streaming_prefill_policy_identity);
         serde_json::json!({
-            "schema": "kiln.training-checkpoint-planning.v2",
+            "schema": "kiln.training-checkpoint-planning.v3",
             "effective_vram": {
                 "total_bytes": self.effective_vram.total_bytes,
                 "source": self.effective_vram.source.to_string(),
                 "unified": self.effective_vram.unified,
             },
             "gradient_checkpoint_policy": self.gradient_checkpoint_policy,
+            "checkpoint_boundary_policy": self.checkpoint_boundary_policy,
             "runtime_device": self.runtime_device.map(kiln_tensor::Device::short_name),
             "streaming_prefill_policy": streaming_prefill_policy,
         })
@@ -1899,6 +2092,107 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_boundary_policy_validates_and_serializes_stably() {
+        let policy = CheckpointBoundaryPolicy::default();
+        assert_eq!(
+            policy.recompute_mode(),
+            CheckpointBoundaryRecomputeMode::Auto
+        );
+        assert_eq!(
+            policy.recompute_threshold_tokens(),
+            DEFAULT_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS
+        );
+        assert_eq!(policy.anchor_stride(), None);
+        assert_eq!(
+            policy.cache_target_bytes(),
+            DEFAULT_CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES
+        );
+        assert_eq!(
+            serde_json::to_value(policy).unwrap(),
+            serde_json::json!({
+                "recompute_mode": "auto",
+                "recompute_threshold_tokens": 8192,
+                "anchor_stride": null,
+                "cache_target_bytes": 6_442_450_944u64,
+            })
+        );
+
+        assert_eq!(
+            CheckpointBoundaryPolicy::from_parts(CheckpointBoundaryRecomputeMode::Auto, 0, None, 1,),
+            Err(InvalidCheckpointBoundaryPolicy::RecomputeThresholdTokens)
+        );
+        assert_eq!(
+            CheckpointBoundaryPolicy::from_parts(
+                CheckpointBoundaryRecomputeMode::Auto,
+                1,
+                Some(0),
+                1,
+            ),
+            Err(InvalidCheckpointBoundaryPolicy::AnchorStride)
+        );
+        assert_eq!(
+            CheckpointBoundaryPolicy::from_parts(CheckpointBoundaryRecomputeMode::Auto, 1, None, 0,),
+            Err(InvalidCheckpointBoundaryPolicy::CacheTargetBytes)
+        );
+    }
+
+    #[test]
+    fn checkpoint_boundary_policy_preserves_existing_dispatch_and_stride() {
+        let automatic = CheckpointBoundaryPolicy::default();
+        assert!(!automatic.recompute_for(8191));
+        assert!(automatic.recompute_for(8192));
+
+        let enabled = CheckpointBoundaryPolicy::from_parts(
+            CheckpointBoundaryRecomputeMode::Enabled,
+            8192,
+            None,
+            DEFAULT_CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES,
+        )
+        .unwrap();
+        let disabled = CheckpointBoundaryPolicy::from_parts(
+            CheckpointBoundaryRecomputeMode::Disabled,
+            8192,
+            None,
+            DEFAULT_CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES,
+        )
+        .unwrap();
+        assert!(enabled.recompute_for(1));
+        assert!(!disabled.recompute_for(usize::MAX));
+
+        let cache_limited = CheckpointBoundaryPolicy::from_parts(
+            CheckpointBoundaryRecomputeMode::Auto,
+            8192,
+            None,
+            4096,
+        )
+        .unwrap();
+        assert_eq!(cache_limited.anchor_stride_for_shape(1, 8, 512, 2), 3);
+        assert_eq!(cache_limited.anchor_stride_for_shape(1, 1, 512, 2), 1);
+
+        let explicit = CheckpointBoundaryPolicy::from_parts(
+            CheckpointBoundaryRecomputeMode::Auto,
+            8192,
+            Some(5),
+            1,
+        )
+        .unwrap();
+        assert_eq!(explicit.anchor_stride_for_shape(1, 1, 1, 1), 5);
+
+        let saturated = CheckpointBoundaryPolicy::from_parts(
+            CheckpointBoundaryRecomputeMode::Auto,
+            1,
+            None,
+            u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(
+            saturated.anchor_stride_for_shape(usize::MAX, usize::MAX, usize::MAX, usize::MAX,),
+            usize::MAX,
+            "maximal shape arithmetic must saturate instead of wrapping"
+        );
+    }
+
+    #[test]
     fn training_runtime_device_selectors_are_backend_specific() {
         use kiln_memory::vram::{LinuxDrmVendor, VramProbeSelector};
 
@@ -1998,7 +2292,11 @@ mod tests {
         );
         let identity =
             runtime.checkpoint_planning_identity_for_device(kiln_tensor::Device::Rocm(0));
-        assert_eq!(identity["schema"], "kiln.training-checkpoint-planning.v2");
+        assert_eq!(identity["schema"], "kiln.training-checkpoint-planning.v3");
+        assert_eq!(
+            identity["checkpoint_boundary_policy"],
+            serde_json::to_value(CheckpointBoundaryPolicy::default()).unwrap()
+        );
         assert_eq!(identity["streaming_prefill_policy"]["mode"], "enabled");
         assert_eq!(
             identity["streaming_prefill_policy"]["base_tile_tokens"],
@@ -2008,6 +2306,62 @@ mod tests {
             identity["streaming_prefill_policy"]["last_token_lm_head"],
             false
         );
+    }
+
+    #[test]
+    fn checkpoint_boundary_policy_dimensions_are_exact_resume_identity() {
+        let vram = kiln_memory::vram::GpuVramInfo {
+            total_bytes: 24 * 1024 * 1024 * 1024,
+            source: kiln_memory::vram::VramSource::ConfigOverride,
+            unified: false,
+        };
+        let base_runtime = TrainingRuntimeContext::new_for_device(
+            kiln_tensor::Device::Rocm(0),
+            vram,
+            GradientCheckpointPolicy::Auto,
+        );
+        let base_identity =
+            base_runtime.checkpoint_planning_identity_for_device(kiln_tensor::Device::Rocm(0));
+        let variants = [
+            CheckpointBoundaryPolicy::from_parts(
+                CheckpointBoundaryRecomputeMode::Enabled,
+                8192,
+                None,
+                DEFAULT_CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES,
+            )
+            .unwrap(),
+            CheckpointBoundaryPolicy::from_parts(
+                CheckpointBoundaryRecomputeMode::Auto,
+                4096,
+                None,
+                DEFAULT_CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES,
+            )
+            .unwrap(),
+            CheckpointBoundaryPolicy::from_parts(
+                CheckpointBoundaryRecomputeMode::Auto,
+                8192,
+                Some(4),
+                DEFAULT_CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES,
+            )
+            .unwrap(),
+            CheckpointBoundaryPolicy::from_parts(
+                CheckpointBoundaryRecomputeMode::Auto,
+                8192,
+                None,
+                3 * 1024 * 1024 * 1024,
+            )
+            .unwrap(),
+        ];
+
+        for policy in variants {
+            let runtime = base_runtime.with_checkpoint_boundary_policy(policy);
+            assert_eq!(runtime.checkpoint_boundary_policy(), policy);
+            assert_ne!(
+                runtime.checkpoint_planning_identity_for_device(kiln_tensor::Device::Rocm(0)),
+                base_identity,
+                "every checkpoint-boundary policy dimension must be exact-resume identity"
+            );
+        }
     }
 
     /// Legacy `TrainingStatus` payloads (pre-`error` archives, older
