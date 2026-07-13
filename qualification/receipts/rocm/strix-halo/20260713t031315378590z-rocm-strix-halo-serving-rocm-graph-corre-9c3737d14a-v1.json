@@ -1,0 +1,414 @@
+{
+  "artifacts": [
+    {
+      "bytes": 18224,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260713t031315378590z-rocm-strix-halo-serving-rocm-graph-corre-9c3737d14a-v1/environment.json",
+      "sha256": "sha256:ab12af90276bff87d6cbb20c13ab9dc8a59e7e131a523f2d364ace49b235952e"
+    },
+    {
+      "bytes": 2455,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260713t031315378590z-rocm-strix-halo-serving-rocm-graph-corre-9c3737d14a-v1/cases/001-rocm-eager-warmed-graph-correctness-r001/stdout.log",
+      "sha256": "sha256:abf2b1b8a11a66ad2d2a38a0763ba9edae7682f33f882d80ac374d2b19b9851c"
+    },
+    {
+      "bytes": 47661,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260713t031315378590z-rocm-strix-halo-serving-rocm-graph-corre-9c3737d14a-v1/cases/001-rocm-eager-warmed-graph-correctness-r001/stderr.log",
+      "sha256": "sha256:06b72994630ed8068b32ef0cf877c74aefee084f9ea3e3ea1cb51928db1b49a1"
+    },
+    {
+      "bytes": 7207,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260713t031315378590z-rocm-strix-halo-serving-rocm-graph-corre-9c3737d14a-v1/cases/001-rocm-eager-warmed-graph-correctness-r001/case-result.json",
+      "sha256": "sha256:1449a94d10f51a5f28fdcebd4e45fe031007810c716532b6a020a08b67930af1"
+    },
+    {
+      "bytes": 5102,
+      "kind": "command_case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260713t031315378590z-rocm-strix-halo-serving-rocm-graph-corre-9c3737d14a-v1/cases/001-rocm-eager-warmed-graph-correctness-r001/command-result.json",
+      "sha256": "sha256:69677c8f6dc9df26e5d83bb1c3d903b38c04348a2d75e20e267f7633f03dd3ee"
+    },
+    {
+      "bytes": 14467,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260713t031315378590z-rocm-strix-halo-serving-rocm-graph-corre-9c3737d14a-v1/run-config.json",
+      "sha256": "sha256:52bb57c0f9ba66ada43073da7664edbc03a774a22f9ff603abc1567d3e91aaf0"
+    }
+  ],
+  "created_at_utc": "2026-07-13T03:16:25.904Z",
+  "effective_config": {
+    "build": {
+      "binary": "kiln",
+      "features": "rocm",
+      "locked": true,
+      "no_default_features": true,
+      "offline": true,
+      "package": "kiln-server",
+      "profile": "release",
+      "rocm_archs": "gfx1151",
+      "rocm_path": "/opt/rocm"
+    },
+    "comparison": {
+      "comparison": "exact_action_tokens_and_selected_logprobs",
+      "graph_cache_max": 12,
+      "max_tokens": 48,
+      "request_timeout_seconds": 240,
+      "scenarios": {
+        "bucket-crossing": 768,
+        "long": 384,
+        "medium": 96,
+        "short": 16
+      },
+      "warm_then_measure": true
+    },
+    "eager": {
+      "runtime": {
+        "kv_autoscale_enabled": false,
+        "kv_autoscale_requested": false,
+        "memory_reclaim_mode": "off",
+        "memory_reclaim_requested_mode": "off",
+        "rocm_graphs_enabled": false,
+        "rocm_graphs_requested": false,
+        "serving_profile": "experimental"
+      },
+      "server": {
+        "chat_performance_metadata_enabled": true,
+        "debug_endpoints_enabled": true,
+        "default_thinking_enabled": false,
+        "deterministic": true,
+        "http_send_buffer_bytes": 4096,
+        "log_format": "json",
+        "max_active_requests": 1,
+        "max_decode_batch": 1,
+        "max_prefill_layers_per_cycle": 4,
+        "max_prefill_staging_priority_burst": 0,
+        "max_prefill_staging_slots": 0,
+        "max_prefill_tokens_per_cycle": 64,
+        "request_timeout_seconds": 180,
+        "stream_stall_grace_ms": 2000
+      }
+    },
+    "graph": {
+      "runtime": {
+        "kv_autoscale_enabled": false,
+        "kv_autoscale_requested": false,
+        "memory_reclaim_mode": "off",
+        "memory_reclaim_requested_mode": "off",
+        "rocm_graphs_enabled": true,
+        "rocm_graphs_requested": true,
+        "serving_profile": "experimental"
+      },
+      "server": {
+        "chat_performance_metadata_enabled": true,
+        "debug_endpoints_enabled": true,
+        "default_thinking_enabled": false,
+        "deterministic": true,
+        "http_send_buffer_bytes": 4096,
+        "log_format": "json",
+        "max_active_requests": 1,
+        "max_decode_batch": 1,
+        "max_prefill_layers_per_cycle": 4,
+        "max_prefill_staging_priority_burst": 0,
+        "max_prefill_staging_slots": 0,
+        "max_prefill_tokens_per_cycle": 64,
+        "request_timeout_seconds": 180,
+        "stream_stall_grace_ms": 2000
+      }
+    }
+  },
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)"
+    },
+    "device": {
+      "architecture": "gfx1151",
+      "driver": "amdgpu kernel 7.0.14-arch1-1",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "execution_environment_sha256": "sha256:8e1ad1077a8aaf2a76367b88fa4922090d5088a5a20893e0dce475cc4511c57b",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "hsa": "1.18",
+      "rocm": "7.2.4"
+    }
+  },
+  "metrics": [],
+  "model": {
+    "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+    "id": "Qwen3.5-4B",
+    "path": "/home/ericflo/Development/kiln/Qwen3.5-4B",
+    "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "weight_files": [
+      {
+        "bytes": 5329398688,
+        "path": "model.safetensors-00001-of-00002.safetensors",
+        "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+      },
+      {
+        "bytes": 3990429408,
+        "path": "model.safetensors-00002-of-00002.safetensors",
+        "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+      }
+    ]
+  },
+  "notes": [],
+  "qualification": {
+    "backend": "rocm",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "--variant",
+      "eager-vs-warmed-graph",
+      "--host-id",
+      "strix-halo",
+      "--model",
+      "/home/ericflo/Development/kiln/Qwen3.5-4B",
+      "--model-id",
+      "Qwen3.5-4B",
+      "qualification/workloads/serving-rocm-graph-correctness-v1.json"
+    ],
+    "duration_seconds": 190.52592690300662,
+    "finished_at_utc": "2026-07-13T03:16:25.904Z",
+    "kind": "correctness",
+    "profile": "serving-rocm-graph-correctness-v1",
+    "started_at_utc": "2026-07-13T03:13:15.378Z",
+    "verdict": "failed"
+  },
+  "receipt_id": "20260713t031315378590z-rocm-strix-halo-serving-rocm-graph-corre-9c3737d14a-v1",
+  "results": [
+    {
+      "details": "behavior_logprob_mismatch_count=1, expected 0 | output_mismatch_count=1, expected 0 | canonical eager and graph trace hashes differ | mismatch_evidence={\"eager_vs_graph\":{\"action_index\":1,\"left_action\":[2395,15,\"sampled\",-0.0026816888712346554],\"right_action\":[2395,15,\"sampled\",-0.0036571058444678783],\"scenario\":\"bucket-crossing\"}}; exit code 1 not in [0]",
+      "duration_seconds": 175.09705900005065,
+      "id": "rocm-eager-warmed-graph-correctness",
+      "metrics": [
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "action_token_count",
+          "unit": "tokens",
+          "value": 192
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "behavior_logprob_mismatch_count",
+          "unit": "count",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "eager_graph_activity_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "eager_repeat_mismatch_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "eager_request_count",
+          "unit": "count",
+          "value": 8
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_capture_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "graph_capture_warm_count",
+          "unit": "count",
+          "value": 3
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_fallback_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_measure_capture_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "graph_measure_replay_count",
+          "unit": "count",
+          "value": 188
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_repeat_mismatch_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_replay_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "graph_request_count",
+          "unit": "count",
+          "value": 8
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_retained_count_end",
+          "unit": "graphs",
+          "value": 3
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "graph_slot_active_count_end",
+          "unit": "slots",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_slot_count_end",
+          "unit": "slots",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_slot_idle_count_end",
+          "unit": "slots",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "graph_slot_reuse_count",
+          "unit": "count",
+          "value": 4
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "non_finite_logprob_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_mismatch_count",
+          "unit": "count",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_hit_count",
+          "unit": "count",
+          "value": 8
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "request_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "scenario_count",
+          "unit": "count",
+          "value": 4
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_forced_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_nonzero_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "snapshot_residue_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "token_id_mismatch_count",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "failed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "bcdad5ea43b2856daf3db0d95c0a5a48b286cc02",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:2c730b2fe19632305b6c096d51f36152a3325c8968a8885a012328628fb8672d",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "serving-rocm-graph-correctness-v1",
+    "parameters": {
+      "variant_id": "eager-vs-warmed-graph"
+    },
+    "seed": 20260713,
+    "sha256": "sha256:5b77000ffe2a3b5f4943164d48ad86b74b99474e6667a71387ac2ebdad3390b9"
+  }
+}
