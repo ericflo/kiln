@@ -5124,12 +5124,13 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "fn trace_model_segment_timings()",
     );
     assert!(
-        streaming_tile_section.contains("training_precision_policy_for_device_kt"),
-        "streaming prefill tile defaults should read backend-owned training policy"
+        streaming_tile_section.contains("StreamingPrefillExecutionPolicy::for_device"),
+        "streaming prefill tile defaults should read the backend-owned streaming policy"
     );
     assert!(
-        !streaming_tile_section.contains("TrainingPrecisionPolicy::for_device_family"),
-        "streaming prefill tile defaults should not call the device-family compatibility helper"
+        !streaming_tile_section.contains("training_precision_policy_for_device_kt")
+            && !streaming_tile_section.contains("TrainingPrecisionPolicy"),
+        "streaming prefill tile defaults should not retain the superseded training-precision authority"
     );
     assert!(
         !streaming_tile_section.contains("match streaming_prefill_device_kind"),
