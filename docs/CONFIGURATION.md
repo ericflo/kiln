@@ -113,10 +113,10 @@ fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
 credential. Of the 71 fixed fields:
 
 - 63 implement the canonical mechanical environment name;
-- 41 also retain one or more deprecated compatibility spellings (42 aliases
+- 42 also retain one or more deprecated compatibility spellings (43 aliases
   total);
 - 8 have no environment override;
-- the 42 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
+- the 43 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
 The tables below cover all 71 fixed fields and both dynamic credential fields.
@@ -475,7 +475,7 @@ These are current implementation facts, not recommended architecture:
    TOML-only values do not control dispatch.
 2. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
    typed object with provenance and backend-derived values.
-3. **Deprecated aliases:** 42 non-canonical spellings across 41 fields remain
+3. **Deprecated aliases:** 43 non-canonical spellings across 42 fields remain
    temporarily for compatibility, including `KILN_DEFAULT_NO_THINK`. Each use
    warns at startup; canonical and compatibility names cannot silently
    disagree.

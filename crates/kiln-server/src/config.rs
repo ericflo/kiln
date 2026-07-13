@@ -3332,7 +3332,7 @@ mod tests {
             })
             .count();
         assert_eq!(canonical_only_aliases, 21);
-        assert_eq!(compatibility_aliases, 42);
+        assert_eq!(compatibility_aliases, 43);
 
         for field in PUBLIC_ENV_FIELDS {
             assert_eq!(
