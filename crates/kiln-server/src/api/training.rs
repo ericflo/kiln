@@ -3690,8 +3690,8 @@ fn admit_training_jobs_with_summary(
             normalize_sft_config_at_submit(&mut req.config)?;
         }
     }
-    enforce_queue_capacity_for(state, pending.len())?;
     pin_registered_teachers(state, &mut pending)?;
+    enforce_queue_capacity_for(state, pending.len())?;
     ensure_training_backend_admission(state)?;
     for (info, entry) in &mut pending {
         enforce_queued_training_workload_admission(state, &entry.job)?;

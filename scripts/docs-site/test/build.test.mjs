@@ -340,12 +340,13 @@ test('search loads its index and resolves product and reference results over HTT
     outDir: output,
   });
   const server = await serveStatic(output);
-  const browser = await puppeteer.launch({
-    executablePath: chromium,
-    headless: true,
-    args: ['--disable-gpu', '--no-sandbox'],
-  });
+  let browser;
   try {
+    browser = await puppeteer.launch({
+      executablePath: chromium,
+      headless: true,
+      args: ['--disable-gpu', '--no-sandbox'],
+    });
     const page = await browser.newPage();
     await page.goto(`${server.url}/docs/`, { waitUntil: 'domcontentloaded' });
     await page.locator('#docs-search-hub').fill('Product');
@@ -362,7 +363,7 @@ test('search loads its index and resolves product and reference results over HTT
     const referenceHref = await page.$eval('.docs-search-result', (element) => element.getAttribute('href'));
     assert.equal(referenceHref, './configuration/');
   } finally {
-    await browser.close();
+    await browser?.close();
     await server.close();
   }
 });
