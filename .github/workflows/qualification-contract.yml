@@ -7,6 +7,9 @@ on:
   push:
     branches: [main]
     paths:
+      - 'crates/**'
+      - 'contracts/runtime-env-direct-reads-v1.json'
+      - 'scripts/check_runtime_env_contract.py'
       - 'scripts/qualification/**'
       - 'scripts/bench-concurrent-batch.py'
       - 'qualification/**'
@@ -14,6 +17,9 @@ on:
       - '.github/workflows/qualification-contract.yml'
   pull_request:
     paths:
+      - 'crates/**'
+      - 'contracts/runtime-env-direct-reads-v1.json'
+      - 'scripts/check_runtime_env_contract.py'
       - 'scripts/qualification/**'
       - 'scripts/bench-concurrent-batch.py'
       - 'qualification/**'
@@ -27,6 +33,9 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
+
+      - name: Ratchet direct environment access
+        run: python3 scripts/check_runtime_env_contract.py --check
 
       - name: Validate tooling and receipts
         shell: bash

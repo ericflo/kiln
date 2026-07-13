@@ -885,6 +885,33 @@ platform commit.
 
 ### 8.1 Typed configuration
 
+Current audit findings and migration order (2026-07-12):
+
+- The environment is not a startup boundary today. Production-reachable code
+  contains more than 250 model/tensor/memory/kernel tuning knobs, at least 32
+  training knobs, and additional server/request-handler reads. Many are read
+  per request, per decode step, per SDPA/GEMM, or per optimizer parameter.
+- Several strict TOML fields are mirrors rather than authorities. Speculative
+  decoding, streaming prefill, GPU-memory sizing, and gradient-checkpoint
+  policy are accepted and validated at startup, then ignored by paths that
+  reread permissive environment parsers. `/v1/config` and debug reporting can
+  also describe a post-startup environment mutation instead of the running
+  configuration.
+- The leading live-pause candidates are the detached transposed-weight cache
+  writer (unbounded queue plus duplicate transpose work and disk I/O), default
+  large-ROCm-matmul stream synchronization, and per-attention live-memory/tile
+  decisions. Lazy memory-governor parsing can panic when first touched instead
+  of failing startup.
+- The target boundary is strict: only startup configuration, a narrow
+  credential-provider adapter, and immutable build/source provenance may read
+  process environment. Model, tensor, kernel, scheduler, training, eval, UI,
+  and request code receive immutable typed policy. Qualification-only controls
+  use one explicit internal namespace/profile and are included in provenance.
+- Migration order: install an exact no-growth source ratchet; remove the hidden
+  cache writer; make existing server TOML authoritative; inject memory, graph,
+  ROCm matmul/attention, Vulkan, and training-execution policies; then delete or
+  namespace the remaining tuning/debug flags and remove test env mutation.
+
 - [ ] Inventory every direct `KILN_*` read and classify it as public stable,
   experimental/debug, build-time, or test-only.
 - [ ] Centralize public runtime configuration into typed structures with one
