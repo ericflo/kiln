@@ -1951,6 +1951,7 @@ pub fn for_explicit_device_kt(device: kiln_tensor::Device) -> Result<Arc<dyn Bac
                 "explicit Vulkan runtime requested from a build without the vulkan feature"
             );
         }
+        other => anyhow::bail!("explicit runtime requested for unsupported device: {other:?}"),
     }
 }
 

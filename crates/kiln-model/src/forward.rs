@@ -25312,7 +25312,7 @@ fn transformer_block_detached_prefill_chunked(
     if !detached_chunked_prefill_supported(backend) || has_kv_cache {
         return Ok(None);
     }
-    let (_batch, seq_len, _hidden) = x.dims3()?;
+    let (batch, seq_len, _hidden) = x.dims3()?;
     if !streaming_prefill_enabled_for(&x.device(), seq_len) {
         return Ok(None);
     }
