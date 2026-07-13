@@ -5129,9 +5129,7 @@ mod tests {
         assert!(server_streaming_prefill_policy(&runtime).is_err());
 
         let expected = kiln_model::StreamingPrefillExecutionPolicy::resolve(
-            kiln_model::backend::StreamingPrefillBackendPolicy::for_device(
-                kiln_tensor::Device::Cpu,
-            ),
+            kiln_model::StreamingPrefillBackendPolicy::for_device(kiln_tensor::Device::Cpu),
             kiln_model::StreamingPrefillMode::Enabled,
             Some(512),
             Some(128),

@@ -17288,7 +17288,7 @@ pub(crate) mod tests {
     #[test]
     fn grpo_shared_prefix_uses_injected_streaming_tile_policy() {
         let forced = StreamingPrefillExecutionPolicy::resolve(
-            kiln_model::backend::StreamingPrefillBackendPolicy::for_device(Device::Cpu),
+            kiln_model::StreamingPrefillBackendPolicy::for_device(Device::Cpu),
             kiln_model::forward::StreamingPrefillMode::Enabled,
             None,
             Some(128),
@@ -17303,7 +17303,7 @@ pub(crate) mod tests {
         assert_eq!(grpo_shared_prefix_tile_tokens(forced, 128).unwrap(), None);
 
         let disabled = StreamingPrefillExecutionPolicy::resolve(
-            kiln_model::backend::StreamingPrefillBackendPolicy::for_device(Device::Cpu),
+            kiln_model::StreamingPrefillBackendPolicy::for_device(Device::Cpu),
             kiln_model::forward::StreamingPrefillMode::Disabled,
             None,
             Some(64),

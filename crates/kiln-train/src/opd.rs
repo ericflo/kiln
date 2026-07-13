@@ -5866,9 +5866,7 @@ mod tests {
         );
 
         let forced_streaming = kiln_model::forward::StreamingPrefillExecutionPolicy::resolve(
-            kiln_model::backend::StreamingPrefillBackendPolicy::for_device(
-                kiln_tensor::Device::Cpu,
-            ),
+            kiln_model::StreamingPrefillBackendPolicy::for_device(kiln_tensor::Device::Cpu),
             kiln_model::forward::StreamingPrefillMode::Enabled,
             Some(256),
             Some(128),
