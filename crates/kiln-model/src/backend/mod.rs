@@ -2581,6 +2581,11 @@ mod tests {
             capability::Support::NativeWithConstraints
         );
         assert_eq!(caps.attention.flash_prefill, capability::Support::Declined);
+        assert_eq!(
+            caps.streaming_prefill.auto_dispatch,
+            capability::StreamingPrefillAutoDispatch::Never
+        );
+        assert_eq!(caps.streaming_prefill.base_tile_tokens, 8_192);
         assert_eq!(caps.gdn.recurrent_step, capability::Support::Declined);
         assert_eq!(caps.decode.linear_argmax, capability::Support::Declined);
         assert_eq!(caps.decode_batcher.max_batch, 8);
@@ -2613,6 +2618,14 @@ mod tests {
         let vulkan_caps = capability::BackendCapabilityQueries::backend_capabilities(&vulkan_probe);
         assert_eq!(vulkan_caps.device, kiln_tensor::Device::Cpu);
         assert_eq!(vulkan_caps.storage.backend, kiln_tensor::Backend::Vulkan);
+        assert_eq!(
+            vulkan_caps.streaming_prefill,
+            capability::StreamingPrefillBackendPolicy::for_backend(
+                "vulkan",
+                kiln_tensor::Device::Cpu
+            )
+        );
+        assert_eq!(vulkan_caps.streaming_prefill.base_tile_tokens, 2_048);
         assert_eq!(vulkan_caps.decode_batcher.max_batch, 64);
         assert_eq!(vulkan_caps.decode_batcher.wait_micros, 5_000);
         assert!(vulkan_caps.decode_batcher.allow_mixed_seq_lens);

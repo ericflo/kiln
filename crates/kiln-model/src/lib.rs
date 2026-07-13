@@ -60,7 +60,8 @@ pub use backend::capability::{
     MatmulRequest, MatmulRequestProjectionError, ReplayAuthority, ReplayCapabilities,
     ReplayGraphCrateRole, ReplayNativePrimitive, ReplayProductionAuthority, ReplayRequest,
     ReplayRequestKind, ServerTrainingDispatchPolicy, ServerTrainingNativeRoute,
-    SpeculativeDecodePolicy, StartupCapabilities, StorageCapabilities, Support,
+    SpeculativeDecodePolicy, StartupCapabilities, StorageCapabilities,
+    StreamingPrefillAutoDispatch, StreamingPrefillBackendPolicy, Support,
     TrainingAccelerationEnvFlagPolicy, TrainingAccelerationProfileLogMessage,
     TrainingAccelerationProfilePolicy,
 };

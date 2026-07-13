@@ -164,7 +164,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 | Descriptor | Field Count | Fields |
 |---|---:|---|
-| `BackendCapabilities` | 12 | `backend`, `device`, `storage`, `startup`, `matmul`, `attention`, `gdn`, `decode`, `decode_batcher`, `training`, `graph_replay`, `fallback` |
+| `BackendCapabilities` | 13 | `backend`, `device`, `storage`, `startup`, `matmul`, `attention`, `streaming_prefill`, `gdn`, `decode`, `decode_batcher`, `training`, `graph_replay`, `fallback` |
 | `StorageCapabilities` | 13 | `backend`, `device`, `resident_activation`, `resident_decode`, `projection_load_policy`, `kv_cache_device_memory_pressure`, `gpu_memory_detection_policy`, `gpu_memory_budget_policy`, `gpu_allocator_memory_probe_policy`, `gpu_memory_reclaim_policy`, `kv_sizing_residency_model_multiplier`, `kv_auto_block_policy`, `kv_cache_fp8_policy` |
 | `ProjectionLoadPolicy` | 18 | `backend`, `direct_transposed_upload_for_cached_weights`, `parallel_transposed_projection_upload`, `parallel_transposed_projection_upload_disable_env`, `parallel_auxiliary_weight_upload`, `parallel_auxiliary_weight_upload_disable_env`, `cache_full_attention_qkv_transpose_concat`, `cache_linear_attention_ab_transpose_concat`, `cache_mlp_gate_up_transpose_concat`, `pack_w8a16_projection_rows`, `stub_embedding_table_after_transposed_upload`, `drop_projection_originals`, `drop_projection_transposes`, `synchronize_after_dropping_originals`, `keep_projection_originals_env`, `drop_projection_originals_env`, `native_training_env`, `keep_projection_transposes_env` |
 | `GpuMemoryDetectionPolicy` | 3 | `detected_total_log_message`, `missing_total_warning`, `missing_total_fallback_bytes` |
@@ -177,6 +177,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `StartupCapabilities` | 6 | `run_inference_prewarm`, `require_inference_prewarm_for_health`, `precompile_custom_kernels`, `native_training_default_enabled`, `native_training_env`, `decode_weight_prewarm_when_native_training` |
 | `MatmulCapabilities` | 3 | `rank2_f32`, `batched_bf16`, `bias_epilogue` |
 | `AttentionCapabilities` | 5 | `flash_prefill`, `flash_prefill_head_major`, `flash_paged_decode`, `flash_prefill_consumes_grouped_kv`, `detached_chunked_prefill` |
+| `StreamingPrefillBackendPolicy` | 6 | `auto_dispatch`, `base_tile_tokens`, `tape_tile_tokens`, `detached_full_attn_tile_tokens`, `detached_full_attn_boundary_tile_tokens`, `detached_full_attn_tape_replay_tile_tokens` |
 | `GdnCapabilities` | 10 | `recurrent_step`, `recurrent_step_f32`, `inference_recurrent_state`, `chunk_pre_permute_bf16`, `chunk_prep`, `chunk_scan`, `full_chunk_forward`, `gates`, `gated_rms_norm`, `gated_rms_norm_preserves_tape_residency` |
 | `InferenceRecurrentStatePolicy` | 2 | `bf16`, `f16` |
 | `DecodeCapabilities` | 8 | `resident_decode`, `paged_decode_graph_outputs`, `mtp_speculative_generation`, `speculative_policy`, `linear_argmax`, `linear_argmax_batch`, `linear_sample`, `linear_sample_batch` |
@@ -243,6 +244,16 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `rocm` | `NativeRequired` | `KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK=1` | SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines |
 | `metal` | `NativeRequired` | `KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_TRAINING_OPTIMIZER_FALLBACK=1` | SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines |
 | `vulkan` | `NativeRequired` | `KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK=1` | SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines |
+
+## Streaming Prefill Backend Policy
+
+| Backend | Auto Dispatch | Base Tile | Tape Tile | Detached Full-Attn Tile | Detached Boundary Tile | Detached Tape-Replay Tile |
+|---|---|---:|---:|---:|---:|---:|
+| `cpu` | `never` | `8192` | `8192` | `8192` | `8192` | `8192` |
+| `cuda` | `prompt_tokens_at_least 2048` | `1024` | `1024` | `8192` | `65536` | `65536` |
+| `rocm` | `prompt_tokens_at_least 2048` | `1024` | `1024` | `8192` | `8192` | `8192` |
+| `metal` | `prompt_tokens_at_least 2048` | `2048` | `2048` | `8192` | `8192` | `8192` |
+| `vulkan` | `never` | `2048` | `2048` | `8192` | `8192` | `8192` |
 
 ## Training Precision Policy
 

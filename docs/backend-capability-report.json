@@ -1439,7 +1439,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "BackendCapabilities": {
-      "field_count": 12,
+      "field_count": 13,
       "fields": [
         {
           "name": "backend",
@@ -1464,6 +1464,10 @@
         {
           "name": "attention",
           "type": "AttentionCapabilities"
+        },
+        {
+          "name": "streaming_prefill",
+          "type": "StreamingPrefillBackendPolicy"
         },
         {
           "name": "gdn",
@@ -2102,6 +2106,36 @@
         {
           "name": "kv_cache_fp8_policy",
           "type": "KvCacheFp8Policy"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "StreamingPrefillBackendPolicy": {
+      "field_count": 6,
+      "fields": [
+        {
+          "name": "auto_dispatch",
+          "type": "StreamingPrefillAutoDispatch"
+        },
+        {
+          "name": "base_tile_tokens",
+          "type": "usize"
+        },
+        {
+          "name": "tape_tile_tokens",
+          "type": "usize"
+        },
+        {
+          "name": "detached_full_attn_tile_tokens",
+          "type": "usize"
+        },
+        {
+          "name": "detached_full_attn_boundary_tile_tokens",
+          "type": "usize"
+        },
+        {
+          "name": "detached_full_attn_tape_replay_tile_tokens",
+          "type": "usize"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
@@ -4488,6 +4522,63 @@
   },
   "source": {
     "script": "scripts/generate_backend_capability_report.py"
+  },
+  "streaming_prefill_backend_policy": {
+    "cpu": {
+      "auto_dispatch": {
+        "kind": "never",
+        "minimum_prompt_tokens": null
+      },
+      "base_tile_tokens": 8192,
+      "detached_full_attn_boundary_tile_tokens": 8192,
+      "detached_full_attn_tape_replay_tile_tokens": 8192,
+      "detached_full_attn_tile_tokens": 8192,
+      "tape_tile_tokens": 8192
+    },
+    "cuda": {
+      "auto_dispatch": {
+        "kind": "prompt_tokens_at_least",
+        "minimum_prompt_tokens": 2048
+      },
+      "base_tile_tokens": 1024,
+      "detached_full_attn_boundary_tile_tokens": 65536,
+      "detached_full_attn_tape_replay_tile_tokens": 65536,
+      "detached_full_attn_tile_tokens": 8192,
+      "tape_tile_tokens": 1024
+    },
+    "metal": {
+      "auto_dispatch": {
+        "kind": "prompt_tokens_at_least",
+        "minimum_prompt_tokens": 2048
+      },
+      "base_tile_tokens": 2048,
+      "detached_full_attn_boundary_tile_tokens": 8192,
+      "detached_full_attn_tape_replay_tile_tokens": 8192,
+      "detached_full_attn_tile_tokens": 8192,
+      "tape_tile_tokens": 2048
+    },
+    "rocm": {
+      "auto_dispatch": {
+        "kind": "prompt_tokens_at_least",
+        "minimum_prompt_tokens": 2048
+      },
+      "base_tile_tokens": 1024,
+      "detached_full_attn_boundary_tile_tokens": 8192,
+      "detached_full_attn_tape_replay_tile_tokens": 8192,
+      "detached_full_attn_tile_tokens": 8192,
+      "tape_tile_tokens": 1024
+    },
+    "vulkan": {
+      "auto_dispatch": {
+        "kind": "never",
+        "minimum_prompt_tokens": null
+      },
+      "base_tile_tokens": 2048,
+      "detached_full_attn_boundary_tile_tokens": 8192,
+      "detached_full_attn_tape_replay_tile_tokens": 8192,
+      "detached_full_attn_tile_tokens": 8192,
+      "tape_tile_tokens": 2048
+    }
   },
   "training_loss_policy": {
     "cpu": {

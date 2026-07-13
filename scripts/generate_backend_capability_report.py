@@ -96,6 +96,7 @@ CAPABILITY_DESCRIPTOR_STRUCTS = [
     "StartupCapabilities",
     "MatmulCapabilities",
     "AttentionCapabilities",
+    "StreamingPrefillBackendPolicy",
     "GdnCapabilities",
     "InferenceRecurrentStatePolicy",
     "DecodeCapabilities",
@@ -1027,6 +1028,56 @@ def training_precision_policy_report() -> dict[str, Any]:
             "exact_gdn_backward_tile_tokens": None,
             "mixed_precision": True,
             "notes": "Vulkan keeps training activations and LoRA parameters F32 while allowing BF16 base weights through explicit VkTensor buffer bridges.",
+        },
+    }
+
+
+def streaming_prefill_backend_policy_report() -> dict[str, Any]:
+    never = {"kind": "never", "minimum_prompt_tokens": None}
+    long_prompt = {
+        "kind": "prompt_tokens_at_least",
+        "minimum_prompt_tokens": 2048,
+    }
+    return {
+        "cpu": {
+            "auto_dispatch": never,
+            "base_tile_tokens": 8192,
+            "tape_tile_tokens": 8192,
+            "detached_full_attn_tile_tokens": 8192,
+            "detached_full_attn_boundary_tile_tokens": 8192,
+            "detached_full_attn_tape_replay_tile_tokens": 8192,
+        },
+        "cuda": {
+            "auto_dispatch": long_prompt,
+            "base_tile_tokens": 1024,
+            "tape_tile_tokens": 1024,
+            "detached_full_attn_tile_tokens": 8192,
+            "detached_full_attn_boundary_tile_tokens": 65536,
+            "detached_full_attn_tape_replay_tile_tokens": 65536,
+        },
+        "rocm": {
+            "auto_dispatch": long_prompt,
+            "base_tile_tokens": 1024,
+            "tape_tile_tokens": 1024,
+            "detached_full_attn_tile_tokens": 8192,
+            "detached_full_attn_boundary_tile_tokens": 8192,
+            "detached_full_attn_tape_replay_tile_tokens": 8192,
+        },
+        "metal": {
+            "auto_dispatch": long_prompt,
+            "base_tile_tokens": 2048,
+            "tape_tile_tokens": 2048,
+            "detached_full_attn_tile_tokens": 8192,
+            "detached_full_attn_boundary_tile_tokens": 8192,
+            "detached_full_attn_tape_replay_tile_tokens": 8192,
+        },
+        "vulkan": {
+            "auto_dispatch": never,
+            "base_tile_tokens": 2048,
+            "tape_tile_tokens": 2048,
+            "detached_full_attn_tile_tokens": 8192,
+            "detached_full_attn_boundary_tile_tokens": 8192,
+            "detached_full_attn_tape_replay_tile_tokens": 8192,
         },
     }
 
@@ -2836,6 +2887,26 @@ def markdown(data: dict[str, Any]) -> str:
             f"{info['enforcement']} |"
         )
     lines.append("")
+    lines.append("## Streaming Prefill Backend Policy")
+    lines.append("")
+    lines.append(
+        "| Backend | Auto Dispatch | Base Tile | Tape Tile | Detached Full-Attn Tile | Detached Boundary Tile | Detached Tape-Replay Tile |"
+    )
+    lines.append("|---|---|---:|---:|---:|---:|---:|")
+    for backend, info in data["streaming_prefill_backend_policy"].items():
+        dispatch = info["auto_dispatch"]
+        dispatch_display = dispatch["kind"]
+        if dispatch["minimum_prompt_tokens"] is not None:
+            dispatch_display += f" {dispatch['minimum_prompt_tokens']}"
+        lines.append(
+            f"| `{backend}` | `{dispatch_display}` | "
+            f"`{info['base_tile_tokens']}` | "
+            f"`{info['tape_tile_tokens']}` | "
+            f"`{info['detached_full_attn_tile_tokens']}` | "
+            f"`{info['detached_full_attn_boundary_tile_tokens']}` | "
+            f"`{info['detached_full_attn_tape_replay_tile_tokens']}` |"
+        )
+    lines.append("")
     lines.append("## Training Precision Policy")
     lines.append("")
     lines.append("| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed RMSNorm Weight | Streaming Tile | Detached Full-Attn Tile | Detached Boundary Tile | Detached Tape Tile | Tape Tile | Paged Medium Tile | Exact GDN Backward Tile | Mixed |")
@@ -3098,6 +3169,7 @@ def build_report_data() -> tuple[dict[str, Any], list[dict[str, Any]]]:
         "decode_hot_path_policy": decode_hot_path_policy_report(),
         "training_optimizer_fallback_policy": training_optimizer_fallback_policy_report(),
         "training_loss_policy": training_loss_policy_report(),
+        "streaming_prefill_backend_policy": streaming_prefill_backend_policy_report(),
         "training_precision_policy": training_precision_policy_report(),
         "optimizer_dispatch": optimizer_dispatch_report(backends),
         "mismatches": mismatches,

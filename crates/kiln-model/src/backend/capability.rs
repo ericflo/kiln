@@ -952,6 +952,47 @@ pub struct AttentionCapabilities {
     pub detached_chunked_prefill: Support,
 }
 
+/// Backend-owned defaults for streaming prefill and its tiled training paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StreamingPrefillBackendPolicy {
+    pub auto_dispatch: StreamingPrefillAutoDispatch,
+    pub base_tile_tokens: usize,
+    pub tape_tile_tokens: usize,
+    pub detached_full_attn_tile_tokens: usize,
+    pub detached_full_attn_boundary_tile_tokens: usize,
+    pub detached_full_attn_tape_replay_tile_tokens: usize,
+}
+
+/// Automatic streaming-prefill dispatch selected by backend policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StreamingPrefillAutoDispatch {
+    Never,
+    PromptTokensAtLeast(usize),
+}
+
+impl StreamingPrefillAutoDispatch {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::PromptTokensAtLeast(_) => "prompt_tokens_at_least",
+        }
+    }
+
+    pub const fn minimum_prompt_tokens(self) -> Option<usize> {
+        match self {
+            Self::Never => None,
+            Self::PromptTokensAtLeast(prompt_tokens) => Some(prompt_tokens),
+        }
+    }
+
+    pub const fn enabled_for_prompt_tokens(self, prompt_tokens: usize) -> bool {
+        match self {
+            Self::Never => false,
+            Self::PromptTokensAtLeast(minimum) => prompt_tokens >= minimum,
+        }
+    }
+}
+
 /// Focused GDN capability snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GdnCapabilities {
@@ -1266,6 +1307,7 @@ pub struct BackendCapabilities {
     pub startup: StartupCapabilities,
     pub matmul: MatmulCapabilities,
     pub attention: AttentionCapabilities,
+    pub streaming_prefill: StreamingPrefillBackendPolicy,
     pub gdn: GdnCapabilities,
     pub decode: DecodeCapabilities,
     pub decode_batcher: DecodeBatcherPolicy,
@@ -1408,6 +1450,7 @@ impl BackendCapabilities {
                 flash_prefill_consumes_grouped_kv: flash_prefill_consumes_grouped_kv(name),
                 detached_chunked_prefill: detached_chunked_prefill_support(name),
             },
+            streaming_prefill: StreamingPrefillBackendPolicy::for_backend(name, device),
             gdn: GdnCapabilities {
                 recurrent_step: Support::from_supports_predicate(
                     GdnBackend::runtime_supports_gdn_recurrent_step(backend),
@@ -1614,6 +1657,78 @@ impl StartupCapabilities {
                 decode_weight_prewarm_when_native_training: false,
             },
         }
+    }
+}
+
+impl StreamingPrefillBackendPolicy {
+    pub const AUTO_MIN_PROMPT_TOKENS: usize = 2_048;
+    pub const PORTABLE_TILE_TOKENS: usize = 8_192;
+    pub const CUDA_ROCM_TILE_TOKENS: usize = 1_024;
+    pub const METAL_VULKAN_TILE_TOKENS: usize = 2_048;
+    pub const MATERIALIZED_FULL_ATTN_TILE_TOKENS: usize = 8_192;
+    pub const FLASH_FULL_ATTN_TILE_TOKENS: usize = 65_536;
+
+    /// Compatibility constructor for callers that only have a concrete device.
+    pub fn for_device(device: kiln_tensor::Device) -> Self {
+        Self::for_backend("", device)
+    }
+
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        match backend_kind_for_runtime(name, device) {
+            kiln_tensor::Backend::Cuda => Self {
+                auto_dispatch: StreamingPrefillAutoDispatch::PromptTokensAtLeast(
+                    Self::AUTO_MIN_PROMPT_TOKENS,
+                ),
+                base_tile_tokens: Self::CUDA_ROCM_TILE_TOKENS,
+                tape_tile_tokens: Self::CUDA_ROCM_TILE_TOKENS,
+                detached_full_attn_tile_tokens: Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
+                detached_full_attn_boundary_tile_tokens: Self::FLASH_FULL_ATTN_TILE_TOKENS,
+                detached_full_attn_tape_replay_tile_tokens: Self::FLASH_FULL_ATTN_TILE_TOKENS,
+            },
+            kiln_tensor::Backend::Rocm => Self {
+                auto_dispatch: StreamingPrefillAutoDispatch::PromptTokensAtLeast(
+                    Self::AUTO_MIN_PROMPT_TOKENS,
+                ),
+                base_tile_tokens: Self::CUDA_ROCM_TILE_TOKENS,
+                tape_tile_tokens: Self::CUDA_ROCM_TILE_TOKENS,
+                detached_full_attn_tile_tokens: Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
+                detached_full_attn_boundary_tile_tokens: Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
+                detached_full_attn_tape_replay_tile_tokens:
+                    Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
+            },
+            kiln_tensor::Backend::Metal => Self {
+                auto_dispatch: StreamingPrefillAutoDispatch::PromptTokensAtLeast(
+                    Self::AUTO_MIN_PROMPT_TOKENS,
+                ),
+                base_tile_tokens: Self::METAL_VULKAN_TILE_TOKENS,
+                tape_tile_tokens: Self::METAL_VULKAN_TILE_TOKENS,
+                detached_full_attn_tile_tokens: Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
+                detached_full_attn_boundary_tile_tokens: Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
+                detached_full_attn_tape_replay_tile_tokens:
+                    Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
+            },
+            kiln_tensor::Backend::Vulkan => Self {
+                auto_dispatch: StreamingPrefillAutoDispatch::Never,
+                base_tile_tokens: Self::METAL_VULKAN_TILE_TOKENS,
+                tape_tile_tokens: Self::METAL_VULKAN_TILE_TOKENS,
+                detached_full_attn_tile_tokens: Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
+                detached_full_attn_boundary_tile_tokens: Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
+                detached_full_attn_tape_replay_tile_tokens:
+                    Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
+            },
+            _ => Self {
+                auto_dispatch: StreamingPrefillAutoDispatch::Never,
+                base_tile_tokens: Self::PORTABLE_TILE_TOKENS,
+                tape_tile_tokens: Self::PORTABLE_TILE_TOKENS,
+                detached_full_attn_tile_tokens: Self::PORTABLE_TILE_TOKENS,
+                detached_full_attn_boundary_tile_tokens: Self::PORTABLE_TILE_TOKENS,
+                detached_full_attn_tape_replay_tile_tokens: Self::PORTABLE_TILE_TOKENS,
+            },
+        }
+    }
+
+    pub const fn auto_enabled_for_prompt_tokens(self, prompt_tokens: usize) -> bool {
+        self.auto_dispatch.enabled_for_prompt_tokens(prompt_tokens)
     }
 }
 
@@ -2421,6 +2536,109 @@ impl<T> BackendCapabilityQueries for T where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_prefill_policy_preserves_backend_defaults() {
+        for (
+            name,
+            device,
+            auto_dispatch,
+            base_tile_tokens,
+            tape_tile_tokens,
+            detached_full_attn_tile_tokens,
+            detached_full_attn_boundary_tile_tokens,
+            detached_full_attn_tape_replay_tile_tokens,
+        ) in [
+            (
+                "cpu",
+                kiln_tensor::Device::Cpu,
+                StreamingPrefillAutoDispatch::Never,
+                8_192,
+                8_192,
+                8_192,
+                8_192,
+                8_192,
+            ),
+            (
+                "cuda",
+                kiln_tensor::Device::Cuda(0),
+                StreamingPrefillAutoDispatch::PromptTokensAtLeast(2_048),
+                1_024,
+                1_024,
+                8_192,
+                65_536,
+                65_536,
+            ),
+            (
+                "rocm",
+                kiln_tensor::Device::Rocm(0),
+                StreamingPrefillAutoDispatch::PromptTokensAtLeast(2_048),
+                1_024,
+                1_024,
+                8_192,
+                8_192,
+                8_192,
+            ),
+            (
+                "metal",
+                kiln_tensor::Device::Metal(0),
+                StreamingPrefillAutoDispatch::PromptTokensAtLeast(2_048),
+                2_048,
+                2_048,
+                8_192,
+                8_192,
+                8_192,
+            ),
+            (
+                "vulkan",
+                kiln_tensor::Device::Vulkan(0),
+                StreamingPrefillAutoDispatch::Never,
+                2_048,
+                2_048,
+                8_192,
+                8_192,
+                8_192,
+            ),
+        ] {
+            let policy = StreamingPrefillBackendPolicy::for_backend(name, device);
+            assert_eq!(
+                StreamingPrefillBackendPolicy::for_device(device),
+                policy,
+                "{name} device compatibility constructor"
+            );
+            assert_eq!(policy.auto_dispatch, auto_dispatch, "{name}");
+            assert_eq!(policy.base_tile_tokens, base_tile_tokens, "{name}");
+            assert_eq!(policy.tape_tile_tokens, tape_tile_tokens, "{name}");
+            assert_eq!(
+                policy.detached_full_attn_tile_tokens, detached_full_attn_tile_tokens,
+                "{name}"
+            );
+            assert_eq!(
+                policy.detached_full_attn_boundary_tile_tokens,
+                detached_full_attn_boundary_tile_tokens,
+                "{name}"
+            );
+            assert_eq!(
+                policy.detached_full_attn_tape_replay_tile_tokens,
+                detached_full_attn_tape_replay_tile_tokens,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_prefill_auto_dispatch_is_pure_and_boundary_inclusive() {
+        let never = StreamingPrefillAutoDispatch::Never;
+        assert_eq!(never.label(), "never");
+        assert_eq!(never.minimum_prompt_tokens(), None);
+        assert!(!never.enabled_for_prompt_tokens(usize::MAX));
+
+        let long_prompt = StreamingPrefillAutoDispatch::PromptTokensAtLeast(2_048);
+        assert_eq!(long_prompt.label(), "prompt_tokens_at_least");
+        assert_eq!(long_prompt.minimum_prompt_tokens(), Some(2_048));
+        assert!(!long_prompt.enabled_for_prompt_tokens(2_047));
+        assert!(long_prompt.enabled_for_prompt_tokens(2_048));
+    }
 
     #[test]
     fn replay_authority_maps_backends_to_native_primitives() {

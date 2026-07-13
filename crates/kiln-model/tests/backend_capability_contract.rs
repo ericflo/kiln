@@ -1379,6 +1379,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "StartupCapabilities",
         "MatmulCapabilities",
         "AttentionCapabilities",
+        "StreamingPrefillBackendPolicy",
         "GdnCapabilities",
         "InferenceRecurrentStatePolicy",
         "DecodeCapabilities",
@@ -1406,6 +1407,10 @@ fn generated_capability_report_lists_request_descriptors() {
     assert!(
         backend_capability_fields.contains(&"startup"),
         "BackendCapabilities should expose startup/prewarm policy"
+    );
+    assert!(
+        backend_capability_fields.contains(&"streaming_prefill"),
+        "BackendCapabilities should expose streaming-prefill backend policy"
     );
     let startup_capability_fields = capability_descriptors["StartupCapabilities"]["fields"]
         .as_array()
@@ -1625,6 +1630,26 @@ fn generated_capability_report_lists_request_descriptors() {
         attention_capability_fields.contains(&"detached_chunked_prefill"),
         "AttentionCapabilities should own detached chunked prefill routing"
     );
+    let streaming_prefill_policy_fields =
+        capability_descriptors["StreamingPrefillBackendPolicy"]["fields"]
+            .as_array()
+            .expect("StreamingPrefillBackendPolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
+    for field in [
+        "auto_dispatch",
+        "base_tile_tokens",
+        "tape_tile_tokens",
+        "detached_full_attn_tile_tokens",
+        "detached_full_attn_boundary_tile_tokens",
+        "detached_full_attn_tape_replay_tile_tokens",
+    ] {
+        assert!(
+            streaming_prefill_policy_fields.contains(&field),
+            "StreamingPrefillBackendPolicy should include {field}"
+        );
+    }
     let decode_capability_fields = capability_descriptors["DecodeCapabilities"]["fields"]
         .as_array()
         .expect("DecodeCapabilities fields should be an array")
@@ -2240,6 +2265,48 @@ fn training_acceleration_profile_policy_routes_vulkan_startup_log() {
             "{name} should not log the Vulkan training acceleration profile"
         );
     }
+}
+
+#[test]
+fn generated_capability_report_lists_streaming_prefill_backend_policy() {
+    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    let policies = report["streaming_prefill_backend_policy"]
+        .as_object()
+        .expect("streaming_prefill_backend_policy should be an object");
+    for backend in ["cpu", "cuda", "rocm", "metal", "vulkan"] {
+        assert!(
+            policies.contains_key(backend),
+            "{backend} should be present in streaming_prefill_backend_policy"
+        );
+    }
+
+    assert_eq!(policies["cpu"]["auto_dispatch"]["kind"], "never");
+    assert_eq!(
+        policies["cpu"]["auto_dispatch"]["minimum_prompt_tokens"],
+        Value::Null
+    );
+    assert_eq!(
+        policies["cuda"]["auto_dispatch"]["kind"],
+        "prompt_tokens_at_least"
+    );
+    assert_eq!(
+        policies["cuda"]["auto_dispatch"]["minimum_prompt_tokens"],
+        2_048
+    );
+    assert_eq!(policies["cuda"]["base_tile_tokens"], 1_024);
+    assert_eq!(
+        policies["cuda"]["detached_full_attn_boundary_tile_tokens"],
+        65_536
+    );
+    assert_eq!(policies["rocm"]["base_tile_tokens"], 1_024);
+    assert_eq!(policies["metal"]["base_tile_tokens"], 2_048);
+    assert_eq!(policies["vulkan"]["auto_dispatch"]["kind"], "never");
+    assert_eq!(policies["vulkan"]["base_tile_tokens"], 2_048);
 }
 
 #[test]
