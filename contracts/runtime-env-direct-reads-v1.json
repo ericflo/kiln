@@ -398,17 +398,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_FULL_ATTN_SCORE_BUDGET_MB",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
       "argument": "KILN_KEEP_PROJECTION_ORIGINALS",
       "argument_kind": "literal",
       "count": 3,
@@ -575,17 +564,6 @@
     {
       "api": "set_var",
       "argument": "KILN_FORCE_EAGER_DECODE",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_FULL_ATTN_SCORE_BUDGET_MB",
       "argument_kind": "literal",
       "count": 2,
       "language": "rust",
@@ -10752,8 +10730,8 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 628,
-    "process_mutation_entries": 299,
+    "process_mutation_call_sites": 625,
+    "process_mutation_entries": 297,
     "read_call_sites": 991,
     "read_entries": 677
   }

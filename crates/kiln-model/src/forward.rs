@@ -40819,13 +40819,7 @@ mod tests {
             batch_four_tile < batch_one_tile,
             "a fixed score budget must select a smaller tile at batch four, batch_one={batch_one_tile} batch_four={batch_four_tile}"
         );
-        unsafe {
-            std::env::set_var(
-                "KILN_FULL_ATTN_SCORE_BUDGET_MB",
-                MATERIALIZED_FULL_ATTN_SCORE_BUDGET_MB.to_string(),
-            );
-        }
-        let rocm_low_budget_long_prefix_tile = full_attn_adaptive_tile_len(
+        let rocm_low_budget_long_prefix_tile = full_attn_adaptive_tile_len_with_budget(
             &Device::Rocm(0),
             DType::BF16,
             1,
@@ -40834,6 +40828,7 @@ mod tests {
             16,
             DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE,
             2,
+            MATERIALIZED_FULL_ATTN_SCORE_BUDGET_MB,
         );
         assert!(
             rocm_low_budget_long_prefix_tile < DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE,
@@ -40843,13 +40838,7 @@ mod tests {
             rocm_low_budget_long_prefix_tile <= MATERIALIZED_FULL_ATTN_TILE_GRANULARITY,
             "long-prefix ROCm replay tiles must be allowed below the GDN chunk size under a low budget, got {rocm_low_budget_long_prefix_tile}"
         );
-        unsafe {
-            std::env::set_var(
-                "KILN_FULL_ATTN_SCORE_BUDGET_MB",
-                MATERIALIZED_FULL_ATTN_DYNAMIC_SCORE_BUDGET_MAX_MB.to_string(),
-            );
-        }
-        let rocm_high_budget_long_prefix_tile = full_attn_adaptive_tile_len(
+        let rocm_high_budget_long_prefix_tile = full_attn_adaptive_tile_len_with_budget(
             &Device::Rocm(0),
             DType::BF16,
             1,
@@ -40858,8 +40847,8 @@ mod tests {
             16,
             DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE,
             2,
+            MATERIALIZED_FULL_ATTN_DYNAMIC_SCORE_BUDGET_MAX_MB,
         );
-        unsafe { std::env::remove_var("KILN_FULL_ATTN_SCORE_BUDGET_MB") };
         assert!(
             rocm_high_budget_long_prefix_tile > rocm_low_budget_long_prefix_tile,
             "larger exact-attention score budgets should permit larger ROCm query tiles, low={rocm_low_budget_long_prefix_tile} high={rocm_high_budget_long_prefix_tile}"
