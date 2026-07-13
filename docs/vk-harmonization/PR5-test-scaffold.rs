@@ -1,4 +1,4 @@
-//! PR5 forward-harmonization test scaffold — **WIP / DROP-IN, DO NOT COMPILE AS-IS.**
+//! PR5 forward-harmonization test scaffold — **HISTORICAL, DO NOT COPY AS CURRENT TEST CODE.**
 //!
 //! Issue #1082, branch `feat/vk-tape-harmonization`. This file is a *spec
 //! companion* to `docs/vk-harmonization/PR5-spec.md`. It is NOT wired into any
@@ -7,6 +7,11 @@
 //! bounded tests (T1–T7) into `crates/kiln-model/tests/vk_tape_forward_parity.rs`
 //! and the reachability smoke (§5.3) into
 //! `crates/kiln-server/tests/real_model_integration.rs`.
+//!
+//! The `KILN_USE_TAPE_*` switches used when this scaffold was written have been
+//! removed without aliases or replacement fields. Current recorders are
+//! activated solely by `with_thread_local_tape`; an active scope must fail
+//! closed when a required recorder cannot accept its operation envelope.
 //!
 //! Every test is BOUNDED (single op / single tiny forward / epochs:1) per the
 //! host-safety ceiling (the dev host has hard-crashed on long runs). Each skips
@@ -31,8 +36,8 @@ use kiln_tensor::{DType, Device, Tensor};
 // compiled in (PR5-spec §2.1). Until then this `use` does not resolve — that is
 // expected; the module gate widen is part of PR5.
 use kiln_model::tape_forward::{
-    tape_forward_enabled, try_tape_cross_entropy_from_logits_kt, try_tape_gdn_recurrent_kt,
-    try_tape_rms_norm_kt, try_tape_sdpa_fallback_kt, with_active_tape, with_thread_local_tape,
+    try_tape_cross_entropy_from_logits_kt, try_tape_gdn_recurrent_kt, try_tape_rms_norm_kt,
+    try_tape_sdpa_fallback_kt, with_active_tape, with_thread_local_tape,
 };
 
 // ---------------------------------------------------------------------------
@@ -86,12 +91,6 @@ fn vk_tape_rms_norm_records_and_backprops() {
         eprintln!("[vk_tape] no Vulkan device — skipping rms_norm record test");
         return;
     }
-    // SAFETY: env tristate must be ON for recorders to fire (defaults on, but be
-    // explicit so the test is not order-dependent on another test's env read).
-    // tape_forward_enabled() is cached after first read (OnceLock); set before
-    // any other tape test in this binary touches it.
-    std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-
     let hidden = 8usize;
     let rows = 4usize;
     let x = vk_f32(ramp(rows * hidden, 1.0), vec![1, rows, hidden]).unwrap();
@@ -127,8 +126,6 @@ fn vk_tape_rms_norm_fd_parity() {
     if !vulkan_available() {
         return;
     }
-    std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-
     // Central FD vs analytic dL/dx for a scalar loss L = sum(rms_norm(x, w)).
     // eps = 1e-3, accept max_abs_err ≤ 1e-3 (PR5-spec §5.0).
     //
@@ -152,9 +149,6 @@ fn vk_tape_sdpa_fallback_records() {
     if !vulkan_available() {
         return;
     }
-    std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-
     // Tiny [B, nq/nkv, T, d] = [1, 2, 3, 4] q, [1,1,3,4] k/v (GQA 2->1), head_dim=4.
     let (b, nq, nkv, t, d) = (1usize, 2usize, 1usize, 3usize, 4usize);
     let q = vk_f32(ramp(b * nq * t * d, 1.0), vec![b, nq, t, d]).unwrap();
@@ -189,9 +183,6 @@ fn vk_tape_gdn_recurrent_records() {
     if !vulkan_available() {
         return;
     }
-    std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    std::env::set_var("KILN_USE_TAPE_GDN", "1");
-
     let _backend = backend::for_device_kt(&vk());
     // Build tiny head-FIRST [B, nv, T, dv] q/k/v/beta/g + recurrent_state on
     // Vulkan, then:
@@ -213,8 +204,6 @@ fn vk_tape_cross_entropy_records() {
     if !vulkan_available() {
         return;
     }
-    std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-
     let (t, vocab) = (3usize, 8usize); // [1, T, V]
     let logits = vk_f32(ramp(t * vocab, 1.0), vec![1, t, vocab]).unwrap();
     let input_ids: Vec<u32> = vec![1, 2, 3];
@@ -272,9 +261,9 @@ fn vk_device_agnostic_recorders_still_record() {
     if !vulkan_available() {
         return;
     }
-    std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     // Smoke each of try_tape_{silu,add,matmul,embedding,swiglu,mul,rope}_kt on a
-    // tiny Vulkan input inside a tape scope and assert Some + a recorded node.
+    // tiny Vulkan input inside `with_thread_local_tape` and assert Some plus a
+    // recorded node.
     // These have NO device gate (tape_forward.rs: silu:143, add:161, rope:184,
     // matmul:384, embedding:410, swiglu:443, mul:470) so they should already
     // record once the module compiles + the kt ops have vulkan_fwd. WIP body.

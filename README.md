@@ -761,6 +761,65 @@ ownership; it is not silently resumed under a different update rule. The old
 `KILN_BF16_STOCHASTIC_ROUND` and optimizer fallback environment switches have
 no replacements and should be removed from service definitions.
 
+The kt autograd tape is likewise execution authority, not configuration. SFT,
+GRPO, and OPD open an internal tape scope only around the forward/backward work
+that must record gradients; requests and operators cannot open, close, or
+partially disable it. Outside that scope, ordinary inference keeps its
+forward-only fast paths, including GDN chunkwise recurrence and CUDA's
+weight-aware embedding lookup. Inside it, a kernel may run only when its
+backward remains connected to the same tape; debug tuning is not allowed to
+sever the graph or select a different update rule.
+
+The former `KILN_USE_TAPE_FORWARD`, `KILN_USE_TAPE_FLASH_ATTN`,
+`KILN_USE_TAPE_SDPA`, `KILN_USE_TAPE_LORA_ADD`, `KILN_USE_TAPE_GDN`,
+`KILN_USE_TAPE_GDN_CONV`, `KILN_USE_TAPE_GDN_QK_NORM`, and
+`KILN_USE_TAPE_GDN_GATED_NORM` inputs were removed without aliases or
+replacement fields. Delete them from launch scripts. Because there is no typed
+field, the mechanical environment-name rule derives no replacement. This is a
+static routing and admission contract; accelerator qualification still requires
+the platform-specific evidence described in the native profile.
+
+Native training treats LoRA A/B tensors as the only trainable model leaves.
+Embedding tables, base projection matrices, RMSNorm and gated-RMSNorm weights,
+GDN gate parameters, MTP projection weights, and SFT/GRPO/OPD loss heads are
+saved constants, not differentiable tape inputs. Their backward operators
+produce only the activation gradients and LoRA gradients needed upstream: they
+do not allocate, retain, deposit, or run matrix products for frozen-weight
+gradients. An embedding lookup therefore starts an activation leaf without
+recording token IDs or the table, a frozen normalization returns only its input
+gradients, and a frozen loss head returns only the hidden-state gradient.
+
+The split Q/gate projection follows the same rule without changing parameter
+identity. Each output slice records the original full LoRA A/B IDs, pads its B
+contribution back to the full parameter shape, and accumulates both chunks
+before the optimizer boundary. Tape-aware reshapes preserve the graph after the
+split. Temporary base-weight or LoRA slices are never optimizer leaves. These
+ownership rules remove frozen dWeight GEMMs and multi-GiB frozen gradient
+residency; they are correctness and memory invariants, not an accelerator
+throughput claim.
+
+The optimizer consumes an exact LoRA gradient set. Before any parameter,
+moment, momentum, or step counter changes, observed tensor IDs must equal the
+configured trainable leaves and every gradient must match its leaf's shape,
+backward dtype, and master device and contain only finite values. Missing or
+unknown entries fail the step; an all-zero but otherwise valid gradient is not
+mistaken for a disconnected graph. Checkpointed reverse passes enforce the
+exact leaves for each layer range. The tape bridge produces one accumulated
+entry per leaf, including when distinct recorded inputs contribute to that
+leaf. Every registered differentiable input must contribute a gradient before
+that reduction, so one connected clone cannot hide another disconnected use.
+Sliced output projections assemble their chunk gradients back into the
+original full LoRA leaf rather than exposing temporary slice IDs. A checkpoint
+range with no configured LoRA leaves accepts only an empty gradient set, and
+the merge rejects duplicate leaf IDs across disjoint segments. GRPO
+accumulation checks identity and metadata as it combines
+completions, then performs one finite-value scan on the final accumulated set at
+the optimizer boundary instead of synchronizing every leaf twice per
+completion. CUDA, ROCm, and Vulkan use backend finite reducers; Metal currently
+uses a synchronized full-gradient host scan at this boundary until a native
+Metal reducer is qualified. That fallback preserves correctness but is not a
+large-batch performance claim.
+
 Resume also re-applies the current per-workload and resident optimizer-tuple
 gates before materializing the checkpoint or corpus. Exact backend/device,
 base/LoRA precision, optimizer kind/state, rank, serving-profile ownership,

@@ -51,7 +51,8 @@
     feature = "cuda",
     feature = "metal",
     feature = "vulkan",
-    feature = "rocm"
+    feature = "rocm",
+    test
 ))]
 pub mod tape_bridge;
 

@@ -1,5 +1,12 @@
 # Issue #1082 — Increment 0 (kt-native training substrate) mergeable decomposition (2026-05-29)
 
+> **Historical snapshot, not current operating guidance.** This document records
+> migration state from May 2026. The `KILN_USE_TAPE_*` and
+> `KILN_USE_TAPE_AUTHORITATIVE` switches mentioned below were removed without
+> aliases or replacement fields. Current GPU training uses an internal tape
+> scope as its sole routing authority. See [Configuration](./CONFIGURATION.md)
+> and [Native SFT Profile](./NATIVE_SFT_PROFILE.md) for current behavior.
+
 > Map+synthesis of the kiln-train grad-delivery/optimizer-keying surface. 6-PR sequence to move off candle GradStore/Var/TensorId. PR1 (moments re-key) landed first.
 
 All anchor points confirmed exactly as the maps describe. The `moments` re-keying is provably isolated: `OptimizerState.moments` is read at exactly two key-bearing sites (`7007`, `7324`), written at one (`785`), and iterated key-agnostically at three (`827`, `841`, `859`). The `sgd_step` and `sgd_step_from_map` paths don't touch moments. The synthesis is complete.

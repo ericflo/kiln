@@ -25,6 +25,33 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn collect_rust_sources(path: &Path, sources: &mut Vec<PathBuf>) {
+    let entries = fs::read_dir(path)
+        .unwrap_or_else(|error| panic!("should read source directory {}: {error}", path.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!("should read source entry under {}: {error}", path.display())
+        });
+        let entry_path = entry.path();
+        let file_type = entry.file_type().unwrap_or_else(|error| {
+            panic!(
+                "should read file type for {}: {error}",
+                entry_path.display()
+            )
+        });
+        if file_type.is_dir() {
+            collect_rust_sources(&entry_path, sources);
+        } else if file_type.is_file()
+            && entry_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                == Some("rs")
+        {
+            sources.push(entry_path);
+        }
+    }
+}
+
 fn assert_supplemental_command(gate: &Value, scope_fragment: &str, command_fragment: &str) {
     let supplemental_commands = gate["supplemental_commands"]
         .as_array()
@@ -6649,6 +6676,84 @@ fn forward_nonpaged_full_attention_mlp_routes_inference_through_backend() {
             && transformer_block.contains("tape_scope_active"),
         "nonpaged full-attention inference must route MLP projections through LinearBackend while preserving the tape-training route"
     );
+}
+
+#[test]
+fn tape_routing_is_owned_only_by_the_active_training_scope_contract() {
+    let root = workspace_root();
+    let forward_source = fs::read_to_string(root.join("crates/kiln-model/src/forward.rs"))
+        .expect("forward source should be readable");
+
+    let chunkwise_recurrence = source_between(
+        &forward_source,
+        "fn gdn_chunkwise_recurrence(",
+        "fn gdn_chunkwise_recurrence_head_last_full_chunks(",
+    );
+    assert!(
+        chunkwise_recurrence
+            .contains("let tape_recording_active = crate::tape_forward::tape_scope_active();"),
+        "GDN chunkwise inference routing should be disabled only by an active internal training tape scope"
+    );
+    assert!(
+        !chunkwise_recurrence.contains("tape_forward_enabled")
+            && !chunkwise_recurrence.contains("KILN_USE_TAPE_"),
+        "GDN chunkwise inference routing must not consult a process-global tape switch"
+    );
+
+    let cuda_weight_aware_embedding = source_between(
+        &forward_source,
+        "fn try_kt_embedding_lookup_from_weights(",
+        "fn raw_embedding_lookup_from_weights(",
+    );
+    assert!(
+        cuda_weight_aware_embedding.contains("crate::tape_forward::tape_scope_active()"),
+        "CUDA weight-aware embedding should defer to the recorder only while an internal training tape scope is active"
+    );
+    for forbidden in ["tape_forward_enabled", "KILN_USE_TAPE_", "std::env::var"] {
+        assert!(
+            !cuda_weight_aware_embedding.contains(forbidden),
+            "CUDA weight-aware embedding must not consult global tape state: {forbidden}"
+        );
+    }
+
+    let removed_correctness_switches = [
+        "KILN_USE_TAPE_FORWARD",
+        "KILN_USE_TAPE_FLASH_ATTN",
+        "KILN_USE_TAPE_SDPA",
+        "KILN_USE_TAPE_LORA_ADD",
+        "KILN_USE_TAPE_GDN",
+        "KILN_USE_TAPE_GDN_CONV",
+        "KILN_USE_TAPE_GDN_QK_NORM",
+        "KILN_USE_TAPE_GDN_GATED_NORM",
+    ];
+    let mut production_sources = Vec::new();
+    for crate_entry in
+        fs::read_dir(root.join("crates")).expect("crates directory should be readable")
+    {
+        let crate_path = crate_entry
+            .expect("crate directory entry should be readable")
+            .path();
+        let source_path = crate_path.join("src");
+        if source_path.is_dir() {
+            collect_rust_sources(&source_path, &mut production_sources);
+        }
+    }
+    production_sources.sort();
+    for source_path in production_sources {
+        let source = fs::read_to_string(&source_path).unwrap_or_else(|error| {
+            panic!(
+                "production Rust source {} should be readable: {error}",
+                source_path.display()
+            )
+        });
+        for removed in removed_correctness_switches {
+            assert!(
+                !source.contains(removed),
+                "removed tape correctness switch {removed} must not remain in production source {}",
+                source_path.display()
+            );
+        }
+    }
 }
 
 #[test]

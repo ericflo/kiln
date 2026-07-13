@@ -73,6 +73,53 @@ impl BackwardOp for MatmulBackward {
     }
 }
 
+/// Input-only adjoint for `out = activation @ frozen_weight`.
+///
+/// LoRA training differentiates the activation but never the resident base
+/// matrix. Recording that matrix as a tape input would run the much larger
+/// `d_weight = activation^T @ grad_output` GEMM and retain a gradient the
+/// optimizer cannot consume. This op saves the frozen right-hand side only as
+/// backward data and emits `d_activation = grad_output @ frozen_weight^T`.
+#[derive(Debug)]
+pub struct FrozenRhsMatmulBackward {
+    /// Saved frozen right-hand side from the forward pass, shape `[..., K, N]`.
+    pub b: Tensor,
+}
+
+impl BackwardOp for FrozenRhsMatmulBackward {
+    fn name(&self) -> &'static str {
+        "frozen_rhs_matmul_backward"
+    }
+
+    fn input_count(&self) -> usize {
+        1
+    }
+
+    fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
+        let target_device = grad_output.device();
+        let b = if self.b.device() == target_device {
+            self.b.clone()
+        } else {
+            self.b.to_device(target_device)?
+        };
+        if b.rank() < 2 {
+            bail!("FrozenRhsMatmulBackward: saved weight must have rank >= 2");
+        }
+        if grad_output.rank() != b.rank() {
+            bail!(
+                "FrozenRhsMatmulBackward: grad_output rank {} != saved weight rank {}",
+                grad_output.rank(),
+                b.rank()
+            );
+        }
+        Ok(vec![Some(matmul_rhs_transposed(grad_output, &b)?)])
+    }
+
+    fn requires_input(&self, _idx: usize) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +157,22 @@ mod tests {
         assert_eq!(db.shape(), &[3, 2]);
         assert_eq!(read_f32(da), vec![3.0, 7.0, 11.0, 3.0, 7.0, 11.0]);
         assert_eq!(read_f32(db), vec![5.0, 5.0, 7.0, 7.0, 9.0, 9.0]);
+    }
+
+    #[test]
+    fn frozen_rhs_backward_matches_full_matmul_input_gradient_only() {
+        let a = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let b = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
+        let dc = Tensor::from_slice(&[1.0f32, 1.0, 1.0, 1.0], vec![2, 2]).unwrap();
+
+        let full = MatmulBackward { a, b: b.clone() }.apply(&dc).unwrap();
+        let frozen = FrozenRhsMatmulBackward { b }.apply(&dc).unwrap();
+
+        assert_eq!(frozen.len(), 1);
+        assert_eq!(
+            read_f32(frozen[0].as_ref().expect("activation gradient")),
+            read_f32(full[0].as_ref().expect("full activation gradient"))
+        );
     }
 
     #[test]
@@ -198,5 +261,12 @@ mod tests {
         assert_eq!(bo.input_count(), 2);
         assert!(bo.requires_input(0));
         assert!(bo.requires_input(1));
+
+        let frozen = FrozenRhsMatmulBackward {
+            b: Tensor::from_slice(&[1.0f32, 1.0, 1.0, 1.0], vec![2, 2]).unwrap(),
+        };
+        assert_eq!(frozen.name(), "frozen_rhs_matmul_backward");
+        assert_eq!(frozen.input_count(), 1);
+        assert!(!frozen.requires_input(0));
     }
 }

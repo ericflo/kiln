@@ -18,6 +18,8 @@
 //!      `kiln_block_reduce_sum`) is likewise a fixed-128 block reduction; the
 //!      gated-RMSNorm here exercises the same wave-agnostic shared-memory tree
 //!      pattern that fix relies on.
+//!      The frozen-weight backward is also checked for BF16 and F32 weights;
+//!      those adapter-training entries return `dx`/`dz` without dWeight work.
 //!
 //! The orchestrator runs this under BOTH wave32 and wave64 (KILN_ROCM_WAVE64);
 //! both must match the CPU reference. Skips cleanly when no AMD GPU / HIP
@@ -28,7 +30,9 @@ use half::bf16;
 
 use kiln_gdn_kernel::{
     gdn_forward_substitution_f32_kt, gdn_forward_substitution_kt, gdn_gated_rms_norm_bf16_kt,
-    gdn_gated_rms_norm_supports_kt, gdn_solve_tri_transpose_f32_kt,
+    gdn_gated_rms_norm_bwd_bf16_f32_weight_frozen_kt, gdn_gated_rms_norm_bwd_bf16_frozen_weight_kt,
+    gdn_gated_rms_norm_bwd_supports_kt, gdn_gated_rms_norm_supports_kt,
+    gdn_solve_tri_transpose_f32_kt,
 };
 use kiln_tensor::{DType, Tensor};
 
@@ -367,6 +371,55 @@ fn gated_rms_ref(
     out
 }
 
+/// CPU F32 reference for the activation-only backward used when the RMSNorm
+/// weight is frozen. The kernel rounds both returned gradients to BF16.
+fn gated_rms_frozen_bwd_ref(
+    grad_out: &[bf16],
+    x: &[bf16],
+    z: &[bf16],
+    weight: &[f32],
+    rows: usize,
+    hidden: usize,
+    eps: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    let mut dx = vec![0.0f32; rows * hidden];
+    let mut dz = vec![0.0f32; rows * hidden];
+    for r in 0..rows {
+        let row = r * hidden;
+        let mut sum_sq = 0.0f32;
+        for h in 0..hidden {
+            let x_val = x[row + h].to_f32();
+            sum_sq += x_val * x_val;
+        }
+        let rms_inv = (sum_sq / hidden as f32 + eps).sqrt().recip();
+
+        let mut s = 0.0f32;
+        for h in 0..hidden {
+            let idx = row + h;
+            let d_normed = grad_out[idx].to_f32() * silu(z[idx].to_f32());
+            s += d_normed * x[idx].to_f32() * weight[h];
+        }
+
+        let rms_inv3 = rms_inv * rms_inv * rms_inv;
+        for h in 0..hidden {
+            let idx = row + h;
+            let x_val = x[idx].to_f32();
+            let z_val = z[idx].to_f32();
+            let dout = grad_out[idx].to_f32();
+            let sig = sigmoid(z_val);
+            let gate = z_val * sig;
+            let d_normed = dout * gate;
+            let normed = x_val * weight[h] * rms_inv;
+            let silu_grad = sig * (1.0 + z_val * (1.0 - sig));
+            let dx_f32 = d_normed * weight[h] * rms_inv - x_val * s * (rms_inv3 / hidden as f32);
+            let dz_f32 = dout * normed * silu_grad;
+            dx[idx] = bf16::from_f32(dx_f32).to_f32();
+            dz[idx] = bf16::from_f32(dz_f32).to_f32();
+        }
+    }
+    (dx, dz)
+}
+
 #[test]
 fn rocm_gdn_gated_rms_norm_parity_sweep() {
     if !rocm_available() {
@@ -411,6 +464,110 @@ fn rocm_gdn_gated_rms_norm_parity_sweep() {
             &want,
             5e-3,
             &format!("gated_rms rows={rows} hidden={hidden}"),
+        );
+    }
+}
+
+#[test]
+fn rocm_gdn_gated_rms_norm_frozen_weight_backward_parity() {
+    if !rocm_available() {
+        eprintln!(
+            "ROCm not available; skipping rocm_gdn_gated_rms_norm_frozen_weight_backward_parity"
+        );
+        return;
+    }
+
+    let hidden = 128usize;
+    let eps = 1e-6f32;
+    for &rows in &[1usize, 65] {
+        let x_host = pattern_bf16(rows * hidden, 0x400 + rows as u64);
+        let z_host: Vec<bf16> = pattern(rows * hidden, 0x500 + rows as u64)
+            .into_iter()
+            .map(|v| bf16::from_f32(v * 2.0))
+            .collect();
+        let grad_out_host = pattern_bf16(rows * hidden, 0x600 + rows as u64);
+        let weight_f32: Vec<f32> = pattern(hidden, 0x700 + rows as u64)
+            .into_iter()
+            .map(|v| v + 1.0)
+            .collect();
+        let weight_bf16: Vec<bf16> = weight_f32.iter().copied().map(bf16::from_f32).collect();
+        let weight_bf16_f32: Vec<f32> = weight_bf16.iter().map(|v| v.to_f32()).collect();
+
+        let x = rocm_bf16(&x_host, vec![rows, hidden]);
+        let z = rocm_bf16(&z_host, vec![rows, hidden]);
+        let grad_out = rocm_bf16(&grad_out_host, vec![rows, hidden]);
+        let weight = rocm_bf16(&weight_bf16, vec![hidden]);
+        let weight_f32_tensor = rocm_f32(&weight_f32, vec![hidden]);
+
+        assert!(gdn_gated_rms_norm_bwd_supports_kt(
+            &grad_out, &x, &z, &weight
+        ));
+        assert!(gdn_gated_rms_norm_bwd_supports_kt(
+            &grad_out,
+            &x,
+            &z,
+            &weight_f32_tensor
+        ));
+
+        let bf16_grads =
+            gdn_gated_rms_norm_bwd_bf16_frozen_weight_kt(&grad_out, &x, &z, &weight, eps)
+                .expect("frozen BF16-weight backward");
+        let f32_grads = gdn_gated_rms_norm_bwd_bf16_f32_weight_frozen_kt(
+            &grad_out,
+            &x,
+            &z,
+            &weight_f32_tensor,
+            eps,
+        )
+        .expect("frozen F32-weight backward");
+
+        assert_eq!(bf16_grads.dx.shape(), &[rows, hidden]);
+        assert_eq!(bf16_grads.dz.shape(), &[rows, hidden]);
+        assert_eq!(f32_grads.dx.shape(), &[rows, hidden]);
+        assert_eq!(f32_grads.dz.shape(), &[rows, hidden]);
+
+        let (want_dx_bf16, want_dz_bf16) = gated_rms_frozen_bwd_ref(
+            &grad_out_host,
+            &x_host,
+            &z_host,
+            &weight_bf16_f32,
+            rows,
+            hidden,
+            eps,
+        );
+        let (want_dx_f32, want_dz_f32) = gated_rms_frozen_bwd_ref(
+            &grad_out_host,
+            &x_host,
+            &z_host,
+            &weight_f32,
+            rows,
+            hidden,
+            eps,
+        );
+
+        assert_close(
+            &read_bf16_f32(&bf16_grads.dx),
+            &want_dx_bf16,
+            6e-3,
+            &format!("frozen gated-rms BF16-weight dx rows={rows}"),
+        );
+        assert_close(
+            &read_bf16_f32(&bf16_grads.dz),
+            &want_dz_bf16,
+            6e-3,
+            &format!("frozen gated-rms BF16-weight dz rows={rows}"),
+        );
+        assert_close(
+            &read_bf16_f32(&f32_grads.dx),
+            &want_dx_f32,
+            6e-3,
+            &format!("frozen gated-rms F32-weight dx rows={rows}"),
+        );
+        assert_close(
+            &read_bf16_f32(&f32_grads.dz),
+            &want_dz_f32,
+            6e-3,
+            &format!("frozen gated-rms F32-weight dz rows={rows}"),
         );
     }
 }

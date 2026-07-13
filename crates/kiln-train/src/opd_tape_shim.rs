@@ -33,8 +33,8 @@
 //!   ([`kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_bwd_kt`]).
 //!   The production candle-autograd path.
 //! - **kt-tape adapters** ([`try_tape_opd_per_position_cuda`],
-//!   [`try_tape_opd_scalar_mean_cuda_kt`]) — `KILN_USE_TAPE_FORWARD`-gated
-//!   adapters that record the OPD backward onto a thread-local
+//!   [`try_tape_opd_scalar_mean_cuda_kt`]) — active-scope adapters that record
+//!   the OPD backward onto a thread-local
 //!   `kiln_autograd::Tape` via the kernel crate's kt-tape entries
 //!   ([`kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape`]
 //!   / [`..._via_kt_tape`]).
@@ -81,8 +81,8 @@ use anyhow::{Context, Result};
 ///   lineage — the gradient lives on the tape); the backward node was recorded
 ///   on the active thread-local tape and the output IO mapping + retained
 ///   output were registered for the bridge.
-/// * `Ok(None)` — `KILN_USE_TAPE_FORWARD` was off, no thread-local tape scope is
-///   active, the active set was empty, or the kt envelope rejected the inputs.
+/// * `Ok(None)` — no thread-local tape scope is active, the active set was
+///   empty, or the kt envelope rejected the inputs.
 ///   The caller surfaces this as a clean error (the dispatch should not have
 ///   selected this path off the envelope).
 /// * `Err(...)` — a kt-tape forward error (envelope OK but the FFI call failed).
@@ -109,10 +109,10 @@ pub fn try_tape_opd_scalar_mean_cuda_kt(
     label_mask: &[bool],
     top_k: usize,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    use kiln_autograd::{Tape, tape_forward_enabled, with_active_tape};
+    use kiln_autograd::{Tape, tape_scope_active, with_active_tape};
     use kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape;
 
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
 
@@ -442,9 +442,9 @@ pub fn try_tape_opd_scalar_mean_vulkan_kt(
     label_mask: &[bool],
     top_k: usize,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    use kiln_autograd::{Tape, tape_forward_enabled, with_active_tape};
+    use kiln_autograd::{Tape, tape_scope_active, with_active_tape};
 
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !matches!(hidden.device(), kiln_tensor::Device::Vulkan(_))
@@ -495,8 +495,10 @@ pub fn try_tape_opd_scalar_mean_vulkan_kt(
 /// same closed form the GRPO fused root uses (`(λ/|O|)·(softmax − onehot)
 /// @ head_tᵀ` at env rows, zero elsewhere).
 ///
-/// Returns `None` (compose nothing) when the spec selects no env rows or
-/// λ = 0 — the OPD loss then trains exactly as before.
+/// Returns `None` (compose nothing) only when the spec selects no env rows or
+/// λ = 0, so the OPD loss trains exactly as before. If the term has a
+/// contribution but no active tape is available, this fails closed instead of
+/// returning an unrecorded composed value or silently dropping ECHO.
 #[cfg(any(
     feature = "cuda",
     feature = "metal",
@@ -542,13 +544,9 @@ pub fn try_tape_opd_echo_env_compose_kt(
             }),
         );
         composed.clone()
-    });
-    match recorded {
-        Some(composed) => Ok(Some((composed, env_ce_val))),
-        // No active tape scope — the caller's loss is already un-recorded;
-        // don't pretend the term combined.
-        None => Ok(None),
-    }
+    })
+    .context("opd echo compose: a nonzero ECHO contribution requires an active tape scope")?;
+    Ok(Some((recorded, env_ce_val)))
 }
 
 #[cfg(any(
@@ -649,5 +647,67 @@ pub(crate) mod test_support {
             device,
             chunk_size,
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+mod recorder_contract_tests {
+    use super::*;
+
+    fn fixture() -> (
+        kiln_tensor::Tensor,
+        kiln_tensor::Tensor,
+        kiln_tensor::Tensor,
+        Vec<u32>,
+        crate::grpo_tape_shim::EchoEnvSpec,
+        kiln_tensor::Device,
+    ) {
+        let device = kiln_tensor::Device::Cpu;
+        let loss = kiln_tensor::Tensor::from_slice(&[1.0f32], Vec::<usize>::new())
+            .expect("scalar OPD loss");
+        let hidden =
+            kiln_tensor::Tensor::from_slice(&[0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6], vec![1, 3, 2])
+                .expect("hidden fixture");
+        let head_t = kiln_tensor::Tensor::from_slice(
+            &[0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            vec![2, 5],
+        )
+        .expect("head fixture");
+        let input_ids = vec![0, 1, 2];
+        let spec = crate::grpo_tape_shim::EchoEnvSpec {
+            env_mask: vec![false, true, false],
+            total_obs_len: 1,
+            lambda: 0.1,
+        };
+        (loss, hidden, head_t, input_ids, spec, device)
+    }
+
+    #[test]
+    fn nonzero_echo_contribution_requires_an_active_tape() {
+        let (loss, hidden, head_t, input_ids, spec, device) = fixture();
+        let error = try_tape_opd_echo_env_compose_kt(
+            &loss, &hidden, &head_t, &input_ids, &spec, 2, &device,
+        )
+        .expect_err("a requested ECHO contribution must not disappear outside a tape scope");
+        assert!(error.to_string().contains("requires an active tape scope"));
+    }
+
+    #[test]
+    fn zero_echo_contribution_remains_a_valid_noop_without_a_tape() -> Result<()> {
+        let (loss, hidden, head_t, input_ids, mut spec, device) = fixture();
+        spec.lambda = 0.0;
+        assert!(
+            try_tape_opd_echo_env_compose_kt(
+                &loss, &hidden, &head_t, &input_ids, &spec, 2, &device,
+            )?
+            .is_none()
+        );
+        Ok(())
     }
 }

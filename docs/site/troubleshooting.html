@@ -279,6 +279,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#wrong-binary-or-gpu-path">GPU path</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#memory-budget-or-sampler">Memory budget</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#streaming-prefill-pauses-or-oom">Prefill pauses/OOM</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#tape-scope-or-removed-switches">Training tape</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#model-weights-not-found">Model weights</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#health-not-green">Health</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#long-prefill-timeouts">Long-prefill timeouts</a>
@@ -506,6 +507,42 @@ curl -s http://localhost:8420/metrics \
           replay use 65536. Forcing <code>enabled</code> on CPU or Vulkan is an explicit diagnostic, not
           proof that the route is supported or faster. Qualify ROCm and Vulkan on the local Strix Halo,
           CUDA on the named CUDA machines, and Metal on the Mac; hosted GPU CI is not hardware evidence.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <h2 id="tape-scope-or-removed-switches" class="text-xl font-semibold mb-4">Tape switches do not isolate training or inference</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>An old launch script sets <code>KILN_USE_TAPE_*</code>, ordinary inference unexpectedly avoids a fast path, a workload reports an unavailable tape/backward route, a step fails with an exact LoRA gradient error, or a profile shows frozen base-weight gradients or dWeight GEMMs.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li>Inspect <code>/v1/config</code> at <code>training.optimizer_support.workloads</code>. That per-workload result, not a shell variable, is the static training-substrate authority.</li>
+              <li>Search the service definition for <code>KILN_USE_TAPE_FORWARD</code>, <code>KILN_USE_TAPE_FLASH_ATTN</code>, <code>KILN_USE_TAPE_SDPA</code>, <code>KILN_USE_TAPE_LORA_ADD</code>, and the four <code>KILN_USE_TAPE_GDN*</code> names.</li>
+              <li>Read the complete gradient error. A missing registered input indicates a disconnected use even if another clone reached the same leaf. Missing or unknown leaf IDs indicate graph/deposit drift, including a temporary slice ID that was not assembled into its original full leaf. Shape, backward dtype, or master-device mismatches indicate producer drift; NaN or infinity indicates numerical failure. A finite all-zero gradient is accepted, and a checkpoint range with no configured leaves must return an empty set.</li>
+              <li>Inspect tape inputs and profiler shapes. Only LoRA A/B are trainable model leaves. Embedding tables, base projection matrices, normalization weights, GDN gate parameters, MTP projections, and loss heads must be saved constants. Their backward routes must not emit a frozen-weight gradient; split Q/gate chunks must deposit under the original full A/B IDs and retain tape-aware reshapes.</li>
+              <li>On Metal, a synchronized full-gradient host scan at the optimizer boundary is the current correctness fallback until a native finite reducer is qualified. Profile it as an expected synchronization cost; do not bypass the check.</li>
+              <li>For an inference pause, use actor, prefill, synchronization, and memory metrics. A historical tape variable is not evidence that a tape scope exists.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix</div>
+            <p>Delete all eight names from launch scripts; they were removed without aliases or replacement fields. Kiln activates its required tape solely through an internal training scope. Ordinary inference opens no such scope and retains forward-only paths, including GDN chunkwise recurrence and CUDA&rsquo;s weight-aware embedding lookup. Fix the producer named by an exact-gradient rejection. If a frozen gradient appears, route that operation through its frozen-input backward rather than filtering the result at the optimizer. No configuration bypass is supported.</p>
+          </div>
+        </div>
+        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
+  | jq '.training.optimizer_support.workloads'
+
+env | grep -E '^KILN_USE_TAPE_(FORWARD|FLASH_ATTN|SDPA|LORA_ADD|GDN)'</code></pre>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Debug or performance tuning may choose only graph-preserving implementations while the internal
+          scope is active; it must not sever the gradient graph or change the update rule. The source
+          contract that enforces scope ownership is portable static evidence, not hardware qualification.
+          Validate numerical correctness, latency, memory, cancellation, and stability on the named ROCm,
+          Vulkan, CUDA, or Metal machine before making a backend claim.
         </p>
       </article>
 

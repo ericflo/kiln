@@ -1,5 +1,12 @@
 # Candle removal status — 2026-05-28 (pm snapshot)
 
+> **Historical snapshot, not current operating guidance.** This document records
+> migration state from May 2026. The `KILN_USE_TAPE_*` and
+> `KILN_USE_TAPE_AUTHORITATIVE` switches mentioned below were removed without
+> aliases or replacement fields. Current GPU training uses an internal tape
+> scope as its sole routing authority. See [Configuration](./CONFIGURATION.md)
+> and [Native SFT Profile](./NATIVE_SFT_PROFILE.md) for current behavior.
+
 Quick-reference dashboard so a fresh agent can read current state without
 scanning 110 KB of issue #1082 body + 7 STOP docs. Companion to
 [`CANDLE_REMOVAL_PLAN.md`](./CANDLE_REMOVAL_PLAN.md) — the plan is the

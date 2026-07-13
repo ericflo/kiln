@@ -38,11 +38,8 @@ kiln-vulkan-kernel = { workspace = true, optional = true }
 kiln-hip = { workspace = true, optional = true }
 kiln-graph = { workspace = true }
 kiln-graph-metal = { workspace = true, optional = true }
-# Phase 6a/CP-4 (#1082): experimental tape-forward path under
-# `KILN_USE_TAPE_FORWARD`. Optional so non-cuda builds don't pull in
-# the autograd substrate; gated on `cuda` since the only kt-tape
-# entry kiln-model can wire today
-# (`fused_rmsnorm_via_kt_tape`) is CUDA-only.
+# Tape-forward autograd substrate. Optional so CPU-only builds do not pull in
+# GPU tape dependencies; enabled by each GPU training backend feature below.
 kiln-autograd = { workspace = true, optional = true }
 # Phase 7 migration adapter: pure `candle <-> kt` Device/DType enum
 # mapping is always-on so the kt-typed Device/DType wrappers on

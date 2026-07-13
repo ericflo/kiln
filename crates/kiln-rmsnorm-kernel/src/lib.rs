@@ -4,7 +4,7 @@
 //!
 //! 1. [`fused_rmsnorm_kt`] / [`fused_rmsnorm_backward_kt`] — Phase 10
 //!    long-context training path: Qwen3.5-style RMSNorm
-//!    `(1 + w) * x * rsqrt(mean(x^2) + eps)` plus a manual CUDA backward
+//!    `(1 + w) * x * rsqrt(mean(x^2) + eps)` plus a manual GPU backward
 //!    kernel. The candle-autograd shim that wires these through
 //!    `KtForwardOp2` (`fused_rmsnorm_via_kt_forward_op`) moved to
 //!    `kiln-model::rmsnorm_candle_shim` in (#1082) so this crate stays
@@ -13,7 +13,9 @@
 //!    candle ops behind `kiln-model::forward::rms_norm`. Used by
 //!    `kiln/norm/pre_attn` and `kiln/norm/pre_mlp`. For Qwen3.5-4B at
 //!    T=8192 this avoids ~32 × 2 saved F32 RMSNorm intermediates per
-//!    training segment.
+//!    training segment. [`fused_rmsnorm_frozen_weight_via_kt_tape`] is the
+//!    LoRA-training path: it records only the activation and computes no
+//!    normalization-weight gradient.
 //! 2. [`fused_l2_qk_norm_kt`] — fused L2-norm(Q) + scale(Q) + L2-norm(K) used
 //!    by GDN linear attention. Replaces the ~11 candle ops behind the
 //!    `kiln/gdn/qk_norm` block in `forward.rs`.
@@ -56,10 +58,11 @@
 //! # APIs
 //!
 //! - [`fused_rmsnorm_kt`] / [`fused_rmsnorm_backward_kt`] — kt-typed
-//!   RMSNorm forward + manual CUDA backward. The autograd-aware shim
-//!   (`fused_rmsnorm_via_kt_forward_op`, uses `KtForwardOp2` when grads
-//!   are propagated) and its `(x, weight)` capability check (`supports`)
-//!   moved to `kiln-model::rmsnorm_candle_shim` in (#1082).
+//!   RMSNorm forward + trainable-weight GPU backward.
+//! - [`fused_rmsnorm_backward_dx_kt`] /
+//!   [`fused_rmsnorm_frozen_weight_via_kt_tape`] — dx-only backward and
+//!   tape integration for a frozen normalization weight.
+//! - [`fused_rmsnorm_via_kt_tape`] — trainable-weight tape integration.
 //! - [`supports_rmsnorm_kt`] — kt-typed `(x, weight)` capability check for
 //!   the RMSNorm kernel.
 //! - [`fused_l2_qk_norm_kt`] — kt-typed wrapper around the GDN QK fused-norm
@@ -71,16 +74,15 @@
 //! # Envelope
 //!
 //! - bf16 activations, bf16 weights, bf16 outputs.
-//! - Contiguous CUDA tensors only.
+//! - Contiguous CUDA or ROCm tensors only.
 //! - Last dim (`hidden`) must be <= 8192 for expanded QK norm; exactly 128
 //!   for the GQA head-expand fast path.
 //! - `eps` is F32 — kiln uses 1e-6 for both kernels.
 //!
 //! Out of scope: fused GEMM prologue, non-bf16 dtypes, non-contiguous input.
 //! Backward currently only supported for the RMSNorm kernel (via
-//! [`fused_rmsnorm_backward_kt`], wired into autograd by the
-//! `kiln-model::rmsnorm_candle_shim` `KtForwardOp2` shim); the QK-norm
-//! kernels remain forward-only.
+//! [`fused_rmsnorm_backward_kt`] and the two tape entries); the QK-norm kernels
+//! remain forward-only.
 
 // (#1082) candle-drop: this crate is now candle-free. The candle-typed
 // glue (the `*_storage` / `matmul_f32_bf16w` / `causal_depthwise_conv1d_f32*`
@@ -114,17 +116,21 @@ pub use kt_api::{
     causal_depthwise_conv1d_bwd_input_kt, causal_depthwise_conv1d_bwd_state_kt,
     causal_depthwise_conv1d_bwd_weight_kt, causal_depthwise_conv1d_inplace_kt,
     causal_depthwise_conv1d_kt, f32_to_bf16_kt, fused_l2_qk_norm_gqa_kt, fused_l2_qk_norm_kt,
-    fused_mlp_silu_mul_kt, fused_mlp_silu_mul_packed_kt, fused_rmsnorm_backward_kt,
-    fused_rmsnorm_kt, fused_rotary_one_bwd_kt, fused_rotary_one_kt, fused_rotary_qk_kt,
-    fused_sigmoid_mul_kt, lora_add_inplace_f32_kt, lora_decode_add_full_kt, lora_decode_add_kt,
-    lora_decode_hidden_kt, muon_step_bf16_kt, muon_step_f32_kt, sgd_step_bf16_kt, sgd_step_f32_kt,
-    silu_inplace_save_sigmoid_f32_kt, supports_attn_decode_qkv_prep_kt, supports_l2_qk_norm_gqa_kt,
-    supports_l2_qk_norm_kt, supports_lora_decode_add_kt, supports_mlp_silu_mul_kt,
-    supports_mlp_silu_mul_packed_kt, supports_optimizer_step_kt, supports_rmsnorm_kt,
-    supports_rotary_qk_kt, supports_sigmoid_mul_kt,
+    fused_mlp_silu_mul_kt, fused_mlp_silu_mul_packed_kt, fused_rmsnorm_backward_dx_kt,
+    fused_rmsnorm_backward_kt, fused_rmsnorm_kt, fused_rotary_one_bwd_kt, fused_rotary_one_kt,
+    fused_rotary_qk_kt, fused_sigmoid_mul_kt, lora_add_inplace_f32_kt, lora_decode_add_full_kt,
+    lora_decode_add_kt, lora_decode_hidden_kt, muon_step_bf16_kt, muon_step_f32_kt,
+    sgd_step_bf16_kt, sgd_step_f32_kt, silu_inplace_save_sigmoid_f32_kt,
+    supports_attn_decode_qkv_prep_kt, supports_l2_qk_norm_gqa_kt, supports_l2_qk_norm_kt,
+    supports_lora_decode_add_kt, supports_mlp_silu_mul_kt, supports_mlp_silu_mul_packed_kt,
+    supports_optimizer_step_kt, supports_rmsnorm_kt, supports_rotary_qk_kt,
+    supports_sigmoid_mul_kt,
 };
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-pub use kt_tape::{CudaFusedRmsNormBackward, fused_rmsnorm_via_kt_tape};
+pub use kt_tape::{
+    CudaFusedRmsNormBackward, FusedRmsNormFrozenWeightBackward,
+    fused_rmsnorm_frozen_weight_via_kt_tape, fused_rmsnorm_via_kt_tape,
+};
 
 // The fused-kernel FFI symbols are provided by the backend lib built in
 // build.rs: nvcc-built under `cuda`, hipcc-built under `rocm`. Gate the
@@ -147,7 +153,7 @@ unsafe extern "C" {
         weight: *const core::ffi::c_void,
         grad_out: *const core::ffi::c_void,
         grad_x: *mut core::ffi::c_void,
-        grad_w_partial_f32: *mut f32,
+        grad_weight_f32: *mut f32,
         rows: i32,
         hidden: i32,
         eps: f32,

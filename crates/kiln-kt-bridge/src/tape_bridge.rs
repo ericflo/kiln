@@ -19,7 +19,7 @@
 //!   checkpointing: seeds an arbitrary segment OUTPUT with an externally
 //!   supplied upstream gradient instead of a loss root.
 //!
-//! The deposit map (`IoMappingScope::kt_to_candle_input`) carries the kt
+//! The deposit map (`IoMappingScope::kt_to_deposit`) carries the kt
 //! input id → deposit id pairs registered during forward; LoRA-`Parameter`
 //! deposits are tagged with [`KT_PARAM_DEPOSIT_TAG`] (see [`register_input_mapping_kt`])
 //! so producers can distinguish them via [`decode_kt_param_deposit`].
@@ -28,7 +28,8 @@
     feature = "cuda",
     feature = "metal",
     feature = "vulkan",
-    feature = "rocm"
+    feature = "rocm",
+    test
 ))]
 
 use std::cell::RefCell;
@@ -78,6 +79,57 @@ fn log_tape_bridge_begin(enabled: bool, phase: &str) {
     }
 }
 
+/// Project kt-input gradients onto their registered deposit ids.
+///
+/// Multiple distinct recorded inputs can legitimately feed one trainable leaf.
+/// Sort before reducing so floating-point accumulation order does not depend on
+/// `HashMap` iteration order, then preserve one summed tensor per deposit id.
+/// Every registered input is a differentiable LoRA leaf mapping and therefore
+/// must have a gradient. Preflight the complete mapping before reducing so a
+/// disconnected branch cannot be hidden by another input targeting the same
+/// deposit id.
+fn build_deposit_grad_map(
+    mut input_map: Vec<(u64, usize)>,
+    kt_grads: &kiln_autograd::GradStore,
+    context: &str,
+) -> Result<HashMap<usize, kiln_tensor::Tensor>, BridgeError> {
+    input_map.sort_unstable_by_key(|(kt_in_raw, mapped_raw)| (*mapped_raw, *kt_in_raw));
+
+    let missing = input_map
+        .iter()
+        .filter(|(kt_in_raw, _)| kt_grads.get(KtTensorId::from_raw(*kt_in_raw)).is_none())
+        .map(|(kt_in_raw, mapped_raw)| format!("kt_input_id={kt_in_raw} deposit_id={mapped_raw}"))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(BridgeError::new(format!(
+            "tape_bridge: {context}: missing gradients for registered differentiable inputs: [{}]",
+            missing.join(", ")
+        )));
+    }
+
+    let mut out: HashMap<usize, kiln_tensor::Tensor> = HashMap::new();
+    for (kt_in_raw, mapped_raw) in input_map {
+        let grad = kt_grads
+            .get(KtTensorId::from_raw(kt_in_raw))
+            .expect("registered gradient preflight established membership");
+        match out.entry(mapped_raw) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(grad.clone());
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let accumulated = kiln_tensor::ops::add(entry.get(), grad).map_err(|error| {
+                    BridgeError::new(format!(
+                        "tape_bridge: {context}: accumulate deposit_id={mapped_raw} from \
+                         kt_input_id={kt_in_raw}: {error}"
+                    ))
+                })?;
+                entry.insert(accumulated);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// One side of the bridge's per-thread mapping state.
 ///
 /// Tracks the kt TensorId → deposit-id pairs registered by tape adapters
@@ -100,7 +152,7 @@ struct IoMappingScope {
     /// (#1082) LoRA-`Parameter` deposits are tagged with
     /// [`KT_PARAM_DEPOSIT_TAG`] via [`register_input_mapping_kt`]; producers
     /// decode them with [`decode_kt_param_deposit`].
-    kt_to_candle_input: HashMap<u64, Vec<usize>>,
+    kt_to_deposit: HashMap<u64, Vec<usize>>,
 }
 
 thread_local! {
@@ -111,7 +163,7 @@ thread_local! {
 }
 
 /// Namespace tag OR'd onto kt-leaf deposit ids stored in the (shared,
-/// `usize`-keyed) `kt_to_candle_input` deposit map by
+/// `usize`-keyed) `kt_to_deposit` deposit map by
 /// [`register_input_mapping_kt`].
 ///
 /// # Why this is REQUIRED (#1082 candle-drop grad-shape regression)
@@ -166,7 +218,7 @@ pub fn decode_kt_param_deposit(key_raw: u64) -> Option<u64> {
 /// kt tensor (e.g. a LoRA `Var` after the #1082 forward flip made
 /// `LoraProjectionWeights` hold `kiln_tensor::Tensor`).
 ///
-/// Records into the `kt_to_candle_input` deposit map with the stored "deposit"
+/// Records into the `kt_to_deposit` map with the stored "deposit"
 /// id namespaced by [`KT_PARAM_DEPOSIT_TAG`] (bit 63) so a kt-param id can never
 /// collide with any other id in the shared `usize`-keyed deposit map (see the
 /// tag's docs for the collision incident). This variant stores `kt_leaf_id | TAG`.
@@ -184,7 +236,7 @@ pub fn register_input_mapping_kt(kt_id: KtTensorId, deposit_kt_id: KtTensorId) {
         // Namespace the kt-leaf deposit id so it cannot alias a candle id that
         // happens to share the same raw counter value (#1082 collision fix).
         let deposit_raw = (deposit_kt_id.as_raw() | KT_PARAM_DEPOSIT_TAG) as usize;
-        let ids = scope.kt_to_candle_input.entry(kt_raw).or_default();
+        let ids = scope.kt_to_deposit.entry(kt_raw).or_default();
         if !ids.contains(&deposit_raw) {
             ids.push(deposit_raw);
         }
@@ -219,20 +271,15 @@ pub fn with_io_mapping_scope<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
-/// kt-loss variant of [`with_tape_authoritative_scope`] (#1082 DoD-100 step 14
-/// keystone). Identical seeding + grad-extraction, but the `forward` closure
-/// returns a **kt** scalar loss instead of a candle one — so there is NO candle
-/// loss round-trip and NO `candle_output_kt` id-resolution: the kt loss IS the
-/// recorded tape root, seeded directly. This is the seam that lets the
-/// GRPO/OPD/cross_entropy adapters stop copying their kt scalar loss back to
-/// candle purely so this scope could resolve it.
+/// Tape-authoritative kt loss scope (#1082 DoD-100 step 14 keystone). The
+/// `forward` closure returns a **kt** scalar loss, which is the recorded tape
+/// root and is seeded directly; there is no cross-framework loss round-trip or
+/// output-id resolution.
 ///
-/// The returned grad map is identical in shape/semantics to
-/// [`with_tape_authoritative_scope`]'s (keyed by the recorded input ids — the
-/// LoRA-`Parameter` deposits are `KT_PARAM_DEPOSIT_TAG`-tagged via
-/// `register_input_mapping_kt`, so callers decode them with
-/// `decode_kt_param_deposit` exactly as today). The grad DEPOSIT was already
-/// kt-native; only the LOSS crosses to kt here.
+/// The returned grad map is keyed by recorded deposit ids. LoRA-`Parameter`
+/// deposits are `KT_PARAM_DEPOSIT_TAG`-tagged via
+/// [`register_input_mapping_kt`], so callers decode them with
+/// [`decode_kt_param_deposit`].
 ///
 /// # Contract
 ///
@@ -298,19 +345,14 @@ where
             cell.borrow()
                 .as_ref()
                 .map(|s| {
-                    s.kt_to_candle_input
+                    s.kt_to_deposit
                         .iter()
                         .flat_map(|(k, vs)| vs.iter().map(move |v| (*k, *v)))
                         .collect()
                 })
                 .unwrap_or_default()
         });
-        let mut out: HashMap<usize, kiln_tensor::Tensor> = HashMap::new();
-        for (kt_in_raw, mapped_raw) in input_map {
-            if let Some(g) = kt_grads.get(KtTensorId::from_raw(kt_in_raw)) {
-                out.insert(mapped_raw, g.clone());
-            }
-        }
+        let out = build_deposit_grad_map(input_map, &kt_grads, "authoritative grad map")?;
         log_tape_bridge_timing(
             trace_timings,
             "authoritative_grad_map",
@@ -329,7 +371,7 @@ where
 
 /// Per-segment tape-authoritative backward for gradient checkpointing (#1082).
 ///
-/// Like [`with_tape_authoritative_scope`], but seeds the backward at an
+/// Like [`with_tape_authoritative_scope_kt`], but seeds the backward at an
 /// arbitrary segment OUTPUT with an externally-supplied upstream gradient
 /// (instead of looking up a loss adapter output and seeding `dL/dL = 1`). This
 /// is the kt-tape replacement for the legacy candle gradient-checkpointing
@@ -343,13 +385,14 @@ where
 /// single segment) and must return the segment's kt OUTPUT tensor. The tape is
 /// then seeded with `{ seg_output.id() : upstream_grad }` and walked.
 ///
-/// Returns `(kt_grads, candle_input_grads)`:
+/// Returns `(kt_grads, deposit_grads)`:
 /// * `kt_grads` — the full [`kiln_autograd::GradStore`] (keyed by `KtTensorId`).
 ///   The caller reads the segment-INPUT grad (`kt_grads.get(seg_input.id())`)
 ///   to chain into the previous segment.
-/// * `candle_input_grads` — `candle_input_id_raw -> kt grad`, the same
-///   candle-id-keyed map [`with_tape_authoritative_scope`] returns, so the
-///   caller can pick out the LoRA `Var` grads for this segment by candle id.
+/// * `deposit_grads` — `deposit_id_raw -> kt grad`, the same map
+///   [`with_tape_authoritative_scope_kt`] returns. Distinct recorded inputs
+///   targeting one deposit are reduced deterministically into one accumulated
+///   entry, so the caller can pick out this segment's LoRA `Parameter` grads.
 ///
 /// # Errors
 /// * `forward()` errors (propagated).
@@ -384,26 +427,22 @@ where
                 ))
             })?;
 
-        // Map each recorded kt input grad to its candle input id(s) (a kt input
-        // may fan out to several candle ids across islands — deposit each).
+        // Map each recorded kt input grad to its deposit id(s). A kt input can
+        // fan out to several ids, and several inputs can contribute to one id.
         let input_map: Vec<(u64, usize)> = BRIDGE_SCOPE.with(|cell| {
             cell.borrow()
                 .as_ref()
                 .map(|s| {
-                    s.kt_to_candle_input
+                    s.kt_to_deposit
                         .iter()
                         .flat_map(|(k, vs)| vs.iter().map(move |v| (*k, *v)))
                         .collect()
                 })
                 .unwrap_or_default()
         });
-        let mut candle_input_grads: HashMap<usize, kiln_tensor::Tensor> = HashMap::new();
-        for (kt_in_raw, candle_in_raw) in input_map {
-            if let Some(g) = kt_grads.get(KtTensorId::from_raw(kt_in_raw)) {
-                candle_input_grads.insert(candle_in_raw, g.clone());
-            }
-        }
-        Ok((kt_grads, candle_input_grads))
+        let deposit_grads =
+            build_deposit_grad_map(input_map, &kt_grads, "checkpoint segment grad map")?;
+        Ok((kt_grads, deposit_grads))
     })
 }
 
@@ -421,6 +460,10 @@ pub fn bridge_scope_active() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cpu_f32(values: &[f32]) -> kiln_tensor::Tensor {
+        kiln_tensor::Tensor::from_slice(values, vec![values.len()]).expect("CPU F32 tensor")
+    }
 
     #[test]
     fn bridge_scope_inactive_by_default() {
@@ -459,6 +502,95 @@ mod tests {
         }
         // The tag occupies bit 63 only — decoding strips exactly that bit.
         assert_eq!(KT_PARAM_DEPOSIT_TAG, 1u64 << 63);
+    }
+
+    #[test]
+    fn deposit_grad_map_sums_distinct_inputs_into_one_leaf() {
+        let first_id = KtTensorId::from_raw(11);
+        let second_id = KtTensorId::from_raw(22);
+        let deposit_id = (91 | KT_PARAM_DEPOSIT_TAG) as usize;
+        let mut grads = kiln_autograd::GradStore::new();
+        grads.insert(first_id, cpu_f32(&[1.0, 2.0]));
+        grads.insert(second_id, cpu_f32(&[10.0, 20.0]));
+
+        let out = build_deposit_grad_map(
+            vec![
+                (second_id.as_raw(), deposit_id),
+                (first_id.as_raw(), deposit_id),
+            ],
+            &grads,
+            "test",
+        )
+        .expect("accumulate deposit gradients");
+
+        assert_eq!(out.len(), 1, "one leaf must produce one accumulated entry");
+        assert_eq!(
+            out.get(&deposit_id)
+                .expect("summed leaf gradient")
+                .to_vec::<f32>()
+                .expect("read CPU gradient"),
+            vec![11.0, 22.0]
+        );
+    }
+
+    #[test]
+    fn deposit_grad_map_reduction_order_is_input_permutation_invariant() {
+        let low_id = KtTensorId::from_raw(101);
+        let middle_id = KtTensorId::from_raw(202);
+        let high_id = KtTensorId::from_raw(303);
+        let deposit_id = (92 | KT_PARAM_DEPOSIT_TAG) as usize;
+        let mut grads = kiln_autograd::GradStore::new();
+        grads.insert(low_id, cpu_f32(&[1.0e20]));
+        grads.insert(middle_id, cpu_f32(&[-1.0e20]));
+        grads.insert(high_id, cpu_f32(&[3.0]));
+
+        let ascending = vec![
+            (low_id.as_raw(), deposit_id),
+            (middle_id.as_raw(), deposit_id),
+            (high_id.as_raw(), deposit_id),
+        ];
+        let mut reversed = ascending.clone();
+        reversed.reverse();
+
+        for input_map in [ascending, reversed] {
+            let out = build_deposit_grad_map(input_map, &grads, "test")
+                .expect("deterministic deposit accumulation");
+            assert_eq!(
+                out.get(&deposit_id)
+                    .expect("summed leaf gradient")
+                    .to_vec::<f32>()
+                    .expect("read CPU gradient"),
+                vec![3.0],
+                "the reducer must follow sorted kt input ids, not map iteration order"
+            );
+        }
+    }
+
+    #[test]
+    fn deposit_grad_map_rejects_a_missing_input_even_when_the_leaf_has_another_gradient() {
+        let connected_id = KtTensorId::from_raw(404);
+        let disconnected_id = KtTensorId::from_raw(505);
+        let deposit_id = (93 | KT_PARAM_DEPOSIT_TAG) as usize;
+        let mut grads = kiln_autograd::GradStore::new();
+        grads.insert(connected_id, cpu_f32(&[1.0, 2.0]));
+
+        let error = build_deposit_grad_map(
+            vec![
+                (connected_id.as_raw(), deposit_id),
+                (disconnected_id.as_raw(), deposit_id),
+            ],
+            &grads,
+            "partial-leaf test",
+        )
+        .expect_err("a connected clone must not hide a disconnected registered input");
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "tape_bridge: partial-leaf test: missing gradients for registered differentiable inputs: [kt_input_id={} deposit_id={deposit_id}]",
+                disconnected_id.as_raw()
+            )
+        );
     }
 
     // The full end-to-end bridge tests live in

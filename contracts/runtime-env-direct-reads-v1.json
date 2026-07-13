@@ -981,171 +981,6 @@
     },
     {
       "api": "set_var",
-      "argument": "KILN_USE_TAPE_FLASH_ATTN",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/tests/rocm_flash_attn_bwd_gradcheck.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_FORWARD",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/tests/rocm_flash_attn_bwd_gradcheck.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_USE_TAPE_FLASH_ATTN",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_USE_TAPE_FORWARD",
-      "argument_kind": "literal",
-      "count": 10,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_USE_TAPE_GDN",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_USE_TAPE_GDN_GATED_NORM",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_USE_TAPE_GDN_QK_NORM",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_USE_TAPE_SDPA",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_FLASH_ATTN",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_FORWARD",
-      "argument_kind": "literal",
-      "count": 35,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_GDN",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_GDN_GATED_NORM",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_GDN_QK_NORM",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_LORA_ADD",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_SDPA",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/tests/tape_forward_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "set_var",
       "argument": "NVCC",
       "argument_kind": "literal",
       "count": 1,
@@ -2355,17 +2190,6 @@
       "surface": "example"
     },
     {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_FORWARD",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/grpo_tape_shim.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "remove_var",
       "argument": "KILN_ECHO_ENABLED",
       "argument_kind": "literal",
@@ -2465,94 +2289,6 @@
       "surface": "source"
     },
     {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_FLASH_ATTN",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_FORWARD",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_GDN",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_GDN_CONV",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_GDN_GATED_NORM",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_GDN_QK_NORM",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_LORA_ADD",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_SDPA",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "remove_var",
       "argument": "& env_name",
       "argument_kind": "expression",
@@ -2571,94 +2307,6 @@
       "language": "rust",
       "operation": "set",
       "path": "crates/kiln-train/src/remote_teacher.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_FLASH_ATTN",
-      "argument_kind": "literal",
-      "count": 6,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_FORWARD",
-      "argument_kind": "literal",
-      "count": 6,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_GDN",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_GDN_CONV",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_GDN_GATED_NORM",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_GDN_QK_NORM",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_LORA_ADD",
-      "argument_kind": "literal",
-      "count": 6,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_SDPA",
-      "argument_kind": "literal",
-      "count": 6,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
       "phase": "runtime",
       "surface": "source"
     },
@@ -2793,17 +2441,6 @@
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-autograd/src/tape.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_USE_TAPE_FORWARD",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-autograd/src/tape_scope.rs",
       "phase": "runtime",
       "surface": "source"
     },
@@ -6548,83 +6185,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "KILN_USE_TAPE_FLASH_ATTN",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_USE_TAPE_GDN",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_USE_TAPE_GDN_CONV",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_USE_TAPE_GDN_GATED_NORM",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_USE_TAPE_GDN_QK_NORM",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_USE_TAPE_LORA_ADD",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_USE_TAPE_SDPA",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var_os",
       "argument": "HOME",
       "argument_kind": "literal",
@@ -9773,9 +9333,9 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 526,
-    "process_mutation_entries": 249,
-    "read_call_sites": 944,
-    "read_entries": 638
+    "process_mutation_call_sites": 376,
+    "process_mutation_entries": 217,
+    "read_call_sites": 936,
+    "read_entries": 630
   }
 }

@@ -28,7 +28,8 @@ use crate::{
     kiln_gdn_decode_qk_norm_gates_recurrent_vf32_bf16, kiln_gdn_forward_substitution,
     kiln_gdn_forward_substitution_f32, kiln_gdn_full_chunk_forward,
     kiln_gdn_full_chunk_forward_multiblock, kiln_gdn_gated_rms_norm_bf16,
-    kiln_gdn_gated_rms_norm_bwd_bf16, kiln_gdn_gated_rms_norm_bwd_wf32_bf16,
+    kiln_gdn_gated_rms_norm_bwd_bf16, kiln_gdn_gated_rms_norm_bwd_frozen_bf16,
+    kiln_gdn_gated_rms_norm_bwd_frozen_wf32_bf16, kiln_gdn_gated_rms_norm_bwd_wf32_bf16,
     kiln_gdn_gated_rms_norm_wf32_bf16, kiln_gdn_gates_bf16, kiln_gdn_gates_bf16_f32_bf16_params,
     kiln_gdn_gates_bf16_f32_params, kiln_gdn_l2_norm_scale_bwd_bf16, kiln_gdn_recurrent_forward,
     kiln_gdn_solve_tri_transpose_f32,
@@ -2148,6 +2149,24 @@ pub struct GdnGatedRmsNormBwdKt {
     pub dw: KtTensor,
 }
 
+/// Fused gated RMSNorm gradients when the normalization weight is frozen.
+///
+/// Only activation gradients are exposed. The corresponding GPU launch does
+/// not allocate a weight-gradient tensor and uses a kernel instantiation with
+/// the cross-row dWeight atomic reduction compiled out.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub struct GdnGatedRmsNormFrozenWeightBwdKt {
+    pub dx: KtTensor,
+    pub dz: KtTensor,
+}
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+struct GdnGatedRmsNormBwdLaunchKt {
+    dx: KtTensor,
+    dz: KtTensor,
+    dw: Option<KtTensor>,
+}
+
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_gated_rms_norm_bwd_bf16_kt(
     grad_out: &KtTensor,
@@ -2156,6 +2175,82 @@ pub fn gdn_gated_rms_norm_bwd_bf16_kt(
     weight: &KtTensor,
     eps: f32,
 ) -> Result<GdnGatedRmsNormBwdKt, GdnError> {
+    let launch = gdn_gated_rms_norm_bwd_impl(grad_out, x, z, weight, eps, KtDType::BF16, true)?;
+    let GdnGatedRmsNormBwdLaunchKt { dx, dz, dw } = launch;
+    let dw = dw.ok_or_else(|| {
+        GdnError::Msg("kt-gdn: trainable gated-rmsnorm backward omitted dWeight".to_string())
+    })?;
+    Ok(GdnGatedRmsNormBwdKt { dx, dz, dw })
+}
+
+/// Fused BF16 gated RMSNorm backward with a frozen BF16 weight.
+///
+/// Returns only BF16 `dx` and `dz`. No dWeight buffer is allocated, and the
+/// selected kernel instantiation performs no dWeight atomic reduction.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn gdn_gated_rms_norm_bwd_bf16_frozen_weight_kt(
+    grad_out: &KtTensor,
+    x: &KtTensor,
+    z: &KtTensor,
+    weight: &KtTensor,
+    eps: f32,
+) -> Result<GdnGatedRmsNormFrozenWeightBwdKt, GdnError> {
+    let launch = gdn_gated_rms_norm_bwd_impl(grad_out, x, z, weight, eps, KtDType::BF16, false)?;
+    debug_assert!(launch.dw.is_none());
+    Ok(GdnGatedRmsNormFrozenWeightBwdKt {
+        dx: launch.dx,
+        dz: launch.dz,
+    })
+}
+
+/// Fused gated RMSNorm backward with BF16 activations and a trainable F32
+/// weight. Returns BF16 `dx`/`dz` and an F32 `dw` accumulated across rows.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn gdn_gated_rms_norm_bwd_bf16_f32_weight_kt(
+    grad_out: &KtTensor,
+    x: &KtTensor,
+    z: &KtTensor,
+    weight: &KtTensor,
+    eps: f32,
+) -> Result<GdnGatedRmsNormBwdKt, GdnError> {
+    let launch = gdn_gated_rms_norm_bwd_impl(grad_out, x, z, weight, eps, KtDType::F32, true)?;
+    let GdnGatedRmsNormBwdLaunchKt { dx, dz, dw } = launch;
+    let dw = dw.ok_or_else(|| {
+        GdnError::Msg("kt-gdn: trainable gated-rmsnorm backward omitted dWeight".to_string())
+    })?;
+    Ok(GdnGatedRmsNormBwdKt { dx, dz, dw })
+}
+
+/// Fused BF16 gated RMSNorm backward with a frozen F32 weight.
+///
+/// Returns only BF16 `dx` and `dz`. No dWeight buffer is allocated, and the
+/// selected kernel instantiation performs no dWeight atomic reduction.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn gdn_gated_rms_norm_bwd_bf16_f32_weight_frozen_kt(
+    grad_out: &KtTensor,
+    x: &KtTensor,
+    z: &KtTensor,
+    weight: &KtTensor,
+    eps: f32,
+) -> Result<GdnGatedRmsNormFrozenWeightBwdKt, GdnError> {
+    let launch = gdn_gated_rms_norm_bwd_impl(grad_out, x, z, weight, eps, KtDType::F32, false)?;
+    debug_assert!(launch.dw.is_none());
+    Ok(GdnGatedRmsNormFrozenWeightBwdKt {
+        dx: launch.dx,
+        dz: launch.dz,
+    })
+}
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+fn gdn_gated_rms_norm_bwd_impl(
+    grad_out: &KtTensor,
+    x: &KtTensor,
+    z: &KtTensor,
+    weight: &KtTensor,
+    eps: f32,
+    weight_dtype: KtDType,
+    compute_weight_grad: bool,
+) -> Result<GdnGatedRmsNormBwdLaunchKt, GdnError> {
     let x_shape = x.shape();
     if x_shape.len() != 2 {
         return Err(GdnError::Msg(format!(
@@ -2181,6 +2276,16 @@ pub fn gdn_gated_rms_norm_bwd_bf16_kt(
             weight.shape()
         )));
     }
+    if grad_out.device() != x.device() || z.device() != x.device() || weight.device() != x.device()
+    {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gated-rmsnorm-bwd inputs must share one device, got grad_out={:?}, x={:?}, z={:?}, weight={:?}",
+            grad_out.device(),
+            x.device(),
+            z.device(),
+            weight.device()
+        )));
+    }
 
     let go_ptr = kiln_kt_bridge::device_input_ptr(grad_out, KtDType::BF16, "grad_out")?;
     let (go_st, _) = cuda_storage_and_byte_offset(grad_out, KtDType::BF16, "grad_out")?;
@@ -2188,22 +2293,29 @@ pub fn gdn_gated_rms_norm_bwd_bf16_kt(
     let _ = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
     let z_ptr = kiln_kt_bridge::device_input_ptr(z, KtDType::BF16, "z")?;
     let _ = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
-    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::BF16, "weight")?;
-    let _ = cuda_storage_and_byte_offset(weight, KtDType::BF16, "weight")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, weight_dtype, "weight")?;
+    let _ = cuda_storage_and_byte_offset(weight, weight_dtype, "weight")?;
 
     let dx = alloc_cuda_tensor(go_st, KtDType::BF16, vec![rows, hidden])?;
     let dz = alloc_cuda_tensor(go_st, KtDType::BF16, vec![rows, hidden])?;
-    let dw = alloc_cuda_tensor(go_st, KtDType::F32, vec![hidden])?;
+    let dw = if compute_weight_grad {
+        Some(alloc_cuda_tensor(go_st, KtDType::F32, vec![hidden])?)
+    } else {
+        None
+    };
     let dx_ptr = kiln_kt_bridge::device_output_ptr(&dx);
     let dz_ptr = kiln_kt_bridge::device_output_ptr(&dz);
-    let dw_ptr = kiln_kt_bridge::device_output_ptr(&dw);
+    let dw_ptr = dw
+        .as_ref()
+        .map(kiln_kt_bridge::device_output_ptr)
+        .unwrap_or(0);
 
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(go_st, "grad_out")?;
     #[cfg(feature = "rocm")]
     let raw_stream = rocm_launch_stream(
         &dx,
-        "gated_rms_norm_bwd_bf16",
+        "gated_rms_norm_bwd",
         &[
             ("grad_out", grad_out),
             ("x", x),
@@ -2212,19 +2324,59 @@ pub fn gdn_gated_rms_norm_bwd_bf16_kt(
         ],
     )?;
     let status = unsafe {
-        kiln_gdn_gated_rms_norm_bwd_bf16(
-            go_ptr as *const _,
-            x_ptr as *const _,
-            z_ptr as *const _,
-            w_ptr as *const _,
-            dx_ptr as *mut _,
-            dz_ptr as *mut _,
-            dw_ptr as *mut _,
-            rows as i32,
-            hidden as i32,
-            eps,
-            raw_stream,
-        )
+        match (weight_dtype, compute_weight_grad) {
+            (KtDType::BF16, true) => kiln_gdn_gated_rms_norm_bwd_bf16(
+                go_ptr as *const _,
+                x_ptr as *const _,
+                z_ptr as *const _,
+                w_ptr as *const _,
+                dx_ptr as *mut _,
+                dz_ptr as *mut _,
+                dw_ptr as *mut _,
+                rows as i32,
+                hidden as i32,
+                eps,
+                raw_stream,
+            ),
+            (KtDType::BF16, false) => kiln_gdn_gated_rms_norm_bwd_frozen_bf16(
+                go_ptr as *const _,
+                x_ptr as *const _,
+                z_ptr as *const _,
+                w_ptr as *const _,
+                dx_ptr as *mut _,
+                dz_ptr as *mut _,
+                rows as i32,
+                hidden as i32,
+                eps,
+                raw_stream,
+            ),
+            (KtDType::F32, true) => kiln_gdn_gated_rms_norm_bwd_wf32_bf16(
+                go_ptr as *const _,
+                x_ptr as *const _,
+                z_ptr as *const _,
+                w_ptr as *const _,
+                dx_ptr as *mut _,
+                dz_ptr as *mut _,
+                dw_ptr as *mut _,
+                rows as i32,
+                hidden as i32,
+                eps,
+                raw_stream,
+            ),
+            (KtDType::F32, false) => kiln_gdn_gated_rms_norm_bwd_frozen_wf32_bf16(
+                go_ptr as *const _,
+                x_ptr as *const _,
+                z_ptr as *const _,
+                w_ptr as *const _,
+                dx_ptr as *mut _,
+                dz_ptr as *mut _,
+                rows as i32,
+                hidden as i32,
+                eps,
+                raw_stream,
+            ),
+            _ => unreachable!("gated-rmsnorm backward weight dtype is BF16 or F32"),
+        }
     };
     if status != 0 {
         return Err(GdnError::Msg(format!(
@@ -2233,95 +2385,7 @@ pub fn gdn_gated_rms_norm_bwd_bf16_kt(
     }
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&dx)?;
-    Ok(GdnGatedRmsNormBwdKt { dx, dz, dw })
-}
-
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-pub fn gdn_gated_rms_norm_bwd_bf16_f32_weight_kt(
-    grad_out: &KtTensor,
-    x: &KtTensor,
-    z: &KtTensor,
-    weight: &KtTensor,
-    eps: f32,
-) -> Result<GdnGatedRmsNormBwdKt, GdnError> {
-    let x_shape = x.shape();
-    if x_shape.len() != 2 {
-        return Err(GdnError::Msg(format!(
-            "kt-gdn: gated-rmsnorm-bwd f32-weight x must be [rows, hidden], got {x_shape:?}"
-        )));
-    }
-    let (rows, hidden) = (x_shape[0], x_shape[1]);
-    if z.shape() != x_shape {
-        return Err(GdnError::Msg(format!(
-            "kt-gdn: gated-rmsnorm-bwd f32-weight z {:?} != x {x_shape:?}",
-            z.shape()
-        )));
-    }
-    if grad_out.shape() != x_shape {
-        return Err(GdnError::Msg(format!(
-            "kt-gdn: gated-rmsnorm-bwd f32-weight grad_out {:?} != x {x_shape:?}",
-            grad_out.shape()
-        )));
-    }
-    if weight.shape() != [hidden] {
-        return Err(GdnError::Msg(format!(
-            "kt-gdn: gated-rmsnorm-bwd f32-weight weight {:?} != [{hidden}]",
-            weight.shape()
-        )));
-    }
-
-    let go_ptr = kiln_kt_bridge::device_input_ptr(grad_out, KtDType::BF16, "grad_out")?;
-    let (go_st, _) = cuda_storage_and_byte_offset(grad_out, KtDType::BF16, "grad_out")?;
-    let x_ptr = kiln_kt_bridge::device_input_ptr(x, KtDType::BF16, "x")?;
-    let _ = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
-    let z_ptr = kiln_kt_bridge::device_input_ptr(z, KtDType::BF16, "z")?;
-    let _ = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
-    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::F32, "weight")?;
-    let _ = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
-
-    let dx = alloc_cuda_tensor(go_st, KtDType::BF16, vec![rows, hidden])?;
-    let dz = alloc_cuda_tensor(go_st, KtDType::BF16, vec![rows, hidden])?;
-    let dw = alloc_cuda_tensor(go_st, KtDType::F32, vec![hidden])?;
-    let dx_ptr = kiln_kt_bridge::device_output_ptr(&dx);
-    let dz_ptr = kiln_kt_bridge::device_output_ptr(&dz);
-    let dw_ptr = kiln_kt_bridge::device_output_ptr(&dw);
-
-    #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(go_st, "grad_out")?;
-    #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
-        &dx,
-        "gated_rms_norm_bwd_bf16_f32_weight",
-        &[
-            ("grad_out", grad_out),
-            ("x", x),
-            ("z", z),
-            ("weight", weight),
-        ],
-    )?;
-    let status = unsafe {
-        kiln_gdn_gated_rms_norm_bwd_wf32_bf16(
-            go_ptr as *const _,
-            x_ptr as *const _,
-            z_ptr as *const _,
-            w_ptr as *const _,
-            dx_ptr as *mut _,
-            dz_ptr as *mut _,
-            dw_ptr as *mut _,
-            rows as i32,
-            hidden as i32,
-            eps,
-            raw_stream,
-        )
-    };
-    if status != 0 {
-        return Err(GdnError::Msg(format!(
-            "kt-gdn: gated_rms_norm_bwd f32-weight FFI returned {status}"
-        )));
-    }
-    #[cfg(feature = "rocm")]
-    device_synchronize_after_launch(&dx)?;
-    Ok(GdnGatedRmsNormBwdKt { dx, dz, dw })
+    Ok(GdnGatedRmsNormBwdLaunchKt { dx, dz, dw })
 }
 
 /// Fused BF16 backward for the GDN q/k L2 norm scale op.

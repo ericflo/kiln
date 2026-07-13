@@ -134,10 +134,6 @@ fn compare(name: &str, reference: &[f32], got: &[f32]) -> (f32, usize) {
 }
 
 fn run_gradcheck(sq: usize, sk: usize, hq: usize, hkv: usize, hd: usize) {
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-        std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-    }
     let scale = 1.0 / (hd as f32).sqrt();
     let q_f: Vec<f32> = (0..sq * hq * hd)
         .map(|i| bf16_round((((i * 17) % 23) as f32 - 11.0) * 0.05))

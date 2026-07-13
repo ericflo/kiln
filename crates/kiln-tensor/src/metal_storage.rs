@@ -2704,6 +2704,32 @@ mod tests {
     }
 
     #[test]
+    fn metal_all_finite_uses_correctness_fallback_for_values_and_views() {
+        let Some(_dev) = maybe_metal_raw_device() else {
+            eprintln!("skip: KILN_TENSOR_METAL_TEST unset or no Metal device");
+            return;
+        };
+
+        let finite_cpu = crate::Tensor::from_slice(&[1.0f32, -2.0, 3.5, 4.25], vec![2, 2])
+            .expect("finite CPU fixture");
+        let finite = host_to_metal_copy(&finite_cpu, 0).expect("finite Metal fixture");
+        assert!(finite.all_finite().expect("finite Metal scan"));
+
+        let nonfinite_cpu =
+            crate::Tensor::from_slice(&[1.0f32, f32::NAN, 3.5, f32::INFINITY], vec![2, 2])
+                .expect("non-finite CPU fixture");
+        let nonfinite = host_to_metal_copy(&nonfinite_cpu, 0).expect("non-finite Metal fixture");
+        assert!(!nonfinite.all_finite().expect("non-finite Metal scan"));
+        assert!(
+            !nonfinite
+                .transpose(0, 1)
+                .expect("transposed Metal view")
+                .all_finite()
+                .expect("non-finite transposed Metal scan")
+        );
+    }
+
+    #[test]
     fn metal_copy_in_place_reuses_destination_buffer() {
         let Some(_dev) = maybe_metal_raw_device() else {
             eprintln!("skip: KILN_TENSOR_METAL_TEST unset or no Metal device");

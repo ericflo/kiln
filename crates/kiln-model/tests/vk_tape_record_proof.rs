@@ -433,20 +433,20 @@ fn vk_tape_rms_norm_backprops_on_vulkan() {
         .expect("Tape::backward errored on the rms_norm Vulkan graph");
 
     let dx = grads.get(x_id).expect("no grad keyed on x.id()");
-    let dw = grads.get(w_id).expect("no grad keyed on weight.id()");
     assert_eq!(dx.shape(), &[rows, HIDDEN], "dL/dx wrong shape");
-    assert_eq!(dw.shape(), &[HIDDEN], "dL/dweight wrong shape");
+    assert!(
+        grads.get(w_id).is_none(),
+        "frozen RMSNorm weight must not receive a gradient"
+    );
 
     let dx_v = read_host_f32(dx);
-    let dw_v = read_host_f32(dw);
     assert!(
-        dx_v.iter().chain(dw_v.iter()).all(|v| v.is_finite()),
-        "non-finite rms_norm grads: dx={dx_v:?} dw={dw_v:?}"
+        dx_v.iter().all(|v| v.is_finite()),
+        "non-finite rms_norm input grad: dx={dx_v:?}"
     );
     eprintln!(
         "[FRONTIER PASS] rms_norm Tape::backward COMPLETED on Device::Vulkan(0) \
-         (no GPUVM fault): dx[0..3]={:?} dw={:?}",
-        &dx_v[..3.min(dx_v.len())],
-        dw_v
+         (no GPUVM fault): dx[0..3]={:?}; frozen weight omitted",
+        &dx_v[..3.min(dx_v.len())]
     );
 }

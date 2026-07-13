@@ -295,9 +295,9 @@ pub fn try_tape_sft_flce_vulkan_kt(
     input_ids: &[u32],
     label_mask: &[bool],
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    use kiln_autograd::{Tape, tape_forward_enabled, with_active_tape};
+    use kiln_autograd::{Tape, tape_scope_active, with_active_tape};
 
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !matches!(hidden.device(), kiln_tensor::Device::Vulkan(_))

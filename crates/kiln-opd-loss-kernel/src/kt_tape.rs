@@ -139,18 +139,12 @@ fn envelope_ok(hidden: &KtTensor, head_t: &KtTensor, top_k: usize) -> bool {
 /// `OpdLossCustomOp::bwd` path uses and returns `d_hidden` of shape
 /// `[1, T, H]` in the input dtype.
 ///
-/// # Input ordering (`input_count = 2`)
+/// # Tape input (`input_count = 1`)
 ///
-/// The forward consumes `(hidden, head_t)` in that order — matching the
-/// order they're recorded on the tape via
-/// `tape.record(&y, &[hidden, head_t], ...)` in
-/// [`opd_top_k_reverse_kl_phase_b_via_kt_tape`].
-///
-/// The kernel produces `d_hidden` only (the head-`head_t` gradient
-/// would require a separate backward path through the gather +
-/// matmul; that's a Phase-7 follow-up). Therefore the second slot in
-/// the returned `Vec` is always `None` — the autograd walker treats
-/// `head_t` as non-differentiable in this op.
+/// `hidden` is the sole differentiable tape input. The frozen `head_t` is
+/// retained as saved backward data because the kernel needs it to compute
+/// `d_hidden`, but it is deliberately absent from the tape input list. The
+/// returned gradient vector is therefore `[Some(d_hidden)]`.
 ///
 /// The `teacher_topk_*` + `label_mask` arrays are host-side metadata
 /// and not tape inputs; they're closed over via the saved struct.
@@ -192,11 +186,9 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
     }
 
     fn input_count(&self) -> usize {
-        // Two recorded tape inputs: hidden, head_t. The kernel only
-        // emits d_hidden — head_t gets `None` in the returned grad
-        // vector (non-differentiable in this op until the gather +
-        // matmul are fused into a single autograd node).
-        2
+        // `hidden` is the only differentiable tape input. `head_t` is a
+        // frozen constant saved on this op solely to compute `d_hidden`.
+        1
     }
 
     fn apply(&self, grad_output: &KtTensor) -> KtResult<Vec<Option<KtTensor>>> {
@@ -287,9 +279,7 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
                 kiln_tensor::Error::Msg(format!("opd kt-tape bwd: kt call: {e}"))
             })?;
 
-            // (Some(d_hidden), None) — kernel only produces hidden grad;
-            // head_t is treated as non-differentiable in this op.
-            return Ok(vec![Some(d_hidden), None]);
+            return Ok(vec![Some(d_hidden)]);
         }
 
         // Non-CUDA (CPU / Metal) device-agnostic composite path.
@@ -307,13 +297,13 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
             kiln_tensor::Error::Msg(format!("opd kt-tape bwd composite: kt call: {e}"))
         })?;
 
-        Ok(vec![Some(d_hidden), None])
+        Ok(vec![Some(d_hidden)])
     }
 
     fn requires_input(&self, idx: usize) -> bool {
-        // Both hidden and head_t are read by the backward kernel
-        // (head_t for the per-token gather inside the FFI body).
-        idx == 0 || idx == 1
+        // The backward reads the recorded hidden activation. The frozen head
+        // and host metadata are saved directly on the op.
+        idx == 0
     }
 }
 
@@ -339,11 +329,10 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
 ///
 /// # Tape integration
 ///
-/// The forward and the backward share `(hidden, head_t)` by `Arc` —
-/// kt `Tensor` is already `Clone` over `Arc<dyn Storage>` so the
-/// saved state is a refcount bump, not a host copy. The host-side
-/// teacher metadata (indices, logprobs, label_mask) is cloned into
-/// the saved struct.
+/// The tape records `hidden` as its sole differentiable input. The backward
+/// also saves `hidden` and the frozen `head_t` by `Arc` clone — kt `Tensor`
+/// is already `Clone` over `Arc<dyn Storage>` so this is a refcount bump, not
+/// a host copy. The host-side teacher metadata is cloned into the saved struct.
 ///
 /// # Returns
 ///
@@ -398,11 +387,7 @@ pub fn opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape(
         scalar_mean_unit_root_grad: false,
         active_metadata,
     };
-    tape.record(
-        &per_token,
-        &[hidden, head_t],
-        Box::new(bwd) as Box<dyn BackwardOp>,
-    );
+    tape.record(&per_token, &[hidden], Box::new(bwd) as Box<dyn BackwardOp>);
 
     Ok(per_token)
 }
@@ -516,11 +501,7 @@ fn opd_top_k_reverse_kl_phase_b_via_kt_tape_impl(
         scalar_mean_unit_root_grad,
         active_metadata,
     };
-    tape.record(
-        &loss,
-        &[hidden, head_t],
-        Box::new(bwd) as Box<dyn BackwardOp>,
-    );
+    tape.record(&loss, &[hidden], Box::new(bwd) as Box<dyn BackwardOp>);
 
     Ok(loss)
 }
@@ -554,6 +535,29 @@ mod tests {
         // tensor we know is CPU — envelope_ok composes both checks.
         assert!(!envelope_ok(&h, &w, 8));
         assert!(!envelope_ok(&h, &w, 64));
+    }
+
+    /// The frozen head is saved backward data, not a differentiable tape
+    /// input. Keep this contract covered without requiring a GPU.
+    #[test]
+    fn backward_contract_has_one_hidden_input() {
+        let hidden = KtTensor::zeros_cpu(vec![1, 4, 8], KtDType::F32);
+        let head_t = KtTensor::zeros_cpu(vec![8, 16], KtDType::F32);
+        let bwd = CudaOpdTopKReverseKlPhaseBBackward {
+            hidden,
+            head_t,
+            teacher_topk_indices: Vec::new(),
+            teacher_topk_logprobs: Vec::new(),
+            label_mask: vec![true; 4],
+            top_k: 16,
+            output_mode: OpdLossOutputKt::ScalarMean,
+            scalar_mean_unit_root_grad: false,
+            active_metadata: None,
+        };
+
+        assert_eq!(bwd.input_count(), 1);
+        assert!(bwd.requires_input(0));
+        assert!(!bwd.requires_input(1));
     }
 
     #[test]
@@ -641,6 +645,10 @@ mod tests {
                 .backward(loss.id(), seed, |a, b| kiln_tensor::ops::add(a, b))
                 .expect("OPD tape backward on ROCm");
             let dh = grads.get(h.id()).expect("d_hidden present");
+            assert!(
+                grads.get(w.id()).is_none(),
+                "frozen head must not appear in the OPD gradient store"
+            );
             let dh_v: Vec<f32> = dh
                 .to_dtype(KtDType::F32)
                 .unwrap()
@@ -756,8 +764,8 @@ mod tests {
             (indices, logprobs, label_mask)
         }
 
-        /// CUDA forward records a tape node tagged with the saved
-        /// `(hidden, head_t)` ids. Skips cleanly without CUDA.
+        /// CUDA forward records only the differentiable hidden id; the frozen
+        /// head remains saved backward data. Skips cleanly without CUDA.
         #[test]
         fn forward_records_tape_node_when_cuda_available() {
             if !cuda_available() {
@@ -793,15 +801,15 @@ mod tests {
             assert_eq!(tape.len(), 1);
 
             let node = &tape.nodes()[0];
-            assert_eq!(node.input_ids.len(), 2);
+            assert_eq!(node.input_ids.len(), 1);
             assert_eq!(node.input_ids[0], h.id());
-            assert_eq!(node.input_ids[1], w.id());
+            assert!(!node.input_ids.contains(&w.id()));
             assert_eq!(node.output_id, per_token.id());
             assert_eq!(
                 node.op.name(),
                 "kiln-opd-loss-kernel/opd_top_k_reverse_kl_phase_b_kt_tape"
             );
-            assert_eq!(node.op.input_count(), 2);
+            assert_eq!(node.op.input_count(), 1);
         }
 
         /// Direct backward apply (per-position) — exercises the
@@ -841,9 +849,8 @@ mod tests {
                 active_metadata: None,
             };
             let grads = bwd.apply(&dy).expect("apply backward");
-            assert_eq!(grads.len(), 2);
+            assert_eq!(grads.len(), 1);
             let d_hidden = grads[0].as_ref().expect("d_hidden present");
-            assert!(grads[1].is_none(), "head_t grad must be None");
             assert_eq!(d_hidden.shape(), &[1, seq_len, hidden_size]);
             assert_eq!(d_hidden.dtype(), KtDType::F32);
         }
@@ -881,9 +888,8 @@ mod tests {
                 active_metadata: None,
             };
             let grads = bwd.apply(&dy).expect("apply backward scalar mean");
-            assert_eq!(grads.len(), 2);
+            assert_eq!(grads.len(), 1);
             let d_hidden = grads[0].as_ref().expect("d_hidden present");
-            assert!(grads[1].is_none(), "head_t grad must be None");
             assert_eq!(d_hidden.shape(), &[1, seq_len, hidden_size]);
             assert_eq!(d_hidden.dtype(), KtDType::F32);
         }

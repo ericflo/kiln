@@ -128,7 +128,7 @@ use kiln_model::backend::GrpoKlAuxiliaryRoute;
     feature = "vulkan",
     feature = "rocm"
 ))]
-use kiln_autograd::{BackwardOp, Tape, tape_forward_enabled, with_active_tape};
+use kiln_autograd::{BackwardOp, Tape, tape_scope_active, with_active_tape};
 
 /// Fused backward for the GRPO scalar PG (+ KL) loss taken from the full
 /// `[1, T, V]` policy logits. Saves the candle `logits` (an `Arc` bump on the
@@ -1339,7 +1339,10 @@ pub(crate) fn echo_env_grad_from_normed_hidden_kt(
 ))]
 #[derive(Debug)]
 struct GrpoPgLossFromNormedHiddenBackward {
+    /// Sole differentiable tape input and saved activation.
     normed_hidden: kiln_tensor::Tensor,
+    /// Frozen tied head, saved only to compute `dL/d(normed_hidden)`.
+    /// It is intentionally not a tape input and receives no gradient.
     head_t: kiln_tensor::Tensor,
     policy_log_probs: kiln_tensor::Tensor,
     running_max: kiln_tensor::Tensor,
@@ -1377,7 +1380,7 @@ impl BackwardOp for GrpoPgLossFromNormedHiddenBackward {
     }
 
     fn input_count(&self) -> usize {
-        2
+        1
     }
 
     fn requires_input(&self, _idx: usize) -> bool {
@@ -1455,7 +1458,7 @@ impl BackwardOp for GrpoPgLossFromNormedHiddenBackward {
             }
         };
 
-        Ok(vec![Some(grad_hidden), None])
+        Ok(vec![Some(grad_hidden)])
     }
 }
 
@@ -2079,8 +2082,8 @@ fn grpo_pg_loss_from_logits_grad_kt(
 /// Returns:
 /// * `Ok(Some(loss))` — the tape-forward path ran; a `GrpoPgLossFromLogitsBackward`
 ///   node was recorded and IO-mapped into the bridge.
-/// * `Ok(None)` — gate off (`KILN_USE_TAPE_FORWARD` unset), `logits` is not a
-///   CUDA rank-3 `[1, T, V]`, no tape scope is active, an empty active set, or a
+/// * `Ok(None)` — `logits` is not a CUDA rank-3 `[1, T, V]`, no tape scope is
+///   active, an empty active set, or a
 ///   kt borrow failed. The caller must NOT have selected the tape-authoritative
 ///   path if the envelope is unmet (the dispatch device-/ECHO-gates it); this
 ///   surfaces a clean `None` so a misdispatch is caught.
@@ -2101,7 +2104,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     device: &Device,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
 
@@ -2199,7 +2202,8 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
 /// This is the long-context training path: forward computes selected log-probs
 /// by chunking the frozen tied head over vocab, and backward emits only
 /// `dL/d(normed_hidden)` by replaying those same chunks. The full `[T, V]`
-/// policy logits and full `[T, V]` logit gradient are never materialized.
+/// policy logits and full `[T, V]` logit gradient are never materialized. The
+/// tape records only `normed_hidden`; `head_t` remains frozen saved state.
 #[cfg(any(
     feature = "cuda",
     feature = "metal",
@@ -2221,7 +2225,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
     echo_env: Option<&EchoEnvSpec>,
     no_pg: bool,
 ) -> Result<Option<(kiln_tensor::Tensor, Option<f64>, kiln_tensor::Tensor)>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     let dims = normed_hidden.dims().to_vec();
@@ -2312,7 +2316,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
         let loss_kt = loss_kt_forward;
         tape.record(
             &loss_kt,
-            &[normed_hidden, head_t],
+            &[normed_hidden],
             Box::new(GrpoPgLossFromNormedHiddenBackward {
                 normed_hidden: normed_hidden.clone(),
                 head_t: head_t.clone(),
@@ -2393,7 +2397,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
     kl_reference_log_probs: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
 ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !matches!(normed_hidden.device(), kiln_tensor::Device::Vulkan(_))
@@ -4237,9 +4241,6 @@ mod tests {
         if !kiln_tensor::rocm_is_available() {
             eprintln!("[GRPO-ROCm] no ROCm device — skipping");
             return;
-        }
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
         }
         let device = kiln_tensor::Device::Rocm(0);
         let (seq_len, vocab) = (6usize, 16usize);

@@ -1,4 +1,4 @@
-//! Parity test for the experimental KILN_USE_TAPE_FORWARD path.
+//! Parity tests for the production tape-forward path.
 //!
 //! Compares the output of `kiln_model::forward::rms_norm` under two
 //! conditions:
@@ -7,33 +7,26 @@
 //!      short-circuits to `Ok(None)`. With `x.track_op() == false`
 //!      (the inputs we build below), the call lands in the
 //!      inference-only `fused_rmsnorm_kt` branch.
-//!   B. **Tape-forward** — env var set + active thread-local Tape;
-//!      `forward::rms_norm` records a node on the tape and
-//!      returns a candle Tensor copied from the kt output. The kt
-//!      call inside is `fused_rmsnorm_via_kt_tape`, which is a thin
-//!      tape-recording wrapper around the same `fused_rmsnorm_kt`
-//!      kernel.
+//!   B. **Tape-forward** — an active thread-local Tape scope makes
+//!      `forward::rms_norm` record a node and return the kt output. The kt
+//!      call inside is `fused_rmsnorm_frozen_weight_via_kt_tape`, which is a
+//!      thin tape-recording wrapper around the same `fused_rmsnorm_kt` kernel
+//!      with an input-only backward.
 //!
 //! Both paths bottom out in the same `kiln_fused_rmsnorm` FFI symbol,
 //! so the outputs must be bit-exact (max-abs-diff == 0.0). The
 //! difference is purely in the backward-graph machinery: the baseline
 //! returns a candle Tensor with no autograd lineage; the tape path
-//! returns a candle Tensor with no candle autograd lineage *plus* a
-//! `RmsNormBackward` node recorded on the active Tape. The
-//! `Tape::backward` walk for that node would produce the same
-//! gradient as the kt-forward-op shim's CustomOp2 backward — but
-//! that's a follow-up assertion (CP-4 tape-backward parity).
+//! returns a candle Tensor with no candle autograd lineage *plus* a frozen-weight
+//! RMSNorm node recorded on the active Tape. The `Tape::backward` walk produces
+//! only `dx`; the base-model norm weight is saved data rather than a tape input.
 //!
 //! # CP-4 (#1082) context
 //!
-//! The audit in
-//! `docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md` blocks
-//! a per-call-site flip of `rms_norm` to `fused_rmsnorm_via_kt_tape`
-//! because the production caller has no `&mut Tape` in scope. The
-//! `crate::tape_forward` module ships an opt-in scaffold (a
-//! thread-local Tape + `KILN_USE_TAPE_FORWARD` env tristate) so we
-//! can exercise the tape substrate end-to-end from kiln-model
-//! without rewriting the full callgraph.
+//! The thread-local scope lets model operations share one tape without
+//! threading `&mut Tape` through the full production call graph. Scope presence
+//! is the only routing authority: inference has no scope and training cannot be
+//! disabled by process environment.
 //!
 //! This test proves the tape-forward path is numerically identical
 //! to the existing production caller — establishing the substrate is
@@ -68,6 +61,11 @@ use std::sync::Mutex;
 
 use kiln_tensor::{DType, Device, Tensor};
 
+/// These tests share one physical CUDA device and allocate enough temporary
+/// storage that parallel execution can destabilize the host. Poison recovery
+/// keeps a failed assertion from disabling the remaining diagnostics.
+static GPU_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 // #1082 candle removal: the forward fns under test (`rms_norm`, `matmul`, etc.)
 // are kt (`kiln_tensor`) typed, so this file is now fully kt-native — inputs are
 // built directly on the CUDA device via `Tensor::from_vec(..).to_device(..)`
@@ -82,13 +80,6 @@ fn kt_in(t: &Tensor) -> Tensor {
 fn candle_out(t: &Tensor) -> Tensor {
     t.clone()
 }
-
-/// Lock to serialize env var mutation across tests in this binary —
-/// the `KILN_USE_TAPE_FORWARD` cache is a process-wide `OnceLock`,
-/// but two tests in different threads could both try to set/unset it.
-/// We only have one test today; the lock is defensive infrastructure
-/// for follow-up tests that extend the substrate.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn cuda_device() -> Option<Device> {
     // #1082 candle removal: kt's `Device::Cuda(0)` is a plain enum variant (no
@@ -150,8 +141,7 @@ fn build_inputs(device: &Device, rows: usize, hidden: usize) -> (Tensor, Tensor)
 
 #[test]
 fn tape_forward_rms_norm_bit_exact_parity_with_baseline() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -166,23 +156,7 @@ fn tape_forward_rms_norm_bit_exact_parity_with_baseline() {
 
     let (x, w) = build_inputs(&device, rows, hidden);
 
-    // Set the env var BEFORE any rms_norm call. `tape_forward_enabled`
-    // caches the result of the first read on process-wide OnceLock,
-    // so the env must already be set by the time the cache reads.
-    // The gate has two conditions (env + active scope); the BASELINE
-    // run still routes through the existing dispatch because no Tape
-    // scope is active, so `forward::rms_norm` returns `Ok(None)`
-    // and falls through.
-    //
-    // SAFETY: `std::env::set_var` is unsound across threads in
-    // multi-threaded contexts (Rust 2024 made this explicit). We hold
-    // ENV_LOCK across the call and we set the var to a stable "1"
-    // that no other test in this binary changes.
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
-
-    // Path A — baseline. Env is on, but no Tape scope is open, so
+    // Path A — baseline. No Tape scope is open, so
     // `forward::rms_norm` short-circuits to `Ok(None)` and the
     // call falls through to the existing kt-forward-op dispatch.
     // This is the production path today.
@@ -193,7 +167,7 @@ fn tape_forward_rms_norm_bit_exact_parity_with_baseline() {
     let baseline =
         candle_out(&kiln_model::forward::rms_norm(&x_kt, &w_kt, eps).expect("baseline rms_norm"));
 
-    // Path B — tape-forward. Env is on AND a Tape scope is open, so
+    // Path B — tape-forward. A Tape scope is open, so
     // `forward::rms_norm` records a node and returns the kt
     // output (which we copy to candle here for comparison).
     let (tape_result, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
@@ -238,14 +212,10 @@ fn tape_forward_rms_norm_bit_exact_parity_with_baseline() {
     );
 }
 
-/// Quick sanity: with the env var unset (or with no active scope),
-/// the gate must short-circuit cleanly without recording anything.
-/// Establishes the production-safety property — opting *in* requires
-/// two conditions; opting out is the default.
+/// Quick sanity: with no active scope, recording must short-circuit cleanly.
 #[test]
 fn tape_forward_short_circuits_without_active_scope() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -259,12 +229,7 @@ fn tape_forward_short_circuits_without_active_scope() {
     let eps = 1e-6f64;
     let (x, w) = build_inputs(&device, rows, hidden);
 
-    // Even with the env var set, no active Tape scope ==
-    // `forward::rms_norm` returns Ok(None) and the baseline
-    // dispatch runs.
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
+    // No active Tape scope means the baseline inference dispatch runs.
     // #1082: rms_norm is kt-typed — bridge inputs, then read the kt output's
     // shape directly (kt `.shape()` returns `&[usize]`).
     let x_kt = kt_in(&x);
@@ -310,8 +275,7 @@ fn build_matmul_inputs(device: &Device, m: usize, k: usize, n: usize) -> (Tensor
 
 #[test]
 fn tape_forward_matmul_bit_exact_parity_with_baseline() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -325,12 +289,6 @@ fn tape_forward_matmul_bit_exact_parity_with_baseline() {
     let k = 256usize;
     let n = 64usize;
     let (a, b) = build_matmul_inputs(&device, m, k, n);
-
-    // SAFETY: see RMSNorm test above — ENV_LOCK serialises mutators,
-    // value is stable "1" across the binary.
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     // #1082: production uses the kt-native twin try_tape_matmul_kt; validate IT.
     let a_kt = a.clone();
@@ -391,8 +349,7 @@ fn tape_forward_matmul_bit_exact_parity_with_baseline() {
 
 #[test]
 fn tape_forward_matmul_short_circuits_without_active_scope() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -402,9 +359,6 @@ fn tape_forward_matmul_short_circuits_without_active_scope() {
     };
 
     let (a, b) = build_matmul_inputs(&device, 8, 32, 16);
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
     let a_kt = a.clone();
     let b_kt = b.clone();
     let out = kiln_model::tape_forward::try_tape_matmul_kt(&a_kt, &b_kt)
@@ -438,8 +392,7 @@ fn build_silu_input(device: &Device, rows: usize, cols: usize) -> Tensor {
 
 #[test]
 fn tape_forward_silu_bit_exact_parity_with_baseline() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -451,10 +404,6 @@ fn tape_forward_silu_bit_exact_parity_with_baseline() {
     let rows = 32usize;
     let cols = 1024usize;
     let x = build_silu_input(&device, rows, cols);
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     // #1082: production uses the kt-native twin `try_tape_silu_kt`; validate it
     // directly. Build the kt input once (the candle adapter is gone).
@@ -503,8 +452,7 @@ fn tape_forward_silu_bit_exact_parity_with_baseline() {
 
 #[test]
 fn tape_forward_silu_short_circuits_without_active_scope() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -514,9 +462,6 @@ fn tape_forward_silu_short_circuits_without_active_scope() {
     };
 
     let x = build_silu_input(&device, 4, 64);
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
     // #1082: production uses the kt-native twin; validate IT short-circuits.
     let x_kt = x.clone();
     let out = kiln_model::tape_forward::try_tape_silu_kt(&x_kt).expect("try_tape_silu_kt call ok");
@@ -532,13 +477,11 @@ fn tape_forward_silu_short_circuits_without_active_scope() {
 // Same pattern as the matmul / silu parity tests: build BF16
 // contiguous CUDA weights of shape [V, H] and U32 token-ids of shape
 // [N], compare baseline (`kiln_tensor::ops::embedding` direct) against
-// the tape-forward path (`try_tape_embedding_cuda` -> `ops::embedding`
-// -> `cuda_index_select_dim0` underneath + `EmbeddingBackward`
-// recorded on the tape). Both paths share the same kt
+// the training path (`try_tape_frozen_embedding_kt` -> `ops::embedding`
+// -> `cuda_index_select_dim0` underneath). Both paths share the same kt
 // `cuda_index_select_dim0` kernel so the outputs must be bit-exact.
-// The difference is purely backward-graph machinery — the tape path
-// additionally records an `EmbeddingBackward` node visible to a
-// subsequent `Tape::backward` walk.
+// The frozen table is deliberately not recorded as a tape input; the gathered
+// activation is the root leaf consumed by the first differentiable layer.
 // ----------------------------------------------------------------------
 
 fn build_embedding_inputs(
@@ -577,8 +520,7 @@ fn build_embedding_inputs(
 
 #[test]
 fn tape_forward_embedding_bit_exact_parity_with_baseline() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -593,19 +535,13 @@ fn tape_forward_embedding_bit_exact_parity_with_baseline() {
     let n_tokens = 32usize;
     let (weights, token_ids) = build_embedding_inputs(&device, vocab, hidden, n_tokens);
 
-    // SAFETY: see RMSNorm test above — ENV_LOCK serialises mutators,
-    // value is stable "1" across the binary.
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
-
-    // #1082: production uses the kt twin try_tape_embedding_kt; validate IT.
+    // Production uses the frozen kt boundary; validate it directly.
     let w_kt = weights.clone();
     let ids_kt = token_ids.clone();
 
     // Path A — baseline. The kt twin short-circuits on no-active-scope.
-    let baseline = kiln_model::tape_forward::try_tape_embedding_kt(&w_kt, &ids_kt)
-        .expect("baseline try_tape_embedding_kt call ok");
+    let baseline = kiln_model::tape_forward::try_tape_frozen_embedding_kt(&w_kt, &ids_kt)
+        .expect("baseline try_tape_frozen_embedding_kt call ok");
     assert!(
         baseline.is_none(),
         "baseline path (no tape scope) must short-circuit to Ok(None) \
@@ -619,10 +555,10 @@ fn tape_forward_embedding_bit_exact_parity_with_baseline() {
 
     // Path B — tape-forward inside an active scope (the kt twin).
     let (tape_result, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_embedding_kt(&w_kt, &ids_kt)
+        kiln_model::tape_forward::try_tape_frozen_embedding_kt(&w_kt, &ids_kt)
     });
     let tape_out_kt = tape_result
-        .expect("tape-forward try_tape_embedding_kt ok")
+        .expect("tape-forward try_tape_frozen_embedding_kt ok")
         .expect("tape-forward returned Some(out)");
     let tape_out = &tape_out_kt.clone();
 
@@ -636,11 +572,8 @@ fn tape_forward_embedding_bit_exact_parity_with_baseline() {
 
     assert_eq!(
         tape.len(),
-        1,
-        "tape-forward embedding must record exactly one tape node \
-         (got {}). Empty tape means try_tape_embedding_cuda fell through; \
-         >1 node means an over-record bug.",
-        tape.len()
+        0,
+        "frozen embedding lookup must not record a differentiable table node"
     );
 
     assert_eq!(
@@ -657,8 +590,7 @@ fn tape_forward_embedding_bit_exact_parity_with_baseline() {
 
 #[test]
 fn tape_forward_embedding_short_circuits_without_active_scope() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -668,13 +600,10 @@ fn tape_forward_embedding_short_circuits_without_active_scope() {
     };
 
     let (weights, token_ids) = build_embedding_inputs(&device, 64, 32, 8);
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
     let w_kt = kt_in(&weights);
     let ids_kt = kt_in(&token_ids);
-    let out = kiln_model::tape_forward::try_tape_embedding_kt(&w_kt, &ids_kt)
-        .expect("try_tape_embedding_kt call ok");
+    let out = kiln_model::tape_forward::try_tape_frozen_embedding_kt(&w_kt, &ids_kt)
+        .expect("try_tape_frozen_embedding_kt call ok");
     assert!(
         out.is_none(),
         "no active tape scope must short-circuit to Ok(None) \
@@ -719,8 +648,7 @@ fn build_swiglu_inputs(device: &Device, rows: usize, cols: usize) -> (Tensor, Te
 
 #[test]
 fn tape_forward_swiglu_bit_exact_parity_with_baseline() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -735,12 +663,6 @@ fn tape_forward_swiglu_bit_exact_parity_with_baseline() {
     let rows = 16usize;
     let cols = 1024usize;
     let (gate, up) = build_swiglu_inputs(&device, rows, cols);
-
-    // SAFETY: see RMSNorm test above — ENV_LOCK serialises mutators,
-    // value is stable "1" across the binary.
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     // #1082: production uses the kt twin try_tape_swiglu_kt; validate IT.
     let gate_kt = kt_in(&gate);
@@ -803,8 +725,7 @@ fn tape_forward_swiglu_bit_exact_parity_with_baseline() {
 
 #[test]
 fn tape_forward_swiglu_short_circuits_without_active_scope() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -814,9 +735,6 @@ fn tape_forward_swiglu_short_circuits_without_active_scope() {
     };
 
     let (gate, up) = build_swiglu_inputs(&device, 4, 64);
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
     let gate_kt = kt_in(&gate);
     let up_kt = kt_in(&up);
     let out = kiln_model::tape_forward::try_tape_swiglu_kt(&gate_kt, &up_kt)
@@ -885,8 +803,7 @@ fn build_seed_grad(device: &Device, dims: &[usize], seed: u64, scale: f32) -> Te
 
 #[test]
 fn tape_backward_silu_matches_analytic_reference() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -898,10 +815,6 @@ fn tape_backward_silu_matches_analytic_reference() {
     let rows = 32usize;
     let cols = 1024usize;
     let x = build_silu_input(&device, rows, cols);
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     // Forward under the tape so a SiluBackward node is recorded (kt twin — the
     // production path; #1082).
@@ -954,8 +867,7 @@ fn tape_backward_silu_matches_analytic_reference() {
 
 #[test]
 fn tape_backward_swiglu_matches_analytic_reference() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -967,10 +879,6 @@ fn tape_backward_swiglu_matches_analytic_reference() {
     let rows = 16usize;
     let cols = 1024usize;
     let (gate, up) = build_swiglu_inputs(&device, rows, cols);
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     let gate_kt = kt_in(&gate);
     let up_kt = kt_in(&up);
@@ -1036,8 +944,7 @@ fn tape_backward_swiglu_matches_analytic_reference() {
 
 #[test]
 fn tape_backward_matmul_matches_analytic_reference() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -1050,10 +957,6 @@ fn tape_backward_matmul_matches_analytic_reference() {
     let k = 256usize;
     let n = 64usize;
     let (a, b) = build_matmul_inputs(&device, m, k, n);
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     let a_kt = a.clone();
     let b_kt = b.clone();
@@ -1110,9 +1013,8 @@ fn tape_backward_matmul_matches_analytic_reference() {
 }
 
 #[test]
-fn tape_backward_embedding_scatter_add_conserves_mass() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+fn tape_backward_embedding_table_is_a_frozen_leaf() {
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -1126,81 +1028,46 @@ fn tape_backward_embedding_scatter_add_conserves_mass() {
     let n_tokens = 32usize;
     let (weights, token_ids) = build_embedding_inputs(&device, vocab, hidden, n_tokens);
 
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
-
     let w_kt = kt_in(&weights);
     let ids_kt = kt_in(&token_ids);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_embedding_kt(&w_kt, &ids_kt)
+        kiln_model::tape_forward::try_tape_frozen_embedding_kt(&w_kt, &ids_kt)
     });
-    let _out = res
-        .expect("tape-forward try_tape_embedding_kt ok")
+    let out = res
+        .expect("tape-forward try_tape_frozen_embedding_kt ok")
         .expect("tape-forward returned Some(out)");
-    assert_eq!(tape.len(), 1, "embedding must record exactly one node");
-    let node = &tape.nodes()[0];
-    let out_id = node.output_id;
-    let input_ids = node.input_ids.clone();
-    assert!(
-        !input_ids.is_empty(),
-        "embedding records at least one input"
+    assert_eq!(
+        tape.len(),
+        0,
+        "frozen embedding lookup must not record weights or token ids"
     );
 
     // Output is [N, H]; seed grad matches.
     let seed = build_seed_grad(&device, &[n_tokens, hidden], 0xE9B0_0000_0004, 0.25);
     let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
-    seeds.insert(out_id, seed_kt);
+    seeds.insert(out.id(), seed_kt);
 
     let grads = tape
         .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
-        .expect("embedding backward walk");
-
-    // input_ids[0] = weights → d_weights via scatter_add. The grad for
-    // token_ids (input_ids[1], when present) must be None — indices have
-    // no gradient.
-    let dw_kt = grads.get(input_ids[0]).expect("d_weights present");
-    let dw = dw_kt.clone();
-    assert_eq!(dw.dims(), &[vocab, hidden], "d_weights shape [V, H]");
-    assert_eq!(dw.dtype(), DType::BF16, "d_weights dtype matches weights");
-    assert!(dw.device().is_gpu(), "d_weights stays on CUDA");
-    if input_ids.len() > 1 {
-        assert!(
-            grads.get(input_ids[1]).is_none(),
-            "token-id indices must carry no gradient"
-        );
-    }
-
-    // Mass conservation: scatter_add distributes every grad-row element
-    // into exactly one weight row, so Σ(d_weights) == Σ(grad). This is a
-    // backend-agnostic invariant that catches a dropped/mis-routed
-    // scatter without needing to re-derive the per-row destinations.
-    let dw_sum = dw
-        .to_dtype(DType::F32)
-        .expect("d_weights -> f32")
-        .sum_all()
-        .expect("sum d_weights")
-        .to_scalar::<f32>()
-        .expect("d_weights scalar");
-    let seed_sum = seed
-        .to_dtype(DType::F32)
-        .expect("seed -> f32")
-        .sum_all()
-        .expect("sum seed")
-        .to_scalar::<f32>()
-        .expect("seed scalar");
+        .expect("frozen embedding leaf backward walk");
     assert!(
-        (dw_sum - seed_sum).abs() < 2e-1,
-        "embedding scatter_add violated mass conservation: \
-         Σ(d_weights) = {dw_sum}, Σ(grad) = {seed_sum}"
+        grads.get(w_kt.id()).is_none(),
+        "frozen embedding table must never receive a gradient"
+    );
+    assert!(
+        grads.get(ids_kt.id()).is_none(),
+        "token ids must never receive a gradient"
+    );
+    assert!(
+        grads.get(out.id()).is_some(),
+        "unconsumed root activation seed remains keyed on the leaf output"
     );
 }
 
 #[test]
 fn tape_backward_rms_norm_produces_input_grads() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -1214,10 +1081,6 @@ fn tape_backward_rms_norm_produces_input_grads() {
     let eps = 1e-6f64;
     let (x, w) = build_inputs(&device, rows, hidden);
 
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
-
     // #1082: rms_norm is kt-typed — bridge candle inputs to kt for the call.
     let x_kt = kt_in(&x);
     let w_kt = kt_in(&w);
@@ -1229,7 +1092,12 @@ fn tape_backward_rms_norm_produces_input_grads() {
     let node = &tape.nodes()[0];
     let out_id = node.output_id;
     let input_ids = node.input_ids.clone();
-    assert!(!input_ids.is_empty(), "rms_norm records at least one input");
+    assert_eq!(
+        input_ids,
+        vec![x_kt.id()],
+        "RMSNorm records only the differentiable activation"
+    );
+    assert_ne!(input_ids[0], w_kt.id(), "norm weight must remain frozen");
 
     let seed = build_seed_grad(&device, &[rows, hidden], 0x12_0000_0005, 0.25);
     let seed_kt = seed.clone();
@@ -1252,15 +1120,10 @@ fn tape_backward_rms_norm_produces_input_grads() {
     assert_eq!(dx.dtype(), DType::BF16, "dx dtype matches x");
     assert!(dx.device().is_gpu(), "dx stays on CUDA");
 
-    // If the fused backward also emits a weight grad, it must be
-    // hidden-shaped. (Don't require it — the op may fold the weight grad
-    // elsewhere; the activation grad is the load-bearing one here.)
-    if input_ids.len() > 1 {
-        if let Some(dw_kt) = grads.get(input_ids[1]) {
-            let dw = dw_kt.clone();
-            assert_eq!(dw.dims(), &[hidden], "weight grad shape [H]");
-        }
-    }
+    assert!(
+        grads.get(w_kt.id()).is_none(),
+        "frozen RMSNorm weight must never appear in GradStore"
+    );
 }
 
 // ----------------------------------------------------------------------
@@ -1363,7 +1226,7 @@ fn ref_rope_split_half_fwd(
 
 #[test]
 fn tape_forward_rope_split_half_matches_f32_reference() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -1371,9 +1234,6 @@ fn tape_forward_rope_split_half_matches_f32_reference() {
             return;
         }
     };
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     for (batch, seq, heads, head_dim, rotary_dim) in [
         (2usize, 8usize, 4usize, 256usize, 64usize),
@@ -1431,15 +1291,12 @@ fn tape_forward_rope_split_half_matches_f32_reference() {
 
 #[test]
 fn tape_forward_rope_split_half_short_circuits_without_scope() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => return,
     };
     let (x, cos, sin) = build_rope_split_half_inputs(&device, 1, 4, 2, 64, 64);
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
     let x_kt = kt_in(&x);
     let cos_kt = kt_in(&cos);
     let sin_kt = kt_in(&sin);
@@ -1453,7 +1310,7 @@ fn tape_forward_rope_split_half_short_circuits_without_scope() {
 
 #[test]
 fn tape_backward_rope_split_half_matches_analytic_adjoint() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -1461,9 +1318,6 @@ fn tape_backward_rope_split_half_matches_analytic_adjoint() {
             return;
         }
     };
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     let (batch, seq, heads, head_dim, rotary_dim) = (2usize, 8usize, 4usize, 256usize, 64usize);
     let half = rotary_dim / 2;
@@ -1567,7 +1421,7 @@ fn build_add_inputs(device: &Device, rows: usize, cols: usize) -> (Tensor, Tenso
 
 #[test]
 fn tape_forward_add_matches_reference() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -1575,9 +1429,6 @@ fn tape_forward_add_matches_reference() {
             return;
         }
     };
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     let (rows, cols) = (32usize, 2560usize);
     let (a, b) = build_add_inputs(&device, rows, cols);
@@ -1631,15 +1482,12 @@ fn tape_forward_add_matches_reference() {
 
 #[test]
 fn tape_forward_add_short_circuits_without_scope() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => return,
     };
     let (a, b) = build_add_inputs(&device, 8, 64);
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
     let a_kt = kt_in(&a);
     let b_kt = kt_in(&b);
     let out = kiln_model::tape_forward::try_tape_add_kt(&a_kt, &b_kt).expect("call ok");
@@ -1651,7 +1499,7 @@ fn tape_forward_add_short_circuits_without_scope() {
 
 #[test]
 fn tape_backward_add_routes_grad_to_both_inputs() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -1659,9 +1507,6 @@ fn tape_backward_add_routes_grad_to_both_inputs() {
             return;
         }
     };
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     let (rows, cols) = (32usize, 2560usize);
     let (a, b) = build_add_inputs(&device, rows, cols);
@@ -1731,9 +1576,9 @@ fn tape_backward_add_routes_grad_to_both_inputs() {
 
 #[test]
 fn tape_connected_chain_backward_walk_parity() {
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use kiln_autograd::{AddBackward, MatmulBackward, Tape};
 
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -1846,7 +1691,7 @@ fn tape_connected_chain_backward_walk_parity() {
 
 #[test]
 fn tape_bridge_connected_adapter_chain_walk_parity() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -1854,9 +1699,6 @@ fn tape_bridge_connected_adapter_chain_walk_parity() {
             return;
         }
     };
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     let (m, k, n) = (16usize, 32usize, 16usize);
     let (a, b) = build_matmul_inputs(&device, m, k, n);
@@ -1956,7 +1798,7 @@ fn tape_bridge_connected_adapter_chain_walk_parity() {
 
 #[test]
 fn tape_bridge_connected_three_op_adapter_chain() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -1964,9 +1806,6 @@ fn tape_bridge_connected_three_op_adapter_chain() {
             return;
         }
     };
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     let (m, k, n) = (16usize, 32usize, 16usize);
     let (a, b) = build_matmul_inputs(&device, m, k, n);
@@ -2062,7 +1901,7 @@ fn tape_bridge_connected_three_op_adapter_chain() {
 //
 // 1. The adapter records exactly one tape node with inputs `[base, x, A, B]`
 //    in that order, and the dispatch gate in `add_lora_delta_to_base`
-//    routes through it when `KILN_USE_TAPE_LORA_ADD=1`.
+//    routes through it whenever a tape scope is active.
 // 2. `Tape::backward_with_seeds` walking that node produces grads for x,
 //    A, B with the original tensor shapes (NOT transposed views), so the
 //    bridge IO mapping `(a_kt.id(), proj.a.id())` deposits a shape-matched
@@ -2112,8 +1951,7 @@ fn build_lora_f32_inputs(
 
 #[test]
 fn tape_lora_add_records_fused_node_and_emits_var_grads() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -2131,11 +1969,6 @@ fn tape_lora_add_records_fused_node_and_emits_var_grads() {
     let out_features = 32usize;
     let lora_scale = 0.5_f32;
     let (base, x, a, b) = build_lora_f32_inputs(&device, rows, in_features, rank, out_features);
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-        std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-    }
 
     let proj = kiln_model::lora_loader::LoraProjectionWeights {
         // #1082: LoraProjectionWeights.{a,b} are kt now — bridge the candle
@@ -2334,14 +2167,137 @@ fn tape_lora_add_records_fused_node_and_emits_var_grads() {
     );
 }
 
+#[test]
+fn tape_split_lora_accumulates_original_b_and_omits_frozen_weights() {
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("split LoRA tape parity: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    let (rows, in_features, rank, out_features) = (3usize, 4usize, 2usize, 5usize);
+    let x = Tensor::from_vec(
+        random_f32_vec(rows * in_features, 0x5100_0001, 0.4),
+        vec![rows, in_features],
+    )
+    .unwrap()
+    .to_device(device)
+    .unwrap();
+    let full_weight = Tensor::from_vec(
+        random_f32_vec(in_features * out_features, 0x5100_0002, 0.3),
+        vec![in_features, out_features],
+    )
+    .unwrap()
+    .to_device(device)
+    .unwrap();
+    let a = Tensor::from_vec(
+        random_f32_vec(rank * in_features, 0x5100_0003, 0.2),
+        vec![rank, in_features],
+    )
+    .unwrap()
+    .to_device(device)
+    .unwrap();
+    let b = Tensor::from_vec(
+        random_f32_vec(out_features * rank, 0x5100_0004, 0.2),
+        vec![out_features, rank],
+    )
+    .unwrap()
+    .to_device(device)
+    .unwrap();
+    let weight0 = full_weight.narrow(1, 0, 2).unwrap().contiguous().unwrap();
+    let weight1 = full_weight.narrow(1, 2, 3).unwrap().contiguous().unwrap();
+    let proj = kiln_model::lora_loader::LoraProjectionWeights {
+        a: a.clone(),
+        b: b.clone(),
+    };
+    let scale = 0.5_f32;
+    let seed = Tensor::from_vec(
+        random_f32_vec(rows * out_features, 0x5100_0005, 0.25),
+        vec![rows, out_features],
+    )
+    .unwrap()
+    .to_device(device)
+    .unwrap();
+
+    let ((split_grads, split_deposits), full_result) = (
+        kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed.clone(), || {
+            let y0 = kiln_model::tape_forward::try_tape_lora_linear_output_slice_kt(
+                &x,
+                &weight0,
+                Some(&proj),
+                scale,
+                0,
+            )
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?
+            .ok_or_else(|| kiln_kt_bridge::BridgeError::new("first split recorder declined"))?;
+            let y1 = kiln_model::tape_forward::try_tape_lora_linear_output_slice_kt(
+                &x,
+                &weight1,
+                Some(&proj),
+                scale,
+                2,
+            )
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?
+            .ok_or_else(|| kiln_kt_bridge::BridgeError::new("second split recorder declined"))?;
+            let pieces = [&y0, &y1];
+            let joined = Tensor::cat(&pieces, 1)
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?;
+            kiln_model::tape_forward::try_tape_concat_kt(&pieces, 1, &joined)
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?
+                .ok_or_else(|| kiln_kt_bridge::BridgeError::new("split concat recorder declined"))
+        })
+        .expect("split LoRA segment backward"),
+        kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
+            kiln_model::tape_forward::try_tape_lora_linear_kt(&x, &full_weight, Some(&proj), scale)
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?
+                .ok_or_else(|| kiln_kt_bridge::BridgeError::new("full LoRA recorder declined"))
+        })
+        .expect("full LoRA segment backward"),
+    );
+    let (full_grads, full_deposits) = full_result;
+
+    let decoded: std::collections::HashSet<u64> = split_deposits
+        .keys()
+        .filter_map(|key| kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(*key as u64))
+        .collect();
+    assert_eq!(
+        decoded,
+        std::collections::HashSet::from([a.id().as_raw(), b.id().as_raw()])
+    );
+    assert_eq!(
+        split_deposits.len(),
+        2,
+        "only original LoRA A/B are deposits"
+    );
+    assert!(split_grads.get(weight0.id()).is_none());
+    assert!(split_grads.get(weight1.id()).is_none());
+    assert!(full_grads.get(full_weight.id()).is_none());
+
+    for (name, id) in [("x", x.id()), ("A", a.id()), ("B", b.id())] {
+        let split = split_grads
+            .get(id)
+            .unwrap_or_else(|| panic!("split {name} gradient missing"));
+        let full = full_grads
+            .get(id)
+            .unwrap_or_else(|| panic!("full {name} gradient missing"));
+        assert!(
+            max_abs_diff(split, full) < 1e-4,
+            "split/full {name} gradient mismatch"
+        );
+    }
+    assert_eq!(full_deposits.len(), 2);
+}
+
 /// The dispatch gate in `add_lora_delta_to_base` must route through the
-/// tape adapter when both env tristates are on AND a Tape scope is active.
+/// tape adapter whenever a Tape scope is active.
 /// This is the integration assertion — without it the parity gate would
 /// still see 0 LoRA grads matched even though the backward op is correct.
 #[test]
 fn add_lora_delta_to_base_routes_through_tape_when_gated() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -2356,11 +2312,6 @@ fn add_lora_delta_to_base_routes_through_tape_when_gated() {
     let out_features = 16usize;
     let lora_scale = 0.25_f32;
     let (base, x, a, b) = build_lora_f32_inputs(&device, rows, in_features, rank, out_features);
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-        std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-    }
 
     let proj = kiln_model::lora_loader::LoraProjectionWeights {
         // #1082: LoraProjectionWeights.{a,b} are kt now — bridge the candle
@@ -2385,7 +2336,7 @@ fn add_lora_delta_to_base_routes_through_tape_when_gated() {
     });
     let out_kt = res
         .expect("dispatch-gate try_tape_lora_add_kt ok")
-        .expect("dispatch-gate returned Some(out) — env + scope both on");
+        .expect("dispatch-gate returned Some(out) with an active scope");
     let out = candle_out(&out_kt);
 
     // #1082: kt twin records the reshape-framed fused chain (4 nodes — see
@@ -2442,8 +2393,7 @@ fn build_attn_bf16(device: &Device, dims: &[usize], seed: u64) -> Tensor {
 
 #[test]
 fn tape_flash_attn_records_node_and_emits_qkv_grads() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -2459,11 +2409,6 @@ fn tape_flash_attn_records_node_and_emits_qkv_grads() {
     let q = build_attn_bf16(&device, &[b, sq, hq, hd], 0x1111_2222_3333_4444);
     let k = build_attn_bf16(&device, &[b, sk, hkv, hd], 0x5555_6666_7777_8888);
     let v = build_attn_bf16(&device, &[b, sk, hkv, hd], 0x9999_AAAA_BBBB_CCCC);
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-        std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-    }
 
     // Forward inside a tape scope. Records one FlashAttnBackward node with
     // inputs [q, k, v].
@@ -2485,7 +2430,7 @@ fn tape_flash_attn_records_node_and_emits_qkv_grads() {
         tape.len(),
         1,
         "flash-attn must record exactly one tape node (got {}). Empty means \
-         the adapter fell through (gate off / envelope rejected); >1 means \
+         the adapter fell through (scope inactive / envelope rejected); >1 means \
          an over-record bug.",
         tape.len()
     );
@@ -2590,17 +2535,11 @@ fn tape_flash_attn_records_node_and_emits_qkv_grads() {
     assert!(all_finite(&dq), "dq has non-finite entries");
     assert!(all_finite(&dk), "dk has non-finite entries");
     assert!(all_finite(&dv), "dv has non-finite entries");
-
-    unsafe {
-        std::env::remove_var("KILN_USE_TAPE_FORWARD");
-        std::env::remove_var("KILN_USE_TAPE_FLASH_ATTN");
-    }
 }
 
 #[test]
 fn tape_flash_attn_short_circuits_without_active_scope() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -2613,13 +2552,8 @@ fn tape_flash_attn_short_circuits_without_active_scope() {
     let k = build_attn_bf16(&device, &[b, sk, hkv, hd], 0x20);
     let v = build_attn_bf16(&device, &[b, sk, hkv, hd], 0x30);
 
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-        std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-    }
-
-    // Called OUTSIDE a `with_thread_local_tape` scope: the gate is on but
-    // there is no active tape, so the adapter must return None cleanly
+    // Called OUTSIDE a `with_thread_local_tape` scope: there is no active tape,
+    // so the adapter must return None cleanly
     // (caller falls through to the existing CustomOp3 / fast path).
     let q_kt = kt_in(&q);
     let k_kt = kt_in(&k);
@@ -2631,11 +2565,6 @@ fn tape_flash_attn_short_circuits_without_active_scope() {
         "flash-attn adapter must return None with no active tape scope, \
          not record a dangling node"
     );
-
-    unsafe {
-        std::env::remove_var("KILN_USE_TAPE_FORWARD");
-        std::env::remove_var("KILN_USE_TAPE_FLASH_ATTN");
-    }
 }
 
 // ----------------------------------------------------------------------
@@ -2651,8 +2580,7 @@ fn tape_flash_attn_short_circuits_without_active_scope() {
 
 #[test]
 fn tape_reshape_records_node_and_passes_grad_through() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -2663,10 +2591,6 @@ fn tape_reshape_records_node_and_passes_grad_through() {
 
     // [2,3,4,5] -> [2,3,20] (the heads*head_dim collapse shape).
     let x = build_attn_bf16(&device, &[2, 3, 4, 5], 0xBEEF_0001);
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     let x_kt = kt_in(&x);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
@@ -2717,10 +2641,6 @@ fn tape_reshape_records_node_and_passes_grad_through() {
         max_abs_diff(&dx, &seed_reshaped) < 1e-3,
         "reshape adjoint must pass the grad through as a view (no value change)"
     );
-
-    unsafe {
-        std::env::remove_var("KILN_USE_TAPE_FORWARD");
-    }
 }
 
 // ----------------------------------------------------------------------
@@ -2753,8 +2673,7 @@ fn det_f32(device: &Device, dims: &[usize], base: f32, step: f32) -> Tensor {
 
 #[test]
 fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -2774,10 +2693,6 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
     let g = det_f32(&device, &[b, nv, t], -0.05, -0.006);
     let state = det_f32(&device, &[b, nv, dk, dv], 0.05, 0.003);
 
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-        std::env::set_var("KILN_USE_TAPE_GDN", "1");
-    }
     let backend = kiln_model::backend::for_device_kt(&device);
 
     // #1082: try_tape_gdn_recurrent_cuda takes kt q/k/v/beta/g + &mut kt state.
@@ -2891,11 +2806,6 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
             "{name} is essentially zero — tape backward not reaching the GDN input"
         );
     }
-
-    unsafe {
-        std::env::remove_var("KILN_USE_TAPE_FORWARD");
-        std::env::remove_var("KILN_USE_TAPE_GDN");
-    }
 }
 
 // ----------------------------------------------------------------------
@@ -2917,8 +2827,7 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
 
 #[test]
 fn tape_record_gdn_recurrent_head_last_records_node_and_emits_5_grads() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -2942,11 +2851,6 @@ fn tape_record_gdn_recurrent_head_last_records_node_and_emits_5_grads() {
     // prefill / full-chunk layout). Values are arbitrary — this is a
     // structural gate on the recorded backward, not a numeric oracle.
     let out_head_last = det_f32(&device, &[b, t, nv, dv], 0.15, 0.005);
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-        std::env::set_var("KILN_USE_TAPE_GDN", "1");
-    }
 
     // #1082: the candle shim `tape_record_gdn_recurrent` was deleted; bridge
     // the candle inputs to kt and drive the kt-native recorder directly.
@@ -3051,11 +2955,6 @@ fn tape_record_gdn_recurrent_head_last_records_node_and_emits_5_grads() {
             "{name} is essentially zero — head-last tape backward not reaching the GDN input"
         );
     }
-
-    unsafe {
-        std::env::remove_var("KILN_USE_TAPE_FORWARD");
-        std::env::remove_var("KILN_USE_TAPE_GDN");
-    }
 }
 
 // ----------------------------------------------------------------------
@@ -3099,8 +2998,7 @@ fn cuda_all_finite(tt: &Tensor) -> bool {
 
 #[test]
 fn tape_gdn_l2_norm_scale_records_node_and_emits_input_grad() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -3119,11 +3017,6 @@ fn tape_gdn_l2_norm_scale_records_node_and_emits_input_grad() {
     // stand-in (this is a structural wiring gate, not a numeric oracle — the
     // recorded backward derives the adjoint from the saved `x`, not from `out`).
     let out = det_f32(&device, &[b, t, nv, dk], 0.05, 0.004);
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-        std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-    }
 
     let x_kt = kt_in(&x);
     let out_in_kt = kt_in(&out);
@@ -3170,17 +3063,11 @@ fn tape_gdn_l2_norm_scale_records_node_and_emits_input_grad() {
         cuda_max_abs(&g_x) > 1e-6,
         "dx is essentially zero — tape backward not reaching the l2-norm input"
     );
-
-    unsafe {
-        std::env::remove_var("KILN_USE_TAPE_FORWARD");
-        std::env::remove_var("KILN_USE_TAPE_GDN_QK_NORM");
-    }
 }
 
 #[test]
-fn tape_gdn_gated_rms_norm_records_node_and_emits_3_grads() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+fn tape_gdn_gated_rms_norm_records_only_activation_inputs() {
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -3197,11 +3084,6 @@ fn tape_gdn_gated_rms_norm_records_node_and_emits_3_grads() {
     let weight = det_f32(&device, &[dv], 0.50, 0.013);
     let out = det_f32(&device, &[b, t, nv, dv], 0.05, 0.004);
     let eps = 1e-6f64;
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-        std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-    }
 
     let x_kt = kt_in(&x);
     let z_kt = kt_in(&z);
@@ -3229,10 +3111,13 @@ fn tape_gdn_gated_rms_norm_records_node_and_emits_3_grads() {
     let input_ids = node.input_ids.clone();
     assert_eq!(
         input_ids.len(),
-        3,
-        "gated-rms-norm records exactly three inputs (x, z, weight); got {}",
+        2,
+        "gated-rms-norm records exactly x and z; got {} inputs",
         input_ids.len()
     );
+    assert_eq!(input_ids, vec![x_kt.id(), z_kt.id()]);
+    assert_ne!(input_ids[0], weight_kt.id());
+    assert_ne!(input_ids[1], weight_kt.id());
 
     let seed = det_f32(&device, &[b, t, nv, dv], 0.3, -0.009);
     let seed_kt = seed.clone();
@@ -3242,7 +3127,7 @@ fn tape_gdn_gated_rms_norm_records_node_and_emits_3_grads() {
         .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
         .expect("gated-rms-norm tape backward walk");
 
-    // Input order [x, z, weight] -> [dx, dz, dw].
+    // Input order [x, z] -> [dx, dz].
     let fetch = |i: usize| -> Tensor {
         let kt = grads
             .get(input_ids[i])
@@ -3251,29 +3136,25 @@ fn tape_gdn_gated_rms_norm_records_node_and_emits_3_grads() {
     };
     let g_dx = fetch(0);
     let g_dz = fetch(1);
-    let g_dw = fetch(2);
     assert_eq!(g_dx.dims(), &[b, t, nv, dv], "dx shape == x");
     assert_eq!(g_dz.dims(), &[b, t, nv, dv], "dz shape == z");
-    assert_eq!(g_dw.dims(), &[dv], "dw shape == weight");
+    assert!(
+        grads.get(weight_kt.id()).is_none(),
+        "frozen GDN norm weight must not appear in GradStore"
+    );
 
-    for (name, t) in [("dx", &g_dx), ("dz", &g_dz), ("dw", &g_dw)] {
+    for (name, t) in [("dx", &g_dx), ("dz", &g_dz)] {
         assert!(cuda_all_finite(t), "{name} has non-finite entries");
         assert!(
             cuda_max_abs(t) > 1e-6,
             "{name} is essentially zero — tape backward not reaching the gated-norm input"
         );
     }
-
-    unsafe {
-        std::env::remove_var("KILN_USE_TAPE_FORWARD");
-        std::env::remove_var("KILN_USE_TAPE_GDN_GATED_NORM");
-    }
 }
 
 #[test]
 fn tape_transpose_records_node_and_passes_grad_through_transposed() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -3286,10 +3167,6 @@ fn tape_transpose_records_node_and_passes_grad_through_transposed() {
     // [b, nv, t, dv] -> head-LAST [b, t, nv, dv] (axes 1<->2).
     let (b, nv, t, dv) = (1usize, 2usize, 4usize, 6usize);
     let x = det_f32(&device, &[b, nv, t, dv], 0.10, 0.011);
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-    }
 
     let x_kt = kt_in(&x);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
@@ -3340,10 +3217,6 @@ fn tape_transpose_records_node_and_passes_grad_through_transposed() {
         cuda_max_abs(&g_x) > 1e-6,
         "transpose grad is essentially zero — tape backward not reaching the input"
     );
-
-    unsafe {
-        std::env::remove_var("KILN_USE_TAPE_FORWARD");
-    }
 }
 
 // ----------------------------------------------------------------------
@@ -3368,8 +3241,7 @@ fn tape_transpose_records_node_and_passes_grad_through_transposed() {
 
 #[test]
 fn tape_sdpa_fallback_records_node_and_emits_qkv_grads() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -3392,11 +3264,6 @@ fn tape_sdpa_fallback_records_node_and_emits_qkv_grads() {
     // q/k/v, not from `out`).
     let out = det_f32(&device, &[b, nq, t, hd], 0.03, 0.004);
 
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-        std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-    }
-
     // Record inside a tape scope. One SdpaBackward node with inputs [q, k, v].
     let q_kt = kt_in(&q);
     let k_kt = kt_in(&k);
@@ -3416,7 +3283,7 @@ fn tape_sdpa_fallback_records_node_and_emits_qkv_grads() {
         tape.len(),
         1,
         "sdpa fallback must record exactly one tape node (got {}). Empty means \
-         the adapter fell through (gate off / envelope rejected); >1 means an \
+         the adapter fell through (scope inactive / envelope rejected); >1 means an \
          over-record bug.",
         tape.len()
     );
@@ -3478,17 +3345,11 @@ fn tape_sdpa_fallback_records_node_and_emits_qkv_grads() {
             "{name} is essentially zero — tape backward not reaching the input"
         );
     }
-
-    unsafe {
-        std::env::remove_var("KILN_USE_TAPE_FORWARD");
-        std::env::remove_var("KILN_USE_TAPE_SDPA");
-    }
 }
 
 #[test]
 fn tape_sdpa_fallback_short_circuits_without_active_scope() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
+    let _gpu_test = GPU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let device = match cuda_device() {
         Some(d) => d,
         None => {
@@ -3502,13 +3363,8 @@ fn tape_sdpa_fallback_short_circuits_without_active_scope() {
     let v = det_f32(&device, &[b, nkv, t, hd], 0.05, 0.013);
     let out = det_f32(&device, &[b, nq, t, hd], 0.03, 0.004);
 
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-        std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-    }
-
-    // Called OUTSIDE a `with_thread_local_tape` scope: the gate is on but there
-    // is no active tape, so the adapter must return None cleanly (caller falls
+    // Called OUTSIDE a `with_thread_local_tape` scope: there is no active tape,
+    // so the adapter must return None cleanly (caller falls
     // through to the plain candle transpose+reshape).
     let q_kt = kt_in(&q);
     let k_kt = kt_in(&k);
@@ -3521,9 +3377,4 @@ fn tape_sdpa_fallback_short_circuits_without_active_scope() {
         "sdpa fallback adapter must return None with no active tape scope, \
          not record a dangling node"
     );
-
-    unsafe {
-        std::env::remove_var("KILN_USE_TAPE_FORWARD");
-        std::env::remove_var("KILN_USE_TAPE_SDPA");
-    }
 }

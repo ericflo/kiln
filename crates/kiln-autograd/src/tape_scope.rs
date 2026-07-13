@@ -1,4 +1,4 @@
-//! Thread-local `Tape` scope — Phase 6a/CP-4 ergonomics shim (#1082).
+//! Thread-local [`Tape`] scope and recording authority.
 //!
 //! # Why this module exists
 //!
@@ -42,14 +42,13 @@
 //!    semantics across nested scopes are undefined until CP-4 figures
 //!    that out.
 //!
-//! # Production-safety
+//! # Production contract
 //!
-//! Off by default. With no scope open, `with_active_tape` returns
-//! `None` and recording sites do not record. Crates calling
-//! `tape_forward_enabled()` must additionally check the
-//! `KILN_USE_TAPE_FORWARD` env var (or an equivalent opt-in) before
-//! attempting a tape route — see `kiln-model::forward::rms_norm`
-//! (the kt-native RMSNorm recorder) for the canonical pattern.
+//! The active thread-local scope is the sole authority for tape routing and
+//! recording. [`tape_scope_active`] is false outside
+//! [`with_thread_local_tape`], so inference keeps its normal fast paths. It is
+//! true for the complete scoped closure and cannot be disabled by process
+//! environment, so training cannot silently sever its gradient graph.
 //!
 //! # See also
 //!
@@ -58,33 +57,8 @@
 //!   adapter wired into `kiln-model::forward::rms_norm`.
 
 use std::cell::RefCell;
-use std::sync::OnceLock;
 
 use crate::Tape;
-
-/// `KILN_USE_TAPE_FORWARD` env var — **DEFAULTS ON** (CP-4 production path).
-/// Cached after first read.
-///
-/// Tape-forward routing is now the default. To **opt out** (for debugging /
-/// comparison against the legacy candle CustomOp path), set the env var to one
-/// of the disable values (`0`, `false`, `no`, empty); any other value (or the
-/// var being unset) keeps it on. Matches the convention used by
-/// `KILN_VULKAN_RMSNORM` and friends in `kiln-model::forward`.
-///
-/// Lifted verbatim from `kiln-model::tape_forward` so kernel crates
-/// can gate their own tape-routing adapters on the same env without
-/// taking a `kiln-model` dependency.
-pub fn tape_forward_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_TAPE_FORWARD")
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no")
-            })
-            .unwrap_or(true)
-    })
-}
 
 thread_local! {
     /// Thread-local active `Tape`. Wrapped in `RefCell` so the
@@ -97,6 +71,30 @@ thread_local! {
     /// primitives must check this and fall back to the
     /// non-tape-tracking path when no scope is active.
     static ACTIVE_TAPE: RefCell<Option<Tape>> = const { RefCell::new(None) };
+}
+
+/// Returns whether the current thread is inside a tape-recording scope.
+///
+/// Production tape-aware operations must use this predicate, or
+/// [`with_active_tape`] directly, as their routing authority. A failed borrow
+/// means the tape is already mutably borrowed by a recording callback, which
+/// also proves that a scope is active.
+pub fn tape_scope_active() -> bool {
+    ACTIVE_TAPE.with(|cell| {
+        cell.try_borrow()
+            .map(|active| active.is_some())
+            .unwrap_or(true)
+    })
+}
+
+struct TapeScopeGuard;
+
+impl Drop for TapeScopeGuard {
+    fn drop(&mut self) {
+        ACTIVE_TAPE.with(|cell| {
+            cell.borrow_mut().take();
+        });
+    }
 }
 
 /// Run `f` with a freshly-allocated `Tape` installed as the active
@@ -117,6 +115,7 @@ pub fn with_thread_local_tape<R>(f: impl FnOnce() -> R) -> (R, Tape) {
         );
         *cell.borrow_mut() = Some(Tape::new());
     });
+    let guard = TapeScopeGuard;
 
     let result = f();
 
@@ -125,6 +124,7 @@ pub fn with_thread_local_tape<R>(f: impl FnOnce() -> R) -> (R, Tape) {
             .take()
             .expect("kiln-autograd::tape_scope: active tape vanished mid-scope")
     });
+    drop(guard);
     (result, tape)
 }
 
@@ -149,21 +149,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tape_forward_enabled_caches_first_read() {
-        // The cache is process-wide; we can't reliably toggle the env
-        // inside a single test process. This test just confirms the
-        // function returns a stable bool across calls.
-        let a = tape_forward_enabled();
-        let b = tape_forward_enabled();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn with_thread_local_tape_round_trips() {
+    fn tape_scope_authority_tracks_scope() {
+        assert!(!tape_scope_active());
         let (result, tape) = with_thread_local_tape(|| 42);
         assert_eq!(result, 42);
-        // Newly-allocated tape with no records.
         assert!(tape.is_empty());
+        assert!(!tape_scope_active());
     }
 
     #[test]
@@ -175,9 +166,22 @@ mod tests {
     #[test]
     fn with_active_tape_returns_some_inside_scope() {
         let ((), _tape) = with_thread_local_tape(|| {
+            assert!(tape_scope_active());
             let out = with_active_tape(|_tape| 7);
             assert_eq!(out, Some(7));
         });
+    }
+
+    #[test]
+    fn panicking_scope_is_cleaned_up() {
+        let result = std::panic::catch_unwind(|| {
+            let _ = with_thread_local_tape::<()>(|| panic!("test panic"));
+        });
+        assert!(result.is_err());
+        assert!(!tape_scope_active());
+
+        let (_, tape) = with_thread_local_tape(|| ());
+        assert!(tape.is_empty());
     }
 
     #[test]

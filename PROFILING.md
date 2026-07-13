@@ -58,32 +58,35 @@ The current Kiln selector does not set this CUDA library variable. CUDA
 determinism qualification must export `CUBLAS_WORKSPACE_CONFIG=:4096:8`
 explicitly until that behavior is wired and proven before cuBLAS startup.
 
-#### 2. atomicAdd in embedding bwd + scatter-add — tolerance-bounded, with deterministic variant
+#### 2. atomicAdd in general trainable-weight and embedding backward kernels
 
 Status: **tolerance-bounded** by default; **deterministic variant
 available** under `KILN_DETERMINISTIC=1`.
 
-Atomic-add inserts into a single backward buffer in arbitrary order on
-the GPU. For BF16 accumulation that lands within the rounding band; the
-order-dependent variation is "real but bounded by 1 ULP near boundaries
-where F32 results straddle a bf16 quantum (e.g. 0.015625 = 2^-6 at
-typical magnitudes)" — verbatim from the existing tolerance comment at
-[`crates/kiln-rmsnorm-kernel/src/lib.rs:5024-5029`](crates/kiln-rmsnorm-kernel/src/lib.rs).
+Atomic-add inserts into a shared backward buffer in arbitrary order on the GPU.
+For BF16 accumulation that lands within the rounding band. These generic
+trainable-weight kernels remain relevant to direct library users, but they are
+not part of native LoRA model training: embedding tables and normalization
+weights are frozen there, so the production tape records neither as an input.
 
 Affected kernels:
 
-- `crates/kiln-rmsnorm-kernel/csrc/fused_rmsnorm_bwd.cu` —
-  `atomicAdd(&grad_w_partial_f32[j], dw_contrib)` on line 123.
+- `crates/kiln-rmsnorm-kernel/csrc/fused_rmsnorm_bwd.cu` — the trainable-weight
+  specialization atomically accumulates `dWeight`. The native LoRA
+  frozen-weight specialization compiles that branch out and allocates only
+  `dx`.
 - `crates/kiln-vulkan-kernel/csrc/shaders/vk_index_select_rows_bwd_f32.comp`
-  — embedding-table backward, atomicAdd over a uint reinterpret of f32.
+  — the generic embedding-table backward atomically adds through a uint
+  reinterpret of F32. Native LoRA training treats the gathered activation as a
+  leaf and does not invoke this table-gradient route.
 - `crates/kiln-flash-attn/csrc/flash_attn/src/flash_bwd_kernel.h:124`
   — already documents a deterministic variant ("each thread block does
   atomicAdd to a different `dQ_accum` buffer"); the deterministic path
   is gated by a build-time flag.
 
-The deterministic variants for each must ship in `kiln-tensor`'s
-backward implementations. The toggle is `KILN_DETERMINISTIC=1`; the
-default stays on the perf-preferred non-deterministic variant.
+Deterministic variants remain required before those general trainable-weight
+routes can claim bit-exact reproducibility. The native frozen paths avoid these
+two reductions by ownership, not by a determinism toggle.
 
 #### 3. Reduction order in softmax / RMSNorm / cross-entropy bwd — deterministic by construction
 

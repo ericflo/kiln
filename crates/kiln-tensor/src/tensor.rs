@@ -864,12 +864,10 @@ impl Tensor {
     ///
     /// CPU storage: iterates the addressable byte buffer (this method
     /// does not materialize a contiguous copy — it walks strides).
-    /// CUDA storage: routes through `cuda_is_finite`, a per-backend
-    /// reduction kernel that atomicOr's a single u32 device flag and
-    /// reads only those 4 bytes back to the host (vs the
-    /// pre-Phase-9 D2H bridge that copied the full tensor). Other
-    /// non-CPU backends still return an error until their
-    /// finite-check substrate lands.
+    /// CUDA, ROCm, and Vulkan storage route through backend reduction
+    /// kernels. Metal currently uses a synchronized logical D2H copy and the
+    /// same stride-aware CPU scan; this is a correctness fallback until a
+    /// native Metal finite reducer lands.
     ///
     /// This is the kt-tensor side of the
     /// `kiln_autograd::anomaly_detection_enabled()` /
@@ -943,6 +941,13 @@ impl Tensor {
             {
                 if matches!(self.device(), crate::Device::Vulkan(_)) {
                     return crate::vulkan_is_finite(self);
+                }
+            }
+            #[cfg(feature = "metal")]
+            {
+                if matches!(self.device(), crate::Device::Metal(_)) {
+                    let cpu_view = crate::metal_to_host_copy(self)?;
+                    return cpu_view.all_finite();
                 }
             }
             return Err(Error::Msg(format!(

@@ -663,6 +663,90 @@ tuple. A true descriptor is not a memory reservation: recipe submission repeats
 the full preflight before any step is prepared, and live-memory admission still
 occurs for each queued job.
 
+### Tape scope is internal execution authority, not configuration
+
+The kt autograd tape is a required workload substrate. Kiln opens its
+thread-local scope internally around the forward/backward region that must
+record gradients and closes it when that region completes. SFT, GRPO, and OPD
+admission first require an authoritative tape route; a request cannot open a
+scope, suppress one recorder, or choose a partially tape-backed execution.
+There is intentionally no TOML field, API member, CLI flag, or mechanically
+derived environment name for tape activation.
+
+Scope presence is also the complete inference boundary. Ordinary inference
+does not open a training tape scope and therefore retains forward-only fast
+paths. In particular, GDN chunkwise recurrence and CUDA's weight-aware
+embedding lookup defer to their tape-aware alternatives only while a scope is
+actually active. They do not consult a cached process-global tape setting. This
+prevents a default-on global flag from changing inference routing when no
+gradient graph exists.
+
+The following former correctness switches were removed without compatibility
+aliases or replacement fields:
+
+- `KILN_USE_TAPE_FORWARD`
+- `KILN_USE_TAPE_FLASH_ATTN`
+- `KILN_USE_TAPE_SDPA`
+- `KILN_USE_TAPE_LORA_ADD`
+- `KILN_USE_TAPE_GDN`
+- `KILN_USE_TAPE_GDN_CONV`
+- `KILN_USE_TAPE_GDN_QK_NORM`
+- `KILN_USE_TAPE_GDN_GATED_NORM`
+
+Delete these names from service definitions instead of translating them. A
+debug or performance control may select an implementation only when the active
+scope still records the required analytic backward and preserves the graph. It
+must not disable the tape, bypass an individual recorder, or fall through to a
+forward-only kernel. If no graph-preserving route exists, the workload fails
+closed through `training.optimizer_support.workloads[]` rather than accepting a
+correctness opt-out.
+
+This contract proves static ownership and route isolation; it does not by
+itself qualify numerical correctness, latency, memory use, or stability on a
+particular accelerator. Those claims require the platform-specific
+qualification workload and committed evidence described in
+[`NATIVE_SFT_PROFILE.md`](NATIVE_SFT_PROFILE.md).
+
+#### Frozen parameters are constants, not optimizer leaves
+
+Native SFT, GRPO, and OPD train only LoRA A/B tensors. Embedding tables, base
+projection matrices, RMSNorm and GDN gated-RMSNorm weights, GDN gate parameters,
+MTP projection weights, and loss-head transposes are saved constants. Their
+tape nodes record only differentiable activations and LoRA leaves. Backward
+therefore returns only required activation and LoRA gradients; it does not
+allocate, retain, or deposit frozen-weight gradients, and frozen projection
+paths do not execute a dWeight matrix multiplication.
+
+The split Q/gate projection keeps the original full LoRA A/B tensor IDs on both
+recorded chunks. Each chunk pads its B contribution to the full shape before
+the tape combines them, and tape-aware reshapes preserve the activation chain.
+Sliced base matrices and temporary B slices are never trainable leaves. This is
+an execution invariant with no TOML, request, CLI, debug, or environment
+override. It reduces frozen-gradient memory and compute by construction, but
+does not by itself qualify backend throughput.
+
+The optimizer boundary independently requires an exact LoRA gradient set. The
+observed tensor IDs must equal the configured trainable leaves; shape,
+backward-compute dtype, master device, and finite values must match before any
+parameter, optimizer state, or step counter is changed. Missing or unknown
+entries reject the step, while a valid all-zero gradient is accepted.
+Checkpointed execution applies the same identity and metadata contract to the
+exact leaves in each layer range. The tape bridge reduces distinct recorded
+input contributions to one accumulated entry per leaf, but rejects the result
+if any registered differentiable input is absent. A connected clone therefore
+cannot hide a disconnected use of the same leaf. Split output-projection chunks
+assemble zero-padded contributions under the original full leaf ID rather than
+temporary slice IDs. A checkpoint range with no configured LoRA leaves accepts
+only an empty gradient set, and the merge rejects duplicate leaf IDs across
+disjoint segments. Token-level GRPO
+accumulation validates identity and metadata for each source but defers its
+finite-value reduction to the single final optimizer boundary, avoiding a
+per-completion device synchronization multiplier. None of these checks has a
+configuration or environment bypass. CUDA, ROCm, and Vulkan
+use backend finite reducers. Metal performs a synchronized full-gradient host
+scan at the same boundary until a native Metal reducer is qualified; this is a
+correctness fallback, not an advertised throughput path.
+
 ### Backend-owned SFT loss route is not configuration
 
 There is intentionally no `[training]` field for the native SFT loss route.

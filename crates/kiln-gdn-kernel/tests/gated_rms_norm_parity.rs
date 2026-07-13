@@ -10,6 +10,8 @@
 //! `Tensor::cuda_from_slice`; the reference path is a pure-Rust F32
 //! host loop (the kernel's documented algorithm). Outputs are pulled
 //! back via `cuda_to_host_copy` and compared element-wise in F32.
+//! Backward coverage exercises both trainable-weight and frozen-weight
+//! entry points for BF16 and F32 weights; their `dx`/`dz` must be bit-exact.
 //!
 //! CUDA-only: `Tensor::cuda_from_slice` / `cuda_to_host_copy` /
 //! `primary_cuda_context` are the cuda-storage substrate helpers and
@@ -22,7 +24,8 @@ use half::bf16;
 
 use kiln_gdn_kernel::{
     gdn_gated_rms_norm_bf16_f32_weight_kt, gdn_gated_rms_norm_bf16_kt,
-    gdn_gated_rms_norm_bwd_bf16_f32_weight_kt, gdn_gated_rms_norm_bwd_bf16_kt,
+    gdn_gated_rms_norm_bwd_bf16_f32_weight_frozen_kt, gdn_gated_rms_norm_bwd_bf16_f32_weight_kt,
+    gdn_gated_rms_norm_bwd_bf16_frozen_weight_kt, gdn_gated_rms_norm_bwd_bf16_kt,
     gdn_gated_rms_norm_bwd_supports_kt, gdn_gated_rms_norm_f32_weight_supports_kt,
     gdn_gated_rms_norm_supports_kt, gdn_l2_norm_scale_bwd_bf16_kt,
     gdn_l2_norm_scale_bwd_supports_kt,
@@ -346,6 +349,11 @@ fn run_bwd_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed:
     let grads_f32_weight =
         gdn_gated_rms_norm_bwd_bf16_f32_weight_kt(&dout, &x, &z, &weight_f32, 1e-6)
             .expect("fused bwd f32 weight");
+    let frozen_grads = gdn_gated_rms_norm_bwd_bf16_frozen_weight_kt(&dout, &x, &z, &weight, 1e-6)
+        .expect("fused frozen-weight bwd");
+    let frozen_grads_f32_weight =
+        gdn_gated_rms_norm_bwd_bf16_f32_weight_frozen_kt(&dout, &x, &z, &weight_f32, 1e-6)
+            .expect("fused frozen f32-weight bwd");
 
     let (ref_dx, ref_dz, ref_dw) =
         reference_bwd_host(&dout_ref, &x_ref, &z_ref, &w_ref, rows, hidden, 1e-6);
@@ -355,6 +363,17 @@ fn run_bwd_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed:
     let got_dx = read_bf16_host_as_f32(&grads.dx);
     let got_dz = read_bf16_host_as_f32(&grads.dz);
     let got_dw = read_f32_host(&grads.dw);
+    let got_frozen_dx = read_bf16_host_as_f32(&frozen_grads.dx);
+    let got_frozen_dz = read_bf16_host_as_f32(&frozen_grads.dz);
+
+    assert_eq!(
+        got_frozen_dx, got_dx,
+        "{label}: frozen BF16-weight dx must match trainable-weight dx exactly"
+    );
+    assert_eq!(
+        got_frozen_dz, got_dz,
+        "{label}: frozen BF16-weight dz must match trainable-weight dz exactly"
+    );
 
     let max_abs = |a: &[f32], b: &[f32]| {
         a.iter()
@@ -395,6 +414,17 @@ fn run_bwd_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed:
     let got_dx_f32_weight = read_bf16_host_as_f32(&grads_f32_weight.dx);
     let got_dz_f32_weight = read_bf16_host_as_f32(&grads_f32_weight.dz);
     let got_dw_f32_weight = read_f32_host(&grads_f32_weight.dw);
+    let got_frozen_dx_f32_weight = read_bf16_host_as_f32(&frozen_grads_f32_weight.dx);
+    let got_frozen_dz_f32_weight = read_bf16_host_as_f32(&frozen_grads_f32_weight.dz);
+
+    assert_eq!(
+        got_frozen_dx_f32_weight, got_dx_f32_weight,
+        "{label}: frozen F32-weight dx must match trainable-weight dx exactly"
+    );
+    assert_eq!(
+        got_frozen_dz_f32_weight, got_dz_f32_weight,
+        "{label}: frozen F32-weight dz must match trainable-weight dz exactly"
+    );
 
     let dx_f32_weight_max = max_abs(&got_dx_f32_weight, &ref_dx_f32_weight_bf16);
     let dz_f32_weight_max = max_abs(&got_dz_f32_weight, &ref_dz_f32_weight_bf16);

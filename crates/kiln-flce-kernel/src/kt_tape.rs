@@ -39,12 +39,11 @@
 //! kt-tape `apply()` simply calls the kt-typed backward and routes
 //! its `dhidden` back through the tape's grad map).
 //!
-//! Note: FLCE has **only one input that carries a gradient** —
-//! `hidden`. `head_t` is treated as a constant by the existing
-//! kt-typed backward (it only returns `dhidden`); `input_ids` and
-//! `label_mask` are non-tensor metadata. The kt-tape backward
-//! returns `[Some(dhidden), None]` — `None` for `head_t` mirrors the
-//! candle `CustomOp1` `bwd()` semantics (no head_t gradient).
+//! Note: FLCE has **only one differentiable tape input** — `hidden`.
+//! The frozen `head_t` is saved on the backward op because computing
+//! `dhidden` needs it, but it is not recorded as an input and never
+//! receives a gradient. `input_ids` and `label_mask` are non-tensor
+//! metadata. The kt-tape backward therefore returns `[Some(dhidden)]`.
 //!
 //! # Envelope
 //!
@@ -125,21 +124,18 @@ fn envelope_ok(hidden: &KtTensor, head_t: &KtTensor) -> bool {
 /// `chunk_size` captured at forward time. On `apply(grad_loss)` it
 /// calls [`fused_linear_cross_entropy_phase_b_backward_kt`] (which
 /// recomputes the chunk loop and produces `dhidden` in the original
-/// hidden dtype). Returns `[Some(dhidden), None]` — `None` for the
-/// `head_t` slot mirrors the candle `CustomOp1` `bwd()` semantics
-/// (FLCE treats `head_t` as a constant; `input_ids` and `label_mask`
-/// are non-tensor metadata and not recorded as tape inputs).
+/// hidden dtype). Returns `[Some(dhidden)]` for the sole differentiable
+/// tape input. The frozen `head_t` is saved backward data, not a tape
+/// input; `input_ids` and `label_mask` are non-tensor metadata.
 ///
 /// # Why no `head_t` gradient?
 ///
 /// FLCE's existing kt-typed backward
 /// ([`fused_linear_cross_entropy_phase_b_backward_kt`]) returns only
 /// `dhidden`. The candle `CustomOp1` path (`KtForwardOp1`) has the
-/// same shape — `bwd()` returns `Ok(vec![Some(dhidden)])` and the
-/// upstream trainer relies on optimizer state for head weights, not
-/// backward-through-FLCE. Adding a `head_t` gradient here would
-/// require a new kt-typed kernel; this pilot stays bit-exact with
-/// the candle path.
+/// same shape — `bwd()` returns `Ok(vec![Some(dhidden)])`. The base
+/// head is frozen for this LoRA training route, so advertising it as
+/// a differentiable tape input would be both wasteful and misleading.
 ///
 /// # Tensor saving cost
 ///
@@ -176,12 +172,9 @@ impl BackwardOp for CudaFlcePhaseBBackward {
     }
 
     fn input_count(&self) -> usize {
-        // `hidden` and `head_t` are tape-recorded inputs. FLCE's
-        // backward only produces a gradient for `hidden` (idx 0);
-        // `head_t` (idx 1) gets `None`. `input_ids` / `label_mask` /
-        // `chunk_size` are non-tensor metadata and live on the op
-        // struct, not in the tape's input list.
-        2
+        // `hidden` is the only differentiable tape input. `head_t` is a
+        // frozen constant saved on this op solely to compute `dhidden`.
+        1
     }
 
     fn apply(&self, grad_output: &KtTensor) -> KtResult<Vec<Option<KtTensor>>> {
@@ -234,18 +227,15 @@ impl BackwardOp for CudaFlcePhaseBBackward {
             kiln_tensor::Error::Msg(format!("flce kt-tape bwd: kt call: {e}"))
         })?;
 
-        // FLCE's backward only produces a gradient for `hidden`. The
-        // `head_t` slot is `None` (same as the candle CustomOp1
-        // `bwd()` semantics — see module docs).
-        Ok(vec![Some(dhidden), None])
+        // FLCE's backward only produces a gradient for the sole tape input,
+        // `hidden`; the frozen head is saved backward data.
+        Ok(vec![Some(dhidden)])
     }
 
     fn requires_input(&self, idx: usize) -> bool {
-        // Both hidden and head_t are needed by the backward kernel
-        // (the chunk loop reads both). The metadata fields
-        // (input_ids, label_mask, chunk_size) are saved on the op
-        // struct itself.
-        idx == 0 || idx == 1
+        // The chunk loop reads the recorded hidden activation. The frozen
+        // head and host metadata are saved directly on the op.
+        idx == 0
     }
 }
 
@@ -271,13 +261,11 @@ impl BackwardOp for CudaFlcePhaseBBackward {
 ///
 /// # Tape integration
 ///
-/// The forward and the backward share `(hidden, head_t)` by `Arc`
-/// — kt `Tensor` is already `Clone` over `Arc<dyn Storage>` so the
-/// saved state is a refcount bump, not a host copy. `input_ids`
-/// and `label_mask` are saved as plain `Vec`s on the op struct
-/// (FLCE treats them as run-time non-tensor metadata; they are
-/// not tape-recorded inputs and the backward returns no gradient
-/// for them).
+/// The tape records `hidden` as its sole differentiable input. The backward
+/// also saves `hidden` and the frozen `head_t` by `Arc` clone — kt `Tensor`
+/// is already `Clone` over `Arc<dyn Storage>` so this is a refcount bump, not
+/// a host copy. `input_ids` and `label_mask` are saved as plain `Vec`s on the
+/// op struct and are not tape inputs.
 ///
 /// # Returns
 ///
@@ -370,11 +358,7 @@ fn fused_linear_cross_entropy_phase_b_via_kt_tape_impl(
         active_metadata,
         unit_root_grad,
     };
-    tape.record(
-        &loss,
-        &[hidden, head_t],
-        Box::new(bwd) as Box<dyn BackwardOp>,
-    );
+    tape.record(&loss, &[hidden], Box::new(bwd) as Box<dyn BackwardOp>);
 
     Ok(loss)
 }
@@ -419,6 +403,28 @@ mod tests {
         assert!(!envelope_ok(&hidden, &head));
     }
 
+    /// The frozen head is saved backward data, not a differentiable tape
+    /// input. Keep this contract covered without requiring a GPU.
+    #[test]
+    fn backward_contract_has_one_hidden_input() {
+        let hidden =
+            KtTensor::from_vec(vec![0.0f32; 1 * 4 * 8], vec![1, 4, 8]).expect("cpu hidden");
+        let head_t = KtTensor::from_vec(vec![0.0f32; 8 * 16], vec![8, 16]).expect("cpu head");
+        let bwd = CudaFlcePhaseBBackward {
+            hidden,
+            head_t,
+            input_ids: vec![0, 1, 2, 3],
+            label_mask: vec![true; 4],
+            chunk_size: 4,
+            active_metadata: None,
+            unit_root_grad: false,
+        };
+
+        assert_eq!(bwd.input_count(), 1);
+        assert!(bwd.requires_input(0));
+        assert!(!bwd.requires_input(1));
+    }
+
     // -----------------------------------------------------------------
     // CUDA E2E tests — gated on the `cuda` cargo feature so non-CUDA
     // builds still compile this module. At runtime we additionally
@@ -443,8 +449,8 @@ mod tests {
         out
     }
 
-    /// CUDA forward records a tape node tagged with the saved
-    /// (hidden, head_t) ids. Skips cleanly without a CUDA device.
+    /// CUDA forward records only the differentiable hidden id; the frozen
+    /// head remains saved backward data. Skips cleanly without a CUDA device.
     /// CUDA E2E forward. (#1082 H-FLCE) Previously `#[ignore]`-d
     /// because the kt-typed forward (`fused_linear_cross_entropy_phase_b_kt`)
     /// built per-chunk index tensors on the CPU (`active_idx`, `row_idx_t`,
@@ -499,21 +505,21 @@ mod tests {
         assert_eq!(tape.len(), 1);
 
         let node = &tape.nodes()[0];
-        assert_eq!(node.input_ids.len(), 2);
+        assert_eq!(node.input_ids.len(), 1);
         assert_eq!(node.input_ids[0], hidden.id());
-        assert_eq!(node.input_ids[1], head.id());
+        assert!(!node.input_ids.contains(&head.id()));
         assert_eq!(node.output_id, loss.id());
         assert_eq!(
             node.op.name(),
             "kiln-flce-kernel/fused_linear_cross_entropy_phase_b_kt_tape"
         );
-        assert_eq!(node.op.input_count(), 2);
+        assert_eq!(node.op.input_count(), 1);
     }
 
     /// Direct backward apply — exercises the apply() path on a
     /// matched (hidden, head_t) shape and asserts the returned
-    /// dhidden has the original hidden dtype + shape and that the
-    /// head_t slot is `None`. Skips cleanly without a CUDA device.
+    /// sole returned gradient has the original hidden dtype + shape.
+    /// Skips cleanly without a CUDA device.
     /// CUDA E2E backward. (#1082 H-FLCE) The backward already allocated its
     /// index/accumulator tensors device-parametrically; with the matching
     /// forward fix (see `forward_records_tape_node_when_cuda_available`) the
@@ -521,7 +527,7 @@ mod tests {
     /// when no GPU is present.
     #[cfg(feature = "cuda")]
     #[test]
-    fn backward_apply_returns_dhidden_shape_and_none_for_head() {
+    fn backward_apply_returns_single_dhidden() {
         if !cuda_available() {
             eprintln!("CUDA device not available; skipping backward_apply");
             return;
@@ -557,12 +563,8 @@ mod tests {
         let grad_loss = KtTensor::cuda_from_slice(&[1.0f32], vec![], 0).expect("grad_loss");
 
         let grads = bwd.apply(&grad_loss).expect("apply backward");
-        assert_eq!(grads.len(), 2);
+        assert_eq!(grads.len(), 1);
         let gh = grads[0].as_ref().expect("dhidden present");
-        assert!(
-            grads[1].is_none(),
-            "head_t grad slot must be None for FLCE kt-tape backward"
-        );
         // FLCE's kt-typed backward returns dhidden in the original
         // hidden dtype with the same `[1, seq, hidden]` shape.
         assert_eq!(gh.shape(), &[1, seq, hidden_size]);

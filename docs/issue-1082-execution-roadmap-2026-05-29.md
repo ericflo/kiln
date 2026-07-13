@@ -1,5 +1,12 @@
 # Issue #1082 — verified execution roadmap (2026-05-29)
 
+> **Historical snapshot, not current operating guidance.** This document records
+> migration state from May 2026. The `KILN_USE_TAPE_*` and
+> `KILN_USE_TAPE_AUTHORITATIVE` switches mentioned below were removed without
+> aliases or replacement fields. Current GPU training uses an internal tape
+> scope as its sole routing authority. See [Configuration](./CONFIGURATION.md)
+> and [Native SFT Profile](./NATIVE_SFT_PROFILE.md) for current behavior.
+
 Output of an 8-track parallel map (Sonnet) + adversarial verify (Opus) +
 synthesis (Opus) workflow. Supersedes the prioritization in the
 2026-05-27 tier roadmap. **The single most important correction below is

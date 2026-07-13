@@ -37,6 +37,16 @@
 //! - [`gdn_recurrent_forward_kt`] — seq_len==1 decode fast path. Collapses
 //!   the single-token GDN recurrence (decay, delta, state-update,
 //!   output projection) into one block per `(batch, head)`.
+//! - [`gdn_gated_rms_norm_bf16_kt`] and
+//!   [`gdn_gated_rms_norm_bf16_f32_weight_kt`] — fused gated RMSNorm forward
+//!   for BF16 activations with BF16 or F32 normalization weights.
+//! - [`gdn_gated_rms_norm_bwd_bf16_kt`] and
+//!   [`gdn_gated_rms_norm_bwd_bf16_f32_weight_kt`] — full backward for callers
+//!   that train the normalization weight.
+//! - [`gdn_gated_rms_norm_bwd_bf16_frozen_weight_kt`] and
+//!   [`gdn_gated_rms_norm_bwd_bf16_f32_weight_frozen_kt`] — adapter-training
+//!   backward that returns only `dx`/`dz`, allocates no dWeight buffer, and
+//!   launches a kernel specialization with no dWeight atomic reduction.
 //!
 //! # Envelope
 //!
@@ -44,7 +54,8 @@
 //! "minimal-scope vendoring" policy):
 //!
 //!   - bf16 activations, F32 accumulators inside the kernel.
-//!   - Causal / forward-pass only.
+//!   - Causal recurrence/chunk kernels; gated RMSNorm has explicit forward and
+//!     backward entry points.
 //!   - `dv` <= 1024 (kiln uses 128).
 //!   - `chunk_size` <= 128 (kiln uses 64) for forward-sub.
 //!   - `dk` <= 256 (kiln uses 128) for recurrent.
@@ -53,12 +64,11 @@
 //! Anything outside that envelope falls back to the Rust reference in
 //! `kiln-model::forward::compute_w_chunk_fallback`.
 //!
-//! # Not yet vendored
+//! # Remaining scope
 //!
-//! Per `PROFILING.md` (post-PR #130, Phase 6), the next GDN-side
-//! targets are the GDN body ranges (`gated_norm`, `gates`, `conv`,
-//! `qk_norm`) and the two RMSNorm stages — these are upstream of the
-//! chunkwise recurrence and are *not* covered by this crate.
+//! This crate now covers the GDN gates, gated RMSNorm, recurrent, chunk-prep,
+//! chunk-scan, and full-chunk families. Convolution and the model's two outer
+//! RMSNorm stages live in their dedicated kernel crates rather than here.
 
 /// kiln-tensor-typed surface. Same FFI used by the kernels.
 mod kt_api;
@@ -80,8 +90,9 @@ pub use kt_api::{
 // kernels).
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 pub use kt_api::{
-    GdnGatedRmsNormBwdKt, gdn_chunk_prep_kt, gdn_chunk_scan_kt, gdn_decode_gates_recurrent_bf16_kt,
-    gdn_decode_gates_recurrent_vf32_bf16_kt, gdn_decode_qk_norm_gates_recurrent_bf16_kt,
+    GdnGatedRmsNormBwdKt, GdnGatedRmsNormFrozenWeightBwdKt, gdn_chunk_prep_kt, gdn_chunk_scan_kt,
+    gdn_decode_gates_recurrent_bf16_kt, gdn_decode_gates_recurrent_vf32_bf16_kt,
+    gdn_decode_qk_norm_gates_recurrent_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt,
@@ -91,7 +102,8 @@ pub use kt_api::{
     gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt, gdn_forward_substitution_f32_kt,
     gdn_forward_substitution_kt, gdn_full_chunk_forward_kt, gdn_full_chunk_forward_multiblock_kt,
     gdn_gated_rms_norm_bf16_f32_weight_kt, gdn_gated_rms_norm_bf16_kt,
-    gdn_gated_rms_norm_bwd_bf16_f32_weight_kt, gdn_gated_rms_norm_bwd_bf16_kt,
+    gdn_gated_rms_norm_bwd_bf16_f32_weight_frozen_kt, gdn_gated_rms_norm_bwd_bf16_f32_weight_kt,
+    gdn_gated_rms_norm_bwd_bf16_frozen_weight_kt, gdn_gated_rms_norm_bwd_bf16_kt,
     gdn_gated_rms_norm_bwd_supports_kt, gdn_gates_bf16_f32_bf16_params_kt,
     gdn_gates_bf16_f32_params_kt, gdn_gates_bf16_kt, gdn_l2_norm_scale_bwd_bf16_kt,
     gdn_l2_norm_scale_bwd_supports_kt, gdn_recurrent_forward_kt, gdn_solve_tri_transpose_f32_kt,
@@ -531,6 +543,19 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_gdn_gated_rms_norm_bwd_frozen_bf16(
+        grad_out: *const core::ffi::c_void,
+        x: *const core::ffi::c_void,
+        z: *const core::ffi::c_void,
+        weight: *const core::ffi::c_void,
+        d_x: *mut core::ffi::c_void,
+        d_z: *mut core::ffi::c_void,
+        rows: i32,
+        hidden: i32,
+        eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_gdn_gated_rms_norm_bwd_wf32_bf16(
         grad_out: *const core::ffi::c_void,
         x: *const core::ffi::c_void,
@@ -539,6 +564,19 @@ unsafe extern "C" {
         d_x: *mut core::ffi::c_void,
         d_z: *mut core::ffi::c_void,
         d_weight: *mut core::ffi::c_void,
+        rows: i32,
+        hidden: i32,
+        eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_gdn_gated_rms_norm_bwd_frozen_wf32_bf16(
+        grad_out: *const core::ffi::c_void,
+        x: *const core::ffi::c_void,
+        z: *const core::ffi::c_void,
+        weight: *const core::ffi::c_void,
+        d_x: *mut core::ffi::c_void,
+        d_z: *mut core::ffi::c_void,
         rows: i32,
         hidden: i32,
         eps: f32,

@@ -895,6 +895,79 @@
                 phase-B backward routes. The first failed condition is preserved in
                 <code>workloads[].unavailable_reason</code> and its allowed-kind list is empty.
               </p>
+              <h5 id="training-tape-scope" class="font-semibold mt-4 mb-2">Tape scope authority and inference isolation</h5>
+              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+                The kt autograd tape is a required workload substrate, not a configuration feature.
+                Kiln opens an internal thread-local training scope only around forward/backward work that
+                must record gradients. Scope presence is the recorder&rsquo;s sole activation authority:
+                a request cannot open or close it, disable one link, or select a partially tape-backed
+                workload. There is no TOML field, API property, CLI flag, or mechanically derived
+                environment name for tape activation. An unavailable graph-preserving route makes the
+                matching <code>workloads[]</code> member unsupported.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Ordinary inference never opens that scope and therefore retains forward-only fast paths.
+                In particular, GDN chunkwise recurrence and CUDA&rsquo;s weight-aware embedding lookup defer
+                only while a training scope is actually active; neither consults a cached global tape
+                default. While the scope is active, debug or performance tuning may select only an
+                implementation whose backward stays connected to the same tape. It cannot suppress a
+                recorder, sever the gradient graph, or silently change the optimizer update.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>KILN_USE_TAPE_FORWARD</code>, <code>KILN_USE_TAPE_FLASH_ATTN</code>,
+                <code>KILN_USE_TAPE_SDPA</code>, <code>KILN_USE_TAPE_LORA_ADD</code>,
+                <code>KILN_USE_TAPE_GDN</code>, <code>KILN_USE_TAPE_GDN_CONV</code>,
+                <code>KILN_USE_TAPE_GDN_QK_NORM</code>, and
+                <code>KILN_USE_TAPE_GDN_GATED_NORM</code> were removed without aliases or replacement
+                fields. Delete them from service definitions. The portable source contract verifies
+                ownership and inference isolation; it is not hardware qualification and does not claim
+                accelerator-specific numerical, latency, memory, or stability evidence.
+              </p>
+              <h5 id="training-frozen-parameter-ownership" class="font-semibold mt-4 mb-2">Frozen parameter ownership</h5>
+              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Native SFT, GRPO, and OPD train LoRA A/B tensors and no base-model parameters.
+                Embedding tables, base projection matrices, RMSNorm and gated-RMSNorm weights,
+                GDN gate parameters, MTP projection weights, and loss-head transposes are saved
+                constants rather than differentiable tape inputs. Backward operators return only
+                the activation and LoRA gradients required upstream. They do not allocate, retain,
+                deposit, or run matrix products for frozen-weight gradients; frozen fused
+                normalization routes also omit dWeight outputs and atomics.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Both chunks of the split Q/gate projection retain the original full LoRA A/B IDs.
+                Each chunk pads its B contribution to the full parameter shape before accumulation,
+                and tape-aware reshapes preserve the post-split activation graph. A sliced base
+                matrix or temporary B slice can never become an optimizer leaf. This ownership has
+                no request, TOML, CLI, debug, or environment override. It removes frozen dWeight
+                compute and storage by construction, but is not accelerator throughput evidence.
+              </p>
+              <h5 id="training-exact-gradient-boundary" class="font-semibold mt-4 mb-2">Exact LoRA gradient-set boundary</h5>
+              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Before an optimizer mutates any parameter, moment, momentum, or step counter, the
+                observed gradient tensor IDs must equal the configured trainable LoRA leaves. Every
+                gradient must match its leaf&rsquo;s shape, backward-compute dtype, and master device and
+                contain only finite values. Missing or unknown IDs, metadata drift, NaN, and infinity
+                reject the step; a finite all-zero gradient remains valid. There is no request, config,
+                debug, or environment bypass.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                CUDA, ROCm, and Vulkan use backend finite reducers. Metal currently synchronizes and
+                copies each complete gradient to the host for the same stride-aware finite scan until a
+                native Metal reducer is qualified. This is a correctness fallback, not a Metal
+                large-batch throughput claim, and it cannot be disabled at the optimizer boundary.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Checkpoint reverse segments must return exactly the leaves in their layer range and
+                the tape bridge produces one accumulated entry per leaf when distinct recorded inputs
+                contribute to it. Every registered differentiable input must have a gradient before
+                reduction, so one connected clone cannot hide a disconnected use of the same leaf.
+                Split output-projection chunks assemble zero-padded contributions under the original
+                full LoRA leaf ID rather than temporary slice IDs. A range with no configured LoRA
+                leaves accepts only an empty gradient set. The checkpoint merge rejects duplicate leaf
+                IDs across disjoint segments. Token-level GRPO validates each completion&rsquo;s identity and metadata while
+                accumulating, then performs one finite-value scan on the combined set immediately
+                before optimizer mutation. SFT, GRPO, and OPD share this consumer contract.
+              </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 DistillRefresh is a separate sequential workload, not an OPD alias. Its SFT knowledge
                 phase and OPD behavior-recovery phase need separate exact phase plans; admission must

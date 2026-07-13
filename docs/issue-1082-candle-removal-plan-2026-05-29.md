@@ -1,5 +1,12 @@
 # kiln-model candle-core Removal — Authoritative Migration Plan (#1082 Tier-3)
 
+> **Historical snapshot, not current operating guidance.** This document records
+> migration state from May 2026. The `KILN_USE_TAPE_*` and
+> `KILN_USE_TAPE_AUTHORITATIVE` switches mentioned below were removed without
+> aliases or replacement fields. Current GPU training uses an internal tape
+> scope as its sole routing authority. See [Configuration](./CONFIGURATION.md)
+> and [Native SFT Profile](./NATIVE_SFT_PROFILE.md) for current behavior.
+
 ## 1. Executive Reframe: The Substrate Is Done — This Is Mechanical Type-Swapping
 
 **The kiln-tensor substrate is essentially complete.** This migration is a `candle_core::Tensor` → `kiln_tensor::Tensor` type-swap across ~6,076 candle reference tokens in `kiln-model/src/`, plus the cargo-feature flip that drops the dependency. It is **not** a substrate-building exercise. A prior plan wrongly claimed five substrate gaps that all already existed; this plan does not repeat that error. Every "gap" below was checked against the kiln-tensor op surface and the existing kt ports (`paged_kv_cache_kt.rs`, `metal_types`, `device_op.rs`, `GumbelSampler`).

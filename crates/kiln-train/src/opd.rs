@@ -3914,18 +3914,8 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
 
     use crate::Optimizer;
     use crate::trainer::TrainableLoraParams;
-    // NOTE(#1082): `use Var;` dropped — only two call sites
-    // inside this function (`Var::from_tensor` boundary states) and both
-    // now use the fully-qualified `Var::from_tensor` path so
-    // opd.rs's candle `use` count drops by 1.
-    //
-    // NOTE(#1082 CP-4 endgame): the per-step forward + backward moved into
-    // `opd_step_forward_backward_tape_authoritative` (tape path) and
-    // `opd_step_forward_backward_candle` (legacy candle path). Their forward
-    // helpers + the candle grad-accumulation helpers
-    // (`accumulate_grads`/`compute_segment_boundaries`/`lora_weights_detached`)
-    // are imported locally in those functions, so `opd_train`'s body no longer
-    // references them directly.
+    // Per-step OPD forward/backward is tape-authoritative and kt-native. The
+    // active tape scope is mandatory; no alternate autograd producer exists.
     use kiln_model::backend;
     if prompts.is_empty() {
         let message = "opd_train: prompts must be non-empty";
@@ -5047,8 +5037,8 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
 /// optimizer step consumes DIRECTLY.
 ///
 /// The single full forward (`model_forward_no_head`) routes the LoRA adapters
-/// through the tape (when `KILN_USE_TAPE_FORWARD` is on — default), and the
-/// kt-native scalar loss adapter (`try_tape_opd_scalar_mean_cuda_kt`) records
+/// through the mandatory active tape scope, and the kt-native scalar loss
+/// adapter (`try_tape_opd_scalar_mean_cuda_kt`) records
 /// the loss as the tape root against the kt `normed` (the final-RMSNorm tape
 /// node output) DIRECTLY so the recorded tape is CONNECTED from the loss back
 /// through the LoRA chain. This REPLACES the candle
@@ -5100,8 +5090,8 @@ fn opd_step_forward_backward_tape_authoritative(
 ) -> Result<(f64, usize, kiln_autograd::GradStore, Option<f64>)> {
     use kiln_model::forward::model_forward_no_head_with_policy;
 
-    // Teacher fetch + mask / top_k resolution — identical to the candle path
-    // (shared helper). This is the (potentially network/IPC) teacher query;
+    // Teacher fetch + mask / top_k resolution uses the shared preparation
+    // helper. This is the (potentially network/IPC) teacher query;
     // done ONCE here, before the tape scope, so the closure is pure tensor
     // work (the scope must not perform side-effecting teacher I/O on a retry).
     let prepared = prepare_opd_kernel_inputs(
@@ -5190,9 +5180,9 @@ fn opd_step_forward_backward_tape_authoritative(
                     // selected this path if the envelope was unmet.
                     return Err(kiln_kt_bridge::BridgeError::new(
                         format!(
-                            "opd tape-authoritative: {:?} returned None \
-                         (KILN_USE_TAPE_FORWARD off, empty active set, unsupported route, or out-of-envelope \
-                         inputs). The dispatch should keep this step on the candle path.",
+                            "opd tape-authoritative: {:?} did not record a scalar root \
+                         (an active tape scope is mandatory; the active set may be empty, the route may be \
+                         unsupported, or the inputs may be outside its envelope)",
                             opd_loss_route
                         ),
                     ));
@@ -5293,13 +5283,10 @@ fn opd_step_forward_backward_tape_authoritative(
         else {
             continue;
         };
-        if var_raw_ids.contains(&param_raw) {
-            // Land the grads under the param's exact kt id so
-            // `optimizer_step_from_kt_grad_store` resolves each param's moments +
-            // grad. Mirrors SFT's
-            // `standard_forward_backward_tape_authoritative_kt`.
-            grads.insert(kiln_tensor_id::TensorId::from_raw(param_raw), kt_grad);
-        }
+        // Preserve every tagged parameter deposit. The shared exact-gradient
+        // validator rejects unknown ids instead of letting this producer hide
+        // them before the optimizer boundary.
+        grads.insert(kiln_tensor_id::TensorId::from_raw(param_raw), kt_grad);
     }
 
     Ok((loss_val, active_count, grads, step_env_ce.get()))
@@ -5572,11 +5559,6 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
     .context("checkpointed OPD final RMSNorm backward")?
     .detach();
 
-    let param_raw_ids: std::collections::HashSet<u64> = params
-        .all_params()
-        .iter()
-        .map(|p| p.tensor_id().as_raw())
-        .collect();
     let mut grads = kiln_autograd::GradStore::new();
     for seg_idx in (0..num_segments).rev() {
         let (start, end) = segments[seg_idx];
@@ -5607,24 +5589,25 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
             })
             .map_err(|e| anyhow!("checkpointed OPD: segment {seg_idx} tape backward: {e}"))?;
 
+        let mut segment_grads = kiln_autograd::GradStore::new();
         for (candle_raw, g) in candle_grads {
             let Some(param_raw) =
                 kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(candle_raw as u64)
             else {
                 continue;
             };
-            if param_raw_ids.contains(&param_raw) {
-                let key = kiln_tensor_id::TensorId::from_raw(param_raw);
-                match grads.remove(key) {
-                    Some(prev) => grads.insert(
-                        key,
-                        kiln_tensor::ops::add(&prev, &g)
-                            .map_err(|e| anyhow!("checkpointed OPD: grad accumulate: {e}"))?,
-                    ),
-                    None => grads.insert(key, g),
-                }
-            }
+            segment_grads.insert(kiln_tensor_id::TensorId::from_raw(param_raw), g);
         }
+        let grad_context =
+            format!("checkpointed OPD segment {seg_idx} layers {start}..{end} gradient contract");
+        crate::trainer::merge_checkpoint_lora_grad_segment(
+            params,
+            &mut grads,
+            segment_grads,
+            start,
+            end,
+            &grad_context,
+        )?;
 
         if seg_idx > 0 {
             upstream_grad = kt_grads.get(seg_input_id).cloned().ok_or_else(|| {
@@ -7207,14 +7190,6 @@ mod tests {
         weights: kiln_model::forward::GpuWeights,
     ) -> Result<()> {
         unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
             std::env::remove_var("KILN_OPD_USE_CHAT_TEMPLATE_RENDER");
         }
         let tokenizer = off_policy_smoke_tokenizer()?;
@@ -7937,23 +7912,6 @@ mod tests {
         }
         let device = Device::Cuda(0);
 
-        // The tape adapters fire only inside a tape scope AND with the tape
-        // gates on. These are `OnceLock`-cached for the process, so set them
-        // FIRST (mirrors the SFT BF16 coverage test). `KILN_USE_TAPE_FORWARD`
-        // gates the OPD scalar-loss kt-tape root + the model-forward kt
-        // adapters; the GDN / attention gates wire the rest of the chain back
-        // to every LoRA Var.
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
-
         let config = tiny_config_bf16();
         let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
         let params =
@@ -8105,17 +8063,6 @@ mod tests {
             return;
         }
         let device = Device::Cuda(0);
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
-
         let config = tiny_config_bf16();
         let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
         let params =
@@ -8210,17 +8157,6 @@ mod tests {
             eprintln!("skip {test_name}: no Vulkan device");
             return;
         }
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
-
         let device = Device::Vulkan(0);
         let config = tiny_config_full_attn(); // F32 base, full-attn-only
         let weights = tiny_weights(&config, &device).expect("f32 tiny weights on Vulkan");
@@ -8336,17 +8272,6 @@ mod tests {
             eprintln!("skip {test_name}: no Vulkan device");
             return;
         }
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
-
         let device = Device::Vulkan(0);
         let config = tiny_config_bf16(); // BF16 base, GDN-bearing
         let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on Vulkan");

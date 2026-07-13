@@ -13,19 +13,19 @@
 //   grad_x[i,j] = rms_inv_i * ((1 + w[j]) * grad_out[i,j] - x[i,j] * c_i)
 //   grad_w[j]   = sum_i x[i,j] * rms_inv_i * grad_out[i,j]
 //
-// Pointer layout (all bf16 except `grad_w_partial_f32`, all CUDA, contiguous):
+// Pointer layout (all bf16 except `grad_weight_f32`, all GPU, contiguous):
 //   x                : [rows, hidden]
 //   weight           : [hidden]
 //   grad_out         : [rows, hidden]
 //   grad_x           : [rows, hidden]
-//   grad_w_partial_f32 : [hidden] f32 — caller MUST zero this buffer before
-//                        the call. Cross-row reduction uses atomicAdd in f32.
-//                        Caller is responsible for the optional final cast
-//                        to bf16.
+//   grad_weight_f32  : optional [hidden] f32. When non-null, caller MUST zero
+//                      this buffer before the call. Cross-row reduction uses
+//                      atomicAdd in f32. Caller owns the optional final bf16
+//                      cast. Null selects the dx-only frozen-weight path.
 //
 // Scope:
 //   - bf16 activations + bf16 weights + bf16 grad_out + bf16 grad_x.
-//   - Per-row F32 reductions; F32 atomicAdd for the cross-row grad_w sum.
+//   - Per-row F32 reductions; optional F32 atomicAdd for grad_w.
 //   - `hidden` <= 8192. Qwen3.5-4B uses 2560.
 //   - `eps` passed as F32 — kiln uses 1e-6.
 //
@@ -53,8 +53,10 @@ typedef int kiln_rmsnorm_bwd_status_t;
 //   grad_x = rms_inv * ((1 + w) * grad_out - x * c)
 //   grad_w[j] = sum_i (x[i,j] * rms_inv_i * grad_out[i,j])
 //
-// `grad_w_partial_f32` MUST be a zero-initialized [hidden] f32 buffer; the
-// caller is responsible for casting it back to bf16 if needed.
+// When `grad_weight_f32` is non-null, it MUST point to a zero-initialized
+// [hidden] f32 buffer; the caller is responsible for casting it back to bf16
+// if needed. A null pointer selects the frozen-weight variant, which computes
+// only grad_x and does not execute the grad_w atomic accumulation.
 //
 // Returns 0 on success, non-zero on launch/config failure.
 kiln_rmsnorm_bwd_status_t kiln_fused_rmsnorm_bwd(
@@ -62,7 +64,7 @@ kiln_rmsnorm_bwd_status_t kiln_fused_rmsnorm_bwd(
     const void *weight,
     const void *grad_out,
     void *grad_x,
-    float *grad_w_partial_f32,
+    float *grad_weight_f32,
     int rows,
     int hidden,
     float eps,
@@ -70,7 +72,7 @@ kiln_rmsnorm_bwd_status_t kiln_fused_rmsnorm_bwd(
 );
 
 // Cast an [hidden] f32 buffer to bf16 in place (out-of-place: writes to
-// `dst`). Used to finalize `grad_w_partial_f32` after the bwd kernel.
+// `dst`). Used to finalize `grad_weight_f32` after the bwd kernel.
 //
 // Returns 0 on success, non-zero on launch/config failure.
 kiln_rmsnorm_bwd_status_t kiln_f32_to_bf16(

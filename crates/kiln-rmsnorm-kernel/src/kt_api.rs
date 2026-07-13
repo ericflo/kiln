@@ -72,12 +72,72 @@ fn alloc_like(
     )?)
 }
 
+/// Allocate an RMSNorm backward output on the source tensor's actual storage
+/// context. This matters for borrowed/external ROCm tensors: allocating by
+/// device index would silently move the output to the cached primary context.
+fn alloc_rmsnorm_backward_like(
+    source: &KtTensor,
+    dtype: KtDType,
+    shape: Vec<usize>,
+) -> Result<KtTensor, RmsNormError> {
+    #[cfg(feature = "rocm")]
+    if matches!(source.device(), KtDevice::Rocm(_)) {
+        let (storage, _) = kiln_kt_bridge::rocm_storage_and_byte_offset(
+            source,
+            source.dtype(),
+            "rmsnorm_backward_source",
+        )?;
+        return Ok(kiln_kt_bridge::alloc_rocm_tensor(storage, dtype, shape)?);
+    }
+
+    alloc_like(source, dtype, shape)
+}
+
 /// Raw GPU stream pointer for `t`'s storage (replaces `device_stream_raw(st, "st")?`).
 fn device_stream_raw(
     t: &KtTensor,
     name: &'static str,
 ) -> Result<*mut core::ffi::c_void, RmsNormError> {
     Ok(kiln_kt_bridge::device_stream_raw_of(t, name)?)
+}
+
+#[cfg(feature = "rocm")]
+fn rocm_owner_stream_raw(
+    tensor: &KtTensor,
+    name: &'static str,
+) -> Result<*mut core::ffi::c_void, RmsNormError> {
+    let (storage, _) = kiln_kt_bridge::rocm_storage_and_byte_offset(tensor, tensor.dtype(), name)?;
+    Ok(storage.context().default_stream().hip_stream() as *mut core::ffi::c_void)
+}
+
+#[cfg(feature = "rocm")]
+fn synchronize_rocm_rmsnorm_backward_inputs(
+    launch_stream: *mut core::ffi::c_void,
+    output_owner_stream: *mut core::ffi::c_void,
+    inputs: &[(&'static str, &KtTensor)],
+) -> Result<(), RmsNormError> {
+    let capture_active = kiln_tensor::rocm_capture_arena_active();
+    for (name, tensor) in inputs {
+        let input_owner_stream = rocm_owner_stream_raw(tensor, name)?;
+        if capture_active {
+            if input_owner_stream != output_owner_stream {
+                return Err(RmsNormError::Msg(format!(
+                    "kt-rmsnorm bwd: ROCm input {name} belongs to a different storage context during graph capture"
+                )));
+            }
+            continue;
+        }
+        let input_stream = kiln_kt_bridge::device_stream_raw_of(tensor, name)?;
+        if input_stream == launch_stream {
+            continue;
+        }
+        kiln_tensor::rocm_synchronize_tensor_stream(tensor).map_err(|e| {
+            RmsNormError::Msg(format!(
+                "kt-rmsnorm bwd: synchronize ROCm input {name} before launch: {e}"
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 /// `fused_rmsnorm` over `kiln_tensor::Tensor` operands.
@@ -239,25 +299,62 @@ fn fused_rmsnorm_kt_rocm_row_tiled(
 
 /// `fused_rmsnorm_backward` over `kiln_tensor::Tensor` operands.
 ///
-/// Returns `(grad_x, grad_w_partial_f32)` where `grad_w_partial_f32`
-/// is the rows-reduced partial gradient that the caller sums across
-/// the rows axis to get the final weight gradient.
+/// Returns `(grad_x, grad_weight_f32)`. The kernel performs the cross-row
+/// reduction directly with F32 atomics, so `grad_weight_f32` is the final
+/// `[hidden]` weight gradient rather than a per-row scratch tensor.
 ///
 /// Shapes:
 /// - `x`, `weight`, `grad_out`: BF16, matching the forward
 /// - `grad_x`: BF16, shape == x
-/// - `grad_w_partial_f32`: F32 `[rows / WARP_SIZE_OR_BUCKET, hidden]` —
-///   the kernel writes per-row partials; the caller reduces.
+/// - `grad_weight_f32`: F32 `[hidden]`, fully reduced across rows
 pub fn fused_rmsnorm_backward_kt(
     x: &KtTensor,
     weight: &KtTensor,
     grad_out: &KtTensor,
     eps: f32,
 ) -> Result<(KtTensor, KtTensor), RmsNormError> {
+    let (grad_x, grad_weight) = fused_rmsnorm_backward_impl(x, weight, grad_out, eps, true)?;
+    let grad_weight = grad_weight.ok_or_else(|| {
+        RmsNormError::Msg("kt-rmsnorm bwd: internal weight-gradient omission".to_string())
+    })?;
+    Ok((grad_x, grad_weight))
+}
+
+/// Fused RMSNorm backward for a frozen normalization weight.
+///
+/// Computes and returns only `grad_x`. The GPU launch selects a specialized
+/// kernel instantiation that omits the weight-gradient atomic accumulation,
+/// and this path does not allocate a weight-gradient tensor.
+pub fn fused_rmsnorm_backward_dx_kt(
+    x: &KtTensor,
+    weight: &KtTensor,
+    grad_out: &KtTensor,
+    eps: f32,
+) -> Result<KtTensor, RmsNormError> {
+    let (grad_x, grad_weight) = fused_rmsnorm_backward_impl(x, weight, grad_out, eps, false)?;
+    debug_assert!(grad_weight.is_none());
+    Ok(grad_x)
+}
+
+fn fused_rmsnorm_backward_impl(
+    x: &KtTensor,
+    weight: &KtTensor,
+    grad_out: &KtTensor,
+    eps: f32,
+    compute_grad_weight: bool,
+) -> Result<(KtTensor, Option<KtTensor>), RmsNormError> {
     let x_shape = x.shape().to_vec();
     let hidden = *x_shape
         .last()
         .ok_or_else(|| RmsNormError::Msg("kt-rmsnorm bwd: x must have rank >= 1".to_string()))?;
+    if weight.device() != x.device() || grad_out.device() != x.device() {
+        return Err(RmsNormError::Msg(format!(
+            "kt-rmsnorm bwd: x, weight, and grad_out must share one device, got x={:?}, weight={:?}, grad_out={:?}",
+            x.device(),
+            weight.device(),
+            grad_out.device()
+        )));
+    }
     if weight.shape() != [hidden] {
         return Err(RmsNormError::Msg(format!(
             "kt-rmsnorm bwd: weight {:?} != [{hidden}]",
@@ -283,31 +380,57 @@ pub fn fused_rmsnorm_backward_kt(
     let g_ptr = kiln_kt_bridge::device_input_ptr(grad_out, KtDType::BF16, "grad_out")?;
     let x_st = x;
 
-    let grad_x = alloc_like(x_st, KtDType::BF16, x_shape.clone())?;
-    // grad_w_partial: the kernel writes one row of partials per warp
-    // of rows; the caller sums. For the kt-API we mirror the candle
-    // shape: [rows, hidden] (the full per-row form). The kernel
-    // expects a contiguous F32 buffer of `rows * hidden`.
-    let grad_w_partial = alloc_like(x_st, KtDType::F32, vec![rows, hidden])?;
+    let grad_x = alloc_rmsnorm_backward_like(x_st, KtDType::BF16, x_shape.clone())?;
+    // The kernel atomically reduces every row into one [hidden] F32 buffer.
+    // Frozen-weight training passes null instead and allocates no dWeight.
+    let grad_weight = if compute_grad_weight {
+        Some(alloc_rmsnorm_backward_like(
+            x_st,
+            KtDType::F32,
+            vec![hidden],
+        )?)
+    } else {
+        None
+    };
 
     let gx_ptr = kiln_kt_bridge::device_output_ptr(&grad_x);
-    let gw_ptr = kiln_kt_bridge::device_output_ptr(&grad_w_partial);
+    let gw_ptr = grad_weight
+        .as_ref()
+        .map(kiln_kt_bridge::device_output_ptr)
+        .unwrap_or(0);
 
-    // Launch on `grad_x`'s stream (see `fused_rmsnorm_kt` for the full rationale):
-    // on ROCm each fresh allocation gets its OWN context+stream, and `grad_x` is
-    // overwritten in full by the kernel, so co-locating the kernel with grad_x's
-    // zeroing memset serializes them. On CUDA `device_stream_raw` resolves to the
-    // single shared default stream, so this is identical to the previous behavior.
+    // Launch on `grad_x`'s owning stream. ROCm backward outputs preserve x's
+    // actual storage context, so both output zeroing memsets, the kernel writes,
+    // and later output consumers are ordered on this stream. Inputs owned by a
+    // different ROCm stream are handed off below. CUDA continues through its
+    // existing allocation and stream path unchanged.
     let raw_stream = device_stream_raw(&grad_x, "grad_x")?;
 
-    // ROCm-only cross-stream ordering (no-op concept on CUDA's single stream):
-    // `grad_w_partial` is *accumulated* into via atomicAdd, so its zeroing memset
-    // (enqueued on grad_w_partial's OWN stream at alloc time) MUST complete before
-    // the kernel's atomicAdds. Those are on different streams with no implicit
-    // ordering, so flush all pending device work before launching.
-    // R.10 perf: no pre-launch device sync needed — grad_w_partial's zeroing
-    // memset and the kernel's atomicAdd are on the one cached per-device stream
-    // (FIFO: memset before kernel). The old hipDeviceSynchronize was a stall.
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), KtDevice::Rocm(_)) {
+        let x_owner_stream = rocm_owner_stream_raw(x, "x")?;
+        let output_owner_stream = rocm_owner_stream_raw(&grad_x, "grad_x")?;
+        if output_owner_stream != x_owner_stream {
+            return Err(RmsNormError::Msg(
+                "kt-rmsnorm bwd: output allocation did not preserve x's ROCm storage context"
+                    .to_string(),
+            ));
+        }
+        if let Some(grad_weight) = &grad_weight {
+            let grad_weight_owner_stream = rocm_owner_stream_raw(grad_weight, "grad_weight")?;
+            if grad_weight_owner_stream != output_owner_stream {
+                return Err(RmsNormError::Msg(
+                    "kt-rmsnorm bwd: backward outputs have different ROCm storage contexts"
+                        .to_string(),
+                ));
+            }
+        }
+        synchronize_rocm_rmsnorm_backward_inputs(
+            raw_stream,
+            output_owner_stream,
+            &[("x", x), ("weight", weight), ("grad_out", grad_out)],
+        )?;
+    }
 
     let status = unsafe {
         kiln_fused_rmsnorm_bwd(
@@ -328,11 +451,11 @@ pub fn fused_rmsnorm_backward_kt(
         )));
     }
 
-    // R.10 perf: no post-launch device sync — grad_x / grad_w_partial readbacks
-    // run on the same cached per-device stream as the kernel (FIFO), and each
-    // rocm_to_host_copy syncs that stream itself.
+    // No post-launch sync is needed outside capture because both outputs own
+    // the launch stream. During capture, all in-graph consumers use the active
+    // capture stream and the graph runner owns the replay handoff.
 
-    Ok((grad_x, grad_w_partial))
+    Ok((grad_x, grad_weight))
 }
 
 /// `fused_rotary_qk` over `kiln_tensor::Tensor` operands.
@@ -1906,12 +2029,13 @@ fn kt_is_cuda(t: &KtTensor) -> bool {
 pub fn supports_rmsnorm_kt(x: &KtTensor, weight: &KtTensor) -> bool {
     kt_is_cuda(x)
         && kt_is_cuda(weight)
+        && x.device() == weight.device()
         && x.dtype() == KtDType::BF16
         && weight.dtype() == KtDType::BF16
         && x.is_contiguous()
         && weight.is_contiguous()
         && x.rank() >= 1
-        && x.shape().last().copied().unwrap_or(0) <= 8192
+        && (1..=8192).contains(&x.shape().last().copied().unwrap_or(0))
         && weight.shape() == [x.shape().last().copied().unwrap_or(0)]
 }
 

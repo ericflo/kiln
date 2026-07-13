@@ -27,14 +27,15 @@
 //! (they call the same FFI symbol on the same input bytes).
 //!
 //! Backward: `grad_x` bit-exact across calls (same FFI symbol
-//! `kiln_fused_rmsnorm_bwd`, no cross-row reduction). `grad_w` may
-//! differ by up to one BF16 ULP across calls because the kernel's
-//! `atomicAdd` cross-row reduction is order-non-deterministic across
-//! separate launches.
+//! `kiln_fused_rmsnorm_bwd`, no cross-row reduction). The generic,
+//! trainable-weight path also returns `grad_w`, which may differ by up to
+//! one BF16 ULP across calls because its cross-row `atomicAdd` reduction is
+//! order-non-deterministic. The frozen-weight path records only `x`, allocates
+//! no `grad_w`, and selects a kernel instantiation without those atomics.
 //!
 //! # Envelope
 //!
-//! Same as the CUDA-side [`crate::supports_rmsnorm_kt`]: CUDA, BF16
+//! Same as [`crate::supports_rmsnorm_kt`]: CUDA or ROCm, BF16
 //! `x` + `weight`, contiguous, rank >= 1, weight shape == `[hidden]`,
 //! `hidden <= 8192`. Out-of-envelope inputs return an error rather
 //! than silently falling back — the production caller is expected to
@@ -46,7 +47,10 @@ use kiln_tensor::{
     DType as KtDType, Device as KtDevice, Result as KtResult, Tensor as KtTensor, bail,
 };
 
-use crate::kt_api::{RmsNormError, fused_rmsnorm_backward_kt, fused_rmsnorm_kt};
+use crate::kt_api::{
+    RmsNormError, fused_rmsnorm_backward_dx_kt, fused_rmsnorm_backward_kt, fused_rmsnorm_kt,
+    supports_rmsnorm_kt,
+};
 
 /// True when `t` lives on a GPU backend the fused RMSNorm kernel runs on.
 /// Phase R.7: accepts `Device::Rocm` (under the `rocm` feature) as well as
@@ -65,54 +69,20 @@ fn is_gpu(t: &KtTensor) -> bool {
 /// exactly (GPU + BF16 + contiguous + rank >= 1 + weight == [hidden] +
 /// hidden <= 8192).
 fn envelope_ok(x: &KtTensor, weight: &KtTensor) -> bool {
-    if !is_gpu(x) {
-        return false;
-    }
-    if !is_gpu(weight) {
-        return false;
-    }
-    if x.dtype() != KtDType::BF16 || weight.dtype() != KtDType::BF16 {
-        return false;
-    }
-    if !x.is_contiguous() || !weight.is_contiguous() {
-        return false;
-    }
-    if x.rank() < 1 {
-        return false;
-    }
-    let hidden = x.shape().last().copied().unwrap_or(0);
-    if hidden == 0 || hidden > 8192 {
-        return false;
-    }
-    if weight.shape() != [hidden] {
-        return false;
-    }
-    true
+    supports_rmsnorm_kt(x, weight)
 }
 
-/// Saved-state backward for the fused CUDA RMSNorm kernel.
+/// Saved-state backward for the fused GPU RMSNorm kernel.
 ///
 /// Stores `x`, `weight`, and `eps` captured at forward time. On
 /// `apply(grad_y)` it calls [`fused_rmsnorm_backward_kt`] (which
-/// produces `grad_x: BF16, grad_w_partial: F32 [rows, hidden]`),
-/// then casts the first `hidden` F32 slots of the partial buffer
-/// down to BF16 to form the final `grad_w`. The cast logic mirrors
-/// the existing candle-wrapped backward closure exactly — same FFI
-/// symbol (`kiln_f32_to_bf16`), same `hidden`-only cast count.
-///
-/// # Why F32 [rows, hidden] partial -> BF16 [hidden] cast?
-///
-/// The kernel writes the cross-row `atomicAdd` accumulation into
-/// the *first* `hidden` F32 slots of the partial buffer (the rest
-/// of the `rows * hidden` allocation is scratch the kernel doesn't
-/// touch). See `csrc/fused_rmsnorm_bwd.cu` lines 12-19/122-123.
-/// We cast only those populated `hidden` slots to BF16, producing
-/// the final `grad_w` tensor.
+/// produces `grad_x: BF16, grad_w: F32 [hidden]`), then casts the
+/// weight gradient down to BF16 so the tape gradient matches the BF16 input.
 #[derive(Debug)]
 pub struct CudaFusedRmsNormBackward {
-    /// Saved BF16 CUDA `x` from the forward pass.
+    /// Saved BF16 GPU `x` from the forward pass.
     pub x: KtTensor,
-    /// Saved BF16 CUDA `weight` from the forward pass.
+    /// Saved BF16 GPU `weight` from the forward pass.
     pub weight: KtTensor,
     /// Epsilon used in the forward pass.
     pub eps: f32,
@@ -128,51 +98,17 @@ impl BackwardOp for CudaFusedRmsNormBackward {
     }
 
     fn apply(&self, grad_output: &KtTensor) -> KtResult<Vec<Option<KtTensor>>> {
-        // Same shape + dtype + device checks as the candle-side
-        // backward closure. We bail with a kt `Error::Msg` rather
-        // than candle's `bail!` since the kt-tape callers don't see
-        // candle errors.
-        if grad_output.shape() != self.x.shape() {
-            bail!(
-                "rmsnorm kt-tape bwd: grad_output {:?} != x {:?}",
-                grad_output.shape(),
-                self.x.shape()
-            );
-        }
-        if !is_gpu(grad_output) {
-            bail!("rmsnorm kt-tape bwd: grad_output must be on a GPU backend");
-        }
-        if grad_output.dtype() != KtDType::BF16 {
-            bail!(
-                "rmsnorm kt-tape bwd: grad_output dtype {} != BF16",
-                grad_output.dtype()
-            );
-        }
-        if !grad_output.is_contiguous() {
-            bail!("rmsnorm kt-tape bwd: grad_output must be contiguous");
-        }
+        let hidden = validate_grad_output(&self.x, grad_output)?;
 
-        let hidden = self
-            .x
-            .shape()
-            .last()
-            .copied()
-            .ok_or_else(|| kiln_tensor::Error::from_str("rmsnorm kt-tape bwd: x rank < 1"))?;
-
-        // Run the CUDA backward kernel: produces (grad_x: BF16, grad_w_partial: F32).
-        let (grad_x, grad_w_partial) =
+        // Run the GPU backward kernel: produces (grad_x: BF16, grad_w: F32).
+        let (grad_x, grad_w_f32) =
             fused_rmsnorm_backward_kt(&self.x, &self.weight, grad_output, self.eps).map_err(
                 |e: RmsNormError| {
                     kiln_tensor::Error::Msg(format!("rmsnorm kt-tape bwd: kt call: {e}"))
                 },
             )?;
 
-        // Cast the first `hidden` F32 slots of the partial buffer to
-        // BF16 to produce the final `grad_w`. See module docs and the
-        // candle backward closure in `kt_forward_op.rs` for why this
-        // slice is valid (kernel writes the reduced result into the
-        // first `hidden` F32 slots).
-        let grad_w = cast_partial_hidden_f32_to_bf16(&grad_w_partial, hidden)?;
+        let grad_w = cast_hidden_f32_to_bf16(&grad_w_f32, hidden)?;
 
         Ok(vec![Some(grad_x), Some(grad_w)])
     }
@@ -183,35 +119,95 @@ impl BackwardOp for CudaFusedRmsNormBackward {
     }
 }
 
-/// Cast the first `hidden` F32 slots of `partial` to BF16, returning a
-/// fresh `[hidden]` BF16 CUDA tensor on the same stream as `partial`.
+/// Saved-state backward for fused RMSNorm with a frozen normalization weight.
 ///
-/// Mirrors the cast block in the candle backward closure of
-/// [`crate::kt_forward_op`]. Lives here so the kt-tape backward
-/// doesn't have to pull `kiln_kt_bridge::cuda_*` plumbing into its
-/// public surface.
-fn cast_partial_hidden_f32_to_bf16(partial: &KtTensor, hidden: usize) -> KtResult<KtTensor> {
+/// The weight remains saved as a constant because `grad_x` depends on it, but
+/// it is deliberately not a tape input. `apply` returns exactly one gradient,
+/// for `x`, and the underlying kernel allocates and computes no weight gradient.
+#[derive(Debug)]
+pub struct FusedRmsNormFrozenWeightBackward {
+    /// Saved BF16 GPU activation from the forward pass.
+    pub x: KtTensor,
+    /// Saved BF16 GPU normalization weight, treated as a frozen constant.
+    pub weight: KtTensor,
+    /// Epsilon used in the forward pass.
+    pub eps: f32,
+}
+
+impl BackwardOp for FusedRmsNormFrozenWeightBackward {
+    fn name(&self) -> &'static str {
+        "kiln-rmsnorm-kernel/fused_rmsnorm_frozen_weight_kt_tape"
+    }
+
+    fn input_count(&self) -> usize {
+        1
+    }
+
+    fn apply(&self, grad_output: &KtTensor) -> KtResult<Vec<Option<KtTensor>>> {
+        validate_grad_output(&self.x, grad_output)?;
+        let grad_x = fused_rmsnorm_backward_dx_kt(&self.x, &self.weight, grad_output, self.eps)
+            .map_err(|e: RmsNormError| {
+                kiln_tensor::Error::Msg(format!("rmsnorm frozen-weight kt-tape bwd: kt call: {e}"))
+            })?;
+        Ok(vec![Some(grad_x)])
+    }
+
+    fn requires_input(&self, idx: usize) -> bool {
+        idx == 0
+    }
+}
+
+fn validate_grad_output(x: &KtTensor, grad_output: &KtTensor) -> KtResult<usize> {
+    if grad_output.shape() != x.shape() {
+        bail!(
+            "rmsnorm kt-tape bwd: grad_output {:?} != x {:?}",
+            grad_output.shape(),
+            x.shape()
+        );
+    }
+    if !is_gpu(grad_output) {
+        bail!("rmsnorm kt-tape bwd: grad_output must be on a GPU backend");
+    }
+    if grad_output.dtype() != KtDType::BF16 {
+        bail!(
+            "rmsnorm kt-tape bwd: grad_output dtype {} != BF16",
+            grad_output.dtype()
+        );
+    }
+    if !grad_output.is_contiguous() {
+        bail!("rmsnorm kt-tape bwd: grad_output must be contiguous");
+    }
+    x.shape()
+        .last()
+        .copied()
+        .ok_or_else(|| kiln_tensor::Error::from_str("rmsnorm kt-tape bwd: x rank < 1"))
+}
+
+/// Cast a `[hidden]` F32 weight gradient to BF16 on the same GPU stream.
+///
+/// Lives here so the kt-tape backward does not expose bridge allocation or
+/// stream plumbing in its public surface.
+fn cast_hidden_f32_to_bf16(grad_weight: &KtTensor, hidden: usize) -> KtResult<KtTensor> {
     // Backend-neutral seam (Phase R.7): the `device_*` dispatchers route
     // `Device::Cuda` tensors to the same CUDA helpers (behavior-identical) and
     // `Device::Rocm` tensors to the ROCm ones.
-    let partial_ptr = kiln_kt_bridge::device_output_ptr(partial);
-    let raw_stream = kiln_kt_bridge::device_stream_raw_of(partial, "partial")
+    let grad_weight_ptr = kiln_kt_bridge::device_output_ptr(grad_weight);
+    let raw_stream = kiln_kt_bridge::device_stream_raw_of(grad_weight, "grad_weight")
         .map_err(|e| kiln_tensor::Error::Msg(format!("rmsnorm kt-tape bwd: stream: {e}")))?;
-    let dst = kiln_kt_bridge::alloc_device_tensor_like(partial, KtDType::BF16, vec![hidden])
+    let dst = kiln_kt_bridge::alloc_device_tensor_like(grad_weight, KtDType::BF16, vec![hidden])
         .map_err(|e| {
             kiln_tensor::Error::Msg(format!("rmsnorm kt-tape bwd: alloc grad_w BF16: {e}"))
         })?;
     let dst_ptr = kiln_kt_bridge::device_output_ptr(&dst);
 
-    // SAFETY: `partial_ptr` points to a F32 buffer of at least `hidden`
-    // populated elements (the kernel writes the reduced result into the
-    // first `hidden` F32 slots — see `csrc/fused_rmsnorm_bwd.cu`).
+    // SAFETY: `grad_weight_ptr` points to an F32 buffer of exactly `hidden`
+    // populated elements.
     // `dst_ptr` points to a BF16 buffer of exactly `hidden` elements we
     // just allocated. `raw_stream` is the GPU stream associated with
-    // `partial`'s storage.
+    // `grad_weight`'s storage.
     let status = unsafe {
         crate::kiln_f32_to_bf16(
-            partial_ptr as *const f32,
+            grad_weight_ptr as *const f32,
             dst_ptr as *mut _,
             hidden as i32,
             raw_stream,
@@ -227,7 +223,7 @@ fn cast_partial_hidden_f32_to_bf16(partial: &KtTensor, hidden: usize) -> KtResul
 /// the candle `KtForwardOp2` shim
 /// `kiln-model::rmsnorm_candle_shim::fused_rmsnorm_via_kt_forward_op`.
 ///
-/// Runs the CUDA forward via [`fused_rmsnorm_kt`], then records a tape
+/// Runs the GPU forward via [`fused_rmsnorm_kt`], then records a tape
 /// node whose backward calls [`fused_rmsnorm_backward_kt`] on the same
 /// FFI symbols. No candle types touched — the input, output, and
 /// recorded saved tensors are all `kiln_tensor::Tensor`.
@@ -245,18 +241,9 @@ fn cast_partial_hidden_f32_to_bf16(partial: &KtTensor, hidden: usize) -> KtResul
 /// `Tensor` is already `Clone` over `Arc<dyn Storage>` so the saved
 /// state is a refcount bump, not a host copy.
 ///
-/// # Production caller status (2026-05-28)
-///
-/// The production caller in `kiln_model::forward::rms_norm`
-/// (`crates/kiln-model/src/forward.rs:7172`) still routes through
-/// `kiln-model::rmsnorm_candle_shim::fused_rmsnorm_via_kt_forward_op`,
-/// not this entry. The
-/// flip is gated on CP-4 substrate work in `kiln-train` (porting
-/// `loss.backward()` / `candle_core::backprop::GradStore` onto
-/// `kiln_autograd::Var` / `Tape::backward`). See
-/// `docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md` for
-/// the full audit and the architectural reason a per-call-site flip
-/// is not progress until CP-4 lands.
+/// This is the trainable-weight API: the recorded node produces gradients for
+/// both `x` and `weight`. LoRA training, where normalization weights are frozen,
+/// should use [`fused_rmsnorm_frozen_weight_via_kt_tape`] instead.
 pub fn fused_rmsnorm_via_kt_tape(
     x: &KtTensor,
     weight: &KtTensor,
@@ -266,7 +253,7 @@ pub fn fused_rmsnorm_via_kt_tape(
     if !envelope_ok(x, weight) {
         bail!(
             "fused_rmsnorm_via_kt_tape: inputs outside kt envelope \
-             (CUDA + BF16 + contiguous + hidden <= 8192 required). \
+             (CUDA/ROCm + BF16 + contiguous + hidden <= 8192 required). \
              Callers must filter via `supports_rmsnorm_kt(x, weight)` first."
         );
     }
@@ -287,8 +274,43 @@ pub fn fused_rmsnorm_via_kt_tape(
     Ok(y)
 }
 
+/// Fused RMSNorm tape path for LoRA-style training with a frozen weight.
+///
+/// The forward is identical to [`fused_rmsnorm_via_kt_tape`], but the tape node
+/// has exactly one differentiable input (`x`). The weight is saved only as a
+/// backward constant; no weight-gradient tensor is allocated, returned, or
+/// deposited in the tape's gradient store.
+pub fn fused_rmsnorm_frozen_weight_via_kt_tape(
+    x: &KtTensor,
+    weight: &KtTensor,
+    eps: f32,
+    tape: &mut Tape,
+) -> KtResult<KtTensor> {
+    if !envelope_ok(x, weight) {
+        bail!(
+            "fused_rmsnorm_frozen_weight_via_kt_tape: inputs outside kt envelope \
+             (CUDA/ROCm + BF16 + contiguous + hidden <= 8192 required). \
+             Callers must filter via `supports_rmsnorm_kt(x, weight)` first."
+        );
+    }
+
+    let y = fused_rmsnorm_kt(x, weight, eps).map_err(|e: RmsNormError| {
+        kiln_tensor::Error::Msg(format!(
+            "fused_rmsnorm_frozen_weight_via_kt_tape fwd: kt call: {e}"
+        ))
+    })?;
+    let bwd = FusedRmsNormFrozenWeightBackward {
+        x: x.clone(),
+        weight: weight.clone(),
+        eps,
+    };
+    tape.record(&y, &[x], Box::new(bwd) as Box<dyn BackwardOp>);
+
+    Ok(y)
+}
+
 // ---------------------------------------------------------------------------
-// Tests — gated on CUDA availability at runtime (skip cleanly when no CUDA).
+// Tests — metadata is CPU-only; kernel coverage skips cleanly without CUDA.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -340,6 +362,22 @@ mod tests {
         assert!(!envelope_ok(&x, &w));
     }
 
+    #[test]
+    fn frozen_weight_backward_metadata_exposes_only_x() {
+        let op = FusedRmsNormFrozenWeightBackward {
+            x: KtTensor::zeros_cpu(vec![2, 16], KtDType::BF16),
+            weight: KtTensor::zeros_cpu(vec![16], KtDType::BF16),
+            eps: 1e-6,
+        };
+        assert_eq!(
+            op.name(),
+            "kiln-rmsnorm-kernel/fused_rmsnorm_frozen_weight_kt_tape"
+        );
+        assert_eq!(op.input_count(), 1);
+        assert!(op.requires_input(0));
+        assert!(!op.requires_input(1));
+    }
+
     /// CUDA forward records a tape node tagged with the saved (x, w) ids.
     /// Skips cleanly without CUDA.
     #[cfg(feature = "cuda")]
@@ -375,8 +413,40 @@ mod tests {
         assert_eq!(node.op.input_count(), 2);
     }
 
+    /// Frozen-weight forward records only x as a differentiable tape input.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn frozen_weight_forward_records_only_x_when_cuda_available() {
+        if !cuda_available() {
+            eprintln!("CUDA not available; skipping frozen-weight tape metadata");
+            return;
+        }
+
+        let rows = 2usize;
+        let hidden = 16usize;
+        let x = KtTensor::cuda_from_slice(&pattern_bf16(rows * hidden, 11), vec![rows, hidden], 0)
+            .expect("x cuda");
+        let w =
+            KtTensor::cuda_from_slice(&pattern_bf16(hidden, 12), vec![hidden], 0).expect("w cuda");
+
+        let mut tape = Tape::new();
+        let y = fused_rmsnorm_frozen_weight_via_kt_tape(&x, &w, 1e-6, &mut tape)
+            .expect("frozen-weight forward + record");
+        assert_eq!(tape.len(), 1);
+
+        let node = &tape.nodes()[0];
+        assert_eq!(node.input_ids, [x.id()]);
+        assert!(!node.input_ids.contains(&w.id()));
+        assert_eq!(node.output_id, y.id());
+        assert_eq!(
+            node.op.name(),
+            "kiln-rmsnorm-kernel/fused_rmsnorm_frozen_weight_kt_tape"
+        );
+        assert_eq!(node.op.input_count(), 1);
+    }
+
     /// Direct backward apply — exercises the apply() path including the
-    /// F32 -> BF16 cast of the partial buffer. Skips cleanly without CUDA.
+    /// F32 -> BF16 cast of the reduced weight gradient. Skips cleanly without CUDA.
     #[cfg(feature = "cuda")]
     #[test]
     fn backward_apply_returns_grads_of_expected_shape() {
@@ -407,5 +477,34 @@ mod tests {
         assert_eq!(gx.dtype(), KtDType::BF16);
         assert_eq!(gw.shape(), &[hidden]);
         assert_eq!(gw.dtype(), KtDType::BF16);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn frozen_weight_backward_apply_returns_only_grad_x() {
+        if !cuda_available() {
+            eprintln!("CUDA not available; skipping frozen-weight backward");
+            return;
+        }
+
+        let rows = 2usize;
+        let hidden = 16usize;
+        let x = KtTensor::cuda_from_slice(&pattern_bf16(rows * hidden, 21), vec![rows, hidden], 0)
+            .expect("x cuda");
+        let w =
+            KtTensor::cuda_from_slice(&pattern_bf16(hidden, 22), vec![hidden], 0).expect("w cuda");
+        let dy = KtTensor::cuda_from_slice(&pattern_bf16(rows * hidden, 23), vec![rows, hidden], 0)
+            .expect("dy cuda");
+
+        let op = FusedRmsNormFrozenWeightBackward {
+            x,
+            weight: w,
+            eps: 1e-6,
+        };
+        let grads = op.apply(&dy).expect("frozen-weight backward");
+        assert_eq!(grads.len(), 1);
+        let grad_x = grads[0].as_ref().expect("grad_x present");
+        assert_eq!(grad_x.shape(), &[rows, hidden]);
+        assert_eq!(grad_x.dtype(), KtDType::BF16);
     }
 }

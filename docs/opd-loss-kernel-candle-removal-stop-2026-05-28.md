@@ -1,5 +1,12 @@
 # `kiln-opd-loss-kernel` candle-core dep removal — STOP (audit 2026-05-28)
 
+> **Historical snapshot, not current operating guidance.** This document records
+> migration state from May 2026. The `KILN_USE_TAPE_*` and
+> `KILN_USE_TAPE_AUTHORITATIVE` switches mentioned below were removed without
+> aliases or replacement fields. Current GPU training uses an internal tape
+> scope as its sole routing authority. See [Configuration](./CONFIGURATION.md)
+> and [Native SFT Profile](./NATIVE_SFT_PROFILE.md) for current behavior.
+
 ## TL;DR
 
 After Wave-13's `try_tape_opd_per_position_cuda` (commit `e6b8c3a3`) and

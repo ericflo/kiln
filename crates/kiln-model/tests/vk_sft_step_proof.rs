@@ -25,7 +25,7 @@
 //! AND a Vulkan device is present (mirrors PR2–PR5 gating). Run named,
 //! single-shot, one test at a time:
 //!
-//!     KILN_TENSOR_VULKAN_TEST=1 KILN_USE_TAPE_FORWARD=1 KILN_USE_TAPE_LORA_ADD=1 \
+//!     KILN_TENSOR_VULKAN_TEST=1 \
 //!       CARGO_TARGET_DIR=/path/to/kiln/target \
 //!       cargo test -p kiln-model --features vulkan \
 //!       vk_sft_lora_linear_backprops -- --nocapture --test-threads=1

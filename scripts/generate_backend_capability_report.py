@@ -1274,7 +1274,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
                 },
                 {
                     "scope": "Vulkan hardware opt-in lane",
-                    "command": "KILN_TENSOR_VULKAN_TEST=1 KILN_USE_TAPE_FORWARD=1 KILN_USE_TAPE_LORA_ADD=1 cargo test -p kiln-model --features vulkan --test vk_sft_step_proof",
+                    "command": "KILN_TENSOR_VULKAN_TEST=1 cargo test -p kiln-model --features vulkan --test vk_sft_step_proof",
                 },
             ],
             "evidence": [

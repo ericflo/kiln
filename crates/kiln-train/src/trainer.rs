@@ -79,15 +79,15 @@ use kiln_model::backend::{
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
     StreamingPrefillExecutionPolicy, gdn_attention_in_projections, gdn_attention_input_norm,
-    gdn_attention_residual_block, gdn_gated_norm_from_recurrent, gdn_gates_from_ab_training,
-    gdn_out_proj_from_gated_norm, gdn_qkv_from_mixed_training, gdn_recurrent_backward_no_grad,
-    gdn_recurrent_forward_from_parts, gqa_attention_apply_output_gate, gqa_attention_core_prefill,
-    gqa_attention_kv_prefill, gqa_attention_output_projection, gqa_attention_pre_o,
-    gqa_attention_pre_o_chunked_prefill, gqa_attention_prepare_prefill,
-    gqa_attention_q_gate_prefill, model_forward_embed, model_forward_final_norm,
-    model_forward_head, model_forward_kt_with_policy, model_forward_no_head_with_policy,
-    model_forward_paged_normed_hidden, model_forward_segment_with_policy, rms_norm, swiglu_ffn,
-    transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
+    gdn_attention_residual_block, gdn_gated_norm_from_recurrent, gdn_out_proj_from_gated_norm,
+    gdn_qkv_from_mixed_training, gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts,
+    gqa_attention_apply_output_gate, gqa_attention_core_prefill, gqa_attention_kv_prefill,
+    gqa_attention_output_projection, gqa_attention_pre_o, gqa_attention_pre_o_chunked_prefill,
+    gqa_attention_prepare_prefill, gqa_attention_q_gate_prefill, model_forward_embed,
+    model_forward_final_norm, model_forward_head, model_forward_kt_with_policy,
+    model_forward_no_head_with_policy, model_forward_paged_normed_hidden,
+    model_forward_segment_with_policy, rms_norm, swiglu_ffn, transformer_mlp_down_from_gated,
+    transformer_mlp_gated_hidden,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
 use kiln_model::sampling::{greedy_sample, try_topk_on_device};
@@ -5014,12 +5014,6 @@ fn run_mtp_alignment_phase(
     if let Some(state) = opt_state.as_ref() {
         state.register_with_backend(backend)?;
     }
-    let param_raw_ids: std::collections::HashSet<u64> = mtp_train
-        .all_params()
-        .iter()
-        .map(|p| p.tensor_id().as_raw())
-        .collect();
-
     let mut initial_ce: Option<f64> = None;
     let mut final_ce: Option<f64> = None;
     let mut trained = 0usize;
@@ -5150,9 +5144,7 @@ fn run_mtp_alignment_phase(
             else {
                 continue;
             };
-            if param_raw_ids.contains(&param_raw) {
-                grads.insert(KtTensorId::from_raw(param_raw), kt_grad);
-            }
+            grads.insert(KtTensorId::from_raw(param_raw), kt_grad);
         }
         anyhow::ensure!(
             !grads.is_empty(),
@@ -9229,7 +9221,7 @@ fn build_grpo_jsonl_preflight_plan(
     })
 }
 
-/// Stream GRPO training from a JSONL dataset path using the generic candle path.
+/// Stream GRPO training from a JSONL dataset path through the kt-native route.
 ///
 /// Each non-empty line must be one [`GrpoGroup`]. Unlike [`grpo_train`], this
 /// path does not retain all parsed or tokenized groups before training.
@@ -11646,9 +11638,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
         if token_level {
             // Cross-completion grad accumulation into the kt `GradMap`
             // (keyed by `Parameter::tensor_id()`).
-            let params_ref: &TrainableLoraParams = params;
-            let plist = params_ref.all_params();
-            accumulate_grads_dispatch(&mut group_accum, &grads, &plist)?;
+            accumulate_grads_dispatch(&mut group_accum, &grads, params)?;
         } else {
             observe_lora_grad_norms_dispatch(grad_norms, params, &grads)?;
             let optimizer_started = Instant::now();
@@ -11820,126 +11810,258 @@ pub(crate) fn observe_lora_grad_norms_from_kt_grad_store(
     Ok(())
 }
 
-fn validate_lora_grad_finiteness(
-    params: &TrainableLoraParams,
-    grads: &kiln_autograd::GradStore,
+fn validate_lora_gradient_metadata(
     context: &str,
+    leaf: &str,
+    expected_shape: &[usize],
+    expected_dtype: KtDType,
+    expected_device: kiln_tensor::Device,
+    observed_shape: &[usize],
+    observed_dtype: KtDType,
+    observed_device: kiln_tensor::Device,
 ) -> Result<()> {
-    for entry in params.all_params_with_modules() {
-        let Some(kt_grad) = grads.get(entry.param.tensor_id()) else {
-            continue;
-        };
-        let fast_finite = kt_grad.all_finite().with_context(|| {
-            format!(
-                "{context}: finite scan failed for LoRA grad layer={} module={} matrix={} tensor_id={}",
-                entry.layer_idx,
-                entry.module,
-                entry.matrix,
-                entry.param.tensor_id().as_raw()
-            )
-        })?;
-        if fast_finite {
-            continue;
-        }
+    anyhow::ensure!(
+        observed_shape == expected_shape,
+        "{context}: LoRA gradient shape mismatch for {leaf}: expected={expected_shape:?} observed={observed_shape:?}"
+    );
+    anyhow::ensure!(
+        observed_dtype == expected_dtype,
+        "{context}: LoRA gradient dtype mismatch for {leaf}: expected={expected_dtype:?} observed={observed_dtype:?}"
+    );
+    anyhow::ensure!(
+        observed_device == expected_device,
+        "{context}: LoRA gradient device mismatch for {leaf}: expected={expected_device} observed={observed_device}"
+    );
+    Ok(())
+}
 
-        let (cpu_finite, value_summary) = summarize_sft_debug_values(kt_grad)
-            .with_context(|| {
-                format!(
-                    "{context}: CPU-confirming finite scan failed for LoRA grad layer={} module={} matrix={} tensor_id={}",
-                    entry.layer_idx,
-                    entry.module,
-                    entry.matrix,
-                    entry.param.tensor_id().as_raw()
-                )
-            })?;
-        if cpu_finite {
-            tracing::warn!(
-                layer = entry.layer_idx,
-                module = entry.module,
-                matrix = entry.matrix,
-                tensor_id = entry.param.tensor_id().as_raw(),
-                dtype = ?kt_grad.dtype(),
-                shape = ?kt_grad.shape(),
-                device = %kt_grad.device(),
-                value_summary,
-                "{context}: backend finite reducer reported a non-finite LoRA grad but CPU confirmation was finite"
-            );
-            continue;
-        }
+fn validate_lora_gradient_tensor(
+    context: &str,
+    entry: &LoraParamRef<'_>,
+    grad: &KtTensor,
+    check_finite_values: bool,
+) -> Result<()> {
+    let id = entry.param.tensor_id();
+    let leaf = format!(
+        "layer={} module={} matrix={} tensor_id={}",
+        entry.layer_idx, entry.module, entry.matrix, id
+    );
+    let master = entry.param.backward_storage().ok_or_else(|| {
+        anyhow::anyhow!("{context}: configured trainable LoRA leaf has no master storage: {leaf}")
+    })?;
+    validate_lora_gradient_metadata(
+        context,
+        &leaf,
+        master.shape(),
+        entry.param.amp_policy().backward_compute_dtype,
+        master.device(),
+        grad.shape(),
+        grad.dtype(),
+        grad.device(),
+    )?;
+    if !check_finite_values {
+        return Ok(());
+    }
 
-        anyhow::bail!(
-            "{context}: non-finite LoRA grad layer={} module={} matrix={} tensor_id={} dtype={:?} shape={:?} device={} {}",
-            entry.layer_idx,
-            entry.module,
-            entry.matrix,
-            entry.param.tensor_id().as_raw(),
-            kt_grad.dtype(),
-            kt_grad.shape(),
-            kt_grad.device(),
-            value_summary
+    let fast_finite = grad
+        .all_finite()
+        .with_context(|| format!("{context}: finite scan failed for LoRA gradient {leaf}"))?;
+    if fast_finite {
+        return Ok(());
+    }
+
+    let (cpu_finite, value_summary) = summarize_sft_debug_values(grad)
+        .with_context(|| format!("{context}: CPU-confirming finite scan failed for {leaf}"))?;
+    if cpu_finite {
+        tracing::warn!(
+            layer = entry.layer_idx,
+            module = entry.module,
+            matrix = entry.matrix,
+            tensor_id = id.as_raw(),
+            dtype = ?grad.dtype(),
+            shape = ?grad.shape(),
+            device = %grad.device(),
+            value_summary,
+            "{context}: backend finite reducer reported a non-finite LoRA gradient but CPU confirmation was finite"
         );
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "{context}: non-finite LoRA gradient {leaf} dtype={:?} shape={:?} device={} {}",
+        grad.dtype(),
+        grad.shape(),
+        grad.device(),
+        value_summary
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedLoraGradientSet {
+    WholeAdapter,
+    CheckpointLayerRange,
+}
+
+fn validate_exact_lora_gradients<'p, 'g>(
+    expected_entries: impl IntoIterator<Item = LoraParamRef<'p>>,
+    observed_gradients: impl IntoIterator<Item = (KtTensorId, &'g KtTensor)>,
+    context: &str,
+    expected_set: ExpectedLoraGradientSet,
+    check_finite_values: bool,
+) -> Result<()> {
+    let mut expected = BTreeMap::new();
+    for entry in expected_entries {
+        let id = entry.param.tensor_id();
+        if let Some(previous) = expected.insert(id, entry) {
+            anyhow::bail!(
+                "{context}: duplicate configured LoRA tensor_id={id}: first=layer={} module={} matrix={} second=layer={} module={} matrix={}",
+                previous.layer_idx,
+                previous.module,
+                previous.matrix,
+                expected[&id].layer_idx,
+                expected[&id].module,
+                expected[&id].matrix
+            );
+        }
+    }
+    if matches!(expected_set, ExpectedLoraGradientSet::WholeAdapter) {
+        anyhow::ensure!(
+            !expected.is_empty(),
+            "{context}: configured trainable LoRA leaf set is empty"
+        );
+    }
+    let observed: BTreeMap<_, _> = observed_gradients.into_iter().collect();
+
+    let missing = expected
+        .iter()
+        .filter(|(id, _)| !observed.contains_key(id))
+        .map(|(id, entry)| {
+            format!(
+                "layer={} module={} matrix={} tensor_id={id}",
+                entry.layer_idx, entry.module, entry.matrix
+            )
+        })
+        .collect::<Vec<_>>();
+    let unknown = observed
+        .keys()
+        .filter(|id| !expected.contains_key(id))
+        .map(|id| format!("tensor_id={id}"))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        missing.is_empty() && unknown.is_empty(),
+        "{context}: exact LoRA gradient identity mismatch: configured={} observed={} missing=[{}] unknown=[{}]",
+        expected.len(),
+        observed.len(),
+        missing.join(", "),
+        unknown.join(", ")
+    );
+
+    for (id, entry) in &expected {
+        let grad = observed
+            .get(id)
+            .expect("exact LoRA gradient identity check established membership");
+        validate_lora_gradient_tensor(context, entry, grad, check_finite_values)?;
     }
     Ok(())
 }
 
-fn validate_lora_grad_map_finiteness(
+pub(crate) fn validate_exact_lora_grad_store(
+    params: &TrainableLoraParams,
+    grads: &kiln_autograd::GradStore,
+    context: &str,
+) -> Result<()> {
+    validate_exact_lora_gradients(
+        params.all_params_with_modules(),
+        grads.iter().map(|(id, grad)| (*id, grad)),
+        context,
+        ExpectedLoraGradientSet::WholeAdapter,
+        true,
+    )
+}
+
+fn validate_exact_lora_grad_store_metadata(
+    params: &TrainableLoraParams,
+    grads: &kiln_autograd::GradStore,
+    context: &str,
+) -> Result<()> {
+    validate_exact_lora_gradients(
+        params.all_params_with_modules(),
+        grads.iter().map(|(id, grad)| (*id, grad)),
+        context,
+        ExpectedLoraGradientSet::WholeAdapter,
+        false,
+    )
+}
+
+fn validate_exact_lora_grad_map(
     params: &TrainableLoraParams,
     grads: &GradMap,
-    context: &'static str,
+    context: &str,
 ) -> Result<()> {
-    for entry in params.all_params_with_modules() {
-        let Some(kt_grad) = grads.get(&entry.param.tensor_id()) else {
-            continue;
-        };
-        let fast_finite = kt_grad.all_finite().with_context(|| {
-            format!(
-                "{context}: finite scan failed for accumulated LoRA grad layer={} module={} matrix={} tensor_id={}",
-                entry.layer_idx,
-                entry.module,
-                entry.matrix,
-                entry.param.tensor_id().as_raw()
-            )
-        })?;
-        if fast_finite {
-            continue;
-        }
+    validate_exact_lora_gradients(
+        params.all_params_with_modules(),
+        grads.iter().map(|(id, grad)| (*id, grad)),
+        context,
+        ExpectedLoraGradientSet::WholeAdapter,
+        true,
+    )
+}
 
-        let (cpu_finite, value_summary) = summarize_sft_debug_values(kt_grad)
-            .with_context(|| {
-                format!(
-                    "{context}: CPU-confirming finite scan failed for accumulated LoRA grad layer={} module={} matrix={} tensor_id={}",
-                    entry.layer_idx,
-                    entry.module,
-                    entry.matrix,
-                    entry.param.tensor_id().as_raw()
-                )
-            })?;
-        if cpu_finite {
-            tracing::warn!(
-                layer = entry.layer_idx,
-                module = entry.module,
-                matrix = entry.matrix,
-                tensor_id = entry.param.tensor_id().as_raw(),
-                dtype = ?kt_grad.dtype(),
-                shape = ?kt_grad.shape(),
-                device = %kt_grad.device(),
-                value_summary,
-                "{context}: backend finite reducer reported a non-finite accumulated LoRA grad but CPU confirmation was finite"
-            );
-            continue;
-        }
+fn validate_exact_lora_grad_map_metadata(
+    params: &TrainableLoraParams,
+    grads: &GradMap,
+    context: &str,
+) -> Result<()> {
+    validate_exact_lora_gradients(
+        params.all_params_with_modules(),
+        grads.iter().map(|(id, grad)| (*id, grad)),
+        context,
+        ExpectedLoraGradientSet::WholeAdapter,
+        false,
+    )
+}
 
-        anyhow::bail!(
-            "{context}: non-finite accumulated LoRA grad layer={} module={} matrix={} tensor_id={} dtype={:?} shape={:?} device={} {}",
-            entry.layer_idx,
-            entry.module,
-            entry.matrix,
-            entry.param.tensor_id().as_raw(),
-            kt_grad.dtype(),
-            kt_grad.shape(),
-            kt_grad.device(),
-            value_summary
-        );
+pub(crate) fn merge_checkpoint_lora_grad_segment(
+    params: &TrainableLoraParams,
+    accumulated: &mut kiln_autograd::GradStore,
+    segment: kiln_autograd::GradStore,
+    start_layer: usize,
+    end_layer: usize,
+    context: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        start_layer < end_layer && end_layer <= params.layers.len(),
+        "{context}: invalid checkpoint layer range {start_layer}..{end_layer} for {} layers",
+        params.layers.len()
+    );
+    validate_exact_lora_gradients(
+        params
+            .all_params_with_modules()
+            .into_iter()
+            .filter(|entry| entry.layer_idx >= start_layer && entry.layer_idx < end_layer),
+        segment.iter().map(|(id, grad)| (*id, grad)),
+        context,
+        ExpectedLoraGradientSet::CheckpointLayerRange,
+        false,
+    )?;
+    let segment = segment.into_inner();
+    let mut duplicate_ids = segment
+        .keys()
+        .copied()
+        .filter(|id| accumulated.contains(*id))
+        .collect::<Vec<_>>();
+    duplicate_ids.sort_unstable();
+    anyhow::ensure!(
+        duplicate_ids.is_empty(),
+        "{context}: duplicate checkpoint LoRA gradient tensor IDs across layer segments: [{}]",
+        duplicate_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for (id, grad) in segment {
+        accumulated.insert(id, grad);
     }
     Ok(())
 }
@@ -13536,14 +13658,13 @@ pub(crate) fn rms_norm_backward_pre_final_norm(
             && grad_normed.is_contiguous();
 
         if fused_envelope {
-            let (grad_hidden, _grad_weight_partial) =
-                kiln_rmsnorm_kernel::fused_rmsnorm_backward_kt(
-                    hidden,
-                    final_norm_weight,
-                    grad_normed,
-                    rms_norm_eps as f32,
-                )
-                .map_err(|e| anyhow::anyhow!("fused final RMSNorm backward: {e}"))?;
+            let grad_hidden = kiln_rmsnorm_kernel::fused_rmsnorm_backward_dx_kt(
+                hidden,
+                final_norm_weight,
+                grad_normed,
+                rms_norm_eps as f32,
+            )
+            .map_err(|e| anyhow::anyhow!("fused final RMSNorm backward: {e}"))?;
             return Ok(grad_hidden.detach());
         }
     }
@@ -13984,47 +14105,11 @@ fn load_or_recompute_checkpoint_boundary(
     Ok(current)
 }
 
-/// (#1082) SGD update (param = param - lr*grad) from a kt-native
-/// [`kiln_autograd::GradStore`] (keyed by `Parameter::tensor_id()`).
-fn sgd_step(
-    backend: &dyn BackendRuntime,
-    params: &mut TrainableLoraParams,
-    grads: &kiln_autograd::GradStore,
-    lr: f64,
-) -> Result<()> {
-    let resident_activation = ResidencyBackend::runtime_supports_resident_activation(backend);
-    for param in params.all_params_mut() {
-        if let Some(grad) = grads.get(param.tensor_id()) {
-            apply_sgd_update_kt(backend, param, grad, lr, resident_activation)?;
-        }
-    }
-    Ok(())
-}
-
-/// (#1082 Inc-0 PR4) Where a SFT forward/backward step delivered its
-/// gradients — the unified return type of [`standard_forward_backward`].
+/// Gradient output from one tape-authoritative training step.
 ///
-/// `Candle` carries a candle [`GradStore`] (keyed by candle `TensorId`,
-/// values are candle `Tensor`) — the legacy/default path, plus the
-/// candle-auth opt-out, the tape-bridge path, and the CPU path.
-///
-/// `Kt` carries a kt-native [`kiln_autograd::GradStore`] (keyed by
-/// [`KtTensorId`], values are `kiln_tensor::Tensor`) produced by
-/// [`standard_forward_backward_tape_authoritative_kt`] — the
-/// perf-correct, candle-free SFT tape-authoritative CUDA path. This is
-/// the variant that lets the forward.rs type-flip drop the candle
-/// `loss` dependency.
-///
-/// The variant is opaque to most call sites: they pattern through
-/// [`optimizer_step_dispatch`] / [`observe_lora_grad_norms_dispatch`],
-/// which dispatch per-variant. Test/diagnostic sites that need a candle
-/// `Tensor` per `Var` use [`GradSource::candle_grad`] (bridges kt ->
-/// candle on demand for the `Kt` variant); sites that need the raw
-/// candle store use [`GradSource::candle`].
-///
-/// Feature-gating: the `Kt` variant exists when a GPU backend feature is
-/// enabled. The producer is selected through backend training capabilities, and
-/// CPU-only builds keep the candle wrapper variant for legacy tests.
+/// The active tape scope is mandatory. Gradients are keyed by each configured
+/// LoRA [`Parameter::tensor_id`] and remain kt-native through observation,
+/// accumulation, exact-contract validation, and optimizer dispatch.
 pub enum GradSource {
     /// kt-native gradients (the SOLE grad producer post-#1082). Keyed by
     /// `Parameter::tensor_id()`; values are `kiln_tensor::Tensor`. The
@@ -14104,10 +14189,9 @@ pub fn observe_lora_grad_norms_dispatch(
     }
 }
 
-/// Dispatch the configured optimizer against grads from candle's
-/// `GradStore`. `opt_state` must be `Some` iff `optimizer` is
-/// `Optimizer::AdamW`. Caller mutates `opt_state.step` (increments by
-/// one) before this returns so the next call sees the new step.
+/// Dispatch the configured optimizer against an exact kt gradient set.
+/// Stateful optimizers increment their step only after the gradient contract
+/// has accepted every configured leaf.
 /// (#1082) Apply one kt-native SGD update (param = param - lr*grad) to a
 /// single LoRA `Parameter`, preferring the on-device registry path when
 /// param + grad are both resident (the backend trait takes kt tensors).
@@ -14197,8 +14281,8 @@ fn apply_sgd_update_kt(
 /// step counter (shared by all params for standard AdamW bias correction).
 ///
 /// `grad` must match the param's AMP `backward_compute_dtype` (BF16 in
-/// production) — the kt tape produces grads in the activation dtype, so
-/// we cast defensively to the policy dtype before the host step.
+/// production). The exact gradient contract checks this before any optimizer
+/// state or parameter is mutated.
 #[allow(clippy::too_many_arguments)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OptimizerStateAuthority {
@@ -14262,20 +14346,11 @@ fn apply_adamw_update_kt(
     }
 
     ensure_training_optimizer_fallback_allowed(backend, primary.device(), "AdamW")?;
-    // Host fallback: drive the CPU reference `kiln_optim::AdamW`. It reads
-    // `param.amp_policy().backward_compute_dtype` for the grad dtype check
-    // (BF16 in production) and `master_dtype` for the master update; cast
-    // the grad to the policy's backward dtype defensively. The host AdamW
-    // owns its own host-side moments + step counter keyed by `tensor_id`.
-    let want = param.amp_policy().backward_compute_dtype;
-    let grad_cast = if grad.dtype() == want {
-        grad.clone()
-    } else {
-        grad.to_dtype(want)
-            .map_err(|e| anyhow::anyhow!("apply_adamw_update_kt: grad to {want:?}: {e}"))?
-    };
+    // Host fallback: drive the CPU reference `kiln_optim::AdamW`. The exact
+    // gradient contract already established the policy dtype, shape, and
+    // device, so this boundary must not coerce an invalid gradient.
     adamw
-        .step(param, &grad_cast)
+        .step(param, grad)
         .map_err(|e| anyhow::anyhow!("apply_adamw_update_kt: kiln_optim AdamW step: {e}"))?;
     // `AdamW::step` swaps the master via `replace_backward_storage`
     // (preserving tensor_id). Refresh the forward storage from the new
@@ -14378,14 +14453,9 @@ fn apply_muon_update_kt(
     muon.nesterov = nesterov;
     muon.ns_iters = ns_iters;
     muon.weight_decay = weight_decay;
-    let want = param.amp_policy().backward_compute_dtype;
-    let grad_cast = if grad.dtype() == want {
-        grad.clone()
-    } else {
-        grad.to_dtype(want)
-            .map_err(|e| anyhow::anyhow!("apply_muon_update_kt: grad to {want:?}: {e}"))?
-    };
-    muon.step(param, &grad_cast)
+    // The exact gradient contract has already checked dtype/shape/device;
+    // silently casting here would turn a producer defect into a plausible step.
+    muon.step(param, grad)
         .map_err(|e| anyhow::anyhow!("apply_muon_update_kt: kiln_optim Muon step: {e}"))?;
     // `Muon::step` swaps the master via `replace_backward_storage`
     // (preserving tensor_id). Refresh the forward storage from the new
@@ -14406,26 +14476,29 @@ fn apply_muon_update_kt(
 
 /// (#1082) Accumulate kt gradients from a kt-native [`kiln_autograd::GradStore`]
 /// (keyed by `Parameter::tensor_id()`) into `dst` (a kt `GradMap`).
-/// Creates entries for any LoRA param with a grad in `src` but not yet in
-/// `dst`; sums otherwise. Grads stay on-device (no CPU offload — kt
-/// tensors are summed kt-natively).
+/// The source must contain exactly one shape/dtype/device-valid gradient for
+/// every configured LoRA leaf. Entries are created on the first source and
+/// summed thereafter; gradients stay on-device. The optimizer boundary scans
+/// the final accumulated values once before any mutation.
 pub(crate) fn accumulate_grads(
     dst: &mut GradMap,
     src: &kiln_autograd::GradStore,
-    params: &[&Parameter],
+    params: &TrainableLoraParams,
 ) -> Result<()> {
-    for param in params {
-        if let Some(grad) = src.get(param.tensor_id()) {
-            let id = param.tensor_id();
-            if let Some(existing) = dst.get(&id) {
-                let summed = kiln_tensor::ops::add(existing, grad)
-                    .map_err(|e| anyhow::anyhow!("accumulate_grads: kt add: {e}"))?;
-                dst.insert(id, summed);
-            } else {
-                dst.insert(id, grad.clone());
-            }
+    validate_exact_lora_grad_store_metadata(params, src, "accumulate_grads source")?;
+    for (id, grad) in src.iter() {
+        if let Some(existing) = dst.get(id) {
+            let summed = kiln_tensor::ops::add(existing, grad)
+                .map_err(|e| anyhow::anyhow!("accumulate_grads: kt add: {e}"))?;
+            dst.insert(*id, summed);
+        } else {
+            dst.insert(*id, grad.clone());
         }
     }
+    // Adding exact sources preserves the destination id set and tensor
+    // metadata. Keep this post-merge guard cheap; the final optimizer boundary
+    // performs the one required finite-value scan of the accumulated result.
+    validate_exact_lora_grad_map_metadata(params, dst, "accumulate_grads result")?;
     Ok(())
 }
 
@@ -14436,7 +14509,7 @@ pub(crate) fn accumulate_grads(
 fn accumulate_grads_dispatch(
     dst: &mut GradMap,
     src: &GradSource,
-    params: &[&Parameter],
+    params: &TrainableLoraParams,
 ) -> Result<()> {
     match src {
         GradSource::Kt(kt) => accumulate_grads(dst, kt, params),
@@ -14453,9 +14526,11 @@ fn sgd_step_from_map(
 ) -> Result<()> {
     let resident_activation = ResidencyBackend::runtime_supports_resident_activation(backend);
     for param in params.all_params_mut() {
-        if let Some(grad) = grads.get(&param.tensor_id()) {
-            apply_sgd_update_kt(backend, param, grad, lr, resident_activation)?;
-        }
+        let id = param.tensor_id();
+        let grad = grads.get(&id).ok_or_else(|| {
+            anyhow::anyhow!("sgd_step_from_map: exact gradient contract lost tensor_id={id}")
+        })?;
+        apply_sgd_update_kt(backend, param, grad, lr, resident_activation)?;
     }
     Ok(())
 }
@@ -14471,7 +14546,7 @@ pub(crate) fn optimizer_step_from_map(
     optimizer: Optimizer,
     opt_state: Option<&mut OptimizerState>,
 ) -> Result<()> {
-    validate_lora_grad_map_finiteness(params, grads, "optimizer_step_from_map")?;
+    validate_exact_lora_grad_map(params, grads, "optimizer_step_from_map")?;
     match optimizer {
         Optimizer::Sgd => sgd_step_from_map(backend, params, grads, lr),
         Optimizer::AdamW {
@@ -14500,29 +14575,32 @@ pub(crate) fn optimizer_step_from_map(
                     let step = *step;
                     for param in params.all_params_mut() {
                         let id = param.tensor_id();
-                        if let Some(grad) = grads.get(&id) {
-                            let m = moments.get(&id);
-                            let authority = apply_adamw_update_kt(
-                                backend,
-                                param,
-                                adamw,
-                                m,
-                                grad,
-                                lr,
-                                beta1,
-                                beta2,
-                                eps,
-                                weight_decay,
-                                step,
-                                resident_activation,
-                            )?;
-                            match authority {
-                                OptimizerStateAuthority::Device => {
-                                    host_authoritative.remove(&id);
-                                }
-                                OptimizerStateAuthority::Host => {
-                                    host_authoritative.insert(id);
-                                }
+                        let grad = grads.get(&id).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "optimizer_step_from_map: exact gradient contract lost tensor_id={id}"
+                            )
+                        })?;
+                        let m = moments.get(&id);
+                        let authority = apply_adamw_update_kt(
+                            backend,
+                            param,
+                            adamw,
+                            m,
+                            grad,
+                            lr,
+                            beta1,
+                            beta2,
+                            eps,
+                            weight_decay,
+                            step,
+                            resident_activation,
+                        )?;
+                        match authority {
+                            OptimizerStateAuthority::Device => {
+                                host_authoritative.remove(&id);
+                            }
+                            OptimizerStateAuthority::Host => {
+                                host_authoritative.insert(id);
                             }
                         }
                     }
@@ -14554,28 +14632,31 @@ pub(crate) fn optimizer_step_from_map(
                     *step = step.saturating_add(1);
                     for param in params.all_params_mut() {
                         let id = param.tensor_id();
-                        if let Some(grad) = grads.get(&id) {
-                            let mom = momenta.get(&id);
-                            let authority = apply_muon_update_kt(
-                                backend,
-                                param,
-                                muon,
-                                mom,
-                                grad,
-                                lr,
-                                momentum,
-                                nesterov,
-                                ns_iters,
-                                weight_decay,
-                                resident_activation,
-                            )?;
-                            match authority {
-                                OptimizerStateAuthority::Device => {
-                                    host_authoritative.remove(&id);
-                                }
-                                OptimizerStateAuthority::Host => {
-                                    host_authoritative.insert(id);
-                                }
+                        let grad = grads.get(&id).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "optimizer_step_from_map: exact gradient contract lost tensor_id={id}"
+                            )
+                        })?;
+                        let mom = momenta.get(&id);
+                        let authority = apply_muon_update_kt(
+                            backend,
+                            param,
+                            muon,
+                            mom,
+                            grad,
+                            lr,
+                            momentum,
+                            nesterov,
+                            ns_iters,
+                            weight_decay,
+                            resident_activation,
+                        )?;
+                        match authority {
+                            OptimizerStateAuthority::Device => {
+                                host_authoritative.remove(&id);
+                            }
+                            OptimizerStateAuthority::Host => {
+                                host_authoritative.insert(id);
                             }
                         }
                     }
@@ -14610,15 +14691,19 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
     optimizer: Optimizer,
     opt_state: Option<&mut OptimizerState>,
 ) -> Result<()> {
-    validate_lora_grad_finiteness(params, grads, "optimizer_step_from_kt_grad_store")?;
+    validate_exact_lora_grad_store(params, grads, "optimizer_step_from_kt_grad_store")?;
     match optimizer {
         Optimizer::Sgd => {
             let resident_activation =
                 ResidencyBackend::runtime_supports_resident_activation(backend);
             for param in params.all_params_mut() {
-                if let Some(kt_grad) = grads.get(param.tensor_id()) {
-                    apply_sgd_update_kt(backend, param, kt_grad, lr, resident_activation)?;
-                }
+                let id = param.tensor_id();
+                let kt_grad = grads.get(id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "optimizer_step_from_kt_grad_store: exact gradient contract lost tensor_id={id}"
+                    )
+                })?;
+                apply_sgd_update_kt(backend, param, kt_grad, lr, resident_activation)?;
             }
             Ok(())
         }
@@ -14648,29 +14733,32 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
                     let step = *step;
                     for param in params.all_params_mut() {
                         let id = param.tensor_id();
-                        if let Some(kt_grad) = grads.get(id) {
-                            let m = moments.get(&id);
-                            let authority = apply_adamw_update_kt(
-                                backend,
-                                param,
-                                adamw,
-                                m,
-                                kt_grad,
-                                lr,
-                                beta1,
-                                beta2,
-                                eps,
-                                weight_decay,
-                                step,
-                                resident_activation,
-                            )?;
-                            match authority {
-                                OptimizerStateAuthority::Device => {
-                                    host_authoritative.remove(&id);
-                                }
-                                OptimizerStateAuthority::Host => {
-                                    host_authoritative.insert(id);
-                                }
+                        let kt_grad = grads.get(id).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "optimizer_step_from_kt_grad_store: exact gradient contract lost tensor_id={id}"
+                            )
+                        })?;
+                        let m = moments.get(&id);
+                        let authority = apply_adamw_update_kt(
+                            backend,
+                            param,
+                            adamw,
+                            m,
+                            kt_grad,
+                            lr,
+                            beta1,
+                            beta2,
+                            eps,
+                            weight_decay,
+                            step,
+                            resident_activation,
+                        )?;
+                        match authority {
+                            OptimizerStateAuthority::Device => {
+                                host_authoritative.remove(&id);
+                            }
+                            OptimizerStateAuthority::Host => {
+                                host_authoritative.insert(id);
                             }
                         }
                     }
@@ -14702,28 +14790,31 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
                     *step = step.saturating_add(1);
                     for param in params.all_params_mut() {
                         let id = param.tensor_id();
-                        if let Some(kt_grad) = grads.get(id) {
-                            let mom = momenta.get(&id);
-                            let authority = apply_muon_update_kt(
-                                backend,
-                                param,
-                                muon,
-                                mom,
-                                kt_grad,
-                                lr,
-                                momentum,
-                                nesterov,
-                                ns_iters,
-                                weight_decay,
-                                resident_activation,
-                            )?;
-                            match authority {
-                                OptimizerStateAuthority::Device => {
-                                    host_authoritative.remove(&id);
-                                }
-                                OptimizerStateAuthority::Host => {
-                                    host_authoritative.insert(id);
-                                }
+                        let kt_grad = grads.get(id).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "optimizer_step_from_kt_grad_store: exact gradient contract lost tensor_id={id}"
+                            )
+                        })?;
+                        let mom = momenta.get(&id);
+                        let authority = apply_muon_update_kt(
+                            backend,
+                            param,
+                            muon,
+                            mom,
+                            kt_grad,
+                            lr,
+                            momentum,
+                            nesterov,
+                            ns_iters,
+                            weight_decay,
+                            resident_activation,
+                        )?;
+                        match authority {
+                            OptimizerStateAuthority::Device => {
+                                host_authoritative.remove(&id);
+                            }
+                            OptimizerStateAuthority::Host => {
+                                host_authoritative.insert(id);
                             }
                         }
                     }
@@ -15760,20 +15851,13 @@ fn standard_forward_backward_tape_authoritative_kt(
     // is the read side of the #1082 collision fix (a frozen RMSNorm `[hidden]`
     // grad was aliasing the `in_proj_z` LoRA-B `[out, rank]` slot → AdamW shape
     // mismatch `[32] != [32, 4]`).
-    let param_raw_ids: std::collections::HashSet<u64> = params
-        .all_params()
-        .iter()
-        .map(|p| p.tensor_id().as_raw())
-        .collect();
     let mut grads = kiln_autograd::GradStore::new();
     for (key_raw, kt_grad) in grads_by_candle_raw {
         let Some(param_raw) = kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)
         else {
             continue;
         };
-        if param_raw_ids.contains(&param_raw) {
-            grads.insert(KtTensorId::from_raw(param_raw), kt_grad);
-        }
+        grads.insert(KtTensorId::from_raw(param_raw), kt_grad);
     }
     Ok((loss_val, grads))
 }
@@ -16232,11 +16316,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     // its output with the upstream grad; we read the LoRA Var grads and the
     // segment-input grad (to chain) out of the walk.
     // (#1082) keyed by `Parameter::tensor_id()`.
-    let param_raw_ids: std::collections::HashSet<u64> = params
-        .all_params()
-        .iter()
-        .map(|p| p.tensor_id().as_raw())
-        .collect();
     let mut grads = kiln_autograd::GradStore::new();
     for seg_idx in (0..num_segments).rev() {
         let (start, end) = segments[seg_idx];
@@ -16296,35 +16375,30 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             })
             .map_err(|e| anyhow::anyhow!("ckpt-kt: segment {seg_idx} tape backward: {e}"))?;
 
-        // Accumulate this segment's LoRA param grads (disjoint across segments —
-        // each layer is in exactly one segment — but sum defensively). Decode
-        // the kt-param namespace tag so candle-keyed deposits (frozen weights /
-        // activations) that happen to share a raw id with a LoRA param are not
-        // mistaken for that param's grad (#1082 collision fix).
+        // Decode every tagged parameter deposit into a segment-local store.
+        // The exact segment contract below rejects missing leaves, deposits for
+        // another layer range, and any unknown tagged parameter before merge.
+        let mut segment_grads = kiln_autograd::GradStore::new();
         for (candle_raw, g) in candle_grads {
             let Some(param_raw) =
                 kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(candle_raw as u64)
             else {
                 continue;
             };
-            if param_raw_ids.contains(&param_raw) {
-                let key = KtTensorId::from_raw(param_raw);
-                match grads.remove(key) {
-                    Some(prev) => grads.insert(
-                        key,
-                        kiln_tensor::ops::add(&prev, &g)
-                            .map_err(|e| anyhow::anyhow!("ckpt-kt: grad accumulate: {e}"))?,
-                    ),
-                    None => grads.insert(key, g),
-                }
-            }
+            segment_grads.insert(KtTensorId::from_raw(param_raw), g);
         }
+        let grad_context =
+            format!("checkpointed SFT segment {seg_idx} layers {start}..{end} gradient contract");
+        merge_checkpoint_lora_grad_segment(
+            params,
+            &mut grads,
+            segment_grads,
+            start,
+            end,
+            &grad_context,
+        )?;
 
         // Chain the upstream grad into the previous (earlier) segment.
-        if debug_finite {
-            let grad_context = format!("ckpt-kt segment {seg_idx} grad validation");
-            validate_lora_grad_finiteness(params, &grads, &grad_context)?;
-        }
         if seg_idx > 0 {
             upstream_grad = kt_grads.get(seg_input_id).cloned().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -16488,14 +16562,9 @@ fn standard_forward_backward_with_policy_and_loss_route(
 /// [`observe_lora_grad_norms_from_kt_grad_store`], and the kt accumulate path)
 /// look grads/moments up by the same key.
 ///
-/// **BF16-only:** the GRPO loop only routes a BF16 base model through this
-/// producer (`base_dtype_supports_tape`). On an F32 base every kt fused adapter
-/// declines and this would produce an EMPTY grad store = broken training; F32
-/// stays on the candle-hack producer above. Mirrors the SFT dtype gate exactly
-/// (the PR4 first-cut bug was routing F32 through the kt producer).
-///
-/// ECHO is NOT handled here (same as the candle-hack producer): the dispatch
-/// keeps any ECHO-active step on the candle path, so this is non-ECHO GRPO only.
+/// The backend-selected loss route must record inside the active tape scope;
+/// there is no environment opt-out or alternate autograd producer. ECHO, when
+/// configured, is composed into that same tape-rooted loss.
 #[cfg(any(
     feature = "cuda",
     feature = "metal",
@@ -16573,42 +16642,37 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
             #[cfg(not(feature = "vulkan"))]
             let mut loss_opt = None;
             if loss_opt.is_none() {
-                loss_opt =
-                    crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_kt(
-                        &policy_hidden,
-                        &weights.embed_tokens_t,
-                        input_ids,
-                        action_mask,
-                        behavior_log_probs,
-                        kl_reference_log_probs,
-                        loss_params,
-                        grpo_kl_auxiliary_route_for_backend(backend),
-                        device,
-                        DEFAULT_CHUNK_SIZE,
-                        echo_env,
-                        no_pg,
-                    )
-                    .context("GRPO tape-authoritative(kt) scalar loss")
-                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                loss_opt = crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_kt(
+                    &policy_hidden,
+                    &weights.embed_tokens_t,
+                    input_ids,
+                    action_mask,
+                    behavior_log_probs,
+                    kl_reference_log_probs,
+                    loss_params,
+                    grpo_kl_auxiliary_route_for_backend(backend),
+                    device,
+                    DEFAULT_CHUNK_SIZE,
+                    echo_env,
+                    no_pg,
+                )
+                .context("GRPO tape-authoritative(kt) scalar loss")
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
             }
 
             let (loss, env_ce, policy_log_probs) = match loss_opt {
                 Some(values) => values,
                 None => {
                     return Err(kiln_kt_bridge::BridgeError::new(
-                        "GRPO tape-authoritative(kt): try_tape_grpo_pg_loss_from_normed_hidden_kt \
-                         returned None (KILN_USE_TAPE_FORWARD off, empty active set, or \
-                         unsupported hidden/head tensors). The dispatch should keep this step on the candle \
-                         path.",
+                        "GRPO tape-authoritative(kt): the selected loss route did not record a \
+                         scalar root (an active tape scope is mandatory; the active set may be \
+                         empty or the hidden/head tensors may be outside the route envelope)",
                     ));
                 }
             };
-            let loss_val = loss
-                .to_scalar::<f32>()
-                .map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) loss.to_scalar: {e}"))
-                })?
-                as f64;
+            let loss_val = loss.to_scalar::<f32>().map_err(|e| {
+                kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) loss.to_scalar: {e}"))
+            })? as f64;
             Ok(((loss_val, env_ce, policy_log_probs), loss))
         })
         .map_err(|e| anyhow::anyhow!("GRPO tape-authoritative(kt) backward: {e}"))?;
@@ -16651,9 +16715,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
         else {
             continue;
         };
-        if param_raw_ids.contains(&param_raw) {
-            grads.insert(KtTensorId::from_raw(param_raw), kt_grad);
-        }
+        grads.insert(KtTensorId::from_raw(param_raw), kt_grad);
     }
 
     let step_elapsed = step_started.elapsed();
@@ -16812,11 +16874,6 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     .context("checkpointed GRPO final RMSNorm backward")?
     .detach();
 
-    let param_raw_ids: std::collections::HashSet<u64> = params
-        .all_params()
-        .iter()
-        .map(|p| p.tensor_id().as_raw())
-        .collect();
     let mut grads = kiln_autograd::GradStore::new();
     for seg_idx in (0..num_segments).rev() {
         let (start, end) = segments[seg_idx];
@@ -16850,25 +16907,25 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
                 anyhow::anyhow!("checkpointed GRPO: segment {seg_idx} tape backward: {e}")
             })?;
 
+        let mut segment_grads = kiln_autograd::GradStore::new();
         for (candle_raw, g) in candle_grads {
             let Some(param_raw) =
                 kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(candle_raw as u64)
             else {
                 continue;
             };
-            if param_raw_ids.contains(&param_raw) {
-                let key = KtTensorId::from_raw(param_raw);
-                match grads.remove(key) {
-                    Some(prev) => grads.insert(
-                        key,
-                        kiln_tensor::ops::add(&prev, &g).map_err(|e| {
-                            anyhow::anyhow!("checkpointed GRPO: grad accumulate: {e}")
-                        })?,
-                    ),
-                    None => grads.insert(key, g),
-                }
-            }
+            segment_grads.insert(KtTensorId::from_raw(param_raw), g);
         }
+        let grad_context =
+            format!("checkpointed GRPO segment {seg_idx} layers {start}..{end} gradient contract");
+        merge_checkpoint_lora_grad_segment(
+            params,
+            &mut grads,
+            segment_grads,
+            start,
+            end,
+            &grad_context,
+        )?;
 
         if seg_idx > 0 {
             upstream_grad = kt_grads.get(seg_input_id).cloned().ok_or_else(|| {
@@ -17249,6 +17306,21 @@ pub(crate) mod tests {
             "production training retained the compatibility transformer-block policy"
         );
         assert!(production.contains("forward::transformer_block_with_policy("));
+    }
+
+    #[test]
+    fn frozen_final_rmsnorm_backward_never_requests_a_weight_gradient() {
+        let source = include_str!("trainer.rs");
+        let production = source
+            .rsplit_once("\n#[cfg(test)]\npub(crate) mod tests {")
+            .map(|(production, _)| production)
+            .expect("trainer has a final test module after production source");
+
+        assert!(production.contains("kiln_rmsnorm_kernel::fused_rmsnorm_backward_dx_kt("));
+        assert!(
+            !production.contains("kiln_rmsnorm_kernel::fused_rmsnorm_backward_kt("),
+            "production training must not allocate or compute a final-norm weight gradient"
+        );
     }
 
     #[test]
@@ -20559,9 +20631,7 @@ pub(crate) mod tests {
     /// are NOT ground truth, so they are excluded. On each stable row the tape
     /// must match finite-diff within `|fd-tape|/|fd| < 0.35`.
     ///
-    /// CUDA-only (kt tape adapters are BF16/CUDA-only). Run under
-    /// `cargo nextest run` for per-process env isolation (tape gates are
-    /// OnceLock-cached).
+    /// CUDA-only because this finite-difference fixture uses BF16 CUDA tensors.
     #[cfg(feature = "cuda")]
     #[test]
     fn tape_grad_matches_finite_difference_bf16() {
@@ -20591,19 +20661,6 @@ pub(crate) mod tests {
         let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
         let label_mask = vec![false, false, true, true, true, true, false];
         let backend = backend::for_device_kt(&device);
-
-        // All CP-4 tape gates on so the authoritative walk records the full
-        // wired chain. OnceLock-cached — run under `cargo nextest`.
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
 
         // --- TAPE grads (ground-truth candidate), unperturbed params. ---
         let (_loss_a, grads_tape) = standard_forward_backward_tape_authoritative_kt(
@@ -21082,19 +21139,6 @@ pub(crate) mod tests {
         let label_mask = vec![false, false, true, true, true, true, false];
         let backend = backend::for_device_kt(&device);
 
-        // All CP-4 tape gates + tape-authoritative backward. OnceLock-cached —
-        // run under `cargo nextest`.
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
-
         // Production AdamW default (decoupled WD). LR 1e-3 — an order of
         // magnitude above the SFT default (1e-4) because the tiny fixture has
         // only 4 supervised tokens; 1e-3 drives a clearly readable downward
@@ -21571,6 +21615,473 @@ pub(crate) mod tests {
             grads.insert(param.tensor_id(), grad);
         }
         Ok(grads)
+    }
+
+    fn gradient_contract_params() -> TrainableLoraParams {
+        let q_proj = (
+            lora_parameter_from_kt(KtTensor::zeros_cpu(vec![2, 3], KtDType::F32)),
+            lora_parameter_from_kt(KtTensor::zeros_cpu(vec![3, 2], KtDType::F32)),
+        );
+        TrainableLoraParams {
+            layers: vec![TrainableLoraLayerParams {
+                q_proj: Some(q_proj),
+                ..Default::default()
+            }],
+            mtp: None,
+            rank: 2,
+            alpha: 4.0,
+            scale: 2.0,
+        }
+    }
+
+    fn checkpoint_gradient_contract_params(layer_count: usize) -> TrainableLoraParams {
+        let layers = (0..layer_count)
+            .map(|_| TrainableLoraLayerParams {
+                q_proj: Some((
+                    lora_parameter_from_kt(KtTensor::zeros_cpu(vec![2, 3], KtDType::F32)),
+                    lora_parameter_from_kt(KtTensor::zeros_cpu(vec![3, 2], KtDType::F32)),
+                )),
+                gate_proj: Some((
+                    lora_parameter_from_kt(KtTensor::zeros_cpu(vec![2, 3], KtDType::F32)),
+                    lora_parameter_from_kt(KtTensor::zeros_cpu(vec![3, 2], KtDType::F32)),
+                )),
+                ..Default::default()
+            })
+            .collect();
+        TrainableLoraParams {
+            layers,
+            mtp: None,
+            rank: 2,
+            alpha: 4.0,
+            scale: 2.0,
+        }
+    }
+
+    fn checkpoint_gradient_contract_params_with_empty_middle() -> TrainableLoraParams {
+        let mut params = checkpoint_gradient_contract_params(3);
+        params.layers[1] = TrainableLoraLayerParams::default();
+        params
+    }
+
+    fn gradient_contract_store(
+        params: &TrainableLoraParams,
+        value: f32,
+    ) -> Result<kiln_autograd::GradStore> {
+        let mut grads = kiln_autograd::GradStore::new();
+        for param in params.all_params() {
+            let master = param
+                .backward_storage()
+                .context("gradient contract fixture requires trainable parameters")?;
+            let grad = KtTensor::from_vec_on(
+                master.device(),
+                vec![value; master.element_count()],
+                master.shape().to_vec(),
+            )?
+            .to_dtype(param.amp_policy().backward_compute_dtype)?;
+            grads.insert(param.tensor_id(), grad);
+        }
+        Ok(grads)
+    }
+
+    fn checkpoint_gradient_contract_segment(
+        params: &TrainableLoraParams,
+        start_layer: usize,
+        end_layer: usize,
+        value: f32,
+    ) -> Result<kiln_autograd::GradStore> {
+        let mut grads = kiln_autograd::GradStore::new();
+        for entry in params
+            .all_params_with_modules()
+            .into_iter()
+            .filter(|entry| entry.layer_idx >= start_layer && entry.layer_idx < end_layer)
+        {
+            let master = entry
+                .param
+                .backward_storage()
+                .context("checkpoint gradient fixture requires trainable parameters")?;
+            let grad = KtTensor::from_vec_on(
+                master.device(),
+                vec![value; master.element_count()],
+                master.shape().to_vec(),
+            )?
+            .to_dtype(entry.param.amp_policy().backward_compute_dtype)?;
+            grads.insert(entry.param.tensor_id(), grad);
+        }
+        Ok(grads)
+    }
+
+    fn checkpoint_gradient_store_snapshot(
+        grads: &kiln_autograd::GradStore,
+    ) -> Result<BTreeMap<KtTensorId, (Vec<usize>, KtDType, kiln_tensor::Device, Vec<f32>)>> {
+        grads
+            .iter()
+            .map(|(id, grad)| {
+                Ok((
+                    *id,
+                    (
+                        grad.shape().to_vec(),
+                        grad.dtype(),
+                        grad.device(),
+                        grad.to_vec::<f32>()?,
+                    ),
+                ))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn checkpoint_gradient_merge_accepts_exact_layer_range() -> Result<()> {
+        let params = checkpoint_gradient_contract_params(3);
+        let segment = checkpoint_gradient_contract_segment(&params, 1, 3, 2.0)?;
+        let expected_ids = segment.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>();
+        let mut accumulated = kiln_autograd::GradStore::new();
+
+        merge_checkpoint_lora_grad_segment(
+            &params,
+            &mut accumulated,
+            segment,
+            1,
+            3,
+            "checkpoint exact-range fixture",
+        )?;
+
+        assert_eq!(
+            accumulated
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<BTreeSet<_>>(),
+            expected_ids
+        );
+        assert_eq!(accumulated.len(), 8);
+        for (_, grad) in accumulated.iter() {
+            assert!(grad.to_vec::<f32>()?.iter().all(|value| *value == 2.0));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_gradient_merge_accepts_an_empty_configured_layer_range() -> Result<()> {
+        let params = checkpoint_gradient_contract_params_with_empty_middle();
+        let mut accumulated = kiln_autograd::GradStore::new();
+
+        merge_checkpoint_lora_grad_segment(
+            &params,
+            &mut accumulated,
+            kiln_autograd::GradStore::new(),
+            1,
+            2,
+            "checkpoint empty-range fixture",
+        )?;
+
+        assert!(accumulated.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_gradient_merge_rejects_a_gradient_for_an_empty_configured_range_atomically()
+    -> Result<()> {
+        let params = checkpoint_gradient_contract_params_with_empty_middle();
+        let mut accumulated = kiln_autograd::GradStore::new();
+        merge_checkpoint_lora_grad_segment(
+            &params,
+            &mut accumulated,
+            checkpoint_gradient_contract_segment(&params, 0, 1, 3.0)?,
+            0,
+            1,
+            "checkpoint prior-range fixture",
+        )?;
+        let before = checkpoint_gradient_store_snapshot(&accumulated)?;
+        let unexpected = checkpoint_gradient_contract_segment(&params, 2, 3, 5.0)?;
+        let unexpected_ids = unexpected
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<BTreeSet<_>>();
+
+        let error = merge_checkpoint_lora_grad_segment(
+            &params,
+            &mut accumulated,
+            unexpected,
+            1,
+            2,
+            "checkpoint empty-range mismatch fixture",
+        )
+        .expect_err("an empty configured range must reject every observed gradient");
+
+        let message = error.to_string();
+        assert!(message.contains("exact LoRA gradient identity mismatch"));
+        for id in unexpected_ids {
+            assert!(message.contains(&format!("tensor_id={id}")));
+        }
+        assert_eq!(checkpoint_gradient_store_snapshot(&accumulated)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_gradient_merge_rejects_foreign_range_id() -> Result<()> {
+        let params = checkpoint_gradient_contract_params(2);
+        let segment = checkpoint_gradient_contract_segment(&params, 0, 2, 1.0)?;
+        let foreign_id = params
+            .all_params_with_modules()
+            .into_iter()
+            .find(|entry| entry.layer_idx == 1)
+            .context("foreign-range fixture requires a second layer")?
+            .param
+            .tensor_id();
+        let mut accumulated = kiln_autograd::GradStore::new();
+
+        let error = merge_checkpoint_lora_grad_segment(
+            &params,
+            &mut accumulated,
+            segment,
+            0,
+            1,
+            "checkpoint foreign-range fixture",
+        )
+        .expect_err("a gradient from outside the declared range must fail closed");
+
+        let message = error.to_string();
+        assert!(message.contains("checkpoint foreign-range fixture"));
+        assert!(message.contains("exact LoRA gradient identity mismatch"));
+        assert!(message.contains(&format!("unknown=[tensor_id={foreign_id}")));
+        assert!(accumulated.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_gradient_merge_rejects_missing_range_member() -> Result<()> {
+        let params = checkpoint_gradient_contract_params(2);
+        let mut segment = checkpoint_gradient_contract_segment(&params, 0, 1, 1.0)?;
+        let missing_id = segment
+            .iter()
+            .map(|(id, _)| *id)
+            .min()
+            .context("missing-member fixture requires a gradient")?;
+        segment.remove(missing_id);
+        let mut accumulated = kiln_autograd::GradStore::new();
+
+        let error = merge_checkpoint_lora_grad_segment(
+            &params,
+            &mut accumulated,
+            segment,
+            0,
+            1,
+            "checkpoint missing-member fixture",
+        )
+        .expect_err("a missing range member must fail closed");
+
+        let message = error.to_string();
+        assert!(message.contains("checkpoint missing-member fixture"));
+        assert!(message.contains("exact LoRA gradient identity mismatch"));
+        assert!(message.contains(&format!("tensor_id={missing_id}")));
+        assert!(message.contains("unknown=[]"));
+        assert!(accumulated.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_gradient_merge_rejects_invalid_layer_bounds() {
+        let params = checkpoint_gradient_contract_params(3);
+        for (start_layer, end_layer) in [(0, 0), (2, 1), (0, 4)] {
+            let mut accumulated = kiln_autograd::GradStore::new();
+            let error = merge_checkpoint_lora_grad_segment(
+                &params,
+                &mut accumulated,
+                kiln_autograd::GradStore::new(),
+                start_layer,
+                end_layer,
+                "checkpoint bounds fixture",
+            )
+            .expect_err("an invalid checkpoint layer range must fail closed");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "checkpoint bounds fixture: invalid checkpoint layer range {start_layer}..{end_layer} for 3 layers"
+                )
+            );
+            assert!(accumulated.is_empty());
+        }
+    }
+
+    #[test]
+    fn checkpoint_gradient_merge_duplicate_rejection_is_atomic() -> Result<()> {
+        let params = checkpoint_gradient_contract_params(2);
+        let mut accumulated = kiln_autograd::GradStore::new();
+        merge_checkpoint_lora_grad_segment(
+            &params,
+            &mut accumulated,
+            checkpoint_gradient_contract_segment(&params, 0, 1, 3.0)?,
+            0,
+            1,
+            "checkpoint prior segment fixture",
+        )?;
+
+        let mut preexisting = checkpoint_gradient_contract_segment(&params, 1, 2, 9.0)?;
+        let mut duplicate_ids = preexisting.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+        duplicate_ids.sort_unstable();
+        duplicate_ids.truncate(2);
+        for id in &duplicate_ids {
+            accumulated.insert(
+                *id,
+                preexisting
+                    .remove(*id)
+                    .expect("selected duplicate gradient must exist"),
+            );
+        }
+        let before = checkpoint_gradient_store_snapshot(&accumulated)?;
+
+        let error = merge_checkpoint_lora_grad_segment(
+            &params,
+            &mut accumulated,
+            checkpoint_gradient_contract_segment(&params, 1, 2, 5.0)?,
+            1,
+            2,
+            "checkpoint duplicate fixture",
+        )
+        .expect_err("a duplicate across checkpoint segments must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "checkpoint duplicate fixture: duplicate checkpoint LoRA gradient tensor IDs across layer segments: [{}]",
+                duplicate_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        );
+        assert_eq!(checkpoint_gradient_store_snapshot(&accumulated)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_lora_gradient_contract_accepts_zero_gradients() -> Result<()> {
+        let params = gradient_contract_params();
+        let grads = gradient_contract_store(&params, 0.0)?;
+        validate_exact_lora_grad_store(&params, &grads, "zero-gradient fixture")
+    }
+
+    #[test]
+    fn exact_lora_gradient_contract_rejects_missing_without_advancing_step() -> Result<()> {
+        let mut params = gradient_contract_params();
+        let mut grads = gradient_contract_store(&params, 1.0)?.into_inner();
+        let missing_id = params.all_params()[0].tensor_id();
+        grads.remove(&missing_id);
+
+        let optimizer = Optimizer::AdamW {
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.01,
+        };
+        let mut state = make_opt_state(&params, optimizer, 1e-3, &cpu_device())?
+            .context("AdamW fixture requires optimizer state")?;
+        let backend = backend::cpu::CpuBackend::new(cpu_device());
+        let error = optimizer_step_from_map(
+            &backend,
+            &mut params,
+            &grads,
+            1e-3,
+            optimizer,
+            Some(&mut state),
+        )
+        .expect_err("missing configured LoRA gradient must fail closed");
+        let message = error.to_string();
+        assert!(message.contains("exact LoRA gradient identity mismatch"));
+        assert!(message.contains("missing=["));
+        assert!(message.contains(&missing_id.to_string()));
+        assert_eq!(state.step_count(), 0, "rejected gradient set advanced step");
+        Ok(())
+    }
+
+    #[test]
+    fn exact_lora_gradient_contract_rejects_unknown_id() -> Result<()> {
+        let params = gradient_contract_params();
+        let mut grads = gradient_contract_store(&params, 1.0)?;
+        let unknown_id = KtTensorId::next();
+        let unknown_grad = grads
+            .iter()
+            .next()
+            .map(|(_, grad)| grad.clone())
+            .context("gradient fixture must be non-empty")?;
+        grads.insert(unknown_id, unknown_grad);
+
+        let error = validate_exact_lora_grad_store(&params, &grads, "unknown-id fixture")
+            .expect_err("unknown gradient id must fail closed");
+        assert!(error.to_string().contains("unknown=["));
+        assert!(error.to_string().contains(&unknown_id.to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn exact_lora_gradient_contract_rejects_wrong_shape() -> Result<()> {
+        let params = gradient_contract_params();
+        let mut grads = gradient_contract_store(&params, 1.0)?;
+        let param = params.all_params()[0];
+        grads.insert(
+            param.tensor_id(),
+            KtTensor::zeros_cpu(vec![1, 6], param.amp_policy().backward_compute_dtype),
+        );
+
+        let error = validate_exact_lora_grad_store(&params, &grads, "shape fixture")
+            .expect_err("wrong gradient shape must fail closed");
+        assert!(error.to_string().contains("gradient shape mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn exact_lora_gradient_contract_rejects_wrong_dtype() -> Result<()> {
+        let params = gradient_contract_params();
+        let mut grads = gradient_contract_store(&params, 1.0)?;
+        let param = params.all_params()[0];
+        let shape = param
+            .backward_storage()
+            .context("gradient fixture requires master")?
+            .shape()
+            .to_vec();
+        grads.insert(param.tensor_id(), KtTensor::zeros_cpu(shape, KtDType::BF16));
+
+        let error = validate_exact_lora_grad_store(&params, &grads, "dtype fixture")
+            .expect_err("wrong gradient dtype must fail closed");
+        assert!(error.to_string().contains("gradient dtype mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn exact_lora_gradient_contract_rejects_wrong_device_metadata() {
+        let error = validate_lora_gradient_metadata(
+            "device fixture",
+            "layer=0 module=q_proj matrix=A tensor_id=t#1",
+            &[2, 3],
+            KtDType::F32,
+            kiln_tensor::Device::Cpu,
+            &[2, 3],
+            KtDType::F32,
+            kiln_tensor::Device::Cuda(1),
+        )
+        .expect_err("wrong gradient device must fail closed");
+        assert!(error.to_string().contains("gradient device mismatch"));
+    }
+
+    #[test]
+    fn exact_lora_gradient_contract_rejects_nonfinite_values() -> Result<()> {
+        let params = gradient_contract_params();
+        let mut grads = gradient_contract_store(&params, 1.0)?;
+        let param = params.all_params()[0];
+        let master = param
+            .backward_storage()
+            .context("gradient fixture requires master")?;
+        let nonfinite = KtTensor::from_vec_on(
+            master.device(),
+            vec![f32::NAN; master.element_count()],
+            master.shape().to_vec(),
+        )?;
+        grads.insert(param.tensor_id(), nonfinite);
+
+        let error = validate_exact_lora_grad_store(&params, &grads, "nonfinite fixture")
+            .expect_err("non-finite gradient values must fail closed");
+        assert!(error.to_string().contains("non-finite LoRA gradient"));
+        Ok(())
     }
 
     fn assert_checkpoint_params_equal(
@@ -22073,13 +22584,6 @@ pub(crate) mod tests {
             kiln_tensor::rocm_is_available(),
             "ROCm qualification requested but no ROCm device is available"
         );
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-        }
-
         let device = Device::Rocm(0);
         let model_config = tiny_config_full_attn_bf16();
         let weights = tiny_weights_bf16(&model_config, &device)?;
@@ -24008,17 +24512,6 @@ pub(crate) mod tests {
             return;
         }
         let device = Device::Cuda(0);
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
-
         let config = tiny_config_bf16();
         let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
         let params = TrainableLoraParams::initialize_seeded(
@@ -24114,7 +24607,7 @@ pub(crate) mod tests {
     // iteration. Self-skips unless `KILN_TENSOR_VULKAN_TEST=1` AND a Vulkan
     // device is present. Run named, single-shot, one at a time:
     //
-    //   KILN_TENSOR_VULKAN_TEST=1 KILN_USE_TAPE_FORWARD=1 ... \
+    //   KILN_TENSOR_VULKAN_TEST=1 \
     //     CARGO_TARGET_DIR=.../target cargo test -p kiln-train --features vulkan \
     //     vk_f32_sft_grads_nonempty -- --nocapture --test-threads=1
     // ====================================================================
@@ -24132,23 +24625,6 @@ pub(crate) mod tests {
             return false;
         }
         true
-    }
-
-    /// Turn on every tape gate so the authoritative walk records the full
-    /// wired chain (mirrors the BF16 CUDA coverage tests). `OnceLock`-cached
-    /// for the process — these tests are single-shot, one-at-a-time.
-    #[cfg(feature = "vulkan")]
-    fn vk_set_all_tape_gates() {
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
     }
 
     /// Print a per-LoRA-module breakdown of which params received a grad —
@@ -24280,7 +24756,6 @@ pub(crate) mod tests {
         if !vk_validation_enabled(test_name) {
             return;
         }
-        vk_set_all_tape_gates();
         let device = Device::Vulkan(0);
         run_vk_f32_sft("SFT/full-attn", &tiny_config_full_attn(), &device);
     }
@@ -24298,7 +24773,6 @@ pub(crate) mod tests {
         if !vk_validation_enabled(test_name) {
             return;
         }
-        vk_set_all_tape_gates();
         let device = Device::Vulkan(0);
         run_vk_f32_sft("SFT/gdn", &tiny_config(), &device);
     }
@@ -24314,7 +24788,6 @@ pub(crate) mod tests {
         if !vk_validation_enabled(test_name) {
             return;
         }
-        vk_set_all_tape_gates();
 
         let device = Device::Vulkan(0);
         let config = tiny_config_full_attn(); // F32 base, full-attn-only
@@ -24465,7 +24938,6 @@ pub(crate) mod tests {
         if !vk_validation_enabled(test_name) {
             return Ok(());
         }
-        vk_set_all_tape_gates();
 
         let device = Device::Vulkan(0);
         let model_config = tiny_config_full_attn();
@@ -24567,17 +25039,6 @@ pub(crate) mod tests {
             kiln_tensor::rocm_is_available(),
             "ROCm qualification requested but no ROCm device is available"
         );
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
-
         let device = Device::Rocm(0);
         let model_config = tiny_config_full_attn_bf16();
         let weights = tiny_weights_bf16(&model_config, &device)?;
@@ -24804,7 +25265,6 @@ pub(crate) mod tests {
         if !vk_validation_enabled(test_name) {
             return;
         }
-        vk_set_all_tape_gates();
         let device = Device::Vulkan(0);
         run_vk_bf16_sft("SFT/full-attn BF16", &tiny_config_full_attn_bf16(), &device);
     }
@@ -24819,7 +25279,6 @@ pub(crate) mod tests {
         if !vk_validation_enabled(test_name) {
             return;
         }
-        vk_set_all_tape_gates();
         let device = Device::Vulkan(0);
         run_vk_bf16_sft("SFT/gdn BF16", &tiny_config_bf16(), &device);
     }
@@ -24834,7 +25293,6 @@ pub(crate) mod tests {
         if !vk_validation_enabled(test_name) {
             return;
         }
-        vk_set_all_tape_gates();
 
         let device = Device::Vulkan(0);
         let config = tiny_config_full_attn_bf16(); // BF16 base, full-attn-only

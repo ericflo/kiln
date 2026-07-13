@@ -2,6 +2,13 @@
 
 # CP-4 Forward-Wiring Master Checklist (#1082, tape-authoritative training)
 
+> **Historical snapshot, not current operating guidance.** This document records
+> migration state from May 2026. The `KILN_USE_TAPE_*` and
+> `KILN_USE_TAPE_AUTHORITATIVE` switches mentioned below were removed without
+> aliases or replacement fields. Current GPU training uses an internal tape
+> scope as its sole routing authority. See [Configuration](./CONFIGURATION.md)
+> and [Native SFT Profile](./NATIVE_SFT_PROFILE.md) for current behavior.
+
 This is the authoritative wiring plan for the tape-authoritative training forward pass (prefill, `seq_len>1`, F32 tiny model on CUDA, all 7 tape gates on). It maps every op on the `cross_entropy → embedding` loss→input path, groups the unwired ops into monotonic-coverage increments, and lists the new adapters and chaining hazards. The measured starting state is `tape_has_grad=0/50` LoRA Vars (~5% of the forward wired).
 
 The single most important structural fact: **`backend.linear_prefill_apply` → `cuda.rs:1759` (`x2d.matmul(weight_t)`) is the universal base-matmul site** for every projection (q/k/v/o, gate/up/down, GDN in_proj_qkv/z/a/b, GDN out_proj) AND the lm_head. On the F32 training path `cuda_lora_linear_training_bf16` returns `None` (BF16-only guard) and `track_op()` is true, so `linear_with_lora_t_backend_decode_if:3451` always routes here. Wiring this one site (as a tape node on the `linear_prefill_apply` output, chaining `tape_kt_input(x)`) closes the largest single class of breaks. The `broadcast_matmul_cpu_compatible` / `matmul_no_broadcast_copy` / `try_kt_matmul` sites the region maps point at are **dead code on the training path** and must NOT be the wiring target.

@@ -144,6 +144,105 @@ to resume an SFT checkpoint with the older v3 planning identity, is planning
 drift. GRPO and OPD continue to use the common v3 planning identity because
 this SFT route is not their loss-routing authority.
 
+## Tape authority and inference isolation
+
+The kt autograd tape is part of the native workload contract, not a tunable
+feature. The trainer opens an internal scope around the forward/backward region
+that must record gradients. Recorder adapters use the presence of that scope as
+their only activation authority. SFT, GRPO, and OPD admission require the
+authoritative route before data or GPU ownership, and execution fails closed if
+the required loss or backward chain is unavailable.
+
+No request, profile, TOML field, CLI option, or environment value can partially
+enable the tape. The former `KILN_USE_TAPE_FORWARD`,
+`KILN_USE_TAPE_FLASH_ATTN`, `KILN_USE_TAPE_SDPA`,
+`KILN_USE_TAPE_LORA_ADD`, `KILN_USE_TAPE_GDN`,
+`KILN_USE_TAPE_GDN_CONV`, `KILN_USE_TAPE_GDN_QK_NORM`, and
+`KILN_USE_TAPE_GDN_GATED_NORM` inputs were removed without aliases or
+replacements. Leaving one in a service definition does not create an A/B arm;
+remove it.
+
+The same scope boundary protects inference performance. An inference request
+does not have an active training scope, so forward-only implementations remain
+eligible. GDN chunkwise recurrence and CUDA's weight-aware embedding lookup no
+longer decline those paths merely because a process-global tape default is on.
+Conversely, while training owns a scope, a tuning or debug selector may choose
+only a graph-preserving implementation. It cannot suppress one recorder,
+silently route through a forward-only kernel, or change the resulting update
+rule. A missing graph-preserving route is an unsupported workload, not a debug
+mode.
+
+Source-contract coverage enforces this ownership and removal across production
+Rust. That portable check is not accelerator qualification. Native numerical,
+memory, latency, cancellation, and stability claims still require the named
+hardware workload and a committed passing receipt for CUDA, ROCm, Metal, or
+Vulkan.
+
+### Frozen parameter ownership
+
+The native profile trains LoRA A/B tensors and no base-model parameters. The
+tape represents that declaration structurally rather than recording every
+forward input and discarding unwanted gradients later:
+
+- Base projection matrices are saved constants. Their backward computes the
+  activation gradient but does not compute or retain a base-weight gradient.
+- Embedding tables and token IDs are not differentiable inputs. The gathered
+  activation is the leaf from which the recorded model graph continues.
+- RMSNorm and GDN gated-RMSNorm weights are saved constants. Portable and fused
+  backward routes return only activation gradients; frozen fused routes do not
+  allocate a weight-gradient output or perform weight-gradient atomics.
+- Frozen GDN gate parameters remain constants while analytic backward preserves
+  the required activation chain.
+- MTP projection weights use the same frozen-right-hand-side matmul contract.
+- Fused SFT cross entropy, OPD, and GRPO loss roots save their head transpose as
+  a constant and return only the hidden-state gradient.
+
+LoRA projection backward still computes `dx`, `dA`, and `dB`, because all three
+are needed to preserve the upstream graph and train the adapter. For the split
+Q/gate projection, both chunks register the original full A/B IDs. Each chunk
+zero-pads its B gradient to the full parameter shape, the tape accumulates the
+two contributions, and tape-aware reshapes keep the post-split activation graph
+connected. Neither a sliced base matrix nor a temporary B slice can appear as
+an optimizer leaf.
+
+This ownership boundary is enforced before optimization by the exact set check
+below. It also avoids frozen dWeight GEMMs and frozen gradient storage instead
+of relying on the optimizer to ignore them. The portable contracts establish
+the graph and allocation intent; backend memory and performance claims still
+require the hardware gates in this document.
+
+### Exact gradient-set boundary
+
+Tape recording is not considered successful merely because a backward call
+returned. Immediately before an optimizer can mutate a parameter or its state,
+Kiln compares the observed gradient tensor IDs with every configured trainable
+LoRA leaf. The sets must be equal. Each gradient must also match the leaf's
+shape, AMP backward-compute dtype, and master device and must contain only
+finite values. Missing and unknown IDs, metadata drift, and NaN or infinity
+reject the step before the AdamW/Muon counter advances. A finite all-zero
+gradient remains valid; zero magnitude alone is not evidence of a severed
+graph.
+
+For gradient checkpointing, each reverse segment must return exactly the LoRA
+leaves whose layers fall in that segment. Within a reverse pass, the tape bridge
+sums distinct recorded input contributions into one accumulated entry per
+leaf, after first requiring a gradient for every registered differentiable
+input. One connected clone cannot mask a disconnected sibling that targets the
+same leaf. Split output-projection chunks are zero-padded and accumulated under
+the original full LoRA leaf ID rather than temporary slice IDs. A deposit for
+another range or a missing range member fails the segment contract; a range
+with no configured leaves accepts only an empty result; and the merge rejects
+duplicate leaf IDs across disjoint checkpoint segments. For token-level GRPO,
+each completion's set is identity/metadata
+checked while the values are accumulated. The combined set receives one
+finite-value reduction immediately before the optimizer, avoiding repeated GPU
+readback barriers at large completion counts. SFT, GRPO, and OPD share this
+consumer contract; there is no request, TOML, CLI, debug, or environment bypass.
+CUDA, ROCm, and Vulkan
+use backend finite reducers. Metal currently synchronizes and scans the complete
+gradient on the host at this boundary until a native Metal reducer is qualified;
+the fallback is a correctness guarantee, not large-batch performance evidence.
+
 ## Optimizers and learning rate
 
 `config.optimizer` is a tagged object. Omission selects Muon with its defaults,

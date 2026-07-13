@@ -1,7 +1,7 @@
 //! ROCm parity sweep for the fused RMSNorm kernels (Phase R.7).
 //!
 //! Validates the wave-size-fixed `fused_rmsnorm_kt` (forward) and
-//! `fused_rmsnorm_backward_kt` (backward) against a CPU F32 reference across
+//! trainable- and frozen-weight backward paths against a CPU F32 reference across
 //! a sweep of last-axis widths that straddle the wavefront boundary
 //! ({31,32,33,63,64,65,127,128,129,256,1024}) — the widths most likely to
 //! expose a wave32-vs-wave64 reduction bug (lanes 32-63 dropping out, a
@@ -14,9 +14,13 @@
 //! Skips cleanly (returns Ok) when no AMD GPU / HIP runtime is present.
 #![cfg(feature = "rocm")]
 
+use std::sync::Arc;
+
 use half::bf16;
 
-use kiln_rmsnorm_kernel::{fused_rmsnorm_backward_kt, fused_rmsnorm_kt};
+use kiln_rmsnorm_kernel::{
+    fused_rmsnorm_backward_dx_kt, fused_rmsnorm_backward_kt, fused_rmsnorm_kt,
+};
 use kiln_tensor::{DType, Tensor};
 
 /// Last-axis widths straddling the 32/64-lane wavefront boundary.
@@ -193,16 +197,40 @@ fn rocm_fused_rmsnorm_backward_parity_sweep() {
         let w = rocm_bf16(&w_host, vec![hidden]);
         let dy = rocm_bf16(&dy_host, vec![rows, hidden]);
 
-        let (grad_x, grad_w_partial) =
+        let (grad_x, grad_weight) =
             fused_rmsnorm_backward_kt(&x, &w, &dy, eps).expect("fused_rmsnorm_backward_kt");
+        let frozen_grad_x =
+            fused_rmsnorm_backward_dx_kt(&x, &w, &dy, eps).expect("fused_rmsnorm_backward_dx_kt");
         assert_eq!(grad_x.shape(), &[rows, hidden]);
         assert_eq!(grad_x.dtype(), DType::BF16);
-        // grad_w_partial is F32 [rows, hidden]; the cross-row-reduced grad_w
-        // lives in its first `hidden` slots (see csrc/fused_rmsnorm_bwd.cu).
-        assert_eq!(grad_w_partial.shape(), &[rows, hidden]);
-        assert_eq!(grad_w_partial.dtype(), DType::F32);
+        assert_eq!(frozen_grad_x.shape(), &[rows, hidden]);
+        assert_eq!(frozen_grad_x.dtype(), DType::BF16);
+        assert_eq!(grad_weight.shape(), &[hidden]);
+        assert_eq!(grad_weight.dtype(), DType::F32);
+
+        let x_storage = x
+            .storage()
+            .as_any()
+            .downcast_ref::<kiln_tensor::RocmStorage>()
+            .expect("x ROCm storage");
+        for (name, output) in [
+            ("grad_x", &grad_x),
+            ("frozen_grad_x", &frozen_grad_x),
+            ("grad_weight", &grad_weight),
+        ] {
+            let output_storage = output
+                .storage()
+                .as_any()
+                .downcast_ref::<kiln_tensor::RocmStorage>()
+                .unwrap_or_else(|| panic!("{name} ROCm storage"));
+            assert!(
+                Arc::ptr_eq(&x_storage.context(), &output_storage.context()),
+                "{name} must preserve x's ROCm context"
+            );
+        }
 
         let got_gx = read_bf16_f32(&grad_x);
+        let got_frozen_gx = read_bf16_f32(&frozen_grad_x);
 
         // CPU F32 reference for grad_x and grad_w, mirroring the kernel math:
         //   rms_inv = rsqrt(mean(x^2) + eps)
@@ -215,14 +243,17 @@ fn rocm_fused_rmsnorm_backward_parity_sweep() {
             &want_gx,
             &format!("backward grad_x hidden={hidden}"),
         );
-
-        // grad_w lives in the first `hidden` F32 slots of the partial buffer.
-        let gw_partial_host = kiln_tensor::rocm_to_host_copy(&grad_w_partial)
-            .expect("rocm_to_host_copy grad_w_partial");
-        let gw_partial = gw_partial_host.to_vec::<f32>().expect("to_vec f32");
-        let got_gw = &gw_partial[..hidden];
         assert_close(
-            got_gw,
+            &got_frozen_gx,
+            &want_gx,
+            &format!("frozen-weight backward grad_x hidden={hidden}"),
+        );
+
+        let grad_weight_host =
+            kiln_tensor::rocm_to_host_copy(&grad_weight).expect("rocm_to_host_copy grad_weight");
+        let got_gw = grad_weight_host.to_vec::<f32>().expect("to_vec f32");
+        assert_close(
+            &got_gw,
             &want_gw,
             &format!("backward grad_w hidden={hidden}"),
         );

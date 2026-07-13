@@ -1,5 +1,5 @@
 // Kiln fused RMSNorm backward kernel — single-pass per row, F32 reductions,
-// F32 atomicAdd for the cross-row grad_w sum.
+// and an optional F32 atomicAdd for the cross-row grad_w sum.
 //
 // Algorithm (matches the math in fused_rmsnorm_bwd.h):
 //
@@ -9,14 +9,14 @@
 //   Pass 2: sum_xgw = sum_j ((1 + w[j]) * x[i,j] * grad_out[i,j])
 //   c = (1/H) * rms_inv^2 * sum_xgw
 //
-//   Pass 3 (write-out + grad_w accumulate):
+//   Pass 3 (write-out + optional grad_w accumulation):
 //     grad_x[i,j] = rms_inv * ((1 + w[j]) * grad_out[i,j] - x[i,j] * c)
-//     atomicAdd(&grad_w_partial_f32[j], x[i,j] * rms_inv * grad_out[i,j])
+//     atomicAdd(&grad_weight_f32[j], x[i,j] * rms_inv * grad_out[i,j])
 //
 // Launch: one block per row, 256 threads/block. Each thread strides over
 // the hidden axis with stride == blockDim.x. Two-stage warp + smem reduction
-// for the per-row sums. Cross-row grad_w accumulation uses atomicAdd into a
-// caller-provided F32 buffer; the caller zeros the buffer before launch.
+// for the per-row sums. When requested, cross-row grad_w accumulation uses
+// atomicAdd into a caller-provided F32 buffer that is zeroed before launch.
 //
 // `hidden` <= 8192 (matches the forward kernel envelope).
 
@@ -35,12 +35,13 @@ namespace {
 
 constexpr int kThreadsPerBlock = 256;
 
+template <bool ComputeGradWeight>
 __global__ void fused_rmsnorm_bwd_kernel(
     const __nv_bfloat16 *__restrict__ x,
     const __nv_bfloat16 *__restrict__ weight,
     const __nv_bfloat16 *__restrict__ grad_out,
     __nv_bfloat16 *__restrict__ grad_x,
-    float *__restrict__ grad_w_partial_f32,
+    float *__restrict__ grad_weight_f32,
     int hidden,
     float eps
 ) {
@@ -93,9 +94,11 @@ __global__ void fused_rmsnorm_bwd_kernel(
         float dx = rms_inv * ((1.0f + wj) * gj - xj * c);
         dx_row[j] = __float2bfloat16(dx);
 
-        // grad_w[j] += x_ij * rms_inv_i * g_ij  (cross-row reduction)
-        float dw_contrib = xj * rms_inv * gj;
-        atomicAdd(&grad_w_partial_f32[j], dw_contrib);
+        if constexpr (ComputeGradWeight) {
+            // grad_w[j] += x_ij * rms_inv_i * g_ij  (cross-row reduction)
+            float dw_contrib = xj * rms_inv * gj;
+            atomicAdd(&grad_weight_f32[j], dw_contrib);
+        }
     }
 }
 
@@ -117,7 +120,7 @@ extern "C" kiln_rmsnorm_bwd_status_t kiln_fused_rmsnorm_bwd(
     const void *weight,
     const void *grad_out,
     void *grad_x,
-    float *grad_w_partial_f32,
+    float *grad_weight_f32,
     int rows,
     int hidden,
     float eps,
@@ -134,15 +137,27 @@ extern "C" kiln_rmsnorm_bwd_status_t kiln_fused_rmsnorm_bwd(
     dim3 block(kThreadsPerBlock);
     cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
 
-    fused_rmsnorm_bwd_kernel<<<grid, block, 0, s>>>(
-        reinterpret_cast<const __nv_bfloat16 *>(x),
-        reinterpret_cast<const __nv_bfloat16 *>(weight),
-        reinterpret_cast<const __nv_bfloat16 *>(grad_out),
-        reinterpret_cast<__nv_bfloat16 *>(grad_x),
-        grad_w_partial_f32,
-        hidden,
-        eps
-    );
+    if (grad_weight_f32 != nullptr) {
+        fused_rmsnorm_bwd_kernel<true><<<grid, block, 0, s>>>(
+            reinterpret_cast<const __nv_bfloat16 *>(x),
+            reinterpret_cast<const __nv_bfloat16 *>(weight),
+            reinterpret_cast<const __nv_bfloat16 *>(grad_out),
+            reinterpret_cast<__nv_bfloat16 *>(grad_x),
+            grad_weight_f32,
+            hidden,
+            eps
+        );
+    } else {
+        fused_rmsnorm_bwd_kernel<false><<<grid, block, 0, s>>>(
+            reinterpret_cast<const __nv_bfloat16 *>(x),
+            reinterpret_cast<const __nv_bfloat16 *>(weight),
+            reinterpret_cast<const __nv_bfloat16 *>(grad_out),
+            reinterpret_cast<__nv_bfloat16 *>(grad_x),
+            nullptr,
+            hidden,
+            eps
+        );
+    }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

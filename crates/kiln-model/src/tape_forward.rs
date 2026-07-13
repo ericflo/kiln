@@ -1,104 +1,22 @@
-//! Experimental tape-forward path — CP-4 production-caller scaffolding (#1082).
+//! Production tape-forward adapters.
 //!
-//! This module wires a `KILN_USE_TAPE_FORWARD`-gated branch into
-//! `forward.rs` that routes a subset of forward-pass sites through the
-//! `kiln_autograd::Tape` substrate (recording onto a thread-local
-//! `Tape` instead of building a candle `BackpropOp` graph).
+//! Model forward signatures intentionally remain tensor-only. Training opens a
+//! thread-local [`Tape`] with [`with_thread_local_tape`], and these adapters use
+//! [`with_active_tape`] to record the corresponding backward nodes without
+//! threading `&mut Tape` through the model call graph.
 //!
-//! # Why this exists
+//! # Routing contract
 //!
-//! The audit in
-//! [`docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`]
-//! documented why a per-call-site flip of `rms_norm` to
-//! `fused_rmsnorm_via_kt_tape` cannot land at HEAD: the production
-//! caller signature
-//! `rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor>`
-//! has no `&mut Tape` in scope and no caller transitively up to the
-//! training step root has one either.
+//! [`tape_scope_active`] is the sole routing authority. Outside a scope every
+//! adapter returns `Ok(None)` and inference retains its backend fast paths.
+//! Inside a scope recording is mandatory whenever the operation is within the
+//! backend's authoritative tape envelope; process environment cannot disable
+//! individual nodes and silently sever a training graph.
 //!
-//! The CP-4 substrate work in `kiln-train` (wave 11, commits
-//! `51643ab` + `de647b8`) added the kt-tape primitives the production
-//! forward will eventually need:
-//!
-//! * `tape_step::rms_norm_via_tape`
-//! * `tape_step::matmul_via_tape`
-//! * `tape_step::silu_via_tape`
-//! * `tape_step::cross_entropy_via_tape`
-//! * `tape_step::transformer_block_step_via_tape`
-//!
-//! …all parameterised on `&mut Tape`. To exercise the substrate end-to-end
-//! from `kiln-model`'s forward path, this module provides a
-//! **thread-local Tape** so existing forward functions can route through
-//! tape-aware primitives without rewriting every signature up to the
-//! training-step root.
-//!
-//! # Design
-//!
-//! 1. [`tape_forward_enabled`] reads `KILN_USE_TAPE_FORWARD` once and
-//!    caches the result. Anything other than `0` / `false` / `no` /
-//!    empty enables the path.
-//! 2. [`with_thread_local_tape`] runs a closure with a fresh `Tape` as
-//!    a thread-local. Tape-aware primitives can fetch the active tape
-//!    via [`with_active_tape`] and record onto it.
-//! 3. `forward::rms_norm` is the production kt-native recorder: it
-//!    checks the env flag, borrows kt-tensors via `kiln_kt_bridge`,
-//!    runs `fused_rmsnorm_via_kt_tape` with the active tape, copies
-//!    the output back to a candle Tensor, and returns. When the gate
-//!    is off, the env-tristate returns `None` and the caller falls
-//!    through to the existing kt-forward-op shim.
-//!
-//! # Production-safety
-//!
-//! This is opt-in only. With `KILN_USE_TAPE_FORWARD` unset (the
-//! default), `tape_forward_enabled()` returns `false` and every
-//! `try_tape_*` helper short-circuits to `Ok(None)`. The existing
-//! `fused_rmsnorm_via_kt_forward_op` path is untouched; the production
-//! decode and training loops route through it exactly as before.
-//!
-//! # What this proves
-//!
-//! With `KILN_USE_TAPE_FORWARD=1`:
-//!
-//! * The forward path *can* be made to drive a `Tape`. The tape-
-//!   recorded backward node is visible to a subsequent `Tape::backward`
-//!   walk.
-//! * The output tensor is bit-exact with the kt-forward-op shim
-//!   (same kernel FFI call underneath; only the backward-graph
-//!   machinery differs).
-//! * Inside a `kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store`
-//!   scope (see `kiln-train::trainer::standard_forward_backward_via_tape_bridge`,
-//!   landed `675e0dea`), every adapter registers `(kt_id ↔ candle_id)`
-//!   IO mappings via `register_input_mapping` / `register_output_mapping`.
-//!   The bridge runs `loss.backward()` candle-side as usual, then walks
-//!   the recorded tape with seeds derived from candle's `GradStore`, and
-//!   merges the per-kt-input grads back into the same store keyed on the
-//!   matched candle TensorIds. Result: callers downstream of the tape-
-//!   routed primitives DO see correct grads in candle's `GradStore` even
-//!   though the candle walker alone wouldn't traverse the tape op.
-//!
-//! # Current adapter coverage
-//!
-//! `try_tape_*_cuda` adapters land for every primitive whose
-//! corresponding `kiln_autograd::backwards::*Backward` exists and whose
-//! kt-side fused kernel ships a `*_via_kt_tape` entry:
-//!
-//! * `try_tape_matmul_kt` — `MatmulBackward`
-//! * `try_tape_silu_kt` — `SiluBackward`
-//! * `try_tape_embedding_kt` — `EmbeddingBackward`
-//! * `try_tape_swiglu_kt` — `MulSigmoidGateBackward` (MLP gate path,
-//!   ~18% of decode per Phase 6 NVTX profiling)
-//!
-//! All 5 register IO mappings into the bridge when a scope is active
-//! (commits `57f7b678` for rms_norm/matmul/silu, `cf138c9c` for swiglu).
-//!
-//! # Out of scope (still)
-//!
-//! * Tape-routing for softmax / log_softmax / cross-entropy (the loss
-//!   primitive — would close the kt-tape coverage end-to-end into the
-//!   loss). Substrate primitives in `kiln_autograd::backwards::cross_entropy`
-//!   exist; the adapter is straightforward but distinct from this PR.
-//! * Tape-routing for rotary / layernorm / fused-attn — non-trivial
-//!   substrate decisions about which kernels carry their own backward.
+//! The adapters cover kt-native tensor transforms, linear and LoRA operations,
+//! embedding, RMSNorm, FlashAttention and SDPA, and the GDN recurrence and its
+//! surrounding operations. Backend, dtype, shape, and residency checks remain
+//! local to each adapter so unsupported envelopes decline explicitly.
 
 #![cfg(any(
     feature = "cuda",
@@ -110,15 +28,16 @@
 use anyhow::{Context, Result};
 use kiln_autograd::{
     AddBackward, BackwardOp, ConcatBackward, ContiguousBackward, CrossEntropyKtBackward,
-    EmbeddingBackward, LoraDeltaAddBackward, MatmulBackward, MulBackward, MulSigmoidGateBackward,
-    ReshapeBackward, RopeSplitHalfBackward, SiluBackward, Tape, TransposeBackward,
+    FrozenRhsMatmulBackward, LoraDeltaAddBackward, MatmulBackward, MulBackward,
+    MulSigmoidGateBackward, ReshapeBackward, RopeSplitHalfBackward, SiluBackward, Tape,
+    TransposeBackward,
 };
 
 use crate::backend::BackendRuntime;
 use crate::forward::{
-    GDN_CHUNK_SIZE, gdn_gated_rms_norm_backward_no_grad, gdn_l2_norm_scale_backward_no_grad,
-    gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts,
-    sdpa_fallback_backward_no_grad,
+    GDN_CHUNK_SIZE, gdn_gated_rms_norm_frozen_weight_backward_no_grad,
+    gdn_l2_norm_scale_backward_no_grad, gdn_recurrent_backward_no_grad,
+    gdn_recurrent_forward_from_parts, sdpa_fallback_backward_no_grad,
 };
 use crate::lora_loader::LoraProjectionWeights;
 
@@ -152,27 +71,10 @@ fn ensure_tape_linear_finite(
     Ok(())
 }
 
-// Phase 6a/CP-4 (#1082): the thread-local-tape scope machinery
-// (`with_thread_local_tape`, `with_active_tape`, `tape_forward_enabled`)
-// originally lived here. Wave-13 (#1082) promoted it into
-// `kiln-autograd::tape_scope` so the OPD and FLCE kernel crates (and
-// their `kiln-train` callers) can share the same thread-local handle
-// without taking a `kiln-model` dependency. We re-export from here for
-// back-compat — every existing call site (the parity test, the
-// `forward.rs:7178` adapter call) keeps compiling unchanged.
-pub use kiln_autograd::{tape_forward_enabled, with_active_tape, with_thread_local_tape};
-
-/// (#1082) True iff a tape-recording scope is currently active on this thread.
-///
-/// Used by `forward.rs` to skip leaf, non-tape-recording backend kernels (e.g.
-/// the Vulkan flash-attn prefill kernel, which also materializes a CPU-host
-/// output at the kt<->vk seam) during a tape-authoritative training step, so the
-/// forward falls through to the device-resident, tape-recording composite
-/// (`try_tape_sdpa_fallback_kt`) instead. No-op outside a tape scope (inference
-/// keeps the fast leaf kernel).
-pub fn tape_scope_active() -> bool {
-    with_active_tape(|_| ()).is_some()
-}
+// The canonical scope machinery lives in `kiln-autograd` so model, kernel, and
+// training crates share one thread-local authority. Re-export it here for the
+// model forward call sites and integration tests.
+pub use kiln_autograd::{tape_scope_active, with_active_tape, with_thread_local_tape};
 
 fn tape_debug_sft_finite_checks() -> bool {
     kiln_core::env_flag::env_flag("KILN_DEBUG_SFT_FINITE", false)
@@ -287,10 +189,10 @@ fn tape_forward_device_supported(device: kiln_tensor::Device) -> bool {
 /// re-registers it via `kt_logits_to_candle`'s `retain_output_for_chaining`, and
 /// a downstream kt-native op consumes it directly.
 ///
-/// `Ok(None)` when tape-forward is off or no tape scope is active (decode /
-/// inference) — the caller falls through to the kt-native non-tape forward.
+/// `Ok(None)` when no tape scope is active (decode / inference), and the caller
+/// falls through to the kt-native non-tape forward.
 pub fn try_tape_silu_kt(x: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     match with_active_tape(|tape: &mut Tape| -> Result<_> {
@@ -311,7 +213,7 @@ pub fn try_tape_add_kt(
     a: &kiln_tensor::Tensor,
     b: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if a.dims() != b.dims() {
@@ -335,7 +237,7 @@ pub fn try_tape_add_kt(
 /// helper materialises the contiguous tensor and records [`ContiguousBackward`]
 /// so backward passes the upstream gradient through to the original view op.
 pub fn try_tape_contiguous_kt(x: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(x.device()) {
@@ -361,7 +263,7 @@ pub fn try_tape_concat_kt(
     axis: usize,
     out: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() || inputs.is_empty() || axis >= out.rank() {
+    if !tape_scope_active() || inputs.is_empty() || axis >= out.rank() {
         return Ok(None);
     }
     if !tape_forward_device_supported(out.device()) {
@@ -419,7 +321,7 @@ pub fn try_tape_concat_kt(
 }
 
 /// kt-native split-half RoPE tape recorder (#1082 seam flip) — the kt-native RoPE tape recorder. Records `RopeSplitHalfBackward` directly from kt inputs,
-/// no candle round-trip. `Ok(None)` outside the rank-4 envelope, tape-off, or no
+/// no candle round-trip. `Ok(None)` outside the rank-4 envelope or without an
 /// active scope (caller falls through to the kt-native non-tape RoPE).
 pub fn try_tape_rope_kt(
     x: &kiln_tensor::Tensor,
@@ -428,7 +330,7 @@ pub fn try_tape_rope_kt(
     head_dim: usize,
     rotary_dim: usize,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if x.rank() != 4 || rotary_dim == 0 || rotary_dim > head_dim {
@@ -474,21 +376,21 @@ pub fn try_tape_rope_kt(
 /// ```
 /// All intermediate math runs in F32 then casts back to the input dtype.
 #[derive(Debug)]
-struct RmsNormKtBackward {
+struct FrozenWeightRmsNormKtBackward {
     x: kiln_tensor::Tensor,
     weight: kiln_tensor::Tensor,
     eps: f32,
 }
 
-impl BackwardOp for RmsNormKtBackward {
+impl BackwardOp for FrozenWeightRmsNormKtBackward {
     fn name(&self) -> &'static str {
-        "rmsnorm_kt_backward"
+        "frozen_weight_rmsnorm_kt_backward"
     }
     fn input_count(&self) -> usize {
-        2
+        1
     }
     fn requires_input(&self, idx: usize) -> bool {
-        idx == 0 || idx == 1
+        idx == 0
     }
     fn apply(
         &self,
@@ -537,42 +439,34 @@ impl BackwardOp for RmsNormKtBackward {
         let dx_f = kiln_tensor::ops::sub(&term1, &term2).map_err(map)?;
         let dx = cast(&dx_f, dt).map_err(map)?;
 
-        // dw = Σ_rows (dy * x) * inv_r, summed over all non-trailing axes -> [hidden].
-        let dxw = mul(&dyf, &xf)
-            .map_err(map)?
-            .broadcast_mul(&inv_r)
-            .map_err(map)?;
-        let rows: usize = shape[..last].iter().product();
-        let dxw_2d = dxw.reshape(vec![rows, hidden]).map_err(map)?;
-        let dw_f = sum_axis(&dxw_2d, 0).map_err(map)?; // [hidden]
-        let dw = cast(&dw_f, dt).map_err(map)?;
-
-        Ok(vec![Some(dx), Some(dw)])
+        Ok(vec![Some(dx)])
     }
 }
 
-/// kt-native RMSNorm tape recorder (#1082 Metal lane).
+/// Device-agnostic kt-native RMSNorm tape recorder.
 ///
-/// On CUDA, `forward::rms_norm` records the fused `CudaFusedRmsNormBackward`
-/// via `kiln_rmsnorm_kernel::fused_rmsnorm_via_kt_tape`. That kernel crate is
-/// CUDA-only, so on Metal the production `rms_norm` falls through to a
-/// forward-only kernel that does NOT record — severing the tape between the
-/// QK-norm and the attention/loss (LoRA grads come back empty).
+/// CUDA and ROCm prefer
+/// `kiln_rmsnorm_kernel::fused_rmsnorm_frozen_weight_via_kt_tape` when its
+/// exact envelope is supported. This composite is the graph-preserving
+/// route for every admitted GPU backend when that fused recorder is unavailable.
 ///
 /// This adapter closes that seam with the device-agnostic
 /// `kiln_tensor::ops::rms_norm` forward + the device-agnostic
-/// [`RmsNormKtBackward`] composite (the `kiln_autograd::RmsNormBackward` loop
+/// [`FrozenWeightRmsNormKtBackward`] composite (the
+/// `kiln_autograd::RmsNormBackward` loop
 /// is CPU-only), recorded against the connected kt `x.id()`. The RMSNorm
 /// weight is FROZEN in LoRA training, so only the `dL/dx` edge matters; the
 /// recorded node keeps the upstream LoRA-affected activations connected to the
-/// loss. Returns `Ok(None)` (caller falls through to the forward-only path)
-/// outside a tape scope or out of the BF16/F32 contiguous CUDA/Metal envelope.
+/// loss. Returns `Ok(None)` outside a tape scope or outside the admitted
+/// BF16/F32 contiguous backend envelope. Production `forward::rms_norm` treats
+/// `None` as an error while a scope is active; only inference may continue to a
+/// forward-only implementation.
 pub fn try_tape_rms_norm_kt(
     x: &kiln_tensor::Tensor,
     weight: &kiln_tensor::Tensor,
     eps: f32,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(x.device()) || !tape_forward_device_supported(weight.device())
@@ -612,8 +506,8 @@ pub fn try_tape_rms_norm_kt(
             .map_err(|e| anyhow::anyhow!("kt rms_norm: {e}"))?;
         tape.record(
             &y,
-            &[x, weight],
-            Box::new(RmsNormKtBackward {
+            &[x],
+            Box::new(FrozenWeightRmsNormKtBackward {
                 x: x.clone(),
                 weight: weight.clone(),
                 eps,
@@ -631,7 +525,7 @@ pub fn try_tape_matmul_kt(
     a: &kiln_tensor::Tensor,
     b: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     match with_active_tape(|tape: &mut Tape| -> Result<_> {
@@ -722,15 +616,15 @@ impl BackwardOp for MatmulBf16wBackward {
 /// today (its `weight_t.dtype() == x.dtype()` gate). Only `x` is recorded as a
 /// tape input (the weight is frozen, no grad edge).
 ///
-/// `Ok(None)` (caller falls through) when tape-forward is off, no tape scope is
-/// active, or the inputs are outside the envelope: Vulkan-resident, `x` rank-2
+/// `Ok(None)` (caller falls through) when no tape scope is active or the inputs
+/// are outside the envelope: Vulkan-resident, `x` rank-2
 /// F32, `weight_t` rank-2 BF16, matching contraction dim `K`.
 #[cfg(feature = "vulkan")]
 pub fn try_tape_matmul_bf16w_kt(
     x: &kiln_tensor::Tensor,
     weight_t: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     // Vulkan-only: CUDA/Metal carry their own BF16 base-weight paths.
@@ -765,37 +659,25 @@ pub fn try_tape_matmul_bf16w_kt(
     }
 }
 
-/// kt-native embedding tape recorder (#1082 seam flip) — the kt-native embedding tape recorder. Records `EmbeddingBackward` directly from kt
-/// inputs. `Ok(None)` outside the rank-2-weights envelope.
-pub fn try_tape_embedding_kt(
+/// Training-time lookup against the frozen token embedding table.
+///
+/// Adapter training never differentiates token ids or the resident embedding
+/// table. The gathered activation is therefore an intentional tape leaf: its
+/// consumers record the downstream graph, while this boundary records no node
+/// and cannot allocate a full `[vocab, hidden]` embedding gradient.
+pub fn try_tape_frozen_embedding_kt(
     weights: &kiln_tensor::Tensor,
     token_ids: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if weights.shape().len() != 2 || token_ids.shape().is_empty() {
         return Ok(None);
     }
-    let vocab_size = weights.shape()[0];
-    let hidden = weights.shape()[1];
-    match with_active_tape(|tape: &mut Tape| -> Result<_> {
-        let y = kiln_tensor::ops::embedding(weights, token_ids)
-            .map_err(|e| anyhow::anyhow!("kt embedding: {e}"))?;
-        tape.record(
-            &y,
-            &[weights, token_ids],
-            Box::new(EmbeddingBackward {
-                vocab_size,
-                hidden,
-                token_ids: token_ids.clone(),
-            }),
-        );
-        Ok(y)
-    }) {
-        Some(result) => Ok(Some(result?)),
-        None => Ok(None),
-    }
+    let y = kiln_tensor::ops::embedding(weights, token_ids)
+        .map_err(|e| anyhow::anyhow!("kt frozen embedding: {e}"))?;
+    Ok(Some(y))
 }
 
 /// kt-native SwiGLU (gate ⊙ sigmoid-gate of up) tape recorder (#1082 seam flip) —
@@ -804,7 +686,7 @@ pub fn try_tape_swiglu_kt(
     gate: &kiln_tensor::Tensor,
     up: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     match with_active_tape(|tape: &mut Tape| -> Result<_> {
@@ -831,7 +713,7 @@ pub fn try_tape_mul_kt(
     a: &kiln_tensor::Tensor,
     b: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if a.dims() != b.dims() {
@@ -917,7 +799,7 @@ pub fn try_tape_attn_gate_sigmoid_mul_kt(
     attn_output: &kiln_tensor::Tensor,
     gate: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(attn_output.device())
@@ -956,7 +838,7 @@ pub fn try_tape_transpose_kt(
     axis_a: usize,
     axis_b: usize,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(x.device()) {
@@ -991,7 +873,7 @@ pub fn try_tape_reshape_kt(
     x: &kiln_tensor::Tensor,
     new_shape: Vec<usize>,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(x.device()) {
@@ -1188,7 +1070,7 @@ pub fn try_tape_cross_entropy_from_logits_kt(
 ) -> Result<Option<kiln_tensor::Tensor>> {
     use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
 
@@ -1332,9 +1214,8 @@ pub fn try_tape_cross_entropy_from_logits_kt(
 ///   `base.shape()`); a `LoraDeltaAddBackward { x, a, b, scale }` node was
 ///   recorded on the active thread-local tape with inputs
 ///   `[base, x, A, B]` in that order.
-/// * `Ok(None)` — gate off (no thread-local tape, `KILN_USE_TAPE_FORWARD`
-///   off, `KILN_USE_TAPE_LORA_ADD` off, or device / dtype / shape /
-///   contiguity preconditions fail). The caller must fall through to the
+/// * `Ok(None)` — no thread-local tape is active, or device / dtype / shape /
+///   contiguity preconditions fail. The caller must fall through to the
 ///   existing CUDA / Metal / Vulkan / candle dispatch.
 /// * `Err(...)` — an unexpected kt forward, kt → candle copy-back, or
 ///   reshape failure. Propagated so callers see the failure cleanly
@@ -1378,7 +1259,7 @@ pub fn try_tape_lora_add_kt(
     proj: &LoraProjectionWeights,
     lora_scale: f32,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() || !tape_lora_add_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(base.device())
@@ -1513,79 +1394,154 @@ pub fn try_tape_lora_add_kt(
     Ok(Some(out_kt))
 }
 
-/// Attempt to run the FULL base projection (and optional fused LoRA delta)
-/// through the kt-typed op surface as ONE chained group of `Tape` nodes:
-/// `reshape → matmul → [lora_delta_add] → reshape`. Records the backward so
-/// `dL/dx` flows through BOTH the frozen base weight AND the LoRA path, and
-/// `proj.a` / `proj.b` receive grads.
+/// LoRA delta adjoint for an output-column slice of a larger projection.
 ///
-/// The forward computes (matching the existing CUDA dispatch bit-for-bit):
+/// Forward and the inner adjoint operate on `B[start..start+len, :]`, but the
+/// tape input is the original full B parameter. The slice gradient is embedded
+/// into a zero-filled full-shape tensor before the tape accumulates it, so
+/// multiple split projection chunks reconstruct exactly one gradient under the
+/// original parameter id.
+#[derive(Debug)]
+struct LoraDeltaAddOutputSliceBackward {
+    inner: LoraDeltaAddBackward,
+    output_start: usize,
+    full_output_features: usize,
+}
+
+impl BackwardOp for LoraDeltaAddOutputSliceBackward {
+    fn name(&self) -> &'static str {
+        "lora_delta_add_output_slice_backward"
+    }
+
+    fn input_count(&self) -> usize {
+        4
+    }
+
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let mut grads = self.inner.apply(grad_output)?;
+        let grad_b_slice = grads.get_mut(3).and_then(Option::take).ok_or_else(|| {
+            kiln_tensor::Error::from_str(
+                "LoraDeltaAddOutputSliceBackward: inner B gradient missing",
+            )
+        })?;
+        if grad_b_slice.rank() != 2 {
+            return Err(kiln_tensor::Error::Msg(format!(
+                "LoraDeltaAddOutputSliceBackward: B gradient must be rank-2, got {:?}",
+                grad_b_slice.shape()
+            )));
+        }
+        let slice_len = grad_b_slice.shape()[0];
+        let rank = grad_b_slice.shape()[1];
+        let output_end = self.output_start.checked_add(slice_len).ok_or_else(|| {
+            kiln_tensor::Error::from_str(
+                "LoraDeltaAddOutputSliceBackward: output slice end overflow",
+            )
+        })?;
+        if output_end > self.full_output_features {
+            return Err(kiln_tensor::Error::Msg(format!(
+                "LoraDeltaAddOutputSliceBackward: slice [{}, {}) exceeds full B rows {}",
+                self.output_start, output_end, self.full_output_features
+            )));
+        }
+
+        let grad_device = grad_b_slice.device();
+        let grad_dtype = grad_b_slice.dtype();
+        let mut pieces = Vec::with_capacity(3);
+        if self.output_start > 0 {
+            pieces.push(kiln_tensor::Tensor::zeros_on(
+                grad_device,
+                vec![self.output_start, rank],
+                grad_dtype,
+            )?);
+        }
+        pieces.push(grad_b_slice);
+        if output_end < self.full_output_features {
+            pieces.push(kiln_tensor::Tensor::zeros_on(
+                grad_device,
+                vec![self.full_output_features - output_end, rank],
+                grad_dtype,
+            )?);
+        }
+        let grad_b_full = if pieces.len() == 1 {
+            pieces.pop().expect("one gradient piece")
+        } else {
+            kiln_tensor::Tensor::cat(&pieces, 0)?
+        };
+        grads[3] = Some(grad_b_full);
+        Ok(grads)
+    }
+
+    fn requires_input(&self, idx: usize) -> bool {
+        self.inner.requires_input(idx)
+    }
+}
+
+/// Run the full base projection and optional fused LoRA delta through the
+/// kt-typed op surface as one chained group of `Tape` nodes:
+/// `reshape → matmul → [lora_delta_add] → reshape`.
+///
+/// The forward computes:
 /// ```text
-/// out = base + scale * (x @ A^T @ B^T)        // when `lora` is Some
-/// out = base = x @ W^T                          // when `lora` is None (lm_head)
+/// out = base + scale * (x @ A^T @ B^T) // when `lora` is Some
+/// out = base = x @ W^T                 // when `lora` is None
 /// ```
 ///
-/// # Why a SINGLE fused adapter (base + LoRA together)
+/// Keeping the base and LoRA paths in one group preserves the shared `x2d` and
+/// `base2d` tensor ids. Consequently, `dL/dx2d` accumulates the frozen-base and
+/// LoRA contributions, while only the trainable LoRA A/B parameters are
+/// registered for exact bridge deposit. The base weight is saved by
+/// `FrozenRhsMatmulBackward`; it is not a tape input and receives no gradient.
 ///
-/// CP-4 (#1082) Increment 2 — the keystone. The tape root
-/// (`try_tape_cross_entropy_from_logits_cuda`, Increment 1) connects to the
-/// lm_head output, but the lm_head matmul and every q/k/v/o/gate/up/down/GDN
-/// projection were unwired, so nothing below the loss got grads
-/// (`tape_has_grad=0/50`). In the authoritative path every intermediate is a
-/// DETACHED kt-copy (`track_op()==false`), so neither
-/// `lm_head_forward_backend_decode_if` nor
-/// `linear_with_lora_t_backend_decode_if` reliably hits `linear_prefill_apply`
-/// (both gate the autograd-safe branch on `x.track_op()`). This adapter is
-/// therefore wired at the TOP of those two functions, before the backend
-/// dispatch.
+/// The group records these nodes inside one `with_active_tape` call:
 ///
-/// Folding base + LoRA into one chained group (instead of routing the base
-/// matmul and the LoRA delta-add through two separate adapters across a
-/// reshape boundary) keeps `x2d` and `base2d` as SHARED kt ids: `base2d` is
-/// the matmul node's output (so `dL/dbase2d` flows into the matmul backward),
-/// and `x2d` is shared between the matmul node and the LoRA node (so `dL/dx2d`
-/// accumulates BOTH the base-weight and LoRA contributions — the correct full
-/// `dL/dx`). Splitting them would mint a fresh kt borrow at the reshape and
-/// fragment the chain.
+/// 1. `ReshapeBackward`: `x → x2d [rows, k]`.
+/// 2. `FrozenRhsMatmulBackward`: `x2d → base2d [rows, n]`.
+/// 3. Optional `LoraDeltaAddBackward`: `base2d → out2d` with shared `x2d`
+///    and the original LoRA A/B ids.
+/// 4. `ReshapeBackward`: `out2d → out` with the input prefix plus `[n]`.
 ///
-/// # Node-recording sequence (inside ONE `with_active_tape`)
-///
-/// 1. `ReshapeBackward { input_shape: x_kt.shape() }` — output `x2d [rows, k]`,
-///    input `x_kt`.
-/// 2. `MatmulBackward { a: x2d, b: w_kt }` — output `base2d [rows, n]`, inputs
-///    `[x2d, w_kt]`.
-/// 3. (lora only) `LoraDeltaAddBackward { x: x2d, a, b, scale }` — output
-///    `out2d`, inputs `[base2d, x2d, a_kt, b_kt]` (same order as
-///    `try_tape_lora_add_cuda`).
-/// 4. `ReshapeBackward { input_shape: [rows, n] }` — output `out_kt`, input
-///    `out2d` (or `base2d` when `lora` is None).
-///
-/// # Returns
-///
-/// * `Ok(Some(out))` — the tape-forward path ran: a candle copy of the kt
-///   output, reshaped to `x.dims[..-1] ++ [n]`, with the chained group recorded
-///   on the active tape and IO-mapped into the bridge (`x` → `x_kt`, and the
-///   LoRA Vars `proj.a`/`proj.b` → `a_kt`/`b_kt` when present).
-/// * `Ok(None)` — gate off (no tape, `KILN_USE_TAPE_FORWARD` off,
-///   `KILN_USE_TAPE_LORA_ADD` off), or device / dtype / shape / contiguity
-///   preconditions fail. The caller falls through to the existing dispatch.
-/// * `Err(...)` — an unexpected kt forward or kt → candle copy-back failure.
+/// Returns `Ok(None)` when there is no active tape or the device, dtype, shape,
+/// or contiguity contract is unsupported. Unexpected kt execution or recording
+/// failures are returned as errors.
 #[allow(clippy::too_many_lines)]
-/// kt-native linear+LoRA tape recorder (#1082 seam flip) — kt-only twin of
-/// `try_tape_lora_linear_cuda`. x + base weight are already kt at the call site
-/// (the loader produces kt base weights), so no candle bridging: the whole
-/// composite (x->2d reshape, base = x2d@W, LoRA delta = (x2d@Aᵀ)@Bᵀ·scale + base,
-/// reshape back) runs in kt ops with the SAME tape nodes (ReshapeBackward,
-/// MatmulBackward, LoraDeltaAddBackward) the candle adapter records. The LoRA-Var
-/// grad mapping (`register_input_mapping_kt`) is preserved so the optimiser sees
-/// dA/dB; no candle-id mapping is needed for x/out (they chain in kt directly).
 pub fn try_tape_lora_linear_kt(
     x: &kiln_tensor::Tensor,
     weight_t: &kiln_tensor::Tensor,
     lora: Option<&LoraProjectionWeights>,
     lora_scale: f32,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() || !tape_lora_add_enabled() {
+    try_tape_lora_linear_impl_kt(x, weight_t, lora, lora_scale, None)
+}
+
+/// Tape-routed linear+LoRA for one output slice of a larger projection.
+///
+/// `weight_t` is already the `[in, slice_out]` frozen base slice. When LoRA is
+/// present, the forward narrows the original full B parameter internally while
+/// the tape records that original id and zero-embeds this slice's `dB` back into
+/// the full parameter shape. This is the authoritative route for split q/gate
+/// training projections.
+pub fn try_tape_lora_linear_output_slice_kt(
+    x: &kiln_tensor::Tensor,
+    weight_t: &kiln_tensor::Tensor,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+    output_start: usize,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    try_tape_lora_linear_impl_kt(x, weight_t, lora, lora_scale, Some(output_start))
+}
+
+#[allow(clippy::too_many_lines)]
+fn try_tape_lora_linear_impl_kt(
+    x: &kiln_tensor::Tensor,
+    weight_t: &kiln_tensor::Tensor,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+    output_start: Option<usize>,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(x.device())
@@ -1632,16 +1588,33 @@ pub fn try_tape_lora_linear_kt(
         let Ok((b_out, b_rank)) = proj.b.dims2() else {
             return Ok(None);
         };
-        if a_in != k || b_out != n || b_rank != rank {
+        let b_envelope_ok = match output_start {
+            Some(start) => start
+                .checked_add(n)
+                .is_some_and(|output_end| output_end <= b_out),
+            None => b_out == n,
+        };
+        if a_in != k || !b_envelope_ok || b_rank != rank {
             return Ok(None);
         }
         if !proj.a.is_contiguous() || !proj.b.is_contiguous() {
             return Ok(None);
         }
     }
-    let (a_kt, b_kt) = match lora {
-        Some(proj) => (Some(proj.a.clone()), Some(proj.b.clone())),
-        None => (None, None),
+    let (a_kt, b_input_kt, b_forward_kt) = match lora {
+        Some(proj) => {
+            let b_forward = match output_start {
+                Some(start) => proj
+                    .b
+                    .narrow(0, start, n)
+                    .context("split LoRA B narrow")?
+                    .contiguous()
+                    .context("split LoRA B contiguous")?,
+                None => proj.b.clone(),
+            };
+            (Some(proj.a.clone()), Some(proj.b.clone()), Some(b_forward))
+        }
+        None => (None, None, None),
     };
     let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
         let debug_finite = debug_tape_linear_finite_checks();
@@ -1667,7 +1640,8 @@ pub fn try_tape_lora_linear_kt(
         // Vulkan `vk_matmul_bf16w` leaf and record a `MatmulBf16wBackward` (dx
         // only; the weight is frozen, no `dW` edge). Output `base2d` is F32, so
         // the LoRA delta / residual adds below stay F32-vs-F32. Every equal-dtype
-        // path keeps the device-agnostic `MatmulBackward` exactly as before.
+        // path uses the device-agnostic input-only adjoint. Base weights are
+        // immutable during adapter training and must never become tape leaves.
         //
         // LAYOUT: the production base `weight_t` reaching this recorder is
         // `[K, N]` = `[in, out]` (the pre-transposed layout `matmul(x2d, weight_t)`
@@ -1705,21 +1679,24 @@ pub fn try_tape_lora_linear_kt(
             ensure_tape_linear_finite(debug_finite, "base2d x2d@w", &base2d)?;
             tape.record(
                 &base2d,
-                &[&x2d, weight_t],
-                Box::new(MatmulBackward {
-                    a: maybe_offload_matmul_a_saved_tensor(&x2d)
-                        .context("try_tape_lora_linear_kt: save base matmul lhs")?,
+                &[&x2d],
+                Box::new(FrozenRhsMatmulBackward {
                     b: weight_t.clone(),
                 }),
             );
             base2d
         };
-        let out2d = match (lora, a_kt.as_ref(), b_kt.as_ref()) {
-            (Some(_proj), Some(a_kt), Some(b_kt)) => {
+        let out2d = match (
+            lora,
+            a_kt.as_ref(),
+            b_input_kt.as_ref(),
+            b_forward_kt.as_ref(),
+        ) {
+            (Some(_proj), Some(a_kt), Some(b_input_kt), Some(b_forward_kt)) => {
                 let h_kt = kiln_tensor::ops::matmul_rhs_transposed(&x2d, a_kt)
                     .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed x@a_t: {e}"))?;
                 ensure_tape_linear_finite(debug_finite, "lora h x@a_t", &h_kt)?;
-                let d_kt = kiln_tensor::ops::matmul_rhs_transposed(&h_kt, b_kt)
+                let d_kt = kiln_tensor::ops::matmul_rhs_transposed(&h_kt, b_forward_kt)
                     .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed h@b_t: {e}"))?;
                 ensure_tape_linear_finite(debug_finite, "lora d h@b_t", &d_kt)?;
                 let delta_kt = kiln_tensor::ops::mul_scalar(&d_kt, lora_scale)
@@ -1728,17 +1705,22 @@ pub fn try_tape_lora_linear_kt(
                 let out2d = kiln_tensor::ops::add(&base2d, &delta_kt)
                     .map_err(|e| anyhow::anyhow!("kt add(base, delta): {e}"))?;
                 ensure_tape_linear_finite(debug_finite, "lora out2d base+delta", &out2d)?;
-                tape.record(
-                    &out2d,
-                    &[&base2d, &x2d, a_kt, b_kt],
-                    Box::new(LoraDeltaAddBackward {
-                        x: maybe_offload_matmul_a_saved_tensor(&x2d)
-                            .context("try_tape_lora_linear_kt: save lora input")?,
-                        a: a_kt.clone(),
-                        b: b_kt.clone(),
-                        scale: lora_scale,
+                let backward = LoraDeltaAddBackward {
+                    x: maybe_offload_matmul_a_saved_tensor(&x2d)
+                        .context("try_tape_lora_linear_kt: save lora input")?,
+                    a: a_kt.clone(),
+                    b: b_forward_kt.clone(),
+                    scale: lora_scale,
+                };
+                let backward: Box<dyn BackwardOp> = match output_start {
+                    Some(output_start) => Box::new(LoraDeltaAddOutputSliceBackward {
+                        inner: backward,
+                        output_start,
+                        full_output_features: b_input_kt.shape()[0],
                     }),
-                );
+                    None => Box::new(backward),
+                };
+                tape.record(&out2d, &[&base2d, &x2d, a_kt, b_input_kt], backward);
                 out2d
             }
             _ => base2d,
@@ -1770,32 +1752,11 @@ pub fn try_tape_lora_linear_kt(
     };
     let out_kt = out_kt.context("tape_forward::try_tape_lora_linear_kt: kt-tape forward failed")?;
     // LoRA-Var grad mapping (kt-keyed) — ESSENTIAL or dA/dB never reach the optimiser.
-    if let (Some(proj), Some(a_kt), Some(b_kt)) = (lora, a_kt.as_ref(), b_kt.as_ref()) {
+    if let (Some(proj), Some(a_kt), Some(b_input_kt)) = (lora, a_kt.as_ref(), b_input_kt.as_ref()) {
         kiln_kt_bridge::tape_bridge::register_input_mapping_kt(a_kt.id(), proj.a.id());
-        kiln_kt_bridge::tape_bridge::register_input_mapping_kt(b_kt.id(), proj.b.id());
+        kiln_kt_bridge::tape_bridge::register_input_mapping_kt(b_input_kt.id(), proj.b.id());
     }
     Ok(Some(out_kt))
-}
-
-/// True unless `KILN_USE_TAPE_FLASH_ATTN` is set to a disable value —
-/// **DEFAULTS ON** (CP-4 production path).
-///
-/// Separate gate from `KILN_USE_TAPE_FORWARD` so the flash-attention tape
-/// adapter can be opted out independently of the rest of the tape-forward
-/// fleet: the attention-block gradient now flows through a kt `Tape` node by
-/// default. Set the env to `0`/`false`/`no`/empty to opt out and route through
-/// candle's `CudaFlashAttentionTrainingBf16` CustomOp3 (for debugging /
-/// comparison). Cached after first read, matching [`tape_lora_add_enabled`].
-pub fn tape_flash_attn_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_TAPE_FLASH_ATTN")
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no")
-            })
-            .unwrap_or(true)
-    })
 }
 
 /// Fused tape backward for the vendored FlashAttention-2 forward
@@ -1979,7 +1940,7 @@ pub fn try_tape_flash_attn_kt(
     num_kv_heads: usize,
     head_dim: usize,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() || !tape_flash_attn_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     // Fused FlashAttention-2 is a CUDA kernel; ROCm (gfx, Phase R.8) records the
@@ -1995,27 +1956,19 @@ pub fn try_tape_flash_attn_kt(
     }
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
+        let fused_device_supported = match q.device() {
+            #[cfg(feature = "cuda")]
+            kiln_tensor::Device::Cuda(_) => true,
+            #[cfg(feature = "rocm")]
+            kiln_tensor::Device::Rocm(_) => true,
+            _ => false,
+        };
         if q.dtype() != kiln_tensor::DType::BF16
             || k.dtype() != kiln_tensor::DType::BF16
             || v.dtype() != kiln_tensor::DType::BF16
-            || !matches!(
-                q.device(),
-                kiln_tensor::Device::Cuda(_)
-                    | kiln_tensor::Device::Metal(_)
-                    | kiln_tensor::Device::Rocm(_)
-            )
-            || !matches!(
-                k.device(),
-                kiln_tensor::Device::Cuda(_)
-                    | kiln_tensor::Device::Metal(_)
-                    | kiln_tensor::Device::Rocm(_)
-            )
-            || !matches!(
-                v.device(),
-                kiln_tensor::Device::Cuda(_)
-                    | kiln_tensor::Device::Metal(_)
-                    | kiln_tensor::Device::Rocm(_)
-            )
+            || !fused_device_supported
+            || k.device() != q.device()
+            || v.device() != q.device()
             || !q.is_contiguous()
             || !k.is_contiguous()
             || !v.is_contiguous()
@@ -2091,23 +2044,6 @@ pub fn try_tape_flash_attn_kt(
             None => Ok(None),
         }
     }
-}
-
-/// True unless `KILN_USE_TAPE_GDN` is set to a disable value — **DEFAULTS ON**
-/// (CP-4 production path). Gate for the GDN (linear-attention) recurrence tape
-/// adapter, separate from the rest of the fleet. Set the env to
-/// `0`/`false`/`no`/empty to opt out (for debugging / comparison). Cached after
-/// first read.
-pub fn tape_gdn_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_TAPE_GDN")
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no")
-            })
-            .unwrap_or(true)
-    })
 }
 
 /// Offload saved GDN recurrence tensors from the tape node to CPU memory.
@@ -2197,6 +2133,237 @@ fn maybe_offload_matmul_a_saved_tensor(
     } else {
         Ok(t.clone())
     }
+}
+
+/// Analytic adjoint for `beta = sigmoid(b)` in the GDN gate transform.
+///
+/// Only `b` is a differentiable tape input. The gate parameters are frozen
+/// model weights, so recording them would widen the training gradient
+/// contract beyond the configured LoRA leaves.
+#[derive(Debug)]
+pub(crate) struct GdnBetaGateBackward {
+    b: kiln_tensor::Tensor,
+    source_dtype: kiln_tensor::DType,
+}
+
+impl BackwardOp for GdnBetaGateBackward {
+    fn name(&self) -> &'static str {
+        "gdn_beta_gate_backward"
+    }
+
+    fn input_count(&self) -> usize {
+        1
+    }
+
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        if grad_output.dims() != self.b.dims() {
+            return Err(kiln_tensor::Error::Msg(format!(
+                "GdnBetaGateBackward: shape mismatch b={:?} grad={:?}",
+                self.b.dims(),
+                grad_output.dims()
+            )));
+        }
+
+        let device = grad_output.device();
+        let b = saved_tensor_for_device(&self.b, device)?
+            .contiguous()?
+            .to_dtype(kiln_tensor::DType::F32)?;
+        let dy = grad_output
+            .contiguous()?
+            .to_dtype(kiln_tensor::DType::F32)?;
+        let sigmoid = kiln_tensor::ops::sigmoid(&b)?;
+        let one_minus_sigmoid =
+            kiln_tensor::ops::add_scalar(&kiln_tensor::ops::mul_scalar(&sigmoid, -1.0)?, 1.0)?;
+        let derivative = kiln_tensor::ops::mul(&sigmoid, &one_minus_sigmoid)?;
+        let db = kiln_tensor::ops::mul(&dy, &derivative)?
+            .to_dtype(self.source_dtype)?
+            .contiguous()?;
+        Ok(vec![Some(db)])
+    }
+}
+
+/// Analytic adjoint for
+/// `g = -exp(a_log) * softplus(a + dt_bias)` in the GDN gate transform.
+///
+/// `a_log` and `dt_bias` are saved constants. Only `a` is registered as a
+/// differentiable input, matching the LoRA-only training contract.
+#[derive(Debug)]
+pub(crate) struct GdnDecayGateBackward {
+    a: kiln_tensor::Tensor,
+    a_log: kiln_tensor::Tensor,
+    dt_bias: kiln_tensor::Tensor,
+    source_dtype: kiln_tensor::DType,
+}
+
+impl BackwardOp for GdnDecayGateBackward {
+    fn name(&self) -> &'static str {
+        "gdn_decay_gate_backward"
+    }
+
+    fn input_count(&self) -> usize {
+        1
+    }
+
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        if grad_output.dims() != self.a.dims() {
+            return Err(kiln_tensor::Error::Msg(format!(
+                "GdnDecayGateBackward: shape mismatch a={:?} grad={:?}",
+                self.a.dims(),
+                grad_output.dims()
+            )));
+        }
+
+        let device = grad_output.device();
+        let a = saved_tensor_for_device(&self.a, device)?
+            .contiguous()?
+            .to_dtype(kiln_tensor::DType::F32)?;
+        let a_log = saved_tensor_for_device(&self.a_log, device)?
+            .contiguous()?
+            .to_dtype(kiln_tensor::DType::F32)?;
+        let dt_bias = saved_tensor_for_device(&self.dt_bias, device)?
+            .contiguous()?
+            .to_dtype(kiln_tensor::DType::F32)?;
+        let dy = grad_output
+            .contiguous()?
+            .to_dtype(kiln_tensor::DType::F32)?;
+
+        // d softplus(x) / dx = sigmoid(x).
+        let biased_a = a.broadcast_add(&dt_bias)?;
+        let softplus_derivative = kiln_tensor::ops::sigmoid(&biased_a)?;
+        let neg_decay = kiln_tensor::ops::mul_scalar(&kiln_tensor::ops::exp(&a_log)?, -1.0)?;
+        let derivative = softplus_derivative.broadcast_mul(&neg_decay)?;
+        let da = kiln_tensor::ops::mul(&dy, &derivative)?
+            .to_dtype(self.source_dtype)?
+            .contiguous()?;
+        Ok(vec![Some(da)])
+    }
+}
+
+/// Record the two GDN gate outputs that the production fallback already
+/// computed.
+///
+/// Outside an authoritative tape scope this returns `Ok(None)` and inference
+/// keeps its existing fused/fallback routing. Inside a scope the complete
+/// shape, dtype, device, and backend-admission contract is mandatory: a bad
+/// route errors rather than returning an unrecorded forward tensor.
+pub fn try_tape_gdn_gates_kt(
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
+    a_log: &kiln_tensor::Tensor,
+    dt_bias: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    g: &kiln_tensor::Tensor,
+) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    if !tape_scope_active() {
+        return Ok(None);
+    }
+
+    let device = a.device();
+    anyhow::ensure!(
+        tape_forward_device_supported(device),
+        "active tape scope does not admit GDN gates on device {device}"
+    );
+    for (name, tensor) in [
+        ("b", b),
+        ("a_log", a_log),
+        ("dt_bias", dt_bias),
+        ("beta", beta),
+        ("g", g),
+    ] {
+        anyhow::ensure!(
+            tensor.device() == device,
+            "GDN gate {name} device mismatch: expected {device}, got {}",
+            tensor.device()
+        );
+        anyhow::ensure!(
+            matches!(
+                tensor.dtype(),
+                kiln_tensor::DType::F32 | kiln_tensor::DType::BF16 | kiln_tensor::DType::F16
+            ),
+            "GDN gate {name} must be F32, BF16, or F16, got {}",
+            tensor.dtype()
+        );
+    }
+    anyhow::ensure!(
+        matches!(
+            a.dtype(),
+            kiln_tensor::DType::F32 | kiln_tensor::DType::BF16 | kiln_tensor::DType::F16
+        ),
+        "GDN gate a must be F32, BF16, or F16, got {}",
+        a.dtype()
+    );
+    anyhow::ensure!(
+        a.rank() > 0 && a.dims() == b.dims(),
+        "GDN gate input shape mismatch: a={:?} b={:?}",
+        a.dims(),
+        b.dims()
+    );
+    anyhow::ensure!(
+        a.dims() == g.dims() && b.dims() == beta.dims(),
+        "GDN gate output shape mismatch: a={:?} b={:?} beta={:?} g={:?}",
+        a.dims(),
+        b.dims(),
+        beta.dims(),
+        g.dims()
+    );
+    anyhow::ensure!(
+        a.dtype() == b.dtype() && g.dtype() == a.dtype() && beta.dtype() == b.dtype(),
+        "GDN gate activation dtype mismatch: a={} b={} beta={} g={}",
+        a.dtype(),
+        b.dtype(),
+        beta.dtype(),
+        g.dtype()
+    );
+    let channels = *a.dims().last().expect("rank checked above");
+    anyhow::ensure!(
+        a_log.dims() == [channels] && dt_bias.dims() == [channels],
+        "GDN gate parameter shape mismatch: channels={channels} a_log={:?} dt_bias={:?}",
+        a_log.dims(),
+        dt_bias.dims()
+    );
+
+    // Prepare every fallible saved-tensor operation before mutating the tape,
+    // so the two-output registration is atomic from the caller's perspective.
+    let offload_saved = tape_gdn_saved_tensor_offload_enabled(&device);
+    let saved_a = maybe_offload_gdn_saved_tensor(a, offload_saved)
+        .context("try_tape_gdn_gates_kt: save a")?;
+    let saved_b = maybe_offload_gdn_saved_tensor(b, offload_saved)
+        .context("try_tape_gdn_gates_kt: save b")?;
+    let saved_a_log = maybe_offload_gdn_saved_tensor(a_log, offload_saved)
+        .context("try_tape_gdn_gates_kt: save a_log")?;
+    let saved_dt_bias = maybe_offload_gdn_saved_tensor(dt_bias, offload_saved)
+        .context("try_tape_gdn_gates_kt: save dt_bias")?;
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            beta,
+            &[b],
+            Box::new(GdnBetaGateBackward {
+                b: saved_b,
+                source_dtype: b.dtype(),
+            }),
+        );
+        tape.record(
+            g,
+            &[a],
+            Box::new(GdnDecayGateBackward {
+                a: saved_a,
+                a_log: saved_a_log,
+                dt_bias: saved_dt_bias,
+                source_dtype: a.dtype(),
+            }),
+        );
+    });
+    anyhow::ensure!(
+        recorded.is_some(),
+        "active tape scope disappeared while recording GDN gates"
+    );
+    Ok(Some((beta.clone(), g.clone())))
 }
 
 /// Tape backward for the GDN (Gated DeltaNet linear-attention) recurrence.
@@ -2391,7 +2558,7 @@ pub fn try_tape_gdn_recurrent_kt(
     g: &kiln_tensor::Tensor,
     recurrent_state: &mut kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() || !tape_gdn_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     // #1082 P4-full: q/k/v/beta/g/recurrent_state are kt (this calls the kt
@@ -2464,7 +2631,7 @@ pub fn tape_record_gdn_recurrent_kt(
     entry_state: &kiln_tensor::Tensor,
     device: &kiln_tensor::Device,
 ) -> Result<bool> {
-    if !tape_forward_enabled() || !tape_gdn_enabled() {
+    if !tape_scope_active() {
         return Ok(false);
     }
     if !tape_forward_device_supported(*device) {
@@ -2528,58 +2695,9 @@ pub fn tape_record_gdn_recurrent_kt(
 // Plus `try_tape_transpose_cuda` (the head-FIRST→head-LAST chaining-gap fix at
 // `forward.rs:gated_deltanet_forward_decode_if`'s `attn_out.transpose(1,2)`).
 //
-// Each has a narrow `KILN_USE_TAPE_GDN_*` gate (mirroring `tape_gdn_enabled`),
-// is a no-op by default, and falls through cleanly so the production forward is
-// untouched with the gate off.
+// Each adapter is active exactly when a tape scope is open, and falls through
+// cleanly outside training so production inference remains unchanged.
 // ===========================================================================
-
-/// True unless `KILN_USE_TAPE_GDN_CONV` is set to a disable value —
-/// **DEFAULTS ON** (CP-4 production path). Gate for the GDN
-/// causal-depthwise-conv1d tape adapter. Set the env to `0`/`false`/`no`/empty
-/// to opt out (for debugging / comparison). Cached after first read.
-pub fn tape_gdn_conv_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_TAPE_GDN_CONV")
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no")
-            })
-            .unwrap_or(true)
-    })
-}
-
-/// True unless `KILN_USE_TAPE_GDN_QK_NORM` is set to a disable value —
-/// **DEFAULTS ON** (CP-4 production path). Gate for the GDN L2-qk-norm tape
-/// adapter. Set the env to `0`/`false`/`no`/empty to opt out (for debugging /
-/// comparison). Cached after first read.
-pub fn tape_gdn_qk_norm_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_TAPE_GDN_QK_NORM")
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no")
-            })
-            .unwrap_or(true)
-    })
-}
-
-/// True unless `KILN_USE_TAPE_GDN_GATED_NORM` is set to a disable value —
-/// **DEFAULTS ON** (CP-4 production path). Gate for the GDN gated-RMSNorm tape
-/// adapter. Set the env to `0`/`false`/`no`/empty to opt out (for debugging /
-/// comparison). Cached after first read.
-pub fn tape_gdn_gated_norm_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_TAPE_GDN_GATED_NORM")
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no")
-            })
-            .unwrap_or(true)
-    })
-}
 
 /// Tape backward (w.r.t. input) for the GDN PREFILL causal depthwise conv1d
 /// (`forward::causal_conv1d_prefill`, the `[B, C, T]` path the training forward
@@ -2948,11 +3066,9 @@ impl BackwardOp for CausalConv1dPrefillSiluInputBackward {
 /// LoRA `Var`). This is the single largest GDN gap — without it the q/k/v reach
 /// `mixed_qkv` but the chain severs before in_proj_qkv.
 ///
-/// Reuses the existing `KILN_USE_TAPE_GDN_CONV` gate (mirroring
-/// `try_tape_causal_conv1d_cuda`). `Ok(None)` (caller's production output
-/// unchanged) when the gate is off, no tape scope is active, the inputs are on
-/// an unsupported device, `batch != 1`, shapes disagree, or a kt borrow fails
-/// — NEVER an error.
+/// `Ok(None)` leaves the caller's production output unchanged when no tape
+/// scope is active, the inputs are on an unsupported device, `batch != 1`,
+/// shapes disagree, or a kt borrow fails.
 /// kt-native GDN prefill causal-depthwise-conv1d tape recorder (#1082 seam flip).
 /// Record-only: builds the F32 `[channels, kernel]` weight view in kt + records
 /// the device-agnostic `CausalConv1dPrefillInputBackward` linking kt `out` back to
@@ -2968,7 +3084,7 @@ pub fn try_tape_causal_conv1d_prefill_kt(
     out: &kiln_tensor::Tensor,
     kernel: usize,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() || !tape_gdn_conv_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     // The bwd is available with any GPU-training backend: CUDA FFI kernel, or the
@@ -3066,7 +3182,7 @@ pub fn try_tape_causal_conv1d_prefill_silu_kt(
     out: &kiln_tensor::Tensor,
     kernel: usize,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() || !tape_gdn_conv_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     #[cfg(not(any(
@@ -3294,7 +3410,7 @@ pub fn try_tape_gdn_l2_norm_scale_kt(
     scale: f64,
     out: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() || !tape_gdn_qk_norm_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(x.device()) {
@@ -3326,15 +3442,16 @@ pub fn try_tape_gdn_l2_norm_scale_kt(
 
 /// Candle-composite tape backward for the GDN gated RMSNorm `out =
 /// rms_norm(x, weight) * silu(z)`. Wraps
-/// [`gdn_gated_rms_norm_backward_no_grad`] (analytic adjoint in candle F32),
-/// mirroring how [`GdnRecurrentBackward`] wraps `gdn_recurrent_backward_no_grad`.
+/// [`gdn_gated_rms_norm_frozen_weight_backward_no_grad`] (analytic adjoint in
+/// candle F32), mirroring how [`GdnRecurrentBackward`] wraps
+/// `gdn_recurrent_backward_no_grad`.
 ///
-/// Three differentiable inputs `[x, z, weight]` in that order. `x` is the
-/// recurrence output (head-LAST `[B, T, nv, dv]`), `z` is the output gate,
-/// `weight` is the GDN `norm` `Var`.
+/// Two differentiable inputs `[x, z]` in that order. `x` is the recurrence
+/// output (head-LAST `[B, T, nv, dv]`) and `z` is the output gate. The GDN norm
+/// weight is frozen adapter-training state and is saved only for `dx`/`dz`.
 #[derive(Debug)]
 pub(crate) struct GdnGatedRmsNormBackward {
-    // #1082: candle->kt (the bwd kernel gdn_gated_rms_norm_backward_no_grad is kt-native).
+    // #1082: candle->kt (the frozen-weight analytic backward is kt-native).
     x: kiln_tensor::Tensor,
     z: kiln_tensor::Tensor,
     weight: kiln_tensor::Tensor,
@@ -3348,13 +3465,7 @@ fn try_gdn_gated_rms_norm_backward_fused_cuda_rocm(
     weight: &kiln_tensor::Tensor,
     eps: f64,
     grad_output: &kiln_tensor::Tensor,
-) -> kiln_tensor::Result<
-    Option<(
-        kiln_tensor::Tensor,
-        kiln_tensor::Tensor,
-        kiln_tensor::Tensor,
-    )>,
-> {
+) -> kiln_tensor::Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
     if !matches!(
         x.device(),
         kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Rocm(_)
@@ -3399,16 +3510,24 @@ fn try_gdn_gated_rms_norm_backward_fused_cuda_rocm(
     }
 
     let grads = match weight.dtype() {
-        kiln_tensor::DType::BF16 => kiln_gdn_kernel::gdn_gated_rms_norm_bwd_bf16_kt(
-            &grad_flat, &x_flat, &z_flat, weight, eps as f32,
-        )
-        .map_err(|e| kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused bwd: {e}")))?,
-        kiln_tensor::DType::F32 => kiln_gdn_kernel::gdn_gated_rms_norm_bwd_bf16_f32_weight_kt(
+        kiln_tensor::DType::BF16 => kiln_gdn_kernel::gdn_gated_rms_norm_bwd_bf16_frozen_weight_kt(
             &grad_flat, &x_flat, &z_flat, weight, eps as f32,
         )
         .map_err(|e| {
-            kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused bwd f32-weight: {e}"))
+            kiln_tensor::Error::Msg(format!(
+                "GdnGatedRmsNormBackward fused frozen-weight bwd: {e}"
+            ))
         })?,
+        kiln_tensor::DType::F32 => {
+            kiln_gdn_kernel::gdn_gated_rms_norm_bwd_bf16_f32_weight_frozen_kt(
+                &grad_flat, &x_flat, &z_flat, weight, eps as f32,
+            )
+            .map_err(|e| {
+                kiln_tensor::Error::Msg(format!(
+                    "GdnGatedRmsNormBackward fused frozen f32-weight bwd: {e}"
+                ))
+            })?
+        }
         _ => return Ok(None),
     };
     let dx = grads.dx.reshape(x_dims.clone()).map_err(|e| {
@@ -3417,15 +3536,7 @@ fn try_gdn_gated_rms_norm_backward_fused_cuda_rocm(
     let dz = grads.dz.reshape(x_dims).map_err(|e| {
         kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused dz reshape: {e}"))
     })?;
-    let dw = if grads.dw.dtype() == weight.dtype() {
-        grads.dw
-    } else {
-        grads.dw.to_dtype(weight.dtype()).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused dw dtype: {e}"))
-        })?
-    };
-
-    Ok(Some((dx, dz, dw)))
+    Ok(Some((dx, dz)))
 }
 
 impl BackwardOp for GdnGatedRmsNormBackward {
@@ -3433,8 +3544,8 @@ impl BackwardOp for GdnGatedRmsNormBackward {
         "gdn_gated_rms_norm_backward"
     }
     fn input_count(&self) -> usize {
-        // x, z, weight.
-        3
+        // x and z; weight is frozen saved data.
+        2
     }
     fn apply(
         &self,
@@ -3445,27 +3556,29 @@ impl BackwardOp for GdnGatedRmsNormBackward {
         let z = saved_tensor_for_device(&self.z, compute_device)?;
         let weight = saved_tensor_for_device(&self.weight, compute_device)?;
         #[cfg(any(feature = "cuda", feature = "rocm"))]
-        if let Some((dx, dz, dw)) =
+        if let Some((dx, dz)) =
             try_gdn_gated_rms_norm_backward_fused_cuda_rocm(&x, &z, &weight, self.eps, grad_output)?
         {
-            return Ok(vec![Some(dx), Some(dz), Some(dw)]);
+            return Ok(vec![Some(dx), Some(dz)]);
         }
 
         // #1082 kt-native: x/z/weight are stored kt now (no candle bridge); the bwd
         // kernel is already kt-typed.
-        let grads = gdn_gated_rms_norm_backward_no_grad(&x, &z, &weight, self.eps, grad_output)
-            .map_err(|e| kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: bwd: {e}")))?;
+        let grads = gdn_gated_rms_norm_frozen_weight_backward_no_grad(
+            &x,
+            &z,
+            &weight,
+            self.eps,
+            grad_output,
+        )
+        .map_err(|e| kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: bwd: {e}")))?;
         // Adjoints (kt) can be non-contiguous; contiguify.
         let to_kt = |t: &kiln_tensor::Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
             t.contiguous().map_err(|e| {
                 kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: grad contiguous: {e}"))
             })
         };
-        Ok(vec![
-            Some(to_kt(&grads.dx)?),
-            Some(to_kt(&grads.dz)?),
-            Some(to_kt(&grads.dw)?),
-        ])
+        Ok(vec![Some(to_kt(&grads.dx)?), Some(to_kt(&grads.dz)?)])
     }
 }
 
@@ -3475,15 +3588,15 @@ impl BackwardOp for GdnGatedRmsNormBackward {
 /// The production forward (`gated_rms_norm`) already computed `out`; this
 /// records-only (no re-run), borrowing `out` as the node output — like
 /// `tape_record_gdn_recurrent`. The recorded [`GdnGatedRmsNormBackward`] emits
-/// `dx`/`dz`/`dw` so a tape-authoritative backward reaches the recurrence
-/// output (`x`), the gate (`z`), and the `norm` `Var` (`weight`).
+/// `dx`/`dz` so a tape-authoritative backward reaches the recurrence output
+/// (`x`) and gate (`z`). The norm weight is immutable during adapter training.
 ///
 /// `Ok(None)` (caller falls through) when the gate is off, no tape scope is
 /// active, the inputs aren't CUDA, shapes disagree, or a kt borrow fails.
 /// kt-native gated-RMSNorm tape recorder (#1082 seam flip) — kt-only twin of
 /// `try_tape_gdn_gated_rms_norm_cuda`. Record-only: records the (now kt-native)
 /// `GdnGatedRmsNormBackward` (stores kt x/z/weight; bwd kernel already kt) linking
-/// kt `out` back to kt x/z/weight. No candle round-trip.
+/// kt `out` back to kt x/z. No candle round-trip.
 pub fn try_tape_gdn_gated_rms_norm_kt(
     x: &kiln_tensor::Tensor,
     z: &kiln_tensor::Tensor,
@@ -3491,7 +3604,7 @@ pub fn try_tape_gdn_gated_rms_norm_kt(
     eps: f64,
     out: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() || !tape_gdn_gated_norm_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(x.device()) {
@@ -3507,7 +3620,7 @@ pub fn try_tape_gdn_gated_rms_norm_kt(
         let offload_saved = tape_gdn_saved_tensor_offload_enabled(&x.device());
         tape.record(
             out,
-            &[x, z, weight],
+            &[x, z],
             Box::new(GdnGatedRmsNormBackward {
                 x: maybe_offload_gdn_saved_tensor(x, offload_saved)
                     .context("try_tape_gdn_gated_rms_norm_kt: save x")?,
@@ -3550,10 +3663,10 @@ pub fn try_tape_gdn_gated_rms_norm_kt(
 //   * Mirrors the proven `GdnRecurrentBackward` / `GdnL2NormScaleBackward` /
 //     `SdpaBackward` candle-composite pattern already in this module.
 //
-// Gated on `tape_forward_enabled()` + an active tape scope only (pure
+// Gated on an active tape scope only (pure
 // layout/dtype ops with trivial, always-safe adjoints — same contract as
 // `try_tape_reshape_cuda` / `try_tape_transpose_cuda`). `Ok(None)` on any
-// gate-off / non-CUDA / envelope-miss / kt-borrow failure — NEVER an error.
+// inactive-scope / non-CUDA / envelope-miss / kt-borrow failure.
 // ===========================================================================
 
 /// Candle-composite tape backward for a float dtype cast (`to_dtype`). The
@@ -3611,7 +3724,7 @@ pub fn try_tape_cast_kt(
     x: &kiln_tensor::Tensor,
     out: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(x.device()) || !tape_forward_device_supported(out.device()) {
@@ -3716,7 +3829,7 @@ impl BackwardOp for NarrowCompositeBackward {
 /// backward stays connected across the slice.
 ///
 /// Used on the GDN path for the QKV split (`mixed_qkv.narrow(2, ·, ·)` → q/k/v).
-/// `Ok(None)` on any gate-off / non-CUDA / shape-envelope-miss / kt-borrow
+/// `Ok(None)` on any inactive-scope / non-CUDA / shape-envelope-miss / kt-borrow
 /// failure.
 /// kt-native narrow tape recorder (#1082 seam flip) — kt-only twin of
 /// `try_tape_narrow_cuda`. Record-only: the forward narrow is already done by the
@@ -3729,7 +3842,7 @@ pub fn try_tape_narrow_kt(
     length: usize,
     out: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(x.device()) || !tape_forward_device_supported(out.device()) {
@@ -3826,7 +3939,7 @@ impl BackwardOp for GqaExpandBackward {
 /// tape-authoritative backward stays connected from the post-norm q/k back to
 /// the pre-expand (post-split) q/k — and thence the in_proj_qkv LoRA `Var`.
 ///
-/// `Ok(None)` on any gate-off / non-CUDA / shape-envelope-miss / kt-borrow
+/// `Ok(None)` on any inactive-scope / non-CUDA / shape-envelope-miss / kt-borrow
 /// failure.
 /// kt-native GQA head-expand tape recorder (#1082 seam flip) — kt-only twin of
 /// `try_tape_gqa_expand_cuda`. Record-only: the forward expand is already done
@@ -3837,7 +3950,7 @@ pub fn try_tape_gqa_expand_kt(
     gqa_ratio: usize,
     out: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(x.device()) || !tape_forward_device_supported(out.device()) {
@@ -3890,24 +4003,6 @@ pub fn try_tape_gqa_expand_kt(
 // attention output with `[q, k, v]` as inputs. SDPA is stateless, so there is
 // no entry-state to snapshot.
 // ===========================================================================
-
-/// True unless `KILN_USE_TAPE_SDPA` is set to a disable value — **DEFAULTS ON**
-/// (CP-4 production path). Gate for the naive SDPA-fallback attention tape
-/// adapter, separate from `KILN_USE_TAPE_FLASH_ATTN` (which covers the flash
-/// path) and the rest of the fleet. Set the env to `0`/`false`/`no`/empty to
-/// opt out (for debugging / comparison). Cached after first read, mirroring
-/// [`tape_gdn_enabled`].
-pub fn tape_sdpa_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_TAPE_SDPA")
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no")
-            })
-            .unwrap_or(true)
-    })
-}
 
 /// Candle-composite tape backward for the naive SDPA fallback
 /// (`forward::gqa_attention_core_prefill`'s non-flash path). Wraps
@@ -4020,7 +4115,7 @@ pub fn try_tape_sdpa_fallback_kt(
     head_dim: usize,
     out: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    if !tape_forward_enabled() || !tape_sdpa_enabled() {
+    if !tape_scope_active() {
         return Ok(None);
     }
     if !tape_forward_device_supported(q.device())
@@ -4077,34 +4172,164 @@ pub fn try_tape_sdpa_fallback_kt(
     Ok(Some(out.clone()))
 }
 
-/// True unless `KILN_USE_TAPE_LORA_ADD` is set to a disable value —
-/// **DEFAULTS ON** (CP-4 production path).
-///
-/// Separate gate from `KILN_USE_TAPE_FORWARD` so the LoRA add adapter can
-/// be opted out independently of the rest of the tape-forward fleet. The
-/// LoRA add now records on the tape (analytic kt backward) by default;
-/// set the env to `0`/`false`/`no`/empty to opt out and route through the
-/// legacy Marlin-fused CustomOp3 backward (for debugging / comparison).
-///
-/// Cached after first read, matching `tape_forward_enabled()`.
-pub fn tape_lora_add_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_TAPE_LORA_ADD")
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no")
-            })
-            .unwrap_or(true)
-    })
-}
-
 // Tape-scope tests live in `kiln-autograd::tape_scope::tests` after
 // wave-13 (#1082) promoted the thread-local-tape machinery there. The
 // kt-tape adapter tests (`try_tape_{rms_norm,matmul,silu,embedding,swiglu,
 // lora_add}_cuda` round-trips) live in the
 // `kiln-model/tests/tape_forward_parity.rs` integration test because they
 // require the `kiln_kt_bridge` + `kiln_rmsnorm_kernel` cuda surface.
+
+#[cfg(test)]
+mod lora_output_slice_backward_tests {
+    use std::collections::HashMap;
+
+    use super::LoraDeltaAddOutputSliceBackward;
+    use kiln_autograd::{BackwardOp, LoraDeltaAddBackward, Tape};
+    use kiln_tensor::Tensor;
+
+    fn t(data: &[f32], shape: &[usize]) -> Tensor {
+        Tensor::from_slice(data, shape.to_vec()).unwrap()
+    }
+
+    fn values(t: &Tensor) -> Vec<f32> {
+        t.to_vec::<f32>().unwrap()
+    }
+
+    fn assert_close(actual: &Tensor, expected: &Tensor) {
+        assert_eq!(actual.shape(), expected.shape());
+        for (index, (a, e)) in values(actual).into_iter().zip(values(expected)).enumerate() {
+            assert!((a - e).abs() < 1e-5, "entry {index}: {a} != {e}");
+        }
+    }
+
+    #[test]
+    fn output_slice_backward_preserves_inner_grads_and_zero_pads_b() {
+        let x = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        let a = t(&[0.5, -0.25], &[1, 2]);
+        let b = t(&[2.0, -3.0], &[2, 1]);
+        let dy = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        let inner = LoraDeltaAddBackward {
+            x,
+            a,
+            b,
+            scale: 0.5,
+        };
+        let expected = inner.apply(&dy).unwrap();
+        let actual = LoraDeltaAddOutputSliceBackward {
+            inner,
+            output_start: 1,
+            full_output_features: 5,
+        }
+        .apply(&dy)
+        .unwrap();
+
+        for index in 0..3 {
+            assert_close(
+                actual[index].as_ref().unwrap(),
+                expected[index].as_ref().unwrap(),
+            );
+        }
+        assert_eq!(
+            values(actual[3].as_ref().unwrap()),
+            vec![0.0, 0.75, 1.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn unequal_output_slices_accumulate_under_original_b_id() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[2, 2]);
+        let a = t(&[0.25, -0.75], &[1, 2]);
+        let full_b = t(&[0.5, -1.0, 1.5, 0.25, -0.5], &[5, 1]);
+        let b0 = full_b.narrow(0, 0, 2).unwrap().contiguous().unwrap();
+        let b1 = full_b.narrow(0, 2, 3).unwrap().contiguous().unwrap();
+        let dy0 = t(&[0.2, -0.4, 0.7, 0.1], &[2, 2]);
+        let dy1 = t(&[0.3, -0.2, 0.8, -0.5, 0.4, 0.6], &[2, 3]);
+        let base0 = Tensor::zeros_cpu(vec![2, 2], kiln_tensor::DType::F32);
+        let base1 = Tensor::zeros_cpu(vec![2, 3], kiln_tensor::DType::F32);
+        let out0 = Tensor::zeros_cpu(vec![2, 2], kiln_tensor::DType::F32);
+        let out1 = Tensor::zeros_cpu(vec![2, 3], kiln_tensor::DType::F32);
+
+        let mut tape = Tape::new();
+        tape.record(
+            &out0,
+            &[&base0, &x, &a, &full_b],
+            Box::new(LoraDeltaAddOutputSliceBackward {
+                inner: LoraDeltaAddBackward {
+                    x: x.clone(),
+                    a: a.clone(),
+                    b: b0.clone(),
+                    scale: 0.5,
+                },
+                output_start: 0,
+                full_output_features: 5,
+            }),
+        );
+        tape.record(
+            &out1,
+            &[&base1, &x, &a, &full_b],
+            Box::new(LoraDeltaAddOutputSliceBackward {
+                inner: LoraDeltaAddBackward {
+                    x: x.clone(),
+                    a: a.clone(),
+                    b: b1.clone(),
+                    scale: 0.5,
+                },
+                output_start: 2,
+                full_output_features: 5,
+            }),
+        );
+        assert!(
+            tape.nodes()
+                .iter()
+                .all(|node| node.input_ids[3] == full_b.id())
+        );
+        assert!(
+            tape.nodes().iter().all(
+                |node| !node.input_ids.contains(&b0.id()) && !node.input_ids.contains(&b1.id())
+            )
+        );
+
+        let mut seeds = HashMap::new();
+        seeds.insert(out0.id(), dy0.clone());
+        seeds.insert(out1.id(), dy1.clone());
+        let grads = tape
+            .backward_with_seeds(seeds, |left, right| kiln_tensor::ops::add(left, right))
+            .unwrap();
+
+        let dy_full = Tensor::cat(&[&dy0, &dy1], 1).unwrap();
+        let reference = LoraDeltaAddBackward {
+            x: x.clone(),
+            a: a.clone(),
+            b: full_b.clone(),
+            scale: 0.5,
+        }
+        .apply(&dy_full)
+        .unwrap();
+        assert_close(grads.get(x.id()).unwrap(), reference[1].as_ref().unwrap());
+        assert_close(grads.get(a.id()).unwrap(), reference[2].as_ref().unwrap());
+        assert_close(
+            grads.get(full_b.id()).unwrap(),
+            reference[3].as_ref().unwrap(),
+        );
+    }
+
+    #[test]
+    fn output_slice_backward_rejects_out_of_range_target() {
+        let one = t(&[1.0], &[1, 1]);
+        let op = LoraDeltaAddOutputSliceBackward {
+            inner: LoraDeltaAddBackward {
+                x: one.clone(),
+                a: one.clone(),
+                b: one.clone(),
+                scale: 1.0,
+            },
+            output_start: 1,
+            full_output_features: 1,
+        };
+        let error = op.apply(&one).unwrap_err().to_string();
+        assert!(error.contains("exceeds full B rows"), "{error}");
+    }
+}
 
 #[cfg(test)]
 mod conv1d_bwd_input_composite_tests {
@@ -4224,5 +4449,136 @@ mod conv1d_bwd_input_composite_tests {
         assert_eq!(gi.dtype(), DType::F32);
         assert_eq!(gi.shape(), [rows, channels]);
         assert!(gi.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    }
+}
+
+#[cfg(test)]
+mod gdn_gate_backward_tests {
+    use super::{GdnBetaGateBackward, GdnDecayGateBackward};
+    use kiln_autograd::BackwardOp;
+    use kiln_tensor::{DType, Tensor};
+
+    fn sigmoid(x: f32) -> f32 {
+        1.0 / (1.0 + (-x).exp())
+    }
+
+    fn softplus(x: f32) -> f32 {
+        x.max(0.0) + (-x.abs()).exp().ln_1p()
+    }
+
+    #[test]
+    fn beta_gate_backward_matches_analytic_and_finite_difference() {
+        let values = vec![-3.0_f32, -0.5, 0.0, 1.5, 4.0, -1.25];
+        let upstream = vec![0.7_f32, -1.2, 0.25, 1.1, -0.4, 0.9];
+        let b = Tensor::from_vec(values.clone(), vec![2, 3]).unwrap();
+        let dy = Tensor::from_vec(upstream.clone(), vec![2, 3]).unwrap();
+        let op = GdnBetaGateBackward {
+            b,
+            source_dtype: DType::F32,
+        };
+        let actual = op.apply(&dy).unwrap().remove(0).unwrap();
+        let actual = actual.to_vec::<f32>().unwrap();
+
+        let loss = |input: &[f32]| -> f32 {
+            input
+                .iter()
+                .zip(&upstream)
+                .map(|(&x, &grad)| grad * sigmoid(x))
+                .sum()
+        };
+        let eps = 1e-3_f32;
+        for idx in 0..values.len() {
+            let sig = sigmoid(values[idx]);
+            let analytic = upstream[idx] * sig * (1.0 - sig);
+            assert!(
+                (actual[idx] - analytic).abs() < 2e-6,
+                "beta analytic mismatch at {idx}: actual={} expected={analytic}",
+                actual[idx]
+            );
+
+            let mut plus = values.clone();
+            let mut minus = values.clone();
+            plus[idx] += eps;
+            minus[idx] -= eps;
+            let finite_difference = (loss(&plus) - loss(&minus)) / (2.0 * eps);
+            assert!(
+                (actual[idx] - finite_difference).abs() < 3e-4,
+                "beta finite-difference mismatch at {idx}: actual={} fd={finite_difference}",
+                actual[idx]
+            );
+        }
+    }
+
+    #[test]
+    fn decay_gate_backward_matches_analytic_and_finite_difference() {
+        let rows = 2usize;
+        let channels = 3usize;
+        let values = vec![-2.0_f32, -0.25, 1.5, 0.75, 3.0, -1.0];
+        let a_log_values = vec![-0.8_f32, 0.2, 1.1];
+        let dt_bias_values = vec![0.3_f32, -0.4, 0.15];
+        let upstream = vec![0.5_f32, -1.1, 0.3, 1.4, -0.2, 0.8];
+        let a = Tensor::from_vec(values.clone(), vec![rows, channels]).unwrap();
+        let a_log = Tensor::from_vec(a_log_values.clone(), vec![channels]).unwrap();
+        let dt_bias = Tensor::from_vec(dt_bias_values.clone(), vec![channels]).unwrap();
+        let dy = Tensor::from_vec(upstream.clone(), vec![rows, channels]).unwrap();
+        let op = GdnDecayGateBackward {
+            a,
+            a_log,
+            dt_bias,
+            source_dtype: DType::F32,
+        };
+        let actual = op.apply(&dy).unwrap().remove(0).unwrap();
+        let actual = actual.to_vec::<f32>().unwrap();
+
+        let loss = |input: &[f32]| -> f32 {
+            input
+                .iter()
+                .enumerate()
+                .map(|(idx, &x)| {
+                    let channel = idx % channels;
+                    upstream[idx]
+                        * -a_log_values[channel].exp()
+                        * softplus(x + dt_bias_values[channel])
+                })
+                .sum()
+        };
+        let eps = 1e-3_f32;
+        for idx in 0..values.len() {
+            let channel = idx % channels;
+            let analytic = upstream[idx]
+                * -a_log_values[channel].exp()
+                * sigmoid(values[idx] + dt_bias_values[channel]);
+            assert!(
+                (actual[idx] - analytic).abs() < 3e-6,
+                "decay analytic mismatch at {idx}: actual={} expected={analytic}",
+                actual[idx]
+            );
+
+            let mut plus = values.clone();
+            let mut minus = values.clone();
+            plus[idx] += eps;
+            minus[idx] -= eps;
+            let finite_difference = (loss(&plus) - loss(&minus)) / (2.0 * eps);
+            assert!(
+                (actual[idx] - finite_difference).abs() < 8e-4,
+                "decay finite-difference mismatch at {idx}: actual={} fd={finite_difference}",
+                actual[idx]
+            );
+        }
+    }
+
+    #[test]
+    fn gate_backwards_reject_wrong_upstream_shape() {
+        let b = Tensor::from_vec(vec![0.0_f32; 6], vec![2, 3]).unwrap();
+        let wrong = Tensor::from_vec(vec![1.0_f32; 3], vec![1, 3]).unwrap();
+        let op = GdnBetaGateBackward {
+            b,
+            source_dtype: DType::F32,
+        };
+        let error = op.apply(&wrong).unwrap_err().to_string();
+        assert!(
+            error.contains("shape mismatch"),
+            "unexpected error: {error}"
+        );
     }
 }

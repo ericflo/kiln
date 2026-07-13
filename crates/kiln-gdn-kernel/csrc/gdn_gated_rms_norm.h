@@ -70,6 +70,23 @@ int32_t kiln_gdn_gated_rms_norm_bwd_bf16(
     void* stream_raw      // cudaStream_t (raw)
 );
 
+// Frozen-weight backward for the BF16-weight fused GDN gated RMSNorm kernel.
+//
+// Computes only d_x and d_z. This entry point neither accepts nor computes a
+// d_weight buffer; its kernel instantiation contains no d_weight atomics.
+int32_t kiln_gdn_gated_rms_norm_bwd_frozen_bf16(
+    const void* grad_out, // [rows, hidden] bf16
+    const void* x,        // [rows, hidden] bf16
+    const void* z,        // [rows, hidden] bf16
+    const void* weight,   // [hidden] bf16, read-only/frozen
+    void* d_x,            // [rows, hidden] bf16
+    void* d_z,            // [rows, hidden] bf16
+    int32_t rows,
+    int32_t hidden,
+    float eps,
+    void* stream_raw      // cudaStream_t (raw)
+);
+
 // Backward for the F32-weight fused GDN gated RMSNorm kernel.
 //
 // Reads bf16 `grad_out`, `x`, `z`, and f32 `weight`. Writes bf16 `d_x`/`d_z`
@@ -82,6 +99,23 @@ int32_t kiln_gdn_gated_rms_norm_bwd_wf32_bf16(
     void* d_x,            // [rows, hidden] bf16
     void* d_z,            // [rows, hidden] bf16
     void* d_weight,       // [hidden] f32
+    int32_t rows,
+    int32_t hidden,
+    float eps,
+    void* stream_raw      // cudaStream_t (raw)
+);
+
+// Frozen-weight backward for the F32-weight fused GDN gated RMSNorm kernel.
+//
+// Computes only d_x and d_z. This entry point neither accepts nor computes a
+// d_weight buffer; its kernel instantiation contains no d_weight atomics.
+int32_t kiln_gdn_gated_rms_norm_bwd_frozen_wf32_bf16(
+    const void* grad_out, // [rows, hidden] bf16
+    const void* x,        // [rows, hidden] bf16
+    const void* z,        // [rows, hidden] bf16
+    const void* weight,   // [hidden] f32, read-only/frozen
+    void* d_x,            // [rows, hidden] bf16
+    void* d_z,            // [rows, hidden] bf16
     int32_t rows,
     int32_t hidden,
     float eps,

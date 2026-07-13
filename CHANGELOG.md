@@ -98,6 +98,49 @@
   through one shared guard before resident setup and again before each direct
   group step. Nine unscoped test mutations, including two leaked false values,
   are removed.
+- tape scope authority and inference isolation: the kt tape is now a required
+  workload substrate, activated solely by Kiln's internal training scope.
+  Removed `KILN_USE_TAPE_FORWARD`, `KILN_USE_TAPE_FLASH_ATTN`,
+  `KILN_USE_TAPE_SDPA`, `KILN_USE_TAPE_LORA_ADD`, `KILN_USE_TAPE_GDN`,
+  `KILN_USE_TAPE_GDN_CONV`, `KILN_USE_TAPE_GDN_QK_NORM`, and
+  `KILN_USE_TAPE_GDN_GATED_NORM` without aliases or replacement configuration.
+  A global default-on switch could make ordinary inference decline forward-only
+  fast paths even though no tape existed; GDN chunkwise recurrence and CUDA's
+  weight-aware embedding route now defer only while a training scope is actually
+  active. Debug and tuning controls may select only graph-preserving
+  implementations inside that scope; they cannot disable a required recorder
+  or silently sever the gradient graph.
+- exact LoRA gradient consumption: every optimizer entry now requires the
+  observed gradient IDs to equal the configured trainable leaf set and checks
+  each tensor's shape, backward dtype, master device, and finite values before
+  mutating parameters or optimizer state. Missing and unknown leaves fail
+  closed; legitimate all-zero gradients remain valid. The tape bridge sums all
+  recorded input contributions into one accumulated entry per leaf, but first
+  requires every registered differentiable input to have a gradient so a
+  connected clone cannot hide a disconnected one. Split output-projection
+  chunks deposit zero-padded gradients under the original full LoRA leaf rather
+  than temporary slice IDs. Checkpoint segments require the exact leaves for
+  their layer range; an empty configured range accepts only an empty result,
+  and the merge rejects duplicate leaf IDs across disjoint segments.
+  Accumulated GRPO values incur only one finite scan at the final optimizer
+  boundary. CUDA,
+  ROCm, and Vulkan use backend reducers; Metal uses a
+  synchronized host-scan correctness fallback instead of rejecting every step
+  while its native finite reducer remains pending.
+- frozen-parameter tape ownership: native training now records LoRA A/B as the
+  only trainable model leaves. Embedding tables, base projection matrices,
+  RMSNorm and gated-RMSNorm weights, GDN gate parameters, MTP projections, and
+  FLCE/OPD/GRPO heads are saved constants. Their backward paths return only the
+  activation and LoRA gradients required upstream, omit frozen dWeight GEMMs,
+  and do not allocate, retain, or deposit frozen-weight gradients. CUDA/ROCm
+  fused RMSNorm routes use dx-only kernels that skip dWeight atomics; the
+  portable route has the same ownership. Split Q/gate projections preserve the
+  original full LoRA A/B IDs, zero-pad and accumulate each B slice, and use
+  tape-aware reshapes so temporary slices cannot become optimizer leaves or
+  sever the activation graph. The shared final-norm helper and portable GDN
+  gated-norm fallback are likewise dx-only. Four unused prefill helpers now
+  reject active training scopes until their reshape/narrow chains are recorded,
+  and ROCm's W8 full-attention output leaf is explicitly inference-only.
 - SFT loss authority and admission: removed the process-global
   `KILN_USE_FLCE` route override. SFT now consumes the selected backend's typed
   loss route for every step. There is no replacement TOML/request field,

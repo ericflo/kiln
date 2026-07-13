@@ -71,9 +71,10 @@ __global__ void gdn_gated_rms_norm_kernel(
     out[base + tid] = __float2bfloat16(out_val);
 }
 
-// One CUDA block computes dx/dz for one row of length 128. d_weight is
-// accumulated in F32 with one atomic per hidden element per row.
-template <typename WeightT>
+// One CUDA block computes dx/dz for one row of length 128. The trainable-weight
+// instantiation also accumulates d_weight in F32 with one atomic per hidden
+// element per row. The frozen-weight instantiation compiles that work out.
+template <typename WeightT, bool ComputeWeightGrad>
 __global__ void gdn_gated_rms_norm_bwd_kernel(
     const __nv_bfloat16* __restrict__ grad_out,
     const __nv_bfloat16* __restrict__ x,
@@ -130,11 +131,55 @@ __global__ void gdn_gated_rms_norm_bwd_kernel(
     const float dx = d_normed * w_val * rms_inv
         - x_val * s * (rms_inv3 / static_cast<float>(kHidden));
     const float dz = dout * normed * silu_grad;
-    const float dw = d_normed * x_val * rms_inv;
-
     d_x[base + tid] = __float2bfloat16(dx);
     d_z[base + tid] = __float2bfloat16(dz);
-    atomicAdd(&d_weight[tid], dw);
+    if constexpr (ComputeWeightGrad) {
+        const float dw = d_normed * x_val * rms_inv;
+        atomicAdd(&d_weight[tid], dw);
+    }
+}
+
+template <typename WeightT, bool ComputeWeightGrad>
+int32_t launch_gdn_gated_rms_norm_bwd(
+    const void* grad_out,
+    const void* x,
+    const void* z,
+    const void* weight,
+    void* d_x,
+    void* d_z,
+    void* d_weight,
+    int32_t rows,
+    int32_t hidden,
+    float eps,
+    void* stream_raw
+) {
+    if (rows <= 0) return 0;
+    if (hidden != kHidden) return 2;
+    if constexpr (ComputeWeightGrad) {
+        if (d_weight == nullptr) return 2;
+    }
+
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_raw);
+    dim3 grid(rows);
+    dim3 block(kHidden);
+
+    gdn_gated_rms_norm_bwd_kernel<WeightT, ComputeWeightGrad><<<grid, block, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(grad_out),
+        reinterpret_cast<const __nv_bfloat16*>(x),
+        reinterpret_cast<const __nv_bfloat16*>(z),
+        reinterpret_cast<const WeightT*>(weight),
+        reinterpret_cast<__nv_bfloat16*>(d_x),
+        reinterpret_cast<__nv_bfloat16*>(d_z),
+        ComputeWeightGrad ? reinterpret_cast<float*>(d_weight) : nullptr,
+        rows,
+        eps
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        return 1;
+    }
+    return 0;
 }
 
 // One CUDA block computes the backward of y = scale * x / sqrt(sum(x^2) + eps)
@@ -266,30 +311,46 @@ extern "C" int32_t kiln_gdn_gated_rms_norm_bwd_bf16(
     float eps,
     void* stream_raw
 ) {
-    if (rows <= 0) return 0;
-    if (hidden != kHidden) return 2;
-
-    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_raw);
-    dim3 grid(rows);
-    dim3 block(kHidden);
-
-    gdn_gated_rms_norm_bwd_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
-        reinterpret_cast<const __nv_bfloat16*>(grad_out),
-        reinterpret_cast<const __nv_bfloat16*>(x),
-        reinterpret_cast<const __nv_bfloat16*>(z),
-        reinterpret_cast<const __nv_bfloat16*>(weight),
-        reinterpret_cast<__nv_bfloat16*>(d_x),
-        reinterpret_cast<__nv_bfloat16*>(d_z),
-        reinterpret_cast<float*>(d_weight),
+    return launch_gdn_gated_rms_norm_bwd<__nv_bfloat16, true>(
+        grad_out,
+        x,
+        z,
+        weight,
+        d_x,
+        d_z,
+        d_weight,
         rows,
-        eps
+        hidden,
+        eps,
+        stream_raw
     );
+}
 
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        return 1;
-    }
-    return 0;
+extern "C" int32_t kiln_gdn_gated_rms_norm_bwd_frozen_bf16(
+    const void* grad_out,
+    const void* x,
+    const void* z,
+    const void* weight,
+    void* d_x,
+    void* d_z,
+    int32_t rows,
+    int32_t hidden,
+    float eps,
+    void* stream_raw
+) {
+    return launch_gdn_gated_rms_norm_bwd<__nv_bfloat16, false>(
+        grad_out,
+        x,
+        z,
+        weight,
+        d_x,
+        d_z,
+        nullptr,
+        rows,
+        hidden,
+        eps,
+        stream_raw
+    );
 }
 
 extern "C" int32_t kiln_gdn_gated_rms_norm_bwd_wf32_bf16(
@@ -305,30 +366,46 @@ extern "C" int32_t kiln_gdn_gated_rms_norm_bwd_wf32_bf16(
     float eps,
     void* stream_raw
 ) {
-    if (rows <= 0) return 0;
-    if (hidden != kHidden) return 2;
-
-    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_raw);
-    dim3 grid(rows);
-    dim3 block(kHidden);
-
-    gdn_gated_rms_norm_bwd_kernel<float><<<grid, block, 0, stream>>>(
-        reinterpret_cast<const __nv_bfloat16*>(grad_out),
-        reinterpret_cast<const __nv_bfloat16*>(x),
-        reinterpret_cast<const __nv_bfloat16*>(z),
-        reinterpret_cast<const float*>(weight),
-        reinterpret_cast<__nv_bfloat16*>(d_x),
-        reinterpret_cast<__nv_bfloat16*>(d_z),
-        reinterpret_cast<float*>(d_weight),
+    return launch_gdn_gated_rms_norm_bwd<float, true>(
+        grad_out,
+        x,
+        z,
+        weight,
+        d_x,
+        d_z,
+        d_weight,
         rows,
-        eps
+        hidden,
+        eps,
+        stream_raw
     );
+}
 
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        return 1;
-    }
-    return 0;
+extern "C" int32_t kiln_gdn_gated_rms_norm_bwd_frozen_wf32_bf16(
+    const void* grad_out,
+    const void* x,
+    const void* z,
+    const void* weight,
+    void* d_x,
+    void* d_z,
+    int32_t rows,
+    int32_t hidden,
+    float eps,
+    void* stream_raw
+) {
+    return launch_gdn_gated_rms_norm_bwd<float, false>(
+        grad_out,
+        x,
+        z,
+        weight,
+        d_x,
+        d_z,
+        nullptr,
+        rows,
+        hidden,
+        eps,
+        stream_raw
+    );
 }
 
 extern "C" int32_t kiln_gdn_l2_norm_scale_bwd_bf16(

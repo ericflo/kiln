@@ -106,7 +106,7 @@ const generatedDocsPages = [
     path: publishedPath('docs/configuration/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/configuration/',
     h1: 'Configuration Reference',
-    anchors: ['optimizer-support-is-a-resident-capability-not-configuration', 'backend-owned-sft-loss-route-is-not-configuration'],
+    anchors: ['optimizer-support-is-a-resident-capability-not-configuration', 'tape-scope-is-internal-execution-authority-not-configuration', 'frozen-parameters-are-constants-not-optimizer-leaves', 'backend-owned-sft-loss-route-is-not-configuration'],
     terms: [
       'KILN_<SECTION>_<FIELD>',
       'Strict failure behavior',
@@ -226,6 +226,38 @@ const generatedDocsPages = [
       'KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK',
       'KILN_METAL_TRAINING_OPTIMIZER_FALLBACK',
       'KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK',
+      'Tape scope is internal execution authority, not configuration',
+      'required workload substrate',
+      'thread-local scope internally',
+      'complete inference boundary',
+      'GDN chunkwise recurrence',
+      "CUDA's weight-aware embedding lookup",
+      'KILN_USE_TAPE_FORWARD',
+      'KILN_USE_TAPE_FLASH_ATTN',
+      'KILN_USE_TAPE_SDPA',
+      'KILN_USE_TAPE_LORA_ADD',
+      'KILN_USE_TAPE_GDN',
+      'KILN_USE_TAPE_GDN_CONV',
+      'KILN_USE_TAPE_GDN_QK_NORM',
+      'KILN_USE_TAPE_GDN_GATED_NORM',
+      'removed without compatibility aliases or replacement fields',
+      'must not disable the tape, bypass an individual recorder',
+      'does not by itself qualify numerical correctness',
+      'Frozen parameters are constants, not optimizer leaves',
+      'train only LoRA A/B tensors',
+      'Embedding tables',
+      'base projection matrices',
+      'RMSNorm and GDN gated-RMSNorm weights',
+      'GDN gate parameters',
+      'MTP projection weights',
+      'loss-head transposes',
+      'saved constants',
+      'do not execute a dWeight matrix multiplication',
+      'original full LoRA A/B tensor IDs',
+      'pads its B contribution to the full shape',
+      'tape-aware reshapes preserve the activation chain',
+      'temporary B slices are never trainable leaves',
+      'does not by itself qualify backend throughput',
       'Backend-owned SFT loss route is not configuration',
       'kt_tape_flce',
       'vulkan_active_rows',
@@ -281,7 +313,7 @@ const generatedDocsPages = [
     path: publishedPath('docs/native-sft-profile/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/native-sft-profile/',
     h1: 'Native SFT Profile',
-    anchors: ['backend-owned-sft-loss-routing'],
+    anchors: ['backend-owned-sft-loss-routing', 'tape-authority-and-inference-isolation', 'frozen-parameter-ownership', 'exact-gradient-set-boundary'],
     terms: [
       'config.optimizer is a tagged object',
       '"kind":"adam_w"',
@@ -342,6 +374,41 @@ const generatedDocsPages = [
       'kiln.training-checkpoint-planning.v4',
       'older v3 planning identity',
       'GRPO and OPD continue to use the common v3 planning identity',
+      'Tape authority and inference isolation',
+      'part of the native workload contract, not a tunable feature',
+      'presence of that scope as their only activation authority',
+      'GDN chunkwise recurrence',
+      "CUDA's weight-aware embedding lookup",
+      'KILN_USE_TAPE_FORWARD',
+      'KILN_USE_TAPE_FLASH_ATTN',
+      'KILN_USE_TAPE_SDPA',
+      'KILN_USE_TAPE_LORA_ADD',
+      'KILN_USE_TAPE_GDN',
+      'KILN_USE_TAPE_GDN_CONV',
+      'KILN_USE_TAPE_GDN_QK_NORM',
+      'KILN_USE_TAPE_GDN_GATED_NORM',
+      'removed without aliases or replacements',
+      'not accelerator qualification',
+      'Frozen parameter ownership',
+      'trains LoRA A/B tensors and no base-model parameters',
+      'Base projection matrices are saved constants',
+      'Embedding tables and token IDs are not differentiable inputs',
+      'RMSNorm and GDN gated-RMSNorm weights are saved constants',
+      'Frozen GDN gate parameters remain constants',
+      'MTP projection weights',
+      'loss roots save their head transpose as a constant',
+      'frozen dWeight GEMMs and frozen gradient storage',
+      'both chunks register the original full A/B IDs',
+      'zero-pads its B gradient to the full parameter shape',
+      'tape-aware reshapes keep the post-split activation graph connected',
+      'Exact gradient-set boundary',
+      'observed gradient tensor IDs',
+      'must contain only finite values',
+      'finite all-zero gradient remains valid',
+      'one connected clone cannot mask a disconnected sibling',
+      'range with no configured leaves accepts only an empty result',
+      'one finite-value reduction immediately before the optimizer',
+      'correctness guarantee, not large-batch performance evidence',
     ],
   },
   {
@@ -517,7 +584,10 @@ const expectedApiSections = [
   { label: 'typed batching diagnostics', terms: ['batching', 'actor_active', 'configured_source', 'backend_policy_enabled', 'prefill_admission_quantum', 'effective_decode_width', 'burst_prefill_admission', 'direct_decode_rendezvous', 'direct_streaming_greedy_only', 'worker_active', 'route_available', 'decode_runtime.batching_configuration', 'decode_runtime.direct_decode_rendezvous', 'batching_engine.configuration', 'batching_engine.direct_decode_rendezvous', 'CPU (8,0,false)', 'CUDA (1,0,false)', 'ROCm (8,0,false)', 'Metal (8,100,true)', 'Vulkan (64,5000,true)'] },
   { label: 'typed streaming-prefill diagnostics', terms: ['streaming_prefill', 'configured_mode', 'prompt_tokens_at_least', 'effective_for_auto_mode', 'override_applied_to_backend_auto_policy', 'tape_tile_tokens', 'detached_full_attn_boundary_tile_tokens', 'detached_full_attn_tape_replay_tile_tokens', 'last_token_lm_head', 'inherited_from_tile_tokens_config_file', 'prefill_runtime.streaming_prefill', 'restart_required_to_change', '(1024,1024,8192,65536,65536)', '(1024,1024,8192,8192,8192)', '(2048,2048,8192,8192,8192)'] },
   { label: 'typed SFT checkpoint-boundary diagnostics', terms: ['checkpoint_boundary_policy', 'recompute_mode', 'recompute_threshold_tokens', 'anchor_stride', 'cache_target_bytes', '/v1/config', '/health', '/v1/health', '/v1/debug/model-state', 'Runtime Config training group', 'immutability', 'restart requirement'] },
-  { label: 'optimizer capability diagnostics', terms: ['optimizer_support', 'kiln.training-optimizer-support', 'backend_implementation', 'portable_reference', 'native_device_hook', 'optimizer_tuple_kinds', 'optimizer_tuple', 'workloads', 'workload', 'supported', 'unavailable_reason', 'allowed_optimizer_kinds', 'base_weight_dtype', 'resolved_lora_parameter_dtype', 'cannot be resolved by the backend precision policy', 'round_to_nearest', 'backend_implementation_rounding_modes', 'live_memory_admission_required', 'backend_maximum', 'model_maximum', 'effective minimum as maximum', 'null backend_maximum means the backend adds no ceiling', 'maximum remains the concrete model ceiling', 'does not lower the requested rank', 'CPU can expose portable F32 tuples while all four server workloads remain unsupported', 'Hybrid Vulkan can expose raw native hooks or tuples', 'exact native backend/device identity', 'no Marlin-packed projection', 'kt_tape_authoritative', 'phase-B backward routes', 'distill_refresh', 'separate exact SFT and OPD phase plans', 'prepare the precise SFT rows', 'reserve the larger of the two sequential working sets', 'Cheap teacher-alias validation and metadata pinning may occur first', 'checkpoint loading, remote/local teacher materialization, corpus scanning, memory preflight, and GPU reservation occur only after the static workload check', 'Metal', 'unsupported', 'rank 2+', 'rank 2..=48', 'rank 2..=32', 'F16 is inference-only', 'KILN_BF16_STOCHASTIC_ROUND', 'KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK', 'KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK', 'KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK', 'KILN_METAL_TRAINING_OPTIMIZER_FALLBACK', 'KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK'] },
+  { label: 'optimizer capability diagnostics', terms: ['optimizer_support', 'kiln.training-optimizer-support', 'backend_implementation', 'portable_reference', 'native_device_hook', 'optimizer_tuple_kinds', 'optimizer_tuple', 'workloads', 'workload', 'supported', 'unavailable_reason', 'allowed_optimizer_kinds', 'base_weight_dtype', 'resolved_lora_parameter_dtype', 'cannot be resolved by the backend precision policy', 'round_to_nearest', 'backend_implementation_rounding_modes', 'live_memory_admission_required', 'backend_maximum', 'model_maximum', 'effective minimum as maximum', 'null backend_maximum means the backend adds no ceiling', 'maximum remains the concrete model ceiling', 'does not lower the requested rank', 'CPU can expose', 'portable F32 tuples', 'all four server workloads remain unsupported', 'Hybrid Vulkan can expose raw native hooks or tuples', 'exact native backend/device identity', 'no Marlin-packed projection', 'kt_tape_authoritative', 'phase-B backward routes', 'distill_refresh', 'separate exact SFT and OPD phase plans', 'prepare the precise SFT rows', 'reserve the larger of the two sequential working sets', 'Cheap teacher-alias validation and metadata pinning may occur first', 'checkpoint loading, remote/local teacher materialization, corpus scanning, memory preflight, and GPU reservation occur only after the static workload check', 'Metal', 'unsupported', 'rank 2+', 'rank 2..=48', 'rank 2..=32', 'F16 is inference-only', 'KILN_BF16_STOCHASTIC_ROUND', 'KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK', 'KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK', 'KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK', 'KILN_METAL_TRAINING_OPTIMIZER_FALLBACK', 'KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK'] },
+  { label: 'training tape scope authority', terms: ['tape scope authority and inference isolation', 'required workload substrate, not a configuration feature', 'internal thread-local training scope', 'sole activation authority', 'no TOML field, API property, CLI flag, or mechanically derived environment name', 'ordinary inference never opens that scope', 'GDN chunkwise recurrence', 'weight-aware embedding lookup', 'neither consults a cached global tape default', 'cannot suppress a recorder, sever the gradient graph', 'KILN_USE_TAPE_FORWARD', 'KILN_USE_TAPE_FLASH_ATTN', 'KILN_USE_TAPE_SDPA', 'KILN_USE_TAPE_LORA_ADD', 'KILN_USE_TAPE_GDN', 'KILN_USE_TAPE_GDN_CONV', 'KILN_USE_TAPE_GDN_QK_NORM', 'KILN_USE_TAPE_GDN_GATED_NORM', 'removed without aliases or replacement fields', 'not hardware qualification'] },
+  { label: 'frozen training parameter ownership', terms: ['Frozen parameter ownership', 'train LoRA A/B tensors and no base-model parameters', 'Embedding tables', 'base projection matrices', 'RMSNorm and gated-RMSNorm weights', 'GDN gate parameters', 'MTP projection weights', 'loss-head transposes', 'saved constants rather than differentiable tape inputs', 'do not allocate, retain, deposit, or run matrix products for frozen-weight gradients', 'omit dWeight outputs and atomics', 'original full LoRA A/B IDs', 'pads its B contribution to the full parameter shape', 'tape-aware reshapes', 'temporary B slice can never become an optimizer leaf', 'not accelerator throughput evidence'] },
+  { label: 'exact LoRA gradient-set boundary', terms: ['Exact LoRA gradient-set boundary', 'observed gradient tensor IDs must equal the configured trainable LoRA leaves', 'shape, backward-compute dtype, and master device', 'only finite values', 'Missing or unknown IDs', 'all-zero gradient remains valid', 'no request, config, debug, or environment bypass', 'CUDA, ROCm, and Vulkan use backend finite reducers', 'Metal currently synchronizes and copies each complete gradient to the host', 'correctness fallback, not a Metal large-batch throughput claim', 'cannot be disabled at the optimizer boundary', 'exactly the leaves in their layer range', 'one accumulated entry per leaf', 'Every registered differentiable input must have a gradient', 'one connected clone cannot hide a disconnected use', 'zero-padded contributions under the original full LoRA leaf ID', 'range with no configured LoRA leaves accepts only an empty gradient set', 'duplicate leaf IDs across disjoint segments', 'one finite-value scan', 'SFT, GRPO, and OPD share this consumer contract'] },
   { label: 'optimizer request, recipe, and resume contract', terms: ['config.optimizer', '{"kind":"sgd"}', '{"kind":"adam_w"', '{"kind":"muon"', 'Muon iterations must be in', 'cheap per-workload gate and resident optimizer tuple are checked before checkpoint or corpus materialization', 'before memory reservation', 'before device residency', '/v1/recipes', 'admission {supported, unavailable_reason}', 'preflights every step again', 'training_invalid_request', 'training_backend_unsupported', 'legacy checkpoint recording stochastic rounding fails closed', 'newly Marlin-packed weight', 'unavailable authoritative route', 'Queued resume admission fully validates', 'checkpoint ID', 'digest of that validated manifest', 'effective seed', 'Before memory reservation at dequeue', 'revalidation, not a filesystem snapshot', 'mutation race after the reload'] },
   { label: 'DistillRefresh fail-closed admission', terms: ['/v1/distill/refresh', 'distinct fail-closed DistillRefresh workload', 'no job or seed is created', 'separate exact SFT and OPD phase plans', 'exact SFT rows', 'maximum sequential working set', 'currently rejects before a seed or job exists', 'Any descriptor containing a DistillRefresh step is currently unsupported'] },
   { label: 'SFT checkpoint-boundary startup and resume contract', terms: ['recompute_checkpoint_boundaries', 'checkpoint_boundary_anchor_stride', 'checkpoint_boundary_cache_gb', 'defaults to auto', 'inclusive sequence threshold defaults to 8,192 tokens', 'default 6 GiB', 'explicit positive strides', 'four historical unsectioned names are deprecated', 'parsed strictly', 'must agree with a present canonical value', 'sft_loss_route', 'kiln.training-checkpoint-planning.v4', 'prior SFT v3 checkpoints fail closed', 'GRPO and OPD', 'kiln.training-checkpoint-planning.v3', 'planning drift', 'cannot resume exactly', 'outer checkpoint envelope remains schema v1'] },
@@ -534,6 +604,12 @@ const expectedApiSections = [
   { label: 'HF/TRL resident-validated PEFT import', terms: ['/v1/train/hf/peft/imports/{name}', '{name}.kiln-hf-import', 'resident model/tokenizer/template identity', 'peft tensor shapes', 'import-receipt digest', 'content revision', 'kiln train hf import-peft', 'strong etag', 'installed byte count', 'source bundle on every outcome'] },
   { label: 'training data safety', terms: ['training data changes', 'adapter'] },
   { label: 'response shapes', terms: ['response shapes'] },
+];
+
+const expectedApiTrainingAnchors = [
+  'training-tape-scope',
+  'training-frozen-parameter-ownership',
+  'training-exact-gradient-boundary',
 ];
 
 const expectedApiCodeExamples = [
@@ -666,6 +742,7 @@ const expectedTroubleshootingSections = [
   { label: 'wrong binary/GPU path', terms: ['wrong binary or gpu path'] },
   { label: 'batching pause diagnosis', terms: ['inference pauses or throughput collapses at concurrency', 'actor_queue_ms', 'rowwise_decode', 'direct rendezvous scope', 'route_available', 'do not label a scheduling pause as vram rebalancing'] },
   { label: 'ROCm streaming-prefill pause/OOM diagnosis', terms: ['rocm long prefill pauses or runs out of memory', 'prefill_runtime.streaming_prefill', 'base/tape tiles of 1024', 'detached/boundary/replay tiles of 8192', 'mode="disabled"', 'multiples of 64', 'do not broadly raise the timeout', 'hosted gpu ci is not hardware evidence'] },
+  { label: 'internal tape-scope diagnosis', terms: ['tape switches do not isolate training or inference', 'training.optimizer_support.workloads', 'KILN_USE_TAPE_FORWARD', 'KILN_USE_TAPE_FLASH_ATTN', 'KILN_USE_TAPE_SDPA', 'KILN_USE_TAPE_LORA_ADD', 'four KILN_USE_TAPE_GDN', 'historical tape variable is not evidence that a tape scope exists', 'removed without aliases or replacement fields', 'internal training scope', 'GDN chunkwise recurrence', 'weight-aware embedding lookup', 'Only LoRA A/B are trainable model leaves', 'saved constants', 'must not emit a frozen-weight gradient', 'original full A/B IDs', 'tape-aware reshapes', 'Metal', 'synchronized full-gradient host scan', 'native finite reducer', 'do not bypass the check', 'must not sever the gradient graph', 'portable static evidence, not hardware qualification'] },
   { label: 'model weights not found', terms: ['model weights are not found'] },
   { label: 'health not green', terms: ['/health', 'not green'] },
   { label: 'remote server not reachable', terms: ['remote server is not reachable'] },
@@ -781,7 +858,8 @@ function validateSftLossRouteDocumentationSourceContract() {
     fail('docs/site/architecture.html: missing generated Native SFT profile route-contract link');
   }
 
-  const apiText = normalizedHtmlText(readFileSync(resolve(repoRoot, 'docs/site/api.html'), 'utf8'));
+  const apiHtml = readFileSync(resolve(repoRoot, 'docs/site/api.html'), 'utf8');
+  const apiText = normalizedHtmlText(apiHtml);
   const missingApiTerms = missingNormalizedTerms(apiText, [
     'sft_loss_route',
     'kiln.training-checkpoint-planning.v4',
@@ -791,6 +869,11 @@ function validateSftLossRouteDocumentationSourceContract() {
   ]);
   if (missingApiTerms.length > 0) {
     fail(`docs/site/api.html: SFT v4 versus GRPO/OPD v3 checkpoint wording missing terms: ${missingApiTerms.join(', ')}`);
+  }
+  const missingApiTrainingAnchors = expectedApiTrainingAnchors
+    .filter((anchor) => !apiHtml.includes(`id="${anchor}"`));
+  if (missingApiTrainingAnchors.length > 0) {
+    fail(`docs/site/api.html: training contract missing stable anchors: ${missingApiTrainingAnchors.join(', ')}`);
   }
 }
 
