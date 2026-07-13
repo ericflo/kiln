@@ -990,6 +990,7 @@ pub(crate) struct MaterializedTrainingResume {
     pub(crate) checkpoint: Option<ResumeCheckpointIdentity>,
 }
 
+#[derive(Debug)]
 struct NormalizedTrainingResume {
     checkpoint_seed: u64,
     identity: ResumeCheckpointIdentity,
