@@ -95,6 +95,10 @@ pub const DEFAULT_THINKING_BUDGET_TOKENS_ENV: &str = "KILN_DEFAULT_THINKING_BUDG
 /// Compatibility alias for canonical `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS`.
 pub const DEFAULT_THINKING_BUDGET_MS_ENV: &str = "KILN_DEFAULT_THINKING_BUDGET_MS";
 
+/// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
+pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
+const GIB_BYTES_F64: f64 = 1024.0 * 1024.0 * 1024.0;
+
 /// Provenance of a resolved startup configuration value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -2020,11 +2024,368 @@ pub struct MemoryConfig {
 /// Training-specific settings. Canonical startup overrides use
 /// `KILN_TRAINING_<FIELD>`; historical unsectioned spellings are
 /// compatibility-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointBoundaryRecomputeSetting {
+    mode: kiln_train::CheckpointBoundaryRecomputeMode,
+    source: ConfigValueSource,
+}
+
+impl CheckpointBoundaryRecomputeSetting {
+    pub const fn new(
+        mode: kiln_train::CheckpointBoundaryRecomputeMode,
+        source: ConfigValueSource,
+    ) -> Self {
+        Self { mode, source }
+    }
+
+    pub const fn mode(self) -> kiln_train::CheckpointBoundaryRecomputeMode {
+        self.mode
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+
+    fn parse_config(raw: &str) -> Result<kiln_train::CheckpointBoundaryRecomputeMode> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(kiln_train::CheckpointBoundaryRecomputeMode::Auto),
+            "enabled" => Ok(kiln_train::CheckpointBoundaryRecomputeMode::Enabled),
+            "disabled" => Ok(kiln_train::CheckpointBoundaryRecomputeMode::Disabled),
+            _ => anyhow::bail!(
+                "training.recompute_checkpoint_boundaries must be one of auto, enabled, or disabled, got {raw:?}"
+            ),
+        }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let mode = if name == "KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES" {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "auto" => kiln_train::CheckpointBoundaryRecomputeMode::Auto,
+                "enabled" | "1" | "true" | "yes" => {
+                    kiln_train::CheckpointBoundaryRecomputeMode::Enabled
+                }
+                "disabled" | "0" | "false" | "no" => {
+                    kiln_train::CheckpointBoundaryRecomputeMode::Disabled
+                }
+                _ => anyhow::bail!(
+                    "{name} must be one of auto, enabled, disabled, true, false, 1, 0, yes, or no, got {raw:?}"
+                ),
+            }
+        } else {
+            Self::parse_config(raw).with_context(|| format!("invalid {name}"))?
+        };
+        Ok(Self::new(mode, ConfigValueSource::Environment))
+    }
+}
+
+impl Default for CheckpointBoundaryRecomputeSetting {
+    fn default() -> Self {
+        Self::new(
+            kiln_train::CheckpointBoundaryRecomputeMode::Auto,
+            ConfigValueSource::Default,
+        )
+    }
+}
+
+impl Serialize for CheckpointBoundaryRecomputeSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.mode.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CheckpointBoundaryRecomputeSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::new(
+            Self::parse_config(&raw).map_err(serde::de::Error::custom)?,
+            ConfigValueSource::ConfigFile,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointBoundaryThresholdSetting {
+    tokens: usize,
+    source: ConfigValueSource,
+}
+
+impl CheckpointBoundaryThresholdSetting {
+    pub fn new(tokens: usize, source: ConfigValueSource) -> Result<Self> {
+        if tokens == 0 {
+            anyhow::bail!(
+                "training.recompute_boundary_threshold_tokens must be a positive integer, got {tokens}"
+            );
+        }
+        Ok(Self { tokens, source })
+    }
+
+    pub const fn tokens(self) -> usize {
+        self.tokens
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let tokens = raw
+            .trim()
+            .parse::<usize>()
+            .with_context(|| format!("{name} must be a positive decimal integer, got {raw:?}"))?;
+        Self::new(tokens, ConfigValueSource::Environment)
+            .with_context(|| format!("invalid {name} value {raw:?}"))
+    }
+}
+
+impl Default for CheckpointBoundaryThresholdSetting {
+    fn default() -> Self {
+        Self {
+            tokens: kiln_train::DEFAULT_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for CheckpointBoundaryThresholdSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(self.tokens as u64)
+    }
+}
+
+impl<'de> Deserialize<'de> for CheckpointBoundaryThresholdSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(
+            usize::deserialize(deserializer)?,
+            ConfigValueSource::ConfigFile,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointBoundaryAnchorStrideSetting {
+    configured: Option<usize>,
+    source: ConfigValueSource,
+}
+
+impl CheckpointBoundaryAnchorStrideSetting {
+    pub fn new(configured: Option<usize>, source: ConfigValueSource) -> Result<Self> {
+        if configured == Some(0) {
+            anyhow::bail!(
+                "training.checkpoint_boundary_anchor_stride must be 'auto' or a positive integer, got 0"
+            );
+        }
+        Ok(Self { configured, source })
+    }
+
+    pub const fn configured(self) -> Option<usize> {
+        self.configured
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let trimmed = raw.trim();
+        if trimmed.eq_ignore_ascii_case("auto") {
+            return Ok(Self {
+                configured: None,
+                source: ConfigValueSource::Environment,
+            });
+        }
+        let stride = trimmed.parse::<usize>().with_context(|| {
+            format!("{name} must be 'auto' or a positive decimal integer, got {raw:?}")
+        })?;
+        Self::new(Some(stride), ConfigValueSource::Environment)
+            .with_context(|| format!("invalid {name} value {raw:?}"))
+    }
+}
+
+impl Default for CheckpointBoundaryAnchorStrideSetting {
+    fn default() -> Self {
+        Self {
+            configured: None,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for CheckpointBoundaryAnchorStrideSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.configured {
+            Some(stride) => serializer.serialize_u64(stride as u64),
+            None => serializer.serialize_str("auto"),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawCheckpointBoundaryAnchorStride {
+    Stride(usize),
+    Mode(String),
+}
+
+impl<'de> Deserialize<'de> for CheckpointBoundaryAnchorStrideSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match RawCheckpointBoundaryAnchorStride::deserialize(deserializer)? {
+            RawCheckpointBoundaryAnchorStride::Stride(stride) => {
+                Self::new(Some(stride), ConfigValueSource::ConfigFile)
+                    .map_err(serde::de::Error::custom)
+            }
+            RawCheckpointBoundaryAnchorStride::Mode(mode)
+                if mode.trim().eq_ignore_ascii_case("auto") =>
+            {
+                Ok(Self {
+                    configured: None,
+                    source: ConfigValueSource::ConfigFile,
+                })
+            }
+            RawCheckpointBoundaryAnchorStride::Mode(mode) => {
+                Err(serde::de::Error::custom(format!(
+                    "training.checkpoint_boundary_anchor_stride must be 'auto' or a positive integer, got {mode:?}"
+                )))
+            }
+        }
+    }
+}
+
+fn checkpoint_boundary_cache_bytes(field: &str, gib: f64) -> Result<u64> {
+    let bytes = gib * GIB_BYTES_F64;
+    if !gib.is_finite()
+        || gib <= 0.0
+        || !bytes.is_finite()
+        || bytes < 1.0
+        || bytes >= u64::MAX as f64
+    {
+        anyhow::bail!(
+            "{field} must be finite, > 0, and convert to between 1 and {} bytes, got {gib}",
+            u64::MAX
+        );
+    }
+    Ok(bytes as u64)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CheckpointBoundaryCacheGbSetting {
+    gib: f64,
+    bytes: u64,
+    source: ConfigValueSource,
+}
+
+impl CheckpointBoundaryCacheGbSetting {
+    pub fn new(gib: f64, source: ConfigValueSource) -> Result<Self> {
+        let bytes = checkpoint_boundary_cache_bytes("training.checkpoint_boundary_cache_gb", gib)?;
+        Ok(Self { gib, bytes, source })
+    }
+
+    pub const fn gib(self) -> f64 {
+        self.gib
+    }
+
+    pub const fn bytes(self) -> u64 {
+        self.bytes
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let gib = raw
+            .trim()
+            .parse::<f64>()
+            .with_context(|| format!("{name} must be a decimal GiB value, got {raw:?}"))?;
+        let bytes = checkpoint_boundary_cache_bytes(name, gib)
+            .with_context(|| format!("invalid {name} value {raw:?}"))?;
+        Ok(Self {
+            gib,
+            bytes,
+            source: ConfigValueSource::Environment,
+        })
+    }
+}
+
+impl Default for CheckpointBoundaryCacheGbSetting {
+    fn default() -> Self {
+        Self {
+            gib: DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB,
+            bytes: kiln_train::DEFAULT_CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for CheckpointBoundaryCacheGbSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_f64(self.gib)
+    }
+}
+
+impl<'de> Deserialize<'de> for CheckpointBoundaryCacheGbSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(
+            f64::deserialize(deserializer)?,
+            ConfigValueSource::ConfigFile,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Copyable configured/source snapshot used by config, health, and debug APIs.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct CheckpointBoundaryConfigDiagnostics {
+    pub recompute_checkpoint_boundaries: kiln_train::CheckpointBoundaryRecomputeMode,
+    pub recompute_checkpoint_boundaries_source: ConfigValueSource,
+    pub recompute_boundary_threshold_tokens: usize,
+    pub recompute_boundary_threshold_tokens_source: ConfigValueSource,
+    pub checkpoint_boundary_anchor_stride: Option<usize>,
+    pub checkpoint_boundary_anchor_stride_source: ConfigValueSource,
+    pub checkpoint_boundary_cache_gb: f64,
+    pub checkpoint_boundary_cache_gb_source: ConfigValueSource,
+    pub checkpoint_boundary_cache_bytes: u64,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrainingConfig {
     pub grad_checkpoint_segments: Option<usize>,
     pub no_grad_checkpoint: bool,
+    /// Retain every checkpoint boundary, replay sparse boundaries, or select
+    /// automatically from `recompute_boundary_threshold_tokens`.
+    pub recompute_checkpoint_boundaries: CheckpointBoundaryRecomputeSetting,
+    /// Sequence length at which automatic checkpoint-boundary replay starts.
+    pub recompute_boundary_threshold_tokens: CheckpointBoundaryThresholdSetting,
+    /// Explicit sparse-anchor stride, or `"auto"` to derive it from the cache
+    /// target and admitted tensor shape.
+    pub checkpoint_boundary_anchor_stride: CheckpointBoundaryAnchorStrideSetting,
+    /// GiB target used to derive an automatic sparse-anchor stride.
+    pub checkpoint_boundary_cache_gb: CheckpointBoundaryCacheGbSetting,
     /// Save a checkpoint every N committed optimizer steps. SFT and GRPO
     /// checkpoints are exact and resumable; modes not yet migrated emit PEFT
     /// snapshots. Per-job config overrides this. `None` disables periodic
@@ -3222,6 +3583,30 @@ impl NormalizedEnvValue for DirectDecodeRendezvousMixedSeqLens {
     }
 }
 
+impl NormalizedEnvValue for CheckpointBoundaryRecomputeSetting {
+    fn normalized_env_value(&self) -> String {
+        self.mode().as_str().to_owned()
+    }
+}
+
+impl NormalizedEnvValue for CheckpointBoundaryThresholdSetting {
+    fn normalized_env_value(&self) -> String {
+        self.tokens().normalized_env_value()
+    }
+}
+
+impl NormalizedEnvValue for CheckpointBoundaryAnchorStrideSetting {
+    fn normalized_env_value(&self) -> String {
+        self.configured().normalized_env_value()
+    }
+}
+
+impl NormalizedEnvValue for CheckpointBoundaryCacheGbSetting {
+    fn normalized_env_value(&self) -> String {
+        self.gib().normalized_env_value()
+    }
+}
+
 impl NormalizedEnvValue for StreamingPrefillModeSetting {
     fn normalized_env_value(&self) -> String {
         self.mode().as_str().to_owned()
@@ -3547,6 +3932,18 @@ macro_rules! public_env_parser {
     (direct_decode_rendezvous_mixed_seq_lens) => {
         DirectDecodeRendezvousMixedSeqLens::from_named_environment_value
     };
+    (checkpoint_boundary_recompute) => {
+        CheckpointBoundaryRecomputeSetting::from_named_environment_value
+    };
+    (checkpoint_boundary_threshold) => {
+        CheckpointBoundaryThresholdSetting::from_named_environment_value
+    };
+    (checkpoint_boundary_anchor_stride) => {
+        CheckpointBoundaryAnchorStrideSetting::from_named_environment_value
+    };
+    (checkpoint_boundary_cache_gb) => {
+        CheckpointBoundaryCacheGbSetting::from_named_environment_value
+    };
     (streaming_prefill_mode) => {
         StreamingPrefillModeSetting::from_named_environment_value
     };
@@ -3768,6 +4165,26 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         "KILN_GRAD_CHECKPOINT_SEGMENTS"
     ),
     public_env_field!(bool, training.no_grad_checkpoint, "KILN_NO_GRAD_CHECKPOINT"),
+    public_env_field!(
+        checkpoint_boundary_recompute,
+        training.recompute_checkpoint_boundaries,
+        "KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES"
+    ),
+    public_env_field!(
+        checkpoint_boundary_threshold,
+        training.recompute_boundary_threshold_tokens,
+        "KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS"
+    ),
+    public_env_field!(
+        checkpoint_boundary_anchor_stride,
+        training.checkpoint_boundary_anchor_stride,
+        "KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE"
+    ),
+    public_env_field!(
+        checkpoint_boundary_cache_gb,
+        training.checkpoint_boundary_cache_gb,
+        "KILN_CHECKPOINT_BOUNDARY_CACHE_GB"
+    ),
     public_env_field!(
         some_usize,
         training.checkpoint_interval,
@@ -3996,11 +4413,47 @@ impl MemoryConfig {
     }
 }
 
+impl TrainingConfig {
+    /// Resolve the typed startup configuration into the immutable policy used
+    /// by admission, execution, and exact-resume planning identity.
+    pub fn checkpoint_boundary_policy(&self) -> Result<kiln_train::CheckpointBoundaryPolicy> {
+        kiln_train::CheckpointBoundaryPolicy::from_parts(
+            self.recompute_checkpoint_boundaries.mode(),
+            self.recompute_boundary_threshold_tokens.tokens(),
+            self.checkpoint_boundary_anchor_stride.configured(),
+            self.checkpoint_boundary_cache_gb.bytes(),
+        )
+        .context("invalid training checkpoint-boundary policy")
+    }
+
+    pub const fn checkpoint_boundary_diagnostics(&self) -> CheckpointBoundaryConfigDiagnostics {
+        CheckpointBoundaryConfigDiagnostics {
+            recompute_checkpoint_boundaries: self.recompute_checkpoint_boundaries.mode(),
+            recompute_checkpoint_boundaries_source: self.recompute_checkpoint_boundaries.source(),
+            recompute_boundary_threshold_tokens: self.recompute_boundary_threshold_tokens.tokens(),
+            recompute_boundary_threshold_tokens_source: self
+                .recompute_boundary_threshold_tokens
+                .source(),
+            checkpoint_boundary_anchor_stride: self.checkpoint_boundary_anchor_stride.configured(),
+            checkpoint_boundary_anchor_stride_source: self
+                .checkpoint_boundary_anchor_stride
+                .source(),
+            checkpoint_boundary_cache_gb: self.checkpoint_boundary_cache_gb.gib(),
+            checkpoint_boundary_cache_gb_source: self.checkpoint_boundary_cache_gb.source(),
+            checkpoint_boundary_cache_bytes: self.checkpoint_boundary_cache_gb.bytes(),
+        }
+    }
+}
+
 impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
             grad_checkpoint_segments: None,
             no_grad_checkpoint: false,
+            recompute_checkpoint_boundaries: CheckpointBoundaryRecomputeSetting::default(),
+            recompute_boundary_threshold_tokens: CheckpointBoundaryThresholdSetting::default(),
+            checkpoint_boundary_anchor_stride: CheckpointBoundaryAnchorStrideSetting::default(),
+            checkpoint_boundary_cache_gb: CheckpointBoundaryCacheGbSetting::default(),
             checkpoint_interval: None,
             webhook_url: None,
             max_queued_jobs: 32,
@@ -4381,6 +4834,7 @@ impl KilnConfig {
         if self.training.grad_checkpoint_segments == Some(0) {
             anyhow::bail!("training.grad_checkpoint_segments must be > 0 when set, got Some(0)");
         }
+        self.training.checkpoint_boundary_policy()?;
         if self.training.checkpoint_interval == Some(0) {
             anyhow::bail!("training.checkpoint_interval must be > 0 when set, got Some(0)");
         }
@@ -4790,11 +5244,15 @@ mod tests {
         "KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS",
         "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS",
         "KILN_STREAMING_PREFILL_TILE_TOKENS",
+        "KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE",
+        "KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB",
         "KILN_TRAINING_CHECKPOINT_INTERVAL",
         "KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS",
         "KILN_TRAINING_MAX_QUEUED_JOBS",
         "KILN_TRAINING_MAX_TRACKED_JOBS",
         "KILN_TRAINING_NO_GRAD_CHECKPOINT",
+        "KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS",
+        "KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES",
         "KILN_TRAINING_TRACKED_JOB_TTL_SECS",
         "KILN_TRAINING_WEBHOOK_URL",
     ];
@@ -5056,6 +5514,41 @@ mod tests {
         assert!(!config.memory.kv_cache_fp8);
         assert!(config.memory.cuda_graphs); // #34: default-ON
         assert!(!config.training.no_grad_checkpoint);
+        assert_eq!(
+            config.training.recompute_checkpoint_boundaries.mode(),
+            kiln_train::CheckpointBoundaryRecomputeMode::Auto
+        );
+        assert_eq!(
+            config.training.recompute_boundary_threshold_tokens.tokens(),
+            kiln_train::DEFAULT_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS
+        );
+        assert_eq!(
+            config
+                .training
+                .checkpoint_boundary_anchor_stride
+                .configured(),
+            None
+        );
+        assert_eq!(
+            config.training.checkpoint_boundary_cache_gb.gib(),
+            DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB
+        );
+        assert_eq!(
+            config.training.checkpoint_boundary_cache_gb.bytes(),
+            kiln_train::DEFAULT_CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES
+        );
+        for source in [
+            config.training.recompute_checkpoint_boundaries.source(),
+            config.training.recompute_boundary_threshold_tokens.source(),
+            config.training.checkpoint_boundary_anchor_stride.source(),
+            config.training.checkpoint_boundary_cache_gb.source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::Default);
+        }
+        assert_eq!(
+            config.training.checkpoint_boundary_policy().unwrap(),
+            kiln_train::CheckpointBoundaryPolicy::default()
+        );
         assert!(config.training.checkpoint_interval.is_none());
         assert!(config.training.webhook_url.is_none());
         assert_eq!(config.training.max_queued_jobs, 32);
@@ -5181,7 +5674,7 @@ mod tests {
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 74);
+        assert_eq!(original_len, 78);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -5216,8 +5709,8 @@ mod tests {
             })
             .count();
         assert_eq!(canonical_only_aliases, 22);
-        assert_eq!(compatibility_aliases, 54);
-        assert_eq!(compatibility_alias_fields, 52);
+        assert_eq!(compatibility_aliases, 58);
+        assert_eq!(compatibility_alias_fields, 56);
 
         for field in PUBLIC_ENV_FIELDS {
             assert_eq!(
@@ -5252,7 +5745,7 @@ mod tests {
                 .len(),
             14
         );
-        assert_eq!(serialized_leaves.len(), 82);
+        assert_eq!(serialized_leaves.len(), 86);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 8);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -5295,7 +5788,7 @@ mod tests {
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_seventy_four_public_fields() {
+    fn public_env_canonical_only_loads_all_seventy_eight_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
@@ -5347,6 +5840,10 @@ mod tests {
             ("KILN_MEMORY_CUDA_GRAPHS", "false"),
             ("KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS", "4"),
             ("KILN_TRAINING_NO_GRAD_CHECKPOINT", "true"),
+            ("KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES", "enabled"),
+            ("KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS", "4096"),
+            ("KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE", "3"),
+            ("KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB", "2.5"),
             ("KILN_TRAINING_CHECKPOINT_INTERVAL", "5"),
             ("KILN_TRAINING_WEBHOOK_URL", "https://hook.example/test"),
             ("KILN_TRAINING_MAX_QUEUED_JOBS", "7"),
@@ -5479,6 +5976,26 @@ mod tests {
         assert!(!config.memory.cuda_graphs);
         assert_eq!(config.training.grad_checkpoint_segments, Some(4));
         assert!(config.training.no_grad_checkpoint);
+        assert_eq!(
+            config.training.recompute_checkpoint_boundaries.mode(),
+            kiln_train::CheckpointBoundaryRecomputeMode::Enabled
+        );
+        assert_eq!(
+            config.training.recompute_boundary_threshold_tokens.tokens(),
+            4096
+        );
+        assert_eq!(
+            config
+                .training
+                .checkpoint_boundary_anchor_stride
+                .configured(),
+            Some(3)
+        );
+        assert_eq!(config.training.checkpoint_boundary_cache_gb.gib(), 2.5);
+        assert_eq!(
+            config.training.checkpoint_boundary_cache_gb.bytes(),
+            2_684_354_560
+        );
         assert_eq!(config.training.checkpoint_interval, Some(5));
         assert_eq!(
             config.training.webhook_url.as_deref(),
@@ -5552,6 +6069,10 @@ mod tests {
                 .batching
                 .direct_decode_rendezvous_mixed_seq_lens
                 .source(),
+            config.training.recompute_checkpoint_boundaries.source(),
+            config.training.recompute_boundary_threshold_tokens.source(),
+            config.training.checkpoint_boundary_anchor_stride.source(),
+            config.training.checkpoint_boundary_cache_gb.source(),
             config.streaming_prefill.mode.source(),
             config.streaming_prefill.threshold_tokens.source(),
             config.streaming_prefill.tile_tokens.source(),
@@ -5596,6 +6117,14 @@ mod tests {
                 "true",
             ),
             ("KILN_DECODE_BATCH_MIXED_SEQ", "yes"),
+            ("KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES", "enabled"),
+            ("KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES", "yes"),
+            ("KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS", "8192"),
+            ("KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS", "08192"),
+            ("KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE", "auto"),
+            ("KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE", "AUTO"),
+            ("KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB", "6.0"),
+            ("KILN_CHECKPOINT_BOUNDARY_CACHE_GB", "6"),
             ("KILN_STREAMING_PREFILL_MODE", "enabled"),
             ("KILN_STREAMING_PREFILL_ENABLED", "true"),
             ("KILN_STREAMING_PREFILL", "on"),
@@ -5647,6 +6176,22 @@ mod tests {
             config.server.serving_profile.profile(),
             ServingProfile::Experimental
         );
+        assert_eq!(
+            config.training.recompute_checkpoint_boundaries.mode(),
+            kiln_train::CheckpointBoundaryRecomputeMode::Enabled
+        );
+        assert_eq!(
+            config.training.recompute_boundary_threshold_tokens.tokens(),
+            8192
+        );
+        assert_eq!(
+            config
+                .training
+                .checkpoint_boundary_anchor_stride
+                .configured(),
+            None
+        );
+        assert_eq!(config.training.checkpoint_boundary_cache_gb.gib(), 6.0);
         assert_eq!(
             config.streaming_prefill.mode.mode(),
             StreamingPrefillMode::Enabled
@@ -5713,6 +6258,10 @@ mod tests {
                 "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
                 "sometimes",
             ),
+            ("KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES", "true"),
+            ("KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS", "0"),
+            ("KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE", "0"),
+            ("KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB", "inf"),
             ("KILN_STREAMING_PREFILL_MODE", "true"),
             ("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS", "0"),
             ("KILN_STREAMING_PREFILL_TILE_TOKENS", "65"),
@@ -7162,6 +7711,10 @@ cuda_graphs = false
 [training]
 grad_checkpoint_segments = 8
 no_grad_checkpoint = false
+recompute_checkpoint_boundaries = "disabled"
+recompute_boundary_threshold_tokens = 4096
+checkpoint_boundary_anchor_stride = 4
+checkpoint_boundary_cache_gb = 2.5
 checkpoint_interval = 50
 webhook_url = "https://example.com/hook"
 max_queued_jobs = 4
@@ -7277,6 +7830,40 @@ composed_cache_max_entries = 8
         assert!(config.memory.kv_cache_fp8);
         assert!(!config.memory.cuda_graphs);
         assert_eq!(config.training.grad_checkpoint_segments, Some(8));
+        assert_eq!(
+            config.training.recompute_checkpoint_boundaries.mode(),
+            kiln_train::CheckpointBoundaryRecomputeMode::Disabled
+        );
+        assert_eq!(
+            config.training.recompute_boundary_threshold_tokens.tokens(),
+            4096
+        );
+        assert_eq!(
+            config
+                .training
+                .checkpoint_boundary_anchor_stride
+                .configured(),
+            Some(4)
+        );
+        assert_eq!(config.training.checkpoint_boundary_cache_gb.gib(), 2.5);
+        assert_eq!(
+            config.training.checkpoint_boundary_policy().unwrap(),
+            kiln_train::CheckpointBoundaryPolicy::from_parts(
+                kiln_train::CheckpointBoundaryRecomputeMode::Disabled,
+                4096,
+                Some(4),
+                2_684_354_560,
+            )
+            .unwrap()
+        );
+        for source in [
+            config.training.recompute_checkpoint_boundaries.source(),
+            config.training.recompute_boundary_threshold_tokens.source(),
+            config.training.checkpoint_boundary_anchor_stride.source(),
+            config.training.checkpoint_boundary_cache_gb.source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::ConfigFile);
+        }
         assert_eq!(config.training.checkpoint_interval, Some(50));
         assert_eq!(
             config.training.webhook_url.as_deref(),
@@ -7336,6 +7923,279 @@ composed_cache_max_entries = 8
             Some(1_073_741_824)
         );
         assert_eq!(config.adapters.composed_cache_max_entries, Some(8));
+    }
+
+    #[test]
+    fn checkpoint_boundary_toml_is_strict_source_tracked_and_resolves_once() {
+        for (raw, expected) in [
+            ("auto", kiln_train::CheckpointBoundaryRecomputeMode::Auto),
+            (
+                "enabled",
+                kiln_train::CheckpointBoundaryRecomputeMode::Enabled,
+            ),
+            (
+                "disabled",
+                kiln_train::CheckpointBoundaryRecomputeMode::Disabled,
+            ),
+        ] {
+            let config: KilnConfig = toml::from_str(&format!(
+                "[training]\nrecompute_checkpoint_boundaries = {raw:?}\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                config.training.recompute_checkpoint_boundaries.mode(),
+                expected
+            );
+            assert_eq!(
+                config.training.recompute_checkpoint_boundaries.source(),
+                ConfigValueSource::ConfigFile
+            );
+        }
+
+        let config: KilnConfig = toml::from_str(
+            r#"
+[training]
+recompute_checkpoint_boundaries = "enabled"
+recompute_boundary_threshold_tokens = 16384
+checkpoint_boundary_anchor_stride = "auto"
+checkpoint_boundary_cache_gb = 0.5
+"#,
+        )
+        .unwrap();
+        let diagnostics = config.training.checkpoint_boundary_diagnostics();
+        assert_eq!(
+            diagnostics.recompute_checkpoint_boundaries,
+            kiln_train::CheckpointBoundaryRecomputeMode::Enabled
+        );
+        assert_eq!(diagnostics.recompute_boundary_threshold_tokens, 16_384);
+        assert_eq!(diagnostics.checkpoint_boundary_anchor_stride, None);
+        assert_eq!(diagnostics.checkpoint_boundary_cache_gb, 0.5);
+        assert_eq!(diagnostics.checkpoint_boundary_cache_bytes, 536_870_912);
+        for source in [
+            diagnostics.recompute_checkpoint_boundaries_source,
+            diagnostics.recompute_boundary_threshold_tokens_source,
+            diagnostics.checkpoint_boundary_anchor_stride_source,
+            diagnostics.checkpoint_boundary_cache_gb_source,
+        ] {
+            assert_eq!(source, ConfigValueSource::ConfigFile);
+        }
+        assert_eq!(
+            config.training.checkpoint_boundary_policy().unwrap(),
+            kiln_train::CheckpointBoundaryPolicy::from_parts(
+                kiln_train::CheckpointBoundaryRecomputeMode::Enabled,
+                16_384,
+                None,
+                536_870_912,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&config.training).unwrap()["checkpoint_boundary_anchor_stride"],
+            serde_json::json!("auto")
+        );
+
+        for (field, input) in [
+            (
+                "recompute_checkpoint_boundaries",
+                "[training]\nrecompute_checkpoint_boundaries = 'sometimes'",
+            ),
+            (
+                "recompute_boundary_threshold_tokens",
+                "[training]\nrecompute_boundary_threshold_tokens = 0",
+            ),
+            (
+                "checkpoint_boundary_anchor_stride",
+                "[training]\ncheckpoint_boundary_anchor_stride = 0",
+            ),
+            (
+                "checkpoint_boundary_anchor_stride",
+                "[training]\ncheckpoint_boundary_anchor_stride = 'sometimes'",
+            ),
+            (
+                "checkpoint_boundary_cache_gb",
+                "[training]\ncheckpoint_boundary_cache_gb = 0.0",
+            ),
+            (
+                "checkpoint_boundary_cache_gb",
+                "[training]\ncheckpoint_boundary_cache_gb = nan",
+            ),
+            (
+                "checkpoint_boundary_cache_gb",
+                "[training]\ncheckpoint_boundary_cache_gb = 1e-12",
+            ),
+            (
+                "checkpoint_boundary_cache_gb",
+                "[training]\ncheckpoint_boundary_cache_gb = 2e10",
+            ),
+        ] {
+            let error = toml::from_str::<KilnConfig>(input).unwrap_err().to_string();
+            assert!(error.contains(field), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn checkpoint_boundary_legacy_env_aliases_override_toml_with_environment_sources() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for (name, value) in [
+            ("KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES", "yes"),
+            ("KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS", "4096"),
+            ("KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE", "5"),
+            ("KILN_CHECKPOINT_BOUNDARY_CACHE_GB", "1.25"),
+        ] {
+            environment.set(name, value);
+        }
+
+        let mut config: KilnConfig = toml::from_str(
+            r#"
+[training]
+recompute_checkpoint_boundaries = "disabled"
+recompute_boundary_threshold_tokens = 2048
+checkpoint_boundary_anchor_stride = "auto"
+checkpoint_boundary_cache_gb = 6.0
+"#,
+        )
+        .unwrap();
+        config.apply_env_overrides().unwrap();
+        assert_eq!(
+            config.training.checkpoint_boundary_policy().unwrap(),
+            kiln_train::CheckpointBoundaryPolicy::from_parts(
+                kiln_train::CheckpointBoundaryRecomputeMode::Enabled,
+                4096,
+                Some(5),
+                1_342_177_280,
+            )
+            .unwrap()
+        );
+        let diagnostics = config.training.checkpoint_boundary_diagnostics();
+        for source in [
+            diagnostics.recompute_checkpoint_boundaries_source,
+            diagnostics.recompute_boundary_threshold_tokens_source,
+            diagnostics.checkpoint_boundary_anchor_stride_source,
+            diagnostics.checkpoint_boundary_cache_gb_source,
+        ] {
+            assert_eq!(source, ConfigValueSource::Environment);
+        }
+
+        for name in [
+            "KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS",
+            "KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE",
+            "KILN_CHECKPOINT_BOUNDARY_CACHE_GB",
+        ] {
+            environment.remove(name);
+        }
+        for (raw, expected) in [
+            ("1", kiln_train::CheckpointBoundaryRecomputeMode::Enabled),
+            ("true", kiln_train::CheckpointBoundaryRecomputeMode::Enabled),
+            ("yes", kiln_train::CheckpointBoundaryRecomputeMode::Enabled),
+            ("0", kiln_train::CheckpointBoundaryRecomputeMode::Disabled),
+            (
+                "false",
+                kiln_train::CheckpointBoundaryRecomputeMode::Disabled,
+            ),
+            ("no", kiln_train::CheckpointBoundaryRecomputeMode::Disabled),
+            ("auto", kiln_train::CheckpointBoundaryRecomputeMode::Auto),
+        ] {
+            environment.set("KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES", raw);
+            let mut config = KilnConfig::default();
+            config.apply_env_overrides().unwrap();
+            assert_eq!(
+                config.training.recompute_checkpoint_boundaries.mode(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_boundary_canonical_and_legacy_env_conflicts_fail_closed_pairwise() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for (canonical, canonical_value, legacy, legacy_value, field) in [
+            (
+                "KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES",
+                "enabled",
+                "KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES",
+                "false",
+                "training.recompute_checkpoint_boundaries",
+            ),
+            (
+                "KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS",
+                "8192",
+                "KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS",
+                "4096",
+                "training.recompute_boundary_threshold_tokens",
+            ),
+            (
+                "KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE",
+                "auto",
+                "KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE",
+                "2",
+                "training.checkpoint_boundary_anchor_stride",
+            ),
+            (
+                "KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB",
+                "6",
+                "KILN_CHECKPOINT_BOUNDARY_CACHE_GB",
+                "3",
+                "training.checkpoint_boundary_cache_gb",
+            ),
+        ] {
+            environment.set(canonical, canonical_value);
+            environment.set(legacy, legacy_value);
+            let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+            environment.remove(canonical);
+            environment.remove(legacy);
+            let detail = format!("{error:#}");
+            assert!(detail.contains(field), "{detail}");
+            assert!(detail.contains(canonical), "{detail}");
+            assert!(detail.contains(legacy), "{detail}");
+        }
+    }
+
+    #[test]
+    fn checkpoint_boundary_malformed_legacy_env_aliases_fail_closed() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for (name, invalid) in [
+            ("KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES", "on"),
+            ("KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS", "not-a-number"),
+            ("KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE", "0"),
+            ("KILN_CHECKPOINT_BOUNDARY_CACHE_GB", "1e-12"),
+        ] {
+            environment.set(name, invalid);
+            let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+            environment.remove(name);
+            let detail = format!("{error:#}");
+            assert!(detail.contains(name), "{name}: {detail}");
+            assert!(detail.contains(invalid), "{name}: {detail}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_boundary_non_unicode_canonical_and_alias_inputs_are_fatal() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for name in [
+            "KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES",
+            "KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS",
+            "KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE",
+            "KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB",
+            "KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES",
+            "KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS",
+            "KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE",
+            "KILN_CHECKPOINT_BOUNDARY_CACHE_GB",
+        ] {
+            let invalid = OsString::from_vec(vec![b'1', 0xff]);
+            environment.set_os(name, &invalid);
+            let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+            environment.remove(name);
+            let detail = format!("{error:#}");
+            assert!(detail.contains(name), "{name}: {detail}");
+            assert!(detail.contains("UTF-8"), "{name}: {detail}");
+        }
     }
 
     #[test]
@@ -9017,6 +9877,10 @@ served_model_id = "from-toml"
             "KILN_CUDA_GRAPHS",
             "KILN_GRAD_CHECKPOINT_SEGMENTS",
             "KILN_NO_GRAD_CHECKPOINT",
+            "KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES",
+            "KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS",
+            "KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE",
+            "KILN_CHECKPOINT_BOUNDARY_CACHE_GB",
             "KILN_CHECKPOINT_INTERVAL",
             "KILN_TRAINING_MAX_QUEUED_JOBS",
             "KILN_TRAINING_MAX_TRACKED_JOBS",
