@@ -3136,8 +3136,8 @@ mod tests {
                     .filter(move |alias| alias.name != canonical)
             })
             .count();
-        assert_eq!(canonical_only_aliases, 19);
-        assert_eq!(compatibility_aliases, 42);
+        assert_eq!(canonical_only_aliases, 18);
+        assert_eq!(compatibility_aliases, 43);
 
         for field in PUBLIC_ENV_FIELDS {
             assert_eq!(

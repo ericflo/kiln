@@ -390,7 +390,7 @@ These are current implementation facts, not recommended architecture:
    detector currently consumes `KILN_GPU_MEMORY_GB` directly.
 5. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
    typed object with provenance and backend-derived values.
-6. **Deprecated aliases:** 42 non-canonical spellings across 41 fields remain
+6. **Deprecated aliases:** 43 non-canonical spellings across 42 fields remain
    temporarily for compatibility, including `KILN_DEFAULT_NO_THINK`. Each use
    warns at startup; canonical and compatibility names cannot silently
    disagree.
