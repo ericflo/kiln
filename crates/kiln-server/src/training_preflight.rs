@@ -1335,14 +1335,14 @@ mod tests {
 
         let sgd = estimate(Optimizer::Sgd);
         let muon = estimate(Optimizer::default());
-        let adamw = estimate(adamw());
+        let adamw_estimate = estimate(adamw());
         assert_eq!(sgd.breakdown.lora_optimizer_state, 0);
         assert_eq!(
             muon.breakdown.lora_param_grad,
             sgd.breakdown.lora_param_grad
         );
         assert_eq!(
-            adamw.breakdown.lora_param_grad,
+            adamw_estimate.breakdown.lora_param_grad,
             sgd.breakdown.lora_param_grad
         );
         assert_eq!(
@@ -1351,11 +1351,11 @@ mod tests {
             "Muon owns one F32 state tensor while params+grads charge two"
         );
         assert_eq!(
-            adamw.breakdown.lora_optimizer_state, sgd.breakdown.lora_param_grad,
+            adamw_estimate.breakdown.lora_optimizer_state, sgd.breakdown.lora_param_grad,
             "AdamW owns two F32 state tensors"
         );
         assert!(sgd.total_bytes < muon.total_bytes);
-        assert!(muon.total_bytes < adamw.total_bytes);
+        assert!(muon.total_bytes < adamw_estimate.total_bytes);
 
         let vk_adamw = estimate_vk_native_recompute_working_set_with_optimizer(
             &cfg,
@@ -1367,7 +1367,10 @@ mod tests {
         );
         assert_eq!(
             vk_adamw.breakdown.lora_optimizer_state,
-            adamw.breakdown.lora_optimizer_state.saturating_mul(2),
+            adamw_estimate
+                .breakdown
+                .lora_optimizer_state
+                .saturating_mul(2),
             "vk-native admission must charge storage plus the registry mirror"
         );
         assert!(vk_adamw.breakdown.lora_registry_scratch > 0);
