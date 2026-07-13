@@ -2000,6 +2000,24 @@ function renderRuntimeConfigBody(cfg) {
   const retainedSegments = checkpointPolicy.mode === 'disabled' && checkpointPolicy.segments != null
     ? flagChip(`${num(checkpointPolicy.segments)} retained`, 'The segment count remains part of checkpoint identity while execution is disabled.')
     : '';
+  const checkpointBoundaryPolicy = train.checkpoint_boundary_policy || {};
+  const checkpointBoundaryMode = checkpointBoundaryPolicy.recompute_mode == null
+    ? '—'
+    : String(checkpointBoundaryPolicy.recompute_mode).replaceAll('_', ' ');
+  const checkpointBoundaryStride = !hasOwn(checkpointBoundaryPolicy, 'anchor_stride')
+    ? '—'
+    : checkpointBoundaryPolicy.anchor_stride == null
+      ? 'auto'
+      : num(checkpointBoundaryPolicy.anchor_stride);
+  const checkpointBoundaryStrideChip = typeof checkpointBoundaryPolicy.anchor_stride === 'number'
+    && isFinite(checkpointBoundaryPolicy.anchor_stride)
+    ? flagChip('explicit', 'The configured stride overrides cache-target-based automatic selection.')
+    : '';
+  const checkpointBoundaryCacheTargetGib = typeof checkpointBoundaryPolicy.cache_target_bytes === 'number'
+    && isFinite(checkpointBoundaryPolicy.cache_target_bytes)
+    && checkpointBoundaryPolicy.cache_target_bytes >= 0
+    ? gib(checkpointBoundaryPolicy.cache_target_bytes / (1024 ** 3))
+    : '—';
   const reclaimRequested = governor.reclaim_mode_requested;
   const reclaimEffective = governor.reclaim_mode_effective;
   const reclaimDisabledByProfile = governor.reclaim_disabled_by_serving_profile === true;
@@ -2130,6 +2148,12 @@ function renderRuntimeConfigBody(cfg) {
         ${runtimeConfigRow('Checkpoint policy', `<strong>${checkpointPolicyLabel}</strong>${retainedSegments}`, 'Immutable typed checkpoint policy for native training runs.')}
         ${runtimeConfigRow('Execution', `<strong>${onOff(train.checkpointing_enabled)}</strong>`, 'Gradient checkpointing trades recompute for activation memory during LoRA training.')}
         ${runtimeConfigRow('Effective segments', `<strong>${num(train.checkpoint_segments)}</strong>${srcChip(train.checkpoint_segments_source)}`, 'Resolved segment count and whether it was measured, conservatively selected, explicitly configured, or disabled.')}
+        ${runtimeConfigRow('Boundary mode', `<strong>${escapeHtml(checkpointBoundaryMode)}</strong>`, 'Whether checkpointed SFT replays sparse segment boundaries automatically, always, or never.')}
+        ${runtimeConfigRow('Recompute threshold', `<strong>${tokens(checkpointBoundaryPolicy.recompute_threshold_tokens)}</strong>`, 'In automatic mode, sequences at or above this token count replay sparse boundaries.')}
+        ${runtimeConfigRow('Anchor stride', `<strong>${checkpointBoundaryStride}</strong>${checkpointBoundaryStrideChip}`, 'Explicit boundaries-per-anchor stride, or auto when the cache target selects the stride for each training shape.')}
+        ${runtimeConfigRow('Anchor cache target', `<strong>${checkpointBoundaryCacheTargetGib}</strong>`, 'Process-lifetime memory target used to derive an automatic sparse-boundary anchor stride.')}
+        ${runtimeConfigRow('Startup policy', '<strong>immutable</strong>', 'Checkpoint-boundary policy is resolved once and shared by every native training run in this process.')}
+        ${runtimeConfigRow('Change requires restart', '<strong>required</strong>', 'Restart the server to apply checkpoint-boundary policy changes.')}
       </div>
       <div class="rc-group">
         <div class="rc-group-title">Generation</div>

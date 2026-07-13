@@ -325,6 +325,12 @@
         model_weight_device: 'cuda:0',
         native_training_supported: true,
         checkpoint_policy: { mode: 'auto' },
+        checkpoint_boundary_policy: {
+          recompute_mode: 'auto',
+          recompute_threshold_tokens: 8_192,
+          anchor_stride: null,
+          cache_target_bytes: 6 * GIB,
+        },
         checkpoint_segments: 4,
         checkpoint_segments_source: 'auto',
         checkpointing_enabled: true,

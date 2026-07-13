@@ -111,6 +111,11 @@ function checkRuntimeConfigSchemaContract(source) {
     'native_training_supported',
     'native_training_unavailable_reason',
     'checkpoint_policy',
+    'train.checkpoint_boundary_policy',
+    'checkpointBoundaryPolicy.recompute_mode',
+    'checkpointBoundaryPolicy.recompute_threshold_tokens',
+    'checkpointBoundaryPolicy.anchor_stride',
+    'checkpointBoundaryPolicy.cache_target_bytes',
     'training_budget_bytes',
     'training_budget_gib',
     'batching.actor_active',
@@ -1296,6 +1301,12 @@ async function startServer({
           native_training_supported: false,
           native_training_unavailable_reason: 'native Vulkan training is unavailable for CPU-host serving weights',
           checkpoint_policy: { mode: 'explicit_segments', segments: 4 },
+          checkpoint_boundary_policy: {
+            recompute_mode: 'enabled',
+            recompute_threshold_tokens: 4_096,
+            anchor_stride: 3,
+            cache_target_bytes: 6 * GIB,
+          },
           checkpoint_segments: 4,
           checkpoint_segments_source: 'configured',
           checkpointing_enabled: true,
@@ -2231,6 +2242,79 @@ async function expectStreamingPrefillRuntimeConfig(page, scenarioLabel) {
   }
 }
 
+async function expectCheckpointBoundaryRuntimeConfig(page, scenarioLabel) {
+  const prefix = `${scenarioLabel} checkpoint-boundary runtime config`;
+  await page.waitForFunction(() => Array.from(document.querySelectorAll('#runtime-config-body .rc-group'))
+    .some((group) => group.querySelector('.rc-group-title')?.textContent?.trim() === 'Training'),
+  { timeout: 5000 }).catch(() => fail(`${prefix} group did not render`));
+  const groupText = await page.$$eval('#runtime-config-body .rc-group', (groups) => groups
+    .find((group) => group.querySelector('.rc-group-title')?.textContent?.trim() === 'Training')
+    ?.innerText || '');
+  for (const [pattern, message] of [
+    [/Boundary mode[\s\S]*enabled/, 'should render the recompute mode'],
+    [/Recompute threshold[\s\S]*4,096 tokens/, 'should render the automatic-mode threshold'],
+    [/Anchor stride[\s\S]*3[\s\S]*explicit/, 'should distinguish an explicit anchor stride from auto'],
+    [/Anchor cache target[\s\S]*6\.00 GiB/, 'should render the anchor-cache target in GiB'],
+    [/Startup policy[\s\S]*immutable[\s\S]*Change requires restart[\s\S]*required/, 'should render immutable and restart-required lifecycle semantics'],
+  ]) {
+    if (!pattern.test(groupText)) fail(`${prefix} ${message}; got ${JSON.stringify(groupText)}`);
+  }
+}
+
+async function expectCheckpointBoundaryRuntimeConfigLayout(page, scenarioLabel) {
+  const layout = await page.evaluate(() => {
+    const group = Array.from(document.querySelectorAll('#runtime-config-body .rc-group'))
+      .find((candidate) => candidate.querySelector('.rc-group-title')?.textContent?.trim() === 'Training');
+    if (!group) return { found: false };
+    const bounds = group.getBoundingClientRect();
+    const rows = Array.from(group.querySelectorAll('.rc-row')).map((row) => {
+      const rect = row.getBoundingClientRect();
+      const label = row.querySelector('.rc-label');
+      const value = row.querySelector('.rc-value');
+      const labelRect = label?.getBoundingClientRect();
+      const valueRect = value?.getBoundingClientRect();
+      const horizontalOverlap = labelRect && valueRect
+        ? Math.min(labelRect.right, valueRect.right) - Math.max(labelRect.left, valueRect.left)
+        : 0;
+      return {
+        name: label?.textContent?.trim() || '<missing>',
+        left: rect.left,
+        right: rect.right,
+        top: rect.top,
+        bottom: rect.bottom,
+        scrollWidth: row.scrollWidth,
+        clientWidth: row.clientWidth,
+        labelValueOverlap: horizontalOverlap > 1,
+      };
+    });
+    const rowOverlaps = [];
+    for (let left = 0; left < rows.length; left += 1) {
+      for (let right = left + 1; right < rows.length; right += 1) {
+        if (Math.min(rows[left].bottom, rows[right].bottom) - Math.max(rows[left].top, rows[right].top) > 1) {
+          rowOverlaps.push([rows[left].name, rows[right].name]);
+        }
+      }
+    }
+    return {
+      found: true,
+      clientWidth: group.clientWidth,
+      scrollWidth: group.scrollWidth,
+      outside: rows.filter((row) => row.left < bounds.left - 1 || row.right > bounds.right + 1).map((row) => row.name),
+      overflowing: rows.filter((row) => row.scrollWidth > row.clientWidth + 1).map((row) => row.name),
+      labelValueOverlaps: rows.filter((row) => row.labelValueOverlap).map((row) => row.name),
+      rowOverlaps,
+    };
+  });
+  if (!layout.found) fail(`${scenarioLabel} checkpoint-boundary runtime config layout is missing its Training group`);
+  if (layout.scrollWidth > layout.clientWidth + 1
+    || layout.outside.length
+    || layout.overflowing.length
+    || layout.labelValueOverlaps.length
+    || layout.rowOverlaps.length) {
+    fail(`${scenarioLabel} checkpoint-boundary diagnostics overlap or overflow: ${JSON.stringify(layout)}`);
+  }
+}
+
 async function expectActiveTrainingTab(page, tabName, message) {
   await page.waitForFunction(
     (name) => {
@@ -2651,6 +2735,8 @@ async function runMobileOnboardingSmoke(baseUrl) {
     await goToPrimaryTab(page, 'overview');
     await clickAndWait(page, '#runtime-config > summary', 'Could not open the runtime config expander on mobile');
     await expectDirectDecodeRendezvousRuntimeConfig(page, 'Mobile');
+    await expectCheckpointBoundaryRuntimeConfig(page, 'Mobile');
+    await expectCheckpointBoundaryRuntimeConfigLayout(page, 'Mobile');
     await expectNoMobileOverflow(page);
     await goToPrimaryTab(page, 'training');
     // The desktop pass earlier submitted jobs on this same server, so the
@@ -2737,6 +2823,7 @@ async function runModelColdStartSmoke(baseUrl, { setModelsCold, getModelsRequest
     if (coldSnippets.includes('Qwen3.5-4B-resolved')) fail('Connect snippets must not know the real model id before /v1/models answers');
     await clickAndWait(page, '#runtime-config > summary', 'Could not open the runtime config expander during model cold start');
     await expectDirectDecodeRendezvousRuntimeConfig(page, 'Cold-start');
+    await expectCheckpointBoundaryRuntimeConfig(page, 'Cold-start');
 
     // Heal. The piggybacked retry on the 2s health poll must upgrade the
     // copyable model-id field and the rendered snippets without a reload.
@@ -2857,6 +2944,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
           .catch(() => fail('Could not click the runtime config Retry button after the APIs healed'));
         await waitForPanelText(page, '#runtime-config-body', /linux-drm-sysfs-unified/, 'Runtime config did not recover after Retry');
         await expectDirectDecodeRendezvousRuntimeConfig(page, 'Recovered failure');
+        await expectCheckpointBoundaryRuntimeConfig(page, 'Recovered failure');
         await recoverPanel('#decode-perf-panel', /No streaming completions/i, 'Decode panel did not recover after the APIs healed');
         await recoverPanel('#recent-requests-panel', /No recent requests yet\./, 'Recent requests did not recover after the APIs healed');
         await goToPrimaryTab(page, 'training');
@@ -3563,6 +3651,8 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#runtime-config-body', /Burst prefill[\s\S]*on/, 'Runtime config should render backend burst-prefill policy');
     await expectDirectDecodeRendezvousRuntimeConfig(page, 'Desktop');
     await expectStreamingPrefillRuntimeConfig(page, 'Desktop');
+    await expectCheckpointBoundaryRuntimeConfig(page, 'Desktop');
+    await expectCheckpointBoundaryRuntimeConfigLayout(page, 'Desktop');
     await waitForPanelText(page, '#runtime-config-body', /Runtime device[\s\S]*vulkan:0/, 'Runtime config should render the native-training runtime device');
     await waitForPanelText(page, '#runtime-config-body', /Weight device[\s\S]*cpu/, 'Runtime config should render the frozen model-weight device');
     await waitForPanelText(page, '#runtime-config-body', /Native training[\s\S]*unavailable/, 'Runtime config should render fail-closed native-training support');
