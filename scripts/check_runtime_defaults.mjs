@@ -119,8 +119,8 @@ for (const [label, path] of [
 }
 
 requireText(read(files.exampleConfig), `port = ${port}`, 'example config');
-requireText(read(files.readme), `| \`server.port\` | \`KILN_PORT\` | ${port} |`, 'README config table');
-requireText(read(files.quickstart), `| \`server.port\` | \`KILN_PORT\` | ${port} |`, 'Quickstart config table');
+requireText(read(files.readme), `| \`server.port\` | \`KILN_SERVER_PORT\` | ${port} |`, 'README config table');
+requireText(read(files.quickstart), `| \`server.port\` | \`KILN_SERVER_PORT\` | ${port} |`, 'Quickstart config table');
 requireText(read(files.readme), '(contracts/runtime-defaults-v1.json)', 'README runtime-defaults link');
 requireText(read(files.quickstart), '(contracts/runtime-defaults-v1.json)', 'Quickstart runtime-defaults link');
 requireText(read(files.siteQuickstart), `${bindHost}:${port}</code> by default`, 'site quickstart');
