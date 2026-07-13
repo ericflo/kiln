@@ -204,6 +204,21 @@ def correctness_manifest() -> dict:
     }
 
 
+def self_contained_correctness_manifest() -> dict:
+    value = correctness_manifest()
+    value["description"] = "Run one self-contained deterministic oracle."
+    value["variants"] = [
+        variant("rocm", "rocm", seeded=False, runner_produced=True, effective_config={})
+    ]
+    value["comparison_policy"] = {
+        "mode": "self_contained_correctness",
+        "variant_pairs": [],
+        "backend_pairs": [],
+        "metric_rules": [],
+    }
+    return value
+
+
 def commit_manifest(root: Path, value: dict) -> compare_module.LoadedWorkload:
     path = root / "qualification/workloads/test-workload.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -343,6 +358,39 @@ def write_receipt(root: Path, name: str, value: dict) -> compare_module.LoadedRe
 
 
 class ReceiptComparisonTests(unittest.TestCase):
+    def test_self_contained_correctness_requires_exact_result_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = commit_manifest(root, self_contained_correctness_manifest())
+            baseline = write_receipt(
+                root,
+                "baseline.json",
+                receipt("baseline-run", manifest, variant_id="rocm", backend="rocm"),
+            )
+            candidate_value = receipt(
+                "candidate-run", manifest, variant_id="rocm", backend="rocm"
+            )
+            candidate = write_receipt(root, "candidate.json", candidate_value)
+            report = compare_module.compare_receipts(
+                baseline, candidate, manifest=manifest
+            )
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["mode"], "self_contained_correctness")
+            self.assertEqual(report["metric_evaluations"], [])
+
+            candidate_value["results"][0]["details"] = "different oracle hash"
+            changed = write_receipt(root, "changed.json", candidate_value)
+            changed_report = compare_module.compare_receipts(
+                baseline, changed, manifest=manifest
+            )
+            self.assertFalse(changed_report["compatible"])
+            self.assertTrue(
+                any(
+                    item["compatibility"] == "result_evidence"
+                    for item in changed_report["compatibility"]["rejected_differences"]
+                )
+            )
+
     def test_same_environment_performance_uses_only_declared_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

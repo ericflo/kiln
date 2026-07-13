@@ -217,6 +217,14 @@ def _strict_result_identity(receipt: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _self_contained_result_identity(receipt: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep bounded oracle hashes in `details` as correctness evidence."""
+    return [
+        {**result, "duration_seconds": None}
+        for result in sorted(receipt["results"], key=lambda item: item["id"])
+    ]
+
+
 def _workload_base_identity(workload: dict[str, Any]) -> dict[str, Any]:
     parameters = {
         key: 0.0 if isinstance(value, float) and value == 0 else value
@@ -894,6 +902,33 @@ def compare_receipts(
                 allowed.extend(environment_allowed)
                 rejected.extend(environment_rejected)
                 compatibility_errors.extend(environment_errors)
+        elif mode == "self_contained_correctness":
+            if baseline_variant != candidate_variant:
+                rejected.append(
+                    {
+                        "compatibility": "workload_variant",
+                        "baseline": baseline_variant,
+                        "candidate": candidate_variant,
+                    }
+                )
+            _add_difference(
+                rejected,
+                "backend_environment",
+                backend_environment_before,
+                backend_environment_after,
+            )
+            _add_difference(
+                rejected,
+                "result_evidence",
+                _self_contained_result_identity(baseline_value),
+                _self_contained_result_identity(candidate_value),
+            )
+            _add_difference(
+                rejected,
+                "unsupported",
+                baseline_value["unsupported"],
+                candidate_value["unsupported"],
+            )
         else:
             raise ComparisonError(f"unsupported workload comparison mode: {mode!r}")
 

@@ -326,7 +326,8 @@
           "enum": [
             "same_environment_performance",
             "declared_ab_variants",
-            "cross_backend_correctness"
+            "cross_backend_correctness",
+            "self_contained_correctness"
           ]
         },
         "variant_pairs": {

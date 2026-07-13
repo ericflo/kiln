@@ -5083,6 +5083,7 @@ impl ModelRunner {
             .collect();
         let sequence_lengths: Vec<usize> = states.iter().map(|state| state.seq_len).collect();
         let step_seeds: Vec<Option<u64>> = states.iter().map(|state| state.step_seed).collect();
+        let row_ids: Vec<u64> = states.iter().map(|state| state.id).collect();
         let generated_tokens: Vec<Vec<TokenId>> = states
             .iter()
             .map(|state| state.generated_tokens.clone())
@@ -5093,7 +5094,37 @@ impl ModelRunner {
             .collect();
 
         let started = std::time::Instant::now();
-        let hidden = {
+        let hip_graph_single_row_ready = row_count == 1
+            && paged_decode_replay_primitive_enabled(
+                self.backend.as_ref(),
+                &self.config,
+                1,
+                ReplayNativePrimitive::HipGraph,
+            )
+            && self
+                .rocm_graph
+                .lock()
+                .map(|graph| graph.is_enabled())
+                .unwrap_or(false);
+        let hidden = if hip_graph_single_row_ready {
+            let pc_guard = lock_paged_cache(paged_cache)?;
+            self.rocm_graph
+                .lock()
+                .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?
+                .decode_step_paged_hidden(
+                    &*self.backend,
+                    input_tokens[0],
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    &block_tables[0],
+                    sequence_lengths[0],
+                    &mut *linear_states[0],
+                    self.active_lora.as_ref(),
+                    row_ids[0],
+                )
+                .context("behavior-logprob ROCm graph hidden row failed")?
+        } else {
             let pc_guard = lock_paged_cache(paged_cache)?;
             model_forward_paged_batched_decode_hidden(
                 &*self.backend,

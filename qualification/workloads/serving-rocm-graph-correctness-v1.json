@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "workload_id": "serving-rocm-graph-correctness-v1",
+  "kind": "correctness",
+  "description": "Compare full-model deterministic ROCm eager generation with warmed HIP-graph replay using exact public rollout action tokens and selected-token log-probabilities.",
+  "determinism": {
+    "seed": 20260713,
+    "seed_delivery": "argv",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "eager-vs-warmed-graph",
+      "description": "Sequential isolated deterministic eager and warmed-graph Qwen3.5-4B servers on required gfx1151 ROCm.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "features": "rocm",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "rocm_archs": "gfx1151",
+          "rocm_path": "/opt/rocm"
+        },
+        "comparison": {
+          "comparison": "exact_action_tokens_and_selected_logprobs",
+          "graph_cache_max": 12,
+          "max_tokens": 48,
+          "request_timeout_seconds": 240,
+          "scenarios": {
+            "bucket-crossing": 768,
+            "long": 384,
+            "medium": 96,
+            "short": 16
+          },
+          "warm_then_measure": true
+        },
+        "eager": {
+          "runtime": {
+            "kv_autoscale_enabled": false,
+            "kv_autoscale_requested": false,
+            "memory_reclaim_mode": "off",
+            "memory_reclaim_requested_mode": "off",
+            "rocm_graphs_enabled": false,
+            "rocm_graphs_requested": false,
+            "serving_profile": "experimental"
+          },
+          "server": {
+            "chat_performance_metadata_enabled": true,
+            "debug_endpoints_enabled": true,
+            "default_thinking_enabled": false,
+            "deterministic": true,
+            "http_send_buffer_bytes": 4096,
+            "log_format": "json",
+            "max_active_requests": 1,
+            "max_decode_batch": 1,
+            "max_prefill_layers_per_cycle": 4,
+            "max_prefill_staging_priority_burst": 0,
+            "max_prefill_staging_slots": 0,
+            "max_prefill_tokens_per_cycle": 64,
+            "request_timeout_seconds": 180,
+            "stream_stall_grace_ms": 2000
+          }
+        },
+        "graph": {
+          "runtime": {
+            "kv_autoscale_enabled": false,
+            "kv_autoscale_requested": false,
+            "memory_reclaim_mode": "off",
+            "memory_reclaim_requested_mode": "off",
+            "rocm_graphs_enabled": true,
+            "rocm_graphs_requested": true,
+            "serving_profile": "experimental"
+          },
+          "server": {
+            "chat_performance_metadata_enabled": true,
+            "debug_endpoints_enabled": true,
+            "default_thinking_enabled": false,
+            "deterministic": true,
+            "http_send_buffer_bytes": 4096,
+            "log_format": "json",
+            "max_active_requests": 1,
+            "max_decode_batch": 1,
+            "max_prefill_layers_per_cycle": 4,
+            "max_prefill_staging_priority_burst": 0,
+            "max_prefill_staging_slots": 0,
+            "max_prefill_tokens_per_cycle": 64,
+            "request_timeout_seconds": 180,
+            "stream_stall_grace_ms": 2000
+          }
+        }
+      },
+      "cases": [
+        {
+          "id": "rocm-eager-warmed-graph-correctness",
+          "description": "Build current source once, warm fixed full-model graph geometries, and require exact repeat and eager-versus-replay action-token and behavior-logprob traces with clean teardown.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_rocm_graph_correctness.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*rocm)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "action_token_count",
+              "behavior_logprob_mismatch_count",
+              "eager_graph_activity_count",
+              "eager_repeat_mismatch_count",
+              "eager_request_count",
+              "graph_capture_failure_count",
+              "graph_capture_warm_count",
+              "graph_fallback_count",
+              "graph_measure_capture_count",
+              "graph_measure_replay_count",
+              "graph_repeat_mismatch_count",
+              "graph_replay_failure_count",
+              "graph_request_count",
+              "graph_retained_count_end",
+              "graph_slot_active_count_end",
+              "graph_slot_count_end",
+              "graph_slot_idle_count_end",
+              "graph_slot_reuse_count",
+              "non_finite_logprob_count",
+              "output_mismatch_count",
+              "prefix_cache_hit_count",
+              "request_failure_count",
+              "scenario_count",
+              "shutdown_forced_count",
+              "shutdown_nonzero_count",
+              "snapshot_residue_count",
+              "token_id_mismatch_count"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "self_contained_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": []
+  }
+}

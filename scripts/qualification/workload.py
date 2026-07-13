@@ -64,6 +64,7 @@ COMPARISON_MODES = {
     "same_environment_performance",
     "declared_ab_variants",
     "cross_backend_correctness",
+    "self_contained_correctness",
 }
 METRIC_SCOPES = {"result"}
 METRIC_CLASSES = {"correctness", "performance"}
@@ -903,6 +904,19 @@ def _validate_comparison(
             errors.append(f"{context}.mode cross_backend_correctness requires backend_pairs")
         if not validated_rules:
             errors.append(f"{context}.mode cross_backend_correctness requires metric_rules")
+    elif mode == "self_contained_correctness":
+        if kind != "correctness":
+            errors.append(
+                f"{context}.mode self_contained_correctness requires kind='correctness'"
+            )
+        if variant_pairs or backend_pairs:
+            errors.append(
+                f"{context}.mode self_contained_correctness cannot declare receipt pairs"
+            )
+        if validated_rules:
+            errors.append(
+                f"{context}.mode self_contained_correctness cannot declare metric_rules"
+            )
 
     comparison_variant_ids: set[str]
     if mode == "declared_ab_variants":
