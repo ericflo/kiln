@@ -2312,28 +2312,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/training_preflight.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_CHECKPOINT_BOUNDARY_CACHE_GB",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/training_preflight.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
       "argument": "KILN_VK_FLCE_CHUNK_LEN",
       "argument_kind": "literal",
       "count": 1,
@@ -8033,50 +8011,6 @@
       "surface": "source"
     },
     {
-      "api": "env_tristate",
-      "argument": "KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/training_preflight.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/training_preflight.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_CHECKPOINT_BOUNDARY_CACHE_GB",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/training_preflight.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/training_preflight.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "KILN_VK_FLCE_CHUNK_LEN",
       "argument_kind": "literal",
@@ -9089,42 +9023,9 @@
       "surface": "source"
     },
     {
-      "api": "env_tristate",
-      "argument": "KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "key",
       "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_CHECKPOINT_BOUNDARY_CACHE_GB",
-      "argument_kind": "literal",
       "count": 1,
       "language": "rust",
       "operation": "read",
@@ -9181,17 +9082,6 @@
       "argument": "KILN_QUALIFICATION",
       "argument_kind": "literal",
       "count": 5,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS",
-      "argument_kind": "literal",
-      "count": 1,
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-train/src/trainer.rs",
@@ -10202,9 +10092,9 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 566,
-    "process_mutation_entries": 270,
-    "read_call_sites": 963,
-    "read_entries": 656
+    "process_mutation_call_sites": 562,
+    "process_mutation_entries": 268,
+    "read_call_sites": 955,
+    "read_entries": 648
   }
 }
