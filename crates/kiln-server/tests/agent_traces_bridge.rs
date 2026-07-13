@@ -1,10 +1,10 @@
 //! Integration tests: the §10 pi-session→training bridge.
 //!
 //! `/v1/agent/self_improve` and `/v1/agent/judge_distill` resolve their
-//! corpora from the §10.3 agent-trace index at submission time — a missing
-//! or empty index is an immediate actionable 400 (naming the discover
-//! endpoint), and a populated index produces queued jobs that carry REAL
-//! prompts from the user's pi sessions instead of placeholder seed text.
+//! corpora from the §10.3 agent-trace index only after static backend
+//! admission succeeds. These integration tests pin that cheap admission
+//! ordering in mock mode; the corpus builders' unit tests pin trace
+//! resolution and the discover remediation used with a real backend.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -169,27 +169,24 @@ fn assert_no_jobs(state: &AppState, context: &str) {
 // ── self_improve ────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn self_improve_without_trace_index_fails_fast_with_remediation() {
-    // Isolate from the developer's real ~/.pi sessions (auto-discovery
-    // would build a real index and defeat the missing-index assertion).
-    unsafe { std::env::set_var("KILN_PI_SESSIONS_DIR", "/nonexistent/pi/sessions") };
+async fn self_improve_without_trace_index_stops_before_discovery_in_mock_mode() {
     let (state, _dir) = make_state();
     let app = api::router(state.clone());
     register_fixture_teacher(&app, "judge-pi-v1").await;
 
     let (status, response) = post(&app, "/v1/agent/self_improve", json!({})).await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    let message = response["error"]["message"].as_str().unwrap();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+    assert_eq!(response["error"]["code"], "mock_mode", "{response}");
     assert!(
-        message.contains("/v1/agent/traces/discover"),
-        "must name the discover endpoint: {message}"
+        !state.adapter_dir.join("agent_traces.json").exists(),
+        "backend admission must precede trace discovery"
     );
     assert_no_jobs(&state, "self_improve without index");
 }
 
 #[tokio::test]
-async fn self_improve_with_traces_passes_data_resolution() {
+async fn self_improve_with_traces_stops_at_backend_admission() {
     let (state, _dir) = make_state();
     let app = api::router(state.clone());
     register_fixture_teacher(&app, "judge-pi-v1").await;
@@ -203,10 +200,8 @@ async fn self_improve_with_traces_passes_data_resolution() {
 
     let (status, response) = post(&app, "/v1/agent/self_improve", json!({})).await;
 
-    // With a populated index, data resolution succeeds and the request
-    // proceeds to the backend gate — in this mock-mode test that's the
-    // honest 503, NOT a corpus error. (The queued-job contents are pinned
-    // by the build_self_improve_jobs unit tests in api/self_improve.rs.)
+    // The cheap backend gate runs before corpus resolution. The queued-job
+    // contents are pinned by build_self_improve_jobs unit tests.
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
     assert_eq!(response["error"]["code"], "mock_mode", "{response}");
     assert_no_jobs(&state, "self_improve in mock mode");
@@ -215,27 +210,24 @@ async fn self_improve_with_traces_passes_data_resolution() {
 // ── judge_distill ───────────────────────────────────────────────────
 
 #[tokio::test]
-async fn judge_distill_without_trace_index_fails_fast() {
-    // Isolate from the developer's real ~/.pi sessions (auto-discovery
-    // would build a real index and defeat the missing-index assertion).
-    unsafe { std::env::set_var("KILN_PI_SESSIONS_DIR", "/nonexistent/pi/sessions") };
+async fn judge_distill_without_trace_index_stops_before_discovery_in_mock_mode() {
     let (state, _dir) = make_state();
     let app = api::router(state.clone());
     register_fixture_teacher(&app, "qwen3.6-27b@local").await;
 
     let (status, response) = post(&app, "/v1/agent/judge_distill", json!({})).await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    let message = response["error"]["message"].as_str().unwrap();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+    assert_eq!(response["error"]["code"], "mock_mode", "{response}");
     assert!(
-        message.contains("/v1/agent/traces/discover"),
-        "must name the discover endpoint: {message}"
+        !state.adapter_dir.join("agent_traces.json").exists(),
+        "backend admission must precede trace discovery"
     );
     assert_no_jobs(&state, "judge_distill without index");
 }
 
 #[tokio::test]
-async fn judge_distill_with_traces_passes_data_resolution() {
+async fn judge_distill_with_traces_stops_at_backend_admission() {
     let (state, _dir) = make_state();
     let app = api::router(state.clone());
     register_fixture_teacher(&app, "qwen3.6-27b@local").await;
@@ -243,9 +235,7 @@ async fn judge_distill_with_traces_passes_data_resolution() {
 
     let (status, response) = post(&app, "/v1/agent/judge_distill", json!({})).await;
 
-    // Corpus resolution succeeded (otherwise this would be the 400 with
-    // the discover remediation); the mock backend gate is what stops it.
-    // The (turn, context) corpus contents are pinned by the
+    // Corpus contents and missing-index remediation are pinned by the
     // build_judge_pump_request unit tests in api/self_improve.rs.
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
     assert_eq!(response["error"]["code"], "mock_mode", "{response}");

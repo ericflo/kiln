@@ -2245,17 +2245,6 @@
       "surface": "source"
     },
     {
-      "api": "set_var",
-      "argument": "KILN_PI_SESSIONS_DIR",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/tests/agent_traces_bridge.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
       "api": "remove_var",
       "argument": "self . 0",
       "argument_kind": "expression",
@@ -9784,8 +9773,8 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 528,
-    "process_mutation_entries": 250,
+    "process_mutation_call_sites": 526,
+    "process_mutation_entries": 249,
     "read_call_sites": 944,
     "read_entries": 638
   }
