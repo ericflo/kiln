@@ -2377,6 +2377,9 @@ pub struct AppState {
     /// Immutable batching-actor policy resolved against the selected backend
     /// and effective decode width during startup.
     pub batching_runtime_config: crate::config::BatchingRuntimeConfig,
+    /// Immutable streaming-prefill dispatch and tiling policy resolved against
+    /// the selected backend during startup.
+    pub streaming_prefill_runtime_config: crate::config::StreamingPrefillRuntimeConfig,
     /// Immutable speculative-decoding policy resolved once during startup.
     pub speculative_config: crate::config::SpeculativeDecodingConfig,
     /// Immutable backend capability snapshot used by diagnostics.
@@ -3039,11 +3042,17 @@ impl AppState {
             },
             decode_runtime_config.max_decode_batch.effective,
         );
+        let streaming_prefill_runtime_config = crate::config::StreamingPrefillConfig::default()
+            .resolve(kiln_model::StreamingPrefillBackendPolicy::for_backend(
+                "cpu",
+                kiln_tensor::Device::Cpu,
+            ));
         let speculative_config = crate::config::SpeculativeDecodingConfig::default();
         Self {
             serving_profile: crate::config::ServingProfileSetting::default(),
             decode_runtime_config,
             batching_runtime_config,
+            streaming_prefill_runtime_config,
             speculative_config,
             speculative_runtime_policy: SpeculativeRuntimePolicy::default(),
             model_config,
@@ -3103,7 +3112,8 @@ impl AppState {
                     unified: false,
                 },
                 kiln_train::GradientCheckpointPolicy::Auto,
-            ),
+            )
+            .with_streaming_prefill_policy(streaming_prefill_runtime_config.execution_policy()),
             model_weight_device: kiln_tensor::Device::Cpu,
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
@@ -3203,6 +3213,8 @@ impl AppState {
         );
         let speculative_runtime_policy =
             SpeculativeRuntimePolicy::new(backend_capabilities.decode.mtp_speculative_generation);
+        let streaming_prefill_runtime_config = crate::config::StreamingPrefillConfig::default()
+            .resolve(backend_capabilities.streaming_prefill);
         Self::new_real_with_serving_profile(
             model_config,
             runner,
@@ -3213,6 +3225,7 @@ impl AppState {
             response_delivery_policy,
             decode_runtime_config,
             crate::config::BatchingConfig::default(),
+            streaming_prefill_runtime_config,
             crate::config::SpeculativeDecodingConfig::default(),
             speculative_runtime_policy,
             max_batch_tokens,
@@ -3240,6 +3253,7 @@ impl AppState {
         response_delivery_policy: crate::batching_engine::ResponseDeliveryPolicy,
         decode_runtime_config: crate::config::DecodeRuntimeConfig,
         batching_config: crate::config::BatchingConfig,
+        streaming_prefill_runtime_config: crate::config::StreamingPrefillRuntimeConfig,
         speculative_config: crate::config::SpeculativeDecodingConfig,
         speculative_runtime_policy: SpeculativeRuntimePolicy,
         max_batch_tokens: crate::config::BatchTokenBudget,
@@ -3254,6 +3268,11 @@ impl AppState {
     ) -> anyhow::Result<Self> {
         speculative_config.validate_for_model(&model_config)?;
         speculative_config.validate_for_serving()?;
+        anyhow::ensure!(
+            runner.streaming_prefill_policy()
+                == streaming_prefill_runtime_config.execution_policy(),
+            "model runner streaming-prefill policy does not match the server runtime configuration"
+        );
         let vram_probe_selector = ensure_accelerator_memory_probe_identity(device_kt)?;
         let physical_vram = kiln_memory::vram::detect_vram_for(vram_probe_selector);
         let vram_capacity_resolution =
@@ -4135,6 +4154,7 @@ impl AppState {
             serving_profile,
             decode_runtime_config,
             batching_runtime_config,
+            streaming_prefill_runtime_config,
             speculative_config,
             speculative_runtime_policy,
             model_config,
@@ -4178,7 +4198,8 @@ impl AppState {
                 device_kt,
                 vram_info,
                 gradient_checkpoint_policy,
-            ),
+            )
+            .with_streaming_prefill_policy(streaming_prefill_runtime_config.execution_policy()),
             model_weight_device,
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
@@ -5083,6 +5104,33 @@ fn format_oom_remediation_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mock_state_shares_one_cpu_streaming_prefill_policy() {
+        let model_config = ModelConfig::qwen3_5_4b();
+        let scheduler = Scheduler::new(kiln_scheduler::SchedulerConfig::default(), 256);
+        let state = AppState::new_mock(
+            model_config.clone(),
+            scheduler,
+            Arc::new(kiln_model::engine::MockEngine::new(model_config)),
+            crate::api::test_tokenizer(),
+            300,
+            "Qwen3.5-4B".to_string(),
+        );
+
+        assert_eq!(
+            state.training_runtime.configured_streaming_prefill_policy(),
+            Some(state.streaming_prefill_runtime_config.execution_policy())
+        );
+        assert_eq!(
+            state
+                .streaming_prefill_runtime_config
+                .dispatch
+                .backend_policy
+                .policy,
+            crate::config::StreamingPrefillDispatchPolicy::Never
+        );
+    }
 
     #[test]
     fn direct_decode_rendezvous_status_distinguishes_worker_from_route() {

@@ -87,15 +87,15 @@ use kiln_model::backend::{
 };
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
-    gdn_attention_in_projections, gdn_attention_input_norm, gdn_attention_residual_block,
-    gdn_gated_norm_from_recurrent, gdn_gates_from_ab_training, gdn_out_proj_from_gated_norm,
-    gdn_qkv_from_mixed_training, gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts,
-    gqa_attention_apply_output_gate, gqa_attention_core_prefill, gqa_attention_kv_prefill,
-    gqa_attention_output_projection, gqa_attention_pre_o, gqa_attention_pre_o_chunked_prefill,
-    gqa_attention_prepare_prefill, gqa_attention_q_gate_prefill, model_forward_embed,
-    model_forward_final_norm, model_forward_head, model_forward_kt, model_forward_no_head,
-    model_forward_paged_normed_hidden, model_forward_segment, rms_norm,
-    streaming_prefill_enabled_for, streaming_tile_tokens_for, swiglu_ffn,
+    StreamingPrefillExecutionPolicy, gdn_attention_in_projections, gdn_attention_input_norm,
+    gdn_attention_residual_block, gdn_gated_norm_from_recurrent, gdn_gates_from_ab_training,
+    gdn_out_proj_from_gated_norm, gdn_qkv_from_mixed_training, gdn_recurrent_backward_no_grad,
+    gdn_recurrent_forward_from_parts, gqa_attention_apply_output_gate, gqa_attention_core_prefill,
+    gqa_attention_kv_prefill, gqa_attention_output_projection, gqa_attention_pre_o,
+    gqa_attention_pre_o_chunked_prefill, gqa_attention_prepare_prefill,
+    gqa_attention_q_gate_prefill, model_forward_embed, model_forward_final_norm,
+    model_forward_head, model_forward_kt_with_policy, model_forward_no_head_with_policy,
+    model_forward_paged_normed_hidden, model_forward_segment_with_policy, rms_norm, swiglu_ffn,
     transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
@@ -3087,6 +3087,7 @@ fn sft_checkpoint_auxiliary_state(
     backend_runtime: &str,
     gradient_checkpoint_plan_sha256: &str,
     ingestion_receipt_sha256: &str,
+    training_runtime_planning_identity: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     let hashes =
         kiln_core::config_hashes::ConfigHashes::from_model_tokenizer(model_config, tokenizer, None);
@@ -3106,6 +3107,7 @@ fn sft_checkpoint_auxiliary_state(
         "gradient_checkpoint_plan_sha256": gradient_checkpoint_plan_sha256,
         "ingestion_receipt_sha256": ingestion_receipt_sha256,
         "training_precision_policy": precision_policy.name,
+        "training_runtime_planning_identity": training_runtime_planning_identity,
         "valid_indices_sha256": valid_indices_sha256,
     }))
 }
@@ -3794,6 +3796,7 @@ fn grpo_checkpoint_auxiliary_state(
     backend_runtime: &str,
     trainable_order_sha256: &str,
     gradient_checkpoint_plan_sha256: &str,
+    training_runtime_planning_identity: &serde_json::Value,
 ) -> serde_json::Value {
     let hashes =
         kiln_core::config_hashes::ConfigHashes::from_model_tokenizer(model_config, tokenizer, None);
@@ -3811,6 +3814,7 @@ fn grpo_checkpoint_auxiliary_state(
         "trainable_order_sha256": trainable_order_sha256,
         "gradient_checkpoint_plan_sha256": gradient_checkpoint_plan_sha256,
         "training_precision_policy": precision_policy.name,
+        "training_runtime_planning_identity": training_runtime_planning_identity,
     })
 }
 
@@ -4281,11 +4285,19 @@ fn run_adapter_smoke_test_best_effort(
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,
     params: &TrainableLoraParams,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> crate::train_receipt::AdapterSmokeTestReceipt {
-    let receipt = run_adapter_smoke_test(backend, weights, model_config, tokenizer, params)
-        .unwrap_or_else(|err| {
-            crate::train_receipt::failed_adapter_smoke_test_receipt(format!("{err:#}"))
-        });
+    let receipt = run_adapter_smoke_test(
+        backend,
+        weights,
+        model_config,
+        tokenizer,
+        params,
+        streaming_prefill,
+    )
+    .unwrap_or_else(|err| {
+        crate::train_receipt::failed_adapter_smoke_test_receipt(format!("{err:#}"))
+    });
     if receipt.passed {
         tracing::info!(
             adapter = adapter_name,
@@ -4310,6 +4322,7 @@ fn run_adapter_smoke_test(
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,
     params: &TrainableLoraParams,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<crate::train_receipt::AdapterSmokeTestReceipt> {
     let lora = lora_weights_detached(params);
     let smoke_prompts = adapter_smoke_test_prompts()?;
@@ -4325,19 +4338,38 @@ fn run_adapter_smoke_test(
             "adapter smoke prompt tokenized to zero tokens: {prompt:?}"
         );
 
-        let base_logits =
-            adapter_smoke_forward_logits(backend, &prompt_ids, weights, model_config, None)
-                .with_context(|| format!("base forward for adapter smoke prompt {prompt:?}"))?;
-        let adapter_logits =
-            adapter_smoke_forward_logits(backend, &prompt_ids, weights, model_config, Some(&lora))
-                .with_context(|| format!("adapter forward for adapter smoke prompt {prompt:?}"))?;
+        let base_logits = adapter_smoke_forward_logits(
+            backend,
+            &prompt_ids,
+            weights,
+            model_config,
+            None,
+            streaming_prefill,
+        )
+        .with_context(|| format!("base forward for adapter smoke prompt {prompt:?}"))?;
+        let adapter_logits = adapter_smoke_forward_logits(
+            backend,
+            &prompt_ids,
+            weights,
+            model_config,
+            Some(&lora),
+            streaming_prefill,
+        )
+        .with_context(|| format!("adapter forward for adapter smoke prompt {prompt:?}"))?;
         let (finite_logits, logit_delta_l2) =
             adapter_smoke_logit_delta_l2(&base_logits, &adapter_logits)
                 .with_context(|| format!("compare adapter smoke logits for {prompt:?}"))?;
 
-        let base_generation =
-            adapter_smoke_greedy_generate(backend, weights, model_config, tokenizer, prompt, None)
-                .with_context(|| format!("base generation for adapter smoke prompt {prompt:?}"))?;
+        let base_generation = adapter_smoke_greedy_generate(
+            backend,
+            weights,
+            model_config,
+            tokenizer,
+            prompt,
+            None,
+            streaming_prefill,
+        )
+        .with_context(|| format!("base generation for adapter smoke prompt {prompt:?}"))?;
         let adapter_generation = adapter_smoke_greedy_generate(
             backend,
             weights,
@@ -4345,6 +4377,7 @@ fn run_adapter_smoke_test(
             tokenizer,
             prompt,
             Some(&lora),
+            streaming_prefill,
         )
         .with_context(|| format!("adapter generation for adapter smoke prompt {prompt:?}"))?;
 
@@ -4429,9 +4462,10 @@ fn adapter_smoke_forward_logits(
     weights: &GpuWeights,
     model_config: &ModelConfig,
     lora: Option<&LoraWeights>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<Tensor> {
     let mut linear_state = adapter_smoke_linear_state(backend, weights, model_config)?;
-    model_forward_kt(
+    model_forward_kt_with_policy(
         backend,
         token_ids,
         weights,
@@ -4439,6 +4473,7 @@ fn adapter_smoke_forward_logits(
         None,
         Some(&mut linear_state),
         lora,
+        streaming_prefill,
     )
 }
 
@@ -4502,6 +4537,7 @@ fn adapter_smoke_greedy_generate(
     tokenizer: &KilnTokenizer,
     prompt: &str,
     lora: Option<&LoraWeights>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<AdapterSmokeGeneration> {
     let mut context = tokenizer
         .encode(prompt)
@@ -4515,7 +4551,14 @@ fn adapter_smoke_greedy_generate(
     let started = Instant::now();
     let mut generated = Vec::with_capacity(ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS);
     for _ in 0..ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS {
-        let logits = adapter_smoke_forward_logits(backend, &context, weights, model_config, lora)?;
+        let logits = adapter_smoke_forward_logits(
+            backend,
+            &context,
+            weights,
+            model_config,
+            lora,
+            streaming_prefill,
+        )?;
         let token = greedy_sample(&logits)?;
         generated.push(token);
         context.push(token);
@@ -4840,6 +4883,7 @@ fn run_mtp_alignment_phase(
     tokenizer: &KilnTokenizer,
     config: &SftConfig,
     device: &Device,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<Option<(usize, Option<f64>, Option<f64>)>> {
     let enabled = config.train_mtp.unwrap_or(true);
     if !enabled || weights.mtp.is_none() {
@@ -4921,13 +4965,14 @@ fn run_mtp_alignment_phase(
 
         // 1) Detached hiddens from the TUNED model — outside any tape scope.
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
-        let hidden = model_forward_no_head(
+        let hidden = model_forward_no_head_with_policy(
             backend,
             &input_ids,
             weights,
             model_config,
             Some(&mut linear_state),
             Some(&lora_view),
+            streaming_prefill,
         )
         .context("mtp alignment: no-head hiddens forward")?
         .detach();
@@ -5523,6 +5568,9 @@ fn sft_train_prepared_to_with_checkpoint_root(
     let weights = resident_weights.as_ref().unwrap_or(weights);
     let backend = training_backend_for_device(device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
+    let streaming_prefill = runtime.resolved_streaming_prefill_policy(device);
+    let training_runtime_planning_identity =
+        runtime.checkpoint_planning_identity_for_device(device);
 
     let learning_rate = config.effective_learning_rate();
     if let Some(explicit) = config.learning_rate {
@@ -5889,8 +5937,13 @@ fn sft_train_prepared_to_with_checkpoint_root(
                     activation_bytes_per_elem,
                     runtime,
                 );
-                let boundaries =
-                    checkpoint_segments_for_config(weights, &device, seq_len, config_for_step);
+                let boundaries = checkpoint_segments_for_config(
+                    weights,
+                    &device,
+                    seq_len,
+                    config_for_step,
+                    streaming_prefill,
+                );
                 serde_json::json!({
                     "seq_len": seq_len,
                     "enabled": config_for_step.enabled,
@@ -5929,6 +5982,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                 BackendIdentity::runtime_name(backend.as_ref()),
                 &gradient_checkpoint_plan_sha256,
                 &ingestion_receipt_sha256,
+                &training_runtime_planning_identity,
             )?,
         };
         if let (Some(checkpoint), Some(loop_state)) =
@@ -6015,8 +6069,13 @@ fn sft_train_prepared_to_with_checkpoint_root(
                     activation_bytes_per_elem,
                     runtime,
                 );
-                let segments =
-                    checkpoint_segments_for_config(weights, &device, input_ids.len(), ckpt_config);
+                let segments = checkpoint_segments_for_config(
+                    weights,
+                    &device,
+                    input_ids.len(),
+                    ckpt_config,
+                    streaming_prefill,
+                );
                 let ckpt_log_key = (ckpt_config.enabled, ckpt_config.num_segments);
                 if last_ckpt_log_key != Some(ckpt_log_key) {
                     if let Some(ref segs) = segments {
@@ -6077,6 +6136,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                             &label_mask,
                             segs,
                             &device,
+                            streaming_prefill,
                         )?;
                         loss_val = lv;
                         GradSource::Kt(kt_grads)
@@ -6102,7 +6162,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                         );
                     }
                 } else {
-                    let (lv, g) = standard_forward_backward(
+                    let (lv, g) = standard_forward_backward_with_policy(
                         &*backend,
                         &input_ids,
                         weights,
@@ -6110,6 +6170,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                         &params,
                         &label_mask,
                         &device,
+                        streaming_prefill,
                     )?;
                     loss_val = lv;
                     g
@@ -6333,6 +6394,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
             tokenizer,
             config,
             &device,
+            streaming_prefill,
         ) {
             Ok(Some((mtp_examples, mtp_initial_ce, mtp_final_ce))) => {
                 tracing::info!(
@@ -6401,6 +6463,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
             model_config,
             tokenizer,
             &params,
+            streaming_prefill,
         ))
     } else {
         None
@@ -6717,6 +6780,9 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
     )?;
     let weights = resident_weights.as_ref().unwrap_or(weights);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
+    let streaming_prefill = runtime.resolved_streaming_prefill_policy(device);
+    let training_runtime_planning_identity =
+        runtime.checkpoint_planning_identity_for_device(device);
 
     let total_completions: usize = groups.iter().map(|g| g.completions.len()).sum();
     let mut data_stats = crate::train_receipt::DataStatsReceipt {
@@ -7211,8 +7277,13 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
                     activation_bytes_per_elem,
                     runtime,
                 );
-                let boundaries =
-                    checkpoint_segments_for_config(weights, &device, max_seq_len, resolved);
+                let boundaries = checkpoint_segments_for_config(
+                    weights,
+                    &device,
+                    max_seq_len,
+                    resolved,
+                    streaming_prefill,
+                );
                 serde_json::json!({
                     "source_index": source_index,
                     "max_seq_len": max_seq_len,
@@ -7263,6 +7334,7 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
                 BackendIdentity::runtime_name(backend.as_ref()),
                 &trainable_order_sha256,
                 &gradient_checkpoint_plan_sha256,
+                &training_runtime_planning_identity,
             ),
             ema_refresh_every,
         };
@@ -7391,8 +7463,13 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
                 activation_bytes_per_elem,
                 runtime,
             );
-            let segments =
-                checkpoint_segments_for_config(weights, &device, group_max_seq_len, ckpt_config);
+            let segments = checkpoint_segments_for_config(
+                weights,
+                &device,
+                group_max_seq_len,
+                ckpt_config,
+                streaming_prefill,
+            );
             let ckpt_log_key = (ckpt_config.enabled, ckpt_config.num_segments);
             if last_ckpt_log_key != Some(ckpt_log_key) {
                 if let Some(ref segs) = segments {
@@ -7435,6 +7512,7 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
                         &mut policy_audit,
                         ema_ref_state.as_ref().map(|s| &s.snapshot),
                         Some(&mut phase_timings),
+                        streaming_prefill,
                     )?;
 
                     // Refresh while the same writer is held: both the policy
@@ -7653,6 +7731,7 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
                     model_config,
                     tokenizer,
                     &params,
+                    streaming_prefill,
                 ));
             }
             // Registry eviction is backend mutation too; keep it within the
@@ -8661,6 +8740,7 @@ fn build_grpo_jsonl_preflight_plan(
     device: &Device,
     activation_bytes_per_elem: usize,
     runtime: &crate::TrainingRuntimeContext,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<GrpoJsonlPreflightPlan> {
     use std::io::{BufRead, BufReader, Read as _};
 
@@ -8916,8 +8996,13 @@ fn build_grpo_jsonl_preflight_plan(
             activation_bytes_per_elem,
             runtime,
         );
-        let boundaries =
-            checkpoint_segments_for_config(weights, device, max_seq_len, checkpoint_config);
+        let boundaries = checkpoint_segments_for_config(
+            weights,
+            device,
+            max_seq_len,
+            checkpoint_config,
+            streaming_prefill,
+        );
         let line_sha256 = crate::train_receipt::sha256_bytes(line.as_bytes());
         order_identity.push(&GrpoJsonlOrderIdentity {
             source_index,
@@ -9289,6 +9374,9 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
     let device = training_device_for_weights(weights, runtime)?;
     let backend = training_backend_for_device(device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
+    let streaming_prefill = runtime.resolved_streaming_prefill_policy(device);
+    let training_runtime_planning_identity =
+        runtime.checkpoint_planning_identity_for_device(device);
     let activation_bytes_per_elem = training_activation_bytes_per_elem_for_policy(
         weights,
         training_precision_policy,
@@ -9412,6 +9500,7 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
         &device,
         activation_bytes_per_elem,
         runtime,
+        streaming_prefill,
     ) {
         Ok(plan) => plan,
         Err(err) => {
@@ -9627,6 +9716,7 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
                 BackendIdentity::runtime_name(backend.as_ref()),
                 &preflight.trainable_order_sha256,
                 &preflight.gradient_checkpoint_plan_sha256,
+                &training_runtime_planning_identity,
             ),
             ema_refresh_every,
         })
@@ -9890,8 +9980,13 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
                 activation_bytes_per_elem,
                 runtime,
             );
-            let segments =
-                checkpoint_segments_for_config(weights, &device, group_max_seq_len, ckpt_config);
+            let segments = checkpoint_segments_for_config(
+                weights,
+                &device,
+                group_max_seq_len,
+                ckpt_config,
+                streaming_prefill,
+            );
             let segments_sha256 = crate::train_receipt::sha256_json_serializable(&segments)
                 .context("hash streamed GRPO runtime checkpoint boundaries")?;
             anyhow::ensure!(
@@ -9943,6 +10038,7 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
                         &mut policy_audit,
                         ema_ref_state.as_ref().map(|s| &s.snapshot),
                         Some(&mut phase_timings),
+                        streaming_prefill,
                     )?;
                     if let Some(state) = ema_ref_state.as_mut() {
                         state.groups_since_refresh += 1;
@@ -10167,6 +10263,7 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
                     model_config,
                     tokenizer,
                     &params,
+                    streaming_prefill,
                 ));
             }
             if let Some(state) = opt_state.as_ref() {
@@ -10405,6 +10502,36 @@ pub fn grpo_benchmark_training_step(
     tokenizer: &KilnTokenizer,
     opt_state: Option<&mut OptimizerState>,
 ) -> Result<GrpoBenchmarkReport> {
+    grpo_benchmark_training_step_with_policy(
+        backend,
+        group,
+        weights,
+        model_config,
+        params,
+        config,
+        segments,
+        device,
+        tokenizer,
+        opt_state,
+        StreamingPrefillExecutionPolicy::for_device(*device),
+    )
+}
+
+/// Explicit-policy variant of [`grpo_benchmark_training_step`].
+#[allow(clippy::too_many_arguments)]
+pub fn grpo_benchmark_training_step_with_policy(
+    backend: &dyn BackendRuntime,
+    group: &GrpoGroup,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &mut TrainableLoraParams,
+    config: &GrpoConfig,
+    segments: Option<&[(usize, usize)]>,
+    device: &Device,
+    tokenizer: &KilnTokenizer,
+    opt_state: Option<&mut OptimizerState>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+) -> Result<GrpoBenchmarkReport> {
     let started = Instant::now();
     let mut timings = GrpoBenchmarkTimings::default();
     let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
@@ -10427,6 +10554,7 @@ pub fn grpo_benchmark_training_step(
         &mut policy_audit,
         None,
         Some(&mut timings),
+        streaming_prefill,
     )?;
     let policy_audit = policy_audit
         .finish()
@@ -10898,14 +11026,15 @@ fn train_tokenized_grpo_group_with_grad_norms(
     // KL-reference forward runs without LoRA (`BasePerStep`) or is skipped.
     ema_ref_lora: Option<&LoraWeights>,
     mut timings: Option<&mut GrpoBenchmarkTimings>,
+    streaming_prefill_policy: StreamingPrefillExecutionPolicy,
 ) -> Result<GrpoGroupStepReport> {
     validate_tokenized_behavior_policy(tgroup, config.behavior_policy)
         .context("validate GRPO behavior-policy provenance")?;
     let skip_kl_reference = !config.kl_penalty_enabled()
         || matches!(config.kl_reference_policy, KlReferencePolicy::None);
 
-    // Same resolution as the `grpo_train` entry points — deterministic from
-    // the config, so the per-group helper doesn't need the value threaded in.
+    // Learning-rate resolution is request-local and independent of runtime
+    // execution policy.
     let learning_rate = config.effective_learning_rate();
     let advantages = compute_advantages(&tgroup.rewards, config.advantage_mode);
     let mut group_loss_sum = 0.0;
@@ -10937,8 +11066,8 @@ fn train_tokenized_grpo_group_with_grad_norms(
         .max()
         .unwrap_or(0);
     let checkpoint_segments = segments.map_or(0, |segs| segs.len());
-    let streaming_tile_tokens = streaming_tile_tokens_for(device);
-    let streaming_prefill = streaming_prefill_enabled_for(device, group_max_seq_len);
+    let streaming_tile_tokens = streaming_prefill_policy.base_tile_tokens();
+    let streaming_prefill = streaming_prefill_policy.enabled_for(group_max_seq_len);
 
     let token_level = matches!(config.loss_aggregation, LossAggregation::TokenLevel);
     let mut group_accum: GradMap = HashMap::new();
@@ -11098,7 +11227,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 action_tokens = num_active,
                 env_tokens = comp_env_count,
                 checkpoint_segments,
-                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                streaming_prefill = streaming_prefill_policy.enabled_for(comp.input_ids.len()),
                 streaming_tile_tokens,
                 "GRPO ref forward start"
             );
@@ -11110,13 +11239,14 @@ fn train_tokenized_grpo_group_with_grad_norms(
             // `selected_log_probs_from_normed_hidden_chunked` are both kt-native;
             // the kt hidden + kt `embed_tokens_t` head weight flow through
             // directly (no candle bridge).
-            let ref_hidden = model_forward_no_head(
+            let ref_hidden = model_forward_no_head_with_policy(
                 backend,
                 &comp.input_ids,
                 weights,
                 model_config,
                 Some(&mut ref_linear_state),
                 ema_ref_lora,
+                streaming_prefill_policy,
             )
             .context("GRPO reference forward pass")?
             .contiguous()
@@ -11138,7 +11268,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 action_tokens = num_active,
                 env_tokens = comp_env_count,
                 checkpoint_segments,
-                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                streaming_prefill = streaming_prefill_policy.enabled_for(comp.input_ids.len()),
                 streaming_tile_tokens,
                 elapsed_ms = ref_started.elapsed().as_millis() as u64,
                 "GRPO ref forward end"
@@ -11212,6 +11342,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         device,
                         echo_env_spec.as_ref(),
                         config.loss.no_policy_loss,
+                        streaming_prefill_policy,
                     )?;
                     let step_elapsed = step_started.elapsed();
                     if let Some(t) = timings.as_deref_mut() {
@@ -11224,7 +11355,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         env_tokens = comp_env_count,
                         checkpoint_segments,
                         streaming_prefill =
-                            streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                            streaming_prefill_policy.enabled_for(comp.input_ids.len()),
                         streaming_tile_tokens,
                         elapsed_ms = step_elapsed.as_millis() as u64,
                         "GRPO step end (checkpointed tape-authoritative kt)"
@@ -11250,6 +11381,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         timings.as_deref_mut(),
                         echo_env_spec.as_ref(),
                         config.loss.no_policy_loss,
+                        streaming_prefill_policy,
                     )?
                 };
                 loss_val = lv;
@@ -13664,6 +13796,7 @@ fn load_or_recompute_checkpoint_boundary(
     segments: &[(usize, usize)],
     lora_detached: &LoraWeights,
     device: &Device,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<Tensor> {
     anyhow::ensure!(
         boundary_idx <= segments.len(),
@@ -13679,7 +13812,7 @@ fn load_or_recompute_checkpoint_boundary(
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
     for replay_idx in anchor_idx..boundary_idx {
         let (start, end) = segments[replay_idx];
-        current = model_forward_segment(
+        current = model_forward_segment_with_policy(
             backend,
             current,
             weights,
@@ -13689,6 +13822,7 @@ fn load_or_recompute_checkpoint_boundary(
             end,
             Some(&mut linear_state),
             Some(lora_detached),
+            streaming_prefill,
         )
         .with_context(|| {
             format!("checkpoint boundary replay segment {replay_idx} layers {start}..{end}")
@@ -14880,6 +15014,7 @@ fn checkpoint_segments_for_config(
     device: &Device,
     seq_len_tokens: usize,
     ckpt_config: CheckpointConfig,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Option<Vec<(usize, usize)>> {
     if !ckpt_config.enabled {
         return None;
@@ -14890,10 +15025,12 @@ fn checkpoint_segments_for_config(
             weights,
             device,
             seq_len_tokens,
+            streaming_prefill,
         ) || rocm_online_full_attention_checkpoint_refinement_needed(
             weights,
             device,
             seq_len_tokens,
+            streaming_prefill,
         ))
     {
         let refined = refine_segments_for_materialized_full_attention(weights, &boundaries);
@@ -14914,10 +15051,11 @@ fn rocm_online_full_attention_checkpoint_refinement_needed(
     weights: &GpuWeights,
     device: &Device,
     seq_len_tokens: usize,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> bool {
     const MIN_TOKENS: usize = 8 * 1024;
 
-    if seq_len_tokens < MIN_TOKENS || !streaming_prefill_enabled_for(device, seq_len_tokens) {
+    if seq_len_tokens < MIN_TOKENS || !streaming_prefill.enabled_for(seq_len_tokens) {
         return false;
     }
     if !matches!(device, Device::Rocm(_)) {
@@ -14935,8 +15073,9 @@ fn materialized_full_attention_checkpoint_refinement_needed(
     weights: &GpuWeights,
     device: &Device,
     seq_len_tokens: usize,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> bool {
-    if !streaming_prefill_enabled_for(device, seq_len_tokens) {
+    if !streaming_prefill.enabled_for(seq_len_tokens) {
         return false;
     }
     if !matches!(device, Device::Metal(_) | Device::Vulkan(_)) {
@@ -15121,10 +15260,9 @@ fn partition_segment_layers_by_attn_type(
 /// Determine whether a time-axis tile path applies for this training step.
 ///
 /// Returns `Some(tile_size)` when:
-/// 1. The streaming-prefill dispatch is enabled for `device` at this
-///    `seq_len` (env override or device-default threshold).
+/// 1. The injected streaming-prefill policy is enabled at this `seq_len`.
 /// 2. The tile size is a positive multiple of `GDN_CHUNK_SIZE` (enforced by
-///    [`streaming_tile_tokens_for`]) and strictly less than `seq_len`.
+///    typed startup validation) and strictly less than `seq_len`.
 ///
 /// Caller routes between two implementations based on
 /// [`model_is_gdn_only`]:
@@ -15138,14 +15276,14 @@ fn partition_segment_layers_by_attn_type(
 #[allow(dead_code)]
 fn tiled_training_tile_size(
     weights: &GpuWeights,
-    device: &Device,
     seq_len: usize,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Option<usize> {
     let _ = weights; // signature retained for callers; gating moved to the dispatcher.
-    if !streaming_prefill_enabled_for(device, seq_len) {
+    if !streaming_prefill.enabled_for(seq_len) {
         return None;
     }
-    let tile = streaming_tile_tokens_for(device);
+    let tile = streaming_prefill.base_tile_tokens();
     if tile == 0 || tile % GDN_CHUNK_SIZE != 0 || tile >= seq_len {
         return None;
     }
@@ -15158,6 +15296,7 @@ fn exact_gdn_reverse_tile_size(
     seq_len: usize,
     seg_start: usize,
     seg_end: usize,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Option<usize> {
     if !kiln_core::env_flag::env_tristate("KILN_EXACT_GDN_TILE_BACKWARD").unwrap_or(true) {
         return None;
@@ -15171,20 +15310,23 @@ fn exact_gdn_reverse_tile_size(
     ) {
         return None;
     }
-    if !streaming_prefill_enabled_for(device, seq_len) {
+    if !streaming_prefill.enabled_for(seq_len) {
         return None;
     }
-    let tile = exact_gdn_backward_tile_tokens_for(device);
+    let tile = exact_gdn_backward_tile_tokens_for(device, streaming_prefill);
     if tile == 0 || tile % GDN_CHUNK_SIZE != 0 || tile >= seq_len {
         return None;
     }
     Some(tile)
 }
 
-fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
-    fn fallback_tile(device: &Device) -> usize {
+fn exact_gdn_backward_tile_tokens_for(
+    device: &Device,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+) -> usize {
+    fn fallback_tile(device: &Device, streaming_prefill: StreamingPrefillExecutionPolicy) -> usize {
         training_precision_policy_for_device(device)
-            .exact_gdn_backward_tile_tokens_or(streaming_tile_tokens_for(device))
+            .exact_gdn_backward_tile_tokens_or(streaming_prefill.base_tile_tokens())
     }
 
     match std::env::var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS") {
@@ -15196,10 +15338,10 @@ fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
                     chunk_size = GDN_CHUNK_SIZE,
                     "ignoring invalid KILN_EXACT_GDN_BACKWARD_TILE_TOKENS"
                 );
-                fallback_tile(device)
+                fallback_tile(device, streaming_prefill)
             }
         },
-        Err(_) => fallback_tile(device),
+        Err(_) => fallback_tile(device, streaming_prefill),
     }
 }
 
@@ -15373,6 +15515,7 @@ fn standard_forward_backward_tape_authoritative_kt(
     params: &TrainableLoraParams,
     label_mask: &[bool],
     device: &Device,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
     let trace_timings = trace_sft_timings();
     let total_start = Instant::now();
@@ -15408,13 +15551,14 @@ fn standard_forward_backward_tape_authoritative_kt(
                         1,
                     );
                     let no_head_start = Instant::now();
-                    let normed = model_forward_no_head(
+                    let normed = model_forward_no_head_with_policy(
                         backend,
                         input_ids,
                         weights,
                         model_config,
                         Some(&mut linear_state),
                         Some(&lora_weights),
+                        streaming_prefill,
                     )
                     .context("tape-authoritative(kt) no-head forward")
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
@@ -15463,13 +15607,14 @@ fn standard_forward_backward_tape_authoritative_kt(
                 SftFlceLossRoute::VulkanActiveRows => {
                     #[cfg(feature = "vulkan")]
                     {
-                        let normed = model_forward_no_head(
+                        let normed = model_forward_no_head_with_policy(
                             backend,
                             input_ids,
                             weights,
                             model_config,
                             Some(&mut linear_state),
                             Some(&lora_weights),
+                            streaming_prefill,
                         )
                         .context("tape-authoritative(kt) no-head Vulkan forward")
                         .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
@@ -15499,7 +15644,7 @@ fn standard_forward_backward_tape_authoritative_kt(
                     }
                 }
                 SftFlceLossRoute::FullLogits => {
-                    let logits = model_forward_kt(
+                    let logits = model_forward_kt_with_policy(
                         backend,
                         input_ids,
                         weights,
@@ -15507,6 +15652,7 @@ fn standard_forward_backward_tape_authoritative_kt(
                         None,
                         Some(&mut linear_state),
                         Some(&lora_weights),
+                        streaming_prefill,
                     )
                     .context("tape-authoritative(kt) fallback full forward")
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
@@ -15632,6 +15778,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     label_mask: &[bool],
     segments: &[(usize, usize)],
     device: &Device,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
     let num_segments = segments.len();
     anyhow::ensure!(
@@ -15725,7 +15872,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
         for (seg_idx, &(start, end)) in segments.iter().enumerate() {
             let segment_start = Instant::now();
-            current = model_forward_segment(
+            current = model_forward_segment_with_policy(
                 backend,
                 current,
                 weights,
@@ -15735,6 +15882,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 end,
                 Some(&mut linear_state),
                 Some(&lora_detached),
+                streaming_prefill,
             )?
             .detach();
             let boundary_label = format!("boundary_segment[{seg_idx}] layers {start}..{end}");
@@ -15784,6 +15932,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 segments,
                 &lora_detached,
                 device,
+                streaming_prefill,
             )?
         } else {
             boundaries[debug_seg_idx]
@@ -15802,6 +15951,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 segments,
                 &lora_detached,
                 device,
+                streaming_prefill,
             )?
         } else {
             boundaries[debug_seg_idx + 1]
@@ -15821,7 +15971,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         let _ = kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
             let mut seg_ls = LinearAttentionState::new(model_config, device)
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-            model_forward_segment(
+            model_forward_segment_with_policy(
                 backend,
                 seg_input,
                 weights,
@@ -15831,6 +15981,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 end,
                 Some(&mut seg_ls),
                 Some(lora_ref),
+                streaming_prefill,
             )
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
         })
@@ -16058,6 +16209,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 segments,
                 &lora_detached,
                 device,
+                streaming_prefill,
             )?
         } else {
             boundaries[seg_idx]
@@ -16085,7 +16237,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 // to each layer's full-sequence pass — see Step 1 note).
                 let mut seg_ls = LinearAttentionState::new(model_config, device)
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                model_forward_segment(
+                model_forward_segment_with_policy(
                     backend,
                     seg_input,
                     weights,
@@ -16095,6 +16247,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                     end,
                     Some(&mut seg_ls),
                     Some(lora_ref),
+                    streaming_prefill,
                 )
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
             })
@@ -16171,6 +16324,30 @@ pub fn standard_forward_backward(
     label_mask: &[bool],
     device: &Device,
 ) -> Result<(f64, GradSource)> {
+    standard_forward_backward_with_policy(
+        backend,
+        input_ids,
+        weights,
+        model_config,
+        params,
+        label_mask,
+        device,
+        StreamingPrefillExecutionPolicy::for_device(*device),
+    )
+}
+
+/// Explicit-policy variant of [`standard_forward_backward`].
+#[allow(clippy::too_many_arguments)]
+pub fn standard_forward_backward_with_policy(
+    backend: &dyn BackendRuntime,
+    input_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    label_mask: &[bool],
+    device: &Device,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+) -> Result<(f64, GradSource)> {
     // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
     // kt tape-authoritative when the backend capability and precision policy
     // allow it. The candle producers
@@ -16206,6 +16383,7 @@ pub fn standard_forward_backward(
             params,
             label_mask,
             device,
+            streaming_prefill,
         )?;
         Ok((loss_val, GradSource::Kt(kt_grads)))
     }
@@ -16224,6 +16402,7 @@ pub fn standard_forward_backward(
             params,
             label_mask,
             device,
+            streaming_prefill,
         );
         anyhow::bail!(
             "standard_forward_backward: SFT training requires a GPU backend feature \
@@ -16285,6 +16464,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     mut timings: Option<&mut GrpoBenchmarkTimings>,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
     no_pg: bool,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<(
     f64,
     Option<f64>,
@@ -16300,13 +16480,14 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
             // Single policy forward through final RMSNorm, without materializing
             // `[1, T, V]` logits. The GRPO loss root chunks the frozen tied head
             // internally and records `dL/d(normed_hidden)` directly.
-            let policy_hidden = model_forward_no_head(
+            let policy_hidden = model_forward_no_head_with_policy(
                 backend,
                 input_ids,
                 weights,
                 model_config,
                 Some(&mut linear_state),
                 Some(&lora_weights),
+                streaming_prefill,
             )
             .context("GRPO tape-authoritative(kt) no-head policy forward")
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
@@ -16431,7 +16612,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
         action_tokens = num_active,
         env_tokens = comp_env_count,
         checkpoint_segments,
-        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_prefill = streaming_prefill.enabled_for(input_ids.len()),
         streaming_tile_tokens,
         elapsed_ms = step_elapsed.as_millis() as u64,
         "GRPO step end (tape-authoritative kt)"
@@ -16461,6 +16642,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     device: &Device,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
     no_pg: bool,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<(
     f64,
     Option<f64>,
@@ -16495,7 +16677,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     {
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
         for &(start, end) in segments {
-            current = model_forward_segment(
+            current = model_forward_segment_with_policy(
                 backend,
                 current,
                 weights,
@@ -16505,6 +16687,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
                 end,
                 Some(&mut linear_state),
                 Some(&lora_detached),
+                streaming_prefill,
             )?
             .detach();
             boundaries.push(current.clone());
@@ -16591,7 +16774,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
             kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
                 let mut seg_ls = LinearAttentionState::new(model_config, device)
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                model_forward_segment(
+                model_forward_segment_with_policy(
                     backend,
                     seg_input,
                     weights,
@@ -16601,6 +16784,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
                     end,
                     Some(&mut seg_ls),
                     Some(lora_ref),
+                    streaming_prefill,
                 )
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
             })
@@ -16989,11 +17173,11 @@ pub(crate) mod tests {
     use super::*;
     use kiln_model::forward::{
         GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
-        GpuLinearAttentionWeights,
+        GpuLinearAttentionWeights, model_forward_kt, model_forward_segment,
     };
 
-    /// Serializes tests in this binary that mutate process-global env vars
-    /// (`KILN_STREAMING_PREFILL`, `KILN_STREAMING_TILE_TOKENS`,
+    /// Serializes tests in this binary that mutate residual training/debug
+    /// environment controls (`KILN_EXACT_GDN_TILE_BACKWARD`,
     /// `KILN_EXACT_GDN_BACKWARD_TILE_TOKENS`,
     /// `KILN_USE_FLCE`, `KILN_DISABLE_RMSNORM_KERNEL`,
     /// `KILN_DISABLE_RMSNORM_BACKWARD`, `KILN_CUDA_FLCE`,
@@ -17475,7 +17659,7 @@ pub(crate) mod tests {
 
     #[test]
     fn training_optimizer_debug_fallback_opt_in_warns_and_counts() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let prior = std::env::var("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK").ok();
         unsafe {
             std::env::set_var("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK", "1");
@@ -17496,7 +17680,7 @@ pub(crate) mod tests {
 
     #[test]
     fn training_optimizer_backend_debug_fallback_uses_policy_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let keys = [
             "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK",
             "KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK",
@@ -19319,19 +19503,27 @@ pub(crate) mod tests {
     #[test]
     fn test_exact_gdn_backward_tile_override_is_independent_of_streaming_tile() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior_streaming_tile = std::env::var("KILN_STREAMING_TILE_TOKENS").ok();
         let prior_backward_tile = std::env::var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS").ok();
+        let cpu_policy = StreamingPrefillExecutionPolicy::resolve(
+            kiln_model::StreamingPrefillBackendPolicy::for_device(cpu_device()),
+            kiln_model::forward::StreamingPrefillMode::Auto,
+            None,
+            Some(256),
+            None,
+            None,
+            true,
+        );
+        let cuda_policy = StreamingPrefillExecutionPolicy::for_device(Device::Cuda(0));
 
         unsafe {
-            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "256");
             std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
         }
         assert_eq!(
-            super::exact_gdn_backward_tile_tokens_for(&cpu_device()),
+            super::exact_gdn_backward_tile_tokens_for(&cpu_device(), cpu_policy),
             256
         );
         assert_eq!(
-            super::exact_gdn_backward_tile_tokens_for(&Device::Cuda(0)),
+            super::exact_gdn_backward_tile_tokens_for(&Device::Cuda(0), cuda_policy),
             1024
         );
 
@@ -19339,7 +19531,7 @@ pub(crate) mod tests {
             std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "128");
         }
         assert_eq!(
-            super::exact_gdn_backward_tile_tokens_for(&cpu_device()),
+            super::exact_gdn_backward_tile_tokens_for(&cpu_device(), cpu_policy),
             128
         );
 
@@ -19347,11 +19539,10 @@ pub(crate) mod tests {
             std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "130");
         }
         assert_eq!(
-            super::exact_gdn_backward_tile_tokens_for(&cpu_device()),
+            super::exact_gdn_backward_tile_tokens_for(&cpu_device(), cpu_policy),
             256
         );
 
-        restore_env("KILN_STREAMING_TILE_TOKENS", prior_streaming_tile);
         restore_env("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", prior_backward_tile);
     }
 
@@ -20218,6 +20409,7 @@ pub(crate) mod tests {
             &params,
             &label_mask,
             &device,
+            StreamingPrefillExecutionPolicy::for_device(device),
         )
         .expect("tape-authoritative(kt) step");
 
@@ -20311,6 +20503,7 @@ pub(crate) mod tests {
                 p,
                 &label_mask,
                 &device,
+                StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("fd loss-value forward");
             lv
@@ -20761,6 +20954,7 @@ pub(crate) mod tests {
                 &params,
                 &label_mask,
                 &device,
+                StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("tape-authoritative forward/backward");
 
@@ -22479,12 +22673,6 @@ pub(crate) mod tests {
 
     #[test]
     fn materialized_full_attention_checkpoint_refinement_limits_replay_scope() -> Result<()> {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior_streaming = std::env::var("KILN_STREAMING_PREFILL").ok();
-        unsafe {
-            std::env::set_var("KILN_STREAMING_PREFILL", "1");
-        }
-
         let device = cpu_device();
         let mut config = tiny_config();
         config.full_attention_interval = 2;
@@ -22496,16 +22684,44 @@ pub(crate) mod tests {
             enabled: true,
             auto_configured: true,
         };
-        let cuda_segments = checkpoint_segments_for_config(&weights, &Device::Cuda(0), 4096, cfg)
-            .expect("CUDA checkpointing should be enabled");
+        let enabled_policy = |device| {
+            StreamingPrefillExecutionPolicy::resolve(
+                kiln_model::StreamingPrefillBackendPolicy::for_device(device),
+                kiln_model::forward::StreamingPrefillMode::Enabled,
+                None,
+                None,
+                None,
+                None,
+                true,
+            )
+        };
+        let cuda_segments = checkpoint_segments_for_config(
+            &weights,
+            &Device::Cuda(0),
+            4096,
+            cfg,
+            enabled_policy(Device::Cuda(0)),
+        )
+        .expect("CUDA checkpointing should be enabled");
         assert_eq!(cuda_segments, vec![(0, 4)]);
 
-        let rocm_segments = checkpoint_segments_for_config(&weights, &Device::Rocm(0), 4096, cfg)
-            .expect("ROCm checkpointing should be enabled");
+        let rocm_segments = checkpoint_segments_for_config(
+            &weights,
+            &Device::Rocm(0),
+            4096,
+            cfg,
+            enabled_policy(Device::Rocm(0)),
+        )
+        .expect("ROCm checkpointing should be enabled");
         assert_eq!(rocm_segments, vec![(0, 4)]);
-        let rocm_long_segments =
-            checkpoint_segments_for_config(&weights, &Device::Rocm(0), 8192, cfg)
-                .expect("ROCm long-context checkpointing should be enabled");
+        let rocm_long_segments = checkpoint_segments_for_config(
+            &weights,
+            &Device::Rocm(0),
+            8192,
+            cfg,
+            enabled_policy(Device::Rocm(0)),
+        )
+        .expect("ROCm long-context checkpointing should be enabled");
         assert_eq!(rocm_long_segments, vec![(0, 3), (3, 4)]);
         let rocm_layer_segments = checkpoint_segments_for_config(
             &weights,
@@ -22516,17 +22732,29 @@ pub(crate) mod tests {
                 enabled: true,
                 auto_configured: true,
             },
+            enabled_policy(Device::Rocm(0)),
         )
         .expect("ROCm layer checkpointing should be enabled");
         assert_eq!(rocm_layer_segments, vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
 
-        let metal_segments = checkpoint_segments_for_config(&weights, &Device::Metal(0), 4096, cfg)
-            .expect("Metal long-context checkpointing should be enabled");
+        let metal_segments = checkpoint_segments_for_config(
+            &weights,
+            &Device::Metal(0),
+            4096,
+            cfg,
+            enabled_policy(Device::Metal(0)),
+        )
+        .expect("Metal long-context checkpointing should be enabled");
         assert_eq!(metal_segments, vec![(0, 3), (3, 4)]);
 
-        let vulkan_segments =
-            checkpoint_segments_for_config(&weights, &Device::Vulkan(0), 4096, cfg)
-                .expect("Vulkan long-context checkpointing should be enabled");
+        let vulkan_segments = checkpoint_segments_for_config(
+            &weights,
+            &Device::Vulkan(0),
+            4096,
+            cfg,
+            enabled_policy(Device::Vulkan(0)),
+        )
+        .expect("Vulkan long-context checkpointing should be enabled");
         assert_eq!(vulkan_segments, vec![(0, 3), (3, 4)]);
 
         for &(start, end) in metal_segments.iter().chain(vulkan_segments.iter()) {
@@ -22540,7 +22768,6 @@ pub(crate) mod tests {
             );
         }
 
-        restore_env("KILN_STREAMING_PREFILL", prior_streaming);
         Ok(())
     }
 
@@ -23622,6 +23849,7 @@ pub(crate) mod tests {
                 &device,
                 None,
                 false,
+                StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("checkpointed GRPO tape-authoritative step");
 
@@ -23925,6 +24153,7 @@ pub(crate) mod tests {
                 None,       // timings
                 None,       // echo_env
                 false,      // no_pg
+                StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("grpo_step_forward_backward_tape_authoritative_kt (F32 Vulkan GRPO)");
 
@@ -24450,6 +24679,7 @@ pub(crate) mod tests {
                 None,
                 None,  // echo_env
                 false, // no_pg
+                StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("grpo_step_forward_backward_tape_authoritative_kt (BF16 Vulkan GRPO)");
 

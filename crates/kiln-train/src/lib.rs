@@ -167,6 +167,7 @@ pub struct TrainingRuntimeContext {
     effective_vram: kiln_memory::vram::GpuVramInfo,
     gradient_checkpoint_policy: GradientCheckpointPolicy,
     runtime_device: Option<kiln_tensor::Device>,
+    streaming_prefill_policy: Option<kiln_model::forward::StreamingPrefillExecutionPolicy>,
 }
 
 impl TrainingRuntimeContext {
@@ -182,6 +183,7 @@ impl TrainingRuntimeContext {
             effective_vram,
             gradient_checkpoint_policy,
             runtime_device: None,
+            streaming_prefill_policy: None,
         }
     }
 
@@ -198,7 +200,22 @@ impl TrainingRuntimeContext {
             effective_vram,
             gradient_checkpoint_policy,
             runtime_device: Some(runtime_device),
+            streaming_prefill_policy: None,
         }
+    }
+
+    /// Install the startup-resolved streaming-prefill policy for this run.
+    ///
+    /// Standalone callers can omit this and receive the selected device's
+    /// backend defaults. Server callers use this builder so inference,
+    /// admission planning, training, and exact-resume identity all share the
+    /// same immutable policy.
+    pub const fn with_streaming_prefill_policy(
+        mut self,
+        policy: kiln_model::forward::StreamingPrefillExecutionPolicy,
+    ) -> Self {
+        self.streaming_prefill_policy = Some(policy);
+        self
     }
 
     /// Build a standalone context using automatic device and checkpoint-policy
@@ -241,6 +258,26 @@ impl TrainingRuntimeContext {
         self.runtime_device
     }
 
+    /// Explicit startup policy, if the owning runtime installed one.
+    pub const fn configured_streaming_prefill_policy(
+        &self,
+    ) -> Option<kiln_model::forward::StreamingPrefillExecutionPolicy> {
+        self.streaming_prefill_policy
+    }
+
+    /// Resolve the immutable streaming-prefill policy for `device`.
+    ///
+    /// This never reads process environment. Compatibility and standalone
+    /// contexts fall back to the backend capability contract for the device.
+    pub fn resolved_streaming_prefill_policy(
+        &self,
+        device: kiln_tensor::Device,
+    ) -> kiln_model::forward::StreamingPrefillExecutionPolicy {
+        self.streaming_prefill_policy.unwrap_or_else(|| {
+            kiln_model::forward::StreamingPrefillExecutionPolicy::for_device(device)
+        })
+    }
+
     /// Resolve the training device without inferring backend identity from
     /// process features, environment variables, or hardware availability.
     ///
@@ -276,8 +313,16 @@ impl TrainingRuntimeContext {
 
     /// Stable exact-resume identity for every input that can change planning.
     pub fn checkpoint_planning_identity(&self) -> serde_json::Value {
+        let streaming_prefill_policy = self
+            .streaming_prefill_policy
+            .or_else(|| {
+                self.runtime_device.map(|device| {
+                    kiln_model::forward::StreamingPrefillExecutionPolicy::for_device(device)
+                })
+            })
+            .map(streaming_prefill_policy_identity);
         serde_json::json!({
-            "schema": "kiln.training-checkpoint-planning.v1",
+            "schema": "kiln.training-checkpoint-planning.v2",
             "effective_vram": {
                 "total_bytes": self.effective_vram.total_bytes,
                 "source": self.effective_vram.source.to_string(),
@@ -285,8 +330,49 @@ impl TrainingRuntimeContext {
             },
             "gradient_checkpoint_policy": self.gradient_checkpoint_policy,
             "runtime_device": self.runtime_device.map(kiln_tensor::Device::short_name),
+            "streaming_prefill_policy": streaming_prefill_policy,
         })
     }
+
+    /// Stable planning identity after resolving the actual training device.
+    pub fn checkpoint_planning_identity_for_device(
+        &self,
+        device: kiln_tensor::Device,
+    ) -> serde_json::Value {
+        let mut identity = self.checkpoint_planning_identity();
+        let object = identity
+            .as_object_mut()
+            .expect("checkpoint planning identity is always an object");
+        object.insert(
+            "runtime_device".to_string(),
+            serde_json::json!(device.short_name()),
+        );
+        object.insert(
+            "streaming_prefill_policy".to_string(),
+            streaming_prefill_policy_identity(self.resolved_streaming_prefill_policy(device)),
+        );
+        identity
+    }
+}
+
+fn streaming_prefill_policy_identity(
+    policy: kiln_model::forward::StreamingPrefillExecutionPolicy,
+) -> serde_json::Value {
+    let mode = match policy.mode() {
+        kiln_model::forward::StreamingPrefillMode::Auto => "auto",
+        kiln_model::forward::StreamingPrefillMode::Enabled => "enabled",
+        kiln_model::forward::StreamingPrefillMode::Disabled => "disabled",
+    };
+    serde_json::json!({
+        "mode": mode,
+        "threshold_tokens": policy.threshold_tokens(),
+        "base_tile_tokens": policy.base_tile_tokens(),
+        "tape_tile_tokens": policy.tape_tile_tokens(),
+        "detached_full_attn_tile_tokens": policy.detached_full_attn_tile_tokens(),
+        "detached_full_attn_boundary_tile_tokens": policy.detached_full_attn_boundary_tile_tokens(),
+        "detached_full_attn_tape_replay_tile_tokens": policy.detached_full_attn_tape_replay_tile_tokens(),
+        "last_token_lm_head": policy.last_token_lm_head(),
+    })
 }
 
 impl Default for TrainingRuntimeContext {
@@ -1877,6 +1963,50 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("does not match")
+        );
+    }
+
+    #[test]
+    fn training_runtime_streaming_prefill_policy_is_explicit_and_resume_stable() {
+        let vram = kiln_memory::vram::GpuVramInfo {
+            total_bytes: 24 * 1024 * 1024 * 1024,
+            source: kiln_memory::vram::VramSource::ConfigOverride,
+            unified: false,
+        };
+        let backend =
+            kiln_model::StreamingPrefillBackendPolicy::for_device(kiln_tensor::Device::Rocm(0));
+        let policy = kiln_model::forward::StreamingPrefillExecutionPolicy::resolve(
+            backend,
+            kiln_model::forward::StreamingPrefillMode::Enabled,
+            Some(4096),
+            Some(2048),
+            Some(1024),
+            Some(8192),
+            false,
+        );
+        let runtime = TrainingRuntimeContext::new_for_device(
+            kiln_tensor::Device::Rocm(0),
+            vram,
+            GradientCheckpointPolicy::Auto,
+        )
+        .with_streaming_prefill_policy(policy);
+
+        assert_eq!(runtime.configured_streaming_prefill_policy(), Some(policy));
+        assert_eq!(
+            runtime.resolved_streaming_prefill_policy(kiln_tensor::Device::Rocm(0)),
+            policy
+        );
+        let identity =
+            runtime.checkpoint_planning_identity_for_device(kiln_tensor::Device::Rocm(0));
+        assert_eq!(identity["schema"], "kiln.training-checkpoint-planning.v2");
+        assert_eq!(identity["streaming_prefill_policy"]["mode"], "enabled");
+        assert_eq!(
+            identity["streaming_prefill_policy"]["base_tile_tokens"],
+            2048
+        );
+        assert_eq!(
+            identity["streaming_prefill_policy"]["last_token_lm_head"],
+            false
         );
     }
 

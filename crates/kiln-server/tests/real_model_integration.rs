@@ -5021,6 +5021,7 @@ async fn rocm_eager_and_graph_decode_survive_active_shrink_and_grow() {
             rocm_graphs: true,
             metal_graphs: false,
             max_decode_batch: Some(1),
+            streaming_prefill: None,
         },
     )));
     assert!(

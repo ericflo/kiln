@@ -152,11 +152,11 @@ fn training_activation_bytes_per_elem(
     }
 }
 
-fn training_activation_estimate_for_runtime_device(
+fn training_activation_estimate_for_streaming_policy(
     base: usize,
     uses_f32_activations: bool,
     has_linear_attention: bool,
-    runtime_device: kiln_tensor::Device,
+    streaming_prefill: kiln_model::StreamingPrefillExecutionPolicy,
     max_seq_len: usize,
 ) -> TrainingActivationEstimate {
     // Mirror kiln-train's GDN tape sizing. The server stamps resolved
@@ -165,8 +165,9 @@ fn training_activation_estimate_for_runtime_device(
     let bytes_per_elem =
         training_activation_bytes_per_elem(base, uses_f32_activations, has_linear_attention);
     let streaming_gdn_tile_tokens = if has_linear_attention {
-        kiln_model::forward::streaming_prefill_enabled_for(&runtime_device, max_seq_len)
-            .then(|| kiln_model::forward::tape_streaming_tile_tokens_for(&runtime_device))
+        streaming_prefill
+            .enabled_for(max_seq_len)
+            .then(|| streaming_prefill.tape_tile_tokens())
             .filter(|&tile| tile > 0 && tile < max_seq_len)
     } else {
         None
@@ -204,13 +205,15 @@ fn training_activation_estimate_for_state(
             .weights
             .linear_attention_layers_in_prefix(runner.config.num_layers)
             > 0;
-    training_activation_estimate_for_runtime_device(
+    training_activation_estimate_for_streaming_policy(
         base,
         runner
             .training_precision_policy()
             .uses_f32_activations_for_mixed_base_weights(),
         has_linear_attention,
-        capabilities.device,
+        state
+            .training_runtime
+            .resolved_streaming_prefill_policy(capabilities.device),
         max_seq_len,
     )
 }
@@ -5556,52 +5559,36 @@ mod tests {
     }
 
     #[test]
-    fn server_preflight_streaming_policy_uses_runtime_backend_device() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior_streaming = std::env::var("KILN_STREAMING_PREFILL").ok();
-        let prior_streaming_tile = std::env::var("KILN_STREAMING_TILE_TOKENS").ok();
-        let prior_tape_tile = std::env::var("KILN_TAPE_STREAMING_TILE_TOKENS").ok();
-        unsafe {
-            std::env::remove_var("KILN_STREAMING_PREFILL");
-            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
-            std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
-        }
-
+    fn server_preflight_streaming_policy_uses_runtime_policy() {
         let max_seq_len = 104_412;
-        let rocm = training_activation_estimate_for_runtime_device(
+        let configured = kiln_model::StreamingPrefillExecutionPolicy::resolve(
+            kiln_model::StreamingPrefillBackendPolicy::for_backend(
+                "rocm",
+                kiln_tensor::Device::Rocm(0),
+            ),
+            kiln_model::StreamingPrefillMode::Enabled,
+            None,
+            None,
+            Some(2048),
+            None,
+            true,
+        );
+        let rocm = training_activation_estimate_for_streaming_policy(
             2,
             false,
             true,
-            kiln_tensor::Device::Rocm(0),
+            configured,
             max_seq_len,
         );
-        let cpu_storage = training_activation_estimate_for_runtime_device(
+        let cpu_storage = training_activation_estimate_for_streaming_policy(
             2,
             false,
             true,
-            kiln_tensor::Device::Cpu,
+            kiln_model::StreamingPrefillExecutionPolicy::for_device(kiln_tensor::Device::Cpu),
             max_seq_len,
         );
 
-        unsafe {
-            if let Some(value) = prior_streaming {
-                std::env::set_var("KILN_STREAMING_PREFILL", value);
-            } else {
-                std::env::remove_var("KILN_STREAMING_PREFILL");
-            }
-            if let Some(value) = prior_streaming_tile {
-                std::env::set_var("KILN_STREAMING_TILE_TOKENS", value);
-            } else {
-                std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
-            }
-            if let Some(value) = prior_tape_tile {
-                std::env::set_var("KILN_TAPE_STREAMING_TILE_TOKENS", value);
-            } else {
-                std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
-            }
-        }
-
-        assert_eq!(rocm.streaming_gdn_tile_tokens, Some(1024));
+        assert_eq!(rocm.streaming_gdn_tile_tokens, Some(2048));
         assert_eq!(cpu_storage.streaming_gdn_tile_tokens, None);
     }
 

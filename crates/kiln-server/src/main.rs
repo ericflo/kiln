@@ -39,6 +39,7 @@ fn resolve_model_runner_runtime_options(
             rocm_graphs: true,
             metal_graphs: true,
             max_decode_batch,
+            streaming_prefill: None,
         }
     } else {
         ModelRunnerRuntimeOptions {
@@ -667,6 +668,10 @@ async fn main() -> Result<()> {
             kiln_model::backend::for_device_kt(&device_kt).backend_capabilities();
         let decode_batcher_policy = backend_capabilities.decode_batcher;
         let speculative_mtp_support = backend_capabilities.decode.mtp_speculative_generation;
+        let streaming_prefill_runtime_config = config
+            .streaming_prefill
+            .resolve(backend_capabilities.streaming_prefill);
+        graph_options.streaming_prefill = Some(streaming_prefill_runtime_config.execution_policy());
         let startup_decode_runtime = kiln_server::batching_engine::resolve_decode_runtime_config(
             config.server.deterministic,
             config.server.max_decode_batch,
@@ -794,7 +799,7 @@ async fn main() -> Result<()> {
             "training endpoints available — in-process LoRA training (no sidecar needed)"
         );
         let speculative_runtime_policy = SpeculativeRuntimePolicy::new(speculative_mtp_support);
-        AppState::new_real_with_serving_profile(
+        let state = AppState::new_real_with_serving_profile(
             model_config,
             runner,
             tokenizer,
@@ -804,6 +809,7 @@ async fn main() -> Result<()> {
             response_delivery_policy,
             startup_decode_runtime,
             config.batching,
+            streaming_prefill_runtime_config,
             config.speculative,
             speculative_runtime_policy,
             config.server.max_batch_tokens,
@@ -816,7 +822,8 @@ async fn main() -> Result<()> {
             config.server.serving_profile,
             gradient_checkpoint_policy,
         )
-        .context("failed to initialize real server state")?
+        .context("failed to initialize real server state")?;
+        state
     } else {
         // Mock mode: use scheduler + mock engine.
         tracing::debug!("no model path set — running in mock mode");
@@ -865,6 +872,9 @@ async fn main() -> Result<()> {
             },
             state.decode_runtime_config.max_decode_batch.effective,
         );
+        state.streaming_prefill_runtime_config = config.streaming_prefill.resolve(
+            kiln_model::StreamingPrefillBackendPolicy::for_backend("cpu", kiln_tensor::Device::Cpu),
+        );
         state
     };
 
@@ -880,6 +890,90 @@ async fn main() -> Result<()> {
         "decode runtime configuration resolved"
     );
 
+    let streaming_prefill = state.streaming_prefill_runtime_config;
+    tracing::info!(
+        configured_mode = %streaming_prefill.dispatch.configured_mode,
+        configured_mode_source = %streaming_prefill.dispatch.configured_source,
+        backend_dispatch = ?streaming_prefill.dispatch.backend_policy.policy,
+        backend_minimum_prompt_tokens = ?streaming_prefill
+            .dispatch
+            .backend_policy
+            .minimum_prompt_tokens,
+        effective_dispatch = ?streaming_prefill.dispatch.effective.policy,
+        effective_minimum_prompt_tokens = ?streaming_prefill
+            .dispatch
+            .effective
+            .minimum_prompt_tokens,
+        effective_dispatch_source = %streaming_prefill.dispatch.effective_source,
+        threshold_tokens_configured = ?streaming_prefill.threshold_tokens.configured,
+        threshold_tokens_configured_source = %streaming_prefill
+            .threshold_tokens
+            .configured_source,
+        threshold_tokens_backend_policy = ?streaming_prefill.threshold_tokens.backend_policy,
+        threshold_tokens_effective_for_auto_mode = ?streaming_prefill
+            .threshold_tokens
+            .effective_for_auto_mode,
+        threshold_override_applied = streaming_prefill
+            .threshold_tokens
+            .override_applied_to_backend_auto_policy,
+        tile_tokens_configured = ?streaming_prefill.tile_tokens.configured,
+        tile_tokens_configured_source = %streaming_prefill.tile_tokens.configured_source,
+        tile_tokens_backend_policy = streaming_prefill.tile_tokens.backend_policy,
+        tile_tokens_effective = streaming_prefill.tile_tokens.effective,
+        tile_tokens_effective_source = %streaming_prefill.tile_tokens.effective_source,
+        tape_tile_tokens_configured = ?streaming_prefill.tape_tile_tokens.configured,
+        tape_tile_tokens_configured_source = %streaming_prefill
+            .tape_tile_tokens
+            .configured_source,
+        tape_tile_tokens_backend_policy = streaming_prefill.tape_tile_tokens.backend_policy,
+        tape_tile_tokens_effective = streaming_prefill.tape_tile_tokens.effective,
+        tape_tile_tokens_effective_source = %streaming_prefill.tape_tile_tokens.effective_source,
+        detached_full_attn_tile_tokens_configured = ?streaming_prefill
+            .detached_full_attn_tile_tokens
+            .configured,
+        detached_full_attn_tile_tokens_configured_source = %streaming_prefill
+            .detached_full_attn_tile_tokens
+            .configured_source,
+        detached_full_attn_tile_tokens_backend_policy = streaming_prefill
+            .detached_full_attn_tile_tokens
+            .backend_policy,
+        detached_full_attn_tile_tokens_effective = streaming_prefill
+            .detached_full_attn_tile_tokens
+            .effective,
+        detached_full_attn_tile_tokens_effective_source = %streaming_prefill
+            .detached_full_attn_tile_tokens
+            .effective_source,
+        detached_full_attn_boundary_tile_tokens_backend_policy = streaming_prefill
+            .detached_full_attn_boundary_tile_tokens
+            .backend_policy,
+        detached_full_attn_boundary_tile_tokens_effective = streaming_prefill
+            .detached_full_attn_boundary_tile_tokens
+            .effective,
+        detached_full_attn_boundary_tile_tokens_effective_source = %streaming_prefill
+            .detached_full_attn_boundary_tile_tokens
+            .effective_source,
+        detached_full_attn_tape_replay_tile_tokens_backend_policy = streaming_prefill
+            .detached_full_attn_tape_replay_tile_tokens
+            .backend_policy,
+        detached_full_attn_tape_replay_tile_tokens_effective = streaming_prefill
+            .detached_full_attn_tape_replay_tile_tokens
+            .effective,
+        detached_full_attn_tape_replay_tile_tokens_effective_source = %streaming_prefill
+            .detached_full_attn_tape_replay_tile_tokens
+            .effective_source,
+        last_token_lm_head_configured = streaming_prefill.last_token_lm_head.configured,
+        last_token_lm_head_configured_source = %streaming_prefill
+            .last_token_lm_head
+            .configured_source,
+        last_token_lm_head_effective = streaming_prefill.last_token_lm_head.effective,
+        last_token_lm_head_effective_source = %streaming_prefill
+            .last_token_lm_head
+            .effective_source,
+        immutable_after_startup = streaming_prefill.immutable_after_startup,
+        restart_required_to_change = streaming_prefill.restart_required_to_change,
+        "streaming-prefill runtime configuration resolved"
+    );
+
     // Apply server-level checkpoint_interval from config
     state.serving_profile = config.server.serving_profile;
     state.speculative_config = config.speculative;
@@ -891,7 +985,8 @@ async fn main() -> Result<()> {
             .unwrap_or(kiln_tensor::Device::Cpu),
         state.vram_info,
         gradient_checkpoint_policy,
-    );
+    )
+    .with_streaming_prefill_policy(state.streaming_prefill_runtime_config.execution_policy());
     state.checkpoint_interval = config.training.checkpoint_interval;
     state.training_webhook_url = config.training.webhook_url.clone();
     state.max_queued_training_jobs = config.training.max_queued_jobs;
@@ -1726,6 +1821,7 @@ mod tests {
                 rocm_graphs: true,
                 metal_graphs: true,
                 max_decode_batch: Some(17),
+                streaming_prefill: None,
             }
         );
         assert!(!resolve_model_runner_runtime_options(policy, false, Some(17)).cuda_graphs);

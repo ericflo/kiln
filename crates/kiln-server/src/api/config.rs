@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::config::{
     BatchingRuntimeConfig, ConfigValueSource, DecodeRuntimeConfig, ServingProfileDiagnostics,
-    SpecMethod,
+    SpecMethod, StreamingPrefillRuntimeConfig,
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::state::{AppState, DirectDecodeRendezvousRuntimeState, ModelBackend};
@@ -21,6 +21,7 @@ struct ConfigResponse {
     serving_profile: ServingProfileDiagnostics,
     decode_runtime: DecodeRuntimeConfig,
     batching: BatchingConfigResponse,
+    streaming_prefill: StreamingPrefillRuntimeConfig,
     speculative: SpeculativeConfig,
     vram: VramConfig,
     kv_cache: KvCacheConfig,
@@ -245,6 +246,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             ),
             direct_decode_rendezvous: state.direct_decode_rendezvous_runtime_state(),
         },
+        streaming_prefill: state.streaming_prefill_runtime_config,
         speculative: build_speculative_config(&state),
         vram: build_vram_config(&state, memory_observation),
         kv_cache: KvCacheConfig {
@@ -483,6 +485,8 @@ mod tests {
         );
         state.default_thinking_budget_tokens = Some(64);
         state.default_thinking_budget_ms = Some(1_500);
+        let expected_streaming_prefill =
+            serde_json::to_value(state.streaming_prefill_runtime_config).unwrap();
         let app = routes().with_state(state);
 
         let response = app
@@ -500,6 +504,7 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
+        assert_eq!(json["streaming_prefill"], expected_streaming_prefill);
         assert_eq!(json["serving_profile"]["profile"], "experimental");
         assert_eq!(json["serving_profile"]["source"], "environment");
         assert_eq!(json["serving_profile"]["immutable_after_startup"], true);
@@ -590,6 +595,28 @@ mod tests {
         assert_eq!(
             json["batching"]["configuration"]["burst_prefill_admission"],
             false
+        );
+        assert_eq!(
+            json["streaming_prefill"]["dispatch"]["configured_mode"],
+            "auto"
+        );
+        assert_eq!(
+            json["streaming_prefill"]["dispatch"]["backend_policy"]["policy"],
+            "never"
+        );
+        assert_eq!(
+            json["streaming_prefill"]["dispatch"]["effective_source"],
+            "backend_policy"
+        );
+        assert_eq!(
+            json["streaming_prefill"]["tile_tokens"]["backend_policy"],
+            8192
+        );
+        assert_eq!(json["streaming_prefill"]["tile_tokens"]["effective"], 8192);
+        assert_eq!(json["streaming_prefill"]["immutable_after_startup"], true);
+        assert_eq!(
+            json["streaming_prefill"]["restart_required_to_change"],
+            true
         );
         assert_eq!(json["speculative"]["enabled"], false);
         assert_eq!(json["speculative"]["configured_method"], "off");

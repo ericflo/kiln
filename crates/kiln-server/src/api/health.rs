@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use crate::batching_engine::BatchingEngineSnapshot;
 use crate::config::{
     BatchingRuntimeConfig, ConfigValueSource, DecodeRuntimeConfig, ModelDefaultsProfile,
-    ServingProfileDiagnostics, ServingRuntimePolicy,
+    ServingProfileDiagnostics, ServingRuntimePolicy, StreamingPrefillRuntimeConfig,
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::recent_requests::RequestRecord;
@@ -54,6 +54,7 @@ struct HealthResponse {
     prefix_cache: PrefixCacheInfo,
     prompt_caches: PromptCachesInfo,
     decode_runtime: DecodeRuntimeInfo,
+    prefill_runtime: PrefillRuntimeInfo,
     training: TrainingInfo,
     checks: Vec<HealthCheck>,
 }
@@ -294,6 +295,11 @@ struct DecodeRuntimeInfo {
     memory_governor: MemoryGovernorRuntimeInfo,
     decode_batcher: Option<DecodeBatcherInfo>,
     batching_engine: Option<BatchingEngineInfo>,
+}
+
+#[derive(Serialize)]
+struct PrefillRuntimeInfo {
+    streaming_prefill: StreamingPrefillRuntimeConfig,
 }
 
 #[derive(Serialize)]
@@ -879,6 +885,9 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         prefix_cache,
         prompt_caches,
         decode_runtime,
+        prefill_runtime: PrefillRuntimeInfo {
+            streaming_prefill: state.streaming_prefill_runtime_config,
+        },
         training,
         checks,
     };
@@ -1363,6 +1372,8 @@ mod tests {
         state.base_weight_shard_manifest = Some(Arc::new(shard_manifest.clone()));
         let execution_provenance = crate::execution_provenance::test_execution_provenance();
         state.execution_provenance = Some(Arc::new(execution_provenance.clone()));
+        let expected_streaming_prefill =
+            serde_json::to_value(state.streaming_prefill_runtime_config).unwrap();
         let app = routes().with_state(state);
 
         let resp = app
@@ -1382,6 +1393,10 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
+        assert_eq!(
+            json["prefill_runtime"]["streaming_prefill"],
+            expected_streaming_prefill
+        );
         assert_eq!(json["status"], "ok");
         assert!(json["uptime_seconds"].is_number());
         assert!(json["model"].as_str().unwrap().contains("Qwen3.5-4B"));
@@ -1489,6 +1504,18 @@ mod tests {
         assert_eq!(json["prefix_cache"]["pending_release_entries"], 0);
         assert!(json["prompt_caches"].is_object());
         assert!(json["decode_runtime"].is_object());
+        assert_eq!(
+            json["prefill_runtime"]["streaming_prefill"]["dispatch"]["configured_mode"],
+            "auto"
+        );
+        assert_eq!(
+            json["prefill_runtime"]["streaming_prefill"]["dispatch"]["effective"]["policy"],
+            "never"
+        );
+        assert_eq!(
+            json["prefill_runtime"]["streaming_prefill"]["tape_tile_tokens"]["effective"],
+            8192
+        );
         assert_eq!(
             json["decode_runtime"]["configuration"]["deterministic"]["enabled"],
             false

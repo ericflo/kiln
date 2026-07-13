@@ -1388,72 +1388,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_STREAMING_PREFILL",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/api/training.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/api/training.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_TAPE_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/api/training.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_STREAMING_PREFILL",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/api/training.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/api/training.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_TAPE_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/api/training.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
       "argument": "& name",
       "argument_kind": "expression",
       "count": 1,
@@ -2841,28 +2775,6 @@
     {
       "api": "set_var",
       "argument": "KILN_METAL_TRAINING_OPTIMIZER_FALLBACK",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_STREAMING_PREFILL",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_STREAMING_TILE_TOKENS",
       "argument_kind": "literal",
       "count": 1,
       "language": "rust",
@@ -7758,39 +7670,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "KILN_STREAMING_PREFILL",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/training.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/training.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_TAPE_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/training.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env!",
       "argument": "CARGO_PKG_VERSION",
       "argument_kind": "literal",
@@ -9321,28 +9200,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_STREAMING_PREFILL",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_TENSOR_VULKAN_TEST",
       "argument_kind": "literal",
       "count": 3,
@@ -10345,9 +10202,9 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 577,
-    "process_mutation_entries": 278,
-    "read_call_sites": 968,
-    "read_entries": 661
+    "process_mutation_call_sites": 566,
+    "process_mutation_entries": 270,
+    "read_call_sites": 963,
+    "read_entries": 656
   }
 }

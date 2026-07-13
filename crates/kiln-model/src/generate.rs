@@ -32,16 +32,17 @@ use crate::cuda_graph::CudaGraphRunner;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
 use crate::forward::lm_head_sample_backend_decode_if;
 use crate::forward::{
-    GpuWeights, LinearAttentionState, PagedLayerForwardState, model_forward_kt,
-    model_forward_paged, model_forward_paged_batched_decode_hidden,
+    GpuWeights, LinearAttentionState, PagedLayerForwardState, StreamingPrefillExecutionPolicy,
+    model_forward_kt_with_policy, model_forward_paged, model_forward_paged_batched_decode_hidden,
     model_forward_paged_decode_contiguous_batch_greedy_with_ids,
     model_forward_paged_decode_contiguous_batch_hidden_with_ids,
     model_forward_paged_decode_contiguous_batch_sample_with_ids, model_forward_paged_last_token,
     model_forward_paged_last_token_greedy, model_forward_paged_last_token_layer_group,
     model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
-    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
-    model_forward_paged_streaming_with_progress,
-    model_forward_paged_streaming_with_progress_offset, streaming_prefill_enabled_for,
+    model_forward_paged_streaming_last_token_with_last_hidden_with_policy,
+    model_forward_paged_streaming_with_policy,
+    model_forward_paged_streaming_with_progress_and_policy,
+    model_forward_paged_streaming_with_progress_offset_and_policy,
 };
 use crate::metal_graph::MetalGraphRunner;
 use crate::rocm_graph::RocmGraphRunner;
@@ -333,6 +334,8 @@ pub struct ModelRunner {
     /// mismatch.
     batched_state_cache: Mutex<Option<CachedBatchedState>>,
     backend: Arc<dyn BackendRuntime>,
+    /// Immutable startup-resolved streaming-prefill execution policy.
+    streaming_prefill: StreamingPrefillExecutionPolicy,
     backend_health: BackendHealthHandle,
     memory_runtime: Option<InferenceMemoryRuntime>,
 }
@@ -493,6 +496,9 @@ pub struct ModelRunnerRuntimeOptions {
     /// Exact width required by an owning scheduler. `None` leaves standalone
     /// model consumers on backend/debug defaults.
     pub max_decode_batch: Option<usize>,
+    /// Owning-product streaming-prefill policy. `None` preserves the selected
+    /// backend's automatic defaults for standalone and compatibility callers.
+    pub streaming_prefill: Option<StreamingPrefillExecutionPolicy>,
 }
 
 impl ModelRunnerRuntimeOptions {
@@ -502,6 +508,7 @@ impl ModelRunnerRuntimeOptions {
             rocm_graphs: false,
             metal_graphs: false,
             max_decode_batch: None,
+            streaming_prefill: None,
         }
     }
 }
@@ -2498,6 +2505,7 @@ impl ModelRunner {
                 rocm_graphs: true,
                 metal_graphs: true,
                 max_decode_batch: None,
+                streaming_prefill: None,
             },
         )
     }
@@ -2542,6 +2550,9 @@ impl ModelRunner {
             TrainingLossBackend::runtime_training_capabilities(selected_backend.as_ref());
         let decode_buffer_max_batch =
             decode_buffer_max_batch(selected_backend.as_ref(), options.max_decode_batch);
+        let streaming_prefill = options.streaming_prefill.unwrap_or_else(|| {
+            StreamingPrefillExecutionPolicy::for_runtime(selected_backend.as_ref())
+        });
         tracing::info!(
             backend = BackendIdentity::runtime_name(selected_backend.as_ref()),
             execution_device = %execution_device.short_name(),
@@ -2574,6 +2585,7 @@ impl ModelRunner {
             decode_buffer_config: OnceLock::new(),
             batched_state_cache: Mutex::new(None),
             backend: selected_backend,
+            streaming_prefill,
             backend_health: BackendHealthHandle::default(),
             memory_runtime: None,
         }
@@ -2607,6 +2619,11 @@ impl ModelRunner {
     /// that installed process memory governance outside `ModelRunner`.
     pub const fn inference_memory_runtime(&self) -> Option<InferenceMemoryRuntime> {
         self.memory_runtime
+    }
+
+    /// Startup-resolved policy governing streaming-prefill dispatch and tiles.
+    pub const fn streaming_prefill_policy(&self) -> StreamingPrefillExecutionPolicy {
+        self.streaming_prefill
     }
 
     pub fn backend_health_handle(&self) -> BackendHealthHandle {
@@ -3007,7 +3024,7 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         // Prefill: run forward pass on all prompt tokens at once
-        let logits = model_forward_kt(
+        let logits = model_forward_kt_with_policy(
             &*self.backend,
             &prompt_tokens,
             &self.weights,
@@ -3015,6 +3032,7 @@ impl ModelRunner {
             Some(&mut kv_cache),
             Some(&mut linear_state),
             self.active_lora.as_ref(),
+            self.streaming_prefill,
         )
         .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
@@ -3067,7 +3085,7 @@ impl ModelRunner {
             }
 
             // Decode step: forward pass on just the new token
-            let logits = model_forward_kt(
+            let logits = model_forward_kt_with_policy(
                 &*self.backend,
                 &[next_token],
                 &self.weights,
@@ -3075,6 +3093,7 @@ impl ModelRunner {
                 Some(&mut kv_cache),
                 Some(&mut linear_state),
                 self.active_lora.as_ref(),
+                self.streaming_prefill,
             )
             .context("decode forward pass failed")?;
             kv_cache.advance(1);
@@ -3117,7 +3136,7 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         // Prefill: run forward pass on all prompt tokens at once
-        let logits = model_forward_kt(
+        let logits = model_forward_kt_with_policy(
             &*self.backend,
             prompt_tokens,
             &self.weights,
@@ -3125,6 +3144,7 @@ impl ModelRunner {
             Some(&mut kv_cache),
             Some(&mut linear_state),
             self.active_lora.as_ref(),
+            self.streaming_prefill,
         )
         .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
@@ -3182,7 +3202,7 @@ impl ModelRunner {
             }
 
             // Decode step: forward pass on just the new token (KV cache has all previous)
-            let logits = model_forward_kt(
+            let logits = model_forward_kt_with_policy(
                 &*self.backend,
                 &[next_token],
                 &self.weights,
@@ -3190,6 +3210,7 @@ impl ModelRunner {
                 Some(&mut kv_cache),
                 Some(&mut linear_state),
                 self.active_lora.as_ref(),
+                self.streaming_prefill,
             )
             .context("decode forward pass failed")?;
             kv_cache.advance(1);
@@ -3820,10 +3841,7 @@ impl ModelRunner {
 
         let use_greedy_prefill_token = params.is_effectively_greedy()
             && greedy_token_decode_enabled(self.backend.as_ref())
-            && !streaming_prefill_enabled_for(
-                &self.weights.embed_tokens.device(),
-                prefill_tokens.len(),
-            );
+            && !self.streaming_prefill.enabled_for(prefill_tokens.len());
         // Same capability gate as the batching-engine path: the split
         // snapshot is what makes multi-turn strict-prefix lookups possible
         // (RealPrefixCache only serves longer prompts from block-aligned
@@ -3836,13 +3854,10 @@ impl ModelRunner {
         let prefill_start = std::time::Instant::now();
         let prefill_source = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(
-                &self.weights.embed_tokens.device(),
-                prefill_tokens.len(),
-            ) {
+            if self.streaming_prefill.enabled_for(prefill_tokens.len()) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
-                    let _ = model_forward_paged_streaming_with_progress(
+                    let _ = model_forward_paged_streaming_with_progress_and_policy(
                         &*self.backend,
                         head_tokens,
                         &self.weights,
@@ -3853,6 +3868,7 @@ impl ModelRunner {
                         Some(&mut linear_state),
                         self.active_lora.as_ref(),
                         cancel,
+                        self.streaming_prefill,
                     )
                     .context("prefill forward pass (paged prefix cache, streaming head)")?;
                     prefill_split_snapshot = Some(RollingPrefixSnapshot {
@@ -3863,7 +3879,7 @@ impl ModelRunner {
                     });
 
                     let tail_tokens = &prompt_tokens[split_pos..];
-                    let logits = model_forward_paged_streaming_with_progress_offset(
+                    let logits = model_forward_paged_streaming_with_progress_offset_and_policy(
                         &*self.backend,
                         tail_tokens,
                         &self.weights,
@@ -3875,6 +3891,7 @@ impl ModelRunner {
                         self.active_lora.as_ref(),
                         cancel,
                         head_tokens.len() as u64,
+                        self.streaming_prefill,
                     )
                     .context("prefill forward pass (paged prefix cache, streaming tail)")?;
                     if let Some(cancel) = cancel {
@@ -3883,7 +3900,7 @@ impl ModelRunner {
                     // (#1082) kt-native logits — sampler is kt now; no candle bridge.
                     PrefillSampleSource::Logits(logits)
                 } else {
-                    let logits = model_forward_paged_streaming_with_progress(
+                    let logits = model_forward_paged_streaming_with_progress_and_policy(
                         &*self.backend,
                         prefill_tokens,
                         &self.weights,
@@ -3894,6 +3911,7 @@ impl ModelRunner {
                         Some(&mut linear_state),
                         self.active_lora.as_ref(),
                         cancel,
+                        self.streaming_prefill,
                     )
                     .context("prefill forward pass (paged prefix cache, streaming) failed")?;
                     PrefillSampleSource::Logits(logits)
@@ -4167,10 +4185,9 @@ impl ModelRunner {
         let split_pos = capture_prefix_split
             .then(|| strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size))
             .flatten();
-        let streaming = streaming_prefill_enabled_for(
-            &self.weights.embed_tokens.device(),
-            prompt_tokens.len().saturating_sub(cached_tokens),
-        );
+        let streaming = self
+            .streaming_prefill
+            .enabled_for(prompt_tokens.len().saturating_sub(cached_tokens));
 
         Ok(PagedBatchedPrefillStart::Prefilling(
             PagedBatchedPrefillState {
@@ -4274,7 +4291,7 @@ impl ModelRunner {
             if state.streaming && !layer_bounded {
                 Ok((
                     Some(
-                        model_forward_paged_streaming_with_progress_offset(
+                        model_forward_paged_streaming_with_progress_offset_and_policy(
                             &*self.backend,
                             tokens,
                             &self.weights,
@@ -4286,6 +4303,7 @@ impl ModelRunner {
                             self.active_lora.as_ref(),
                             cancel,
                             chunk_start.saturating_sub(state.cached_tokens) as u64,
+                            self.streaming_prefill,
                         )
                         .context("batched-engine chunked streaming prefill failed")?,
                     ),
@@ -6973,11 +6991,8 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(
-                &self.weights.embed_tokens.device(),
-                prompt_tokens.len(),
-            ) {
-                model_forward_paged_streaming_with_progress(
+            if self.streaming_prefill.enabled_for(prompt_tokens.len()) {
+                model_forward_paged_streaming_with_progress_and_policy(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
@@ -6988,6 +7003,7 @@ impl ModelRunner {
                     Some(&mut linear_state),
                     self.active_lora.as_ref(),
                     cancel,
+                    self.streaming_prefill,
                 )
                 .context("prefill forward pass (paged, streaming) failed")?
             } else {
@@ -7123,12 +7139,11 @@ impl ModelRunner {
         // Prefill: lock the paged cache for one forward pass and drop it
         // before the decode loop starts. The decode loop then re-acquires the
         // cache per step.
-        let streaming_prefill =
-            streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len());
+        let streaming_prefill = self.streaming_prefill.enabled_for(prompt_tokens.len());
         let prefill_source = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill {
-                let logits = model_forward_paged_streaming(
+                let logits = model_forward_paged_streaming_with_policy(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
@@ -7138,6 +7153,7 @@ impl ModelRunner {
                     0,
                     Some(&mut linear_state),
                     self.active_lora.as_ref(),
+                    self.streaming_prefill,
                 )
                 .context("prefill forward pass (paged, streaming) failed")?;
                 // (#1082) kt-native logits — sampler is kt now; no candle bridge.
@@ -7326,11 +7342,8 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(
-                &self.weights.embed_tokens.device(),
-                prompt_tokens.len(),
-            ) {
-                model_forward_paged_streaming(
+            if self.streaming_prefill.enabled_for(prompt_tokens.len()) {
+                model_forward_paged_streaming_with_policy(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
@@ -7340,6 +7353,7 @@ impl ModelRunner {
                     0,
                     Some(&mut linear_state),
                     self.active_lora.as_ref(),
+                    self.streaming_prefill,
                 )
                 .context("prefill forward pass (paged skip-layer, streaming) failed")?
             } else {
@@ -7510,12 +7524,10 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         // Prefill: forward pass on all prompt tokens (never uses CUDA graphs).
-        // Long Metal prompts use tiled streaming prefill by default; env
-        // overrides can force either path.
-        let streaming_prefill =
-            streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len());
+        // The immutable startup policy selects tiled or monolithic execution.
+        let streaming_prefill = self.streaming_prefill.enabled_for(prompt_tokens.len());
         let prefill_source = if streaming_prefill {
-            let logits = model_forward_paged_streaming(
+            let logits = model_forward_paged_streaming_with_policy(
                 &*self.backend,
                 prompt_tokens,
                 &self.weights,
@@ -7525,6 +7537,7 @@ impl ModelRunner {
                 0,
                 Some(&mut linear_state),
                 self.active_lora.as_ref(),
+                self.streaming_prefill,
             )
             .context("prefill forward pass (paged, streaming) failed")?;
             // (#1082) kt-native logits — sampler is kt now; no candle bridge.
@@ -7760,7 +7773,7 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         // Prefill: full model forward pass on all prompt tokens
-        let logits = model_forward_kt(
+        let logits = model_forward_kt_with_policy(
             &*self.backend,
             prompt_tokens,
             &self.weights,
@@ -7768,6 +7781,7 @@ impl ModelRunner {
             Some(&mut kv_cache),
             Some(&mut linear_state),
             self.active_lora.as_ref(),
+            self.streaming_prefill,
         )
         .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
@@ -8029,37 +8043,36 @@ impl ModelRunner {
 
         // Prefill: feed the prompt through the base model and capture the
         // post-final-norm last hidden row as the seed `h_prev`.
-        let (prefill_logits_kt, h_prev_kt) = if streaming_prefill_enabled_for(
-            &self.weights.embed_tokens.device(),
-            prompt_tokens.len(),
-        ) {
-            model_forward_paged_streaming_last_token_with_last_hidden(
-                &*self.backend,
-                prompt_tokens,
-                &self.weights,
-                &self.config,
-                &base_cache,
-                &base_block_table,
-                0,
-                Some(&mut linear_state),
-                self.active_lora.as_ref(),
-            )
-            .context("mtp streaming prefill forward pass failed")?
-        } else {
-            model_forward_paged_last_token_with_last_hidden(
-                &*self.backend,
-                prompt_tokens,
-                &self.weights,
-                &self.config,
-                &base_cache,
-                &base_block_table,
-                0,
-                Some(&mut linear_state),
-                self.active_lora.as_ref(),
-                None,
-            )
-            .context("mtp prefill forward pass failed")?
-        };
+        let (prefill_logits_kt, h_prev_kt) =
+            if self.streaming_prefill.enabled_for(prompt_tokens.len()) {
+                model_forward_paged_streaming_last_token_with_last_hidden_with_policy(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &base_cache,
+                    &base_block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    self.streaming_prefill,
+                )
+                .context("mtp streaming prefill forward pass failed")?
+            } else {
+                model_forward_paged_last_token_with_last_hidden(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &base_cache,
+                    &base_block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("mtp prefill forward pass failed")?
+            };
         // (#1082) MTP speculative step + speculative.rs are fully kt now —
         // `h_prev`/`prefill_logits` stay kt; no candle bridge.
         let prefill_logits = prefill_logits_kt;
@@ -8277,7 +8290,7 @@ impl ModelRunner {
         let mut kv_cache = self.new_kv_cache(max_total)?;
         let mut linear_state = self.new_linear_state()?;
 
-        let logits = model_forward_kt(
+        let logits = model_forward_kt_with_policy(
             &*self.backend,
             &prompt_tokens,
             &self.weights,
@@ -8285,6 +8298,7 @@ impl ModelRunner {
             Some(&mut kv_cache),
             Some(&mut linear_state),
             self.active_lora.as_ref(),
+            self.streaming_prefill,
         )
         .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
@@ -8497,37 +8511,36 @@ impl ModelRunner {
         let (tx, rx) = mpsc::channel();
         let mut linear_state = self.new_linear_state()?;
 
-        let (prefill_logits_kt, h_prev_kt) = if streaming_prefill_enabled_for(
-            &self.weights.embed_tokens.device(),
-            prompt_tokens.len(),
-        ) {
-            model_forward_paged_streaming_last_token_with_last_hidden(
-                &*self.backend,
-                &prompt_tokens,
-                &self.weights,
-                &self.config,
-                &base_cache,
-                &base_block_table,
-                0,
-                Some(&mut linear_state),
-                self.active_lora.as_ref(),
-            )
-            .context("mtp streaming prefill forward pass failed")?
-        } else {
-            model_forward_paged_last_token_with_last_hidden(
-                &*self.backend,
-                &prompt_tokens,
-                &self.weights,
-                &self.config,
-                &base_cache,
-                &base_block_table,
-                0,
-                Some(&mut linear_state),
-                self.active_lora.as_ref(),
-                None,
-            )
-            .context("mtp prefill forward pass failed")?
-        };
+        let (prefill_logits_kt, h_prev_kt) =
+            if self.streaming_prefill.enabled_for(prompt_tokens.len()) {
+                model_forward_paged_streaming_last_token_with_last_hidden_with_policy(
+                    &*self.backend,
+                    &prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &base_cache,
+                    &base_block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    self.streaming_prefill,
+                )
+                .context("mtp streaming prefill forward pass failed")?
+            } else {
+                model_forward_paged_last_token_with_last_hidden(
+                    &*self.backend,
+                    &prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &base_cache,
+                    &base_block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("mtp prefill forward pass failed")?
+            };
         // (#1082) MTP speculative step + speculative.rs are fully kt now —
         // `h_prev`/`prefill_logits` stay kt; no candle bridge.
         let prefill_logits = prefill_logits_kt;
@@ -8829,11 +8842,11 @@ impl ModelRunner {
                         .expect("linear state initialized before prefill");
                     let logits = {
                         let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
-                        if streaming_prefill_enabled_for(
-                            &runner_guard.weights.embed_tokens.device(),
-                            prompt_tokens.len(),
-                        ) {
-                            model_forward_paged_streaming_with_progress(
+                        if runner_guard
+                            .streaming_prefill
+                            .enabled_for(prompt_tokens.len())
+                        {
+                            model_forward_paged_streaming_with_progress_and_policy(
                                 &*runner_guard.backend,
                                 &prompt_tokens,
                                 &runner_guard.weights,
@@ -8844,6 +8857,7 @@ impl ModelRunner {
                                 Some(linear_state),
                                 runner_guard.active_lora.as_ref(),
                                 Some(&cancel),
+                                runner_guard.streaming_prefill,
                             )
                             .context("prefill forward pass (paged, streaming) failed")?
                         } else {
@@ -9136,13 +9150,10 @@ impl ModelRunner {
                     let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
                     let logits = {
                         let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
-                        if streaming_prefill_enabled_for(
-                            &runner_guard.weights.embed_tokens.device(),
-                            prompt_tokens.len(),
-                        ) {
+                        if runner_guard.streaming_prefill.enabled_for(prefill_tokens.len()) {
                             if let Some(split_pos) = split_pos {
                                 let head_tokens = &prompt_tokens[cached_tokens..split_pos];
-                                let _ = model_forward_paged_streaming_with_progress(
+                                let _ = model_forward_paged_streaming_with_progress_and_policy(
                                     &*runner_guard.backend,
                                     head_tokens,
                                     &runner_guard.weights,
@@ -9153,6 +9164,7 @@ impl ModelRunner {
                                     Some(&mut *linear_state),
                                     runner_guard.active_lora.as_ref(),
                                     Some(&cancel),
+                                    runner_guard.streaming_prefill,
                                 )
                                 .context(
                                     "prefill forward pass (streaming paged prefix cache head)",
@@ -9165,7 +9177,7 @@ impl ModelRunner {
                                 });
 
                                 let tail_tokens = &prompt_tokens[split_pos..];
-                                model_forward_paged_streaming_with_progress_offset(
+                                model_forward_paged_streaming_with_progress_offset_and_policy(
                                     &*runner_guard.backend,
                                     tail_tokens,
                                     &runner_guard.weights,
@@ -9177,12 +9189,13 @@ impl ModelRunner {
                                     runner_guard.active_lora.as_ref(),
                                     Some(&cancel),
                                     head_tokens.len() as u64,
+                                    runner_guard.streaming_prefill,
                                 )
                                 .context(
                                     "prefill forward pass (streaming paged prefix cache tail)",
                                 )?
                             } else {
-                                model_forward_paged_streaming_with_progress(
+                                model_forward_paged_streaming_with_progress_and_policy(
                                     &*runner_guard.backend,
                                     prefill_tokens,
                                     &runner_guard.weights,
@@ -9193,6 +9206,7 @@ impl ModelRunner {
                                     Some(&mut *linear_state),
                                     runner_guard.active_lora.as_ref(),
                                     Some(&cancel),
+                                    runner_guard.streaming_prefill,
                                 )
                                 .context(
                                     "prefill forward pass (streaming paged prefix cache) failed",
@@ -9582,13 +9596,10 @@ impl ModelRunner {
         let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(
-                &self.weights.embed_tokens.device(),
-                prompt_tokens.len(),
-            ) {
+            if self.streaming_prefill.enabled_for(prefill_tokens.len()) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
-                    let _ = model_forward_paged_streaming(
+                    let _ = model_forward_paged_streaming_with_policy(
                         &*self.backend,
                         head_tokens,
                         &self.weights,
@@ -9598,6 +9609,7 @@ impl ModelRunner {
                         cached_tokens,
                         Some(&mut linear_state),
                         self.active_lora.as_ref(),
+                        self.streaming_prefill,
                     )
                     .context("prefill forward pass (streaming paged prefix cache head)")?;
                     prefill_split_snapshot = Some(RollingPrefixSnapshot {
@@ -9608,7 +9620,7 @@ impl ModelRunner {
                     });
 
                     let tail_tokens = &prompt_tokens[split_pos..];
-                    model_forward_paged_streaming(
+                    model_forward_paged_streaming_with_policy(
                         &*self.backend,
                         tail_tokens,
                         &self.weights,
@@ -9618,10 +9630,11 @@ impl ModelRunner {
                         split_pos,
                         Some(&mut linear_state),
                         self.active_lora.as_ref(),
+                        self.streaming_prefill,
                     )
                     .context("prefill forward pass (streaming paged prefix cache tail)")?
                 } else {
-                    model_forward_paged_streaming(
+                    model_forward_paged_streaming_with_policy(
                         &*self.backend,
                         prefill_tokens,
                         &self.weights,
@@ -9631,6 +9644,7 @@ impl ModelRunner {
                         cached_tokens,
                         Some(&mut linear_state),
                         self.active_lora.as_ref(),
+                        self.streaming_prefill,
                     )
                     .context("prefill forward pass (streaming paged prefix cache) failed")?
                 }
@@ -9702,11 +9716,8 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(
-                &self.weights.embed_tokens.device(),
-                prompt_tokens.len(),
-            ) {
-                model_forward_paged_streaming(
+            if self.streaming_prefill.enabled_for(prompt_tokens.len()) {
+                model_forward_paged_streaming_with_policy(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
@@ -9716,6 +9727,7 @@ impl ModelRunner {
                     0,
                     Some(&mut linear_state),
                     self.active_lora.as_ref(),
+                    self.streaming_prefill,
                 )
                 .context("prefill forward pass (paged, streaming) failed")?
             } else {
@@ -9896,11 +9908,8 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(
-                &self.weights.embed_tokens.device(),
-                prompt_tokens.len(),
-            ) {
-                model_forward_paged_streaming_with_progress(
+            if self.streaming_prefill.enabled_for(prompt_tokens.len()) {
+                model_forward_paged_streaming_with_progress_and_policy(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
@@ -9911,6 +9920,7 @@ impl ModelRunner {
                     Some(&mut linear_state),
                     self.active_lora.as_ref(),
                     cancel,
+                    self.streaming_prefill,
                 )
                 .context("prefill forward pass (streaming paged skip-layer, streaming) failed")?
             } else {
@@ -10119,14 +10129,10 @@ impl ModelRunner {
             || -> Result<mpsc::Receiver<StreamEvent>> {
                 owners.linear_state = Some(self.new_linear_state()?);
 
-                // Prefill. Long Metal prompts use tiled streaming prefill by default;
-                // env overrides can force either path.
+                // The immutable startup policy selects tiled or monolithic prefill.
                 owners.prefill_logits = Some(
-                    if streaming_prefill_enabled_for(
-                        &self.weights.embed_tokens.device(),
-                        prompt_tokens.len(),
-                    ) {
-                        model_forward_paged_streaming(
+                    if self.streaming_prefill.enabled_for(prompt_tokens.len()) {
+                        model_forward_paged_streaming_with_policy(
                             &*self.backend,
                             prompt_tokens,
                             &self.weights,
@@ -10136,6 +10142,7 @@ impl ModelRunner {
                             0,
                             owners.linear_state.as_mut(),
                             self.active_lora.as_ref(),
+                            self.streaming_prefill,
                         )
                     } else {
                         model_forward_paged_last_token(

@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::batching_engine::BatchingEngineSnapshot;
 use crate::config::{
     BatchingRuntimeConfig, ConfigValueSource, DecodeRuntimeConfig, ModelDefaultsProfile,
+    StreamingPrefillRuntimeConfig,
 };
 use crate::state::{AppState, DirectDecodeRendezvousRuntimeState, ModelBackend};
 
@@ -35,6 +36,7 @@ struct ModelStateResponse {
     config_hashes: ConfigHashes,
     http: HttpDebugState,
     decode_runtime: DecodeRuntimeConfig,
+    streaming_prefill: StreamingPrefillRuntimeConfig,
     env_flags: BTreeMap<&'static str, EnvFlagState>,
     batching_engine: BatchingEngineDebugState,
     thinking: ThinkingDebugState,
@@ -288,6 +290,7 @@ async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
             send_buffer_effective_bytes: state.http_send_buffer_preflight_effective_bytes,
         },
         decode_runtime: state.decode_runtime_config,
+        streaming_prefill: state.streaming_prefill_runtime_config,
         env_flags: selected_env_flags(),
         batching_engine: batching_engine_state(state).await,
         thinking: thinking_state(state),
@@ -751,6 +754,8 @@ mod tests {
                 ..Default::default()
             });
         }
+        let expected_streaming_prefill =
+            serde_json::to_value(state.streaming_prefill_runtime_config).unwrap();
 
         let app = routes().with_state(state);
         let resp = app
@@ -767,6 +772,7 @@ mod tests {
         let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
+        assert_eq!(json["streaming_prefill"], expected_streaming_prefill);
         assert_eq!(json["model"]["path"], "/models/Qwen3.5-4B");
         assert_eq!(json["model"]["served_model_id"], "Qwen3.5-4B");
         assert_eq!(json["model"]["defaults_profile"]["name"], "Qwen3.5-4B");
@@ -866,6 +872,15 @@ mod tests {
         assert_eq!(json["http"]["send_buffer_effective_bytes"], 4096);
         assert_eq!(json["decode_runtime"]["deterministic"]["enabled"], false);
         assert_eq!(json["decode_runtime"]["max_decode_batch"]["effective"], 8);
+        assert_eq!(
+            json["streaming_prefill"]["dispatch"]["configured_mode"],
+            "auto"
+        );
+        assert_eq!(
+            json["streaming_prefill"]["dispatch"]["effective"]["policy"],
+            "never"
+        );
+        assert_eq!(json["streaming_prefill"]["tile_tokens"]["effective"], 8192);
         assert!(json["caches"]["rendered_prompt"].is_object());
         assert!(json["caches"]["prefix_cache"].is_object());
         assert_eq!(json["caches"]["prefix_cache"]["active_leases"], 0);
