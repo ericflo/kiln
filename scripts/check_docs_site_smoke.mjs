@@ -405,7 +405,7 @@ const generatedDocsPages = [
       'observed gradient tensor IDs',
       'must contain only finite values',
       'finite all-zero gradient remains valid',
-      'one connected clone cannot mask a disconnected sibling',
+      'One connected clone cannot mask a disconnected sibling',
       'range with no configured leaves accepts only an empty result',
       'one finite-value reduction immediately before the optimizer',
       'correctness guarantee, not large-batch performance evidence',
