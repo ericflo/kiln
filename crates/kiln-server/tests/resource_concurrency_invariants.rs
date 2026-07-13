@@ -930,7 +930,7 @@ fn explicit_inference_runtime_cannot_auto_promote_cpu_to_vulkan() {
         "pub const fn inference_memory_runtime(",
     );
     assert!(
-        constructor.contains("backend::for_explicit_device_kt(memory_runtime.device())"),
+        constructor.contains("backend::for_explicit_device_kt(memory_binding.device())"),
         "the initialized runtime must select its backend from the explicit device binding"
     );
     assert!(

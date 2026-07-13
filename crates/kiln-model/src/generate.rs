@@ -2673,19 +2673,19 @@ impl ModelRunner {
         tokenizer: KilnTokenizer,
         config: ModelConfig,
         options: ModelRunnerRuntimeOptions,
-        memory_runtime: &InferenceMemoryRuntime,
+        memory_binding: &InferenceMemoryRuntime,
     ) -> Result<Self> {
-        memory_runtime.validate_weight_device(weights.embed_tokens.device())?;
-        let selected_backend = backend::for_explicit_device_kt(memory_runtime.device())?;
+        memory_binding.validate_weight_device(weights.embed_tokens.device())?;
+        let selected_backend = backend::for_explicit_device_kt(memory_binding.device())?;
         let mut runner = Self::new_with_selected_backend(
             weights,
             tokenizer,
             config,
             options,
-            memory_runtime.device(),
+            memory_binding.device(),
             selected_backend,
         );
-        runner.memory_runtime = Some(*memory_runtime);
+        runner.memory_runtime = Some(*memory_binding);
         Ok(runner)
     }
 
