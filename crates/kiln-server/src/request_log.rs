@@ -36,6 +36,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::task::Poll;
 use std::time::Instant;
 
+use anyhow::{Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::Request;
@@ -48,7 +49,7 @@ use crate::state::AppState;
 
 /// `[request_log]` section of kiln.toml. Env overrides: `KILN_REQUEST_LOG_*`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RequestLogConfig {
     /// Master switch. Default true — the log is the raw material for the
     /// mine→filter→train flywheel, and rotation + retention keep it bounded.
@@ -82,33 +83,87 @@ impl Default for RequestLogConfig {
 impl RequestLogConfig {
     /// Apply `KILN_REQUEST_LOG_*` env overrides, mirroring the other config
     /// sections' env precedence.
-    pub fn apply_env_overrides(&mut self) {
-        if let Ok(v) = std::env::var("KILN_REQUEST_LOG_ENABLED") {
-            if let Some(b) = parse_bool(&v) {
-                self.enabled = b;
-            }
+    pub fn apply_env_overrides(&mut self) -> Result<()> {
+        if let Some(v) = read_env("KILN_REQUEST_LOG_ENABLED")? {
+            self.enabled = parse_required_bool("KILN_REQUEST_LOG_ENABLED", &v)?;
         }
-        if let Ok(v) = std::env::var("KILN_REQUEST_LOG_DIR") {
-            if !v.trim().is_empty() {
-                self.dir = Some(PathBuf::from(v));
+        if let Some(v) = read_env("KILN_REQUEST_LOG_DIR")? {
+            if v.trim().is_empty() {
+                anyhow::bail!("KILN_REQUEST_LOG_DIR must be a non-empty path, got {v:?}");
             }
+            self.dir = Some(PathBuf::from(v));
         }
-        if let Ok(v) = std::env::var("KILN_REQUEST_LOG_MAX_FILE_BYTES") {
-            if let Ok(n) = v.parse::<u64>() {
-                self.max_file_bytes = n.max(4096);
-            }
+        if let Some(v) = read_env("KILN_REQUEST_LOG_MAX_FILE_BYTES")? {
+            self.max_file_bytes = parse_u64("KILN_REQUEST_LOG_MAX_FILE_BYTES", &v)?;
         }
-        if let Ok(v) = std::env::var("KILN_REQUEST_LOG_MAX_TOTAL_BYTES") {
-            if let Ok(n) = v.parse::<u64>() {
-                self.max_total_bytes = n;
-            }
+        if let Some(v) = read_env("KILN_REQUEST_LOG_MAX_TOTAL_BYTES")? {
+            self.max_total_bytes = parse_u64("KILN_REQUEST_LOG_MAX_TOTAL_BYTES", &v)?;
         }
-        if let Ok(v) = std::env::var("KILN_REQUEST_LOG_COMPRESS") {
-            if let Some(b) = parse_bool(&v) {
-                self.compress = b;
-            }
+        if let Some(v) = read_env("KILN_REQUEST_LOG_COMPRESS")? {
+            self.compress = parse_required_bool("KILN_REQUEST_LOG_COMPRESS", &v)?;
         }
+        if let Some(v) = read_env("KILN_REQUEST_LOG_MAX_CAPTURE_BYTES")? {
+            self.max_capture_bytes = parse_usize("KILN_REQUEST_LOG_MAX_CAPTURE_BYTES", &v)?;
+        }
+        Ok(())
     }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self
+            .dir
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            anyhow::bail!("request_log.dir must be non-empty when set, got an empty path");
+        }
+        if self.max_file_bytes < 4096 {
+            anyhow::bail!(
+                "request_log.max_file_bytes must be at least 4096, got {}",
+                self.max_file_bytes
+            );
+        }
+        if self.max_total_bytes == 0 {
+            anyhow::bail!(
+                "request_log.max_total_bytes must be > 0, got {}",
+                self.max_total_bytes
+            );
+        }
+        if self.max_capture_bytes == 0 {
+            anyhow::bail!(
+                "request_log.max_capture_bytes must be > 0, got {}",
+                self.max_capture_bytes
+            );
+        }
+        Ok(())
+    }
+}
+
+fn read_env(name: &str) -> Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} must be valid UTF-8"),
+    }
+}
+
+fn parse_required_bool(name: &str, value: &str) -> Result<bool> {
+    parse_bool(value).with_context(|| {
+        format!("{name} must be one of true, false, 1, 0, yes, no, on, or off, got {value:?}")
+    })
+}
+
+fn parse_u64(name: &str, value: &str) -> Result<u64> {
+    value
+        .trim()
+        .parse::<u64>()
+        .with_context(|| format!("{name} must be a non-negative decimal integer, got {value:?}"))
+}
+
+fn parse_usize(name: &str, value: &str) -> Result<usize> {
+    value
+        .trim()
+        .parse::<usize>()
+        .with_context(|| format!("{name} must be a non-negative decimal integer, got {value:?}"))
 }
 
 fn parse_bool(v: &str) -> Option<bool> {
@@ -1045,6 +1100,9 @@ mod tests {
 
     #[test]
     fn env_overrides_apply() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut config = RequestLogConfig::default();
         // Serialized via temp envs — safe: tests in this module run on one
         // process; restore after.
@@ -1052,12 +1110,39 @@ mod tests {
             std::env::set_var("KILN_REQUEST_LOG_ENABLED", "false");
             std::env::set_var("KILN_REQUEST_LOG_MAX_FILE_BYTES", "8192");
         }
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         unsafe {
             std::env::remove_var("KILN_REQUEST_LOG_ENABLED");
             std::env::remove_var("KILN_REQUEST_LOG_MAX_FILE_BYTES");
         }
         assert!(!config.enabled);
         assert_eq!(config.max_file_bytes, 8192);
+    }
+
+    #[test]
+    fn malformed_env_overrides_are_fatal_and_identify_the_input() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for name in [
+            "KILN_REQUEST_LOG_ENABLED",
+            "KILN_REQUEST_LOG_MAX_FILE_BYTES",
+            "KILN_REQUEST_LOG_MAX_TOTAL_BYTES",
+            "KILN_REQUEST_LOG_COMPRESS",
+            "KILN_REQUEST_LOG_MAX_CAPTURE_BYTES",
+        ] {
+            unsafe {
+                std::env::set_var(name, "definitely-invalid");
+            }
+            let error = RequestLogConfig::default()
+                .apply_env_overrides()
+                .unwrap_err();
+            unsafe {
+                std::env::remove_var(name);
+            }
+            let message = format!("{error:#}");
+            assert!(message.contains(name), "{name}: {message}");
+            assert!(message.contains("definitely-invalid"), "{name}: {message}");
+        }
     }
 }

@@ -30,11 +30,18 @@ Do not override the repository toolchain with a floating `stable` toolchain.
 Toolchain upgrades are explicit changes to `rust-toolchain.toml` so formatting,
 local builds, release builds, and CI move together.
 
-Build the default (no-GPU) configuration. This works on any host and is the fastest way to iterate on non-kernel code:
+Build the default (no-GPU) configuration. On Linux, use the bounded wrapper.
+It refuses to overlap another compiler, requires adequate available memory,
+uses one build job, and places the complete compiler/linker process tree under
+one no-swap memory ceiling:
 
 ```bash
-cargo build --locked
+scripts/cargo-bounded.sh build --locked
 ```
+
+This matters on unified-memory accelerator hosts: even a filtered
+`kiln-server` test can link a 400+ MiB debug test executable. Direct `cargo`
+remains available when an operator has independently isolated the build.
 
 Build with Apple Silicon GPU support (M-series Macs, Xcode Command Line Tools sufficient):
 
@@ -57,13 +64,15 @@ KILN_CUDA_ARCHS=86 cargo build --release --features cuda
 Run the test suite. The skipped `test_health_with_real_backend` depends on a live network backend and is intentionally excluded from automatic CI. Env-mutating tests are serialized via an internal `ENV_LOCK` mutex and run safely in parallel. Run Metal feature tests locally with `--test-threads=1` because of a known race in `candle-metal`'s `MetalDevice::new`:
 
 ```bash
-cargo test --locked -- --skip test_health_with_real_backend
+scripts/cargo-bounded.sh test --locked -- --skip test_health_with_real_backend
 
 # On an Apple Silicon qualification machine:
 cargo test --locked --features metal -- --test-threads=1
 ```
 
-If you have `cargo-nextest` installed, it runs the same tests in parallel and is noticeably faster:
+Do not run workspace-wide `cargo-nextest` concurrently with another build or
+accelerator workload. Its parallelism is throughput-oriented and is not the
+resource-bounded verification path.
 
 ```bash
 cargo nextest run --locked
@@ -86,7 +95,7 @@ See [`QUICKSTART.md`](QUICKSTART.md) for the full zero-to-running walkthrough â€
 
 - Branch from `main`. Forks and direct branches are both fine.
 - One logical change per PR. Small PRs land faster and are easier to bisect when something regresses.
-- Run `cargo build --locked` and `cargo test --locked` (with the documented skips above) before pushing. Automatic CI reruns the Linux default-feature checks; GPU backend builds are deliberate manual jobs and real hardware evidence comes from local qualification receipts. See [`docs/ci-policy.md`](docs/ci-policy.md).
+- Run `scripts/cargo-bounded.sh build --locked` and `scripts/cargo-bounded.sh test --locked` (with the documented skips above) before pushing on Linux. Automatic CI reruns the Linux default-feature checks; GPU backend builds are deliberate manual jobs and real hardware evidence comes from local qualification receipts. See [`docs/ci-policy.md`](docs/ci-policy.md).
 - Open the PR with a **plain title** â€” no project prefix. Describe what changed and why in the body.
 - For performance PRs, include comparable local qualification receipts. Record the exact source/model/workload identity, named hardware, tail latency, throughput, memory, and raw-log hash; a green compile-only job is not performance evidence. Follow the [local hardware qualification guide](docs/qualification.md) so another machine can validate and extend the evidence chain.
 

@@ -259,7 +259,8 @@ draft_layers = 8                      # First N layers used as draft model
 # Files: <dir>/requests-current.jsonl (active) and rotated
 # requests-<ts>.jsonl.gz. Env overrides: KILN_REQUEST_LOG_ENABLED,
 # KILN_REQUEST_LOG_DIR, KILN_REQUEST_LOG_MAX_FILE_BYTES,
-# KILN_REQUEST_LOG_MAX_TOTAL_BYTES, KILN_REQUEST_LOG_COMPRESS.
+# KILN_REQUEST_LOG_MAX_TOTAL_BYTES, KILN_REQUEST_LOG_COMPRESS,
+# KILN_REQUEST_LOG_MAX_CAPTURE_BYTES.
 enabled = true
 # dir = "/var/kiln/requests"          # Default: <adapter_dir>/.requests
 max_file_bytes = 67108864             # Rotate the active file at 64 MiB

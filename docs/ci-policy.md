@@ -89,6 +89,21 @@ changes before treating 4-6 aggregate minutes as the established baseline.
 
 ## Local Receipt Flow
 
+On Linux qualification hosts, run ad hoc Cargo verification through
+`scripts/cargo-bounded.sh`. The wrapper serializes build work, preflights
+available memory, preserves a host-memory reserve, and places the compiler and
+linker process tree in one memory-capped, no-swap systemd scope. Qualification workloads must not
+overlap a separate Cargo build; build first, then run the device workload.
+
+```bash
+scripts/cargo-bounded.sh check --locked -p kiln-server --lib
+scripts/cargo-bounded.sh test --locked -p kiln-server --lib config::tests -- --test-threads=1
+```
+
+Always name `--lib`, `--bin`, or `--test` for a filtered Cargo test. A filter
+changes which tests execute, but without a target selector Cargo still builds
+every integration-test executable in the package before applying that filter.
+
 Raw logs, traces, and profiles belong under ignored `.qualification/` paths.
 Only compact receipts, workload manifests, schemas, and useful summaries are
 checked in. The complete new-machine, workload, validation, comparison, and

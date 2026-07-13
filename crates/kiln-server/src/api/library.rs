@@ -155,8 +155,9 @@ mod tests {
     /// 39555704 with `default_library_url_when_env_unset` seeing
     /// `https://custom.example/` (the override test's value).
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+        crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]

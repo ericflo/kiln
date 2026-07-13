@@ -13,6 +13,7 @@
 use std::io::IsTerminal;
 use std::path::Path;
 
+use anyhow::{Context, Result};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::LoggingConfig;
@@ -78,19 +79,26 @@ fn apply_logging_table(logging: &mut LoggingConfig, contents: &str) {
 }
 
 /// Build an `EnvFilter` from `RUST_LOG` (if set) or the provided level string.
-pub fn build_filter(level: &str) -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| match level {
+pub fn build_filter(level: &str) -> Result<EnvFilter> {
+    match std::env::var("RUST_LOG") {
+        Ok(raw) => {
+            return EnvFilter::try_new(&raw)
+                .with_context(|| format!("RUST_LOG contains an invalid filter, got {raw:?}"));
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("RUST_LOG must be valid UTF-8")
+        }
+    }
+
+    let directive = match level {
         "trace" | "debug" | "info" | "warn" | "error" => {
             format!("kiln={level},kiln_server={level},tower_http={level}")
-                .parse()
-                .expect("valid filter directive")
         }
-        other => other.parse().unwrap_or_else(|_| {
-            "kiln=info,kiln_server=info,tower_http=info"
-                .parse()
-                .expect("valid filter directive")
-        }),
-    })
+        other => other.to_string(),
+    };
+    EnvFilter::try_new(&directive)
+        .with_context(|| format!("logging.level contains an invalid filter, got {level:?}"))
 }
 
 /// Resolve a user-supplied format string to a concrete renderer choice.
@@ -122,7 +130,7 @@ pub(crate) fn resolve_format(format: &str, stderr_is_tty: bool) -> &'static str 
 /// Call once at startup. Panics if called twice (tracing's global subscriber
 /// can only be set once per process).
 pub fn init(level: &str, format: &str) -> anyhow::Result<()> {
-    let filter = build_filter(level);
+    let filter = build_filter(level)?;
     let resolved = resolve_format(format, std::io::stderr().is_terminal());
 
     match resolved {
@@ -173,11 +181,14 @@ format = "json"
 
     #[test]
     fn test_build_filter_default() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // Ensure RUST_LOG is not set for this test
         unsafe {
             std::env::remove_var("RUST_LOG");
         }
-        let filter = build_filter("info");
+        let filter = build_filter("info").unwrap();
         let s = format!("{filter}");
         assert!(
             s.contains("info"),
@@ -187,26 +198,57 @@ format = "json"
 
     #[test]
     fn test_build_filter_custom_level() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         unsafe {
             std::env::remove_var("RUST_LOG");
         }
-        let filter = build_filter("debug");
+        let filter = build_filter("debug").unwrap();
         let s = format!("{filter}");
         assert!(s.contains("debug"), "filter should contain debug: {s}");
     }
 
     #[test]
     fn test_build_filter_custom_directive() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         unsafe {
             std::env::remove_var("RUST_LOG");
         }
-        let filter = build_filter("kiln=trace,tower_http=warn");
+        let filter = build_filter("kiln=trace,tower_http=warn").unwrap();
         let s = format!("{filter}");
         // Custom directive is parsed as-is (not expanded to the standard triple)
         assert!(
             s.contains("kiln=trace") || s.contains("tower_http=warn"),
             "filter should parse custom directive: {s}"
         );
+    }
+
+    #[test]
+    fn malformed_filter_inputs_are_fatal_and_identify_the_value() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::remove_var("RUST_LOG");
+        }
+        let error = build_filter("kiln=definitely-not-a-level").unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("logging.level"), "{message}");
+        assert!(message.contains("kiln=definitely-not-a-level"), "{message}");
+
+        unsafe {
+            std::env::set_var("RUST_LOG", "kiln=definitely-not-a-level");
+        }
+        let error = build_filter("info").unwrap_err();
+        unsafe {
+            std::env::remove_var("RUST_LOG");
+        }
+        let message = format!("{error:#}");
+        assert!(message.contains("RUST_LOG"), "{message}");
+        assert!(message.contains("kiln=definitely-not-a-level"), "{message}");
     }
 
     #[test]

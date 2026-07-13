@@ -897,11 +897,9 @@ pub fn format_oom_message_with_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_ENV_LOCK as ENV_LOCK;
     use kiln_core::config::ModelConfig;
     use kiln_memory::vram::{GpuVramInfo, VramSource};
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn qwen_4b() -> ModelConfig {
         ModelConfig::qwen3_5_4b()

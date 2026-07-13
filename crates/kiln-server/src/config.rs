@@ -753,7 +753,7 @@ impl<'de> Deserialize<'de> for PrefillLayerBudget {
 
 /// Top-level configuration for kiln.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct KilnConfig {
     pub server: ServerConfig,
     pub model: ModelConfig,
@@ -990,7 +990,7 @@ fn default_run_timeout_secs() -> u64 {
 
 /// Eval subsystem configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct EvalConfig {
     /// Directory where named eval suites are persisted (each as
     /// `<eval_dir>/<name>/suite.json`). `None` falls back to
@@ -1022,7 +1022,7 @@ impl Default for EvalConfig {
 
 /// HTTP server settings.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
     /// Immutable serving-safety profile. Stable is the default; switching to
     /// experimental or maintenance requires an explicit file/env setting and
@@ -1090,7 +1090,7 @@ pub struct ServerConfig {
 
 /// Model and tokenizer paths.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
     pub path: Option<String>,
     pub model_id: String,
@@ -1190,7 +1190,7 @@ impl ModelConfig {
 
 /// GPU memory allocation settings.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MemoryConfig {
     pub num_blocks: Option<usize>,
     pub gpu_memory_gb: Option<f64>,
@@ -1209,7 +1209,7 @@ pub struct MemoryConfig {
 
 /// Training-specific settings.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TrainingConfig {
     pub grad_checkpoint_segments: Option<usize>,
     pub no_grad_checkpoint: bool,
@@ -1272,7 +1272,7 @@ pub struct TrainingConfig {
 
 /// Logging settings.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     pub level: String,
     pub format: String,
@@ -1280,7 +1280,7 @@ pub struct LoggingConfig {
 
 /// Prefix caching settings.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PrefixCacheConfig {
     /// Enable prefix caching for shared prompt prefixes (default: true).
     /// When enabled, KV cache blocks for shared prefixes are reused across requests.
@@ -1343,7 +1343,7 @@ impl SpecMethod {
 /// compatibility, setting `enabled = true` with `method = Off` falls back to
 /// `SkipLayer`.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SpeculativeDecodingConfig {
     /// Enable speculative decoding (default: false).
     pub enabled: bool,
@@ -1372,7 +1372,7 @@ pub struct SpeculativeDecodingConfig {
 /// while runtime device policy enables streaming by default for CUDA prompts at
 /// 8k+ tokens and Metal prompts after device-specific thresholds.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StreamingPrefillConfig {
     /// Force tiled/streaming prefill on through config/env. Runtime device
     /// policy may still enable it for long CUDA/Metal prompts when unset.
@@ -1388,7 +1388,7 @@ pub struct StreamingPrefillConfig {
 
 /// Adapter-storage settings.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AdaptersConfig {
     /// Maximum total size in bytes for `adapter_dir/` (excluding the
     /// `.upload-tmp-*/` staging dirs and the `.composed/<hash>/` cache —
@@ -1678,9 +1678,10 @@ impl KilnConfig {
     }
 
     fn load_inner(path: Option<&str>) -> Result<Self> {
-        let config_path = path
-            .map(String::from)
-            .or_else(|| std::env::var("KILN_CONFIG").ok());
+        let config_path = match path {
+            Some(path) => Some(path.to_string()),
+            None => read_optional_unicode_env("KILN_CONFIG")?,
+        };
 
         let mut config = if let Some(ref p) = config_path {
             let contents = std::fs::read_to_string(p)
@@ -1695,7 +1696,7 @@ impl KilnConfig {
             Self::default()
         };
 
-        config.apply_env_overrides();
+        config.apply_env_overrides()?;
         config.apply_http_send_buffer_env_override()?;
         config.apply_serving_profile_env_override()?;
         config.apply_deterministic_env_override()?;
@@ -1705,7 +1706,7 @@ impl KilnConfig {
         config.apply_max_prefill_layers_per_cycle_env_override()?;
         config.apply_max_decode_batch_env_override()?;
         config.apply_default_thinking_budget_env_overrides()?;
-        config.request_log.apply_env_overrides();
+        config.request_log.apply_env_overrides()?;
         config.validate()?;
         Ok(config)
     }
@@ -1751,229 +1752,194 @@ impl KilnConfig {
     }
 
     /// Override config values with KILN_* environment variables (if set).
-    fn apply_env_overrides(&mut self) {
-        // Server
-        if let Ok(v) = std::env::var("KILN_HOST") {
+    fn apply_env_overrides(&mut self) -> Result<()> {
+        if let Some(v) = read_optional_unicode_env("KILN_HOST")? {
             self.server.host = v;
         }
-        if let Ok(v) = std::env::var("KILN_PORT") {
-            if let Ok(p) = v.parse() {
-                self.server.port = p;
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_PORT")? {
+            self.server.port = parse_decimal_env("KILN_PORT", &v, "a TCP port")?;
         }
-        if let Ok(v) = std::env::var("KILN_REQUEST_TIMEOUT_SECS") {
-            if let Ok(s) = v.parse() {
-                self.server.request_timeout_secs = s;
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_REQUEST_TIMEOUT_SECS")? {
+            self.server.request_timeout_secs =
+                parse_decimal_env("KILN_REQUEST_TIMEOUT_SECS", &v, "seconds")?;
         }
-        if let Ok(v) = std::env::var("KILN_EVAL_MODE") {
-            self.server.eval_mode = v == "1" || v.eq_ignore_ascii_case("true");
+        if let Some(v) = read_optional_unicode_env("KILN_EVAL_MODE")? {
+            self.server.eval_mode = parse_required_bool_env("KILN_EVAL_MODE", &v)?;
         }
-        if std::env::var("KILN_DEFAULT_NO_THINK").is_ok() {
+        if read_optional_unicode_env("KILN_DEFAULT_NO_THINK")?.is_some() {
             self.server.default_thinking_enabled = Some(false);
         }
-        if let Ok(v) = std::env::var("KILN_DEFAULT_THINKING_ENABLED")
-            && let Some(enabled) = parse_bool_env(&v)
-        {
-            self.server.default_thinking_enabled = Some(enabled);
+        if let Some(v) = read_optional_unicode_env("KILN_DEFAULT_THINKING_ENABLED")? {
+            self.server.default_thinking_enabled = Some(parse_required_bool_env(
+                "KILN_DEFAULT_THINKING_ENABLED",
+                &v,
+            )?);
         }
-        if let Ok(v) = std::env::var("KILN_FOLD_REASONING_INTO_CONTENT")
-            && let Some(enabled) = parse_bool_env(&v)
-        {
-            self.server.fold_reasoning_into_content = enabled;
+        if let Some(v) = read_optional_unicode_env("KILN_FOLD_REASONING_INTO_CONTENT")? {
+            self.server.fold_reasoning_into_content =
+                parse_required_bool_env("KILN_FOLD_REASONING_INTO_CONTENT", &v)?;
         }
-        if let Ok(v) = std::env::var("KILN_CHAT_PERFORMANCE_METADATA")
-            && let Some(enabled) = parse_bool_env(&v)
-        {
-            self.server.chat_performance_metadata = enabled;
+        if let Some(v) = read_optional_unicode_env("KILN_CHAT_PERFORMANCE_METADATA")? {
+            self.server.chat_performance_metadata =
+                parse_required_bool_env("KILN_CHAT_PERFORMANCE_METADATA", &v)?;
         }
-        if let Ok(v) = std::env::var("KILN_CHAT_CONFIG_HASH_METADATA")
-            && let Some(enabled) = parse_bool_env(&v)
-        {
-            self.server.chat_config_hash_metadata = enabled;
+        if let Some(v) = read_optional_unicode_env("KILN_CHAT_CONFIG_HASH_METADATA")? {
+            self.server.chat_config_hash_metadata =
+                parse_required_bool_env("KILN_CHAT_CONFIG_HASH_METADATA", &v)?;
         }
-        if let Ok(v) = std::env::var("KILN_SLOW_REQUEST_WARN_SECS") {
-            if let Ok(s) = v.parse() {
-                self.server.slow_request_warn_secs = s;
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_SLOW_REQUEST_WARN_SECS")? {
+            self.server.slow_request_warn_secs =
+                parse_decimal_env("KILN_SLOW_REQUEST_WARN_SECS", &v, "seconds")?;
         }
-        if let Ok(v) = std::env::var("KILN_SHUTDOWN_TIMEOUT_SECS") {
-            if let Ok(s) = v.parse() {
-                self.server.shutdown_timeout_secs = s;
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_SHUTDOWN_TIMEOUT_SECS")? {
+            self.server.shutdown_timeout_secs =
+                parse_decimal_env("KILN_SHUTDOWN_TIMEOUT_SECS", &v, "seconds")?;
         }
 
-        // Model
-        if let Ok(v) = std::env::var("KILN_MODEL_PATH") {
+        if let Some(v) = read_optional_unicode_env("KILN_MODEL_PATH")? {
             self.model.path = Some(v);
         }
-        if let Ok(v) = std::env::var("KILN_MODEL_ID") {
+        if let Some(v) = read_optional_unicode_env("KILN_MODEL_ID")? {
             self.model.model_id = v;
         }
-        if let Ok(v) = std::env::var("KILN_TOKENIZER_PATH") {
+        if let Some(v) = read_optional_unicode_env("KILN_TOKENIZER_PATH")? {
             self.model.tokenizer_path = Some(v);
         }
-        if let Ok(v) = std::env::var("KILN_ADAPTER_DIR") {
+        if let Some(v) = read_optional_unicode_env("KILN_ADAPTER_DIR")? {
             self.model.adapter_dir = Some(v);
         }
-        if let Ok(v) = std::env::var("KILN_MODEL_SNAPSHOT_DIR") {
+        if let Some(v) = read_optional_unicode_env("KILN_MODEL_SNAPSHOT_DIR")? {
             self.model.snapshot_dir = if v.trim().is_empty() { None } else { Some(v) };
         }
-        if let Ok(v) = std::env::var("KILN_SERVED_MODEL_ID") {
+        if let Some(v) = read_optional_unicode_env("KILN_SERVED_MODEL_ID")? {
             self.model.served_model_id = Some(v);
         }
 
-        // Memory
-        if let Ok(v) = std::env::var("KILN_NUM_BLOCKS") {
-            if let Ok(n) = v.parse() {
-                self.memory.num_blocks = Some(n);
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_NUM_BLOCKS")? {
+            self.memory.num_blocks = Some(parse_decimal_env("KILN_NUM_BLOCKS", &v, "blocks")?);
         }
-        if let Ok(v) = std::env::var("KILN_GPU_MEMORY_GB") {
-            if let Ok(g) = v.parse() {
-                self.memory.gpu_memory_gb = Some(g);
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_GPU_MEMORY_GB")? {
+            self.memory.gpu_memory_gb = Some(parse_decimal_env("KILN_GPU_MEMORY_GB", &v, "GiB")?);
         }
-        if let Ok(v) = std::env::var("KILN_INFERENCE_MEMORY_FRACTION") {
-            if let Ok(f) = v.parse::<f64>() {
-                self.memory.inference_memory_fraction = f;
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_INFERENCE_MEMORY_FRACTION")? {
+            self.memory.inference_memory_fraction = parse_decimal_env(
+                "KILN_INFERENCE_MEMORY_FRACTION",
+                &v,
+                "a fraction from 0.0 through 1.0",
+            )?;
         }
-        if let Ok(v) = std::env::var("KILN_TRAINING_MEMORY_GB") {
-            if let Ok(g) = v.parse() {
-                self.memory.training_memory_gb = Some(g);
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_TRAINING_MEMORY_GB")? {
+            self.memory.training_memory_gb =
+                Some(parse_decimal_env("KILN_TRAINING_MEMORY_GB", &v, "GiB")?);
         }
-        if let Ok(v) = std::env::var("KILN_KV_CACHE_FP8") {
-            self.memory.kv_cache_fp8 = v == "1" || v.eq_ignore_ascii_case("true");
+        if let Some(v) = read_optional_unicode_env("KILN_KV_CACHE_FP8")? {
+            self.memory.kv_cache_fp8 = parse_required_bool_env("KILN_KV_CACHE_FP8", &v)?;
         }
-        if let Ok(v) = std::env::var("KILN_CUDA_GRAPHS") {
-            self.memory.cuda_graphs = v == "1" || v.eq_ignore_ascii_case("true");
+        if let Some(v) = read_optional_unicode_env("KILN_CUDA_GRAPHS")? {
+            self.memory.cuda_graphs = parse_required_bool_env("KILN_CUDA_GRAPHS", &v)?;
         }
 
-        // Training
-        if let Ok(v) = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS") {
-            if let Ok(s) = v.parse() {
-                self.training.grad_checkpoint_segments = Some(s);
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_GRAD_CHECKPOINT_SEGMENTS")? {
+            self.training.grad_checkpoint_segments = Some(parse_decimal_env(
+                "KILN_GRAD_CHECKPOINT_SEGMENTS",
+                &v,
+                "a segment count",
+            )?);
         }
-        if let Ok(v) = std::env::var("KILN_NO_GRAD_CHECKPOINT") {
-            self.training.no_grad_checkpoint = v == "1" || v.eq_ignore_ascii_case("true");
+        if let Some(v) = read_optional_unicode_env("KILN_NO_GRAD_CHECKPOINT")? {
+            self.training.no_grad_checkpoint =
+                parse_required_bool_env("KILN_NO_GRAD_CHECKPOINT", &v)?;
         }
-        if let Ok(v) = std::env::var("KILN_CHECKPOINT_INTERVAL") {
-            if let Ok(n) = v.parse() {
-                self.training.checkpoint_interval = Some(n);
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_CHECKPOINT_INTERVAL")? {
+            self.training.checkpoint_interval = Some(parse_decimal_env(
+                "KILN_CHECKPOINT_INTERVAL",
+                &v,
+                "an optimizer-step interval",
+            )?);
         }
-        if let Ok(v) = std::env::var("KILN_TRAINING_WEBHOOK_URL") {
-            // Empty string explicitly clears any TOML-set URL.
+        if let Some(v) = read_optional_unicode_env("KILN_TRAINING_WEBHOOK_URL")? {
             self.training.webhook_url = if v.is_empty() { None } else { Some(v) };
         }
-        if let Ok(v) = std::env::var("KILN_TRAINING_MAX_QUEUED_JOBS") {
-            if let Ok(n) = v.parse::<usize>() {
-                self.training.max_queued_jobs = n;
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_TRAINING_MAX_QUEUED_JOBS")? {
+            self.training.max_queued_jobs =
+                parse_decimal_env("KILN_TRAINING_MAX_QUEUED_JOBS", &v, "a job count")?;
         }
-        if let Ok(v) = std::env::var("KILN_TRAINING_MAX_TRACKED_JOBS") {
-            if let Ok(n) = v.parse::<usize>() {
-                self.training.max_tracked_jobs = n;
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_TRAINING_MAX_TRACKED_JOBS")? {
+            self.training.max_tracked_jobs =
+                parse_decimal_env("KILN_TRAINING_MAX_TRACKED_JOBS", &v, "a job count")?;
         }
-        if let Ok(v) = std::env::var("KILN_TRAINING_TRACKED_JOB_TTL_SECS") {
-            if let Ok(n) = v.parse::<u64>() {
-                self.training.tracked_job_ttl_secs = n;
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_TRAINING_TRACKED_JOB_TTL_SECS")? {
+            self.training.tracked_job_ttl_secs =
+                parse_decimal_env("KILN_TRAINING_TRACKED_JOB_TTL_SECS", &v, "seconds")?;
         }
 
-        // Logging
-        if let Ok(v) = std::env::var("KILN_LOG_LEVEL") {
+        if let Some(v) = read_optional_unicode_env("KILN_LOG_LEVEL")? {
             self.logging.level = v;
         }
-        if let Ok(v) = std::env::var("KILN_LOG_FORMAT") {
+        if let Some(v) = read_optional_unicode_env("KILN_LOG_FORMAT")? {
             self.logging.format = v;
         }
 
-        // Prefix cache
-        if let Ok(v) = std::env::var("KILN_PREFIX_CACHE_ENABLED") {
-            self.prefix_cache.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        if let Some(v) = read_optional_unicode_env("KILN_PREFIX_CACHE_ENABLED")? {
+            self.prefix_cache.enabled = parse_required_bool_env("KILN_PREFIX_CACHE_ENABLED", &v)?;
         }
-        if let Ok(v) = std::env::var("KILN_PREFIX_CACHE_MAX_BLOCKS") {
-            if let Ok(n) = v.parse() {
-                self.prefix_cache.max_blocks = Some(n);
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_PREFIX_CACHE_MAX_BLOCKS")? {
+            self.prefix_cache.max_blocks = Some(parse_decimal_env(
+                "KILN_PREFIX_CACHE_MAX_BLOCKS",
+                &v,
+                "a block count",
+            )?);
         }
-        if let Ok(v) = std::env::var("KILN_PREFIX_CACHE_MAX_ENTRIES") {
-            if let Ok(n) = v.parse() {
-                self.prefix_cache.max_entries = Some(n);
-            }
-        }
-
-        // Speculative decoding
-        if let Ok(v) = std::env::var("KILN_SPEC_ENABLED") {
-            self.speculative.enabled = v == "1" || v.eq_ignore_ascii_case("true");
-        }
-        if let Ok(v) = std::env::var("KILN_SPEC_METHOD") {
-            if let Some(m) = SpecMethod::parse_env(&v) {
-                self.speculative.method = m;
-            } else {
-                tracing::warn!(
-                    "ignoring unknown KILN_SPEC_METHOD='{}' (expected off|skip_layer|mtp)",
-                    v
-                );
-            }
-        }
-        if let Ok(v) = std::env::var("KILN_SPEC_NUM_TOKENS") {
-            if let Ok(n) = v.parse() {
-                self.speculative.num_speculative_tokens = n;
-            }
-        }
-        if let Ok(v) = std::env::var("KILN_SPEC_DRAFT_LAYERS") {
-            if let Ok(n) = v.parse() {
-                self.speculative.draft_layers = n;
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_PREFIX_CACHE_MAX_ENTRIES")? {
+            self.prefix_cache.max_entries = Some(parse_decimal_env(
+                "KILN_PREFIX_CACHE_MAX_ENTRIES",
+                &v,
+                "an entry count",
+            )?);
         }
 
-        // Adapters
-        if let Ok(v) = std::env::var("KILN_ADAPTERS_MAX_DISK_BYTES") {
-            // `0` is the operator-opt-out shorthand: disable the cap.
-            // Empty string also clears any TOML-set cap.
-            let trimmed = v.trim();
-            if trimmed.is_empty() {
-                self.adapters.max_disk_bytes = None;
-            } else if let Ok(n) = trimmed.parse::<u64>() {
-                self.adapters.max_disk_bytes = if n == 0 { None } else { Some(n) };
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_SPEC_ENABLED")? {
+            self.speculative.enabled = parse_required_bool_env("KILN_SPEC_ENABLED", &v)?;
         }
-        if let Ok(v) = std::env::var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES") {
-            let trimmed = v.trim();
-            if trimmed.is_empty() {
-                self.adapters.composed_cache_max_bytes = None;
-            } else if let Ok(n) = trimmed.parse::<u64>() {
-                self.adapters.composed_cache_max_bytes = if n == 0 { None } else { Some(n) };
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_SPEC_METHOD")? {
+            self.speculative.method = SpecMethod::parse_env(&v).with_context(|| {
+                format!("KILN_SPEC_METHOD must be off, skip_layer, or mtp, got {v:?}")
+            })?;
         }
-        if let Ok(v) = std::env::var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES") {
-            let trimmed = v.trim();
-            if trimmed.is_empty() {
-                self.adapters.composed_cache_max_entries = None;
-            } else if let Ok(n) = trimmed.parse::<u64>() {
-                self.adapters.composed_cache_max_entries = if n == 0 { None } else { Some(n) };
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_SPEC_NUM_TOKENS")? {
+            self.speculative.num_speculative_tokens =
+                parse_decimal_env("KILN_SPEC_NUM_TOKENS", &v, "a token count")?;
+        }
+        if let Some(v) = read_optional_unicode_env("KILN_SPEC_DRAFT_LAYERS")? {
+            self.speculative.draft_layers =
+                parse_decimal_env("KILN_SPEC_DRAFT_LAYERS", &v, "a layer count")?;
         }
 
-        // Streaming/tiled prefill
-        if let Ok(v) = std::env::var("KILN_STREAMING_PREFILL") {
-            self.streaming_prefill.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        if let Some(v) = read_optional_unicode_env("KILN_ADAPTERS_MAX_DISK_BYTES")? {
+            self.adapters.max_disk_bytes =
+                parse_optional_capacity_env("KILN_ADAPTERS_MAX_DISK_BYTES", &v)?;
         }
-        if let Ok(v) = std::env::var("KILN_STREAMING_TILE_TOKENS") {
-            if let Ok(n) = v.parse() {
-                self.streaming_prefill.tile_tokens = n;
-            }
+        if let Some(v) = read_optional_unicode_env("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES")? {
+            self.adapters.composed_cache_max_bytes =
+                parse_optional_capacity_env("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES", &v)?;
         }
-        if let Ok(v) = std::env::var("KILN_STREAMING_LAST_TOKEN_LM_HEAD") {
+        if let Some(v) = read_optional_unicode_env("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES")? {
+            self.adapters.composed_cache_max_entries =
+                parse_optional_capacity_env("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES", &v)?;
+        }
+
+        if let Some(v) = read_optional_unicode_env("KILN_STREAMING_PREFILL")? {
+            self.streaming_prefill.enabled = parse_required_bool_env("KILN_STREAMING_PREFILL", &v)?;
+        }
+        if let Some(v) = read_optional_unicode_env("KILN_STREAMING_TILE_TOKENS")? {
+            self.streaming_prefill.tile_tokens =
+                parse_decimal_env("KILN_STREAMING_TILE_TOKENS", &v, "a token count")?;
+        }
+        if let Some(v) = read_optional_unicode_env("KILN_STREAMING_LAST_TOKEN_LM_HEAD")? {
             self.streaming_prefill.last_token_lm_head =
-                !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no");
+                parse_required_bool_env("KILN_STREAMING_LAST_TOKEN_LM_HEAD", &v)?;
         }
+        Ok(())
     }
 
     /// Apply the accepted-socket send-buffer override strictly. Unlike legacy
@@ -2113,11 +2079,17 @@ impl KilnConfig {
 
     /// Validate configuration values. Returns an error describing the first invalid value.
     fn validate(&self) -> Result<()> {
+        if self.server.host.trim().is_empty() {
+            anyhow::bail!("server.host must be non-empty, got {:?}", self.server.host);
+        }
         if self.server.port == 0 {
-            anyhow::bail!("server.port must be > 0");
+            anyhow::bail!("server.port must be > 0, got {}", self.server.port);
         }
         if self.server.request_timeout_secs == 0 {
-            anyhow::bail!("server.request_timeout_secs must be > 0");
+            anyhow::bail!(
+                "server.request_timeout_secs must be > 0, got {}",
+                self.server.request_timeout_secs
+            );
         }
         if let Some(bytes) = self.server.http_send_buffer_bytes {
             validate_http_send_buffer_bytes(bytes)?;
@@ -2127,31 +2099,129 @@ impl KilnConfig {
         validate_max_prefill_tokens_per_cycle(self.server.max_prefill_tokens_per_cycle.tokens())?;
         validate_max_prefill_layers_per_cycle(self.server.max_prefill_layers_per_cycle.layers())?;
         if self.server.shutdown_timeout_secs == 0 {
-            anyhow::bail!("server.shutdown_timeout_secs must be > 0");
-        }
-
-        let f = self.memory.inference_memory_fraction;
-        if !(0.0..=1.0).contains(&f) {
-            anyhow::bail!("memory.inference_memory_fraction must be between 0.0 and 1.0, got {f}");
-        }
-
-        let valid_levels = ["trace", "debug", "info", "warn", "error"];
-        let level = self.logging.level.to_lowercase();
-        // Allow both simple levels and tracing filter directives (contain '=')
-        if !valid_levels.contains(&level.as_str()) && !level.contains('=') {
             anyhow::bail!(
-                "logging.level must be one of {valid_levels:?} or a tracing filter directive, got '{}'",
-                self.logging.level
+                "server.shutdown_timeout_secs must be > 0, got {}",
+                self.server.shutdown_timeout_secs
             );
         }
 
-        if self.speculative.enabled {
-            if self.speculative.num_speculative_tokens == 0 {
-                anyhow::bail!("speculative.num_speculative_tokens must be > 0");
+        if self.model.model_id.trim().is_empty() {
+            anyhow::bail!(
+                "model.model_id must be non-empty, got {:?}",
+                self.model.model_id
+            );
+        }
+        if self
+            .model
+            .served_model_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            anyhow::bail!(
+                "model.served_model_id must be non-empty when set, got {:?}",
+                self.model.served_model_id
+            );
+        }
+        for (field, value) in [
+            ("model.path", self.model.path.as_deref()),
+            ("model.tokenizer_path", self.model.tokenizer_path.as_deref()),
+            ("model.adapter_dir", self.model.adapter_dir.as_deref()),
+            ("model.snapshot_dir", self.model.snapshot_dir.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.trim().is_empty()) {
+                anyhow::bail!("{field} must be non-empty when set, got {value:?}");
             }
-            if self.speculative.draft_layers == 0 {
-                anyhow::bail!("speculative.draft_layers must be > 0");
+        }
+
+        if self.memory.num_blocks == Some(0) {
+            anyhow::bail!("memory.num_blocks must be > 0 when set, got Some(0)");
+        }
+        for (field, value) in [
+            ("memory.gpu_memory_gb", self.memory.gpu_memory_gb),
+            ("memory.training_memory_gb", self.memory.training_memory_gb),
+        ] {
+            if let Some(value) = value
+                && (!value.is_finite() || value <= 0.0)
+            {
+                anyhow::bail!("{field} must be finite and > 0 when set, got {value}");
             }
+        }
+
+        let f = self.memory.inference_memory_fraction;
+        if !f.is_finite() || !(0.0..=1.0).contains(&f) {
+            anyhow::bail!("memory.inference_memory_fraction must be between 0.0 and 1.0, got {f}");
+        }
+
+        if self.training.grad_checkpoint_segments == Some(0) {
+            anyhow::bail!("training.grad_checkpoint_segments must be > 0 when set, got Some(0)");
+        }
+        if self.training.checkpoint_interval == Some(0) {
+            anyhow::bail!("training.checkpoint_interval must be > 0 when set, got Some(0)");
+        }
+        if self.training.max_queued_jobs == 0 {
+            anyhow::bail!(
+                "training.max_queued_jobs must be > 0, got {}",
+                self.training.max_queued_jobs
+            );
+        }
+        if self.training.max_tracked_jobs == 0 {
+            anyhow::bail!(
+                "training.max_tracked_jobs must be > 0, got {}",
+                self.training.max_tracked_jobs
+            );
+        }
+        if self.training.tracked_job_ttl_secs == 0 {
+            anyhow::bail!(
+                "training.tracked_job_ttl_secs must be > 0, got {}",
+                self.training.tracked_job_ttl_secs
+            );
+        }
+        if self.training.max_tracked_jobs < self.training.max_queued_jobs {
+            anyhow::bail!(
+                "training.max_tracked_jobs must be at least training.max_queued_jobs ({}), got {}",
+                self.training.max_queued_jobs,
+                self.training.max_tracked_jobs
+            );
+        }
+        validate_optional_webhook_url(
+            "training.webhook_url",
+            self.training.webhook_url.as_deref(),
+        )?;
+
+        let valid_levels = ["trace", "debug", "info", "warn", "error"];
+        let level = self.logging.level.to_ascii_lowercase();
+        if !valid_levels.contains(&level.as_str()) && !self.logging.level.contains('=') {
+            anyhow::bail!(
+                "logging.level must be one of {valid_levels:?} or a tracing filter directive, got {:?}",
+                self.logging.level
+            );
+        }
+        tracing_subscriber::EnvFilter::try_new(&self.logging.level).with_context(|| {
+            format!(
+                "logging.level must be a valid tracing filter directive, got {:?}",
+                self.logging.level
+            )
+        })?;
+
+        let valid_formats = ["auto", "json", "pretty", "text", "human"];
+        if !valid_formats.contains(&self.logging.format.as_str()) {
+            anyhow::bail!(
+                "logging.format must be one of {valid_formats:?}, got {:?}",
+                self.logging.format
+            );
+        }
+
+        if self.speculative.num_speculative_tokens == 0 {
+            anyhow::bail!(
+                "speculative.num_speculative_tokens must be > 0, got {}",
+                self.speculative.num_speculative_tokens
+            );
+        }
+        if self.speculative.draft_layers == 0 {
+            anyhow::bail!(
+                "speculative.draft_layers must be > 0, got {}",
+                self.speculative.draft_layers
+            );
         }
 
         if self.streaming_prefill.tile_tokens == 0 || self.streaming_prefill.tile_tokens % 64 != 0 {
@@ -2161,10 +2231,79 @@ impl KilnConfig {
             );
         }
 
+        if self.prefix_cache.max_blocks == Some(0) {
+            anyhow::bail!("prefix_cache.max_blocks must be > 0 when set, got Some(0)");
+        }
+        if self.prefix_cache.max_entries == Some(0) {
+            anyhow::bail!("prefix_cache.max_entries must be > 0 when set, got Some(0)");
+        }
+
         self.teachers.validate()?;
+
+        if let Some(eval) = &self.eval {
+            if eval
+                .eval_dir
+                .as_ref()
+                .is_some_and(|path| path.as_os_str().is_empty())
+            {
+                anyhow::bail!("eval.eval_dir must be non-empty when set, got an empty path");
+            }
+            if eval.max_queued_jobs == 0 {
+                anyhow::bail!(
+                    "eval.max_queued_jobs must be > 0, got {}",
+                    eval.max_queued_jobs
+                );
+            }
+            if eval.max_tracked_jobs == 0 {
+                anyhow::bail!(
+                    "eval.max_tracked_jobs must be > 0, got {}",
+                    eval.max_tracked_jobs
+                );
+            }
+            if eval.max_tracked_jobs < eval.max_queued_jobs {
+                anyhow::bail!(
+                    "eval.max_tracked_jobs must be at least eval.max_queued_jobs ({}), got {}",
+                    eval.max_queued_jobs,
+                    eval.max_tracked_jobs
+                );
+            }
+            validate_optional_webhook_url("eval.webhook_url", eval.webhook_url.as_deref())?;
+        }
+
+        if let Some(agent) = &self.agent {
+            if agent.max_concurrent_runs == 0 {
+                anyhow::bail!(
+                    "agent.max_concurrent_runs must be > 0, got {}",
+                    agent.max_concurrent_runs
+                );
+            }
+            if agent.run_timeout_secs < 10 {
+                anyhow::bail!(
+                    "agent.run_timeout_secs must be at least 10, got {}",
+                    agent.run_timeout_secs
+                );
+            }
+        }
+
+        self.request_log.validate()?;
 
         Ok(())
     }
+}
+
+fn validate_optional_webhook_url(field: &str, value: Option<&str>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.trim().is_empty() {
+        anyhow::bail!("{field} must be a non-empty HTTP(S) URL when set, got {value:?}");
+    }
+    let parsed = reqwest::Url::parse(value)
+        .with_context(|| format!("{field} must be a valid HTTP(S) URL, got {value:?}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        anyhow::bail!("{field} must use the http or https scheme, got {value:?}");
+    }
+    Ok(())
 }
 
 fn validate_http_send_buffer_bytes(bytes: usize) -> Result<()> {
@@ -2241,6 +2380,36 @@ fn parse_bool_env(value: &str) -> Option<bool> {
     }
 }
 
+fn parse_required_bool_env(name: &str, value: &str) -> Result<bool> {
+    parse_bool_env(value).with_context(|| {
+        format!("{name} must be one of true, false, 1, 0, yes, no, on, or off, got {value:?}")
+    })
+}
+
+fn parse_decimal_env<T>(name: &str, value: &str, expected: &str) -> Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display + Send + Sync + 'static,
+{
+    value
+        .trim()
+        .parse::<T>()
+        .map_err(|error| anyhow::anyhow!("{name} must be {expected}, got {value:?}: {error}"))
+}
+
+fn parse_optional_capacity_env(name: &str, value: &str) -> Result<Option<u64>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let capacity = parse_decimal_env::<u64>(
+        name,
+        value,
+        "an empty value, 0, or a non-negative decimal integer",
+    )?;
+    Ok((capacity != 0).then_some(capacity))
+}
+
 fn read_optional_unicode_env(name: &str) -> Result<Option<String>> {
     match std::env::var(name) {
         Ok(raw) => Ok(Some(raw)),
@@ -2274,7 +2443,7 @@ fn parse_optional_u64_env(name: &str, value: &str) -> Result<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::TEST_ENV_LOCK as ENV_LOCK;
 
     // Serializes tests that mutate the process-wide environment. cargo nextest
     // and `cargo test` run tests in parallel by default, so any test that
@@ -2283,8 +2452,6 @@ mod tests {
     // the test (bind to a named guard, NOT `_`) before mutating env state.
     // `unwrap_or_else(|e| e.into_inner())` recovers from poisoning so a single
     // panicking test doesn't cascade into the rest of the suite.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     #[test]
     fn runtime_defaults_contract_matches_server_and_client_defaults() {
         let contract: serde_json::Value =
@@ -3460,7 +3627,7 @@ max_prefill_layers_per_cycle = 8
         }
 
         let mut config = KilnConfig::default();
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
 
         assert_eq!(config.server.host, "10.0.0.1");
         assert_eq!(config.server.port, 7777);
@@ -3534,13 +3701,13 @@ max_prefill_layers_per_cycle = 8
         }
 
         let mut config = KilnConfig::default();
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         assert_eq!(config.server.default_thinking_enabled, Some(false));
 
         unsafe {
             std::env::set_var("KILN_DEFAULT_THINKING_ENABLED", "true");
         }
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         assert_eq!(
             config.server.default_thinking_enabled,
             Some(true),
@@ -3563,14 +3730,14 @@ max_prefill_layers_per_cycle = 8
         unsafe {
             std::env::set_var("KILN_ADAPTERS_MAX_DISK_BYTES", "1073741824");
         }
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         assert_eq!(config.adapters.max_disk_bytes, Some(1_073_741_824));
 
         // `0` disables the cap (operator-opt-out shorthand).
         unsafe {
             std::env::set_var("KILN_ADAPTERS_MAX_DISK_BYTES", "0");
         }
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         assert!(config.adapters.max_disk_bytes.is_none());
 
         // Empty string also clears the cap.
@@ -3578,7 +3745,7 @@ max_prefill_layers_per_cycle = 8
             std::env::set_var("KILN_ADAPTERS_MAX_DISK_BYTES", "");
         }
         config.adapters.max_disk_bytes = Some(123);
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         assert!(config.adapters.max_disk_bytes.is_none());
 
         unsafe {
@@ -3599,7 +3766,7 @@ max_prefill_layers_per_cycle = 8
         unsafe {
             std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES", "536870912");
         }
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         assert_eq!(config.adapters.composed_cache_max_bytes, Some(536_870_912));
 
         unsafe {
@@ -3617,7 +3784,7 @@ max_prefill_layers_per_cycle = 8
         unsafe {
             std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES", "12");
         }
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         assert_eq!(config.adapters.composed_cache_max_entries, Some(12));
 
         unsafe {
@@ -3637,7 +3804,7 @@ max_prefill_layers_per_cycle = 8
             std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES", "0");
             std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES", "0");
         }
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         assert!(config.adapters.composed_cache_max_bytes.is_none());
         assert!(config.adapters.composed_cache_max_entries.is_none());
 
@@ -3648,7 +3815,7 @@ max_prefill_layers_per_cycle = 8
             std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES", "");
             std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES", "");
         }
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         assert!(config.adapters.composed_cache_max_bytes.is_none());
         assert!(config.adapters.composed_cache_max_entries.is_none());
 
@@ -3674,7 +3841,7 @@ webhook_url = "https://from-toml.example/hook"
         unsafe {
             std::env::set_var("KILN_TRAINING_WEBHOOK_URL", "");
         }
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         assert!(
             config.training.webhook_url.is_none(),
             "empty env var should clear the TOML-set webhook URL"
@@ -3800,7 +3967,7 @@ served_model_id = "from-toml"
         unsafe {
             std::env::set_var("KILN_SERVED_MODEL_ID", "from-env");
         }
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         assert_eq!(
             config.model.effective_served_model_id(),
             "from-env",
@@ -3809,5 +3976,156 @@ served_model_id = "from-toml"
         unsafe {
             std::env::remove_var("KILN_SERVED_MODEL_ID");
         }
+    }
+
+    #[test]
+    fn malformed_legacy_env_overrides_are_fatal_and_identify_the_input() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let names = [
+            "KILN_PORT",
+            "KILN_REQUEST_TIMEOUT_SECS",
+            "KILN_EVAL_MODE",
+            "KILN_DEFAULT_THINKING_ENABLED",
+            "KILN_FOLD_REASONING_INTO_CONTENT",
+            "KILN_CHAT_PERFORMANCE_METADATA",
+            "KILN_CHAT_CONFIG_HASH_METADATA",
+            "KILN_SLOW_REQUEST_WARN_SECS",
+            "KILN_SHUTDOWN_TIMEOUT_SECS",
+            "KILN_NUM_BLOCKS",
+            "KILN_GPU_MEMORY_GB",
+            "KILN_INFERENCE_MEMORY_FRACTION",
+            "KILN_TRAINING_MEMORY_GB",
+            "KILN_KV_CACHE_FP8",
+            "KILN_CUDA_GRAPHS",
+            "KILN_GRAD_CHECKPOINT_SEGMENTS",
+            "KILN_NO_GRAD_CHECKPOINT",
+            "KILN_CHECKPOINT_INTERVAL",
+            "KILN_TRAINING_MAX_QUEUED_JOBS",
+            "KILN_TRAINING_MAX_TRACKED_JOBS",
+            "KILN_TRAINING_TRACKED_JOB_TTL_SECS",
+            "KILN_PREFIX_CACHE_ENABLED",
+            "KILN_PREFIX_CACHE_MAX_BLOCKS",
+            "KILN_PREFIX_CACHE_MAX_ENTRIES",
+            "KILN_SPEC_ENABLED",
+            "KILN_SPEC_METHOD",
+            "KILN_SPEC_NUM_TOKENS",
+            "KILN_SPEC_DRAFT_LAYERS",
+            "KILN_ADAPTERS_MAX_DISK_BYTES",
+            "KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES",
+            "KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES",
+            "KILN_STREAMING_PREFILL",
+            "KILN_STREAMING_TILE_TOKENS",
+            "KILN_STREAMING_LAST_TOKEN_LM_HEAD",
+        ];
+
+        for name in names {
+            unsafe {
+                std::env::set_var(name, "definitely-invalid");
+            }
+            let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+            unsafe {
+                std::env::remove_var(name);
+            }
+            let message = format!("{error:#}");
+            assert!(message.contains(name), "{name}: {message}");
+            assert!(message.contains("definitely-invalid"), "{name}: {message}");
+        }
+    }
+
+    #[test]
+    fn unknown_toml_fields_are_rejected_at_every_config_level() {
+        for (name, input) in [
+            ("root_typo", "root_typo = 17"),
+            ("port_typo", "[server]\nport_typo = 17"),
+            ("path_typo", "[model]\npath_typo = 'bad-model'"),
+            ("bytes_typo", "[request_log]\nbytes_typo = 17"),
+            ("jobs_typo", "[eval]\njobs_typo = 17"),
+        ] {
+            let error = toml::from_str::<KilnConfig>(input).unwrap_err().to_string();
+            assert!(error.contains(name), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn semantically_invalid_toml_fields_name_the_field_and_value() {
+        for (field, value, input) in [
+            ("server.host", "empty", "[server]\nhost = ''"),
+            ("server.port", "0", "[server]\nport = 0"),
+            ("model.model_id", "empty", "[model]\nmodel_id = ''"),
+            ("memory.num_blocks", "0", "[memory]\nnum_blocks = 0"),
+            (
+                "training.max_queued_jobs",
+                "0",
+                "[training]\nmax_queued_jobs = 0",
+            ),
+            ("logging.format", "bogus", "[logging]\nformat = 'bogus'"),
+            (
+                "logging.level",
+                "kiln=definitely-not-a-level",
+                "[logging]\nlevel = 'kiln=definitely-not-a-level'",
+            ),
+            (
+                "training.webhook_url",
+                "smtp://bad",
+                "[training]\nwebhook_url = 'smtp://bad'",
+            ),
+            (
+                "prefix_cache.max_blocks",
+                "0",
+                "[prefix_cache]\nmax_blocks = 0",
+            ),
+            (
+                "speculative.num_speculative_tokens",
+                "0",
+                "[speculative]\nnum_speculative_tokens = 0",
+            ),
+            (
+                "streaming_prefill.tile_tokens",
+                "63",
+                "[streaming_prefill]\ntile_tokens = 63",
+            ),
+            (
+                "request_log.max_file_bytes",
+                "1024",
+                "[request_log]\nmax_file_bytes = 1024",
+            ),
+            ("eval.max_queued_jobs", "0", "[eval]\nmax_queued_jobs = 0"),
+            (
+                "eval.webhook_url",
+                "not a URL",
+                "[eval]\nwebhook_url = 'not a URL'",
+            ),
+            (
+                "agent.max_concurrent_runs",
+                "0",
+                "[agent]\nmax_concurrent_runs = 0",
+            ),
+        ] {
+            let config = toml::from_str::<KilnConfig>(input).unwrap();
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains(field), "{field}: {error}");
+            assert!(error.contains(value), "{field}: {error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_config_environment_is_fatal() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var(
+                "KILN_CONFIG",
+                std::ffi::OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]),
+            );
+        }
+        let error = KilnConfig::load(None).unwrap_err();
+        unsafe {
+            std::env::remove_var("KILN_CONFIG");
+        }
+        let message = format!("{error:#}");
+        assert!(message.contains("KILN_CONFIG"), "{message}");
+        assert!(message.contains("UTF-8"), "{message}");
     }
 }

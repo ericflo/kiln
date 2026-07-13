@@ -676,6 +676,9 @@ mod tests {
 
     #[test]
     fn judge_pump_without_index_carries_discover_remediation() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         // Point auto-discovery away from the developer's real ~/.pi
         // sessions so the missing-index path actually exercises. Restored

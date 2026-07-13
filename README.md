@@ -844,7 +844,7 @@ crates/
 
 ## Configuration
 
-Kiln uses a TOML config file. Environment variables override config values. See [`kiln.example.toml`](kiln.example.toml) for all options. The server, CLI, and desktop share the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json), including the local port. The default `stable` GPU ownership contract and the restart-only maintenance workflow are documented in [Serving Profiles](docs/SERVING_PROFILES.md).
+Kiln uses a TOML config file. Environment variables override config values. Unknown TOML fields, malformed environment values, non-Unicode inputs, and invalid semantic values stop startup and identify the rejected field or variable and value; Kiln never silently retains a default for a malformed override. See [`kiln.example.toml`](kiln.example.toml) for all options. The server, CLI, and desktop share the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json), including the local port. The default `stable` GPU ownership contract and the restart-only maintenance workflow are documented in [Serving Profiles](docs/SERVING_PROFILES.md).
 
 | Setting | Env Var | Default | Description |
 |---|---|---|---|
@@ -871,6 +871,10 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
 | `request_log.enabled` | `KILN_REQUEST_LOG_ENABLED` | true | Durable JSONL request/response log for the inference endpoints |
 | `request_log.dir` | `KILN_REQUEST_LOG_DIR` | `<adapter_dir>/.requests` | Request log directory (rotated + gzipped, retention-capped) |
+| `request_log.max_file_bytes` | `KILN_REQUEST_LOG_MAX_FILE_BYTES` | 67108864 | Rotation threshold; values below 4096 are rejected |
+| `request_log.max_total_bytes` | `KILN_REQUEST_LOG_MAX_TOTAL_BYTES` | 2147483648 | Retention ceiling in bytes |
+| `request_log.compress` | `KILN_REQUEST_LOG_COMPRESS` | true | Gzip rotated request logs |
+| `request_log.max_capture_bytes` | `KILN_REQUEST_LOG_MAX_CAPTURE_BYTES` | 4194304 | Per-body storage cap; wire responses are unchanged |
 
 Kiln resolves the logging table and its environment overrides before full
 configuration validation. Every file-read, TOML, environment, or validation

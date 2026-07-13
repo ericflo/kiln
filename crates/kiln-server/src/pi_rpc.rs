@@ -238,11 +238,12 @@ mod tests {
 
     #[test]
     fn find_pi_honors_env_override() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("pi");
         std::fs::write(&fake, "#!/bin/sh\n").unwrap();
-        // Env mutation: serialize against other tests via a lock-free
-        // convention — this test is the only one touching KILN_PI_BIN.
         unsafe { std::env::set_var("KILN_PI_BIN", &fake) };
         let found = find_pi();
         unsafe { std::env::remove_var("KILN_PI_BIN") };

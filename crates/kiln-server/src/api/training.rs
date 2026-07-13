@@ -3098,9 +3098,9 @@ mod tests {
         ChatMessage, GrpoConfig, OpdLossGranularity, OpdObjective, ScoredCompletion, SftConfig,
         SftExample, SftInvalidRowPolicy,
     };
-    use std::sync::{Arc, Barrier, Mutex, RwLock};
+    use std::sync::{Arc, Barrier, RwLock};
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::TEST_ENV_LOCK as ENV_LOCK;
 
     #[test]
     fn correction_ids_follow_the_server_owned_skip_manifest() {

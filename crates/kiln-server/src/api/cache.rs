@@ -156,8 +156,9 @@ pub fn routes() -> Router<AppState> {
 mod tests {
     #[test]
     fn cache_root_honors_env_var() {
-        // SAFETY: tests serialize through cargo test; we set/unset
-        // around the assertion.
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         unsafe {
             std::env::set_var("KILN_LOGIT_CACHE_DIR", "/tmp/kiln-cache-test");
         }

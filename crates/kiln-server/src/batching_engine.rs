@@ -5746,11 +5746,12 @@ mod tests {
 
     #[test]
     fn default_rowwise_decode_uses_batched_decode_unless_overridden() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // Snapshot + restore the env var so other tests that share this
         // process see the original value.
         let prior = std::env::var("KILN_BATCH_DECODE_ROWWISE").ok();
-        // SAFETY: tests in this crate that touch this env var must not run in
-        // parallel; cargo defaults to serial within a single test binary.
         unsafe {
             std::env::remove_var("KILN_BATCH_DECODE_ROWWISE");
         }
@@ -5869,9 +5870,10 @@ mod tests {
 
     #[test]
     fn prefill_admission_quantum_default_and_override() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let prior = std::env::var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM").ok();
-        // SAFETY: tests in this crate that touch this env var must not run in
-        // parallel; cargo defaults to serial within a single test binary.
         unsafe {
             std::env::remove_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM");
         }

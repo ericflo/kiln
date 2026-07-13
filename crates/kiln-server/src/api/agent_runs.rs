@@ -317,6 +317,9 @@ mod tests {
 
     #[test]
     fn gate_env_overrides_win() {
+        let _env_guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // Cannot mutate the bind-host OnceLock here, but the env
         // overrides short-circuit before the host check.
         unsafe { std::env::set_var("KILN_AGENT_RUNS", "0") };

@@ -4158,7 +4158,7 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::TEST_ENV_LOCK as ENV_LOCK;
 
     fn write_resume_checkpoint_fixture(
         root: &std::path::Path,

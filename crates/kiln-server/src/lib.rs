@@ -1,5 +1,10 @@
 //! Kiln HTTP server — library interface for integration testing.
 
+/// Process environment is global mutable state. Every unit test in this crate
+/// that reads around a temporary environment mutation must hold this lock.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub mod adapter_swap;
 pub mod adapter_verify;
 pub mod agent_runs;
