@@ -32,6 +32,12 @@ CANCELLATION_MAX_TOKENS = 512
 CANCELLATION_PROMPT_WORDS = 48
 QUALIFICATION_DURATION_SECONDS = 1800.0
 MAX_STEADY_STATE_WARMUP_WAVES = 16
+MIN_STABILIZATION_CYCLES = 4
+MAX_STABILIZATION_CYCLES = 8
+REQUIRED_STABLE_CYCLES = 2
+STABILIZATION_GPU_DELTA_LIMIT_BYTES = 64 * 1024 * 1024
+STABILIZATION_RSS_DELTA_LIMIT_BYTES = 16 * 1024 * 1024
+SETUP_DEADLINE_SECONDS = 840.0
 
 METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "attributed_itl_outlier_count": ("count", "sum", True),
@@ -86,6 +92,14 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "soak_duration_seconds": ("s", "sum", False),
     "steady_state_warmup_request_count": ("count", "sum", False),
     "steady_state_warmup_wave_count": ("count", "sum", False),
+    "stabilization_cancellation_count": ("count", "sum", False),
+    "stabilization_cycle_count": ("count", "sum", False),
+    "stabilization_final_gpu_delta_bytes": ("bytes", "max", True),
+    "stabilization_final_rss_delta_bytes": ("bytes", "max", True),
+    "stabilization_max_gpu_delta_bytes": ("bytes", "max", True),
+    "stabilization_max_rss_delta_bytes": ("bytes", "max", True),
+    "stabilization_request_count": ("count", "sum", False),
+    "stabilization_stable_cycle_count": ("count", "sum", False),
     "ttft_ms_p50": ("ms", "p50", True),
     "ttft_ms_p99": ("ms", "p99", True),
     "ttft_ms_p999": ("ms", "p99.9", True),
@@ -123,6 +137,16 @@ def effective_config(
                 f"slot_{index}": words for index, words in enumerate(PROMPT_WORDS)
             },
             "request_ignore_eos": True,
+            "setup_deadline_seconds": int(SETUP_DEADLINE_SECONDS),
+            "stabilization_gpu_delta_limit_bytes": (
+                STABILIZATION_GPU_DELTA_LIMIT_BYTES
+            ),
+            "stabilization_max_cycles": MAX_STABILIZATION_CYCLES,
+            "stabilization_min_cycles": MIN_STABILIZATION_CYCLES,
+            "stabilization_required_stable_cycles": REQUIRED_STABLE_CYCLES,
+            "stabilization_rss_delta_limit_bytes": (
+                STABILIZATION_RSS_DELTA_LIMIT_BYTES
+            ),
             "steady_state_warmup_max_waves": MAX_STEADY_STATE_WARMUP_WAVES,
             "wave_concurrency": {
                 f"wave_{index}": concurrency
@@ -270,6 +294,38 @@ def run_wave(
             raise SoakError(f"{len(unfinished)} request workers survived wave cleanup")
 
 
+def run_cancellation(
+    port: int,
+    *,
+    wave: int,
+    base_seed: int,
+    phase: str,
+    deadline: float,
+) -> str | None:
+    role = f"soak-{phase}-cancel-w{wave:05d}"
+    wave_seed = base_seed + wave * 100
+    cancelled = mixed.run_stream(
+        port,
+        name=role,
+        marker=mixed.workload_marker(wave_seed, role),
+        prompt_words=CANCELLATION_PROMPT_WORDS,
+        max_tokens=CANCELLATION_MAX_TOKENS,
+        seed=wave_seed + 99,
+        cancel_after=mixed.CANCELLATION_AFTER_DELTAS,
+        absolute_deadline=deadline,
+    )
+    confirmed, _ = mixed.wait_for_cancellation_and_drain(
+        port, cancelled.marker, deadline
+    )
+    if (
+        not cancelled.cancelled
+        or len(cancelled.semantic_times) < mixed.CANCELLATION_AFTER_DELTAS
+        or not confirmed
+    ):
+        return f"cancellation was not confirmed in {phase} wave {wave}"
+    return None
+
+
 def metrics_from_values(values: dict[str, float | int]) -> list[dict[str, Any]]:
     if set(values) != set(METRIC_DEFINITIONS):
         missing = sorted(set(METRIC_DEFINITIONS) - set(values))
@@ -302,7 +358,7 @@ def execute(
     memory_growth_limit_bytes: int,
 ) -> tuple[list[dict[str, Any]], str | None]:
     started = time.monotonic()
-    deadline = started + minimum_duration_seconds + 480.0
+    deadline = started + minimum_duration_seconds + SETUP_DEADLINE_SECONDS
     binary, binary_hash, build_seconds = mixed.build_binary(deadline)
     mixed.trace(
         "soak_binary_built",
@@ -336,6 +392,14 @@ def execute(
     snapshot_residue: list[str] = []
     values: dict[str, float | int] | None = None
     failures: list[str] = []
+    stabilization_requests = 0
+    stabilization_cancellations = 0
+    stabilization_cycles = 0
+    stabilization_stable_cycles = 0
+    stabilization_final_gpu_delta = 0
+    stabilization_final_rss_delta = 0
+    stabilization_max_gpu_delta = 0
+    stabilization_max_rss_delta = 0
     try:
         mixed.wait_ready(port, process, server_log, deadline)
         health_startup = mixed.read_stable_health(port, deadline, "soak startup health")
@@ -434,6 +498,142 @@ def execute(
                 waves=steady_state_warmup_waves,
             )
 
+        previous_gpu = gpu_memory_bytes(port)
+        previous_rss = rss_bytes(process.pid)
+        stabilization_started = time.monotonic()
+        while stabilization_cycles < MAX_STABILIZATION_CYCLES:
+            cycle_failures: list[str] = []
+            for offset in range(len(WAVE_CONCURRENCY)):
+                stabilization_wave = (
+                    stabilization_cycles * len(WAVE_CONCURRENCY) + offset
+                )
+                stable_results = run_wave(
+                    port,
+                    wave=stabilization_wave,
+                    base_seed=seed,
+                    deadline=deadline,
+                    phase="stabilize",
+                )
+                stabilization_requests += len(stable_results)
+                bad_stable = [
+                    result
+                    for result in stable_results
+                    if not result.success
+                    or result.finish_reason != "length"
+                    or result.completion_tokens != MAX_TOKENS
+                ]
+                if bad_stable:
+                    cycle_failures.append(
+                        "stabilization produced invalid responses: "
+                        + ", ".join(item.name for item in bad_stable[:8])
+                    )
+                if (stabilization_wave + 1) % CANCEL_EVERY_WAVES == 0:
+                    cancellation_failure = run_cancellation(
+                        port,
+                        wave=stabilization_wave,
+                        base_seed=seed + 2_000_000,
+                        phase="stabilize",
+                        deadline=deadline,
+                    )
+                    if cancellation_failure is None:
+                        stabilization_cancellations += 1
+                    else:
+                        cycle_failures.append(cancellation_failure)
+
+                health_start = wait_drained(
+                    port, deadline, f"stabilization wave {stabilization_wave}"
+                )
+                graph_stable = mixed.graph_snapshot(health_start)
+                batching_stable = mixed.batching_snapshot(health_start)
+                prefix_stable = prefix_cache_snapshot(health_start)
+                cycle_failures.extend(
+                    mixed.attest_runtime(
+                        RUNTIME_VARIANT,
+                        health_start,
+                        mixed.json_request(port, "GET", "/v1/debug/model-state"),
+                    )
+                )
+                if (
+                    graph_stable["failures"] != 0
+                    or graph_stable["fallback_total"] != 0
+                ):
+                    cycle_failures.append(
+                        "graph failure or fallback occurred during stabilization"
+                    )
+                if graph_stable["captured_graph_count"] != 0:
+                    cycle_failures.append(
+                        "stabilization retained a live captured graph"
+                    )
+                if unaccounted_blocks(batching_stable, prefix_stable) != 0:
+                    cycle_failures.append(
+                        "stabilization retained blocks outside the prefix cache"
+                    )
+                if (
+                    prefix_stable["active_leases"] != 0
+                    or prefix_stable["pending_release_entries"] != 0
+                ):
+                    cycle_failures.append(
+                        "stabilization retained active or pending prefix ownership"
+                    )
+                if (
+                    prefix_stable["cached_entries"] != prefix_stable["max_entries"]
+                    or prefix_stable["cached_state_bytes"]
+                    != prefix_stable["max_state_bytes"]
+                ):
+                    cycle_failures.append(
+                        "stabilization lost full prefix-cache residency"
+                    )
+                if process.poll() is not None:
+                    raise SoakError(
+                        "server exited during stabilization "
+                        f"({process.returncode})"
+                    )
+                if any(
+                    event.category == "device_fault"
+                    for event in server_log.events_since(stabilization_started)
+                ):
+                    cycle_failures.append(
+                        "server logged a device fault during stabilization"
+                    )
+
+            if cycle_failures:
+                raise SoakError("; ".join(dict.fromkeys(cycle_failures)))
+            current_gpu = gpu_memory_bytes(port)
+            current_rss = rss_bytes(process.pid)
+            gpu_delta = max(0, current_gpu - previous_gpu)
+            rss_delta = max(0, current_rss - previous_rss)
+            stabilization_final_gpu_delta = gpu_delta
+            stabilization_final_rss_delta = rss_delta
+            stabilization_max_gpu_delta = max(stabilization_max_gpu_delta, gpu_delta)
+            stabilization_max_rss_delta = max(stabilization_max_rss_delta, rss_delta)
+            if (
+                gpu_delta <= STABILIZATION_GPU_DELTA_LIMIT_BYTES
+                and rss_delta <= STABILIZATION_RSS_DELTA_LIMIT_BYTES
+            ):
+                stabilization_stable_cycles += 1
+            else:
+                stabilization_stable_cycles = 0
+            stabilization_cycles += 1
+            mixed.trace(
+                "soak_stabilization_cycle",
+                cycle=stabilization_cycles,
+                gpu_delta_bytes=gpu_delta,
+                rss_delta_bytes=rss_delta,
+                stable_cycles=stabilization_stable_cycles,
+            )
+            previous_gpu = current_gpu
+            previous_rss = current_rss
+            if (
+                stabilization_cycles >= MIN_STABILIZATION_CYCLES
+                and stabilization_stable_cycles >= REQUIRED_STABLE_CYCLES
+            ):
+                break
+        else:
+            raise SoakError(
+                "GPU/RSS memory did not stabilize within "
+                f"{MAX_STABILIZATION_CYCLES} cycles"
+            )
+
         graph_start = mixed.graph_snapshot(health_start)
         batching_start = mixed.batching_snapshot(health_start)
         prefix_start = prefix_cache_snapshot(health_start)
@@ -448,7 +648,6 @@ def execute(
 
         while wave == 0 or time.monotonic() - measurement_started < minimum_duration_seconds:
             wave_failures: list[str] = []
-            wave_seed = seed + wave * 100
             wave_results = run_wave(
                 port, wave=wave, base_seed=seed, deadline=deadline
             )
@@ -471,28 +670,15 @@ def execute(
                 )
 
             if (wave + 1) % CANCEL_EVERY_WAVES == 0:
-                role = f"soak-cancel-w{wave:05d}"
-                cancelled = mixed.run_stream(
+                cancellation_failure = run_cancellation(
                     port,
-                    name=role,
-                    marker=mixed.workload_marker(seed, "soak-cancel-shared"),
-                    prompt_words=CANCELLATION_PROMPT_WORDS,
-                    max_tokens=CANCELLATION_MAX_TOKENS,
-                    seed=wave_seed + 99,
-                    cancel_after=mixed.CANCELLATION_AFTER_DELTAS,
-                    absolute_deadline=deadline,
+                    wave=wave,
+                    base_seed=seed,
+                    phase="measured",
+                    deadline=deadline,
                 )
-                confirmed, _ = mixed.wait_for_cancellation_and_drain(
-                    port, cancelled.marker, deadline
-                )
-                if (
-                    not cancelled.cancelled
-                    or len(cancelled.semantic_times) < mixed.CANCELLATION_AFTER_DELTAS
-                    or not confirmed
-                ):
-                    wave_failures.append(
-                        f"cancellation was not confirmed in wave {wave}"
-                    )
+                if cancellation_failure is not None:
+                    wave_failures.append(cancellation_failure)
                 else:
                     cancellations += 1
 
@@ -674,6 +860,14 @@ def execute(
             "soak_duration_seconds": duration,
             "steady_state_warmup_request_count": steady_state_warmup_requests,
             "steady_state_warmup_wave_count": steady_state_warmup_waves,
+            "stabilization_cancellation_count": stabilization_cancellations,
+            "stabilization_cycle_count": stabilization_cycles,
+            "stabilization_final_gpu_delta_bytes": stabilization_final_gpu_delta,
+            "stabilization_final_rss_delta_bytes": stabilization_final_rss_delta,
+            "stabilization_max_gpu_delta_bytes": stabilization_max_gpu_delta,
+            "stabilization_max_rss_delta_bytes": stabilization_max_rss_delta,
+            "stabilization_request_count": stabilization_requests,
+            "stabilization_stable_cycle_count": stabilization_stable_cycles,
             "ttft_ms_p50": mixed.percentile_r7(ttfts, 0.5),
             "ttft_ms_p99": mixed.percentile_r7(ttfts, 0.99),
             "ttft_ms_p999": mixed.percentile_r7(ttfts, 0.999),
@@ -741,6 +935,14 @@ def execute(
     if values is None:
         values = {name: 0 for name in METRIC_DEFINITIONS}
         values["soak_duration_seconds"] = max(0.0, time.monotonic() - started)
+        values["stabilization_cancellation_count"] = stabilization_cancellations
+        values["stabilization_cycle_count"] = stabilization_cycles
+        values["stabilization_final_gpu_delta_bytes"] = stabilization_final_gpu_delta
+        values["stabilization_final_rss_delta_bytes"] = stabilization_final_rss_delta
+        values["stabilization_max_gpu_delta_bytes"] = stabilization_max_gpu_delta
+        values["stabilization_max_rss_delta_bytes"] = stabilization_max_rss_delta
+        values["stabilization_request_count"] = stabilization_requests
+        values["stabilization_stable_cycle_count"] = stabilization_stable_cycles
     assert shutdown is not None
     values["shutdown_forced_count"] = int(shutdown.forced)
     values["shutdown_nonzero_count"] = int(shutdown.returncode != 0)

@@ -105,6 +105,63 @@ class ServeRocmSoakTests(unittest.TestCase):
             warm = run.call_args.kwargs
         self.assertNotEqual(first["marker"], warm["marker"])
 
+    def test_cancellation_markers_are_unique_and_confirmation_is_required(self) -> None:
+        def result(*_args: object, **kwargs: object) -> mock.Mock:
+            return mock.Mock(
+                cancelled=True,
+                semantic_times=[0.0] * soak.mixed.CANCELLATION_AFTER_DELTAS,
+                marker=kwargs["marker"],
+            )
+
+        with (
+            mock.patch.object(soak.mixed, "run_stream", side_effect=result) as run,
+            mock.patch.object(
+                soak.mixed,
+                "wait_for_cancellation_and_drain",
+                return_value=(True, {}),
+            ),
+        ):
+            self.assertIsNone(
+                soak.run_cancellation(
+                    8420,
+                    wave=4,
+                    base_seed=7,
+                    phase="measured",
+                    deadline=time.monotonic() + 1.0,
+                )
+            )
+            first_marker = run.call_args.kwargs["marker"]
+            self.assertIsNone(
+                soak.run_cancellation(
+                    8420,
+                    wave=9,
+                    base_seed=7,
+                    phase="measured",
+                    deadline=time.monotonic() + 1.0,
+                )
+            )
+            repeated_marker = run.call_args.kwargs["marker"]
+        self.assertNotEqual(first_marker, repeated_marker)
+
+        with (
+            mock.patch.object(soak.mixed, "run_stream", side_effect=result),
+            mock.patch.object(
+                soak.mixed,
+                "wait_for_cancellation_and_drain",
+                return_value=(False, {}),
+            ),
+        ):
+            self.assertIn(
+                "not confirmed",
+                soak.run_cancellation(
+                    8420,
+                    wave=4,
+                    base_seed=7,
+                    phase="measured",
+                    deadline=time.monotonic() + 1.0,
+                ),
+            )
+
     def test_checked_in_workload_exactly_matches_driver_contract(self) -> None:
         path = ROOT / "qualification/workloads/serving-rocm-development-soak-v1.json"
         workload = json.loads(path.read_text())

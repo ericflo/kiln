@@ -408,7 +408,15 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
     requests, three cancellations, 1,085 graph replays, and all correctness,
     fault, fallback, synchronization, attribution, ownership, and teardown
     gates otherwise passed. The failed receipt is retained; allocator/batch
-    high-watermark establishment must move into warmup before rerunning.
+    high-watermark establishment must move into warmup before rerunning. The
+    follow-up harness now requires two consecutive stable memory cycles after
+    at least four full concurrency cycles, failing after eight; the measured
+    512 MiB bound is unchanged. A direct development probe then failed that
+    gate: cycles five, six, and eight still added 146,829,312, 126,554,112,
+    and 146,071,552 RSS bytes respectively. The graph runner captured and
+    released request-owned graphs throughout the repeated workload, so graph
+    lifecycle churn is the next bounded runtime hypothesis; no later baseline
+    may hide this continuing growth.
 - [ ] Run a final 24-hour mixed-load soak for the ROCm phase.
 - [ ] Require every ITL gap above `max(250 ms, 5 * rolling p50 ITL)` to have a
   bounded reason code. The final unexplained count must be zero.
@@ -1298,6 +1306,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-12 | Continuous-process ROCm development-soak gate | `sha256:1ea8b37d4f8f` | this commit | portable + Strix Halo ROCm/gfx1151 | 323 qualification-tooling tests; all eight workload manifests; release-version and formatting guards; 67-second real-device harness validation after steady-state warmup | passed | The new non-comparative soak workload builds once, holds one graph-on/fixed-capacity server, fills the bounded 39-entry recurrent prefix cache before establishing memory baselines, and then runs fixed-output concurrency waves with multiple sequence buckets and periodic cancellation. It fails closed on request/cancellation errors, structured or message-carried device faults, graph failures/fallbacks, failed or 100 ms backend settlement, unexplained ITL gaps, unaccounted KV blocks, active/pending prefix ownership, cache-residency drift, dirty teardown, snapshot residue, and more than 512 MiB of post-warmup GPU or RSS growth. The final direct smoke measured 38 requests over six waves, one confirmed cancellation, 26 prefix hits reusing 331 blocks, 546 graph replays, zero faults/fallbacks/request failures/unaccounted blocks/unexplained gaps, three bounded actor-decode ITL attributions, stable 39-entry residency, 287 MiB GPU growth, and 219 MiB RSS growth. This smoke validated the dirty development harness and is not a qualification receipt; the 30-minute gate remains open until the committed workload runs from clean pushed source. |
 
 | 2026-07-12 | ROCm soak post-warmup RSS counterexample | `sha256:1ea8b37d4f8f` | `6da0aea9` | Strix Halo ROCm/gfx1151 | `qualification/receipts/rocm/strix-halo/20260712t234918603177z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1.json`; strict receipt validation | failed | The first clean source-bound run filled all 39 prefix entries before measurement, then completed 116 requests across 16 waves, three confirmed cancellations, 65 captures, 1,085 replays, 106 prefix hits reusing 1,414 blocks, and clean teardown. It recorded zero request failures, device faults, graph failures/fallbacks, backend-sync failures/slow calls, unexplained ITL gaps, unaccounted blocks, active leases, pending releases, or cache-residency drift. GPU growth was 438.86 MiB, but RSS grew 537.45 MiB after only 148.5 measured seconds and crossed the unchanged 512 MiB bound by 25.45 MiB. Filling prefix entries alone therefore does not establish the graph/batch allocator high-watermark; the next harness checkpoint must exercise repeated fixed-prompt concurrency cycles before taking the baseline rather than weakening the limit. |
+
+| 2026-07-12 | Fail-closed ROCm soak memory convergence | `sha256:31e9a1667393` | this commit | portable + Strix Halo ROCm/gfx1151 development probe | 28 focused qualification tests; strict workload validation; eight-cycle real-device convergence probe | failed as designed | Before the measured clock starts, the harness now requires at least four complete workload cycles and two consecutive endpoints within 64 MiB GPU-used and 16 MiB server-RSS deltas. It fails after eight cycles and preserves partial cycle, request, cancellation, final-delta, and maximum-delta evidence rather than emitting misleading zeros. The first dirty-tree probe reached the full 39-entry prefix-cache state and then failed after all eight cycles with no forced/nonzero shutdown or snapshot residue. RSS remained nonconvergent: observed cycles five, six, and eight added 146,829,312, 126,554,112, and 146,071,552 bytes. The unchanged 512 MiB measured bound was never entered. Repeated request-owned HIP graph capture/release is now the bounded runtime hypothesis to test; this row is harness evidence, not a passed soak or a causal claim. |
 
 ## Known Starting Defects
 

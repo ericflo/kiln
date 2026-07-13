@@ -232,14 +232,22 @@ python3 scripts/qualification/run.py \
 The driver builds once, starts one server process, warms ROCm graphs, and fills
 the bounded prefix cache to its declared entry/state capacity before recording
 the post-warmup memory baseline or starting the 30-minute measurement clock.
-It then keeps that process under fixed-output waves at concurrency 1, 8, and 12
-with prompt lengths spanning multiple sequence buckets. Every fifth wave also
-cancels a longer request. Slot prompts repeat across waves so prefix hits and
-cached-block reuse are measured. After each wave, it requires the engine to
-drain, every used KV block to be owned by the prefix cache, zero active cache
-leases or pending releases, stable cache residency, no graph to remain live,
-the process to remain alive, and runtime/debug policy attestations to remain
-consistent.
+It then exercises complete fixed-prompt concurrency cycles, including periodic
+cancellation, until GPU-used and server-RSS deltas remain within 64 MiB and 16
+MiB respectively for two consecutive cycles. This convergence requires at
+least four cycles and fails after eight instead of silently moving a growing
+allocator into the baseline. The result retains completed cycle, request,
+cancellation, final-delta, and maximum-delta metrics even when convergence
+fails before the measured phase begins.
+
+The measured phase keeps that process under the same fixed-output waves at
+concurrency 1, 8, and 12 with prompt lengths spanning multiple sequence
+buckets. Every fifth wave also cancels a longer request using a unique marker.
+Slot prompts repeat across waves so prefix hits and cached-block reuse are
+measured. After each wave, the driver requires the engine to drain, every used
+KV block to be owned by the prefix cache, zero active cache leases or pending
+releases, stable cache residency, no graph to remain live, the process to
+remain alive, and runtime/debug policy attestations to remain consistent.
 
 The result fails on any request or cancellation error, graph capture/replay
 failure, typed eager fallback, backend synchronization failure or 100 ms slow
