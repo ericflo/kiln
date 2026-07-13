@@ -108,18 +108,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 13 top-level sections and 70 fixed leaf
+The accepted TOML surface contains 13 top-level sections and 71 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 70 fixed fields:
+credential. Of the 71 fixed fields:
 
-- 62 implement the canonical mechanical environment name;
+- 63 implement the canonical mechanical environment name;
 - 41 also retain one or more deprecated compatibility spellings (42 aliases
   total);
 - 8 have no environment override;
 - the 42 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 70 fixed fields and both dynamic credential fields.
+The tables below cover all 71 fixed fields and both dynamic credential fields.
 
 ## `[server]`
 

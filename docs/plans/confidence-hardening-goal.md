@@ -915,7 +915,7 @@ Current audit findings and migration order (2026-07-12):
   process environment. Model, tensor, kernel, scheduler, training, eval, UI,
   and request code receive immutable typed policy. Qualification-only controls
   use one explicit internal namespace/profile and are included in provenance.
-- The startup loader now owns one declarative registry for all 62 public fixed
+- The startup loader now owns one declarative registry for all 63 public fixed
   typed leaves. Canonical names derive mechanically from section and field,
   compatibility aliases parse strictly and warn without values, every present
   alias must agree with a canonical value, and typed CLI overrides no longer
