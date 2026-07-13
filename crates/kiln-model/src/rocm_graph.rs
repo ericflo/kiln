@@ -171,20 +171,19 @@ struct RocmGraphKey {
 
 #[cfg(feature = "rocm")]
 impl RocmGraphKey {
+    fn exact_max_seqlen_k(attention_len: usize) -> usize {
+        let kblock_n = crate::generate::FA2_KBLOCK_N;
+        attention_len.div_ceil(kblock_n) * kblock_n
+    }
+
     fn new(block_table: &BlockTable, paged_cache: &PagedKvCacheKt, seq_len: usize) -> Self {
         let stable_metadata = Self::stable_paged_metadata_enabled();
         let attention_len = seq_len + 1;
-        // Bucket + size by a multiple of FA2_KBLOCK_N (=64 for hdim256). A
-        // coarser default avoids recapturing on every 64-token boundary while
-        // preserving the padded block-table layout that the captured forward
-        // expects. `seqused_k` still bounds the actual usable K/V length.
+        // Match eager's exact FA2 split geometry. A coarser graph bucket changes
+        // the number of split-K partials and can perturb BF16 reductions even
+        // when `seqused_k` masks the same logical K/V length.
         let kblock_n = crate::generate::FA2_KBLOCK_N;
-        let bucket_tokens = std::env::var("KILN_ROCM_GRAPH_KBLOCK_BUCKET_TOKENS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&v| v >= kblock_n && v % kblock_n == 0)
-            .unwrap_or(512);
-        let max_seqlen_k = attention_len.div_ceil(bucket_tokens) * bucket_tokens;
+        let max_seqlen_k = Self::exact_max_seqlen_k(attention_len);
         let pages_per_chunk = kblock_n / paged_cache.block_size();
         let max_blocks_per_seq = (max_seqlen_k / kblock_n) * pages_per_chunk;
         Self {
@@ -3020,6 +3019,17 @@ impl RocmGraphRunner {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn graph_attention_geometry_matches_exact_fa2_splits() {
+        let kblock_n = crate::generate::FA2_KBLOCK_N;
+        for attention_len in [1, kblock_n, kblock_n + 1, 2395, 2560, 2561] {
+            let expected = attention_len.div_ceil(kblock_n) * kblock_n;
+            assert_eq!(RocmGraphKey::exact_max_seqlen_k(attention_len), expected);
+        }
+        assert_eq!(RocmGraphKey::exact_max_seqlen_k(2395), 2432);
+    }
+
     #[test]
     fn graph_slot_restore_preserves_tensor_handles() {
         let mut state = LinearAttentionState {
@@ -3431,13 +3441,6 @@ mod tests {
             std::env::var("KILN_QUALIFICATION").ok().as_deref(),
             Some("1"),
             "set KILN_QUALIFICATION=1 for the explicit hardware run"
-        );
-        assert_eq!(
-            std::env::var("KILN_ROCM_GRAPH_KBLOCK_BUCKET_TOKENS")
-                .ok()
-                .as_deref(),
-            Some("64"),
-            "qualification must force 64-token graph buckets"
         );
         assert!(kiln_tensor::rocm_is_available());
 
