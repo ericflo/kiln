@@ -23424,12 +23424,13 @@ pub(crate) mod tests {
             10240,
             151936,
             2,
-            2,
+            4,
             &tight_runtime,
         );
         assert!(
             tight_cfg.enabled && tight_cfg.num_segments >= 2,
-            "injected 16 GiB capacity should checkpoint a 4K-token step: {tight_cfg:?}"
+            "injected 16 GiB capacity should checkpoint a promoted-F32 4K-token step: \
+             {tight_cfg:?}"
         );
 
         let explicit_runtime = crate::TrainingRuntimeContext::new(
