@@ -183,8 +183,8 @@ instead. See [Serving Profiles](docs/SERVING_PROFILES.md) before step 6.
 
 By default, Kiln logs in colored "pretty" format when stderr is an interactive
 terminal and switches to structured JSON when stderr is piped or redirected
-(systemd, docker, CI). To force a specific format, set `KILN_LOG_FORMAT=json`
-or `KILN_LOG_FORMAT=pretty` (or the equivalent `[logging] format = "..."` in
+(systemd, docker, CI). To force a specific format, set `KILN_LOGGING_FORMAT=json`
+or `KILN_LOGGING_FORMAT=pretty` (or the equivalent `[logging] format = "..."` in
 `kiln.toml`). Kiln bootstraps those logging fields before it validates the rest
 of the configuration, so file-read, TOML, environment, and validation failures
 emit a structured `configuration_load_failed` event with the selected path and
@@ -211,7 +211,7 @@ You'll see the startup banner:
 
 The `GPU` and `VRAM` lines come from `nvidia-smi` and are skipped silently if it isn't installed. If you launched with `--config kiln.toml`, a `Config:` line appears just below `Version:`.
 
-Kiln binds to loopback (`127.0.0.1`) by default so a fresh install isn't reachable from the network. To accept connections from other hosts, set `server.host = "0.0.0.0"` in your TOML config or `KILN_HOST=0.0.0.0` and put Kiln behind a trusted reverse proxy (auth is out of scope for v0.1).
+Kiln binds to loopback (`127.0.0.1`) by default so a fresh install isn't reachable from the network. To accept connections from other hosts, set `server.host = "0.0.0.0"` in your TOML config or `KILN_SERVER_HOST=0.0.0.0` and put Kiln behind a trusted reverse proxy (auth is out of scope for v0.1).
 
 **Training endpoints are privileged.** `/v1/train/sft` and `/v1/train/grpo` apply a faithful gradient update to whatever structurally-valid examples you POST — kiln does not validate the *content* of training data. A poisoned example will permanently influence the active adapter until you unload it. Do not expose training endpoints to untrusted inputs, and treat your training corpus as security-sensitive. See the README's [Security model](README.md#security-model) section for the full picture.
 
@@ -325,14 +325,14 @@ Training requires GPU-writer ownership. For this interactive tutorial, stop the
 stable server and restart the same command with the development profile:
 
 ```bash
-KILN_SERVING_PROFILE=experimental \
+KILN_SERVER_SERVING_PROFILE=experimental \
   KILN_MODEL_PATH=./Qwen3.5-4B \
   ./target/release/kiln serve
 ```
 
 This keeps inference, live adapter activation, and post-training eval available
 in one process. For production, remove the instance from traffic, restart with
-`KILN_SERVING_PROFILE=maintenance`, train without `post_eval`, then restart in
+`KILN_SERVER_SERVING_PROFILE=maintenance`, train without `post_eval`, then restart in
 `stable` and run the eval before restoring traffic. The full drain procedure is
 in [Serving Profiles](docs/SERVING_PROFILES.md#entering-maintenance).
 
@@ -626,17 +626,17 @@ allocation with a shrinking `inference_memory_fraction` from the list
 `[0.75, 0.65, 0.55, 0.45]` if the configured value OOMs at startup. On
 recovery it logs a `WARN` naming the `actual_fraction` it landed on; pin
 that value in `[memory] inference_memory_fraction` (or
-`KILN_INFERENCE_MEMORY_FRACTION`) to silence the warning on the next restart.
+`KILN_MEMORY_INFERENCE_MEMORY_FRACTION`) to silence the warning on the next restart.
 
 If every fallback also OOMs, startup aborts with a structured panic and
 recommends:
 
-- **`KILN_NUM_BLOCKS=N`** (or `[memory] num_blocks = N` in
+- **`KILN_MEMORY_NUM_BLOCKS=N`** (or `[memory] num_blocks = N` in
   [`kiln.example.toml`](kiln.example.toml)) — preferred; bypasses the
   auto-sizer with an exact block count. This is the canonical workaround in
   [issue #685](https://github.com/ericflo/kiln/issues/685). The panic prints
   a concrete `N`.
-- **`KILN_INFERENCE_MEMORY_FRACTION=X`** — fraction-based equivalent.
+- **`KILN_MEMORY_INFERENCE_MEMORY_FRACTION=X`** — fraction-based equivalent.
 
 
 ### 9.4 GRPO rollout generation
@@ -1013,16 +1013,16 @@ Key settings:
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
 | `model.path` | `KILN_MODEL_PATH` | none | Path to model weights (required for real inference) |
-| `server.port` | `KILN_PORT` | 8420 | Server listen port |
-| `server.serving_profile` | `KILN_SERVING_PROFILE` | `stable` | Immutable GPU ownership policy: `stable`, `experimental`, or `maintenance` |
-| `server.max_batch_tokens` | `KILN_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per actor cycle; lower values favor decode latency during long prefills, higher values favor prefill throughput |
-| `server.max_decode_batch` | `KILN_MAX_DECODE_BATCH` | `auto` | Concurrent decode-row ceiling (`auto` or 1–65536); malformed values fail startup, and deterministic mode or `max_batch_tokens` may lower the reported effective value |
-| `server.deterministic` | `KILN_DETERMINISTIC` | false | Strict serving-repeatability mode; freezes the process-wide determinism selector and forces effective decode width 1. It does not make every accelerator kernel bitwise deterministic |
-| `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default token budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
-| `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
+| `server.port` | `KILN_SERVER_PORT` | 8420 | Server listen port |
+| `server.serving_profile` | `KILN_SERVER_SERVING_PROFILE` | `stable` | Immutable GPU ownership policy: `stable`, `experimental`, or `maintenance` |
+| `server.max_batch_tokens` | `KILN_SERVER_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per actor cycle; lower values favor decode latency during long prefills, higher values favor prefill throughput |
+| `server.max_decode_batch` | `KILN_SERVER_MAX_DECODE_BATCH` | `auto` | Concurrent decode-row ceiling (`auto` or 1–65536); malformed values fail startup, and deterministic mode or `max_batch_tokens` may lower the reported effective value |
+| `server.deterministic` | `KILN_SERVER_DETERMINISTIC` | false | Strict serving-repeatability mode; freezes the process-wide determinism selector and forces effective decode width 1. It does not make every accelerator kernel bitwise deterministic |
+| `server.default_thinking_budget_tokens` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default token budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
+| `server.default_thinking_budget_ms` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference (rest for training) |
-| `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (halves memory, ~2x context) |
-| `logging.format` | `KILN_LOG_FORMAT` | auto | Log format: `auto` (pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, `human` |
+| `memory.kv_cache_fp8` | `KILN_MEMORY_KV_CACHE_FP8` | false | FP8 KV cache (halves memory, ~2x context) |
+| `logging.format` | `KILN_LOGGING_FORMAT` | auto | Log format: `auto` (pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, `human` |
 | `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
 | `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
 | `request_log.enabled` | `KILN_REQUEST_LOG_ENABLED` | true | Durable JSONL log of every inference request/response (the mine→train corpus) |

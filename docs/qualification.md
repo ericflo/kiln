@@ -203,7 +203,7 @@ scheduler policy is changed.
 
 For the historical dynamic-runtime A/B, run each of `default`,
 `autoscale-off`, `graphs-off`, and `both-off` separately. These four arms now
-pin `KILN_SERVING_PROFILE=experimental` so their requested graph/autoscale
+pin `KILN_SERVER_SERVING_PROFILE=experimental` so their requested graph/autoscale
 differences retain the semantics they had before stable became the default:
 
 ```bash

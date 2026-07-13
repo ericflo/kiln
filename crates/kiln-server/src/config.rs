@@ -68,17 +68,18 @@ pub const MAX_PREFILL_TOKENS_PER_CYCLE_MAX: usize = MAX_BATCH_TOKENS_MAX;
 pub const DEFAULT_MAX_PREFILL_LAYERS_PER_CYCLE: usize = 4;
 pub const MAX_PREFILL_LAYERS_PER_CYCLE_MIN: usize = 1;
 pub const MAX_PREFILL_LAYERS_PER_CYCLE_MAX: usize = 1_024;
-/// Strict startup selector for the serving-safety contract.
+/// Compatibility alias for canonical `KILN_SERVER_SERVING_PROFILE`.
 pub const SERVING_PROFILE_ENV: &str = "KILN_SERVING_PROFILE";
-/// Strict startup selector for the process-lifetime reproducibility envelope.
+/// Compatibility alias for canonical `KILN_SERVER_DETERMINISTIC`.
 pub const DETERMINISTIC_ENV: &str = "KILN_DETERMINISTIC";
-/// Strict startup override for the concurrent decode-row ceiling.
+/// Compatibility alias for canonical `KILN_SERVER_MAX_DECODE_BATCH`.
 pub const MAX_DECODE_BATCH_ENV: &str = "KILN_MAX_DECODE_BATCH";
 pub const MAX_DECODE_BATCH_MIN: usize = 1;
 pub const MAX_DECODE_BATCH_MAX: usize = MAX_BATCH_TOKENS_MAX;
-/// Strict startup override for the default open-thinking token limit.
+/// Compatibility alias for canonical
+/// `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS`.
 pub const DEFAULT_THINKING_BUDGET_TOKENS_ENV: &str = "KILN_DEFAULT_THINKING_BUDGET_TOKENS";
-/// Strict startup override for the default open-thinking decode-time limit.
+/// Compatibility alias for canonical `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS`.
 pub const DEFAULT_THINKING_BUDGET_MS_ENV: &str = "KILN_DEFAULT_THINKING_BUDGET_MS";
 
 /// Provenance of a resolved startup configuration value.
@@ -113,13 +114,15 @@ impl DeterministicInference {
         Self { enabled, source }
     }
 
-    fn from_environment_value(raw: &str) -> Result<Self> {
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
         let enabled = parse_bool_env(raw).with_context(|| {
-            format!(
-                "{DETERMINISTIC_ENV} must be one of true, false, 1, 0, yes, no, on, off; got {raw:?}"
-            )
+            format!("{name} must be one of true, false, 1, 0, yes, no, on, off; got {raw:?}")
         })?;
         Ok(Self::new(enabled, ConfigValueSource::Environment))
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        Self::from_named_environment_value(DETERMINISTIC_ENV, raw)
     }
 
     pub const fn enabled(self) -> bool {
@@ -191,7 +194,7 @@ impl MaxDecodeBatch {
         Ok(Self { limit, source })
     }
 
-    fn from_environment_value(raw: &str) -> Result<Self> {
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
         let trimmed = raw.trim();
         if is_auto_decode_batch(trimmed) {
             return Ok(Self {
@@ -201,11 +204,15 @@ impl MaxDecodeBatch {
         }
         let limit = trimmed.parse::<usize>().with_context(|| {
             format!(
-                "{MAX_DECODE_BATCH_ENV} must be 'auto' or a decimal integer in {MAX_DECODE_BATCH_MIN}..={MAX_DECODE_BATCH_MAX}, got {raw:?}"
+                "{name} must be 'auto' or a decimal integer in {MAX_DECODE_BATCH_MIN}..={MAX_DECODE_BATCH_MAX}, got {raw:?}"
             )
         })?;
         Self::new(Some(limit), ConfigValueSource::Environment)
-            .with_context(|| format!("invalid {MAX_DECODE_BATCH_ENV} value {raw:?}"))
+            .with_context(|| format!("invalid {name} value {raw:?}"))
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        Self::from_named_environment_value(MAX_DECODE_BATCH_ENV, raw)
     }
 
     pub const fn limit(self) -> Option<usize> {
@@ -436,11 +443,15 @@ impl ServingProfileSetting {
         Self { profile, source }
     }
 
-    fn from_environment_value(raw: &str) -> Result<Self> {
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
         Ok(Self {
-            profile: ServingProfile::parse(raw, SERVING_PROFILE_ENV)?,
+            profile: ServingProfile::parse(raw, name)?,
             source: ConfigValueSource::Environment,
         })
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        Self::from_named_environment_value(SERVING_PROFILE_ENV, raw)
     }
 
     pub const fn profile(self) -> ServingProfile {
@@ -517,15 +528,18 @@ impl StreamStallGrace {
         Ok(Self { millis, source })
     }
 
-    fn from_environment_value(raw: &str) -> Result<Self> {
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
         let millis = raw.trim().parse::<u64>().with_context(|| {
             format!(
-                "KILN_STREAM_STALL_GRACE_MS must be a decimal integer in {}..={}, got {raw:?}",
+                "{name} must be a decimal integer in {}..={}, got {raw:?}",
                 STREAM_STALL_GRACE_MIN_MS, STREAM_STALL_GRACE_MAX_MS
             )
         })?;
-        Self::new(millis, ConfigValueSource::Environment)
-            .context("invalid KILN_STREAM_STALL_GRACE_MS")
+        Self::new(millis, ConfigValueSource::Environment).with_context(|| format!("invalid {name}"))
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        Self::from_named_environment_value("KILN_STREAM_STALL_GRACE_MS", raw)
     }
 
     pub fn millis(self) -> u64 {
@@ -582,14 +596,18 @@ impl BatchTokenBudget {
         Ok(Self { tokens, source })
     }
 
-    fn from_environment_value(raw: &str) -> Result<Self> {
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
         let tokens = raw.trim().parse::<usize>().with_context(|| {
             format!(
-                "KILN_MAX_BATCH_TOKENS must be a decimal integer in {}..={}, got {raw:?}",
+                "{name} must be a decimal integer in {}..={}, got {raw:?}",
                 MAX_BATCH_TOKENS_MIN, MAX_BATCH_TOKENS_MAX
             )
         })?;
-        Self::new(tokens, ConfigValueSource::Environment).context("invalid KILN_MAX_BATCH_TOKENS")
+        Self::new(tokens, ConfigValueSource::Environment).with_context(|| format!("invalid {name}"))
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        Self::from_named_environment_value("KILN_MAX_BATCH_TOKENS", raw)
     }
 
     pub fn tokens(self) -> usize {
@@ -642,15 +660,18 @@ impl PrefillTokenBudget {
         Ok(Self { tokens, source })
     }
 
-    fn from_environment_value(raw: &str) -> Result<Self> {
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
         let tokens = raw.trim().parse::<usize>().with_context(|| {
             format!(
-                "KILN_MAX_PREFILL_TOKENS_PER_CYCLE must be a decimal integer in {}..={}, got {raw:?}",
+                "{name} must be a decimal integer in {}..={}, got {raw:?}",
                 MAX_PREFILL_TOKENS_PER_CYCLE_MIN, MAX_PREFILL_TOKENS_PER_CYCLE_MAX
             )
         })?;
-        Self::new(tokens, ConfigValueSource::Environment)
-            .context("invalid KILN_MAX_PREFILL_TOKENS_PER_CYCLE")
+        Self::new(tokens, ConfigValueSource::Environment).with_context(|| format!("invalid {name}"))
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        Self::from_named_environment_value("KILN_MAX_PREFILL_TOKENS_PER_CYCLE", raw)
     }
 
     pub fn tokens(self) -> usize {
@@ -703,15 +724,18 @@ impl PrefillLayerBudget {
         Ok(Self { layers, source })
     }
 
-    fn from_environment_value(raw: &str) -> Result<Self> {
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
         let layers = raw.trim().parse::<usize>().with_context(|| {
             format!(
-                "KILN_MAX_PREFILL_LAYERS_PER_CYCLE must be a decimal integer in {}..={}, got {raw:?}",
+                "{name} must be a decimal integer in {}..={}, got {raw:?}",
                 MAX_PREFILL_LAYERS_PER_CYCLE_MIN, MAX_PREFILL_LAYERS_PER_CYCLE_MAX
             )
         })?;
-        Self::new(layers, ConfigValueSource::Environment)
-            .context("invalid KILN_MAX_PREFILL_LAYERS_PER_CYCLE")
+        Self::new(layers, ConfigValueSource::Environment).with_context(|| format!("invalid {name}"))
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        Self::from_named_environment_value("KILN_MAX_PREFILL_LAYERS_PER_CYCLE", raw)
     }
 
     pub fn layers(self) -> usize {
@@ -774,7 +798,8 @@ pub struct KilnConfig {
     #[serde(default)]
     pub eval: Option<EvalConfig>,
     /// Durable request/response log for the inference endpoints
-    /// (mine→filter→train flywheel). See [`crate::request_log`].
+    /// (mine→filter→train flywheel). Canonical startup overrides use
+    /// `KILN_REQUEST_LOG_<FIELD>`. See [`crate::request_log`].
     #[serde(default)]
     pub request_log: crate::request_log::RequestLogConfig,
     /// §10.6 self-improvement automation. `None` / omitted section means
@@ -1020,7 +1045,8 @@ impl Default for EvalConfig {
     }
 }
 
-/// HTTP server settings.
+/// HTTP server settings. Canonical startup overrides use
+/// `KILN_SERVER_<FIELD>`; shorter historical spellings are compatibility-only.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
@@ -1088,7 +1114,9 @@ pub struct ServerConfig {
     pub shutdown_timeout_secs: u64,
 }
 
-/// Model and tokenizer paths.
+/// Model and tokenizer paths. Canonical startup overrides use
+/// `KILN_MODEL_<FIELD>`; historical unsectioned spellings are
+/// compatibility-only.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
@@ -1188,7 +1216,9 @@ impl ModelConfig {
     }
 }
 
-/// GPU memory allocation settings.
+/// GPU memory allocation settings. Canonical startup overrides use
+/// `KILN_MEMORY_<FIELD>`; historical unsectioned spellings are
+/// compatibility-only.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MemoryConfig {
@@ -1207,7 +1237,9 @@ pub struct MemoryConfig {
     pub cuda_graphs: bool,
 }
 
-/// Training-specific settings.
+/// Training-specific settings. Canonical startup overrides use
+/// `KILN_TRAINING_<FIELD>`; historical unsectioned spellings are
+/// compatibility-only.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrainingConfig {
@@ -1270,7 +1302,8 @@ pub struct TrainingConfig {
     pub tracked_job_ttl_secs: u64,
 }
 
-/// Logging settings.
+/// Logging settings. Canonical startup overrides use
+/// `KILN_LOGGING_<FIELD>`; `KILN_LOG_*` spellings are compatibility-only.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
@@ -1278,7 +1311,8 @@ pub struct LoggingConfig {
     pub format: String,
 }
 
-/// Prefix caching settings.
+/// Prefix caching settings. Canonical startup overrides use
+/// `KILN_PREFIX_CACHE_<FIELD>`.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PrefixCacheConfig {
@@ -1331,7 +1365,9 @@ impl SpecMethod {
     }
 }
 
-/// Speculative decoding settings.
+/// Speculative decoding settings. Canonical startup overrides use
+/// `KILN_SPECULATIVE_<FIELD>`; `KILN_SPEC_*` spellings are
+/// compatibility-only.
 ///
 /// Two implementations coexist:
 ///   * `SkipLayer` — the first `draft_layers` of the main model act as the
@@ -1356,7 +1392,9 @@ pub struct SpeculativeDecodingConfig {
     pub draft_layers: usize,
 }
 
-/// Streaming/tiled prefill settings.
+/// Streaming/tiled prefill settings. Canonical startup overrides use
+/// `KILN_STREAMING_PREFILL_<FIELD>`; shorter `KILN_STREAMING_*` spellings are
+/// compatibility-only.
 ///
 /// When enabled, long-context prefill iterates over the sequence in tiles of
 /// `tile_tokens` tokens, carrying O(1) GDN recurrent state across tile
@@ -1366,11 +1404,13 @@ pub struct SpeculativeDecodingConfig {
 ///
 /// `tile_tokens` must be a positive multiple of 64 (the GDN chunk size).
 ///
-/// Dispatch is driven by reading these environment variables directly from
-/// `kiln-model` helpers; this struct is the documentation / TOML-config
-/// mirror. The generic config default keeps streaming OFF unless explicitly set,
-/// while runtime device policy enables streaming by default for CUDA prompts at
-/// 8k+ tokens and Metal prompts after device-specific thresholds.
+/// Production startup resolves the canonical names above into this typed
+/// object. Lower `kiln-model` helpers temporarily still read compatibility
+/// `KILN_STREAMING_*` spellings directly; that split-read path is a migration
+/// limitation rather than a second public contract. The generic config default
+/// keeps streaming OFF unless explicitly set, while runtime device policy
+/// enables streaming by default for CUDA, ROCm, and Metal prompts at 2,048 or
+/// more tokens.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StreamingPrefillConfig {
@@ -1386,7 +1426,8 @@ pub struct StreamingPrefillConfig {
     pub last_token_lm_head: bool,
 }
 
-/// Adapter-storage settings.
+/// Adapter-storage settings. Canonical startup overrides use
+/// `KILN_ADAPTERS_<FIELD>`.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdaptersConfig {
@@ -1431,6 +1472,614 @@ pub struct AdaptersConfig {
     /// Set to `0` via env to disable the cap (operator-opt-out shorthand).
     pub composed_cache_max_entries: Option<u64>,
 }
+
+/// One compatibility spelling for a public typed configuration field.
+///
+/// `PresenceAsFalse` preserves the historical `KILN_DEFAULT_NO_THINK`
+/// switch: any present Unicode value means false, and the explicit boolean
+/// alias has higher legacy precedence because it appears later in the field's
+/// alias list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvAliasMode {
+    Value,
+    PresenceAsFalse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EnvAlias {
+    name: &'static str,
+    mode: EnvAliasMode,
+}
+
+impl EnvAlias {
+    const fn value(name: &'static str) -> Self {
+        Self {
+            name,
+            mode: EnvAliasMode::Value,
+        }
+    }
+
+    const fn presence_as_false(name: &'static str) -> Self {
+        Self {
+            name,
+            mode: EnvAliasMode::PresenceAsFalse,
+        }
+    }
+
+    fn effective_raw<'a>(self, raw: &'a str) -> &'a str {
+        match self.mode {
+            EnvAliasMode::Value => raw,
+            EnvAliasMode::PresenceAsFalse => "false",
+        }
+    }
+}
+
+/// Normalize parsed values only for canonical/legacy equivalence checks.
+/// The concrete typed value is installed directly in `KilnConfig`; this trait
+/// does not create a second configuration model.
+trait NormalizedEnvValue {
+    fn normalized_env_value(&self) -> String;
+}
+
+macro_rules! impl_normalized_display {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl NormalizedEnvValue for $type {
+                fn normalized_env_value(&self) -> String {
+                    self.to_string()
+                }
+            }
+        )+
+    };
+}
+
+impl_normalized_display!(bool, u16, u64, usize);
+
+impl NormalizedEnvValue for f64 {
+    fn normalized_env_value(&self) -> String {
+        if *self == 0.0 {
+            "0".to_owned()
+        } else {
+            self.to_string()
+        }
+    }
+}
+
+impl NormalizedEnvValue for String {
+    fn normalized_env_value(&self) -> String {
+        self.clone()
+    }
+}
+
+impl NormalizedEnvValue for PathBuf {
+    fn normalized_env_value(&self) -> String {
+        self.as_os_str().to_string_lossy().into_owned()
+    }
+}
+
+impl<T: NormalizedEnvValue> NormalizedEnvValue for Option<T> {
+    fn normalized_env_value(&self) -> String {
+        match self {
+            Some(value) => format!("some:{}", value.normalized_env_value()),
+            None => "none".to_owned(),
+        }
+    }
+}
+
+impl NormalizedEnvValue for DeterministicInference {
+    fn normalized_env_value(&self) -> String {
+        self.enabled().normalized_env_value()
+    }
+}
+
+impl NormalizedEnvValue for MaxDecodeBatch {
+    fn normalized_env_value(&self) -> String {
+        self.limit().normalized_env_value()
+    }
+}
+
+impl NormalizedEnvValue for ServingProfileSetting {
+    fn normalized_env_value(&self) -> String {
+        self.profile().as_str().to_owned()
+    }
+}
+
+impl NormalizedEnvValue for StreamStallGrace {
+    fn normalized_env_value(&self) -> String {
+        self.millis().normalized_env_value()
+    }
+}
+
+impl NormalizedEnvValue for BatchTokenBudget {
+    fn normalized_env_value(&self) -> String {
+        self.tokens().normalized_env_value()
+    }
+}
+
+impl NormalizedEnvValue for PrefillTokenBudget {
+    fn normalized_env_value(&self) -> String {
+        self.tokens().normalized_env_value()
+    }
+}
+
+impl NormalizedEnvValue for PrefillLayerBudget {
+    fn normalized_env_value(&self) -> String {
+        self.layers().normalized_env_value()
+    }
+}
+
+impl NormalizedEnvValue for SpecMethod {
+    fn normalized_env_value(&self) -> String {
+        match self {
+            Self::Off => "off",
+            Self::SkipLayer => "skip_layer",
+            Self::Mtp => "mtp",
+        }
+        .to_owned()
+    }
+}
+
+fn parse_public_text(_name: &str, raw: &str) -> Result<String> {
+    Ok(raw.to_owned())
+}
+
+fn parse_public_some_text(_name: &str, raw: &str) -> Result<Option<String>> {
+    Ok(Some(raw.to_owned()))
+}
+
+fn parse_public_snapshot_dir(_name: &str, raw: &str) -> Result<Option<String>> {
+    Ok((!raw.trim().is_empty()).then(|| raw.to_owned()))
+}
+
+fn parse_public_empty_clears_text(_name: &str, raw: &str) -> Result<Option<String>> {
+    Ok((!raw.is_empty()).then(|| raw.to_owned()))
+}
+
+fn parse_public_request_log_dir(name: &str, raw: &str) -> Result<Option<PathBuf>> {
+    if raw.trim().is_empty() {
+        anyhow::bail!("{name} must be a non-empty path, got {raw:?}");
+    }
+    Ok(Some(PathBuf::from(raw)))
+}
+
+fn parse_public_bool(name: &str, raw: &str) -> Result<bool> {
+    parse_required_bool_env(name, raw)
+}
+
+fn parse_public_some_bool(name: &str, raw: &str) -> Result<Option<bool>> {
+    parse_required_bool_env(name, raw).map(Some)
+}
+
+fn parse_public_decimal<T>(name: &str, raw: &str) -> Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: fmt::Display + Send + Sync + 'static,
+{
+    parse_decimal_env(name, raw, "a decimal value")
+}
+
+fn parse_public_some_decimal<T>(name: &str, raw: &str) -> Result<Option<T>>
+where
+    T: std::str::FromStr,
+    T::Err: fmt::Display + Send + Sync + 'static,
+{
+    parse_public_decimal(name, raw).map(Some)
+}
+
+fn parse_public_http_send_buffer(name: &str, raw: &str) -> Result<Option<usize>> {
+    let value = parse_public_decimal(name, raw)?;
+    validate_http_send_buffer_bytes(value)
+        .with_context(|| format!("invalid {name} value {raw:?}"))?;
+    Ok(Some(value))
+}
+
+fn parse_public_spec_method(name: &str, raw: &str) -> Result<SpecMethod> {
+    SpecMethod::parse_env(raw)
+        .with_context(|| format!("{name} must be off, skip_layer, or mtp, got {raw:?}"))
+}
+
+type ApplyPublicEnvValue = fn(&mut KilnConfig, &str, &str) -> Result<String>;
+
+/// Declarative public alias contract for one fixed typed leaf.
+struct PublicEnvField {
+    section: &'static str,
+    field: &'static str,
+    supported_aliases: &'static [EnvAlias],
+    apply: ApplyPublicEnvValue,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AppliedEnvSources {
+    canonical: bool,
+    compatibility: bool,
+}
+
+impl AppliedEnvSources {
+    const fn any(self) -> bool {
+        self.canonical || self.compatibility
+    }
+}
+
+impl PublicEnvField {
+    fn canonical_name(&self) -> String {
+        canonical_env_name(self.section, self.field)
+    }
+
+    fn field_path(&self) -> String {
+        format!("{}.{}", self.section, self.field)
+    }
+
+    fn apply_from_environment(&self, config: &mut KilnConfig) -> Result<AppliedEnvSources> {
+        let canonical_name = self.canonical_name();
+        let canonical_raw = read_optional_unicode_env(&canonical_name)?;
+        let mut sources = AppliedEnvSources {
+            canonical: canonical_raw.is_some(),
+            compatibility: false,
+        };
+
+        // Compatibility aliases are ordered from lowest to highest legacy
+        // precedence. Parse every present alias strictly. Without a canonical
+        // spelling, the last alias retains its historical precedence; when a
+        // canonical spelling is present, every alias must agree with it.
+        let mut legacy_values = Vec::new();
+        for alias in self.supported_aliases {
+            if alias.name == canonical_name {
+                // Future registry rows whose old spelling was already
+                // canonical must observe the process environment only once.
+                continue;
+            }
+            let Some(raw) = read_optional_unicode_env(alias.name)? else {
+                continue;
+            };
+            sources.compatibility = true;
+            let value = (self.apply)(config, alias.name, alias.effective_raw(&raw))?;
+            tracing::warn!(
+                field = %self.field_path(),
+                alias = alias.name,
+                canonical = %canonical_name,
+                "deprecated_configuration_environment_alias"
+            );
+            legacy_values.push((alias.name, value));
+        }
+
+        let Some(raw) = canonical_raw else {
+            return Ok(sources);
+        };
+        let canonical_value = (self.apply)(config, &canonical_name, &raw)?;
+        for (legacy_name, legacy_value) in legacy_values {
+            if canonical_value != legacy_value {
+                anyhow::bail!(
+                    "conflicting environment overrides for {}: {} and {} resolve to different values",
+                    self.field_path(),
+                    canonical_name,
+                    legacy_name
+                );
+            }
+        }
+        Ok(sources)
+    }
+}
+
+/// Derive the public environment spelling mechanically from a typed leaf.
+fn canonical_env_name(section: &str, field: &str) -> String {
+    format!(
+        "KILN_{}_{}",
+        section.to_ascii_uppercase(),
+        field.to_ascii_uppercase()
+    )
+}
+
+macro_rules! public_env_parser {
+    (text) => {
+        parse_public_text
+    };
+    (some_text) => {
+        parse_public_some_text
+    };
+    (snapshot_dir) => {
+        parse_public_snapshot_dir
+    };
+    (empty_clears_text) => {
+        parse_public_empty_clears_text
+    };
+    (request_log_dir) => {
+        parse_public_request_log_dir
+    };
+    (bool) => {
+        parse_public_bool
+    };
+    (some_bool_with_presence_false) => {
+        parse_public_some_bool
+    };
+    (u16) => {
+        parse_public_decimal::<u16>
+    };
+    (u64) => {
+        parse_public_decimal::<u64>
+    };
+    (usize) => {
+        parse_public_decimal::<usize>
+    };
+    (some_usize) => {
+        parse_public_some_decimal::<usize>
+    };
+    (f64) => {
+        parse_public_decimal::<f64>
+    };
+    (some_f64) => {
+        parse_public_some_decimal::<f64>
+    };
+    (optional_capacity) => {
+        parse_optional_capacity_env
+    };
+    (optional_usize) => {
+        parse_optional_usize_env
+    };
+    (optional_u64) => {
+        parse_optional_u64_env
+    };
+    (serving_profile) => {
+        ServingProfileSetting::from_named_environment_value
+    };
+    (deterministic) => {
+        DeterministicInference::from_named_environment_value
+    };
+    (http_send_buffer) => {
+        parse_public_http_send_buffer
+    };
+    (stream_stall) => {
+        StreamStallGrace::from_named_environment_value
+    };
+    (batch_tokens) => {
+        BatchTokenBudget::from_named_environment_value
+    };
+    (prefill_tokens) => {
+        PrefillTokenBudget::from_named_environment_value
+    };
+    (prefill_layers) => {
+        PrefillLayerBudget::from_named_environment_value
+    };
+    (max_decode_batch) => {
+        MaxDecodeBatch::from_named_environment_value
+    };
+    (spec_method) => {
+        parse_public_spec_method
+    };
+}
+
+macro_rules! public_env_field {
+    ($kind:ident, $section:ident.$field:ident, $legacy:expr) => {
+        PublicEnvField {
+            section: stringify!($section),
+            field: stringify!($field),
+            supported_aliases: &[EnvAlias::value($legacy)],
+            apply: |config, name, raw| {
+                let value = (public_env_parser!($kind))(name, raw)?;
+                let normalized = value.normalized_env_value();
+                config.$section.$field = value;
+                Ok(normalized)
+            },
+        }
+    };
+    (some_bool_with_presence_false, $section:ident.$field:ident, $legacy:expr, $presence:expr) => {
+        PublicEnvField {
+            section: stringify!($section),
+            field: stringify!($field),
+            supported_aliases: &[
+                EnvAlias::presence_as_false($presence),
+                EnvAlias::value($legacy),
+            ],
+            apply: |config, name, raw| {
+                let value = parse_public_some_bool(name, raw)?;
+                let normalized = value.normalized_env_value();
+                config.$section.$field = value;
+                Ok(normalized)
+            },
+        }
+    };
+}
+/// Complete public environment contract for fixed typed leaves. Keep this as
+/// the sole list: canonical names, compatibility aliases, duplicate handling,
+/// and conformance tests all derive from it.
+static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
+    public_env_field!(serving_profile, server.serving_profile, SERVING_PROFILE_ENV),
+    public_env_field!(deterministic, server.deterministic, DETERMINISTIC_ENV),
+    public_env_field!(text, server.host, "KILN_HOST"),
+    public_env_field!(u16, server.port, "KILN_PORT"),
+    public_env_field!(
+        u64,
+        server.request_timeout_secs,
+        "KILN_REQUEST_TIMEOUT_SECS"
+    ),
+    public_env_field!(
+        http_send_buffer,
+        server.http_send_buffer_bytes,
+        "KILN_HTTP_SEND_BUFFER_BYTES"
+    ),
+    public_env_field!(
+        stream_stall,
+        server.stream_stall_grace_ms,
+        "KILN_STREAM_STALL_GRACE_MS"
+    ),
+    public_env_field!(
+        batch_tokens,
+        server.max_batch_tokens,
+        "KILN_MAX_BATCH_TOKENS"
+    ),
+    public_env_field!(
+        prefill_tokens,
+        server.max_prefill_tokens_per_cycle,
+        "KILN_MAX_PREFILL_TOKENS_PER_CYCLE"
+    ),
+    public_env_field!(
+        prefill_layers,
+        server.max_prefill_layers_per_cycle,
+        "KILN_MAX_PREFILL_LAYERS_PER_CYCLE"
+    ),
+    public_env_field!(
+        max_decode_batch,
+        server.max_decode_batch,
+        MAX_DECODE_BATCH_ENV
+    ),
+    public_env_field!(bool, server.eval_mode, "KILN_EVAL_MODE"),
+    public_env_field!(
+        some_bool_with_presence_false,
+        server.default_thinking_enabled,
+        "KILN_DEFAULT_THINKING_ENABLED",
+        "KILN_DEFAULT_NO_THINK"
+    ),
+    public_env_field!(
+        optional_usize,
+        server.default_thinking_budget_tokens,
+        DEFAULT_THINKING_BUDGET_TOKENS_ENV
+    ),
+    public_env_field!(
+        optional_u64,
+        server.default_thinking_budget_ms,
+        DEFAULT_THINKING_BUDGET_MS_ENV
+    ),
+    public_env_field!(
+        bool,
+        server.fold_reasoning_into_content,
+        "KILN_FOLD_REASONING_INTO_CONTENT"
+    ),
+    public_env_field!(
+        bool,
+        server.chat_performance_metadata,
+        "KILN_CHAT_PERFORMANCE_METADATA"
+    ),
+    public_env_field!(
+        bool,
+        server.chat_config_hash_metadata,
+        "KILN_CHAT_CONFIG_HASH_METADATA"
+    ),
+    public_env_field!(
+        u64,
+        server.slow_request_warn_secs,
+        "KILN_SLOW_REQUEST_WARN_SECS"
+    ),
+    public_env_field!(
+        u64,
+        server.shutdown_timeout_secs,
+        "KILN_SHUTDOWN_TIMEOUT_SECS"
+    ),
+    public_env_field!(some_text, model.path, "KILN_MODEL_PATH"),
+    public_env_field!(text, model.model_id, "KILN_MODEL_ID"),
+    public_env_field!(some_text, model.tokenizer_path, "KILN_TOKENIZER_PATH"),
+    public_env_field!(some_text, model.adapter_dir, "KILN_ADAPTER_DIR"),
+    public_env_field!(snapshot_dir, model.snapshot_dir, "KILN_MODEL_SNAPSHOT_DIR"),
+    public_env_field!(some_text, model.served_model_id, "KILN_SERVED_MODEL_ID"),
+    public_env_field!(some_usize, memory.num_blocks, "KILN_NUM_BLOCKS"),
+    public_env_field!(some_f64, memory.gpu_memory_gb, "KILN_GPU_MEMORY_GB"),
+    public_env_field!(
+        f64,
+        memory.inference_memory_fraction,
+        "KILN_INFERENCE_MEMORY_FRACTION"
+    ),
+    public_env_field!(
+        some_f64,
+        memory.training_memory_gb,
+        "KILN_TRAINING_MEMORY_GB"
+    ),
+    public_env_field!(bool, memory.kv_cache_fp8, "KILN_KV_CACHE_FP8"),
+    public_env_field!(bool, memory.cuda_graphs, "KILN_CUDA_GRAPHS"),
+    public_env_field!(
+        some_usize,
+        training.grad_checkpoint_segments,
+        "KILN_GRAD_CHECKPOINT_SEGMENTS"
+    ),
+    public_env_field!(bool, training.no_grad_checkpoint, "KILN_NO_GRAD_CHECKPOINT"),
+    public_env_field!(
+        some_usize,
+        training.checkpoint_interval,
+        "KILN_CHECKPOINT_INTERVAL"
+    ),
+    public_env_field!(
+        empty_clears_text,
+        training.webhook_url,
+        "KILN_TRAINING_WEBHOOK_URL"
+    ),
+    public_env_field!(
+        usize,
+        training.max_queued_jobs,
+        "KILN_TRAINING_MAX_QUEUED_JOBS"
+    ),
+    public_env_field!(
+        usize,
+        training.max_tracked_jobs,
+        "KILN_TRAINING_MAX_TRACKED_JOBS"
+    ),
+    public_env_field!(
+        u64,
+        training.tracked_job_ttl_secs,
+        "KILN_TRAINING_TRACKED_JOB_TTL_SECS"
+    ),
+    public_env_field!(text, logging.level, "KILN_LOG_LEVEL"),
+    public_env_field!(text, logging.format, "KILN_LOG_FORMAT"),
+    public_env_field!(bool, prefix_cache.enabled, "KILN_PREFIX_CACHE_ENABLED"),
+    public_env_field!(
+        some_usize,
+        prefix_cache.max_blocks,
+        "KILN_PREFIX_CACHE_MAX_BLOCKS"
+    ),
+    public_env_field!(
+        some_usize,
+        prefix_cache.max_entries,
+        "KILN_PREFIX_CACHE_MAX_ENTRIES"
+    ),
+    public_env_field!(bool, speculative.enabled, "KILN_SPEC_ENABLED"),
+    public_env_field!(spec_method, speculative.method, "KILN_SPEC_METHOD"),
+    public_env_field!(
+        usize,
+        speculative.num_speculative_tokens,
+        "KILN_SPEC_NUM_TOKENS"
+    ),
+    public_env_field!(usize, speculative.draft_layers, "KILN_SPEC_DRAFT_LAYERS"),
+    public_env_field!(bool, streaming_prefill.enabled, "KILN_STREAMING_PREFILL"),
+    public_env_field!(
+        usize,
+        streaming_prefill.tile_tokens,
+        "KILN_STREAMING_TILE_TOKENS"
+    ),
+    public_env_field!(
+        bool,
+        streaming_prefill.last_token_lm_head,
+        "KILN_STREAMING_LAST_TOKEN_LM_HEAD"
+    ),
+    public_env_field!(
+        optional_capacity,
+        adapters.max_disk_bytes,
+        "KILN_ADAPTERS_MAX_DISK_BYTES"
+    ),
+    public_env_field!(
+        optional_capacity,
+        adapters.composed_cache_max_bytes,
+        "KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES"
+    ),
+    public_env_field!(
+        optional_capacity,
+        adapters.composed_cache_max_entries,
+        "KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES"
+    ),
+    public_env_field!(bool, request_log.enabled, "KILN_REQUEST_LOG_ENABLED"),
+    public_env_field!(request_log_dir, request_log.dir, "KILN_REQUEST_LOG_DIR"),
+    public_env_field!(
+        u64,
+        request_log.max_file_bytes,
+        "KILN_REQUEST_LOG_MAX_FILE_BYTES"
+    ),
+    public_env_field!(
+        u64,
+        request_log.max_total_bytes,
+        "KILN_REQUEST_LOG_MAX_TOTAL_BYTES"
+    ),
+    public_env_field!(bool, request_log.compress, "KILN_REQUEST_LOG_COMPRESS"),
+    public_env_field!(
+        usize,
+        request_log.max_capture_bytes,
+        "KILN_REQUEST_LOG_MAX_CAPTURE_BYTES"
+    ),
+];
 
 // --- Defaults ---
 
@@ -1561,10 +2210,11 @@ impl Default for SpeculativeDecodingConfig {
 }
 
 impl SpeculativeDecodingConfig {
-    /// Build the speculative config from defaults plus the KILN_SPEC_* env vars.
+    /// Compatibility-only direct reader for historical `KILN_SPEC_*` names.
     ///
-    /// This mirrors the desktop app's control surface, which drives kiln
-    /// through env vars rather than CLI flags.
+    /// Production startup resolves canonical `KILN_SPECULATIVE_<FIELD>` names
+    /// through `KilnConfig`. Lower request dispatch temporarily calls this
+    /// method until it receives the loaded typed value directly.
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
         cfg.apply_env_overrides();
@@ -1677,6 +2327,23 @@ impl KilnConfig {
         result
     }
 
+    /// Apply `serve` command-line values after file and environment
+    /// resolution. This keeps CLI precedence typed and avoids translating CLI
+    /// arguments into compatibility environment variables.
+    pub fn apply_serve_cli_overrides(
+        &mut self,
+        served_model_id: Option<&str>,
+        eval_mode: bool,
+    ) -> Result<()> {
+        if let Some(served_model_id) = served_model_id {
+            self.model.served_model_id = Some(served_model_id.to_owned());
+        }
+        if eval_mode {
+            self.server.eval_mode = true;
+        }
+        self.validate()
+    }
+
     fn load_inner(path: Option<&str>) -> Result<Self> {
         let config_path = match path {
             Some(path) => Some(path.to_string()),
@@ -1697,31 +2364,8 @@ impl KilnConfig {
         };
 
         config.apply_env_overrides()?;
-        config.apply_http_send_buffer_env_override()?;
-        config.apply_serving_profile_env_override()?;
-        config.apply_deterministic_env_override()?;
-        config.apply_stream_stall_grace_env_override()?;
-        config.apply_max_batch_tokens_env_override()?;
-        config.apply_max_prefill_tokens_per_cycle_env_override()?;
-        config.apply_max_prefill_layers_per_cycle_env_override()?;
-        config.apply_max_decode_batch_env_override()?;
-        config.apply_default_thinking_budget_env_overrides()?;
-        config.request_log.apply_env_overrides()?;
         config.validate()?;
         Ok(config)
-    }
-
-    /// Resolve the process-lifetime serving profile strictly. Unlike legacy
-    /// permissive overrides, a present malformed value is always fatal.
-    fn apply_serving_profile_env_override(&mut self) -> Result<()> {
-        let raw = match std::env::var(SERVING_PROFILE_ENV) {
-            Ok(raw) => raw,
-            Err(std::env::VarError::NotPresent) => return Ok(()),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                anyhow::bail!("{SERVING_PROFILE_ENV} must be valid UTF-8")
-            }
-        };
-        self.apply_serving_profile_env_value(Some(&raw))
     }
 
     fn apply_serving_profile_env_value(&mut self, raw: Option<&str>) -> Result<()> {
@@ -1731,19 +2375,6 @@ impl KilnConfig {
         Ok(())
     }
 
-    /// Resolve deterministic inference once, before model or tensor runtime
-    /// initialization. Present malformed values are fatal.
-    fn apply_deterministic_env_override(&mut self) -> Result<()> {
-        let raw = match std::env::var(DETERMINISTIC_ENV) {
-            Ok(raw) => raw,
-            Err(std::env::VarError::NotPresent) => return Ok(()),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                anyhow::bail!("{DETERMINISTIC_ENV} must be valid UTF-8")
-            }
-        };
-        self.apply_deterministic_env_value(Some(&raw))
-    }
-
     fn apply_deterministic_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
             self.server.deterministic = DeterministicInference::from_environment_value(raw)?;
@@ -1751,229 +2382,26 @@ impl KilnConfig {
         Ok(())
     }
 
-    /// Override config values with KILN_* environment variables (if set).
+    /// Resolve the complete fixed-field public startup environment contract.
     fn apply_env_overrides(&mut self) -> Result<()> {
-        if let Some(v) = read_optional_unicode_env("KILN_HOST")? {
-            self.server.host = v;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_PORT")? {
-            self.server.port = parse_decimal_env("KILN_PORT", &v, "a TCP port")?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_REQUEST_TIMEOUT_SECS")? {
-            self.server.request_timeout_secs =
-                parse_decimal_env("KILN_REQUEST_TIMEOUT_SECS", &v, "seconds")?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_EVAL_MODE")? {
-            self.server.eval_mode = parse_required_bool_env("KILN_EVAL_MODE", &v)?;
-        }
-        if read_optional_unicode_env("KILN_DEFAULT_NO_THINK")?.is_some() {
-            self.server.default_thinking_enabled = Some(false);
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_DEFAULT_THINKING_ENABLED")? {
-            self.server.default_thinking_enabled = Some(parse_required_bool_env(
-                "KILN_DEFAULT_THINKING_ENABLED",
-                &v,
-            )?);
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_FOLD_REASONING_INTO_CONTENT")? {
-            self.server.fold_reasoning_into_content =
-                parse_required_bool_env("KILN_FOLD_REASONING_INTO_CONTENT", &v)?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_CHAT_PERFORMANCE_METADATA")? {
-            self.server.chat_performance_metadata =
-                parse_required_bool_env("KILN_CHAT_PERFORMANCE_METADATA", &v)?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_CHAT_CONFIG_HASH_METADATA")? {
-            self.server.chat_config_hash_metadata =
-                parse_required_bool_env("KILN_CHAT_CONFIG_HASH_METADATA", &v)?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_SLOW_REQUEST_WARN_SECS")? {
-            self.server.slow_request_warn_secs =
-                parse_decimal_env("KILN_SLOW_REQUEST_WARN_SECS", &v, "seconds")?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_SHUTDOWN_TIMEOUT_SECS")? {
-            self.server.shutdown_timeout_secs =
-                parse_decimal_env("KILN_SHUTDOWN_TIMEOUT_SECS", &v, "seconds")?;
+        let mut speculative_enabled_is_explicit = false;
+        let mut legacy_speculative_method_is_present = false;
+        for field in PUBLIC_ENV_FIELDS {
+            let sources = field.apply_from_environment(self)?;
+            if field.section == "speculative" && field.field == "enabled" {
+                speculative_enabled_is_explicit = sources.any();
+            } else if field.section == "speculative" && field.field == "method" {
+                legacy_speculative_method_is_present = sources.compatibility;
+            }
         }
 
-        if let Some(v) = read_optional_unicode_env("KILN_MODEL_PATH")? {
-            self.model.path = Some(v);
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_MODEL_ID")? {
-            self.model.model_id = v;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_TOKENIZER_PATH")? {
-            self.model.tokenizer_path = Some(v);
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_ADAPTER_DIR")? {
-            self.model.adapter_dir = Some(v);
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_MODEL_SNAPSHOT_DIR")? {
-            self.model.snapshot_dir = if v.trim().is_empty() { None } else { Some(v) };
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_SERVED_MODEL_ID")? {
-            self.model.served_model_id = Some(v);
-        }
-
-        if let Some(v) = read_optional_unicode_env("KILN_NUM_BLOCKS")? {
-            self.memory.num_blocks = Some(parse_decimal_env("KILN_NUM_BLOCKS", &v, "blocks")?);
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_GPU_MEMORY_GB")? {
-            self.memory.gpu_memory_gb = Some(parse_decimal_env("KILN_GPU_MEMORY_GB", &v, "GiB")?);
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_INFERENCE_MEMORY_FRACTION")? {
-            self.memory.inference_memory_fraction = parse_decimal_env(
-                "KILN_INFERENCE_MEMORY_FRACTION",
-                &v,
-                "a fraction from 0.0 through 1.0",
-            )?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_TRAINING_MEMORY_GB")? {
-            self.memory.training_memory_gb =
-                Some(parse_decimal_env("KILN_TRAINING_MEMORY_GB", &v, "GiB")?);
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_KV_CACHE_FP8")? {
-            self.memory.kv_cache_fp8 = parse_required_bool_env("KILN_KV_CACHE_FP8", &v)?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_CUDA_GRAPHS")? {
-            self.memory.cuda_graphs = parse_required_bool_env("KILN_CUDA_GRAPHS", &v)?;
-        }
-
-        if let Some(v) = read_optional_unicode_env("KILN_GRAD_CHECKPOINT_SEGMENTS")? {
-            self.training.grad_checkpoint_segments = Some(parse_decimal_env(
-                "KILN_GRAD_CHECKPOINT_SEGMENTS",
-                &v,
-                "a segment count",
-            )?);
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_NO_GRAD_CHECKPOINT")? {
-            self.training.no_grad_checkpoint =
-                parse_required_bool_env("KILN_NO_GRAD_CHECKPOINT", &v)?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_CHECKPOINT_INTERVAL")? {
-            self.training.checkpoint_interval = Some(parse_decimal_env(
-                "KILN_CHECKPOINT_INTERVAL",
-                &v,
-                "an optimizer-step interval",
-            )?);
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_TRAINING_WEBHOOK_URL")? {
-            self.training.webhook_url = if v.is_empty() { None } else { Some(v) };
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_TRAINING_MAX_QUEUED_JOBS")? {
-            self.training.max_queued_jobs =
-                parse_decimal_env("KILN_TRAINING_MAX_QUEUED_JOBS", &v, "a job count")?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_TRAINING_MAX_TRACKED_JOBS")? {
-            self.training.max_tracked_jobs =
-                parse_decimal_env("KILN_TRAINING_MAX_TRACKED_JOBS", &v, "a job count")?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_TRAINING_TRACKED_JOB_TTL_SECS")? {
-            self.training.tracked_job_ttl_secs =
-                parse_decimal_env("KILN_TRAINING_TRACKED_JOB_TTL_SECS", &v, "seconds")?;
-        }
-
-        if let Some(v) = read_optional_unicode_env("KILN_LOG_LEVEL")? {
-            self.logging.level = v;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_LOG_FORMAT")? {
-            self.logging.format = v;
-        }
-
-        if let Some(v) = read_optional_unicode_env("KILN_PREFIX_CACHE_ENABLED")? {
-            self.prefix_cache.enabled = parse_required_bool_env("KILN_PREFIX_CACHE_ENABLED", &v)?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_PREFIX_CACHE_MAX_BLOCKS")? {
-            self.prefix_cache.max_blocks = Some(parse_decimal_env(
-                "KILN_PREFIX_CACHE_MAX_BLOCKS",
-                &v,
-                "a block count",
-            )?);
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_PREFIX_CACHE_MAX_ENTRIES")? {
-            self.prefix_cache.max_entries = Some(parse_decimal_env(
-                "KILN_PREFIX_CACHE_MAX_ENTRIES",
-                &v,
-                "an entry count",
-            )?);
-        }
-
-        if let Some(v) = read_optional_unicode_env("KILN_SPEC_ENABLED")? {
-            self.speculative.enabled = parse_required_bool_env("KILN_SPEC_ENABLED", &v)?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_SPEC_METHOD")? {
-            self.speculative.method = SpecMethod::parse_env(&v).with_context(|| {
-                format!("KILN_SPEC_METHOD must be off, skip_layer, or mtp, got {v:?}")
-            })?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_SPEC_NUM_TOKENS")? {
-            self.speculative.num_speculative_tokens =
-                parse_decimal_env("KILN_SPEC_NUM_TOKENS", &v, "a token count")?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_SPEC_DRAFT_LAYERS")? {
-            self.speculative.draft_layers =
-                parse_decimal_env("KILN_SPEC_DRAFT_LAYERS", &v, "a layer count")?;
-        }
-
-        if let Some(v) = read_optional_unicode_env("KILN_ADAPTERS_MAX_DISK_BYTES")? {
-            self.adapters.max_disk_bytes =
-                parse_optional_capacity_env("KILN_ADAPTERS_MAX_DISK_BYTES", &v)?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES")? {
-            self.adapters.composed_cache_max_bytes =
-                parse_optional_capacity_env("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES", &v)?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES")? {
-            self.adapters.composed_cache_max_entries =
-                parse_optional_capacity_env("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES", &v)?;
-        }
-
-        if let Some(v) = read_optional_unicode_env("KILN_STREAMING_PREFILL")? {
-            self.streaming_prefill.enabled = parse_required_bool_env("KILN_STREAMING_PREFILL", &v)?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_STREAMING_TILE_TOKENS")? {
-            self.streaming_prefill.tile_tokens =
-                parse_decimal_env("KILN_STREAMING_TILE_TOKENS", &v, "a token count")?;
-        }
-        if let Some(v) = read_optional_unicode_env("KILN_STREAMING_LAST_TOKEN_LM_HEAD")? {
-            self.streaming_prefill.last_token_lm_head =
-                parse_required_bool_env("KILN_STREAMING_LAST_TOKEN_LM_HEAD", &v)?;
+        // Historical `KILN_SPEC_METHOD=<non-off>` meant both select and enable
+        // the method. Preserve that only for the compatibility spelling;
+        // canonical method selection remains the literal typed-field value.
+        if legacy_speculative_method_is_present && !speculative_enabled_is_explicit {
+            self.speculative.enabled = self.speculative.method != SpecMethod::Off;
         }
         Ok(())
-    }
-
-    /// Apply the accepted-socket send-buffer override strictly. Unlike legacy
-    /// numeric overrides, a present but malformed value is a startup error.
-    fn apply_http_send_buffer_env_override(&mut self) -> Result<()> {
-        let raw = match std::env::var("KILN_HTTP_SEND_BUFFER_BYTES") {
-            Ok(raw) => raw,
-            Err(std::env::VarError::NotPresent) => return Ok(()),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                anyhow::bail!("KILN_HTTP_SEND_BUFFER_BYTES must be valid UTF-8 decimal bytes")
-            }
-        };
-        let value = raw.trim().parse::<usize>().with_context(|| {
-            format!(
-                "KILN_HTTP_SEND_BUFFER_BYTES must be a decimal integer in {}..={}, got {raw:?}",
-                HTTP_SEND_BUFFER_MIN_BYTES, HTTP_SEND_BUFFER_MAX_BYTES
-            )
-        })?;
-        validate_http_send_buffer_bytes(value).context("invalid KILN_HTTP_SEND_BUFFER_BYTES")?;
-        self.server.http_send_buffer_bytes = Some(value);
-        Ok(())
-    }
-
-    /// Resolve the batching stream-stall override strictly at startup. The
-    /// actor never reads process environment and receives only this typed value.
-    fn apply_stream_stall_grace_env_override(&mut self) -> Result<()> {
-        let raw = match std::env::var("KILN_STREAM_STALL_GRACE_MS") {
-            Ok(raw) => raw,
-            Err(std::env::VarError::NotPresent) => return Ok(()),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                anyhow::bail!("KILN_STREAM_STALL_GRACE_MS must be valid UTF-8 decimal milliseconds")
-            }
-        };
-        self.apply_stream_stall_grace_env_value(Some(&raw))
     }
 
     fn apply_stream_stall_grace_env_value(&mut self, raw: Option<&str>) -> Result<()> {
@@ -1983,36 +2411,11 @@ impl KilnConfig {
         Ok(())
     }
 
-    /// Resolve chunked-prefill scheduling once at startup. The actor receives
-    /// this typed value and never consults mutable process environment.
-    fn apply_max_batch_tokens_env_override(&mut self) -> Result<()> {
-        let raw = match std::env::var("KILN_MAX_BATCH_TOKENS") {
-            Ok(raw) => raw,
-            Err(std::env::VarError::NotPresent) => return Ok(()),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                anyhow::bail!("KILN_MAX_BATCH_TOKENS must be valid UTF-8 decimal tokens")
-            }
-        };
-        self.apply_max_batch_tokens_env_value(Some(&raw))
-    }
-
     fn apply_max_batch_tokens_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
             self.server.max_batch_tokens = BatchTokenBudget::from_environment_value(raw)?;
         }
         Ok(())
-    }
-
-    /// Resolve the prompt-only actor-cycle ceiling once at startup.
-    fn apply_max_prefill_tokens_per_cycle_env_override(&mut self) -> Result<()> {
-        let raw = match std::env::var("KILN_MAX_PREFILL_TOKENS_PER_CYCLE") {
-            Ok(raw) => raw,
-            Err(std::env::VarError::NotPresent) => return Ok(()),
-            Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
-                "KILN_MAX_PREFILL_TOKENS_PER_CYCLE must be valid UTF-8 decimal tokens"
-            ),
-        };
-        self.apply_max_prefill_tokens_per_cycle_env_value(Some(&raw))
     }
 
     fn apply_max_prefill_tokens_per_cycle_env_value(&mut self, raw: Option<&str>) -> Result<()> {
@@ -2023,17 +2426,6 @@ impl KilnConfig {
         Ok(())
     }
 
-    fn apply_max_prefill_layers_per_cycle_env_override(&mut self) -> Result<()> {
-        let raw = match std::env::var("KILN_MAX_PREFILL_LAYERS_PER_CYCLE") {
-            Ok(raw) => raw,
-            Err(std::env::VarError::NotPresent) => return Ok(()),
-            Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
-                "KILN_MAX_PREFILL_LAYERS_PER_CYCLE must be valid UTF-8 decimal layers"
-            ),
-        };
-        self.apply_max_prefill_layers_per_cycle_env_value(Some(&raw))
-    }
-
     fn apply_max_prefill_layers_per_cycle_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
             self.server.max_prefill_layers_per_cycle =
@@ -2042,37 +2434,9 @@ impl KilnConfig {
         Ok(())
     }
 
-    /// Resolve the optional decode-row ceiling once at startup. The batching
-    /// actor receives only the typed value and never reads process environment.
-    fn apply_max_decode_batch_env_override(&mut self) -> Result<()> {
-        let raw = match std::env::var(MAX_DECODE_BATCH_ENV) {
-            Ok(raw) => raw,
-            Err(std::env::VarError::NotPresent) => return Ok(()),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                anyhow::bail!("{MAX_DECODE_BATCH_ENV} must be valid UTF-8")
-            }
-        };
-        self.apply_max_decode_batch_env_value(Some(&raw))
-    }
-
     fn apply_max_decode_batch_env_value(&mut self, raw: Option<&str>) -> Result<()> {
         if let Some(raw) = raw {
             self.server.max_decode_batch = MaxDecodeBatch::from_environment_value(raw)?;
-        }
-        Ok(())
-    }
-
-    /// Resolve both server-default thinking limits before startup. Present
-    /// malformed or non-Unicode values are fatal instead of silently removing
-    /// the corresponding limit.
-    fn apply_default_thinking_budget_env_overrides(&mut self) -> Result<()> {
-        if let Some(raw) = read_optional_unicode_env(DEFAULT_THINKING_BUDGET_TOKENS_ENV)? {
-            self.server.default_thinking_budget_tokens =
-                parse_optional_usize_env(DEFAULT_THINKING_BUDGET_TOKENS_ENV, &raw)?;
-        }
-        if let Some(raw) = read_optional_unicode_env(DEFAULT_THINKING_BUDGET_MS_ENV)? {
-            self.server.default_thinking_budget_ms =
-                parse_optional_u64_env(DEFAULT_THINKING_BUDGET_MS_ENV, &raw)?;
         }
         Ok(())
     }
@@ -2444,6 +2808,184 @@ fn parse_optional_u64_env(name: &str, value: &str) -> Result<Option<u64>> {
 mod tests {
     use super::*;
     use crate::TEST_ENV_LOCK as ENV_LOCK;
+    use std::ffi::{OsStr, OsString};
+
+    const EXPECTED_PUBLIC_ENV_NAMES: &[&str] = &[
+        "KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES",
+        "KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES",
+        "KILN_ADAPTERS_MAX_DISK_BYTES",
+        "KILN_LOGGING_FORMAT",
+        "KILN_LOGGING_LEVEL",
+        "KILN_MEMORY_CUDA_GRAPHS",
+        "KILN_MEMORY_GPU_MEMORY_GB",
+        "KILN_MEMORY_INFERENCE_MEMORY_FRACTION",
+        "KILN_MEMORY_KV_CACHE_FP8",
+        "KILN_MEMORY_NUM_BLOCKS",
+        "KILN_MEMORY_TRAINING_MEMORY_GB",
+        "KILN_MODEL_ADAPTER_DIR",
+        "KILN_MODEL_ID",
+        "KILN_MODEL_PATH",
+        "KILN_MODEL_SERVED_MODEL_ID",
+        "KILN_MODEL_SNAPSHOT_DIR",
+        "KILN_MODEL_TOKENIZER_PATH",
+        "KILN_PREFIX_CACHE_ENABLED",
+        "KILN_PREFIX_CACHE_MAX_BLOCKS",
+        "KILN_PREFIX_CACHE_MAX_ENTRIES",
+        "KILN_REQUEST_LOG_COMPRESS",
+        "KILN_REQUEST_LOG_DIR",
+        "KILN_REQUEST_LOG_ENABLED",
+        "KILN_REQUEST_LOG_MAX_CAPTURE_BYTES",
+        "KILN_REQUEST_LOG_MAX_FILE_BYTES",
+        "KILN_REQUEST_LOG_MAX_TOTAL_BYTES",
+        "KILN_SERVER_CHAT_CONFIG_HASH_METADATA",
+        "KILN_SERVER_CHAT_PERFORMANCE_METADATA",
+        "KILN_SERVER_DEFAULT_THINKING_BUDGET_MS",
+        "KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS",
+        "KILN_SERVER_DEFAULT_THINKING_ENABLED",
+        "KILN_SERVER_DETERMINISTIC",
+        "KILN_SERVER_EVAL_MODE",
+        "KILN_SERVER_FOLD_REASONING_INTO_CONTENT",
+        "KILN_SERVER_HOST",
+        "KILN_SERVER_HTTP_SEND_BUFFER_BYTES",
+        "KILN_SERVER_MAX_BATCH_TOKENS",
+        "KILN_SERVER_MAX_DECODE_BATCH",
+        "KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE",
+        "KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE",
+        "KILN_SERVER_PORT",
+        "KILN_SERVER_REQUEST_TIMEOUT_SECS",
+        "KILN_SERVER_SERVING_PROFILE",
+        "KILN_SERVER_SHUTDOWN_TIMEOUT_SECS",
+        "KILN_SERVER_SLOW_REQUEST_WARN_SECS",
+        "KILN_SERVER_STREAM_STALL_GRACE_MS",
+        "KILN_SPECULATIVE_DRAFT_LAYERS",
+        "KILN_SPECULATIVE_ENABLED",
+        "KILN_SPECULATIVE_METHOD",
+        "KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS",
+        "KILN_STREAMING_PREFILL_ENABLED",
+        "KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD",
+        "KILN_STREAMING_PREFILL_TILE_TOKENS",
+        "KILN_TRAINING_CHECKPOINT_INTERVAL",
+        "KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS",
+        "KILN_TRAINING_MAX_QUEUED_JOBS",
+        "KILN_TRAINING_MAX_TRACKED_JOBS",
+        "KILN_TRAINING_NO_GRAD_CHECKPOINT",
+        "KILN_TRAINING_TRACKED_JOB_TTL_SECS",
+        "KILN_TRAINING_WEBHOOK_URL",
+    ];
+
+    const INTENTIONALLY_UNMAPPED_ENV_TARGETS: &[&str] = &[
+        "KILN_EVAL_EVAL_DIR",
+        "KILN_EVAL_MAX_QUEUED_JOBS",
+        "KILN_EVAL_MAX_TRACKED_JOBS",
+        "KILN_EVAL_WEBHOOK_URL",
+        "KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS",
+        "KILN_AGENT_SELF_IMPROVE",
+        "KILN_AGENT_MAX_CONCURRENT_RUNS",
+        "KILN_AGENT_RUN_TIMEOUT_SECS",
+        "KILN_TEACHERS_CREDENTIALS",
+    ];
+
+    const CONFIG_FILE_ONLY_FIXED_FIELDS: &[&str] = &[
+        "agent.max_concurrent_runs",
+        "agent.run_timeout_secs",
+        "agent.self_improve",
+        "agent.self_improve_interval_hours",
+        "eval.eval_dir",
+        "eval.max_queued_jobs",
+        "eval.max_tracked_jobs",
+        "eval.webhook_url",
+    ];
+
+    const DYNAMIC_CONFIG_FIELDS: &[&str] = &[
+        "teachers.credentials.<id>.api_key_env",
+        "teachers.credentials.<id>.origin",
+    ];
+
+    fn collect_json_leaf_paths(prefix: &str, value: &serde_json::Value, paths: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for (field, value) in fields {
+                    let path = if prefix.is_empty() {
+                        field.clone()
+                    } else {
+                        format!("{prefix}.{field}")
+                    };
+                    collect_json_leaf_paths(&path, value, paths);
+                }
+            }
+            _ => paths.push(prefix.to_owned()),
+        }
+    }
+
+    struct ScopedConfigEnvironment {
+        saved: Vec<(String, Option<OsString>)>,
+    }
+
+    impl ScopedConfigEnvironment {
+        fn isolated() -> Self {
+            let mut names = vec!["KILN_CONFIG".to_owned()];
+            for field in PUBLIC_ENV_FIELDS {
+                names.push(field.canonical_name());
+                names.extend(
+                    field
+                        .supported_aliases
+                        .iter()
+                        .map(|alias| alias.name.to_owned()),
+                );
+            }
+            names.extend(
+                INTENTIONALLY_UNMAPPED_ENV_TARGETS
+                    .iter()
+                    .map(|name| (*name).to_owned()),
+            );
+            names.sort();
+            names.dedup();
+
+            let saved = names
+                .into_iter()
+                .map(|name| {
+                    let value = std::env::var_os(&name);
+                    unsafe {
+                        std::env::remove_var(&name);
+                    }
+                    (name, value)
+                })
+                .collect();
+            Self { saved }
+        }
+
+        fn set(&self, name: &str, value: &str) {
+            unsafe {
+                std::env::set_var(name, value);
+            }
+        }
+
+        fn set_os(&self, name: &str, value: &OsStr) {
+            unsafe {
+                std::env::set_var(name, value);
+            }
+        }
+
+        fn remove(&self, name: &str) {
+            unsafe {
+                std::env::remove_var(name);
+            }
+        }
+    }
+
+    impl Drop for ScopedConfigEnvironment {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                unsafe {
+                    if let Some(value) = value {
+                        std::env::set_var(name, value);
+                    } else {
+                        std::env::remove_var(name);
+                    }
+                }
+            }
+        }
+    }
 
     // Serializes tests that mutate the process-wide environment. cargo nextest
     // and `cargo test` run tests in parallel by default, so any test that
@@ -2553,6 +3095,570 @@ mod tests {
             "default composed-cache entry cap should be 64"
         );
         assert!(config.teachers.credentials.is_empty());
+    }
+
+    #[test]
+    fn public_env_registry_is_mechanical_complete_and_unique() {
+        let mut names = PUBLIC_ENV_FIELDS
+            .iter()
+            .map(PublicEnvField::canonical_name)
+            .collect::<Vec<_>>();
+        let original_len = names.len();
+        names.sort();
+        names.dedup();
+
+        let mut expected = EXPECTED_PUBLIC_ENV_NAMES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(original_len, 60);
+        assert_eq!(names.len(), original_len, "canonical names must be unique");
+        assert_eq!(names, expected);
+
+        let canonical_only_aliases = PUBLIC_ENV_FIELDS
+            .iter()
+            .flat_map(|field| {
+                let canonical = field.canonical_name();
+                field
+                    .supported_aliases
+                    .iter()
+                    .filter(move |alias| alias.name == canonical)
+            })
+            .count();
+        let compatibility_aliases = PUBLIC_ENV_FIELDS
+            .iter()
+            .flat_map(|field| {
+                let canonical = field.canonical_name();
+                field
+                    .supported_aliases
+                    .iter()
+                    .filter(move |alias| alias.name != canonical)
+            })
+            .count();
+        assert_eq!(canonical_only_aliases, 19);
+        assert_eq!(compatibility_aliases, 42);
+
+        for field in PUBLIC_ENV_FIELDS {
+            assert_eq!(
+                field.canonical_name(),
+                format!(
+                    "KILN_{}_{}",
+                    field.section.to_ascii_uppercase(),
+                    field.field.to_ascii_uppercase()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn public_env_every_fixed_typed_leaf_has_an_explicit_classification() {
+        let mut config = KilnConfig::default();
+        config.eval = Some(EvalConfig::default());
+        config.agent = Some(AgentConfig::default());
+
+        let mut serialized_leaves = Vec::new();
+        collect_json_leaf_paths(
+            "",
+            &serde_json::to_value(&config).unwrap(),
+            &mut serialized_leaves,
+        );
+        serialized_leaves.sort();
+
+        let mut classified = PUBLIC_ENV_FIELDS
+            .iter()
+            .map(PublicEnvField::field_path)
+            .chain(
+                CONFIG_FILE_ONLY_FIXED_FIELDS
+                    .iter()
+                    .map(|path| (*path).to_owned()),
+            )
+            .collect::<Vec<_>>();
+        classified.sort();
+        classified.dedup();
+        assert_eq!(serialized_leaves, classified);
+
+        config.teachers.credentials.insert(
+            "probe".to_owned(),
+            TeacherCredentialConfig {
+                origin: "https://teacher.example".to_owned(),
+                api_key_env: "PROBE_API_KEY".to_owned(),
+            },
+        );
+        let mut teacher_leaves = Vec::new();
+        collect_json_leaf_paths(
+            "teachers",
+            &serde_json::to_value(&config.teachers).unwrap(),
+            &mut teacher_leaves,
+        );
+        for path in &mut teacher_leaves {
+            *path = path.replace(".probe.", ".<id>.");
+        }
+        teacher_leaves.sort();
+        assert_eq!(
+            teacher_leaves,
+            DYNAMIC_CONFIG_FIELDS
+                .iter()
+                .map(|path| (*path).to_owned())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn public_env_canonical_only_loads_all_sixty_public_fields() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for (name, value) in [
+            ("KILN_SERVER_SERVING_PROFILE", "experimental"),
+            ("KILN_SERVER_DETERMINISTIC", "true"),
+            ("KILN_SERVER_HOST", "127.0.0.2"),
+            ("KILN_SERVER_PORT", "9444"),
+            ("KILN_SERVER_REQUEST_TIMEOUT_SECS", "321"),
+            ("KILN_SERVER_HTTP_SEND_BUFFER_BYTES", "4096"),
+            ("KILN_SERVER_STREAM_STALL_GRACE_MS", "100"),
+            ("KILN_SERVER_MAX_BATCH_TOKENS", "1024"),
+            ("KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE", "128"),
+            ("KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE", "8"),
+            ("KILN_SERVER_MAX_DECODE_BATCH", "backend_policy"),
+            ("KILN_SERVER_EVAL_MODE", "true"),
+            ("KILN_SERVER_DEFAULT_THINKING_ENABLED", "false"),
+            ("KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS", "7"),
+            ("KILN_SERVER_DEFAULT_THINKING_BUDGET_MS", "20"),
+            ("KILN_SERVER_FOLD_REASONING_INTO_CONTENT", "true"),
+            ("KILN_SERVER_CHAT_PERFORMANCE_METADATA", "true"),
+            ("KILN_SERVER_CHAT_CONFIG_HASH_METADATA", "true"),
+            ("KILN_SERVER_SLOW_REQUEST_WARN_SECS", "0"),
+            ("KILN_SERVER_SHUTDOWN_TIMEOUT_SECS", "9"),
+            ("KILN_MODEL_PATH", "/tmp/canonical-model"),
+            ("KILN_MODEL_ID", "Canonical/Test-Model"),
+            ("KILN_MODEL_TOKENIZER_PATH", "/tmp/canonical-tokenizer"),
+            ("KILN_MODEL_ADAPTER_DIR", "/tmp/canonical-adapters"),
+            ("KILN_MODEL_SNAPSHOT_DIR", "/tmp/canonical-snapshot"),
+            ("KILN_MODEL_SERVED_MODEL_ID", "canonical-served"),
+            ("KILN_MEMORY_NUM_BLOCKS", "123"),
+            ("KILN_MEMORY_GPU_MEMORY_GB", "64"),
+            ("KILN_MEMORY_INFERENCE_MEMORY_FRACTION", "0.6"),
+            ("KILN_MEMORY_TRAINING_MEMORY_GB", "8"),
+            ("KILN_MEMORY_KV_CACHE_FP8", "true"),
+            ("KILN_MEMORY_CUDA_GRAPHS", "false"),
+            ("KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS", "4"),
+            ("KILN_TRAINING_NO_GRAD_CHECKPOINT", "true"),
+            ("KILN_TRAINING_CHECKPOINT_INTERVAL", "5"),
+            ("KILN_TRAINING_WEBHOOK_URL", "https://hook.example/test"),
+            ("KILN_TRAINING_MAX_QUEUED_JOBS", "7"),
+            ("KILN_TRAINING_MAX_TRACKED_JOBS", "9"),
+            ("KILN_TRAINING_TRACKED_JOB_TTL_SECS", "11"),
+            ("KILN_LOGGING_LEVEL", "debug"),
+            ("KILN_LOGGING_FORMAT", "json"),
+            ("KILN_PREFIX_CACHE_ENABLED", "false"),
+            ("KILN_PREFIX_CACHE_MAX_BLOCKS", "64"),
+            ("KILN_PREFIX_CACHE_MAX_ENTRIES", "12"),
+            ("KILN_SPECULATIVE_ENABLED", "true"),
+            ("KILN_SPECULATIVE_METHOD", "native-mtp"),
+            ("KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS", "3"),
+            ("KILN_SPECULATIVE_DRAFT_LAYERS", "2"),
+            ("KILN_STREAMING_PREFILL_ENABLED", "true"),
+            ("KILN_STREAMING_PREFILL_TILE_TOKENS", "2048"),
+            ("KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD", "false"),
+            ("KILN_ADAPTERS_MAX_DISK_BYTES", "1024"),
+            ("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES", "512"),
+            ("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES", "6"),
+            ("KILN_REQUEST_LOG_ENABLED", "false"),
+            ("KILN_REQUEST_LOG_DIR", "/tmp/canonical-request-log"),
+            ("KILN_REQUEST_LOG_MAX_FILE_BYTES", "8192"),
+            ("KILN_REQUEST_LOG_MAX_TOTAL_BYTES", "16384"),
+            ("KILN_REQUEST_LOG_COMPRESS", "false"),
+            ("KILN_REQUEST_LOG_MAX_CAPTURE_BYTES", "2048"),
+        ] {
+            environment.set(name, value);
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("kiln.toml");
+        std::fs::write(&path, "").unwrap();
+        let config = KilnConfig::load(Some(path.to_str().unwrap())).unwrap();
+
+        assert_eq!(
+            config.server.serving_profile.profile(),
+            ServingProfile::Experimental
+        );
+        assert!(config.server.deterministic.enabled());
+        assert_eq!(config.server.host, "127.0.0.2");
+        assert_eq!(config.server.port, 9444);
+        assert_eq!(config.server.request_timeout_secs, 321);
+        assert_eq!(config.server.http_send_buffer_bytes, Some(4096));
+        assert_eq!(config.server.stream_stall_grace_ms.millis(), 100);
+        assert_eq!(config.server.max_batch_tokens.tokens(), 1024);
+        assert_eq!(config.server.max_prefill_tokens_per_cycle.tokens(), 128);
+        assert_eq!(config.server.max_prefill_layers_per_cycle.layers(), 8);
+        assert_eq!(config.server.max_decode_batch.limit(), None);
+        assert!(config.server.eval_mode);
+        assert_eq!(config.server.default_thinking_enabled, Some(false));
+        assert_eq!(config.server.default_thinking_budget_tokens, Some(7));
+        assert_eq!(config.server.default_thinking_budget_ms, Some(20));
+        assert!(config.server.fold_reasoning_into_content);
+        assert!(config.server.chat_performance_metadata);
+        assert!(config.server.chat_config_hash_metadata);
+        assert_eq!(config.server.slow_request_warn_secs, 0);
+        assert_eq!(config.server.shutdown_timeout_secs, 9);
+        assert_eq!(config.model.path.as_deref(), Some("/tmp/canonical-model"));
+        assert_eq!(config.model.model_id, "Canonical/Test-Model");
+        assert_eq!(
+            config.model.tokenizer_path.as_deref(),
+            Some("/tmp/canonical-tokenizer")
+        );
+        assert_eq!(
+            config.model.adapter_dir.as_deref(),
+            Some("/tmp/canonical-adapters")
+        );
+        assert_eq!(
+            config.model.snapshot_dir.as_deref(),
+            Some("/tmp/canonical-snapshot")
+        );
+        assert_eq!(
+            config.model.served_model_id.as_deref(),
+            Some("canonical-served")
+        );
+        assert_eq!(config.memory.num_blocks, Some(123));
+        assert_eq!(config.memory.gpu_memory_gb, Some(64.0));
+        assert_eq!(config.memory.inference_memory_fraction, 0.6);
+        assert_eq!(config.memory.training_memory_gb, Some(8.0));
+        assert!(config.memory.kv_cache_fp8);
+        assert!(!config.memory.cuda_graphs);
+        assert_eq!(config.training.grad_checkpoint_segments, Some(4));
+        assert!(config.training.no_grad_checkpoint);
+        assert_eq!(config.training.checkpoint_interval, Some(5));
+        assert_eq!(
+            config.training.webhook_url.as_deref(),
+            Some("https://hook.example/test")
+        );
+        assert_eq!(config.training.max_queued_jobs, 7);
+        assert_eq!(config.training.max_tracked_jobs, 9);
+        assert_eq!(config.training.tracked_job_ttl_secs, 11);
+        assert_eq!(config.logging.level, "debug");
+        assert_eq!(config.logging.format, "json");
+        assert!(!config.prefix_cache.enabled);
+        assert_eq!(config.prefix_cache.max_blocks, Some(64));
+        assert_eq!(config.prefix_cache.max_entries, Some(12));
+        assert!(config.speculative.enabled);
+        assert_eq!(config.speculative.method, SpecMethod::Mtp);
+        assert_eq!(config.speculative.num_speculative_tokens, 3);
+        assert_eq!(config.speculative.draft_layers, 2);
+        assert!(config.streaming_prefill.enabled);
+        assert_eq!(config.streaming_prefill.tile_tokens, 2048);
+        assert!(!config.streaming_prefill.last_token_lm_head);
+        assert_eq!(config.adapters.max_disk_bytes, Some(1024));
+        assert_eq!(config.adapters.composed_cache_max_bytes, Some(512));
+        assert_eq!(config.adapters.composed_cache_max_entries, Some(6));
+        assert!(!config.request_log.enabled);
+        assert_eq!(
+            config.request_log.dir.as_deref(),
+            Some(Path::new("/tmp/canonical-request-log"))
+        );
+        assert_eq!(config.request_log.max_file_bytes, 8192);
+        assert_eq!(config.request_log.max_total_bytes, 16384);
+        assert!(!config.request_log.compress);
+        assert_eq!(config.request_log.max_capture_bytes, 2048);
+
+        for source in [
+            config.server.serving_profile.source(),
+            config.server.deterministic.source(),
+            config.server.stream_stall_grace_ms.source(),
+            config.server.max_batch_tokens.source(),
+            config.server.max_prefill_tokens_per_cycle.source(),
+            config.server.max_prefill_layers_per_cycle.source(),
+            config.server.max_decode_batch.source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::Environment);
+        }
+    }
+
+    #[test]
+    fn public_env_equivalent_canonical_and_compatibility_aliases_are_accepted() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for (name, value) in [
+            ("KILN_SERVER_DETERMINISTIC", " true "),
+            ("KILN_DETERMINISTIC", "1"),
+            ("KILN_SERVER_MAX_DECODE_BATCH", "backend_policy"),
+            ("KILN_MAX_DECODE_BATCH", "auto"),
+            ("KILN_SERVER_SERVING_PROFILE", "EXPERIMENTAL"),
+            ("KILN_SERVING_PROFILE", "experimental"),
+            ("KILN_MEMORY_INFERENCE_MEMORY_FRACTION", "0.70"),
+            ("KILN_INFERENCE_MEMORY_FRACTION", ".7"),
+        ] {
+            environment.set(name, value);
+        }
+
+        let mut config = KilnConfig::default();
+        config.apply_env_overrides().unwrap();
+        assert!(config.server.deterministic.enabled());
+        assert_eq!(config.server.max_decode_batch.limit(), None);
+        assert_eq!(
+            config.server.serving_profile.profile(),
+            ServingProfile::Experimental
+        );
+        assert_eq!(config.memory.inference_memory_fraction, 0.7);
+    }
+
+    #[test]
+    fn public_env_conflicting_canonical_and_compatibility_aliases_name_both() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        environment.set("KILN_SERVER_PORT", "9444");
+        environment.set("KILN_PORT", "9555");
+
+        let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(detail.contains("server.port"), "{detail}");
+        assert!(detail.contains("KILN_SERVER_PORT"), "{detail}");
+        assert!(detail.contains("KILN_PORT"), "{detail}");
+    }
+
+    #[test]
+    fn public_env_canonical_value_must_agree_with_every_compatibility_alias() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        environment.set("KILN_SERVER_DEFAULT_THINKING_ENABLED", "true");
+        environment.set("KILN_DEFAULT_NO_THINK", "1");
+        environment.set("KILN_DEFAULT_THINKING_ENABLED", "true");
+
+        let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains("server.default_thinking_enabled"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("KILN_SERVER_DEFAULT_THINKING_ENABLED"),
+            "{detail}"
+        );
+        assert!(detail.contains("KILN_DEFAULT_NO_THINK"), "{detail}");
+    }
+
+    #[test]
+    fn public_env_malformed_canonical_inputs_fail_closed_and_name_the_input() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for (name, invalid) in [
+            ("KILN_SERVER_SERVING_PROFILE", "sometimes"),
+            ("KILN_SERVER_PORT", "nine-thousand"),
+            ("KILN_SERVER_DETERMINISTIC", "maybe"),
+            ("KILN_SERVER_DEFAULT_THINKING_BUDGET_MS", "2.5"),
+            ("KILN_SPECULATIVE_METHOD", "guessing"),
+            ("KILN_REQUEST_LOG_COMPRESS", "occasionally"),
+        ] {
+            environment.set(name, invalid);
+            let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+            environment.remove(name);
+            let detail = format!("{error:#}");
+            assert!(detail.contains(name), "{name}: {detail}");
+            assert!(detail.contains(invalid), "{name}: {detail}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_env_non_unicode_canonical_input_is_fatal() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        let invalid = OsString::from_vec(vec![b'9', 0xff]);
+        environment.set_os("KILN_SERVER_PORT", &invalid);
+
+        let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(detail.contains("KILN_SERVER_PORT"), "{detail}");
+        assert!(detail.contains("UTF-8"), "{detail}");
+    }
+
+    #[test]
+    fn public_env_canonical_spelling_that_is_also_alias_is_applied_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static APPLY_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+        fn count_apply(config: &mut KilnConfig, _name: &str, raw: &str) -> Result<String> {
+            APPLY_COUNT.fetch_add(1, Ordering::SeqCst);
+            config.server.host = raw.to_owned();
+            Ok(raw.to_owned())
+        }
+
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        environment.set("KILN_SERVER_HOST", "127.0.0.9");
+        APPLY_COUNT.store(0, Ordering::SeqCst);
+        let field = PublicEnvField {
+            section: "server",
+            field: "host",
+            supported_aliases: &[EnvAlias::value("KILN_SERVER_HOST")],
+            apply: count_apply,
+        };
+
+        let mut config = KilnConfig::default();
+        let sources = field.apply_from_environment(&mut config).unwrap();
+        assert_eq!(APPLY_COUNT.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            sources,
+            AppliedEnvSources {
+                canonical: true,
+                compatibility: false
+            }
+        );
+        assert_eq!(config.server.host, "127.0.0.9");
+    }
+
+    #[test]
+    fn public_env_compatibility_alias_use_is_classified_separately() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        environment.set("KILN_HOST", "127.0.0.8");
+        let field = PUBLIC_ENV_FIELDS
+            .iter()
+            .find(|field| field.section == "server" && field.field == "host")
+            .unwrap();
+
+        let mut config = KilnConfig::default();
+        let sources = field.apply_from_environment(&mut config).unwrap();
+        assert_eq!(
+            sources,
+            AppliedEnvSources {
+                canonical: false,
+                compatibility: true
+            }
+        );
+        assert_eq!(config.server.host, "127.0.0.8");
+    }
+
+    #[test]
+    fn public_env_config_file_only_and_dynamic_targets_are_not_public() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for name in INTENTIONALLY_UNMAPPED_ENV_TARGETS {
+            environment.set(name, "1");
+        }
+
+        let mut config = KilnConfig::default();
+        config.apply_env_overrides().unwrap();
+        assert!(config.eval.is_none());
+        assert!(config.agent.is_none());
+        assert!(config.teachers.credentials.is_empty());
+        assert!(PUBLIC_ENV_FIELDS.iter().all(|field| {
+            !INTENTIONALLY_UNMAPPED_ENV_TARGETS.contains(&field.canonical_name().as_str())
+        }));
+    }
+
+    #[test]
+    fn public_env_legacy_speculative_method_preserves_implicit_enable() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+
+        environment.set("KILN_SPEC_METHOD", "mtp");
+        let mut config = KilnConfig::default();
+        config.apply_env_overrides().unwrap();
+        assert_eq!(config.speculative.method, SpecMethod::Mtp);
+        assert!(config.speculative.enabled);
+
+        environment.remove("KILN_SPEC_METHOD");
+        environment.set("KILN_SPECULATIVE_METHOD", "mtp");
+        let mut config = KilnConfig::default();
+        config.apply_env_overrides().unwrap();
+        assert_eq!(config.speculative.method, SpecMethod::Mtp);
+        assert!(!config.speculative.enabled);
+
+        environment.remove("KILN_SPECULATIVE_METHOD");
+        environment.set("KILN_SPEC_METHOD", "mtp");
+        environment.set("KILN_SPECULATIVE_ENABLED", "false");
+        let mut config = KilnConfig::default();
+        config.apply_env_overrides().unwrap();
+        assert_eq!(config.speculative.method, SpecMethod::Mtp);
+        assert!(!config.speculative.enabled);
+
+        environment.remove("KILN_SPECULATIVE_ENABLED");
+        environment.set("KILN_SPEC_ENABLED", "false");
+        let mut config = KilnConfig::default();
+        config.apply_env_overrides().unwrap();
+        assert_eq!(config.speculative.method, SpecMethod::Mtp);
+        assert!(!config.speculative.enabled);
+
+        environment.remove("KILN_SPEC_ENABLED");
+        environment.set("KILN_SPEC_METHOD", "off");
+        let mut config: KilnConfig =
+            toml::from_str("[speculative]\nenabled = true\nmethod = 'mtp'\n").unwrap();
+        config.apply_env_overrides().unwrap();
+        assert_eq!(config.speculative.method, SpecMethod::Off);
+        assert!(!config.speculative.enabled);
+    }
+
+    #[test]
+    fn public_env_typed_serve_cli_overrides_win_without_env_mutation() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        environment.set("KILN_MODEL_SERVED_MODEL_ID", "from-env");
+        environment.set("KILN_SERVED_MODEL_ID", "from-env");
+        environment.set("KILN_SERVER_EVAL_MODE", "false");
+        environment.set("KILN_EVAL_MODE", "0");
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("kiln.toml");
+        std::fs::write(
+            &path,
+            "[server]\neval_mode = false\n[model]\nserved_model_id = 'from-toml'\n",
+        )
+        .unwrap();
+        let mut config = KilnConfig::load(Some(path.to_str().unwrap())).unwrap();
+        config
+            .apply_serve_cli_overrides(Some("from-cli"), true)
+            .unwrap();
+        assert_eq!(config.model.served_model_id.as_deref(), Some("from-cli"));
+        assert!(config.server.eval_mode);
+        assert_eq!(std::env::var("KILN_SERVED_MODEL_ID").unwrap(), "from-env");
+        assert_eq!(std::env::var("KILN_EVAL_MODE").unwrap(), "0");
+
+        environment.set("KILN_SERVER_EVAL_MODE", "true");
+        environment.set("KILN_EVAL_MODE", "1");
+        let mut config = KilnConfig::load(Some(path.to_str().unwrap())).unwrap();
+        let resolved_id = config.model.served_model_id.clone();
+        config.apply_serve_cli_overrides(None, false).unwrap();
+        assert_eq!(config.model.served_model_id, resolved_id);
+        assert!(config.server.eval_mode);
+
+        let error = config
+            .apply_serve_cli_overrides(Some("   "), false)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("model.served_model_id"));
+
+        let mut invalid = KilnConfig::default();
+        invalid.server.port = 0;
+        let error = invalid.apply_serve_cli_overrides(None, false).unwrap_err();
+        assert!(format!("{error:#}").contains("server.port"));
+    }
+
+    #[test]
+    fn public_env_canonical_clear_semantics_match_existing_contract() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        let mut config: KilnConfig = toml::from_str(
+            "[model]\nsnapshot_dir = '/tmp/from-toml'\n\
+             [training]\nwebhook_url = 'https://hook.example/toml'\n\
+             [adapters]\nmax_disk_bytes = 99\n",
+        )
+        .unwrap();
+
+        environment.set("KILN_MODEL_SNAPSHOT_DIR", "   ");
+        environment.set("KILN_TRAINING_WEBHOOK_URL", "");
+        environment.set("KILN_ADAPTERS_MAX_DISK_BYTES", "0");
+        config.apply_env_overrides().unwrap();
+        assert!(config.model.snapshot_dir.is_none());
+        assert!(config.training.webhook_url.is_none());
+        assert!(config.adapters.max_disk_bytes.is_none());
+
+        environment.set("KILN_REQUEST_LOG_DIR", "   ");
+        let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(detail.contains("KILN_REQUEST_LOG_DIR"), "{detail}");
+        assert!(detail.contains("non-empty path"), "{detail}");
     }
 
     #[test]

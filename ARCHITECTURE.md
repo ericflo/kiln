@@ -211,7 +211,8 @@ Both caches use the same block-aligned hash scheme (each block hash mixes the pa
 
 ### VRAM Budget
 
-At startup, Kiln detects GPU memory via `nvidia-smi` (overridable with `KILN_GPU_MEMORY_GB`) and auto-configures:
+At startup, Kiln detects GPU memory via the active backend (overridable with
+`KILN_MEMORY_GPU_MEMORY_GB`) and auto-configures:
 
 | GPU VRAM | KV Cache Blocks | Grad Checkpoint Segments |
 |----------|----------------|------------------------|
@@ -502,7 +503,10 @@ With 8 segments:       Store 8 checkpoint boundaries, recompute within each segm
                        Peak VRAM: ~12-16 GB (model 8 GB + checkpointed activations + LoRA grads)
 ```
 
-More segments = less VRAM but more computation. The number of segments is auto-tuned based on detected VRAM. Controlled by `KILN_GRAD_CHECKPOINT_SEGMENTS` or disabled with `KILN_NO_GRAD_CHECKPOINT=1`.
+More segments = less VRAM but more computation. The number of segments is
+auto-tuned based on detected VRAM. Override it with
+`KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS`, or disable checkpointing with
+`KILN_TRAINING_NO_GRAD_CHECKPOINT=1`.
 
 See `model_forward_segment()` in `crates/kiln-model/src/forward.rs`.
 
@@ -745,21 +749,28 @@ See `crates/kiln-marlin-gemm/` for the kernel and `crates/kiln-model/src/marlin_
 
 ### Speculative Decoding
 
-Kiln has two self-speculative-decode paths, both off by default. Both use the same generic verify loop in `crates/kiln-model/src/speculative.rs`; the dispatch is selected at server startup via `KILN_SPEC_METHOD={off|skip_layer|mtp}` (see `crates/kiln-server/src/config.rs`).
+Kiln has two self-speculative-decode paths, both off by default. Both use the
+same generic verify loop in `crates/kiln-model/src/speculative.rs`. Select one
+at startup with `[speculative]` or with both
+`KILN_SPECULATIVE_ENABLED=true` and
+`KILN_SPECULATIVE_METHOD={skip_layer|mtp}` (see
+`crates/kiln-server/src/config.rs`).
 
 - **`skip_layer` (legacy)** — uses the first N layers of the main model as a draft. No extra VRAM, no separate checkpoint. Acceptance rate is workload-dependent and the default is `off`.
 - **`mtp` (native MTP, attempted, null on A6000)** — Qwen3.5-4B ships with a single pretrained MTP (Multi-Token Prediction) head (`mtp.*` tensors in the checkpoint). PRs #535 / #536 vendored this head, ran the existing draft-then-verify loop with the MTP head as the drafter, and benchmarked end-to-end self-spec decode on A6000 bs=1.
 
 Result for native MTP: measured acceptance α = **0.69**, below the 0.72 break-even ceiling implied by the kiln-native verify cost (see `PROFILING-MTP-C40*.md`). PR #536 merged the implementation behind `KILN_ENABLE_MTP=0` (default off) so the code path stays exercised but the production decode path is unaffected. The cross-stack audits in PRs #532 (SGLang) and #533 (vLLM), plus the HF-transformers α microbench in PR #534, all corroborated kiln's native α and confirmed there was no missed implementation win — the 0.72 ceiling is a property of the Qwen3.5-4B MTP head, not a kiln bug.
 
-This supersedes the older skip-layer self-spec design described in the agent note `kiln-speculative-decoding-design`. Per-token configuration still flows through `[speculative_decoding]` in `kiln.toml`:
+This supersedes the older skip-layer self-spec design described in the agent
+note `kiln-speculative-decoding-design`. Startup configuration flows through
+`[speculative]` in `kiln.toml`:
 
 ```toml
-[speculative_decoding]
-enabled = false                # KILN_SPEC_ENABLED
-method = "off"                 # KILN_SPEC_METHOD: off | skip_layer | mtp
-num_speculative_tokens = 4     # KILN_SPEC_NUM_TOKENS
-draft_layers = 8               # KILN_SPEC_DRAFT_LAYERS (skip_layer only)
+[speculative]
+enabled = false                 # KILN_SPECULATIVE_ENABLED
+method = "off"                  # KILN_SPECULATIVE_METHOD: off | skip_layer | mtp
+num_speculative_tokens = 256    # KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS
+draft_layers = 8                # KILN_SPECULATIVE_DRAFT_LAYERS (skip_layer only)
 ```
 
 See `crates/kiln-model/src/speculative.rs` for the verify loop and `crates/kiln-model/src/mtp_debug.rs` for the per-step instrumentation used during the α investigation.
@@ -798,11 +809,12 @@ format = "auto"                     # auto (pretty on TTY, JSON otherwise), json
 
 [prefix_cache]
 enabled = true
-max_blocks = 128                    # default: 25% of total blocks
+# max_blocks = 128                  # omitted by default; auto resolves to half the KV block pool
 
-[speculative_decoding]
+[speculative]
 enabled = false
-num_speculative_tokens = 4
+method = "off"
+num_speculative_tokens = 256
 draft_layers = 8
 ```
 
@@ -819,12 +831,12 @@ tool-call rendering.
 | Variable | Description |
 |----------|-------------|
 | `KILN_CONFIG` | Path to config file (default: `kiln.toml`) |
-| `KILN_GPU_MEMORY_GB` | Override GPU VRAM detection |
-| `KILN_NUM_BLOCKS` | Override KV cache block count |
-| `KILN_GRAD_CHECKPOINT_SEGMENTS` | Override gradient checkpoint segments |
-| `KILN_NO_GRAD_CHECKPOINT` | Set to `1` to disable gradient checkpointing |
-| `KILN_LOG_LEVEL` | Override log level |
-| `KILN_LOG_FORMAT` | Override log format (`json` or `pretty`) |
+| `KILN_MEMORY_GPU_MEMORY_GB` | Override GPU VRAM detection |
+| `KILN_MEMORY_NUM_BLOCKS` | Override KV cache block count |
+| `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS` | Override gradient checkpoint segments |
+| `KILN_TRAINING_NO_GRAD_CHECKPOINT` | Set to `1` to disable gradient checkpointing |
+| `KILN_LOGGING_LEVEL` | Override log level |
+| `KILN_LOGGING_FORMAT` | Override log format (`json` or `pretty`) |
 
 See `crates/kiln-server/src/config.rs` for the full configuration schema and validation.
 
@@ -994,7 +1006,7 @@ and fall through to CPU on `Ok(None)`.
 `ToleranceBounded { dtype_band_key }`. The band keys reference rows
 in `bench-results/parity-tolerance.csv` (Phase 0.4) which carries 416
 `{op, dtype, backend}` cells. `server.deterministic = true` (or the strict
-`KILN_DETERMINISTIC=1` override) freezes the process-wide selector that kernel
+`KILN_SERVER_DETERMINISTIC=1` override) freezes the process-wide selector that kernel
 implementations can consume. The metadata and selector do not, by themselves,
 prove that every tolerance-bounded op has or selects a deterministic variant.
 
@@ -1007,7 +1019,7 @@ through `kiln_tensor::profile::emit_contiguous_copy()`, which
 The following controls cover different parts of the reproducibility and
 fail-fast surface. They are **off by default**.
 
-**`server.deterministic = true` / `KILN_DETERMINISTIC=1`** is the typed,
+**`server.deterministic = true` / `KILN_SERVER_DETERMINISTIC=1`** is the typed,
 immutable serving-repeatability selector
 (`crates/kiln-tensor/src/determinism.rs`, `deterministic_enabled()`). The server
 validates it before tensor initialization and forces the batching actor's

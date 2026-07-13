@@ -39,7 +39,7 @@ Today, improving a deployed model looks like: collect failure examples, format t
 
 ```bash
 # Development only: admit inference plus GPU-writer transitions in one process
-KILN_SERVING_PROFILE=experimental KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
+KILN_SERVER_SERVING_PROFILE=experimental KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
 
 # Submit a correction — the model learns it in seconds
 curl http://localhost:8420/v1/train/sft \
@@ -372,7 +372,7 @@ curl http://localhost:8420/v1/chat/completions \
 
 The default server is `stable`. To run the development training example, stop
 it and restart the same binary/model command with
-`KILN_SERVING_PROFILE=experimental`, then submit:
+`KILN_SERVER_SERVING_PROFILE=experimental`, then submit:
 
 ```bash
 # Train
@@ -484,7 +484,7 @@ curl http://localhost:8420/v1/agent/runs/<id>/steer -d '{"message": "Prefer a mi
 curl -X POST http://localhost:8420/v1/agent/runs/<id>/abort
 ```
 
-Runs queue FIFO (`[agent].max_concurrent_runs`, default 2; `run_timeout_secs`, default 900), persist across restarts, and auto-index into `GET /v1/agent/traces` when they finish — so `kiln self-improve` trains on them in the same cycle. Because embedded runs execute code on the server, they are enabled only on loopback binds by default (`KILN_AGENT_RUNS=1` opts in elsewhere, `=0` force-disables). The dashboard's **Distill → Agent runs** tab provides a launch form and a live trajectory view.
+Runs queue FIFO (`[agent].max_concurrent_runs`, default 2; `run_timeout_secs`, default 900), persist across restarts, and auto-index into `GET /v1/agent/traces` when they finish — so `kiln self-improve` trains on them in the same cycle. Because embedded runs execute code on the server, they are enabled only on loopback binds by default; network-bound deployments should keep the run engine local rather than relying on process-global tuning flags. The dashboard's **Distill → Agent runs** tab provides a launch form and a live trajectory view.
 
 See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including Desktop App setup, source builds, GRPO, adapter management, Docker, and systemd setup. If setup stalls on binary downloads, CUDA/ROCm/Vulkan/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, start with the [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html). For tools-bearing workloads on older pinned releases, see [QUICKSTART.md §9.2](QUICKSTART.md#92-troubleshooting-older-release-long-prefill-timeouts) for the legacy `workers=1` / request-timeout troubleshooting note ([#664](https://github.com/ericflo/kiln/issues/664)).
 
@@ -850,23 +850,23 @@ Kiln uses a typed TOML config file. Environment overrides are resolved during st
 | Setting | Env Var | Default | Description |
 |---|---|---|---|
 | `model.path` | `KILN_MODEL_PATH` | — | Path to model weights (required) |
-| `server.port` | `KILN_PORT` | 8420 | Server listen port |
-| `server.serving_profile` | `KILN_SERVING_PROFILE` | `stable` | Immutable process-lifetime GPU ownership policy: `stable`, `experimental`, or `maintenance`; malformed values stop startup, and health/config report the source and every effective policy field |
-| `server.http_send_buffer_bytes` | `KILN_HTTP_SEND_BUFFER_BYTES` | OS default | Optional accepted-socket `SO_SNDBUF` request (1024–16777216 bytes); Kiln preflights it before readiness and reports requested, kernel-readback, and platform-normalized effective bytes in health/debug |
-| `server.stream_stall_grace_ms` | `KILN_STREAM_STALL_GRACE_MS` | 2000 | Maximum continuous time a full 64-event response channel may make no delivery progress before that request is cancelled (10–2000 ms). Strict startup validation rejects malformed or out-of-range values; health/debug report the effective value and whether it came from the default, config file, or environment |
-| `server.max_batch_tokens` | `KILN_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per batching-actor cycle (2–65536). Ready decode rows consume one token each first; admission and resumable prefill share the remainder. Invalid values stop startup; health/debug report value and source |
-| `server.max_prefill_tokens_per_cycle` | `KILN_MAX_PREFILL_TOKENS_PER_CYCLE` | 64 | Prompt-only ceiling inside the combined actor-cycle budget (1–65536). Decode reserves its rows first, then partial prefills advance round-robin by at most this many tokens before the next decode cohort. Lower values favor ITL; higher values favor prefill throughput. Invalid values stop startup; health/debug report the effective value and source |
-| `server.max_prefill_layers_per_cycle` | `KILN_MAX_PREFILL_LAYERS_PER_CYCLE` | 4 | Transformer-layer ceiling for each retained prompt chunk (1–1024). A partial chunk yields to ready decode after this many layers and later resumes from its hidden state without replay. Lower values favor ITL; higher values reduce scheduling and synchronization overhead. Invalid values stop startup; health/debug report value and source |
-| `server.max_decode_batch` | `KILN_MAX_DECODE_BATCH` | `auto` (backend policy) | Concurrent decode-row ceiling (`auto` or 1–65536). Invalid values stop startup. Deterministic mode and `max_batch_tokens` may lower it; startup, health, config, debug, and `kiln_batching_engine_max_decode_batch` report the final effective value |
-| `server.deterministic` | `KILN_DETERMINISTIC` | false | Serving repeatability envelope. Strict boolean parsing rejects malformed values. True freezes the process-wide determinism selector and forces effective decode width 1 even when a wider batch is configured, preventing request-cohort changes from selecting different BF16 batched-GEMM shapes at close greedy-logit boundaries. This does not by itself make every accelerator kernel bitwise deterministic |
-| `server.default_thinking_enabled` | `KILN_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
-| `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block. The environment value must be a non-negative base-10 integer or `unlimited`; malformed values stop startup |
-| `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget before Kiln closes an open thinking block. The environment value must be a non-negative base-10 integer or `unlimited`; malformed values stop startup |
-| `server.fold_reasoning_into_content` | `KILN_FOLD_REASONING_INTO_CONTENT` | false | Also copy separated reasoning into chat `content` for compatibility |
+| `server.port` | `KILN_SERVER_PORT` | 8420 | Server listen port |
+| `server.serving_profile` | `KILN_SERVER_SERVING_PROFILE` | `stable` | Immutable process-lifetime GPU ownership policy: `stable`, `experimental`, or `maintenance`; malformed values stop startup, and health/config report the source and every effective policy field |
+| `server.http_send_buffer_bytes` | `KILN_SERVER_HTTP_SEND_BUFFER_BYTES` | OS default | Optional accepted-socket `SO_SNDBUF` request (1024–16777216 bytes); Kiln preflights it before readiness and reports requested, kernel-readback, and platform-normalized effective bytes in health/debug |
+| `server.stream_stall_grace_ms` | `KILN_SERVER_STREAM_STALL_GRACE_MS` | 2000 | Maximum continuous time a full 64-event response channel may make no delivery progress before that request is cancelled (10–2000 ms). Strict startup validation rejects malformed or out-of-range values; health/debug report the effective value and whether it came from the default, config file, or environment |
+| `server.max_batch_tokens` | `KILN_SERVER_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per batching-actor cycle (2–65536). Ready decode rows consume one token each first; admission and resumable prefill share the remainder. Invalid values stop startup; health/debug report value and source |
+| `server.max_prefill_tokens_per_cycle` | `KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE` | 64 | Prompt-only ceiling inside the combined actor-cycle budget (1–65536). Decode reserves its rows first, then partial prefills advance round-robin by at most this many tokens before the next decode cohort. Lower values favor ITL; higher values favor prefill throughput. Invalid values stop startup; health/debug report the effective value and source |
+| `server.max_prefill_layers_per_cycle` | `KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE` | 4 | Transformer-layer ceiling for each retained prompt chunk (1–1024). A partial chunk yields to ready decode after this many layers and later resumes from its hidden state without replay. Lower values favor ITL; higher values reduce scheduling and synchronization overhead. Invalid values stop startup; health/debug report value and source |
+| `server.max_decode_batch` | `KILN_SERVER_MAX_DECODE_BATCH` | `auto` (backend policy) | Concurrent decode-row ceiling (`auto` or 1–65536). Invalid values stop startup. Deterministic mode and `max_batch_tokens` may lower it; startup, health, config, debug, and `kiln_batching_engine_max_decode_batch` report the final effective value |
+| `server.deterministic` | `KILN_SERVER_DETERMINISTIC` | false | Serving repeatability envelope. Strict boolean parsing rejects malformed values. True freezes the process-wide determinism selector and forces effective decode width 1 even when a wider batch is configured, preventing request-cohort changes from selecting different BF16 batched-GEMM shapes at close greedy-logit boundaries. This does not by itself make every accelerator kernel bitwise deterministic |
+| `server.default_thinking_enabled` | `KILN_SERVER_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
+| `server.default_thinking_budget_tokens` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block. The environment value must be a non-negative base-10 integer or `unlimited`; malformed values stop startup |
+| `server.default_thinking_budget_ms` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget before Kiln closes an open thinking block. The environment value must be a non-negative base-10 integer or `unlimited`; malformed values stop startup |
+| `server.fold_reasoning_into_content` | `KILN_SERVER_FOLD_REASONING_INTO_CONTENT` | false | Also copy separated reasoning into chat `content` for compatibility |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference vs training |
-| `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (2x context length) |
+| `memory.kv_cache_fp8` | `KILN_MEMORY_KV_CACHE_FP8` | false | FP8 KV cache (2x context length) |
 | — | `KILN_MEMORY_RECLAIM_MODE` | `off` | Device-pool reclaim policy: `off`, `on-demand`, or `automatic`. Automatic mode triggers at 10% free, stays armed until 25% free, waits 8s after a successful reclaim, and backs zero-yield attempts off from 2s to 128s. |
-| `logging.format` | `KILN_LOG_FORMAT` | auto | `auto` (default; pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, or `human` |
+| `logging.format` | `KILN_LOGGING_FORMAT` | auto | `auto` (default; pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, or `human` |
 | `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
 | `prefix_cache.max_blocks` | `KILN_PREFIX_CACHE_MAX_BLOCKS` | auto | Cap retained KV blocks for shared prefixes (auto = 50% of KV block pool) |
 | `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
@@ -984,7 +984,7 @@ is passed. In eval mode, the same profile injects
 overrides it, so tool-agent evals and Pi-style loops get final `content`
 instead of long `reasoning_content`. Operators can also set
 `server.default_thinking_enabled = false` or
-`KILN_DEFAULT_THINKING_ENABLED=false` for non-eval serving. The legacy
+`KILN_SERVER_DEFAULT_THINKING_ENABLED=false` for non-eval serving. The legacy
 `KILN_DEFAULT_NO_THINK` env var is still accepted as a compatibility alias.
 
 The normative wire schema and executable cross-runtime vectors are in the
@@ -1109,7 +1109,7 @@ answer. If final answer content is empty, response `metadata` includes
 
 ## Security model
 
-Kiln has no built-in auth. The default listen address is `127.0.0.1:8420` so a fresh install isn't reachable from the network. To accept remote connections, set `server.host = "0.0.0.0"` (or `KILN_HOST=0.0.0.0`) and front kiln with a reverse proxy (nginx, Caddy) that adds auth, or run it on a private network (WireGuard, Tailscale).
+Kiln has no built-in auth. The default listen address is `127.0.0.1:8420` so a fresh install isn't reachable from the network. To accept remote connections, set `server.host = "0.0.0.0"` (or `KILN_SERVER_HOST=0.0.0.0`) and front kiln with a reverse proxy (nginx, Caddy) that adds auth, or run it on a private network (WireGuard, Tailscale).
 
 **Training data is privileged.** Kiln applies a faithful gradient update to anything you POST to `/v1/train/sft` or `/v1/train/grpo` — it validates structure, not semantics. A poisoned training example will permanently influence the active adapter until you unload or reset it. Treat your training corpus as security-sensitive: do not accept training data from untrusted sources, and review examples before submission the same way you would review code before merging it.
 

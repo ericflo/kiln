@@ -78,10 +78,10 @@ const SERVE_EXAMPLES: &str = r#"Examples:
   kiln serve --eval-mode
       Start with deterministic eval defaults, no-thinking chat-template defaults, adapter headers, and per-request transient cache cleanup.
 
-  KILN_DEFAULT_THINKING_ENABLED=false kiln serve
+  KILN_SERVER_DEFAULT_THINKING_ENABLED=false kiln serve
       Default Qwen/DeepSeek-style chat templates to non-thinking mode unless a request overrides chat_template_kwargs.enable_thinking.
 
-  KILN_FOLD_REASONING_INTO_CONTENT=true kiln serve
+  KILN_SERVER_FOLD_REASONING_INTO_CONTENT=true kiln serve
       Duplicate separated reasoning into assistant content for compatibility with clients that treat empty content as no response.
 
   kiln serve --config kiln.toml
@@ -486,7 +486,7 @@ pub struct Cli {
     pub config: Option<String>,
 
     /// Increase verbosity. `-v` shows debug logs (the legacy startup firehose),
-    /// `-vv` adds trace-level kernel detail. Wins over `KILN_LOG_LEVEL` and the
+    /// `-vv` adds trace-level kernel detail. Wins over `KILN_LOGGING_LEVEL` and the
     /// TOML `[logging] level`, but loses to `RUST_LOG` if set explicitly.
     #[arg(long, short, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
@@ -520,7 +520,8 @@ pub enum Commands {
     #[command(long_about = SERVE_OVERVIEW, after_help = SERVE_EXAMPLES)]
     Serve {
         /// Override the served model identifier exposed at /v1/models.
-        /// Wins over KILN_SERVED_MODEL_ID env and TOML `model.served_model_id`.
+        /// Wins over `KILN_MODEL_SERVED_MODEL_ID`, its legacy
+        /// `KILN_SERVED_MODEL_ID` alias, and TOML `model.served_model_id`.
         #[arg(long, value_name = "ID")]
         served_model_id: Option<String>,
         /// Enable deterministic eval-serving defaults, adapter headers, and
@@ -1098,7 +1099,7 @@ pub enum TrajectoryCommands {
         #[arg(long, default_value_t = 64)]
         preview_tokens: usize,
 
-        /// Explicit tokenizer.json path. Defaults to KILN_TOKENIZER_PATH,
+        /// Explicit tokenizer.json path. Defaults to KILN_MODEL_TOKENIZER_PATH,
         /// config model.tokenizer_path, <model-path>/tokenizer.json, or HF model_id.
         #[arg(long)]
         tokenizer: Option<PathBuf>,
@@ -1299,7 +1300,7 @@ pub(crate) fn bind_addr_in_use_message(host: &str, port: u16) -> String {
     format!(
         "{host}:{port} is already in use — another kiln (or another service) is likely listening there.\n  \
          Run `kiln health` to check for a live server, stop the other process,\n  \
-         or pick a different port via KILN_PORT or `[server] port` in kiln.toml."
+         or pick a different port via KILN_SERVER_PORT or `[server] port` in kiln.toml."
     )
 }
 
@@ -3582,7 +3583,7 @@ mod tests {
         let msg = bind_addr_in_use_message("127.0.0.1", 8420);
         assert!(msg.contains("127.0.0.1:8420"));
         assert!(msg.contains("kiln health"));
-        assert!(msg.contains("KILN_PORT"));
+        assert!(msg.contains("KILN_SERVER_PORT"));
         assert!(msg.contains("[server] port"));
     }
 

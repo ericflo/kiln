@@ -6,7 +6,7 @@ inference, share the same model weights, and slot into the same job-queue
 machinery as training — so you can `train → eval → compare` in one HTTP
 loop without touching Python.
 
-That one-process loop requires `KILN_SERVING_PROFILE=experimental`. The
+That one-process loop requires `KILN_SERVER_SERVING_PROFILE=experimental`. The
 default `stable` profile admits eval inference but rejects training and real
 adapter weight transitions. A `maintenance` process admits training and
 adapter transitions but rejects every eval because inference is disabled; run
@@ -836,7 +836,7 @@ therefore always decoded, while repeated prompt setup remains inexpensive.
 
 For agentic evals where most requests should run without Qwen thinking, set
 `server.default_thinking_enabled = false` in `kiln.toml` or
-`KILN_DEFAULT_THINKING_ENABLED=false` in the environment. Kiln applies that as
+`KILN_SERVER_DEFAULT_THINKING_ENABLED=false` in the environment. Kiln applies that as
 the default `chat_template_kwargs.enable_thinking` value only when a request
 omits it, so individual examples can still opt back into thinking with
 `"generation": {"chat_template_kwargs": {"enable_thinking": true}}`. `/health`

@@ -1751,6 +1751,17 @@
     },
     {
       "api": "remove_var",
+      "argument": "& name",
+      "argument_kind": "expression",
+      "count": 1,
+      "language": "rust",
+      "operation": "remove",
+      "path": "crates/kiln-server/src/config.rs",
+      "phase": "runtime",
+      "surface": "source"
+    },
+    {
+      "api": "remove_var",
       "argument": "DEFAULT_THINKING_BUDGET_MS_ENV",
       "argument_kind": "expression",
       "count": 1,
@@ -1797,7 +1808,7 @@
       "api": "remove_var",
       "argument": "name",
       "argument_kind": "expression",
-      "count": 3,
+      "count": 5,
       "language": "rust",
       "operation": "remove",
       "path": "crates/kiln-server/src/config.rs",
@@ -2237,7 +2248,7 @@
       "api": "set_var",
       "argument": "name",
       "argument_kind": "expression",
-      "count": 3,
+      "count": 6,
       "language": "rust",
       "operation": "set",
       "path": "crates/kiln-server/src/config.rs",
@@ -2641,28 +2652,6 @@
       "surface": "source"
     },
     {
-      "api": "set_var",
-      "argument": "KILN_EVAL_MODE",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/main.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_SERVED_MODEL_ID",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/main.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "remove_var",
       "argument": "KILN_PI_BIN",
       "argument_kind": "literal",
@@ -2681,72 +2670,6 @@
       "language": "rust",
       "operation": "set",
       "path": "crates/kiln-server/src/pi_rpc.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "name",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/request_log.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_REQUEST_LOG_ENABLED",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/request_log.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_REQUEST_LOG_MAX_FILE_BYTES",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/request_log.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "name",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/request_log.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_REQUEST_LOG_ENABLED",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/request_log.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_REQUEST_LOG_MAX_FILE_BYTES",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/request_log.rs",
       "phase": "runtime",
       "surface": "source"
     },
@@ -8683,39 +8606,6 @@
     },
     {
       "api": "var",
-      "argument": "DETERMINISTIC_ENV",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "MAX_DECODE_BATCH_ENV",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "SERVING_PROFILE_ENV",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "name",
       "argument_kind": "expression",
       "count": 1,
@@ -8738,7 +8628,7 @@
     },
     {
       "api": "var",
-      "argument": "KILN_HTTP_SEND_BUFFER_BYTES",
+      "argument": "KILN_EVAL_MODE",
       "argument_kind": "literal",
       "count": 1,
       "language": "rust",
@@ -8749,29 +8639,7 @@
     },
     {
       "api": "var",
-      "argument": "KILN_MAX_BATCH_TOKENS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_MAX_PREFILL_LAYERS_PER_CYCLE",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_MAX_PREFILL_TOKENS_PER_CYCLE",
+      "argument": "KILN_SERVED_MODEL_ID",
       "argument_kind": "literal",
       "count": 1,
       "language": "rust",
@@ -8825,9 +8693,9 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "KILN_STREAM_STALL_GRACE_MS",
-      "argument_kind": "literal",
+      "api": "var_os",
+      "argument": "& name",
+      "argument_kind": "expression",
       "count": 1,
       "language": "rust",
       "operation": "read",
@@ -8925,29 +8793,18 @@
     },
     {
       "api": "var",
+      "argument": "name",
+      "argument_kind": "expression",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-server/src/logging.rs",
+      "phase": "runtime",
+      "surface": "source"
+    },
+    {
+      "api": "var",
       "argument": "KILN_CONFIG",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/logging.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_LOG_FORMAT",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/logging.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_LOG_LEVEL",
       "argument_kind": "literal",
       "count": 1,
       "language": "rust",
@@ -8986,17 +8843,6 @@
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-server/src/pi_rpc.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "name",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/request_log.rs",
       "phase": "runtime",
       "surface": "source"
     },
@@ -11313,9 +11159,9 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 672,
-    "process_mutation_entries": 323,
-    "read_call_sites": 1034,
-    "read_entries": 704
+    "process_mutation_call_sites": 670,
+    "process_mutation_entries": 316,
+    "read_call_sites": 1027,
+    "read_entries": 697
   }
 }

@@ -11,7 +11,7 @@ The headline result on the paper's TerminalBench-2.0 benchmark: **pass@1 nearly 
 This guide is the operational companion to the integration plan
 ([`docs/plans/echo-integration-plan.md`](plans/echo-integration-plan.md)) and the paper archives ([`docs/papers/echo/echo_paper.md`](papers/echo/echo_paper.md)).
 
-Server-side ECHO/GRPO training requires `KILN_SERVING_PROFILE=experimental`
+Server-side ECHO/GRPO training requires `KILN_SERVER_SERVING_PROFILE=experimental`
 for an interactive generate/train loop or `maintenance` for drained training.
 The default `stable` profile rejects training GPU ownership. See
 [Serving Profiles](SERVING_PROFILES.md).

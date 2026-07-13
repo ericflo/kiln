@@ -23,13 +23,13 @@ serving_profile = "stable"              # Immutable process-lifetime GPU ownersh
                                         # stable: inference only, no live physical mutation;
                                         # experimental: dynamic development behavior;
                                         # maintenance: inference disabled, drained exclusive work.
-                                        # KILN_SERVING_PROFILE overrides this strictly. See
+                                        # KILN_SERVER_SERVING_PROFILE overrides this strictly. See
                                         # docs/SERVING_PROFILES.md for the restart workflow.
 deterministic = false                    # Serving repeatability envelope. True freezes the process-
                                         # wide determinism selector and forces one concurrent decode
                                         # row, even when max_decode_batch is wider. It does not make
                                         # every accelerator kernel bitwise deterministic. Override
-                                        # strictly with KILN_DETERMINISTIC; malformed values fail
+                                        # strictly with KILN_SERVER_DETERMINISTIC; malformed values fail
                                         # startup instead of silently disabling determinism.
 host = "127.0.0.1"                    # Kiln has no built-in auth. Set "0.0.0.0" to accept
                                       # remote connections ONLY behind an authenticated
@@ -49,41 +49,41 @@ slow_request_warn_secs = 30             # Structured warning threshold; 0 disabl
                                         # kernel-readback, and effective values are in health/debug.
                                         # Valid range:
                                         # 1024..=16777216. Override strictly with
-                                        # KILN_HTTP_SEND_BUFFER_BYTES; malformed/zero/out-of-range
+                                        # KILN_SERVER_HTTP_SEND_BUFFER_BYTES; malformed/zero/out-of-range
                                         # values are fatal startup errors.
 stream_stall_grace_ms = 2000             # Maximum continuous time a full 64-event response channel
                                         # may make no delivery progress before only that request is
                                         # cancelled. Delivery runs outside the compute actor; any
                                         # successful event resets this clock. This is not the request
                                         # or socket timeout. Valid range: 10..=2000.
-                                        # KILN_STREAM_STALL_GRACE_MS overrides this strictly;
+                                        # KILN_SERVER_STREAM_STALL_GRACE_MS overrides this strictly;
                                         # malformed/zero/out-of-range values fail startup. The
                                         # effective value and source are in health/debug state.
 max_batch_tokens = 512                   # Combined decode-plus-prefill token budget per batching
                                         # actor cycle. Existing decode rows consume one token each;
                                         # admission and resumable prefill share the remainder.
                                         # Valid range:
-                                        # 2..=65536. KILN_MAX_BATCH_TOKENS overrides this strictly;
+                                        # 2..=65536. KILN_SERVER_MAX_BATCH_TOKENS overrides this strictly;
                                         # the effective value and source are in health/debug state.
 max_prefill_tokens_per_cycle = 64        # Independent prompt-token ceiling inside the combined
                                         # budget. Decode reserves its rows first, then prompt work
                                         # advances round-robin by at most this many tokens before the
                                         # next decode cohort. Lower values favor ITL; higher values
                                         # favor prompt throughput. Valid range: 1..=65536. Override
-                                        # strictly with KILN_MAX_PREFILL_TOKENS_PER_CYCLE.
+                                        # strictly with KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE.
 max_prefill_layers_per_cycle = 4         # Transformer layers processed before a retained prompt
                                         # chunk yields to the next decode cohort. Its token width is
                                         # charged once when selected; the same hidden state and width
                                         # resume without a second token charge or layer replay. Lower
                                         # values favor ITL; higher values reduce scheduling and
                                         # synchronization overhead. Valid range: 1..=1024. Override
-                                        # strictly with KILN_MAX_PREFILL_LAYERS_PER_CYCLE.
+                                        # strictly with KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE.
                                         # Every third dispatch remains round-robin; the other two
                                         # may accelerate the shortest tail of at most four chunks.
 max_decode_batch = "auto"                # Concurrent decode-row ceiling. "auto" selects the active
                                         # backend policy; an integer in 1..=65536 sets an operator
                                         # ceiling. Deterministic mode and max_batch_tokens may lower
-                                        # the effective value. KILN_MAX_DECODE_BATCH overrides this
+                                        # the effective value. KILN_SERVER_MAX_DECODE_BATCH overrides this
                                         # strictly and also accepts "auto". Startup, /health,
                                         # /v1/config, and debug report all sources and constraints.
 # eval_mode = false
@@ -126,7 +126,9 @@ model_id = "Qwen/Qwen3.5-4B"
                                       # everything up to and including the last "/" (so
                                       # "Qwen/Qwen3.5-4B" becomes
                                       # "Qwen3.5-4B"). Override precedence:
-                                      #   --served-model-id flag > KILN_SERVED_MODEL_ID env >
+                                      #   --served-model-id flag >
+                                      #   KILN_MODEL_SERVED_MODEL_ID env >
+                                      #   legacy KILN_SERVED_MODEL_ID env >
                                       #   this TOML value > derived default.
                                       #
                                       # GPTQ INT4 quantization: point `path` at a GPTQ model directory
@@ -139,12 +141,12 @@ model_id = "Qwen/Qwen3.5-4B"
                                       # full-attention layers. CUDA auto-sizing fills
                                       # `inference_memory_fraction` of free VRAM with
                                       # blocks; explicit values override this. Also
-                                      # settable via KILN_NUM_BLOCKS env var.
+                                      # settable via KILN_MEMORY_NUM_BLOCKS env var.
 # gpu_memory_gb = 24.0               # Override detected VRAM (for testing)
 inference_memory_fraction = 0.7       # Fraction of VRAM for inference (rest for training)
 # training_memory_gb = 4.0           # Override auto-calculated training budget
 # kv_cache_fp8 = true                # FP8 (E4M3) KV cache quantization — halves memory, ~2x longer context
-                                      # Also settable via KILN_KV_CACHE_FP8=1 env var
+                                      # Also settable via KILN_MEMORY_KV_CACHE_FP8=1 env var
 cuda_graphs = true                    # CUDA graph capture/replay policy. Non-CUDA backends
                                       # resolve their graph policy separately while config
                                       # consolidation is in progress.
@@ -214,8 +216,9 @@ method = "off"                         # off, skip_layer, or mtp. enabled=true w
 num_speculative_tokens = 256          # Upper bound on drafted tokens per step (the paged
                                       # skip-layer draft adapts within this budget)
 draft_layers = 8                      # First N layers used as draft model
-                                      # Also settable via KILN_SPEC_ENABLED, KILN_SPEC_NUM_TOKENS,
-                                      # KILN_SPEC_DRAFT_LAYERS env vars
+                                      # Also settable via KILN_SPECULATIVE_ENABLED,
+                                      # KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS, and
+                                      # KILN_SPECULATIVE_DRAFT_LAYERS env vars.
 
 [streaming_prefill]
 enabled = false                       # Typed long-prefill policy. Runtime propagation into all
@@ -240,8 +243,9 @@ max_tracked_jobs = 1024               # In-memory bound including terminal eval 
 # self_improve_interval_hours = 168
 # # Embedded pi runs (POST /v1/agent/runs): the server drives pi itself,
 # # streams the trajectory live, and auto-indexes finished sessions into
-# # the agent-trace layer. Enabled on loopback binds by default;
-# # KILN_AGENT_RUNS=1 opts in on network binds, =0 force-disables.
+# # the agent-trace layer. Network-bound serving requires the security model
+# # documented in README.md; arbitrary runtime environment flags are not
+# # part of this typed configuration contract.
 # max_concurrent_runs = 2       # runs executing at once (FIFO queue)
 # run_timeout_secs = 900        # wall-clock cap per run (abort + index partial)
 # # Optional request overrides (same shape as POST /v1/agent/self_improve).
@@ -302,21 +306,13 @@ composed_cache_max_entries = 64       # Entry-count cap on the same composed-ada
                                       # (or empty) to disable the entry cap.
 
 # -----------------------------------------------------------------------------
-# Memory budget (env-only; no [memory] section needed).
+# Unified-memory detection notes.
 # -----------------------------------------------------------------------------
-# KILN_GPU_MEMORY_GB
-#   Override the auto-detected GPU memory (in GB, decimal OK). Highest priority
-#   among VRAM detection sources — useful when nvidia-smi or DRM sysfs misreport,
-#   or when you want to deliberately cap kiln serve below physical capacity.
-#
-# KILN_TRAINING_MEMORY_RESERVE_GB
-#   On unified-memory systems (Apple Silicon, AMD APUs like Strix Halo), this is
-#   the GB held back from MemTotal before declaring the training budget. Default
-#   is `max(6, MemTotal / 4)` — chosen so the OS, X/Wayland compositor, and any
-#   other apps don't get crowded out when training occupies most of system RAM.
-#   On a 30 GB unified APU the default reserve is 7.5 GB, leaving ~22.5 GB for
-#   training. Lower it (e.g. 4) to free more headroom for training; raise it
-#   (e.g. 12) on a workstation that runs heavier desktop workloads alongside.
+# Configure explicit capacity through `memory.gpu_memory_gb` and an explicit
+# training budget through `memory.training_memory_gb` above. Their canonical
+# startup overrides are `KILN_MEMORY_GPU_MEMORY_GB` and
+# `KILN_MEMORY_TRAINING_MEMORY_GB`; deprecated shorter aliases are documented
+# only in docs/CONFIGURATION.md.
 #
 # Unified-memory detection (Linux):
 #   On a Linux host with an integrated AMD/Intel GPU, the BIOS-configured VRAM
@@ -324,7 +320,7 @@ composed_cache_max_entries = 64       # Entry-count cap on the same composed-ada
 #   exceed physical RAM (the GTT heap pages against system memory). When kiln
 #   detects this — `mem_info_vram_total > MemTotal × 1.25`, OR a display
 #   controller + integrated AMD/Intel vendor + GTT ≥ 1 GB — it corrects the
-#   budget down to `min(reported_vram, MemTotal − reserve)` so training sized
-#   against this number cannot exhaust system RAM. The "GPU memory budget" log
+#   budget down to an automatically reserved fraction of physical memory so
+#   training sized against this number cannot exhaust system RAM. The "GPU memory budget" log
 #   line at startup includes a `vram_source = linux-drm-sysfs-unified` field so
 #   the corrected value is honest about its provenance.

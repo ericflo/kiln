@@ -163,6 +163,13 @@ fn preflight_http_send_buffer(
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Cli::parse();
+    let serve_cli_overrides = match &args.command {
+        Some(Commands::Serve {
+            served_model_id,
+            eval_mode,
+        }) => (served_model_id.clone(), *eval_mode),
+        _ => (None, false),
+    };
     let diagnostics_config_path = match &args.command {
         Some(Commands::ConfigCheck { file }) => file.as_deref().or(args.config.as_deref()),
         _ => args.config.as_deref(),
@@ -467,30 +474,13 @@ async fn main() -> Result<()> {
             return cli::run_self_improve(url, agent, judge, !no_crisp).await;
         }
         // Serve mode (default)
-        Some(Commands::Serve {
-            ref served_model_id,
-            eval_mode,
-        }) => {
-            // CLI flag wins over env/TOML; surface it via env var so the
-            // config loader picks it up uniformly.
-            if let Some(v) = served_model_id {
-                // Safety: argv parsing happens before any threads are spawned.
-                unsafe {
-                    std::env::set_var("KILN_SERVED_MODEL_ID", v);
-                }
-            }
-            if eval_mode {
-                // Safety: argv parsing happens before any threads are spawned.
-                unsafe {
-                    std::env::set_var("KILN_EVAL_MODE", "1");
-                }
-            }
-        }
+        Some(Commands::Serve { .. }) => {}
         None => {}
     }
 
     // --- Server startup ---
-    let config = KilnConfig::load(args.config.as_deref())?;
+    let mut config = KilnConfig::load(args.config.as_deref())?;
+    config.apply_serve_cli_overrides(serve_cli_overrides.0.as_deref(), serve_cli_overrides.1)?;
     kiln_tensor::DETERMINISTIC_CACHED
         .configure(config.server.deterministic.enabled())
         .context("failed to fix deterministic tensor behavior from startup configuration")?;

@@ -436,7 +436,7 @@ curl -s http://localhost:8420/v1/chat/completions \
             <div class="label mb-2">Check</div>
             <ul class="list-disc pl-5">
               <li>The default bind is local-only: <code>127.0.0.1:8420</code>.</li>
-              <li>For private-network access, set <code>server.host = "0.0.0.0"</code> in config or start with <code>KILN_HOST=0.0.0.0</code>.</li>
+              <li>For private-network access, set <code>server.host = "0.0.0.0"</code> in config or start with <code>KILN_SERVER_HOST=0.0.0.0</code>.</li>
               <li>Only expose that bind on a trusted/private network or behind a reverse proxy that adds authentication.</li>
               <li>From the client machine, verify the exact host with <code>curl http://gpu-box:8420/health</code>.</li>
             </ul>

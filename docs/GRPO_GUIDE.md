@@ -7,7 +7,7 @@ code-runs). Everything below assumes a Kiln server running on
 on the client.
 
 The end-to-end generate/train/hot-swap loop requires the explicit development
-profile: start Kiln with `KILN_SERVING_PROFILE=experimental`. The default
+profile: start Kiln with `KILN_SERVER_SERVING_PROFILE=experimental`. The default
 `stable` profile returns `409 serving_profile_conflict` for training, while
 `maintenance` disables the generation half of the loop. Production systems
 should generate under `stable`, restart into drained `maintenance` for the

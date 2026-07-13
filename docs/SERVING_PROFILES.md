@@ -13,10 +13,13 @@ development or drained-maintenance session:
 serving_profile = "stable"
 ```
 
-`KILN_SERVING_PROFILE` overrides the TOML value. Accepted values are exactly
+`KILN_SERVER_SERVING_PROFILE` overrides the TOML value. Accepted values are exactly
 `stable`, `experimental`, and `maintenance` (case-insensitive, with surrounding
 whitespace ignored). An empty or unknown value is a fatal startup error that
 names the invalid field or environment variable and value.
+
+The older `KILN_SERVING_PROFILE` spelling remains a deprecated compatibility
+alias and emits a startup warning. Do not use it in new deployments.
 
 ## Policy matrix
 
@@ -57,12 +60,12 @@ restart as the ownership boundary:
 
 1. Remove the stable instance from traffic and stop it gracefully. Wait for
    admitted requests to finish within the configured shutdown timeout.
-2. Start a new process with `KILN_SERVING_PROFILE=maintenance`. Keep it out of
+2. Start a new process with `KILN_SERVER_SERVING_PROFILE=maintenance`. Keep it out of
    the serving pool; its 503 health response is an additional readiness guard.
 3. Run the training, adapter activation, or physical memory operation that
    requires exclusive GPU ownership.
 4. Stop the maintenance process and restart with
-   `KILN_SERVING_PROFILE=stable` (or remove the override).
+   `KILN_SERVER_SERVING_PROFILE=stable` (or remove the override).
 5. Wait for `/health` to return 200 before restoring traffic.
 
 Post-training evaluation requires inference. Do not schedule it inside the

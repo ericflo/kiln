@@ -1,14 +1,17 @@
 //! Structured logging initialization.
 //!
 //! Configurable via the `[logging]` section of `kiln.toml` or environment variables:
-//! - `KILN_LOG_LEVEL`: verbosity level (`trace`, `debug`, `info`, `warn`, `error`)
-//!   or a full `tracing_subscriber::EnvFilter` directive. Default: `info`.
-//! - `KILN_LOG_FORMAT`: output format — `auto` (default), `json`, or `pretty`
+//! - `KILN_LOGGING_LEVEL`: verbosity level (`trace`, `debug`, `info`, `warn`,
+//!   `error`) or a full `tracing_subscriber::EnvFilter` directive. The legacy
+//!   `KILN_LOG_LEVEL` spelling remains a deprecated compatibility alias.
+//!   Default: `info`.
+//! - `KILN_LOGGING_FORMAT`: output format — `auto` (default), `json`, or `pretty`.
+//!   The legacy `KILN_LOG_FORMAT` spelling remains a deprecated compatibility alias
 //!   (also accepts `text`/`human` as aliases for `pretty`). With `auto`, kiln
 //!   emits colored pretty logs when stderr is a TTY (interactive terminal) and
 //!   structured JSON otherwise (systemd, docker, CI, log pipelines). Set to
 //!   `json` to force JSON in production, or `pretty` to force colored output.
-//! - `RUST_LOG`: if set, takes precedence over `KILN_LOG_LEVEL`.
+//! - `RUST_LOG`: if set, takes precedence over the resolved typed logging level.
 
 use std::io::IsTerminal;
 use std::path::Path;
@@ -17,6 +20,11 @@ use anyhow::{Context, Result};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::LoggingConfig;
+
+const LOGGING_LEVEL_ENV: &str = "KILN_LOGGING_LEVEL";
+const LEGACY_LOG_LEVEL_ENV: &str = "KILN_LOG_LEVEL";
+const LOGGING_FORMAT_ENV: &str = "KILN_LOGGING_FORMAT";
+const LEGACY_LOG_FORMAT_ENV: &str = "KILN_LOG_FORMAT";
 
 /// Minimal logging policy resolved before full configuration validation.
 ///
@@ -49,17 +57,33 @@ pub fn bootstrap_config(explicit_path: Option<&str>) -> BootstrapLoggingConfig {
     {
         apply_logging_table(&mut logging, &contents);
     }
-    if let Ok(level) = std::env::var("KILN_LOG_LEVEL") {
-        logging.level = level;
-    }
-    if let Ok(format) = std::env::var("KILN_LOG_FORMAT") {
-        logging.format = format;
-    }
+    apply_bootstrap_environment(&mut logging, |name| std::env::var(name).ok());
 
     BootstrapLoggingConfig {
         level: logging.level,
         format: logging.format,
         config_path,
+    }
+}
+
+/// Mirror authoritative logging precedence before the global subscriber is
+/// installed. Full configuration loading still performs strict parsing,
+/// conflict detection, and compatibility warnings.
+fn apply_bootstrap_environment(
+    logging: &mut LoggingConfig,
+    mut read: impl FnMut(&str) -> Option<String>,
+) {
+    if let Some(level) = read(LEGACY_LOG_LEVEL_ENV) {
+        logging.level = level;
+    }
+    if let Some(level) = read(LOGGING_LEVEL_ENV) {
+        logging.level = level;
+    }
+    if let Some(format) = read(LEGACY_LOG_FORMAT_ENV) {
+        logging.format = format;
+    }
+    if let Some(format) = read(LOGGING_FORMAT_ENV) {
+        logging.format = format;
     }
 }
 
@@ -172,6 +196,29 @@ format = "json"
         apply_logging_table(&mut logging, "[logging\nlevel = ???");
         assert_eq!(logging.level, "debug");
         assert_eq!(logging.format, "json");
+    }
+
+    #[test]
+    fn bootstrap_logging_uses_canonical_environment_precedence() {
+        let mut canonical_only = LoggingConfig::default();
+        apply_bootstrap_environment(&mut canonical_only, |name| match name {
+            LOGGING_LEVEL_ENV => Some("debug".to_owned()),
+            LOGGING_FORMAT_ENV => Some("json".to_owned()),
+            _ => None,
+        });
+        assert_eq!(canonical_only.level, "debug");
+        assert_eq!(canonical_only.format, "json");
+
+        let mut both = LoggingConfig::default();
+        apply_bootstrap_environment(&mut both, |name| match name {
+            LEGACY_LOG_LEVEL_ENV => Some("warn".to_owned()),
+            LOGGING_LEVEL_ENV => Some("debug".to_owned()),
+            LEGACY_LOG_FORMAT_ENV => Some("pretty".to_owned()),
+            LOGGING_FORMAT_ENV => Some("json".to_owned()),
+            _ => None,
+        });
+        assert_eq!(both.level, "debug");
+        assert_eq!(both.format, "json");
     }
 
     // NOTE: env var manipulation is unsafe in Rust 1.78+ because it is not
