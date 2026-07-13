@@ -22,16 +22,11 @@ path = "src/bench.rs"
 name = "kiln-eval"
 path = "src/bin/kiln_eval_cli.rs"
 
-# These three examples drive the CUDA fused-op call sites end-to-end,
+# These two examples drive the CUDA fused-op call sites end-to-end,
 # so they require --features cuda. The kt-typed entries on
 # kiln-model's public surface (GpuWeights::from_model_weights_kt, etc.)
 # themselves are available on every build now — the cuda gate here is
 # about the model-loading + CUDA-only fused-op chain the benches run.
-[[example]]
-name = "flce_phase_a_validation_bench"
-path = "examples/flce_phase_a_validation_bench.rs"
-required-features = ["cuda"]
-
 [[example]]
 name = "flce_preflight_bench"
 path = "examples/flce_preflight_bench.rs"

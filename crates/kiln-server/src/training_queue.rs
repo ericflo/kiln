@@ -370,6 +370,22 @@ pub struct PreparedSftAdmission {
     pub max_seq_len: usize,
     pub max_supervised_tokens: usize,
     pub admission_weight_bytes: u64,
+    /// Backend capability used by the route-specific memory estimate.
+    pub loss_route: kiln_model::backend::SftFlceLossRoute,
+}
+
+fn ensure_sft_loss_route_unchanged(
+    admitted: kiln_model::backend::SftFlceLossRoute,
+    execution: kiln_model::backend::SftFlceLossRoute,
+) -> std::result::Result<(), String> {
+    if admitted == execution {
+        return Ok(());
+    }
+    Err(format!(
+        "SFT loss route changed after admission: admitted `{}`, execution backend reports `{}`",
+        admitted.as_str(),
+        execution.as_str(),
+    ))
 }
 
 const GRPO_SNAPSHOT_ROOT_MARKER: &str = ".kiln-training-inputs-v1";
@@ -1443,6 +1459,7 @@ fn run_sft(
     };
     let examples = req.examples.as_slice();
     let ingestion = &prepared.ingestion;
+    let execution_runtime = runtime.with_admitted_sft_loss_route(prepared.loss_route);
 
     if native_route_enabled {
         #[cfg(feature = "cuda")]
@@ -1466,7 +1483,7 @@ fn run_sft(
                 adapter_name,
                 Some(progress_cb),
                 gpu_step_coordination,
-                runtime,
+                &execution_runtime,
             )
             .map_err(|e| format!("{e:#}"));
         }
@@ -1495,7 +1512,7 @@ fn run_sft(
         Some(progress_cb),
         Some(replay_ctx),
         gpu_step_coordination,
-        runtime,
+        &execution_runtime,
     )
     .map_err(|e| format!("{e:#}"))
 }
@@ -4396,7 +4413,20 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
     // identities and require every dynamic source to have its submit-time
     // materialization before any governor reservation, KV resize, or pooled
     // allocator reclamation.
-    let prepared_data_is_valid = verify_prepared_training_data(&entry.job, &entry.prepared_data);
+    let prepared_data_is_valid = verify_prepared_training_data(&entry.job, &entry.prepared_data)
+        .and_then(|()| match (&entry.job, &entry.prepared_data) {
+            (QueuedJob::Sft(_), PreparedTrainingData::Sft(prepared)) => {
+                let execution_route = runner_arc
+                    .read()
+                    .map_err(|_| {
+                        "model runner lock poisoned while revalidating admitted SFT loss route"
+                            .to_string()
+                    })?
+                    .sft_flce_loss_route();
+                ensure_sft_loss_route_unchanged(prepared.loss_route, execution_route)
+            }
+            _ => Ok(()),
+        });
 
     // Resolve only the immutable submit-time binding. Registry deletion or
     // replacement while this job waited in the FIFO is a terminal failure,
@@ -5114,6 +5144,22 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::TEST_ENV_LOCK as ENV_LOCK;
+
+    #[test]
+    fn admitted_sft_loss_route_must_match_execution_backend() {
+        use kiln_model::backend::SftFlceLossRoute;
+
+        ensure_sft_loss_route_unchanged(SftFlceLossRoute::KtTapeFlce, SftFlceLossRoute::KtTapeFlce)
+            .unwrap();
+        let error = ensure_sft_loss_route_unchanged(
+            SftFlceLossRoute::KtTapeFlce,
+            SftFlceLossRoute::FullLogits,
+        )
+        .unwrap_err();
+        assert!(error.contains("changed after admission"));
+        assert!(error.contains("kt_tape_flce"));
+        assert!(error.contains("full_logits"));
+    }
 
     #[test]
     fn server_teacher_policy_requires_and_preserves_startup_resolution() {

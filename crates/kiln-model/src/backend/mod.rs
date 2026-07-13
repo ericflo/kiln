@@ -193,7 +193,8 @@ pub mod rocm;
 // lora_delta_resident}` now decline so the kt-recorded forward path owns the
 // projection / LoRA matmuls and the tape produces their gradients.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SftFlceLossRoute {
     /// Materialize logits and use the portable loss path.
     FullLogits,

@@ -1190,72 +1190,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_STREAMING_PREFILL",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_USE_FLCE",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_STREAMING_PREFILL",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_FLCE",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "remove_var",
       "argument": "KILN_DISABLE_RMSNORM_BACKWARD",
       "argument_kind": "literal",
       "count": 2,
@@ -1279,17 +1213,6 @@
     {
       "api": "set_var",
       "argument": "KILN_DISABLE_RMSNORM_BACKWARD",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/examples/phase10_rmsnorm_bench.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_FLCE",
       "argument_kind": "literal",
       "count": 1,
       "language": "rust",
@@ -10004,8 +9927,8 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 550,
-    "process_mutation_entries": 264,
+    "process_mutation_call_sites": 539,
+    "process_mutation_entries": 257,
     "read_call_sites": 950,
     "read_entries": 644
   }

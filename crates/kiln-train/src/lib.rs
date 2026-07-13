@@ -345,6 +345,7 @@ pub struct TrainingRuntimeContext {
     checkpoint_boundary_policy: CheckpointBoundaryPolicy,
     runtime_device: Option<kiln_tensor::Device>,
     streaming_prefill_policy: Option<kiln_model::forward::StreamingPrefillExecutionPolicy>,
+    admitted_sft_loss_route: Option<kiln_model::backend::SftFlceLossRoute>,
 }
 
 impl TrainingRuntimeContext {
@@ -362,6 +363,7 @@ impl TrainingRuntimeContext {
             checkpoint_boundary_policy: CheckpointBoundaryPolicy::DEFAULT,
             runtime_device: None,
             streaming_prefill_policy: None,
+            admitted_sft_loss_route: None,
         }
     }
 
@@ -380,6 +382,7 @@ impl TrainingRuntimeContext {
             checkpoint_boundary_policy: CheckpointBoundaryPolicy::DEFAULT,
             runtime_device: Some(runtime_device),
             streaming_prefill_policy: None,
+            admitted_sft_loss_route: None,
         }
     }
 
@@ -403,6 +406,19 @@ impl TrainingRuntimeContext {
         policy: kiln_model::forward::StreamingPrefillExecutionPolicy,
     ) -> Self {
         self.streaming_prefill_policy = Some(policy);
+        self
+    }
+
+    /// Bind one SFT run to the backend loss route used by admission.
+    ///
+    /// This is job-local typed state, not an operator-selectable policy. The
+    /// trainer revalidates it against the execution backend before allocating
+    /// trainable parameters, then carries this exact value through every step.
+    pub const fn with_admitted_sft_loss_route(
+        mut self,
+        route: kiln_model::backend::SftFlceLossRoute,
+    ) -> Self {
+        self.admitted_sft_loss_route = Some(route);
         self
     }
 
@@ -455,6 +471,11 @@ impl TrainingRuntimeContext {
         &self,
     ) -> Option<kiln_model::forward::StreamingPrefillExecutionPolicy> {
         self.streaming_prefill_policy
+    }
+
+    /// The loss route pinned by SFT admission, if this is an admitted run.
+    pub const fn admitted_sft_loss_route(&self) -> Option<kiln_model::backend::SftFlceLossRoute> {
+        self.admitted_sft_loss_route
     }
 
     /// Resolve the immutable streaming-prefill policy for `device`.
@@ -513,7 +534,7 @@ impl TrainingRuntimeContext {
                 })
             })
             .map(streaming_prefill_policy_identity);
-        serde_json::json!({
+        let mut identity = serde_json::json!({
             "schema": "kiln.training-checkpoint-planning.v3",
             "effective_vram": {
                 "total_bytes": self.effective_vram.total_bytes,
@@ -524,7 +545,21 @@ impl TrainingRuntimeContext {
             "checkpoint_boundary_policy": self.checkpoint_boundary_policy,
             "runtime_device": self.runtime_device.map(kiln_tensor::Device::short_name),
             "streaming_prefill_policy": streaming_prefill_policy,
-        })
+        });
+        if let Some(route) = self.admitted_sft_loss_route {
+            let object = identity
+                .as_object_mut()
+                .expect("checkpoint planning identity is always an object");
+            object.insert(
+                "schema".to_string(),
+                serde_json::json!("kiln.training-checkpoint-planning.v4"),
+            );
+            object.insert(
+                "sft_loss_route".to_string(),
+                serde_json::json!(route.as_str()),
+            );
+        }
+        identity
     }
 
     /// Stable planning identity after resolving the actual training device.
@@ -2306,6 +2341,64 @@ mod tests {
             identity["streaming_prefill_policy"]["last_token_lm_head"],
             false
         );
+    }
+
+    #[test]
+    fn admitted_sft_loss_route_is_job_local_exact_resume_identity() {
+        let checkpoint_boundary_policy = CheckpointBoundaryPolicy::from_parts(
+            CheckpointBoundaryRecomputeMode::Enabled,
+            4096,
+            Some(2),
+            1024 * 1024 * 1024,
+        )
+        .unwrap();
+        let streaming_prefill_policy =
+            kiln_model::forward::StreamingPrefillExecutionPolicy::resolve(
+                kiln_model::StreamingPrefillBackendPolicy::for_device(kiln_tensor::Device::Cpu),
+                kiln_model::forward::StreamingPrefillMode::Enabled,
+                Some(64),
+                Some(128),
+                Some(256),
+                Some(512),
+                false,
+            );
+        let runtime = TrainingRuntimeContext::new_for_device(
+            kiln_tensor::Device::Cpu,
+            kiln_memory::vram::GpuVramInfo {
+                total_bytes: 0,
+                source: kiln_memory::vram::VramSource::None,
+                unified: false,
+            },
+            GradientCheckpointPolicy::Auto,
+        )
+        .with_checkpoint_boundary_policy(checkpoint_boundary_policy)
+        .with_streaming_prefill_policy(streaming_prefill_policy);
+        let unbound = runtime.checkpoint_planning_identity_for_device(kiln_tensor::Device::Cpu);
+        assert_eq!(unbound["schema"], "kiln.training-checkpoint-planning.v3");
+        assert!(unbound.get("sft_loss_route").is_none());
+
+        let full_logits = runtime
+            .with_admitted_sft_loss_route(kiln_model::backend::SftFlceLossRoute::FullLogits)
+            .checkpoint_planning_identity_for_device(kiln_tensor::Device::Cpu);
+        assert_eq!(
+            full_logits["schema"],
+            "kiln.training-checkpoint-planning.v4"
+        );
+        assert_eq!(full_logits["sft_loss_route"], "full_logits");
+        assert_eq!(
+            full_logits["checkpoint_boundary_policy"],
+            serde_json::to_value(checkpoint_boundary_policy).unwrap()
+        );
+        assert_eq!(
+            full_logits["streaming_prefill_policy"]["base_tile_tokens"],
+            128
+        );
+
+        let kt_flce = runtime
+            .with_admitted_sft_loss_route(kiln_model::backend::SftFlceLossRoute::KtTapeFlce)
+            .checkpoint_planning_identity_for_device(kiln_tensor::Device::Cpu);
+        assert_eq!(kt_flce["sft_loss_route"], "kt_tape_flce");
+        assert_ne!(full_logits, kt_flce);
     }
 
     #[test]

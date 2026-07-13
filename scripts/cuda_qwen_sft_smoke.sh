@@ -90,7 +90,6 @@ if [[ "$NATIVE_CUDA" -eq 1 ]]; then
 fi
 KILN_CUDA_ARCHS="$CUDA_ARCHS" \
 KILN_SPEC_METHOD=off \
-KILN_USE_FLCE=1 \
 KILN_CUDA_NATIVE_TRAINING="$NATIVE_CUDA" \
 "$BENCH_BIN" \
     --model-path "$MODEL_PATH" \

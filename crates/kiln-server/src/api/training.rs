@@ -3241,13 +3241,14 @@ fn prepare_training_entry_admission(
             };
             let admission_weight_bytes =
                 sft_materialized_weight_bytes(&prepared.examples, &prepared.ingestion)?;
+            let loss_route = sft_loss_route_for_state(state)?;
             let admission = enforce_training_preflight(
                 state,
                 prepared.max_seq_len,
                 EstimateOptions {
                     sft: Some(SftEstimateOptions {
                         max_active_tokens: prepared.max_supervised_tokens,
-                        loss_route: sft_loss_route_for_state(state)?,
+                        loss_route,
                         checkpoint_boundary_policy: state
                             .training_runtime
                             .checkpoint_boundary_policy(),
@@ -3272,6 +3273,7 @@ fn prepare_training_entry_admission(
                 max_seq_len: prepared.max_seq_len,
                 max_supervised_tokens: prepared.max_supervised_tokens,
                 admission_weight_bytes,
+                loss_route,
             });
         }
         QueuedJob::Grpo(req) => {
@@ -5751,7 +5753,7 @@ mod tests {
     }
 
     #[test]
-    fn full_logits_checkpoint_plan_is_rejected_before_queueing() {
+    fn full_logits_checkpoint_plan_helper_rejects_multiple_segments() {
         let sft = SftEstimateOptions {
             max_active_tokens: 32,
             loss_route: kiln_model::backend::SftFlceLossRoute::FullLogits,

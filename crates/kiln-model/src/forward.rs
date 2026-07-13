@@ -28581,8 +28581,9 @@ pub fn model_forward_project_normalized_hidden(
 /// `[1, seq_len, vocab_size]` logits materialization that dominates peak
 /// VRAM at long context on the Qwen3.5-4B head (V=151936).
 ///
-/// Call site is the trainer (SFT and GRPO) behind the `KILN_USE_FLCE`
-/// environment flag. No KV cache is used (matches `standard_forward_backward`).
+/// SFT and GRPO call this when their backend-owned typed loss route consumes
+/// normalized hidden states directly. No KV cache is used (matches
+/// `standard_forward_backward`).
 pub fn model_forward_no_head(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],

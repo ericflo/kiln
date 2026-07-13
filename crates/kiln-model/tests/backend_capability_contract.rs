@@ -5330,9 +5330,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         checkpointed_sft_entry.contains("ensure_tape_forward_backward_supported(")
             && checkpointed_sft_entry.contains("ensure_sft_loss_route_supports_checkpointing(")
-            && checkpointed_sft_entry
+            && checkpointed_sft_entry.contains("sft_loss_route: SftFlceLossRoute")
+            && !checkpointed_sft_entry
                 .contains("TrainingLossBackend::runtime_sft_flce_loss_route(backend)"),
-        "checkpointed SFT must reject unsupported tape and loss routes before forward work"
+        "checkpointed SFT must consume its pinned loss route and reject unsupported routes before forward work"
     );
     assert!(
         !checkpointed_sft_section.contains("model_forward_head(")
@@ -5675,6 +5676,119 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !forward_source.contains(forbidden),
             "forward conv paths should not call broad BackendRuntime method {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn sft_loss_route_is_bound_from_admission_through_artifacts() {
+    let root = workspace_root();
+    let api = fs::read_to_string(root.join("crates/kiln-server/src/api/training.rs"))
+        .expect("training API source should be readable");
+    let queue = fs::read_to_string(root.join("crates/kiln-server/src/training_queue.rs"))
+        .expect("training queue source should be readable");
+    let trainer = fs::read_to_string(root.join("crates/kiln-train/src/trainer.rs"))
+        .expect("trainer source should be readable");
+    let train_lib = fs::read_to_string(root.join("crates/kiln-train/src/lib.rs"))
+        .expect("training library source should be readable");
+    let receipt = fs::read_to_string(root.join("crates/kiln-train/src/train_receipt.rs"))
+        .expect("training receipt source should be readable");
+
+    let sft_admission = source_between(
+        &api,
+        "QueuedJob::Sft(req) => {",
+        "QueuedJob::Grpo(req) => {",
+    );
+    assert!(
+        sft_admission.contains("let loss_route = sft_loss_route_for_state(state)?;")
+            && sft_admission.matches("loss_route,").count() >= 2,
+        "SFT API admission should resolve one route and pin it in both the estimate and prepared queue data"
+    );
+    for required in [
+        "pub loss_route: kiln_model::backend::SftFlceLossRoute",
+        "ensure_sft_loss_route_unchanged(prepared.loss_route, execution_route)",
+        "runtime.with_admitted_sft_loss_route(prepared.loss_route)",
+    ] {
+        assert!(
+            queue.contains(required),
+            "queued SFT execution should preserve and revalidate its admitted route: {required}"
+        );
+    }
+    let route_revalidation = queue
+        .find("let prepared_data_is_valid =")
+        .expect("queue should revalidate prepared data");
+    let memory_reservation = queue
+        .find("let _mem_reservation =")
+        .expect("queue should create its memory reservation");
+    assert!(
+        route_revalidation < memory_reservation,
+        "SFT route drift must fail before governor reservation or memory reclamation"
+    );
+
+    for required in [
+        ".admitted_sft_loss_route()",
+        ".unwrap_or(backend_loss_route)",
+        "sft_loss_route == backend_loss_route",
+        "runtime.with_admitted_sft_loss_route(sft_loss_route)",
+        "standard_forward_backward_with_policy_and_loss_route(",
+        "sft_loss_route: SftFlceLossRoute",
+    ] {
+        assert!(
+            trainer.contains(required),
+            "SFT trainer should execute only the pinned, revalidated route: {required}"
+        );
+    }
+    let trainer_route_revalidation = trainer
+        .find("let backend_loss_route =")
+        .expect("trainer should resolve the execution backend loss route");
+    let resident_weight_allocation = trainer
+        .find("let resident_weights = resident_training_weights(")
+        .expect("trainer should materialize training-session resident weights");
+    assert!(
+        trainer_route_revalidation < resident_weight_allocation,
+        "fresh-backend route drift must fail before job-local resident-weight allocation"
+    );
+    assert!(
+        train_lib.contains("kiln.training-checkpoint-planning.v4")
+            && train_lib.contains("\"sft_loss_route\".to_string()"),
+        "SFT exact-resume identity should include the pinned loss route"
+    );
+    assert!(
+        receipt.contains("pub sft_loss_route: Option<kiln_model::backend::SftFlceLossRoute>")
+            && trainer.contains("receipt.runtime.sft_loss_route = Some(sft_loss_route)"),
+        "new SFT success and failure receipts should record the executed route"
+    );
+}
+
+#[test]
+fn retired_sft_loss_route_override_stays_out_of_live_surfaces() {
+    let root = workspace_root();
+    let retired_override = ["KILN", "USE", "FLCE"].join("_");
+    let retired_bench = root.join("crates/kiln-server/examples/flce_phase_a_validation_bench.rs");
+
+    assert!(
+        !retired_bench.exists(),
+        "the phase-A A/B bench depended on a mutable loss-route override and must stay retired"
+    );
+
+    for path in [
+        "crates/kiln-model/src/forward.rs",
+        "crates/kiln-train/src/trainer.rs",
+        "crates/kiln-server/Cargo.toml",
+        "crates/kiln-server/examples/phase10_rmsnorm_bench.rs",
+        "scripts/cuda_qwen_sft_smoke.sh",
+        "scripts/generate_backend_capability_report.py",
+        "scripts/phase10_flce_phase_b_t16384_only.py",
+    ] {
+        let source = fs::read_to_string(root.join(path))
+            .unwrap_or_else(|err| panic!("{path} should be readable: {err}"));
+        assert!(
+            !source.contains(&retired_override),
+            "{path} must consume backend-owned SFT loss routing, not the retired process override"
+        );
+        assert!(
+            !source.contains("flce_phase_a_validation_bench"),
+            "{path} must not restore evidence or registration for the retired phase-A bench"
         );
     }
 }
@@ -6636,7 +6750,6 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "scripts/plan_backend_latency_fixture_dispatch.py",
         "crates/kiln-tensor/tests/cuda_latency_bench.rs",
         "crates/kiln-server/examples/flce_preflight_bench.rs",
-        "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
         "crates/kiln-tensor/tests/metal_matmul_bench.rs",
         "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
         "crates/kiln-tensor/tests/rocm_latency_bench.rs",

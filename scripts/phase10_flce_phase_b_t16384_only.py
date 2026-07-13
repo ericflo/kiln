@@ -6,10 +6,9 @@ This is the §3 conditional-reopen FleCE T=16384 OOM probe — we don't need
 the full A/B sweep, we just need to observe whether T=16384 closes (peak
 < 48 GiB) or OOMs at the 48 GiB ceiling on A6000/A40 with Phase B alone.
 
-The bench's run_one() already sets KILN_USE_FLCE=1 (Phase B = chunked-vocab
-CustomOp1 forward), so this probe matches the audit's "Phase B alone, no
-future FleCE Phase C" configuration. PR #649's audit recommends this exact
-probe.
+The bench consumes the CUDA backend's authoritative chunked-vocabulary SFT
+loss route, so this probe matches the audit's "Phase B alone, no future FleCE
+Phase C" configuration. PR #649's audit recommends this exact probe.
 
 After running, build and execute the patched bench. Restore the file via
 git checkout when done.

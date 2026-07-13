@@ -1788,6 +1788,10 @@ mod tests {
             accepted.total_bytes as f64 / BYTES_PER_GB as f64,
         );
         assert!(
+            accepted.breakdown.loss_workspace >= 4 * max_seq_len as u64 * cfg.hidden_size as u64,
+            "Vulkan loss workspace must retain the full-sequence F32 gradient upper bound"
+        );
+        assert!(
             accepted.breakdown.per_segment_activations < 30 * BYTES_PER_GB,
             "streaming GDN should not charge full-sequence GDN intermediates"
         );

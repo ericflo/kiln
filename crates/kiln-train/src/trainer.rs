@@ -4577,6 +4577,7 @@ fn write_sft_train_receipt_best_effort(
     base_weight_shard_manifest: Option<&kiln_core::model_provenance::BaseWeightShardManifest>,
     execution_provenance: Option<&kiln_core::execution_provenance::ExecutionProvenanceV1>,
     training_precision: Option<crate::checkpoint::TrainingCheckpointPrecision>,
+    sft_loss_route: SftFlceLossRoute,
     config: &SftConfig,
     effective_seed: Option<u64>,
     alpha_over_rank: Option<f32>,
@@ -4602,6 +4603,7 @@ fn write_sft_train_receipt_best_effort(
     receipt.model.base_weight_shard_manifest = base_weight_shard_manifest.cloned();
     receipt.runtime.execution_provenance = execution_provenance.cloned();
     receipt.runtime.training_precision = training_precision;
+    receipt.runtime.sft_loss_route = Some(sft_loss_route);
     receipt.training_data = crate::train_receipt::TrainingDataReceipt {
         source: ingestion.source.clone(),
         path: ingestion.source_locator.clone(),
@@ -5555,13 +5557,25 @@ fn sft_train_prepared_to_with_checkpoint_root(
     // touch left is the safetensors adapter I/O, which bridges the kt device
     // to candle locally inside `load_from_safetensors`/`save_peft`.
     let device = training_device_for_weights(weights, runtime)?;
+    let backend = training_backend_for_device(device);
+    let backend_loss_route = TrainingLossBackend::runtime_sft_flce_loss_route(backend.as_ref());
+    let sft_loss_route = runtime
+        .admitted_sft_loss_route()
+        .unwrap_or(backend_loss_route);
+    anyhow::ensure!(
+        sft_loss_route == backend_loss_route,
+        "SFT loss route changed after admission: admitted `{}`, execution backend reports `{}`",
+        sft_loss_route.as_str(),
+        backend_loss_route.as_str(),
+    );
+    let bound_runtime = runtime.with_admitted_sft_loss_route(sft_loss_route);
+    let runtime = &bound_runtime;
     // Training-session residency: upload a one-device copy of the weights
     // when the substrate needs it (Vulkan hybrid). Shadow `weights` so the
-    // whole body trains against the resident copy; it drops at return.
+    // whole body trains against the resident copy; it drops at return. Route
+    // drift has already failed closed before this potentially large copy.
     let resident_weights = resident_training_weights(weights, &device)?;
     let weights = resident_weights.as_ref().unwrap_or(weights);
-    let backend = training_backend_for_device(device);
-    let sft_loss_route = TrainingLossBackend::runtime_sft_flce_loss_route(backend.as_ref());
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
     let checkpoint_boundary_policy = runtime.checkpoint_boundary_policy();
     let streaming_prefill = runtime.resolved_streaming_prefill_policy(device);
@@ -5637,6 +5651,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                 weights.base_weight_shard_manifest.as_ref(),
                 weights.execution_provenance.as_ref(),
                 None,
+                sft_loss_route,
                 config,
                 config.seed,
                 None,
@@ -5740,6 +5755,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                 weights.base_weight_shard_manifest.as_ref(),
                 weights.execution_provenance.as_ref(),
                 None,
+                sft_loss_route,
                 config,
                 effective_seed,
                 Some(alpha_over_rank),
@@ -6128,6 +6144,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                     {
                         let (lv, kt_grads) = checkpointed_forward_backward_tape_authoritative_kt(
                             &*backend,
+                            sft_loss_route,
                             &input_ids,
                             weights,
                             model_config,
@@ -6162,8 +6179,9 @@ fn sft_train_prepared_to_with_checkpoint_root(
                         );
                     }
                 } else {
-                    let (lv, g) = standard_forward_backward_with_policy(
+                    let (lv, g) = standard_forward_backward_with_policy_and_loss_route(
                         &*backend,
+                        sft_loss_route,
                         &input_ids,
                         weights,
                         model_config,
@@ -6494,6 +6512,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
         weights.base_weight_shard_manifest.as_ref(),
         weights.execution_provenance.as_ref(),
         training_precision_for_receipt_best_effort(&params, opt_state.as_ref()),
+        sft_loss_route,
         config,
         effective_seed,
         Some(alpha_over_rank),
@@ -15404,6 +15423,7 @@ fn ensure_tape_forward_backward_supported(
 ))]
 fn standard_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
+    sft_loss_route: SftFlceLossRoute,
     input_ids: &[u32],
     weights: &GpuWeights,
     model_config: &ModelConfig,
@@ -15422,8 +15442,7 @@ fn standard_forward_backward_tape_authoritative_kt(
     );
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
-    let sft_flce_loss_route = TrainingLossBackend::runtime_sft_flce_loss_route(backend);
-    ensure_sft_loss_route_supports_checkpointing(sft_flce_loss_route, false)?;
+    ensure_sft_loss_route_supports_checkpointing(sft_loss_route, false)?;
 
     let (loss_val, _loss_kt, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
@@ -15434,7 +15453,7 @@ fn standard_forward_backward_tape_authoritative_kt(
                 1,
             );
             let closure_start = Instant::now();
-            let loss_kt = match sft_flce_loss_route {
+            let loss_kt = match sft_loss_route {
                 SftFlceLossRoute::KtTapeFlce => {
                     log_sft_timing_begin(
                         trace_timings,
@@ -15663,6 +15682,7 @@ fn standard_forward_backward_tape_authoritative_kt(
 #[allow(clippy::too_many_arguments)]
 fn checkpointed_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
+    sft_loss_route: SftFlceLossRoute,
     input_ids: &[u32],
     weights: &GpuWeights,
     model_config: &ModelConfig,
@@ -15689,8 +15709,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         "checkpointed (kt-tape) SFT called with no supervised shifted-label positions"
     );
     ensure_tape_forward_backward_supported("checkpointed SFT", weights, backend)?;
-    let sft_flce_loss_route = TrainingLossBackend::runtime_sft_flce_loss_route(backend);
-    ensure_sft_loss_route_supports_checkpointing(sft_flce_loss_route, true)?;
+    ensure_sft_loss_route_supports_checkpointing(sft_loss_route, true)?;
 
     let trace_timings = trace_sft_timings();
     let debug_finite = debug_sft_finite_checks();
@@ -15908,7 +15927,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let mut flce_active_metadata_for_tail = None;
     let tail_grad_override: Option<Tensor>;
     let tail_loss_start = Instant::now();
-    let loss_val = match sft_flce_loss_route {
+    let loss_val = match sft_loss_route {
         SftFlceLossRoute::KtTapeFlce => {
             tail_grad_override = None;
             // (#1082 H-FLCE / candle-drop) FLCE loss-VALUE via the kt-native forward
@@ -16012,14 +16031,14 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         SftFlceLossRoute::FullLogits => {
             anyhow::bail!(
                 "checkpointed SFT reached unsupported loss route `{}` after its entry guard",
-                sft_flce_loss_route.as_str()
+                sft_loss_route.as_str()
             )
         }
     };
     anyhow::ensure!(
         loss_val.is_finite(),
         "SFT loss became non-finite before backward: loss={loss_val} route={} seq_len={} segments={}",
-        sft_flce_loss_route.as_str(),
+        sft_loss_route.as_str(),
         input_ids.len(),
         num_segments
     );
@@ -16237,6 +16256,31 @@ pub fn standard_forward_backward_with_policy(
     device: &Device,
     streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<(f64, GradSource)> {
+    standard_forward_backward_with_policy_and_loss_route(
+        backend,
+        TrainingLossBackend::runtime_sft_flce_loss_route(backend),
+        input_ids,
+        weights,
+        model_config,
+        params,
+        label_mask,
+        device,
+        streaming_prefill,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn standard_forward_backward_with_policy_and_loss_route(
+    backend: &dyn BackendRuntime,
+    sft_loss_route: SftFlceLossRoute,
+    input_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    label_mask: &[bool],
+    device: &Device,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+) -> Result<(f64, GradSource)> {
     // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
     // kt tape-authoritative when the backend capability and precision policy
     // allow it. The candle producers
@@ -16254,6 +16298,7 @@ pub fn standard_forward_backward_with_policy(
         ensure_tape_forward_backward_supported("standard_forward_backward", weights, backend)?;
         let (loss_val, kt_grads) = standard_forward_backward_tape_authoritative_kt(
             backend,
+            sft_loss_route,
             input_ids,
             weights,
             model_config,
@@ -16273,6 +16318,7 @@ pub fn standard_forward_backward_with_policy(
     {
         let _ = (
             backend,
+            sft_loss_route,
             input_ids,
             weights,
             model_config,
@@ -20276,6 +20322,7 @@ pub(crate) mod tests {
         // --- TAPE grads (ground-truth candidate), unperturbed params. ---
         let (_loss_a, grads_tape) = standard_forward_backward_tape_authoritative_kt(
             &*backend,
+            TrainingLossBackend::runtime_sft_flce_loss_route(&*backend),
             &input_ids,
             &weights,
             &config,
@@ -20370,6 +20417,7 @@ pub(crate) mod tests {
         let loss_value = |p: &TrainableLoraParams| -> f64 {
             let (lv, _g) = standard_forward_backward_tape_authoritative_kt(
                 &*backend,
+                TrainingLossBackend::runtime_sft_flce_loss_route(&*backend),
                 &input_ids,
                 &weights,
                 &config,
@@ -20816,6 +20864,7 @@ pub(crate) mod tests {
         for step in 0..STEPS {
             let (loss, grads) = standard_forward_backward_tape_authoritative_kt(
                 &*backend,
+                TrainingLossBackend::runtime_sft_flce_loss_route(&*backend),
                 &input_ids,
                 &weights,
                 &config,

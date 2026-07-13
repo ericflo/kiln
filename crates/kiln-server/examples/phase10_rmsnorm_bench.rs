@@ -1,8 +1,7 @@
 //! Phase 10 §1 — Liger-style RMSNorm with custom backward: A6000 SFT
 //! peak-VRAM and loss parity validation bench.
 //!
-//! Companion to `flce_phase_a_validation_bench.rs`. Compares the new
-//! `RmsNormCustomOp` (default) path against the
+//! Compares the `RmsNormCustomOp` (default) path against the
 //! `KILN_DISABLE_RMSNORM_BACKWARD=1` fallback (pre-Phase-10 candle-op
 //! chain) at three SFT lengths on Qwen3.5-4B + KILN_W4A16=1:
 //!
@@ -21,12 +20,10 @@
 //!   cargo run --release --features cuda -p kiln-server \
 //!     --example phase10_rmsnorm_bench -- --model-path /workspace/Qwen3.5-4B
 //!
-//! Env vars set/unset by this bench:
+//! Environment control varied by this bench:
 //!   KILN_DISABLE_RMSNORM_BACKWARD  (1 = fallback path; unset = custom op)
-//!   KILN_USE_FLCE                  (always 1 — training peak is dominated
-//!                                   by the head materialization without
-//!                                   FLCE, which would mask the per-layer
-//!                                   RMSNorm saved-tensor delta)
+//!
+//! The SFT loss route is selected by the backend and is not mutated per cell.
 //!
 //! Each cell records peak VRAM (background `nvidia-smi` poller @ 50 ms),
 //! step wall-time, status (Ok / OOM / other-error), and final loss.
@@ -88,8 +85,8 @@ fn current_vram_mib() -> u64 {
 }
 
 fn build_example(tokenizer: &KilnTokenizer, target_t: usize) -> Result<(SftExample, usize)> {
-    // Same builder as flce_phase_a_validation_bench. Repeats a paragraph
-    // until tokenized chat-template length is approximately target_t.
+    // Repeat a paragraph until tokenized chat-template length is approximately
+    // target_t.
     let base = "The quick brown fox jumps over the lazy dog near the river bank. \
                 Scientists discovered a new species of deep-sea fish in the Pacific Ocean. \
                 The quantum computer solved the optimization problem in record time. \
@@ -202,10 +199,6 @@ fn run_one(
     } else {
         unsafe { std::env::set_var("KILN_DISABLE_RMSNORM_BACKWARD", "1") };
     }
-    // FLCE on so the dominant peak comes from the per-layer activations
-    // (where the RMSNorm saved-tensor delta lives), not from logits.
-    unsafe { std::env::set_var("KILN_USE_FLCE", "1") };
-
     let (example, actual_t) = build_example(tokenizer, target_t)?;
     eprintln!("  Tokenized length: {actual_t} tokens (target {target_t})");
 

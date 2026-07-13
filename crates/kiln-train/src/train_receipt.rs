@@ -892,6 +892,11 @@ impl EchoActivityMetrics {
 pub struct RuntimeReceipt {
     pub wall_clock_ms: u64,
     pub peak_vram_mib: Option<u64>,
+    /// Backend-owned route used by this SFT run. Server jobs pin and revalidate
+    /// it at admission; standalone jobs resolve it once before execution.
+    /// Absent for non-SFT and legacy receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sft_loss_route: Option<kiln_model::backend::SftFlceLossRoute>,
     /// Complete process/backend envelope for the resident weights. Absent only
     /// for legacy receipts and explicitly synthetic or dry-run paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1095,6 +1100,7 @@ impl TrainReceipt {
             runtime: RuntimeReceipt {
                 wall_clock_ms: 0,
                 peak_vram_mib: None,
+                sft_loss_route: None,
                 execution_provenance: None,
                 training_precision: None,
             },
@@ -3719,6 +3725,37 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("reward mean"))
         );
+    }
+
+    #[test]
+    fn runtime_receipt_sft_loss_route_is_typed_and_legacy_optional() -> Result<()> {
+        let tokenizer = minimal_tokenizer()?;
+        let mut receipt = TrainReceipt::new(
+            "route-receipt",
+            "sft",
+            &ModelConfig::qwen3_5_4b(),
+            &tokenizer,
+            HyperparameterReceipt {
+                mode: "sft".to_string(),
+                rank: 8,
+                alpha: 16.0,
+                alpha_over_rank: Some(2.0),
+                learning_rate: 1e-4,
+                epochs: 1,
+                seed: Some(1),
+                shuffle: true,
+            },
+            serde_json::json!({}),
+        );
+        let legacy_json = serde_json::to_value(&receipt)?;
+        assert!(legacy_json["runtime"].get("sft_loss_route").is_none());
+
+        receipt.runtime.sft_loss_route =
+            Some(kiln_model::backend::SftFlceLossRoute::VulkanActiveRows);
+        let encoded = serde_json::to_value(&receipt)?;
+        assert_eq!(encoded["runtime"]["sft_loss_route"], "vulkan_active_rows");
+        assert_eq!(serde_json::from_value::<TrainReceipt>(encoded)?, receipt);
+        Ok(())
     }
 
     fn minimal_tokenizer() -> Result<KilnTokenizer> {
