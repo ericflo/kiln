@@ -1177,9 +1177,22 @@ fn hip_runtime_errors_are_cleared_at_wrapper_boundary() {
         "the sticky-error boundary is a concurrency/resource invariant and should stay documented"
     );
 
+    assert!(
+        rocm_graph.contains("fn restore_linear_state_in_place("),
+        "ROCm graph capture rollback must preserve persistent graph-slot addresses"
+    );
+    assert!(
+        !rocm_graph.contains("*linear_state = gdn_snapshot;")
+            && !rocm_graph.contains("*linear_state = capture_snapshot;"),
+        "ROCm graph capture rollback must never replace persistent graph-slot tensor handles"
+    );
     for required in [
-        "*linear_state = gdn_snapshot;",
-        "*linear_state = capture_snapshot;",
+        "restore graph-slot GDN state after warm-forward failure",
+        "restore graph-slot GDN state after warm pass",
+        "restore graph-slot GDN state after capture-forward failure",
+        "restore graph-slot GDN state after end-capture failure",
+        "restore graph-slot GDN state after graph-instantiation failure",
+        "restore graph-slot GDN state after first-launch failure",
         "freeze-pointers warm (Record) pass failed",
         "forward pass failed during graph capture",
         "end_capture failed",
