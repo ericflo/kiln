@@ -539,6 +539,7 @@ struct BatchingEngineInfo {
 struct TrainingInfo {
     active_job: Option<ActiveJobInfo>,
     queued: usize,
+    checkpoint_boundary_policy: kiln_train::CheckpointBoundaryPolicy,
 }
 
 #[derive(Serialize)]
@@ -791,7 +792,11 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     };
     let queued = state.training_queue.lock().unwrap().len();
 
-    let training = TrainingInfo { active_job, queued };
+    let training = TrainingInfo {
+        active_job,
+        queued,
+        checkpoint_boundary_policy: state.training_runtime.checkpoint_boundary_policy(),
+    };
 
     // Health checks
     let scheduler_responsive = scheduler_stats.is_some();
@@ -1372,8 +1377,20 @@ mod tests {
         state.base_weight_shard_manifest = Some(Arc::new(shard_manifest.clone()));
         let execution_provenance = crate::execution_provenance::test_execution_provenance();
         state.execution_provenance = Some(Arc::new(execution_provenance.clone()));
+        let checkpoint_boundary_policy = kiln_train::CheckpointBoundaryPolicy::from_parts(
+            kiln_train::CheckpointBoundaryRecomputeMode::Disabled,
+            2048,
+            Some(7),
+            3 * 1024 * 1024 * 1024,
+        )
+        .unwrap();
+        state.training_runtime = state
+            .training_runtime
+            .with_checkpoint_boundary_policy(checkpoint_boundary_policy);
         let expected_streaming_prefill =
             serde_json::to_value(state.streaming_prefill_runtime_config).unwrap();
+        let expected_checkpoint_boundary_policy =
+            serde_json::to_value(checkpoint_boundary_policy).unwrap();
         let app = routes().with_state(state);
 
         let resp = app
@@ -1645,6 +1662,10 @@ mod tests {
         assert!(json["training"].is_object());
         assert_eq!(json["training"]["queued"], 0);
         assert!(json["training"]["active_job"].is_null());
+        assert_eq!(
+            json["training"]["checkpoint_boundary_policy"],
+            expected_checkpoint_boundary_policy
+        );
         assert!(json["checks"].is_array());
         let checks = json["checks"].as_array().unwrap();
         assert!(checks.iter().all(|c| c["pass"] == true));

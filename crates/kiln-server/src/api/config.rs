@@ -137,6 +137,7 @@ struct TrainingConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     native_training_unavailable_reason: Option<String>,
     checkpoint_policy: kiln_train::GradientCheckpointPolicy,
+    checkpoint_boundary_policy: kiln_train::CheckpointBoundaryPolicy,
     checkpoint_segments: usize,
     checkpoint_segments_source: &'static str,
     checkpointing_enabled: bool,
@@ -266,6 +267,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             native_training_supported: native_training_unavailable_reason.is_none(),
             native_training_unavailable_reason,
             checkpoint_policy: state.training_runtime.gradient_checkpoint_policy(),
+            checkpoint_boundary_policy: state.training_runtime.checkpoint_boundary_policy(),
             checkpoint_segments: if ckpt.enabled { ckpt.num_segments } else { 0 },
             checkpoint_segments_source: segments_source,
             checkpointing_enabled: ckpt.enabled,
@@ -485,8 +487,20 @@ mod tests {
         );
         state.default_thinking_budget_tokens = Some(64);
         state.default_thinking_budget_ms = Some(1_500);
+        let checkpoint_boundary_policy = kiln_train::CheckpointBoundaryPolicy::from_parts(
+            kiln_train::CheckpointBoundaryRecomputeMode::Enabled,
+            4096,
+            Some(3),
+            2 * 1024 * 1024 * 1024,
+        )
+        .unwrap();
+        state.training_runtime = state
+            .training_runtime
+            .with_checkpoint_boundary_policy(checkpoint_boundary_policy);
         let expected_streaming_prefill =
             serde_json::to_value(state.streaming_prefill_runtime_config).unwrap();
+        let expected_checkpoint_boundary_policy =
+            serde_json::to_value(checkpoint_boundary_policy).unwrap();
         let app = routes().with_state(state);
 
         let response = app
@@ -668,6 +682,10 @@ mod tests {
             "mock backend does not execute native training"
         );
         assert_eq!(json["training"]["checkpoint_policy"]["mode"], "auto");
+        assert_eq!(
+            json["training"]["checkpoint_boundary_policy"],
+            expected_checkpoint_boundary_policy
+        );
         assert!(json["vram"]["live"]["raw_observations"]["driver_total_bytes"].is_null());
     }
 

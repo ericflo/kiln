@@ -37,10 +37,16 @@ struct ModelStateResponse {
     http: HttpDebugState,
     decode_runtime: DecodeRuntimeConfig,
     streaming_prefill: StreamingPrefillRuntimeConfig,
+    training: TrainingDebugState,
     env_flags: BTreeMap<&'static str, EnvFlagState>,
     batching_engine: BatchingEngineDebugState,
     thinking: ThinkingDebugState,
     caches: CacheDebugState,
+}
+
+#[derive(Serialize)]
+struct TrainingDebugState {
+    checkpoint_boundary_policy: kiln_train::CheckpointBoundaryPolicy,
 }
 
 #[derive(Serialize)]
@@ -291,6 +297,9 @@ async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
         },
         decode_runtime: state.decode_runtime_config,
         streaming_prefill: state.streaming_prefill_runtime_config,
+        training: TrainingDebugState {
+            checkpoint_boundary_policy: state.training_runtime.checkpoint_boundary_policy(),
+        },
         env_flags: selected_env_flags(),
         batching_engine: batching_engine_state(state).await,
         thinking: thinking_state(state),
@@ -722,6 +731,16 @@ mod tests {
         state.http_send_buffer_preflight_actual_bytes = Some(8192);
         state.http_send_buffer_preflight_effective_bytes = Some(4096);
         state.default_thinking_enabled = Some(false);
+        let checkpoint_boundary_policy = kiln_train::CheckpointBoundaryPolicy::from_parts(
+            kiln_train::CheckpointBoundaryRecomputeMode::Enabled,
+            16_384,
+            Some(11),
+            4 * 1024 * 1024 * 1024,
+        )
+        .unwrap();
+        state.training_runtime = state
+            .training_runtime
+            .with_checkpoint_boundary_policy(checkpoint_boundary_policy);
         let shard_manifest = BaseWeightShardManifest::new(vec![
             kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
                 "model.safetensors",
@@ -756,6 +775,8 @@ mod tests {
         }
         let expected_streaming_prefill =
             serde_json::to_value(state.streaming_prefill_runtime_config).unwrap();
+        let expected_checkpoint_boundary_policy =
+            serde_json::to_value(checkpoint_boundary_policy).unwrap();
 
         let app = routes().with_state(state);
         let resp = app
@@ -773,6 +794,10 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(json["streaming_prefill"], expected_streaming_prefill);
+        assert_eq!(
+            json["training"]["checkpoint_boundary_policy"],
+            expected_checkpoint_boundary_policy
+        );
         assert_eq!(json["model"]["path"], "/models/Qwen3.5-4B");
         assert_eq!(json["model"]["served_model_id"], "Qwen3.5-4B");
         assert_eq!(json["model"]["defaults_profile"]["name"], "Qwen3.5-4B");
