@@ -2791,7 +2791,7 @@ mod tests {
         );
         assert_eq!(
             vulkan_caps.fallback.training_optimizer,
-            FallbackPolicy::NativeRequired
+            FallbackPolicy::ErrorInHotPath
         );
     }
 
