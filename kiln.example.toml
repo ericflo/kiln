@@ -219,6 +219,23 @@ cuda_graphs = true                    # CUDA graph capture/replay policy. Non-CU
 [training]
 # grad_checkpoint_segments = 4       # Segments for gradient checkpointing
 no_grad_checkpoint = false
+recompute_checkpoint_boundaries = "auto" # SFT only: auto replays sparse boundaries at or above
+                                         # recompute_boundary_threshold_tokens; enabled always
+                                         # replays and disabled retains every boundary.
+recompute_boundary_threshold_tokens = 8192 # Inclusive auto-mode SFT sequence threshold; > 0.
+checkpoint_boundary_anchor_stride = "auto" # auto derives a positive shape-specific stride from
+                                            # the cache target; a positive integer pins the stride.
+checkpoint_boundary_cache_gb = 6.0   # GiB target for automatic sparse anchors. Must be finite,
+                                     # positive, at least one byte, and representable as u64 bytes.
+                                     # Canonical overrides are mechanically named:
+                                     # KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES,
+                                     # KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS,
+                                     # KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE, and
+                                     # KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB.
+                                     # The four unsectioned spellings are deprecated strict aliases.
+                                     # Values resolve once at startup; admission, execution,
+                                     # checkpoint identity, APIs, and the dashboard share the
+                                     # immutable result. Changing one requires a server restart.
 # checkpoint_interval = 50           # Save adapter every N training steps
 max_queued_jobs = 32                  # Admission bound for queued/running training jobs.
 max_tracked_jobs = 1024               # In-memory bound including terminal job records.

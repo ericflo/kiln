@@ -108,18 +108,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 14 top-level sections and 82 fixed leaf
+The accepted TOML surface contains 14 top-level sections and 86 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 82 fixed fields:
+credential. Of the 86 fixed fields:
 
-- 74 implement the canonical mechanical environment name;
-- 52 also retain one or more deprecated compatibility spellings (54 aliases
+- 78 implement the canonical mechanical environment name;
+- 56 also retain one or more deprecated compatibility spellings (58 aliases
   total);
 - 8 are config-file-only and have no environment override;
-- the 54 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
+- the 58 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 82 fixed fields and both dynamic credential fields.
+The tables below cover all 86 fixed fields and both dynamic credential fields.
 
 ## `[server]`
 
@@ -390,6 +390,10 @@ typed PCI-address or UUID identity.
 |---|---|---|---|---|
 | `training.grad_checkpoint_segments` | optional unsigned integer; omitted (`None`) | `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS` (implemented) | `KILN_GRAD_CHECKPOINT_SEGMENTS` (deprecated compatibility) | Must be greater than zero when set. When present, selects an explicit process-lifetime gradient-checkpoint segment count for native training; omission leaves workload- and capacity-aware automatic planning enabled. |
 | `training.no_grad_checkpoint` | boolean; `false` | `KILN_TRAINING_NO_GRAD_CHECKPOINT` (implemented) | `KILN_NO_GRAD_CHECKPOINT` (deprecated compatibility) | Disables gradient checkpoint execution for native training. The disabled state and any explicit segment count are retained together in the immutable training policy and exact-resume identity. Disabling checkpointing can materially increase training memory. |
+| `training.recompute_checkpoint_boundaries` | string enum; `"auto"` | `KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES` (implemented) | `KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive with surrounding whitespace ignored. `auto` replays sparse SFT boundaries when sequence length is at least `recompute_boundary_threshold_tokens`; `enabled` always replays them and `disabled` always retains them. The canonical environment name accepts only those three words. The deprecated alias additionally accepts historical `1`/`true`/`yes` and `0`/`false`/`no`; `on` and `off` are not accepted for this alias. |
+| `training.recompute_boundary_threshold_tokens` | positive unsigned integer; `8192` | `KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` (implemented) | `KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` (deprecated compatibility) | Inclusive sequence-length threshold used only by automatic SFT boundary replay. Zero, negative, overflowing, malformed, and non-UTF-8 environment values stop startup. |
+| `training.checkpoint_boundary_anchor_stride` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` (implemented) | `KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` (deprecated compatibility) | When sparse SFT replay is active, a concrete value retains every Nth segment boundary as an anchor. `auto` derives a shape-specific positive stride from sequence length, segment count, hidden width, boundary dtype, and the cache target. Zero and strings other than `auto` fail startup. |
+| `training.checkpoint_boundary_cache_gb` | positive floating-point GiB value; `6.0` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB` (implemented) | `KILN_CHECKPOINT_BOUNDARY_CACHE_GB` (deprecated compatibility) | Automatic anchor-stride memory target. Despite the historical `_gb` spelling, the unit is GiB (`2^30` bytes). The value must be finite, positive, convert to at least one byte, and remain below the `u64` byte limit. Startup converts it once to integral bytes using the historical truncating conversion. |
 | `training.checkpoint_interval` | optional unsigned integer; omitted (`None`) | `KILN_TRAINING_CHECKPOINT_INTERVAL` (implemented) | `KILN_CHECKPOINT_INTERVAL` (deprecated compatibility) | Must be greater than zero when set. Number of committed optimizer steps between checkpoints; per-job configuration overrides it. Omission disables periodic checkpoints. |
 | `training.webhook_url` | optional string; omitted (`None`) | `KILN_TRAINING_WEBHOOK_URL` (implemented) | `KILN_TRAINING_WEBHOOK_URL` | Must be a non-empty valid HTTP(S) URL. An exactly empty environment value clears a TOML URL; whitespace is not a clearing value and fails validation. Delivery is fire-and-forget with a five-second timeout after terminal state is recorded. |
 | `training.max_queued_jobs` | unsigned integer; `32` | `KILN_TRAINING_MAX_QUEUED_JOBS` (implemented) | `KILN_TRAINING_MAX_QUEUED_JOBS` | Must be greater than zero. At capacity, submissions return HTTP 503 with `Retry-After: 30`. |
@@ -398,6 +402,61 @@ typed PCI-address or UUID identity.
 
 Training GPU work is also governed by `server.serving_profile`; the default
 `stable` profile does not grant training GPU ownership.
+
+### SFT checkpoint-boundary policy
+
+These four fields control activation boundaries inside gradient-checkpointed
+native SFT. They do not enable or disable gradient checkpointing; that remains
+the job of `no_grad_checkpoint` and the resolved segment plan. When replay is
+inactive, SFT retains every segment input. When replay is active, it retains a
+sparse set of anchors and recomputes intervening segment inputs during the
+backward pass.
+
+For `checkpoint_boundary_anchor_stride = "auto"`, Kiln computes the bytes in
+one boundary as `sequence length * hidden size * bytes per element`, determines
+how many anchors fit in `checkpoint_boundary_cache_gb`, reserves one slot for
+replay, and spreads the remaining anchors across the planned segments. The
+automatically selected result is always at least one, and auto mode selects
+stride one for a one-segment plan. An explicit stride wins even for a
+one-segment plan and bypasses only this shape calculation. It does not override
+the recompute mode.
+
+Startup resolves all four values into one immutable
+`CheckpointBoundaryPolicy`. The typed loader retains `default`, `config_file`,
+or `environment` source attribution for each configured value. Admission and
+execution receive the same copyable policy and call the same pure threshold and
+shape functions, so a request cannot be admitted under one boundary-memory
+estimate and execute another. Trainer and preflight code do not re-read any of
+the four environment names. Changing any value requires restarting the server;
+queued and running jobs retain the policy installed at startup.
+
+Sparse checkpoint-boundary replay is currently SFT-only. Native GRPO and OPD
+retain all `num_segments + 1` boundaries and do not use these fields to choose
+their live boundary layout. The common training runtime still records the
+resolved policy in exact-resume planning identity for SFT, GRPO, and OPD under
+`kiln.training-checkpoint-planning.v3`. A changed value, including one that is
+execution-inert for GRPO or OPD today, is therefore exact-resume drift. See
+[Native Training Checkpoints](training-checkpoints.md#checkpoint-planning-identity).
+
+The resolved object has this stable JSON shape:
+
+```json
+{
+  "recompute_mode": "auto",
+  "recompute_threshold_tokens": 8192,
+  "anchor_stride": null,
+  "cache_target_bytes": 6442450944
+}
+```
+
+`GET /v1/config` exposes it at `training.checkpoint_boundary_policy` alongside
+the gradient-checkpoint plan. `GET /health` and its `/v1/health` alias expose it
+at `training.checkpoint_boundary_policy`; trusted
+`GET /v1/debug/model-state` exposes the same object at
+`training.checkpoint_boundary_policy`. The dashboard's Runtime Config training
+group renders mode, threshold, explicit-or-auto stride, cache target, and the
+restart requirement. These are observations of immutable application state,
+not live controls or fresh environment reads.
 
 ## `[logging]`
 
@@ -673,8 +732,11 @@ Kiln currently exposes several complementary, partial views:
 - `GET /v1/config` reports runtime diagnostics for serving profile, effective
   decode width, speculative configuration and availability, VRAM/KV state,
   native-training runtime/weight devices and
-  support reason, checkpoint segmentation, memory budgets, and generation
-  defaults. Its `speculative` object distinguishes `configured_method` and
+  support reason, gradient-checkpoint segmentation, the immutable SFT
+  checkpoint-boundary policy, memory budgets, and generation defaults. Its
+  `training.checkpoint_boundary_policy` object reports resolved recompute mode,
+  inclusive automatic threshold, optional explicit stride, and integral cache
+  target bytes. Its `speculative` object distinguishes `configured_method` and
   `configured_effective_method` from the actual `serving_effective_method`
   (`off`), reports `serving_routable=false`, the stable
   `serving_unavailable_reason`, the K ceiling, and immutable backend MTP
@@ -687,6 +749,11 @@ Kiln currently exposes several complementary, partial views:
   `training.checkpoint_segments` is `0`; an optional segment count retained in
   `training.checkpoint_policy` is provenance, not an active execution plan. The
   endpoint is not a serialization of all accepted TOML.
+- `GET /health` and `/v1/health` repeat the resolved boundary policy under
+  `training.checkpoint_boundary_policy`; trusted `GET /v1/debug/model-state`
+  reports the identical object at the same path. The dashboard reads
+  `/v1/config` and renders the same process-lifetime values. None of these
+  surfaces parses configuration or rereads process environment.
 - `GET /v1/config` also reports cached-sample age, maximum age, staleness,
   sampler requirement/liveness/health, cgroup `memory.high`, and the separately
   bounded `vram.live.raw_observations.host_backed` tier. `/health` exposes the

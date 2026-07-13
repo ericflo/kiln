@@ -93,6 +93,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **FP8 KV cache** — optional quantization doubles effective context length.
 - **Prefix caching** — shared prompt prefixes reuse cached KV blocks.
 - **Gradient checkpointing** — training fits on consumer 24GB GPUs (RTX 3090/4090).
+- **Typed SFT checkpoint-boundary policy** — sparse boundary replay, its automatic 8192-token crossover, anchor stride, and 6 GiB anchor-cache target resolve once for matching admission and execution; no trainer-side environment rereads.
 - **Adapter management** — load, unload, upload (import), download (export), and version LoRA adapters; click any adapter in `/ui/` for its provenance (training history + eval scores against it).
 - **Adapter composition** — stack multiple LoRAs per request with per-adapter scaling and source-revision-aware caching, or merge them server-side via weighted_average / TIES / concatenation.
 - **Embedded web dashboard** at `/ui/` — live server status, VRAM donut, adapter cards, training queue with live loss curves, full eval workflow (datasets / suites / jobs / judgments) with drill-in per-example modal, A/B compare playground, and a `⌘K` command palette across all of it. No extra service to run.
@@ -599,12 +600,12 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
 | POST | `/v1/judgments/render_prompt` | Render the canonical pairwise judging prompt (debug aid) |
 | GET | `/v1/models` | List available models |
-| GET | `/v1/config` | Current server configuration, serving-profile source, typed batching and streaming-prefill policy/provenance, and every effective profile policy |
-| GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of the complete base-weight shard manifest and execution-provenance record, active model/adapters, config hashes, env flags, batching, thinking defaults, and cache counts; enabled only with `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
+| GET | `/v1/config` | Current server configuration, serving-profile source, typed batching, streaming-prefill, and SFT checkpoint-boundary runtime policies, and every effective profile policy |
+| GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of the complete base-weight shard manifest and execution-provenance record, active model/adapters, config hashes, env flags, batching, thinking defaults, SFT checkpoint-boundary policy, and cache counts; enabled only with `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
 | GET | `/ui/` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
 | GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history, including effective thinking-budget provenance and outcomes, for the dashboard's request panel |
-| GET | `/health` | Server readiness and diagnostics, including bounded base-weight and execution-identity summaries; maintenance or missing/invalid real-backend execution provenance returns 503 |
+| GET | `/health` | Server readiness and diagnostics, including bounded base-weight and execution-identity summaries plus the immutable SFT checkpoint-boundary policy; maintenance or missing/invalid real-backend execution provenance returns 503 |
 | GET | `/v1/health` | `/v1` compatibility alias for readiness and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 
@@ -789,7 +790,11 @@ SFT, GRPO, and OPD can also publish immutable exact `.kiln-checkpoint` directori
 directly beneath the adapter registry while the final adapter remains staged.
 They restore optimizer, cursor/RNG, and objective-specific reference state, not
 just PEFT weights; admission validates the complete bundle and exact data route
-before GPU work. See [Native Training Checkpoints](docs/training-checkpoints.md)
+before GPU work. Training checkpoint planning identity v3 includes the resolved
+SFT checkpoint-boundary policy. SFT uses that policy for sparse boundary replay;
+GRPO and OPD do not execute that SFT route, but retain the shared planning
+identity, so policy or schema drift rejects exact resume instead of silently
+changing the runtime contract. See [Native Training Checkpoints](docs/training-checkpoints.md)
 for API, CLI, browser, cancellation, teacher-identity, and resume semantics.
 
 The historically named `replay.jsonl`, `lineage.json`, and `kiln-replay`
@@ -882,6 +887,10 @@ Kiln uses a typed TOML config file. Environment overrides are resolved during st
 | `server.fold_reasoning_into_content` | `KILN_SERVER_FOLD_REASONING_INTO_CONTENT` | false | Also copy separated reasoning into chat `content` for compatibility |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference vs training |
 | `memory.kv_cache_fp8` | `KILN_MEMORY_KV_CACHE_FP8` | false | FP8 KV cache (2x context length) |
+| `training.recompute_checkpoint_boundaries` | `KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES` | `auto` | Checkpointed SFT sparse-boundary replay: `auto`, `enabled`, or `disabled`. Auto enables replay at the configured sequence-length threshold. Restart required |
+| `training.recompute_boundary_threshold_tokens` | `KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` | 8192 | Positive sequence length where automatic SFT boundary replay begins. Ignored for dispatch when replay is explicitly enabled or disabled. Restart required |
+| `training.checkpoint_boundary_anchor_stride` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` | `auto` | `auto` derives the sparse anchor stride from the admitted tensor shape and cache target; a positive integer pins the segment stride. Restart required |
+| `training.checkpoint_boundary_cache_gb` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB` | 6.0 | Finite positive GiB target used only to derive an automatic anchor stride. Restart required |
 | — | `KILN_MEMORY_RECLAIM_MODE` | `off` | Device-pool reclaim policy: `off`, `on-demand`, or `automatic`. Automatic mode triggers at 10% free, stays armed until 25% free, waits 8s after a successful reclaim, and backs zero-yield attempts off from 2s to 128s. |
 | `logging.format` | `KILN_LOGGING_FORMAT` | auto | `auto` (default; pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, or `human` |
 | `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
@@ -898,6 +907,15 @@ Kiln resolves the logging table and its environment overrides before full
 configuration validation. Every file-read, TOML, environment, or validation
 error therefore emits `configuration_load_failed` with the selected config path
 and complete error chain in the configured pretty/JSON format before exiting.
+
+The four checkpoint-boundary overrides follow the mechanical
+`KILN_<SECTION>_<FIELD>` rule. Their historical unsectioned spellings remain
+strict, warning compatibility aliases; malformed or conflicting canonical and
+legacy values stop startup. Kiln converts the configured values into one
+immutable policy and gives that same value to SFT memory admission and runtime
+execution. Inspect `training.checkpoint_boundary_policy` in `GET /v1/config`,
+`GET /health`, and trusted `GET /v1/debug/model-state`, or in the dashboard's
+Runtime config → Training group.
 
 Streaming response channels are serviced by a fair delivery worker outside the
 compute actor. A full or disconnected client cannot park peer decode or control

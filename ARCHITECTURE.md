@@ -827,6 +827,10 @@ cuda_graphs = true                  # 10-15% decode speedup
 
 [training]
 # grad_checkpoint_segments = 8      # auto-tuned if omitted
+recompute_checkpoint_boundaries = "auto"  # auto at threshold; enabled; disabled
+recompute_boundary_threshold_tokens = 8192
+checkpoint_boundary_anchor_stride = "auto" # or a positive segment stride
+checkpoint_boundary_cache_gb = 6.0          # auto-stride memory target
 checkpoint_interval = 100           # save checkpoint every N training steps
 
 [logging]
@@ -883,6 +887,10 @@ tool-call rendering.
 | `KILN_MEMORY_NUM_BLOCKS` | Override KV cache block count |
 | `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS` | Override gradient checkpoint segments |
 | `KILN_TRAINING_NO_GRAD_CHECKPOINT` | Set to `1` to disable gradient checkpointing |
+| `KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES` | `auto`, `enabled`, or `disabled` SFT boundary replay |
+| `KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` | Positive automatic-replay sequence-length crossover |
+| `KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` | `auto` or a positive sparse-anchor segment stride |
+| `KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB` | Finite positive GiB target for automatic anchor spacing |
 | `KILN_LOGGING_LEVEL` | Override log level |
 | `KILN_LOGGING_FORMAT` | Override log format (`json` or `pretty`) |
 
@@ -952,6 +960,39 @@ the policy at `streaming_prefill`, health at
 `streaming_prefill`. This makes a long-prefill pause attributable to scheduling,
 tiled model work, or memory activity without guessing from an ambient shell.
 
+Checkpointed SFT has a parallel typed authority boundary. Startup resolves the
+four `[training]` fields into one integral, copyable
+`CheckpointBoundaryPolicy`: replay mode defaults to `auto`, the automatic
+crossover defaults to 8192 sequence tokens, anchor stride defaults to `auto`,
+and its memory target defaults to 6.0 GiB. Automatic replay starts at
+`seq_len >= threshold`; `enabled` always replays sparse boundaries and
+`disabled` retains every boundary. A concrete positive stride wins. Otherwise,
+an automatic one-segment shape uses stride 1; for larger shapes the resolver
+sizes one boundary from sequence length, hidden width, and element size,
+reserves a replay slot, and spaces the remaining anchors across the checkpoint
+segments within the cache target.
+
+The canonical overrides derive mechanically as `KILN_TRAINING_<FIELD>`. The
+four old unsectioned names (`KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES`,
+`KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS`,
+`KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE`, and
+`KILN_CHECKPOINT_BOUNDARY_CACHE_GB`) remain strict warning aliases. Invalid,
+non-Unicode, or conflicting inputs fail startup. After resolution, neither
+training admission nor the trainer reads those variables: SFT memory preflight
+and boundary execution call the same policy methods, preventing estimate/runtime
+drift. GRPO and OPD do not execute the SFT boundary-spooling path.
+
+Every training mode still records this policy in the shared
+`kiln.training-checkpoint-planning.v3` identity. A field change, or a checkpoint
+carrying the former v2 planning schema, is exact-resume drift and fails closed
+rather than continuing with different memory/replay behavior. The immutable
+runtime object appears as `training.checkpoint_boundary_policy` in
+`GET /v1/config`, `GET /health`, and trusted `GET /v1/debug/model-state`; the
+serialized fields are `recompute_mode`, `recompute_threshold_tokens`,
+`anchor_stride` (`null` means automatic), and `cache_target_bytes`. The
+dashboard renders the same resolved fields under Runtime config → Training. A
+restart is required to change them.
+
 ## Key Data Structures
 
 ### ModelConfig (`crates/kiln-core/src/config.rs`)
@@ -1005,7 +1046,8 @@ See `crates/kiln-server/src/metrics.rs`.
 
 ### Health Endpoint (`GET /v1/health`)
 
-Returns uptime, model info, scheduler statistics, GPU memory breakdown, active adapter, and training queue state.
+Returns uptime, model info, scheduler statistics, GPU memory breakdown, active
+adapter, training queue state, and the immutable SFT checkpoint-boundary policy.
 
 ### Debug Model State (`GET /v1/debug/model-state`)
 
@@ -1014,8 +1056,8 @@ hitting?" It is available only when `server.eval_mode=true` or
 `KILN_DEBUG_ENDPOINTS=1`, and returns no prompt or user message data. The
 response includes model path, served model id, active defaults profile,
 active/loaded adapters with adapter weight hashes, config hashes, selected
-`KILN_*` flags, batching-engine status, thinking defaults, and aggregate cache
-counts.
+`KILN_*` flags, batching-engine status, thinking defaults, the resolved SFT
+checkpoint-boundary policy, and aggregate cache counts.
 
 ## Phase status (2026-05-13)
 

@@ -429,6 +429,12 @@ validates the complete adapter/optimizer/reference/loop state and checksums
 before continuation; it is not a weights-only warm start. See
 [Native Training Checkpoints](docs/training-checkpoints.md).
 
+Exact checkpoints also bind training checkpoint planning identity v3. That
+identity includes the process's resolved SFT checkpoint-boundary policy, so a
+policy change or the v2-to-v3 schema transition is rejected as exact-resume
+drift. GRPO and OPD do not run SFT sparse-boundary replay, but their checkpoints
+carry the same shared planning identity.
+
 ## 7. Check Training Status
 
 Via CLI:
@@ -969,7 +975,7 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | GET | `/ui/` | Embedded web dashboard (status, adapters, training, chat) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
 | GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history for the dashboard's request panel |
-| GET | `/health` | Server readiness and diagnostics; maintenance intentionally returns 503 |
+| GET | `/health` (`/v1/health` alias) | Server readiness and diagnostics, including the immutable SFT checkpoint-boundary policy; maintenance intentionally returns 503 |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/v1/models` | List available models |
 | POST | `/v1/chat/completions` | Chat completion (OpenAI-compatible). Kiln extensions include `thinking_budget_tokens` / `thinking_budget_ms`, exact single-choice `rollout_provenance`, and per-request `adapter` or `adapters: [{name, scale}, …]` composition (see [9.8](#98-compose-adapters-per-request)). |
@@ -1002,7 +1008,8 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | POST | `/v1/judgments/{name}/rows` | Append one A/B/Tie/Skip preference |
 | POST | `/v1/judgments/{name}/compile` | Compile judgments into an SFT dataset for a judge LoRA |
 | POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
-| GET | `/v1/config` | Current server configuration, source attribution, typed batching and streaming-prefill intent/backend/effective policy, actor activity, and effective serving/decode policy fields |
+| GET | `/v1/config` | Current server configuration, source attribution, typed batching and streaming-prefill policy, immutable SFT checkpoint-boundary policy, actor activity, and effective serving/decode fields |
+| GET | `/v1/debug/model-state` | Trusted model/config snapshot, including the SFT checkpoint-boundary policy; requires `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
 
 ## Configuration
 
@@ -1036,6 +1043,10 @@ Key settings:
 | `server.default_thinking_budget_ms` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference (rest for training) |
 | `memory.kv_cache_fp8` | `KILN_MEMORY_KV_CACHE_FP8` | false | FP8 KV cache (halves memory, ~2x context) |
+| `training.recompute_checkpoint_boundaries` | `KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES` | `auto` | SFT sparse-boundary replay mode: auto at the threshold, always enabled, or disabled |
+| `training.recompute_boundary_threshold_tokens` | `KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` | 8192 | Positive sequence-length crossover used by automatic replay |
+| `training.checkpoint_boundary_anchor_stride` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` | `auto` | Auto derives an anchor stride per admitted SFT shape; a positive integer pins the segment stride |
+| `training.checkpoint_boundary_cache_gb` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB` | 6.0 | Finite positive GiB target used to derive the automatic anchor stride |
 | `logging.format` | `KILN_LOGGING_FORMAT` | auto | Log format: `auto` (pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, `human` |
 | `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
 | `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
@@ -1053,6 +1064,13 @@ curl -s http://localhost:8420/health \
   | jq '.decode_runtime.batching_configuration, .decode_runtime.batching_engine, .decode_runtime.direct_decode_rendezvous, .prefill_runtime.streaming_prefill'
 curl -s http://localhost:8420/v1/config \
   | jq '.streaming_prefill'
+curl -s http://localhost:8420/v1/config \
+  | jq '.training.checkpoint_boundary_policy'
+curl -s http://localhost:8420/health \
+  | jq '.training.checkpoint_boundary_policy'
+# Available only when trusted debug endpoints are enabled.
+curl -s http://localhost:8420/v1/debug/model-state \
+  | jq '.training.checkpoint_boundary_policy'
 ```
 
 The `batching.configuration` response path preserves configured intent and
@@ -1079,6 +1097,20 @@ health repeats the object at `prefill_runtime.streaming_prefill`. Use
 `mode = "disabled"` for a clean monolithic-prefill comparison when diagnosing a
 pause, then change one threshold or tile at a time and retain both diagnostic
 objects with the measurement.
+
+Checkpoint-boundary settings have the same startup-only authority. With the
+defaults, checkpointed SFT retains all segment boundaries below 8192 tokens and
+replays from sparse anchors at or above that threshold. An explicit anchor
+stride wins; otherwise Kiln derives one from sequence length, model width,
+element size, segment count, and the 6 GiB target. The exact resolved policy is
+used both for SFT admission memory estimates and execution, with no environment
+reread while a job runs. GRPO and OPD do not execute this SFT-only replay route.
+All four canonical environment names are mechanically derived from the table;
+the corresponding old unsectioned names remain deprecated strict aliases, and
+malformed or conflicting values fail startup. Changing any field requires a
+restart and changes exact-resume planning identity v3. Trusted debug repeats the
+policy at `.training.checkpoint_boundary_policy`, and the dashboard shows it in
+Runtime config → Training.
 
 ## Running with Docker
 

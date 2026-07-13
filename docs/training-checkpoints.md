@@ -138,6 +138,54 @@ reject malformed values or disagreement with the execution record. See
 [Execution Provenance](EXECUTION_PROVENANCE.md) for the canonical schema and
 evidence sources.
 
+## Checkpoint planning identity
+
+Every exact SFT, GRPO, and OPD checkpoint binds the immutable
+`TrainingRuntimeContext` used to plan the run. The nested planning object uses
+schema `kiln.training-checkpoint-planning.v3` and records effective VRAM,
+gradient-checkpoint policy, runtime device, resolved streaming-prefill policy,
+and this complete checkpoint-boundary policy:
+
+```json
+{
+  "recompute_mode": "auto",
+  "recompute_threshold_tokens": 8192,
+  "anchor_stride": null,
+  "cache_target_bytes": 6442450944
+}
+```
+
+SFT and GRPO store the object under
+`auxiliary_state.training_runtime_planning_identity`; OPD retains the same
+object under its existing `auxiliary_state.checkpoint_planning` key. Exact
+resume compares the complete auxiliary state rather than silently adopting the
+new process policy. A checkpoint whose nested object is schema v2, lacks the
+boundary policy, or contains any different mode, threshold, stride, or cache
+target is rejected as planning drift before continuation.
+
+This nested version change does not change the outer
+`TrainingCheckpointManifest` envelope, which remains checkpoint schema v1.
+Older artifacts can still be inspected and checksum-validated, but a v2
+planning identity cannot authorize exact continuation under v3. Start a fresh
+training run to create a resumable checkpoint with the current planning
+contract; do not edit the manifest or auxiliary JSON.
+
+Sparse boundary replay is an SFT execution policy. In `auto` mode, sequences
+at least `recompute_threshold_tokens` replay between sparse anchors;
+`enabled` always replays and `disabled` retains every boundary. An explicit
+positive `anchor_stride` wins over cache-based shape selection. With
+`anchor_stride = null`, the same pure shape calculation used by admission and
+execution derives a stride from sequence length, planned segment count, hidden
+width, boundary dtype, and `cache_target_bytes`. No trainer or admission path
+re-reads process environment after startup.
+
+GRPO and OPD currently retain all `num_segments + 1` checkpoint boundaries and
+do not use this policy to choose their live layout. The policy is nevertheless
+part of their common v3 runtime identity. Changing one of the four startup
+fields therefore rejects exact GRPO or OPD resume too, even though the setting
+is execution-inert for those modes today. This conservative rule prevents a
+future boundary-layout expansion from reinterpreting an older checkpoint.
+
 ## Integration status
 
 Native SFT, inline and streamed-JSONL GRPO, and OPD support exact resume. A

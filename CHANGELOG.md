@@ -18,6 +18,20 @@
   CISPO now has its own absolute upper-only `cispo_max_weight` control
   (default 5.0), with matching receipts, API validation, audit semantics,
   ROCm device-coefficient coverage, and Vulkan shader coverage.
+- typed SFT checkpoint boundaries: `[training]` now owns sparse-boundary replay
+  mode (`auto`, default), its automatic sequence crossover (8192 tokens),
+  anchor stride (`auto`, default), and automatic-stride cache target (6.0 GiB).
+  Canonical overrides derive mechanically as `KILN_TRAINING_<FIELD>`; the four
+  old unsectioned spellings remain strict warning aliases. Malformed,
+  non-Unicode, or conflicting values stop startup, and every change requires a
+  restart.
+- checkpoint-boundary authority and identity: startup resolves one immutable
+  integral policy shared by SFT memory admission and execution, eliminating
+  trainer/preflight parsing drift and runtime environment rereads. GRPO and OPD
+  do not execute the SFT sparse-boundary route, but every mode records the
+  policy in training checkpoint planning identity v3; policy or v2/v3 schema
+  drift rejects exact resume. `/v1/config`, health, trusted debug, and the
+  dashboard expose the same runtime policy.
 
 - inference: chat, streaming chat, multi-choice chat, and batch generation now
   accept `thinking_budget_tokens` and `thinking_budget_ms`. Kiln closes an open
