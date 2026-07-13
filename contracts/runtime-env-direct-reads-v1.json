@@ -1619,50 +1619,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_BATCH_DECODE_ROWWISE",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/batching_engine.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_BATCH_PREFILL_ADMISSION_QUANTUM",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/batching_engine.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_BATCH_DECODE_ROWWISE",
-      "argument_kind": "literal",
-      "count": 3,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/batching_engine.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_BATCH_PREFILL_ADMISSION_QUANTUM",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/batching_engine.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
       "argument": "& name",
       "argument_kind": "expression",
       "count": 1,
@@ -8055,39 +8011,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "KILN_BATCH_DECODE_ROWWISE",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/batching_engine.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_BATCH_PREFILL_ADMISSION_QUANTUM",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/batching_engine.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_BATCH_PREFIX_AWARE_ADMISSION",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/batching_engine.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env!",
       "argument": "CARGO_PKG_VERSION",
       "argument_kind": "literal",
@@ -8432,17 +8355,6 @@
       "api": "var",
       "argument": "policy . env",
       "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/state.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_BATCHING_ENGINE",
-      "argument_kind": "literal",
       "count": 1,
       "language": "rust",
       "operation": "read",
@@ -10653,9 +10565,9 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 625,
-    "process_mutation_entries": 297,
-    "read_call_sites": 981,
-    "read_entries": 670
+    "process_mutation_call_sites": 613,
+    "process_mutation_entries": 293,
+    "read_call_sites": 975,
+    "read_entries": 666
   }
 }

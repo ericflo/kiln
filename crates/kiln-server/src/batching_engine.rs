@@ -24,7 +24,8 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::config::{
-    BatchTokenBudget, ConfigValueSource, DecodeBatchEffectiveSource, DecodeRuntimeConfig,
+    BatchTokenBudget, BatchingActorAdmissionConfig, BatchingBackendPolicy, BatchingConfig,
+    ConfigValueSource, DEFAULT_ROWWISE_DECODE, DecodeBatchEffectiveSource, DecodeRuntimeConfig,
     DeterministicInference, MaxDecodeBatch, MaxDecodeBatchDiagnostics, PrefillLayerBudget,
     PrefillTokenBudget, StreamStallGrace,
 };
@@ -41,8 +42,6 @@ use crate::state::{
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
-const DEFAULT_PREFILL_ADMISSION_QUANTUM: usize = 4;
-const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 /// Latency-oriented actors may prepare a small number of interactive prompts
 /// without widening the backend's decode cohort. Ordinary FIFO slots and this
 /// staging lane are accounted independently so staged arrivals cannot consume
@@ -194,65 +193,6 @@ pub fn resolve_decode_runtime_config(
             effective_source,
         },
     }
-}
-
-fn env_prefix_aware_admission() -> bool {
-    match std::env::var("KILN_BATCH_PREFIX_AWARE_ADMISSION") {
-        Ok(raw) => !matches!(
-            raw.trim(),
-            "0" | "false" | "FALSE" | "off" | "OFF" | "no" | "NO"
-        ),
-        Err(_) => DEFAULT_PREFIX_AWARE_ADMISSION,
-    }
-}
-
-/// Cap how many queued requests the actor prefills before yielding to a decode
-/// step. Vulkan defaults to filling the resident decode width before the first
-/// decode step, while other backends keep a smaller latency-oriented default.
-pub(crate) fn env_prefill_admission_quantum_for_policy(
-    max_decode_batch: usize,
-    policy: Option<DecodeBatcherPolicy>,
-) -> usize {
-    let max_decode_batch = max_decode_batch.max(1);
-    std::env::var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or_else(|| {
-            // #1082 CUDA concurrency regression: this quantum governs how many
-            // waiting requests are prompt-prefilled per actor cycle before the
-            // decode width is reached. At LKG 2d9d4fc4 `admit_waiting`
-            // burst-filled the whole decode width in one cycle and CUDA scaled
-            // ~5.9x to ~498 tok/s @ bs=64. The Vulkan admission-tuning commits
-            // (568d82a4 / 07607d5d) restored that full-width burst ONLY for
-            // Vulkan, leaving CUDA pinned at the latency default (4): the 64
-            // prompt prefills then drained ~1/decode-cycle on the single actor
-            // thread, ballooning TTFT to ~38s and collapsing aggregate
-            // throughput to ~22 tok/s. GPU backends saturate via wide decode
-            // batches, so give CUDA the same full-width quantum as Vulkan; CPU
-            // keeps the latency-oriented default. Per-deploy override:
-            // KILN_BATCH_PREFILL_ADMISSION_QUANTUM.
-            if policy.is_some_and(|policy| policy.use_decode_width_prefill_admission) {
-                max_decode_batch
-            } else {
-                DEFAULT_PREFILL_ADMISSION_QUANTUM
-            }
-        })
-        .clamp(1, max_decode_batch)
-}
-
-/// Decide whether multi-row decode steps should be issued one-row-at-a-time
-/// instead of as a single batched forward. Backends now default to true batched
-/// decode; `KILN_BATCH_DECODE_ROWWISE` (0/1) remains as an operator override
-/// for focused comparisons and emergency fallback.
-fn default_rowwise_decode() -> bool {
-    if let Ok(raw) = std::env::var("KILN_BATCH_DECODE_ROWWISE") {
-        return !matches!(
-            raw.trim(),
-            "0" | "false" | "FALSE" | "off" | "OFF" | "no" | "NO"
-        );
-    }
-    false
 }
 
 #[derive(Debug, Clone)]
@@ -672,9 +612,9 @@ pub struct RealDecodeForward {
     loaded_adapter: Arc<RwLock<Option<LoadedAdapterIdentity>>>,
     allow_dynamic_kv_resize: bool,
     // When set, multi-row decode steps are dispatched as a loop of single-row
-    // forwards instead of one batched forward. Defaults off so Vulkan reaches
-    // the native multi-row resident decode route; the env override is kept for
-    // focused comparisons and fallback.
+    // forwards instead of one batched forward. Startup configuration resolves
+    // this once; the constructor default keeps library callers on true batched
+    // decode unless they use the explicit builder.
     rowwise_decode: bool,
 }
 
@@ -688,7 +628,6 @@ impl RealDecodeForward {
         loaded_adapter: Arc<RwLock<Option<LoadedAdapterIdentity>>>,
         allow_dynamic_kv_resize: bool,
     ) -> Self {
-        let rowwise_decode = default_rowwise_decode();
         let backend_health = runner
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -702,7 +641,7 @@ impl RealDecodeForward {
             gpu_lock,
             loaded_adapter,
             allow_dynamic_kv_resize,
-            rowwise_decode,
+            rowwise_decode: DEFAULT_ROWWISE_DECODE,
         }
     }
 
@@ -1634,15 +1573,54 @@ impl BatchingEngineHandle {
         response_delivery_policy: ResponseDeliveryPolicy,
     ) -> Self {
         let max_decode_batch = max_decode_batch.max(1);
+        let batching = BatchingConfig::default().resolve(
+            BatchingBackendPolicy {
+                batching_engine_default_enabled: policy
+                    .is_some_and(|policy| policy.batching_engine_default_enabled),
+                use_decode_width_prefill_admission: policy
+                    .is_some_and(|policy| policy.use_decode_width_prefill_admission),
+                burst_prefill_admission: policy
+                    .is_some_and(|policy| policy.burst_prefill_admission),
+            },
+            max_decode_batch,
+        );
+        Self::start_with_admission_config(
+            forward,
+            max_decode_batch,
+            batching.actor_admission_config(),
+            max_batch_tokens,
+            max_prefill_tokens_per_cycle,
+            max_prefill_layers_per_cycle,
+            response_delivery_policy,
+        )
+    }
+
+    /// Start an actor from the immutable admission policy resolved during
+    /// application startup. No actor thread reads process environment.
+    pub fn start_with_admission_config(
+        forward: Arc<dyn DecodeForward>,
+        max_decode_batch: usize,
+        admission: BatchingActorAdmissionConfig,
+        max_batch_tokens: BatchTokenBudget,
+        max_prefill_tokens_per_cycle: PrefillTokenBudget,
+        max_prefill_layers_per_cycle: PrefillLayerBudget,
+        response_delivery_policy: ResponseDeliveryPolicy,
+    ) -> Self {
+        let max_decode_batch = max_decode_batch.max(1);
+        let BatchingActorAdmissionConfig {
+            prefix_aware_admission,
+            prefill_admission_quantum,
+            burst_prefill_admission,
+        } = admission;
         Self::start_with_policy(
             forward,
             max_decode_batch,
             max_batch_tokens,
             max_prefill_tokens_per_cycle,
             max_prefill_layers_per_cycle,
-            env_prefix_aware_admission(),
-            env_prefill_admission_quantum_for_policy(max_decode_batch, policy),
-            policy.is_some_and(|policy| policy.burst_prefill_admission),
+            prefix_aware_admission,
+            prefill_admission_quantum,
+            burst_prefill_admission,
             response_delivery_policy,
         )
     }
@@ -4529,6 +4507,27 @@ mod tests {
         assert_eq!(actor.snapshot.slow_decode_forward_count, 1);
     }
 
+    #[test]
+    fn actor_constructor_consumes_only_resolved_admission_config() {
+        let handle = BatchingEngineHandle::start_with_admission_config(
+            Arc::new(MockForward::default()),
+            8,
+            BatchingActorAdmissionConfig {
+                prefix_aware_admission: false,
+                prefill_admission_quantum: 3,
+                burst_prefill_admission: true,
+            },
+            BatchTokenBudget::default(),
+            PrefillTokenBudget::default(),
+            PrefillLayerBudget::default(),
+            ResponseDeliveryPolicy::default(),
+        );
+
+        let snapshot = handle.cached_snapshot();
+        assert_eq!(snapshot.max_prefill_admission_quantum, 3);
+        assert_eq!(snapshot.max_prefill_staging_slots, 0);
+    }
+
     #[tokio::test]
     async fn thinking_budget_forces_close_tokens_into_batched_decode_history() {
         let forward = Arc::new(MockForward::default());
@@ -4992,14 +4991,22 @@ mod tests {
             stream_stall_grace: Duration::from_millis(1000),
             stream_stall_grace_source: ConfigValueSource::ConfigFile,
         };
+        let batching = BatchingConfig::default().resolve(
+            BatchingBackendPolicy {
+                batching_engine_default_enabled: false,
+                use_decode_width_prefill_admission: false,
+                burst_prefill_admission: false,
+            },
+            8,
+        );
         let handle = BatchingEngineHandle::start_with_policy(
             forward,
             8,
             BatchTokenBudget::default(),
             PrefillTokenBudget::default(),
             PrefillLayerBudget::default(),
-            env_prefix_aware_admission(),
-            env_prefill_admission_quantum_for_policy(8, None),
+            batching.prefix_aware_admission.enabled,
+            batching.prefill_admission_quantum.effective,
             false,
             response_delivery_policy,
         );
@@ -5745,32 +5752,6 @@ mod tests {
     }
 
     #[test]
-    fn default_rowwise_decode_uses_batched_decode_unless_overridden() {
-        let _env_guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        // Snapshot + restore the env var so other tests that share this
-        // process see the original value.
-        let prior = std::env::var("KILN_BATCH_DECODE_ROWWISE").ok();
-        unsafe {
-            std::env::remove_var("KILN_BATCH_DECODE_ROWWISE");
-        }
-        assert!(!default_rowwise_decode());
-        unsafe {
-            std::env::set_var("KILN_BATCH_DECODE_ROWWISE", "0");
-        }
-        assert!(!default_rowwise_decode());
-        unsafe {
-            std::env::set_var("KILN_BATCH_DECODE_ROWWISE", "1");
-        }
-        assert!(default_rowwise_decode());
-        match prior {
-            Some(v) => unsafe { std::env::set_var("KILN_BATCH_DECODE_ROWWISE", v) },
-            None => unsafe { std::env::remove_var("KILN_BATCH_DECODE_ROWWISE") },
-        }
-    }
-
-    #[test]
     fn max_decode_batch_default_is_backend_aware() {
         let resolve = |deterministic: bool,
                        configured: Option<usize>,
@@ -5866,79 +5847,6 @@ mod tests {
             resolved.max_decode_batch.effective_source,
             DecodeBatchEffectiveSource::MaxBatchTokens
         );
-    }
-
-    #[test]
-    fn prefill_admission_quantum_default_and_override() {
-        let _env_guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let prior = std::env::var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM").ok();
-        unsafe {
-            std::env::remove_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM");
-        }
-        let cuda_policy = DecodeBatcherPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0));
-        let vulkan_policy =
-            DecodeBatcherPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0));
-        let metal_policy = DecodeBatcherPolicy::for_backend("metal", kiln_tensor::Device::Metal(0));
-        assert_eq!(env_prefill_admission_quantum_for_policy(64, None), 4);
-        assert_eq!(
-            env_prefill_admission_quantum_for_policy(64, Some(vulkan_policy)),
-            64
-        );
-        // #1082: CUDA gets the same full-width quantum as Vulkan (regression fix).
-        assert_eq!(
-            env_prefill_admission_quantum_for_policy(64, Some(cuda_policy)),
-            64
-        );
-        // Metal stays at the latency default (the Metal lane can opt in separately).
-        assert_eq!(
-            env_prefill_admission_quantum_for_policy(64, Some(metal_policy)),
-            4
-        );
-        // CUDA still clamps to demand when the decode width is small.
-        assert_eq!(
-            env_prefill_admission_quantum_for_policy(2, Some(cuda_policy)),
-            2
-        );
-        assert_eq!(env_prefill_admission_quantum_for_policy(2, None), 2);
-        assert_eq!(
-            env_prefill_admission_quantum_for_policy(2, Some(vulkan_policy)),
-            2
-        );
-        assert_eq!(env_prefill_admission_quantum_for_policy(0, None), 1);
-        unsafe {
-            std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "24");
-        }
-        assert_eq!(env_prefill_admission_quantum_for_policy(64, None), 24);
-        assert_eq!(
-            env_prefill_admission_quantum_for_policy(64, Some(vulkan_policy)),
-            24
-        );
-        unsafe {
-            std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "999");
-        }
-        assert_eq!(env_prefill_admission_quantum_for_policy(64, None), 64);
-        unsafe {
-            std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "0");
-        }
-        assert_eq!(env_prefill_admission_quantum_for_policy(64, None), 4);
-        assert_eq!(
-            env_prefill_admission_quantum_for_policy(64, Some(vulkan_policy)),
-            64
-        );
-        unsafe {
-            std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "bad");
-        }
-        assert_eq!(env_prefill_admission_quantum_for_policy(64, None), 4);
-        assert_eq!(
-            env_prefill_admission_quantum_for_policy(64, Some(vulkan_policy)),
-            64
-        );
-        match prior {
-            Some(v) => unsafe { std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", v) },
-            None => unsafe { std::env::remove_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM") },
-        }
     }
 
     #[test]

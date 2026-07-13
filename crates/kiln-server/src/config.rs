@@ -76,6 +76,15 @@ pub const DETERMINISTIC_ENV: &str = "KILN_DETERMINISTIC";
 pub const MAX_DECODE_BATCH_ENV: &str = "KILN_MAX_DECODE_BATCH";
 pub const MAX_DECODE_BATCH_MIN: usize = 1;
 pub const MAX_DECODE_BATCH_MAX: usize = MAX_BATCH_TOKENS_MAX;
+/// Latency-oriented prompt-admission default for backends that do not ask the
+/// batching actor to fill the effective decode width before the first decode.
+pub const DEFAULT_PREFILL_ADMISSION_QUANTUM: usize = 4;
+pub const PREFILL_ADMISSION_QUANTUM_MIN: usize = 1;
+pub const PREFILL_ADMISSION_QUANTUM_MAX: usize = MAX_BATCH_TOKENS_MAX;
+/// Stable admission default used by the production batching actor.
+pub const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
+/// Stable decode default: issue one true batched forward for all ready rows.
+pub const DEFAULT_ROWWISE_DECODE: bool = false;
 /// Compatibility alias for canonical
 /// `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS`.
 pub const DEFAULT_THINKING_BUDGET_TOKENS_ENV: &str = "KILN_DEFAULT_THINKING_BUDGET_TOKENS";
@@ -279,6 +288,357 @@ fn is_auto_decode_batch(raw: &str) -> bool {
         raw.trim().to_ascii_lowercase().as_str(),
         "auto" | "backend" | "backend_policy"
     )
+}
+
+/// Operator intent for whether the production batching actor owns inference.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchingMode {
+    /// Defer to the selected backend's immutable decode policy.
+    #[default]
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+impl BatchingMode {
+    fn parse_config(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "enabled" => Ok(Self::Enabled),
+            "disabled" => Ok(Self::Disabled),
+            _ => anyhow::bail!(
+                "batching.mode must be one of auto, enabled, or disabled, got {raw:?}"
+            ),
+        }
+    }
+
+    fn parse_environment(name: &str, raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "enabled" | "1" | "true" | "yes" | "on" => Ok(Self::Enabled),
+            "disabled" | "0" | "false" | "no" | "off" => Ok(Self::Disabled),
+            _ => anyhow::bail!(
+                "{name} must be one of auto, enabled, disabled, true, false, 1, 0, yes, no, on, or off, got {raw:?}"
+            ),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+impl fmt::Display for BatchingMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Validated batching-mode selector plus the startup source that selected it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchingModeSetting {
+    mode: BatchingMode,
+    source: ConfigValueSource,
+}
+
+impl BatchingModeSetting {
+    pub const fn new(mode: BatchingMode, source: ConfigValueSource) -> Self {
+        Self { mode, source }
+    }
+
+    pub const fn mode(self) -> BatchingMode {
+        self.mode
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        Ok(Self::new(
+            BatchingMode::parse_environment(name, raw)?,
+            ConfigValueSource::Environment,
+        ))
+    }
+}
+
+impl Default for BatchingModeSetting {
+    fn default() -> Self {
+        Self::new(BatchingMode::Auto, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for BatchingModeSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.mode.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for BatchingModeSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::new(
+            BatchingMode::parse_config(&raw).map_err(serde::de::Error::custom)?,
+            ConfigValueSource::ConfigFile,
+        ))
+    }
+}
+
+/// Boolean batching setting represented as a TOML boolean with provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchingToggle {
+    enabled: bool,
+    source: ConfigValueSource,
+}
+
+impl BatchingToggle {
+    pub const fn new(enabled: bool, source: ConfigValueSource) -> Self {
+        Self { enabled, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let enabled = parse_required_bool_env(name, raw)?;
+        Ok(Self::new(enabled, ConfigValueSource::Environment))
+    }
+
+    pub const fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+
+    pub const fn diagnostics(self) -> BatchingToggleDiagnostics {
+        BatchingToggleDiagnostics {
+            enabled: self.enabled,
+            source: self.source,
+        }
+    }
+}
+
+impl Default for BatchingToggle {
+    fn default() -> Self {
+        Self::new(false, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for BatchingToggle {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bool(self.enabled)
+    }
+}
+
+impl<'de> Deserialize<'de> for BatchingToggle {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::new(
+            bool::deserialize(deserializer)?,
+            ConfigValueSource::ConfigFile,
+        ))
+    }
+}
+
+/// Optional prompt-admission quantum plus the startup source that selected it.
+/// `None` preserves the selected backend's admission policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillAdmissionQuantum {
+    configured: Option<usize>,
+    source: ConfigValueSource,
+}
+
+impl PrefillAdmissionQuantum {
+    pub fn new(configured: Option<usize>, source: ConfigValueSource) -> Result<Self> {
+        if let Some(quantum) = configured {
+            validate_prefill_admission_quantum(quantum)?;
+        }
+        Ok(Self { configured, source })
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let trimmed = raw.trim();
+        if trimmed.eq_ignore_ascii_case("auto") {
+            return Ok(Self {
+                configured: None,
+                source: ConfigValueSource::Environment,
+            });
+        }
+        let quantum = trimmed.parse::<usize>().with_context(|| {
+            format!(
+                "{name} must be 'auto' or a decimal integer in {PREFILL_ADMISSION_QUANTUM_MIN}..={PREFILL_ADMISSION_QUANTUM_MAX}, got {raw:?}"
+            )
+        })?;
+        Self::new(Some(quantum), ConfigValueSource::Environment)
+            .with_context(|| format!("invalid {name} value {raw:?}"))
+    }
+
+    pub const fn configured(self) -> Option<usize> {
+        self.configured
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for PrefillAdmissionQuantum {
+    fn default() -> Self {
+        Self {
+            configured: None,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for PrefillAdmissionQuantum {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.configured {
+            Some(quantum) => serializer.serialize_u64(quantum as u64),
+            None => serializer.serialize_str("auto"),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawPrefillAdmissionQuantum {
+    Quantum(usize),
+    Mode(String),
+}
+
+impl<'de> Deserialize<'de> for PrefillAdmissionQuantum {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match RawPrefillAdmissionQuantum::deserialize(deserializer)? {
+            RawPrefillAdmissionQuantum::Quantum(quantum) => {
+                Self::new(Some(quantum), ConfigValueSource::ConfigFile)
+                    .map_err(serde::de::Error::custom)
+            }
+            RawPrefillAdmissionQuantum::Mode(mode) if mode.trim().eq_ignore_ascii_case("auto") => {
+                Ok(Self {
+                    configured: None,
+                    source: ConfigValueSource::ConfigFile,
+                })
+            }
+            RawPrefillAdmissionQuantum::Mode(mode) => Err(serde::de::Error::custom(format!(
+                "batching.prefill_admission_quantum must be 'auto' or an integer in {PREFILL_ADMISSION_QUANTUM_MIN}..={PREFILL_ADMISSION_QUANTUM_MAX}, got {mode:?}"
+            ))),
+        }
+    }
+}
+
+/// Authority that selected an effective batching value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchingEffectiveSource {
+    Default,
+    BackendPolicy,
+    ConfigFile,
+    Environment,
+    EffectiveDecodeWidth,
+}
+
+impl fmt::Display for BatchingEffectiveSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Default => "default",
+            Self::BackendPolicy => "backend_policy",
+            Self::ConfigFile => "config_file",
+            Self::Environment => "environment",
+            Self::EffectiveDecodeWidth => "effective_decode_width",
+        })
+    }
+}
+
+/// Backend-owned batching capabilities used to resolve the operator's `auto`
+/// settings. Named fields prevent independent boolean capabilities from being
+/// swapped at the startup boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchingBackendPolicy {
+    pub batching_engine_default_enabled: bool,
+    pub use_decode_width_prefill_admission: bool,
+    pub burst_prefill_admission: bool,
+}
+
+/// Runtime-ready batching policy resolved once after backend selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct BatchingRuntimeConfig {
+    pub mode: BatchingModeDiagnostics,
+    pub rowwise_decode: BatchingToggleDiagnostics,
+    pub prefix_aware_admission: BatchingToggleDiagnostics,
+    pub prefill_admission_quantum: PrefillAdmissionQuantumDiagnostics,
+    /// Backend-owned refill behavior, carried here so actor construction does
+    /// not retain a second copy of the backend decode policy.
+    pub burst_prefill_admission: bool,
+}
+
+impl BatchingRuntimeConfig {
+    /// Project the resolved settings owned by the batching actor's admission
+    /// loop. Actor activation and rowwise model dispatch are enforced at their
+    /// separate startup boundaries and therefore are not part of this type.
+    pub const fn actor_admission_config(self) -> BatchingActorAdmissionConfig {
+        BatchingActorAdmissionConfig {
+            prefix_aware_admission: self.prefix_aware_admission.enabled,
+            prefill_admission_quantum: self.prefill_admission_quantum.effective,
+            burst_prefill_admission: self.burst_prefill_admission,
+        }
+    }
+}
+
+/// Effective settings consumed specifically by the batching actor's admission
+/// loop. Keeping this surface narrower than [`BatchingRuntimeConfig`] prevents
+/// actor construction from appearing to apply activation or decode-dispatch
+/// settings that belong to other startup boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchingActorAdmissionConfig {
+    pub prefix_aware_admission: bool,
+    pub prefill_admission_quantum: usize,
+    pub burst_prefill_admission: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct BatchingModeDiagnostics {
+    pub configured: BatchingMode,
+    pub configured_source: ConfigValueSource,
+    pub backend_policy_enabled: bool,
+    pub effective_enabled: bool,
+    pub effective_source: BatchingEffectiveSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct BatchingToggleDiagnostics {
+    pub enabled: bool,
+    pub source: ConfigValueSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PrefillAdmissionQuantumDiagnostics {
+    pub configured: Option<usize>,
+    pub configured_source: ConfigValueSource,
+    pub backend_policy: usize,
+    pub effective: usize,
+    pub effective_source: BatchingEffectiveSource,
 }
 
 /// Final authority that selected the effective concurrent decode width.
@@ -841,6 +1201,7 @@ impl<'de> Deserialize<'de> for PrefillLayerBudget {
 #[serde(default, deny_unknown_fields)]
 pub struct KilnConfig {
     pub server: ServerConfig,
+    pub batching: BatchingConfig,
     pub model: ModelConfig,
     pub memory: MemoryConfig,
     pub training: TrainingConfig,
@@ -1396,6 +1757,99 @@ pub struct PrefixCacheConfig {
     pub max_entries: Option<usize>,
 }
 
+/// Production batching-actor settings. Canonical startup overrides are
+/// mechanically derived as `KILN_BATCHING_<FIELD>`; historical actor-specific
+/// spellings are compatibility-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BatchingConfig {
+    /// Whether the batching actor is selected. `auto` preserves the active
+    /// backend policy instead of imposing one cross-backend default.
+    pub mode: BatchingModeSetting,
+    /// Issue each row of a ready decode cohort separately. This is an emergency
+    /// comparison/fallback switch; true batched decode is the stable default.
+    pub rowwise_decode: BatchingToggle,
+    /// Defer a queued strict same-adapter descendant while an active prefix can
+    /// still become reusable; independent rows remain eligible for admission.
+    pub prefix_aware_admission: BatchingToggle,
+    /// Number of queued prompts admitted before yielding to decode. `auto`
+    /// uses either the effective decode width or the latency-oriented default,
+    /// according to backend policy.
+    pub prefill_admission_quantum: PrefillAdmissionQuantum,
+}
+
+impl BatchingConfig {
+    /// Resolve backend-dependent settings after the backend has selected its
+    /// batching default and effective decode width.
+    pub fn resolve(
+        self,
+        backend_policy: BatchingBackendPolicy,
+        effective_decode_width: usize,
+    ) -> BatchingRuntimeConfig {
+        let effective_decode_width = effective_decode_width.max(1);
+        let (effective_enabled, mode_effective_source) = match self.mode.mode() {
+            BatchingMode::Auto => (
+                backend_policy.batching_engine_default_enabled,
+                BatchingEffectiveSource::BackendPolicy,
+            ),
+            BatchingMode::Enabled => (
+                true,
+                effective_source_for_explicit_value(self.mode.source()),
+            ),
+            BatchingMode::Disabled => (
+                false,
+                effective_source_for_explicit_value(self.mode.source()),
+            ),
+        };
+
+        let backend_quantum = if backend_policy.use_decode_width_prefill_admission {
+            effective_decode_width
+        } else {
+            DEFAULT_PREFILL_ADMISSION_QUANTUM
+        };
+        let selected_quantum = self
+            .prefill_admission_quantum
+            .configured()
+            .unwrap_or(backend_quantum);
+        let effective_quantum = selected_quantum.clamp(1, effective_decode_width);
+        let quantum_effective_source = if effective_quantum != selected_quantum {
+            BatchingEffectiveSource::EffectiveDecodeWidth
+        } else if self.prefill_admission_quantum.configured().is_some() {
+            effective_source_for_explicit_value(self.prefill_admission_quantum.source())
+        } else {
+            BatchingEffectiveSource::BackendPolicy
+        };
+
+        BatchingRuntimeConfig {
+            mode: BatchingModeDiagnostics {
+                configured: self.mode.mode(),
+                configured_source: self.mode.source(),
+                backend_policy_enabled: backend_policy.batching_engine_default_enabled,
+                effective_enabled,
+                effective_source: mode_effective_source,
+            },
+            rowwise_decode: self.rowwise_decode.diagnostics(),
+            prefix_aware_admission: self.prefix_aware_admission.diagnostics(),
+            prefill_admission_quantum: PrefillAdmissionQuantumDiagnostics {
+                configured: self.prefill_admission_quantum.configured(),
+                configured_source: self.prefill_admission_quantum.source(),
+                backend_policy: backend_quantum,
+                effective: effective_quantum,
+                effective_source: quantum_effective_source,
+            },
+            burst_prefill_admission: backend_policy.burst_prefill_admission,
+        }
+    }
+}
+
+fn effective_source_for_explicit_value(source: ConfigValueSource) -> BatchingEffectiveSource {
+    match source {
+        ConfigValueSource::Default => BatchingEffectiveSource::Default,
+        ConfigValueSource::ConfigFile => BatchingEffectiveSource::ConfigFile,
+        ConfigValueSource::Environment => BatchingEffectiveSource::Environment,
+    }
+}
+
 /// Configured speculative-decoding intent when `enabled = true`.
 ///
 /// - `Off` — no spec decoding, one token per step.
@@ -1651,6 +2105,24 @@ impl NormalizedEnvValue for DeterministicInference {
 impl NormalizedEnvValue for MaxDecodeBatch {
     fn normalized_env_value(&self) -> String {
         self.limit().normalized_env_value()
+    }
+}
+
+impl NormalizedEnvValue for BatchingModeSetting {
+    fn normalized_env_value(&self) -> String {
+        self.mode().as_str().to_owned()
+    }
+}
+
+impl NormalizedEnvValue for BatchingToggle {
+    fn normalized_env_value(&self) -> String {
+        self.enabled().normalized_env_value()
+    }
+}
+
+impl NormalizedEnvValue for PrefillAdmissionQuantum {
+    fn normalized_env_value(&self) -> String {
+        self.configured().normalized_env_value()
     }
 }
 
@@ -1927,6 +2399,15 @@ macro_rules! public_env_parser {
     (max_decode_batch) => {
         MaxDecodeBatch::from_named_environment_value
     };
+    (batching_mode) => {
+        BatchingModeSetting::from_named_environment_value
+    };
+    (batching_toggle) => {
+        BatchingToggle::from_named_environment_value
+    };
+    (prefill_admission_quantum) => {
+        PrefillAdmissionQuantum::from_named_environment_value
+    };
     (spec_method) => {
         parse_public_spec_method
     };
@@ -2047,6 +2528,22 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         u64,
         server.shutdown_timeout_secs,
         "KILN_SHUTDOWN_TIMEOUT_SECS"
+    ),
+    public_env_field!(batching_mode, batching.mode, "KILN_BATCHING_ENGINE"),
+    public_env_field!(
+        batching_toggle,
+        batching.rowwise_decode,
+        "KILN_BATCH_DECODE_ROWWISE"
+    ),
+    public_env_field!(
+        batching_toggle,
+        batching.prefix_aware_admission,
+        "KILN_BATCH_PREFIX_AWARE_ADMISSION"
+    ),
+    public_env_field!(
+        prefill_admission_quantum,
+        batching.prefill_admission_quantum,
+        "KILN_BATCH_PREFILL_ADMISSION_QUANTUM"
     ),
     public_env_field!(some_text, model.path, "KILN_MODEL_PATH"),
     public_env_field!(text, model.model_id, "KILN_MODEL_ID"),
@@ -2179,6 +2676,7 @@ impl Default for KilnConfig {
     fn default() -> Self {
         Self {
             server: ServerConfig::default(),
+            batching: BatchingConfig::default(),
             model: ModelConfig::default(),
             memory: MemoryConfig::default(),
             training: TrainingConfig::default(),
@@ -2318,6 +2816,20 @@ impl Default for PrefixCacheConfig {
             enabled: true,
             max_blocks: None,
             max_entries: None,
+        }
+    }
+}
+
+impl Default for BatchingConfig {
+    fn default() -> Self {
+        Self {
+            mode: BatchingModeSetting::default(),
+            rowwise_decode: BatchingToggle::new(DEFAULT_ROWWISE_DECODE, ConfigValueSource::Default),
+            prefix_aware_admission: BatchingToggle::new(
+                DEFAULT_PREFIX_AWARE_ADMISSION,
+                ConfigValueSource::Default,
+            ),
+            prefill_admission_quantum: PrefillAdmissionQuantum::default(),
         }
     }
 }
@@ -2572,6 +3084,9 @@ impl KilnConfig {
         validate_max_batch_tokens(self.server.max_batch_tokens.tokens())?;
         validate_max_prefill_tokens_per_cycle(self.server.max_prefill_tokens_per_cycle.tokens())?;
         validate_max_prefill_layers_per_cycle(self.server.max_prefill_layers_per_cycle.layers())?;
+        if let Some(quantum) = self.batching.prefill_admission_quantum.configured() {
+            validate_prefill_admission_quantum(quantum)?;
+        }
         if self.server.shutdown_timeout_secs == 0 {
             anyhow::bail!(
                 "server.shutdown_timeout_secs must be > 0, got {}",
@@ -2866,6 +3381,17 @@ fn validate_max_decode_batch(limit: usize) -> Result<()> {
     Ok(())
 }
 
+fn validate_prefill_admission_quantum(quantum: usize) -> Result<()> {
+    if !(PREFILL_ADMISSION_QUANTUM_MIN..=PREFILL_ADMISSION_QUANTUM_MAX).contains(&quantum) {
+        anyhow::bail!(
+            "batching.prefill_admission_quantum must be between {} and {} requests, got {quantum}",
+            PREFILL_ADMISSION_QUANTUM_MIN,
+            PREFILL_ADMISSION_QUANTUM_MAX
+        );
+    }
+    Ok(())
+}
+
 fn parse_bool_env(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -2944,6 +3470,10 @@ mod tests {
         "KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES",
         "KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES",
         "KILN_ADAPTERS_MAX_DISK_BYTES",
+        "KILN_BATCHING_MODE",
+        "KILN_BATCHING_PREFIX_AWARE_ADMISSION",
+        "KILN_BATCHING_PREFILL_ADMISSION_QUANTUM",
+        "KILN_BATCHING_ROWWISE_DECODE",
         "KILN_LOGGING_FORMAT",
         "KILN_LOGGING_LEVEL",
         "KILN_MEMORY_CUDA_GRAPHS",
@@ -3188,6 +3718,23 @@ mod tests {
         assert!(!config.server.chat_config_hash_metadata);
         assert_eq!(config.server.slow_request_warn_secs, 30);
         assert_eq!(config.server.shutdown_timeout_secs, 5);
+        assert_eq!(config.batching.mode.mode(), BatchingMode::Auto);
+        assert_eq!(config.batching.mode.source(), ConfigValueSource::Default);
+        assert!(!config.batching.rowwise_decode.enabled());
+        assert_eq!(
+            config.batching.rowwise_decode.source(),
+            ConfigValueSource::Default
+        );
+        assert!(config.batching.prefix_aware_admission.enabled());
+        assert_eq!(
+            config.batching.prefix_aware_admission.source(),
+            ConfigValueSource::Default
+        );
+        assert_eq!(config.batching.prefill_admission_quantum.configured(), None);
+        assert_eq!(
+            config.batching.prefill_admission_quantum.source(),
+            ConfigValueSource::Default
+        );
         assert_eq!(config.model.model_id, "Qwen/Qwen3.5-4B");
         assert!(config.model.path.is_none());
         assert!(config.model.tokenizer_path.is_none());
@@ -3307,7 +3854,7 @@ mod tests {
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 63);
+        assert_eq!(original_len, 67);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -3331,8 +3878,19 @@ mod tests {
                     .filter(move |alias| alias.name != canonical)
             })
             .count();
+        let compatibility_alias_fields = PUBLIC_ENV_FIELDS
+            .iter()
+            .filter(|field| {
+                let canonical = field.canonical_name();
+                field
+                    .supported_aliases
+                    .iter()
+                    .any(|alias| alias.name != canonical)
+            })
+            .count();
         assert_eq!(canonical_only_aliases, 21);
-        assert_eq!(compatibility_aliases, 43);
+        assert_eq!(compatibility_aliases, 47);
+        assert_eq!(compatibility_alias_fields, 46);
 
         for field in PUBLIC_ENV_FIELDS {
             assert_eq!(
@@ -3359,6 +3917,8 @@ mod tests {
             &mut serialized_leaves,
         );
         serialized_leaves.sort();
+        assert_eq!(serialized_leaves.len(), 75);
+        assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 8);
 
         let mut classified = PUBLIC_ENV_FIELDS
             .iter()
@@ -3400,7 +3960,7 @@ mod tests {
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_sixty_three_public_fields() {
+    fn public_env_canonical_only_loads_all_sixty_seven_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
@@ -3424,6 +3984,10 @@ mod tests {
             ("KILN_SERVER_CHAT_CONFIG_HASH_METADATA", "true"),
             ("KILN_SERVER_SLOW_REQUEST_WARN_SECS", "0"),
             ("KILN_SERVER_SHUTDOWN_TIMEOUT_SECS", "9"),
+            ("KILN_BATCHING_MODE", "enabled"),
+            ("KILN_BATCHING_ROWWISE_DECODE", "true"),
+            ("KILN_BATCHING_PREFIX_AWARE_ADMISSION", "false"),
+            ("KILN_BATCHING_PREFILL_ADMISSION_QUANTUM", "16"),
             ("KILN_MODEL_PATH", "/tmp/canonical-model"),
             ("KILN_MODEL_MODEL_ID", "Canonical/Test-Model"),
             ("KILN_MODEL_TOKENIZER_PATH", "/tmp/canonical-tokenizer"),
@@ -3499,6 +4063,13 @@ mod tests {
         assert!(config.server.chat_config_hash_metadata);
         assert_eq!(config.server.slow_request_warn_secs, 0);
         assert_eq!(config.server.shutdown_timeout_secs, 9);
+        assert_eq!(config.batching.mode.mode(), BatchingMode::Enabled);
+        assert!(config.batching.rowwise_decode.enabled());
+        assert!(!config.batching.prefix_aware_admission.enabled());
+        assert_eq!(
+            config.batching.prefill_admission_quantum.configured(),
+            Some(16)
+        );
         assert_eq!(config.model.path.as_deref(), Some("/tmp/canonical-model"));
         assert_eq!(config.model.model_id, "Canonical/Test-Model");
         assert_eq!(
@@ -3576,6 +4147,10 @@ mod tests {
             config.server.max_prefill_tokens_per_cycle.source(),
             config.server.max_prefill_layers_per_cycle.source(),
             config.server.max_decode_batch.source(),
+            config.batching.mode.source(),
+            config.batching.rowwise_decode.source(),
+            config.batching.prefix_aware_admission.source(),
+            config.batching.prefill_admission_quantum.source(),
         ] {
             assert_eq!(source, ConfigValueSource::Environment);
         }
@@ -3592,6 +4167,14 @@ mod tests {
             ("KILN_MAX_DECODE_BATCH", "auto"),
             ("KILN_SERVER_SERVING_PROFILE", "EXPERIMENTAL"),
             ("KILN_SERVING_PROFILE", "experimental"),
+            ("KILN_BATCHING_MODE", "enabled"),
+            ("KILN_BATCHING_ENGINE", "1"),
+            ("KILN_BATCHING_ROWWISE_DECODE", "true"),
+            ("KILN_BATCH_DECODE_ROWWISE", "on"),
+            ("KILN_BATCHING_PREFIX_AWARE_ADMISSION", "false"),
+            ("KILN_BATCH_PREFIX_AWARE_ADMISSION", "0"),
+            ("KILN_BATCHING_PREFILL_ADMISSION_QUANTUM", "16"),
+            ("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "016"),
             ("KILN_MEMORY_INFERENCE_MEMORY_FRACTION", "0.70"),
             ("KILN_INFERENCE_MEMORY_FRACTION", ".7"),
         ] {
@@ -3602,6 +4185,13 @@ mod tests {
         config.apply_env_overrides().unwrap();
         assert!(config.server.deterministic.enabled());
         assert_eq!(config.server.max_decode_batch.limit(), None);
+        assert_eq!(config.batching.mode.mode(), BatchingMode::Enabled);
+        assert!(config.batching.rowwise_decode.enabled());
+        assert!(!config.batching.prefix_aware_admission.enabled());
+        assert_eq!(
+            config.batching.prefill_admission_quantum.configured(),
+            Some(16)
+        );
         assert_eq!(
             config.server.serving_profile.profile(),
             ServingProfile::Experimental
@@ -3653,6 +4243,10 @@ mod tests {
             ("KILN_SERVER_PORT", "nine-thousand"),
             ("KILN_SERVER_DETERMINISTIC", "maybe"),
             ("KILN_SERVER_DEFAULT_THINKING_BUDGET_MS", "2.5"),
+            ("KILN_BATCHING_MODE", "sometimes"),
+            ("KILN_BATCHING_ROWWISE_DECODE", "row-by-row-ish"),
+            ("KILN_BATCHING_PREFIX_AWARE_ADMISSION", "preferably"),
+            ("KILN_BATCHING_PREFILL_ADMISSION_QUANTUM", "0"),
             ("KILN_MEMORY_RECLAIM_MODE", "whenever"),
             ("KILN_SPECULATIVE_METHOD", "guessing"),
             ("KILN_REQUEST_LOG_COMPRESS", "occasionally"),
@@ -3664,6 +4258,317 @@ mod tests {
             assert!(detail.contains(name), "{name}: {detail}");
             assert!(detail.contains(invalid), "{name}: {detail}");
         }
+    }
+
+    #[test]
+    fn batching_toml_is_strict_source_tracked_and_bounded() {
+        for mode in ["auto", "enabled", "disabled"] {
+            let config: KilnConfig =
+                toml::from_str(&format!("[batching]\nmode = {mode:?}\n")).unwrap();
+            assert_eq!(config.batching.mode.mode().as_str(), mode);
+            assert_eq!(config.batching.mode.source(), ConfigValueSource::ConfigFile);
+            assert!(!config.batching.rowwise_decode.enabled());
+            assert!(config.batching.prefix_aware_admission.enabled());
+            assert_eq!(
+                config.batching.prefix_aware_admission.source(),
+                ConfigValueSource::Default
+            );
+            assert_eq!(config.batching.prefill_admission_quantum.configured(), None);
+        }
+
+        for quantum in [PREFILL_ADMISSION_QUANTUM_MIN, PREFILL_ADMISSION_QUANTUM_MAX] {
+            let config: KilnConfig = toml::from_str(&format!(
+                "[batching]\nprefill_admission_quantum = {quantum}\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                config.batching.prefill_admission_quantum.configured(),
+                Some(quantum)
+            );
+            assert_eq!(
+                config.batching.prefill_admission_quantum.source(),
+                ConfigValueSource::ConfigFile
+            );
+        }
+
+        let auto: KilnConfig =
+            toml::from_str("[batching]\nprefill_admission_quantum = \"auto\"\n").unwrap();
+        assert_eq!(auto.batching.prefill_admission_quantum.configured(), None);
+        assert_eq!(
+            auto.batching.prefill_admission_quantum.source(),
+            ConfigValueSource::ConfigFile
+        );
+
+        for document in [
+            "[batching]\nmode = \"sometimes\"\n".to_owned(),
+            "[batching]\nmode = true\n".to_owned(),
+            "[batching]\nrowwise_decode = \"true\"\n".to_owned(),
+            "[batching]\nprefix_aware_admission = 1\n".to_owned(),
+            "[batching]\nprefill_admission_quantum = 0\n".to_owned(),
+            format!(
+                "[batching]\nprefill_admission_quantum = {}\n",
+                PREFILL_ADMISSION_QUANTUM_MAX + 1
+            ),
+            "[batching]\nprefill_admission_quantum = \"backend-ish\"\n".to_owned(),
+        ] {
+            let error = toml::from_str::<KilnConfig>(&document).unwrap_err();
+            let detail = error.to_string();
+            assert!(
+                detail.contains("batching") || detail.contains("invalid type"),
+                "unexpected error for {document:?}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn batching_legacy_env_aliases_override_toml_with_environment_provenance() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for (name, value) in [
+            ("KILN_BATCHING_ENGINE", "on"),
+            ("KILN_BATCH_DECODE_ROWWISE", "yes"),
+            ("KILN_BATCH_PREFIX_AWARE_ADMISSION", "off"),
+            ("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "9"),
+        ] {
+            environment.set(name, value);
+        }
+
+        let mut config: KilnConfig = toml::from_str(
+            r#"
+[batching]
+mode = "disabled"
+rowwise_decode = false
+prefix_aware_admission = true
+prefill_admission_quantum = "auto"
+"#,
+        )
+        .unwrap();
+        config.apply_env_overrides().unwrap();
+
+        assert_eq!(config.batching.mode.mode(), BatchingMode::Enabled);
+        assert!(config.batching.rowwise_decode.enabled());
+        assert!(!config.batching.prefix_aware_admission.enabled());
+        assert_eq!(
+            config.batching.prefill_admission_quantum.configured(),
+            Some(9)
+        );
+        for source in [
+            config.batching.mode.source(),
+            config.batching.rowwise_decode.source(),
+            config.batching.prefix_aware_admission.source(),
+            config.batching.prefill_admission_quantum.source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::Environment);
+        }
+
+        for name in [
+            "KILN_BATCHING_ENGINE",
+            "KILN_BATCH_DECODE_ROWWISE",
+            "KILN_BATCH_PREFIX_AWARE_ADMISSION",
+            "KILN_BATCH_PREFILL_ADMISSION_QUANTUM",
+        ] {
+            environment.remove(name);
+        }
+        environment.set("KILN_BATCHING_MODE", " auto ");
+        environment.set("KILN_BATCHING_PREFILL_ADMISSION_QUANTUM", " AUTO ");
+        let mut auto = KilnConfig::default();
+        auto.apply_env_overrides().unwrap();
+        assert_eq!(auto.batching.mode.mode(), BatchingMode::Auto);
+        assert_eq!(auto.batching.mode.source(), ConfigValueSource::Environment);
+        assert_eq!(auto.batching.prefill_admission_quantum.configured(), None);
+        assert_eq!(
+            auto.batching.prefill_admission_quantum.source(),
+            ConfigValueSource::Environment
+        );
+    }
+
+    #[test]
+    fn batching_canonical_and_legacy_env_conflicts_fail_closed_pairwise() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for (canonical, canonical_value, legacy, legacy_value, field) in [
+            (
+                "KILN_BATCHING_MODE",
+                "enabled",
+                "KILN_BATCHING_ENGINE",
+                "false",
+                "batching.mode",
+            ),
+            (
+                "KILN_BATCHING_ROWWISE_DECODE",
+                "true",
+                "KILN_BATCH_DECODE_ROWWISE",
+                "false",
+                "batching.rowwise_decode",
+            ),
+            (
+                "KILN_BATCHING_PREFIX_AWARE_ADMISSION",
+                "true",
+                "KILN_BATCH_PREFIX_AWARE_ADMISSION",
+                "false",
+                "batching.prefix_aware_admission",
+            ),
+            (
+                "KILN_BATCHING_PREFILL_ADMISSION_QUANTUM",
+                "16",
+                "KILN_BATCH_PREFILL_ADMISSION_QUANTUM",
+                "17",
+                "batching.prefill_admission_quantum",
+            ),
+        ] {
+            environment.set(canonical, canonical_value);
+            environment.set(legacy, legacy_value);
+            let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+            environment.remove(canonical);
+            environment.remove(legacy);
+            let detail = format!("{error:#}");
+            assert!(detail.contains(field), "{detail}");
+            assert!(detail.contains(canonical), "{detail}");
+            assert!(detail.contains(legacy), "{detail}");
+        }
+    }
+
+    #[test]
+    fn batching_malformed_legacy_env_aliases_fail_closed() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for (name, invalid) in [
+            ("KILN_BATCHING_ENGINE", "automatic-ish"),
+            ("KILN_BATCH_DECODE_ROWWISE", "maybe"),
+            ("KILN_BATCH_PREFIX_AWARE_ADMISSION", ""),
+            ("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "65537"),
+        ] {
+            environment.set(name, invalid);
+            let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+            environment.remove(name);
+            let detail = format!("{error:#}");
+            assert!(detail.contains(name), "{name}: {detail}");
+            assert!(detail.contains(&format!("{invalid:?}")), "{name}: {detail}");
+        }
+    }
+
+    #[test]
+    fn batching_runtime_resolution_preserves_backend_auto_policy_and_clamps_quantum() {
+        let defaults = BatchingConfig::default();
+        let latency_backend = defaults.resolve(
+            BatchingBackendPolicy {
+                batching_engine_default_enabled: false,
+                use_decode_width_prefill_admission: false,
+                burst_prefill_admission: false,
+            },
+            64,
+        );
+        assert!(!latency_backend.mode.effective_enabled);
+        assert_eq!(
+            latency_backend.mode.effective_source,
+            BatchingEffectiveSource::BackendPolicy
+        );
+        assert_eq!(latency_backend.prefill_admission_quantum.backend_policy, 4);
+        assert_eq!(latency_backend.prefill_admission_quantum.effective, 4);
+        assert_eq!(
+            latency_backend.prefill_admission_quantum.effective_source,
+            BatchingEffectiveSource::BackendPolicy
+        );
+
+        let throughput_backend = defaults.resolve(
+            BatchingBackendPolicy {
+                batching_engine_default_enabled: true,
+                use_decode_width_prefill_admission: true,
+                burst_prefill_admission: true,
+            },
+            64,
+        );
+        assert!(throughput_backend.mode.effective_enabled);
+        assert!(throughput_backend.burst_prefill_admission);
+        assert_eq!(
+            throughput_backend.prefill_admission_quantum.backend_policy,
+            64
+        );
+        assert_eq!(throughput_backend.prefill_admission_quantum.effective, 64);
+        assert_eq!(
+            throughput_backend.actor_admission_config(),
+            BatchingActorAdmissionConfig {
+                prefix_aware_admission: true,
+                prefill_admission_quantum: 64,
+                burst_prefill_admission: true,
+            }
+        );
+
+        let narrow_backend = defaults.resolve(
+            BatchingBackendPolicy {
+                batching_engine_default_enabled: true,
+                use_decode_width_prefill_admission: false,
+                burst_prefill_admission: false,
+            },
+            2,
+        );
+        assert_eq!(narrow_backend.prefill_admission_quantum.backend_policy, 4);
+        assert_eq!(narrow_backend.prefill_admission_quantum.effective, 2);
+        assert_eq!(
+            narrow_backend.prefill_admission_quantum.effective_source,
+            BatchingEffectiveSource::EffectiveDecodeWidth
+        );
+
+        let explicit: KilnConfig = toml::from_str(
+            r#"
+[batching]
+mode = "disabled"
+rowwise_decode = true
+prefix_aware_admission = false
+prefill_admission_quantum = 100
+"#,
+        )
+        .unwrap();
+        let resolved = explicit.batching.resolve(
+            BatchingBackendPolicy {
+                batching_engine_default_enabled: true,
+                use_decode_width_prefill_admission: true,
+                burst_prefill_admission: true,
+            },
+            16,
+        );
+        assert!(!resolved.mode.effective_enabled);
+        assert_eq!(
+            resolved.mode.effective_source,
+            BatchingEffectiveSource::ConfigFile
+        );
+        assert!(resolved.rowwise_decode.enabled);
+        assert!(!resolved.prefix_aware_admission.enabled);
+        assert!(resolved.burst_prefill_admission);
+        assert_eq!(resolved.prefill_admission_quantum.configured, Some(100));
+        assert_eq!(resolved.prefill_admission_quantum.effective, 16);
+        assert_eq!(
+            resolved.prefill_admission_quantum.effective_source,
+            BatchingEffectiveSource::EffectiveDecodeWidth
+        );
+
+        let built_in_explicit = BatchingConfig {
+            mode: BatchingModeSetting::new(BatchingMode::Enabled, ConfigValueSource::Default),
+            prefill_admission_quantum: PrefillAdmissionQuantum::new(
+                Some(3),
+                ConfigValueSource::Default,
+            )
+            .unwrap(),
+            ..BatchingConfig::default()
+        }
+        .resolve(
+            BatchingBackendPolicy {
+                batching_engine_default_enabled: false,
+                use_decode_width_prefill_admission: false,
+                burst_prefill_admission: false,
+            },
+            16,
+        );
+        assert!(built_in_explicit.mode.effective_enabled);
+        assert_eq!(
+            built_in_explicit.mode.effective_source,
+            BatchingEffectiveSource::Default
+        );
+        assert_eq!(built_in_explicit.prefill_admission_quantum.effective, 3);
+        assert_eq!(
+            built_in_explicit.prefill_admission_quantum.effective_source,
+            BatchingEffectiveSource::Default
+        );
     }
 
     #[test]
@@ -4065,6 +4970,12 @@ chat_config_hash_metadata = true
 slow_request_warn_secs = 15
 shutdown_timeout_secs = 10
 
+[batching]
+mode = "enabled"
+rowwise_decode = true
+prefix_aware_admission = false
+prefill_admission_quantum = 12
+
 [model]
 path = "/models/qwen"
 model_id = "custom/model"
@@ -4158,6 +5069,26 @@ composed_cache_max_entries = 8
         assert!(config.server.chat_performance_metadata);
         assert!(config.server.chat_config_hash_metadata);
         assert_eq!(config.server.slow_request_warn_secs, 15);
+        assert_eq!(config.batching.mode.mode(), BatchingMode::Enabled);
+        assert_eq!(config.batching.mode.source(), ConfigValueSource::ConfigFile);
+        assert!(config.batching.rowwise_decode.enabled());
+        assert_eq!(
+            config.batching.rowwise_decode.source(),
+            ConfigValueSource::ConfigFile
+        );
+        assert!(!config.batching.prefix_aware_admission.enabled());
+        assert_eq!(
+            config.batching.prefix_aware_admission.source(),
+            ConfigValueSource::ConfigFile
+        );
+        assert_eq!(
+            config.batching.prefill_admission_quantum.configured(),
+            Some(12)
+        );
+        assert_eq!(
+            config.batching.prefill_admission_quantum.source(),
+            ConfigValueSource::ConfigFile
+        );
         assert_eq!(config.model.path.as_deref(), Some("/models/qwen"));
         assert_eq!(config.model.model_id, "custom/model");
         assert_eq!(config.memory.num_blocks, Some(128));

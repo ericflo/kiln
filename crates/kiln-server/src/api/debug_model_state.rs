@@ -15,7 +15,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::batching_engine::BatchingEngineSnapshot;
-use crate::config::{ConfigValueSource, DecodeRuntimeConfig, ModelDefaultsProfile};
+use crate::config::{
+    BatchingRuntimeConfig, ConfigValueSource, DecodeRuntimeConfig, ModelDefaultsProfile,
+};
 use crate::state::{AppState, ModelBackend};
 
 const DEBUG_ENDPOINT_ENV: &str = "KILN_DEBUG_ENDPOINTS";
@@ -100,6 +102,7 @@ struct HttpDebugState {
 struct BatchingEngineDebugState {
     backend: &'static str,
     enabled: bool,
+    configuration: BatchingRuntimeConfig,
     snapshot: Option<BatchingEngineSnapshotDebug>,
     decode_batcher: Option<DecodeBatcherDebug>,
 }
@@ -420,7 +423,6 @@ fn selected_env_flags() -> BTreeMap<&'static str, EnvFlagState> {
         "KILN_EVAL_MODE",
         "KILN_DEFAULT_THINKING_ENABLED",
         "KILN_DEFAULT_NO_THINK",
-        "KILN_BATCHING_ENGINE",
         "KILN_CUDA_GRAPHS",
         "KILN_ROCM_GRAPHS",
         "KILN_KV_AUTOSCALE",
@@ -455,6 +457,7 @@ async fn batching_engine_state(state: &AppState) -> BatchingEngineDebugState {
         ModelBackend::Mock { .. } => BatchingEngineDebugState {
             backend: "mock",
             enabled: false,
+            configuration: state.batching_runtime_config,
             snapshot: None,
             decode_batcher: None,
         },
@@ -470,6 +473,7 @@ async fn batching_engine_state(state: &AppState) -> BatchingEngineDebugState {
             BatchingEngineDebugState {
                 backend: "model",
                 enabled: batching_engine.is_some(),
+                configuration: state.batching_runtime_config,
                 snapshot,
                 decode_batcher: decode_batcher.as_ref().map(|batcher| {
                     let stats = batcher.stats();
@@ -815,6 +819,14 @@ mod tests {
         );
         assert_eq!(json["batching_engine"]["backend"], "mock");
         assert_eq!(json["batching_engine"]["enabled"], false);
+        assert_eq!(
+            json["batching_engine"]["configuration"]["mode"]["effective_enabled"],
+            false
+        );
+        assert_eq!(
+            json["batching_engine"]["configuration"]["prefix_aware_admission"]["enabled"],
+            true
+        );
         assert!(json["env_flags"]["KILN_ROCM_GRAPHS"].is_object());
         assert!(json["env_flags"]["KILN_KV_AUTOSCALE"].is_object());
         assert!(json["env_flags"]["KILN_HTTP_SEND_BUFFER_BYTES"].is_object());

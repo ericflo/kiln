@@ -803,6 +803,7 @@ async fn main() -> Result<()> {
             &config.memory,
             response_delivery_policy,
             startup_decode_runtime,
+            config.batching,
             config.speculative,
             speculative_runtime_policy,
             config.server.max_batch_tokens,
@@ -848,6 +849,14 @@ async fn main() -> Result<()> {
             config.server.max_decode_batch,
             None,
             config.server.max_batch_tokens,
+        );
+        state.batching_runtime_config = config.batching.resolve(
+            kiln_server::config::BatchingBackendPolicy {
+                batching_engine_default_enabled: false,
+                use_decode_width_prefill_admission: false,
+                burst_prefill_admission: false,
+            },
+            state.decode_runtime_config.max_decode_batch.effective,
         );
         state
     };

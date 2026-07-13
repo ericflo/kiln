@@ -4345,10 +4345,28 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     );
     assert!(
         server_batching_source.contains("resolve_decode_runtime_config")
-            && server_batching_source.contains("env_prefill_admission_quantum_for_policy")
-            && server_batching_source.contains("DecodeBatcherPolicy"),
-        "kiln-server batching engine defaults should consume DecodeBatcherPolicy"
+            && server_batching_source.contains("BatchingBackendPolicy")
+            && server_batching_source.contains("BatchingActorAdmissionConfig")
+            && server_state_source.contains("batching_config.resolve(")
+            && server_state_source.contains("batching_runtime_config.actor_admission_config()")
+            && server_state_source.contains("batching_engine_default_enabled")
+            && server_state_source.contains("use_decode_width_prefill_admission")
+            && server_state_source.contains("burst_prefill_admission"),
+        "kiln-server batching startup should resolve DecodeBatcherPolicy once and project narrow actor admission settings"
     );
+    for legacy_name in [
+        "KILN_BATCHING_ENGINE",
+        "KILN_BATCH_DECODE_ROWWISE",
+        "KILN_BATCH_PREFIX_AWARE_ADMISSION",
+        "KILN_BATCH_PREFILL_ADMISSION_QUANTUM",
+    ] {
+        let direct_read = format!("std::env::var(\"{legacy_name}\")");
+        assert!(
+            !server_batching_source.contains(&direct_read)
+                && !server_state_source.contains(&direct_read),
+            "production batching must not reread legacy environment control {legacy_name}"
+        );
+    }
     for forbidden in [
         "env_max_decode_batch_for_backend",
         "env_prefill_admission_quantum_for_backend",

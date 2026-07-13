@@ -1609,6 +1609,31 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
             );
             println!(
                 "  {} {}",
+                style("Batching actor:").dim(),
+                config.batching.mode.mode()
+            );
+            println!(
+                "  {} {}",
+                style("Rowwise decode:").dim(),
+                config.batching.rowwise_decode.enabled()
+            );
+            println!(
+                "  {} {}",
+                style("Prefix-aware admission:").dim(),
+                config.batching.prefix_aware_admission.enabled()
+            );
+            println!(
+                "  {} {}",
+                style("Prefill admission quantum:").dim(),
+                config
+                    .batching
+                    .prefill_admission_quantum
+                    .configured()
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "auto".to_string())
+            );
+            println!(
+                "  {} {}",
                 style("Thinking tokens:").dim(),
                 config
                     .server

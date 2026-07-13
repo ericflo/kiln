@@ -2,7 +2,8 @@ use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
 use crate::config::{
-    ConfigValueSource, DecodeRuntimeConfig, ServingProfileDiagnostics, SpecMethod,
+    BatchingRuntimeConfig, ConfigValueSource, DecodeRuntimeConfig, ServingProfileDiagnostics,
+    SpecMethod,
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::state::{AppState, ModelBackend};
@@ -19,12 +20,19 @@ fn gib(bytes: u64) -> f64 {
 struct ConfigResponse {
     serving_profile: ServingProfileDiagnostics,
     decode_runtime: DecodeRuntimeConfig,
+    batching: BatchingConfigResponse,
     speculative: SpeculativeConfig,
     vram: VramConfig,
     kv_cache: KvCacheConfig,
     training: TrainingConfig,
     memory_budget: MemoryBudgetConfig,
     generation: GenerationConfig,
+}
+
+#[derive(Serialize)]
+struct BatchingConfigResponse {
+    configuration: BatchingRuntimeConfig,
+    actor_active: bool,
 }
 
 #[derive(Serialize)]
@@ -225,6 +233,16 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
         serving_profile: state.serving_profile.diagnostics(),
         decode_runtime: state.decode_runtime_config,
+        batching: BatchingConfigResponse {
+            configuration: state.batching_runtime_config,
+            actor_active: matches!(
+                state.backend.as_ref(),
+                ModelBackend::Real {
+                    batching_engine: Some(_),
+                    ..
+                }
+            ),
+        },
         speculative: build_speculative_config(&state),
         vram: build_vram_config(&state, memory_observation),
         kv_cache: KvCacheConfig {
@@ -493,6 +511,31 @@ mod tests {
         assert_eq!(
             json["decode_runtime"]["max_decode_batch"]["effective_source"],
             "backend_policy"
+        );
+        assert_eq!(json["batching"]["actor_active"], false);
+        assert_eq!(
+            json["batching"]["configuration"]["mode"]["configured"],
+            "auto"
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["mode"]["effective_enabled"],
+            false
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["rowwise_decode"]["enabled"],
+            false
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["prefix_aware_admission"]["enabled"],
+            true
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["prefill_admission_quantum"]["effective"],
+            4
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["burst_prefill_admission"],
+            false
         );
         assert_eq!(json["speculative"]["enabled"], false);
         assert_eq!(json["speculative"]["configured_method"], "off");

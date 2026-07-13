@@ -2338,6 +2338,9 @@ pub struct AppState {
     /// Immutable deterministic and concurrent-decode policy, including the
     /// configured, backend-selected, and final effective values.
     pub decode_runtime_config: crate::config::DecodeRuntimeConfig,
+    /// Immutable batching-actor policy resolved against the selected backend
+    /// and effective decode width during startup.
+    pub batching_runtime_config: crate::config::BatchingRuntimeConfig,
     /// Immutable speculative-decoding policy resolved once during startup.
     pub speculative_config: crate::config::SpeculativeDecodingConfig,
     /// Immutable backend capability snapshot used by diagnostics.
@@ -2964,10 +2967,19 @@ impl AppState {
             None,
             crate::config::BatchTokenBudget::default(),
         );
+        let batching_runtime_config = crate::config::BatchingConfig::default().resolve(
+            crate::config::BatchingBackendPolicy {
+                batching_engine_default_enabled: false,
+                use_decode_width_prefill_admission: false,
+                burst_prefill_admission: false,
+            },
+            decode_runtime_config.max_decode_batch.effective,
+        );
         let speculative_config = crate::config::SpeculativeDecodingConfig::default();
         Self {
             serving_profile: crate::config::ServingProfileSetting::default(),
             decode_runtime_config,
+            batching_runtime_config,
             speculative_config,
             speculative_runtime_policy: SpeculativeRuntimePolicy::default(),
             model_config,
@@ -3135,6 +3147,7 @@ impl AppState {
             memory_cfg,
             response_delivery_policy,
             decode_runtime_config,
+            crate::config::BatchingConfig::default(),
             crate::config::SpeculativeDecodingConfig::default(),
             speculative_runtime_policy,
             max_batch_tokens,
@@ -3161,6 +3174,7 @@ impl AppState {
         memory_cfg: &crate::config::MemoryConfig,
         response_delivery_policy: crate::batching_engine::ResponseDeliveryPolicy,
         decode_runtime_config: crate::config::DecodeRuntimeConfig,
+        batching_config: crate::config::BatchingConfig,
         speculative_config: crate::config::SpeculativeDecodingConfig,
         speculative_runtime_policy: SpeculativeRuntimePolicy,
         max_batch_tokens: crate::config::BatchTokenBudget,
@@ -3746,6 +3760,45 @@ impl AppState {
                 .unwrap_or(decode_batcher_policy.max_batch)
         );
         let max_decode_batch = decode_runtime_config.max_decode_batch.effective;
+        let batching_runtime_config = batching_config.resolve(
+            crate::config::BatchingBackendPolicy {
+                batching_engine_default_enabled: decode_batcher_policy
+                    .batching_engine_default_enabled,
+                use_decode_width_prefill_admission: decode_batcher_policy
+                    .use_decode_width_prefill_admission,
+                burst_prefill_admission: decode_batcher_policy.burst_prefill_admission,
+            },
+            max_decode_batch,
+        );
+        tracing::info!(
+            backend = backend_name,
+            mode_configured = %batching_runtime_config.mode.configured,
+            mode_configured_source = %batching_runtime_config.mode.configured_source,
+            mode_backend_policy_enabled = batching_runtime_config.mode.backend_policy_enabled,
+            mode_effective_enabled = batching_runtime_config.mode.effective_enabled,
+            mode_effective_source = %batching_runtime_config.mode.effective_source,
+            rowwise_decode = batching_runtime_config.rowwise_decode.enabled,
+            rowwise_decode_source = %batching_runtime_config.rowwise_decode.source,
+            prefix_aware_admission = batching_runtime_config.prefix_aware_admission.enabled,
+            prefix_aware_admission_source = %batching_runtime_config.prefix_aware_admission.source,
+            prefill_admission_quantum_configured = ?batching_runtime_config
+                .prefill_admission_quantum
+                .configured,
+            prefill_admission_quantum_configured_source = %batching_runtime_config
+                .prefill_admission_quantum
+                .configured_source,
+            prefill_admission_quantum_backend_policy = batching_runtime_config
+                .prefill_admission_quantum
+                .backend_policy,
+            prefill_admission_quantum_effective = batching_runtime_config
+                .prefill_admission_quantum
+                .effective,
+            prefill_admission_quantum_effective_source = %batching_runtime_config
+                .prefill_admission_quantum
+                .effective_source,
+            burst_prefill_admission = batching_runtime_config.burst_prefill_admission,
+            "batching runtime configuration resolved"
+        );
         let decode_batcher_config =
             DecodeBatcherConfig::enabled_for_device_kt(&device_kt).then(|| {
                 DecodeBatcherConfig::from_env_for_policy_with_max_batch(
@@ -3778,20 +3831,13 @@ impl AppState {
                 "resident decode pool startup allocation"
             );
         }
-        // Batching engine defaults are owned by the backend decode policy.
-        // Operators can still override with KILN_BATCHING_ENGINE.
-        let batching_engine_env = std::env::var("KILN_BATCHING_ENGINE").ok();
-        let batching_engine_disabled = match batching_engine_env.as_deref() {
-            Some("0" | "false" | "FALSE" | "off" | "OFF") => true,
-            Some("1" | "true" | "TRUE" | "on" | "ON") => false,
-            _ => !decode_batcher_policy.batching_engine_default_enabled,
-        };
-        if batching_engine_disabled && !decode_batcher_policy.batching_engine_default_enabled {
+        if !batching_runtime_config.mode.effective_enabled {
             tracing::info!(
-                "batching engine disabled by backend policy; set KILN_BATCHING_ENGINE=1 to opt in"
+                effective_source = %batching_runtime_config.mode.effective_source,
+                "batching engine disabled by resolved startup configuration"
             );
         }
-        let batching_engine = (!batching_engine_disabled).then(|| {
+        let batching_engine = batching_runtime_config.mode.effective_enabled.then(|| {
             tracing::info!(
                 backend = backend_name,
                 max_decode_batch,
@@ -3811,10 +3857,9 @@ impl AppState {
                     .stream_stall_grace_ms(),
                 stream_stall_grace_source = %response_delivery_policy
                     .stream_stall_grace_source(),
-                "batching engine enabled — routing streaming and non-streaming real completions through batching actor (set KILN_BATCHING_ENGINE=0 to disable)"
+                "batching engine enabled; routing streaming and non-streaming real completions through the batching actor"
             );
-            crate::batching_engine::BatchingEngineHandle::start_with_runtime_options(
-                Arc::new(crate::batching_engine::RealDecodeForward::new(
+            let forward = crate::batching_engine::RealDecodeForward::new(
                     runner.clone(),
                     block_manager.clone(),
                     paged_cache.clone(),
@@ -3822,9 +3867,12 @@ impl AppState {
                     gpu_lock.clone(),
                     loaded_adapter.clone(),
                     serving_policy.dynamic_kv_resize,
-                )),
+                )
+                .with_rowwise_decode(batching_runtime_config.rowwise_decode.enabled);
+            crate::batching_engine::BatchingEngineHandle::start_with_admission_config(
+                Arc::new(forward),
                 max_decode_batch,
-                Some(decode_batcher_policy),
+                batching_runtime_config.actor_admission_config(),
                 max_batch_tokens,
                 max_prefill_tokens_per_cycle,
                 max_prefill_layers_per_cycle,
@@ -3911,6 +3959,7 @@ impl AppState {
         Ok(Self {
             serving_profile,
             decode_runtime_config,
+            batching_runtime_config,
             speculative_config,
             speculative_runtime_policy,
             model_config,

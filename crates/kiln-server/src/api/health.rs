@@ -12,8 +12,8 @@ use std::sync::atomic::Ordering;
 
 use crate::batching_engine::BatchingEngineSnapshot;
 use crate::config::{
-    ConfigValueSource, DecodeRuntimeConfig, ModelDefaultsProfile, ServingProfileDiagnostics,
-    ServingRuntimePolicy,
+    BatchingRuntimeConfig, ConfigValueSource, DecodeRuntimeConfig, ModelDefaultsProfile,
+    ServingProfileDiagnostics, ServingRuntimePolicy,
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::recent_requests::RequestRecord;
@@ -285,6 +285,7 @@ struct PromptCacheInfo {
 #[derive(Serialize)]
 struct DecodeRuntimeInfo {
     configuration: DecodeRuntimeConfig,
+    batching_configuration: BatchingRuntimeConfig,
     cuda_graphs: GraphInfo,
     rocm_graphs: RocmGraphInfo,
     metal_graphs: GraphInfo,
@@ -679,6 +680,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         CachedMemoryGovernorObservation::capture_global_for(state.vram_probe_selector);
     let decode_runtime = DecodeRuntimeInfo {
         configuration: state.decode_runtime_config,
+        batching_configuration: state.batching_runtime_config,
         cuda_graphs,
         rocm_graphs,
         metal_graphs,
@@ -1492,6 +1494,14 @@ mod tests {
         assert_eq!(
             json["decode_runtime"]["configuration"]["max_decode_batch"]["effective"],
             8
+        );
+        assert_eq!(
+            json["decode_runtime"]["batching_configuration"]["mode"]["effective_enabled"],
+            false
+        );
+        assert_eq!(
+            json["decode_runtime"]["batching_configuration"]["prefill_admission_quantum"]["effective"],
+            4
         );
         for backend in ["cuda_graphs", "rocm_graphs", "metal_graphs"] {
             assert_eq!(json["decode_runtime"][backend]["enabled"], false);
