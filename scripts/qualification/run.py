@@ -822,11 +822,48 @@ def load_case_result(
 def _group_exists(process_group: int) -> bool:
     try:
         os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    if sys.platform != "linux":
+        return True
+    try:
+        entries = tuple(Path("/proc").iterdir())
+    except OSError:
+        return True
+    saw_member = False
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat_line = (entry / "stat").read_text()
+            fields = stat_line[stat_line.rfind(")") + 2 :].split()
+            state = fields[0]
+            member_group = int(fields[2])
+        except (FileNotFoundError, IndexError, OSError, ValueError):
+            continue
+        if member_group != process_group:
+            continue
+        saw_member = True
+        if state != "Z":
+            return True
+    if saw_member:
+        return False
+    try:
+        os.killpg(process_group, 0)
         return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+
+
+def _wait_for_process_group_exit(process_group: int, grace_seconds: float) -> bool:
+    deadline = time.monotonic() + max(0.0, grace_seconds)
+    while _group_exists(process_group) and time.monotonic() < deadline:
+        time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+    return not _group_exists(process_group)
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes], grace_seconds: float) -> None:
@@ -989,8 +1026,12 @@ def execute_argv(
                 except CaseResultError as exc:
                     errors.append(str(exc))
             if not timed_out and not limit_reached.is_set() and _group_exists(process.pid):
-                _terminate_process_group(process, termination_grace_seconds)
-                errors.append("command left descendant processes running")
+                settled = _wait_for_process_group_exit(
+                    process.pid, min(1.0, termination_grace_seconds)
+                )
+                if not settled:
+                    _terminate_process_group(process, termination_grace_seconds)
+                    errors.append("command left descendant processes running")
             for thread in threads:
                 thread.join(timeout=max(1.0, termination_grace_seconds))
             if any(thread.is_alive() for thread in threads):

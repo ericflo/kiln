@@ -503,6 +503,48 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(process_running(child_pid), f"child {child_pid} survived timeout cleanup")
         self.assert_valid(outcome, repository.root)
 
+    def test_success_waits_for_short_lived_descendant_settlement(self) -> None:
+        code = (
+            "import subprocess,sys; "
+            "subprocess.Popen([sys.executable,'-c','import time; time.sleep(0.1)'])"
+        )
+        repository = Repository(
+            environment_workload([sys.executable, "-c", code])
+        )
+        self.addCleanup(repository.close)
+        outcome = self.execute(repository)
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(outcome.receipt["results"][0]["status"], "passed")
+        self.assertNotIn(
+            "descendant processes", outcome.receipt["results"][0]["details"] or ""
+        )
+        self.assert_valid(outcome, repository.root)
+
+    def test_success_rejects_persistent_descendant(self) -> None:
+        code = (
+            "import pathlib,subprocess,sys; "
+            "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+            "pathlib.Path('.qualification/child.pid').write_text(str(child.pid))"
+        )
+        repository = Repository(
+            environment_workload([sys.executable, "-c", code])
+        )
+        self.addCleanup(repository.close)
+        outcome = self.execute(repository)
+        child_pid = int((repository.root / ".qualification/child.pid").read_text())
+
+        self.assertEqual(outcome.exit_code, 1)
+        self.assertIn(
+            "command left descendant processes running",
+            outcome.receipt["results"][0]["details"],
+        )
+        deadline = time.monotonic() + 3
+        while process_running(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(process_running(child_pid), f"child {child_pid} survived cleanup")
+        self.assert_valid(outcome, repository.root)
+
     def test_missing_and_malformed_command_results_fail_with_receipts(self) -> None:
         commands = {
             "missing": [sys.executable, "-c", "print('no result')"],
