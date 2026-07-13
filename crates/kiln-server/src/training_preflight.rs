@@ -1744,17 +1744,16 @@ mod tests {
     }
 
     #[test]
-    fn streaming_gdn_long_context_fits_uma_budget_at_one_layer_segments() {
+    fn streaming_gdn_long_context_requires_route_complete_uma_budget() {
         let cfg = qwen_4b();
         let max_seq_len = 104_412;
-        let available = 30 * BYTES_PER_GB;
         let options = EstimateOptions {
             sft: Some(vulkan_sft(512)),
             activation_bytes_per_elem: Some(10),
             streaming_gdn_tile_tokens: Some(1024),
             ..Default::default()
         };
-        let (segments, fit) = auto_fit_checkpoint_segments(
+        let (segments_at_30_gib, rejected) = auto_fit_checkpoint_segments(
             &cfg,
             max_seq_len,
             8,
@@ -1762,23 +1761,34 @@ mod tests {
             WeightResidency::DualResidentCpuAndVulkan,
             true,
             options,
-            available,
+            30 * BYTES_PER_GB,
         );
-        assert_eq!(segments, cfg.num_layers);
+        assert_eq!(segments_at_30_gib, cfg.num_layers);
         assert!(
-            fit.total_bytes > 29 * BYTES_PER_GB,
-            "the complete Muon/LoRA working set must not retain the stale 29 GiB acceptance claim"
+            rejected.total_bytes > 30 * BYTES_PER_GB,
+            "the complete route-specific working set must reject the stale 30 GiB acceptance claim"
+        );
+
+        let (segments_at_31_gib, accepted) = auto_fit_checkpoint_segments(
+            &cfg,
+            max_seq_len,
+            8,
+            cfg.num_layers,
+            WeightResidency::DualResidentCpuAndVulkan,
+            true,
+            options,
+            31 * BYTES_PER_GB,
+        );
+        assert_eq!(segments_at_31_gib, cfg.num_layers);
+        assert_eq!(accepted.total_bytes, rejected.total_bytes);
+        assert!(
+            accepted.total_bytes <= 31 * BYTES_PER_GB,
+            "streaming GDN estimate should accept the 104k-token rank-8 repro only with the next complete GiB of live budget: estimate={} ({:.2} GiB)",
+            accepted.total_bytes,
+            accepted.total_bytes as f64 / BYTES_PER_GB as f64,
         );
         assert!(
-            fit.total_bytes <= available,
-            "streaming GDN estimate should accept the 104k-token rank-8 repro at a 30 GiB live budget: estimate={} ({:.2} GiB), available={} ({:.2} GiB)",
-            fit.total_bytes,
-            fit.total_bytes as f64 / BYTES_PER_GB as f64,
-            available,
-            available as f64 / BYTES_PER_GB as f64
-        );
-        assert!(
-            fit.breakdown.per_segment_activations < 30 * BYTES_PER_GB,
+            accepted.breakdown.per_segment_activations < 30 * BYTES_PER_GB,
             "streaming GDN should not charge full-sequence GDN intermediates"
         );
     }
