@@ -958,7 +958,10 @@ fn hybrid_vulkan_native_training_fails_before_dataset_admission() {
         "const MAX_MATERIALIZED_OPD_DATASET_BYTES",
     );
     assert!(admission.contains("training_runtime"));
-    assert!(admission.contains("resolve_device_for_weights(weight_device)"));
+    assert!(
+        admission.contains("resolve_device_for_weights(state.model_weight_device)"),
+        "training admission must resolve against the immutable serving-weight device"
+    );
     assert!(admission.contains("ApiError::training_backend_unsupported"));
 
     let training_runtime = read("crates/kiln-train/src/lib.rs");
