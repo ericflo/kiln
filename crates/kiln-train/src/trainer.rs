@@ -462,7 +462,7 @@ pub(crate) fn ensure_training_optimizer_device_supported(
         .with_context(|| format!("{workload}: invalid optimizer configuration"))?;
     TrainingOptimizerSupport::for_device(runtime_device)
         .resolve_optimizer_request(
-            TrainingPrecisionPolicy::for_device_family(runtime_device),
+            training_precision_policy_for_device(&runtime_device),
             optimizer.kind(),
             weights.embed_tokens.dtype(),
             TrainingOptimizerRounding::RoundToNearest,

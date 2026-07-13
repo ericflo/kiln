@@ -3870,8 +3870,8 @@
         "crates/kiln-model/src/backend/vulkan_training.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
-      "genuine": false,
-      "migration": "partial",
+      "genuine": true,
+      "migration": "complete",
       "migration_signals": [
         {
           "evidence": [
@@ -3881,8 +3881,8 @@
           ],
           "expected": 0,
           "name": "training_precision_for_device_family_removed_from_production",
-          "observed": 1,
-          "passed": false
+          "observed": 0,
+          "passed": true
         },
         {
           "evidence": [
@@ -3924,9 +3924,7 @@
         }
       ],
       "phase": 6,
-      "remaining": [
-        "production training paths still call TrainingPrecisionPolicy::for_device_family"
-      ],
+      "remaining": [],
       "report_sections": [
         "Training Optimizer Fallback",
         "Training Loss Routing",
@@ -3934,7 +3932,7 @@
         "Optimizer Dispatch",
         "Conformance And Performance Gates"
       ],
-      "status": "partial",
+      "status": "covered",
       "title": "Finish shared training integration"
     },
     {
