@@ -62,8 +62,6 @@ use kiln_core::tokenizer::KilnTokenizer;
 // `FlceProvider`/`fused_linear_cross_entropy*` opt-in (KILN_CUDA_FLCE) is gone —
 // FLCE is kt-native via `kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt`.
 use kiln_flce_kernel::DEFAULT_CHUNK_SIZE;
-use kiln_model::BackendCapabilityQueries;
-use kiln_model::PagedKvCacheKt;
 #[cfg(feature = "vulkan")]
 use kiln_model::backend::GrpoLossRoute;
 #[cfg(any(
@@ -76,8 +74,7 @@ use kiln_model::backend::TrainingTapeRoute;
 use kiln_model::backend::{
     self, BackendIdentity, BackendRuntime, ExternalYieldBackend, FinalRmsNormBackwardRoute,
     GrpoKlAuxiliaryRoute, OptimizerBackend, ResidencyBackend, SftFlceLossRoute,
-    TrainingLossBackend, TrainingOptimizerRequest, TrainingOptimizerRounding,
-    TrainingOptimizerSupport, TrainingPrecisionPolicy,
+    TrainingLossBackend, TrainingPrecisionPolicy,
 };
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
@@ -94,6 +91,10 @@ use kiln_model::forward::{
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
 use kiln_model::sampling::{greedy_sample, try_topk_on_device};
+use kiln_model::{
+    BackendCapabilityQueries, PagedKvCacheKt, TrainingOptimizerRequest, TrainingOptimizerRounding,
+    TrainingOptimizerSupport,
+};
 
 use crate::replay::{
     self, BaseModel, Lineage, OutcomeRecord, OutcomeStatus, ParentLora, ReplayKind, ReplayLog,
