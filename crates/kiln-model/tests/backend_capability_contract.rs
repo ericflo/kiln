@@ -4283,6 +4283,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "kiln-server prefix-cache state sizing should not keep a local backend/env policy table: {forbidden}"
         );
     }
+    let server_startup_policy_section = source_between(
+        &server_state_source,
+        "let backend_name = runner.backend_name();",
+        "let decode_batcher = if let Some(config) = decode_batcher_config {",
+    );
     for forbidden in [
         "backend_name == \"vulkan\"",
         "backend_name == \"metal\"",
