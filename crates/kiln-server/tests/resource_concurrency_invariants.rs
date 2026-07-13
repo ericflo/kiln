@@ -944,9 +944,9 @@ fn explicit_inference_runtime_cannot_auto_promote_cpu_to_vulkan() {
         "pub fn for_explicit_device_kt(",
         "pub fn training_precision_policy_for_device_kt(",
     );
-    assert!(
-        selector.contains("kiln_tensor::Device::Cpu => Ok(Arc::new(cpu::CpuBackend::new(device)))")
-    );
+    assert!(selector.contains("kiln_tensor::Device::Cpu"));
+    assert!(selector.contains("Arc::new(cpu::CpuBackend::new(device))"));
+    assert!(selector.contains("validate_explicit_backend_identity(device"));
 }
 
 #[test]
