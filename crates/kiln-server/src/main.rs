@@ -487,6 +487,18 @@ async fn main() -> Result<()> {
         config.training.no_grad_checkpoint,
     )
     .context("failed to resolve typed gradient-checkpoint policy")?;
+    let checkpoint_boundary_policy = config
+        .training
+        .checkpoint_boundary_policy()
+        .context("failed to resolve typed checkpoint-boundary policy")?;
+    tracing::info!(
+        recompute_mode = %checkpoint_boundary_policy.recompute_mode(),
+        recompute_threshold_tokens = checkpoint_boundary_policy.recompute_threshold_tokens(),
+        anchor_stride = ?checkpoint_boundary_policy.anchor_stride(),
+        cache_target_bytes = checkpoint_boundary_policy.cache_target_bytes(),
+        immutable_after_startup = true,
+        "SFT checkpoint-boundary policy resolved"
+    );
     kiln_tensor::DETERMINISTIC_CACHED
         .configure(config.server.deterministic.enabled())
         .context("failed to fix deterministic tensor behavior from startup configuration")?;
@@ -822,6 +834,7 @@ async fn main() -> Result<()> {
             Some(base_teacher_identity),
             config.server.serving_profile,
             gradient_checkpoint_policy,
+            checkpoint_boundary_policy,
         )
         .context("failed to initialize real server state")?;
         state
@@ -987,6 +1000,7 @@ async fn main() -> Result<()> {
         state.vram_info,
         gradient_checkpoint_policy,
     )
+    .with_checkpoint_boundary_policy(checkpoint_boundary_policy)
     .with_streaming_prefill_policy(state.streaming_prefill_runtime_config.execution_policy());
     state.checkpoint_interval = config.training.checkpoint_interval;
     state.training_webhook_url = config.training.webhook_url.clone();

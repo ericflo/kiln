@@ -3237,6 +3237,7 @@ impl AppState {
             base_teacher_identity,
             crate::config::ServingProfileSetting::default(),
             kiln_train::GradientCheckpointPolicy::Auto,
+            kiln_train::CheckpointBoundaryPolicy::default(),
         )
     }
 
@@ -3265,6 +3266,7 @@ impl AppState {
         base_teacher_identity: Option<Arc<kiln_train::TeacherIdentityV1>>,
         serving_profile: crate::config::ServingProfileSetting,
         gradient_checkpoint_policy: kiln_train::GradientCheckpointPolicy,
+        checkpoint_boundary_policy: kiln_train::CheckpointBoundaryPolicy,
     ) -> anyhow::Result<Self> {
         speculative_config.validate_for_model(&model_config)?;
         speculative_config.validate_for_serving()?;
@@ -4199,6 +4201,7 @@ impl AppState {
                 vram_info,
                 gradient_checkpoint_policy,
             )
+            .with_checkpoint_boundary_policy(checkpoint_boundary_policy)
             .with_streaming_prefill_policy(streaming_prefill_runtime_config.execution_policy()),
             model_weight_device,
             shutdown: crate::training_queue::new_shutdown_flag(),

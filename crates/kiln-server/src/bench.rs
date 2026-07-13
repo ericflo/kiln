@@ -1547,9 +1547,14 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_streaming_prefill_is_startup_policy_bound() {
+    fn benchmark_training_execution_policies_are_startup_bound() {
         let source = include_str!("bench.rs");
         assert!(source.contains("KilnConfig::load(args.config_path.as_deref())"));
+        assert!(source.contains(concat!("checkpoint_boundary_", "policy()")));
+        assert!(source.contains(concat!(
+            "with_checkpoint_boundary_",
+            "policy(checkpoint_boundary_policy)"
+        )));
         assert!(source.contains("with_streaming_prefill_policy(streaming_prefill)"));
         assert!(source.contains("streaming_prefill: Some(streaming_prefill)"));
         for compatibility_call in [
@@ -2961,6 +2966,18 @@ fn main() -> Result<()> {
         startup_config.training.no_grad_checkpoint,
     )
     .context("resolve benchmark gradient-checkpoint policy")?;
+    let checkpoint_boundary_policy = startup_config
+        .training
+        .checkpoint_boundary_policy()
+        .context("resolve benchmark checkpoint-boundary policy")?;
+    tracing::info!(
+        recompute_mode = %checkpoint_boundary_policy.recompute_mode(),
+        recompute_threshold_tokens = checkpoint_boundary_policy.recompute_threshold_tokens(),
+        anchor_stride = ?checkpoint_boundary_policy.anchor_stride(),
+        cache_target_bytes = checkpoint_boundary_policy.cache_target_bytes(),
+        immutable_after_startup = true,
+        "SFT checkpoint-boundary policy resolved"
+    );
     let model_path = Path::new(&args.model_path);
 
     // Compact banner — the rich box+GPU panel lives in `kiln serve`. Bench is
@@ -3000,6 +3017,7 @@ fn main() -> Result<()> {
         vram,
         gradient_checkpoint_policy,
     )
+    .with_checkpoint_boundary_policy(checkpoint_boundary_policy)
     .with_streaming_prefill_policy(streaming_prefill);
     kiln_train::ensure_memory_governor_for_runtime(device_kt, &bench_runtime)
         .context("failed to initialize benchmark memory governor")?;
