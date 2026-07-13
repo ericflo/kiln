@@ -5318,8 +5318,13 @@ async function loadPlaygroundThinkingBudgetDefaults(force = false) {
   try {
     await fetchRuntimeConfig(force);
   } catch (error) {
-    playgroundThinkingBudgetDefaults.loading = false;
-    playgroundThinkingBudgetDefaults.error = (error && error.message) || 'Server defaults unavailable';
+    playgroundThinkingBudgetDefaults = {
+      loaded: false,
+      loading: false,
+      error: (error && error.message) || 'Server defaults unavailable',
+      tokens: null,
+      timeMs: null,
+    };
     renderThinkingBudgetPreview();
   }
 }
