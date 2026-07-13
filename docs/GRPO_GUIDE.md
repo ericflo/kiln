@@ -352,7 +352,7 @@ The most powerful verifiable reward is "run the code and see if it works."
 Kiln's GRPO endpoint doesn't care how you produce the score, only that it's a
 float per completion.
 
-```python
+````python
 # code_reward.py
 import re
 import subprocess
@@ -422,7 +422,7 @@ requests.post(f"{KILN}/v1/train/grpo", json={
     "groups": [group],
     "config": {"lora_rank": 16, "output_name": "code-runs"},
 }).raise_for_status()
-```
+````
 
 For the trivial `add` task, a base Qwen3.5-4B already nails most rollouts.
 The interesting regime is harder problems (string parsing, recursion, small

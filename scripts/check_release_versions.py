@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 import shlex
 import sys
@@ -69,6 +70,7 @@ NO_VALUE_FLAGS = frozenset({
 })
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 DOCS_SITE = ROOT / "docs/site"
+DOCS_MANIFEST = DOCS_SITE / "docs-manifest.json"
 DOCS_SITE_URL_ATTR_RE = re.compile(r"\b(?:href|src)\s*=\s*(['\"])(.*?)\1", re.IGNORECASE | re.DOTALL)
 DOCS_SITE_JS_URL_RE = re.compile(r"\b(?:cast|script)\s*:\s*(['\"])(.*?)\1")
 IGNORED_LOCAL_URL_PREFIXES = ("mailto:", "tel:", "javascript:", "data:")
@@ -446,8 +448,32 @@ def is_relative_to(path: Path, base: Path) -> bool:
     return True
 
 
-def check_docs_site_local_links() -> list[str]:
+def generated_docs_site_paths() -> tuple[set[Path], list[str]]:
+    """Return routes owned by the Markdown generator, before `_site` exists."""
+    try:
+        manifest = json.loads(DOCS_MANIFEST.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        return set(), [f"{rel(DOCS_MANIFEST)}: cannot load generated-route manifest: {error}"]
+
+    documents = manifest.get("documents") if isinstance(manifest, dict) else None
+    if not isinstance(documents, list):
+        return set(), [f"{rel(DOCS_MANIFEST)}: documents must be a list"]
+
+    paths = {(DOCS_SITE / "docs/index.html").resolve()}
     errors: list[str] = []
+    for index, document in enumerate(documents):
+        slug = document.get("slug") if isinstance(document, dict) else None
+        if not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
+            errors.append(
+                f"{rel(DOCS_MANIFEST)}: documents[{index}].slug is not a valid generated route"
+            )
+            continue
+        paths.add((DOCS_SITE / "docs" / slug / "index.html").resolve())
+    return paths, errors
+
+
+def check_docs_site_local_links() -> list[str]:
+    generated_paths, errors = generated_docs_site_paths()
     docs_site_root = DOCS_SITE.resolve()
     for path in docs_site_html_pages():
         text = path.read_text()
@@ -467,7 +493,7 @@ def check_docs_site_local_links() -> list[str]:
                     f"{url!r} resolves to {resolved}"
                 )
                 continue
-            if not resolved.exists():
+            if not resolved.exists() and resolved not in generated_paths:
                 errors.append(
                     f"{rel(path)}:{line}: broken docs site local link {url!r}: "
                     f"missing {rel(resolved)}"
@@ -539,7 +565,7 @@ def main() -> int:
     print(
         "release version drift check passed: "
         f"server examples avoid pinned {SERVER_VERSION}; desktop pins match {expected_desktop_tag}; "
-        "CLI examples match cli.rs; docs/site local links resolve"
+        "CLI examples match cli.rs; docs/site local and manifest-generated links resolve"
     )
     return 0
 

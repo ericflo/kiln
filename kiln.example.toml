@@ -1,5 +1,7 @@
 # Kiln configuration — all values shown are defaults.
-# Environment variables (KILN_*) override any value set here.
+# See docs/CONFIGURATION.md for the complete field, validation, precedence,
+# source-attribution, and environment-override reference. Only aliases listed
+# there are public startup overrides; arbitrary KILN_* names are not config.
 #
 # Config file resolution order:
 #   1. --config <path> CLI argument
@@ -36,6 +38,9 @@ host = "127.0.0.1"                    # Kiln has no built-in auth. Set "0.0.0.0"
 port = 8420
 request_timeout_secs = 600
 shutdown_timeout_secs = 5
+chat_performance_metadata = false       # Include per-request timing metadata in chat responses.
+chat_config_hash_metadata = false       # Include effective config hashes in chat responses.
+slow_request_warn_secs = 30             # Structured warning threshold; 0 disables warnings.
 # http_send_buffer_bytes = 4096         # Optional per-connection SO_SNDBUF request, useful for
                                         # deterministic slow-client/backpressure testing. The OS
                                         # may round it, and Linux reports 2x for bookkeeping. Kiln
@@ -140,6 +145,9 @@ inference_memory_fraction = 0.7       # Fraction of VRAM for inference (rest for
 # training_memory_gb = 4.0           # Override auto-calculated training budget
 # kv_cache_fp8 = true                # FP8 (E4M3) KV cache quantization — halves memory, ~2x longer context
                                       # Also settable via KILN_KV_CACHE_FP8=1 env var
+cuda_graphs = true                    # CUDA graph capture/replay policy. Non-CUDA backends
+                                      # resolve their graph policy separately while config
+                                      # consolidation is in progress.
 
 [teachers]
 # Remote API credentials are server-owned handles. A registration submits only
@@ -159,6 +167,9 @@ inference_memory_fraction = 0.7       # Fraction of VRAM for inference (rest for
 # grad_checkpoint_segments = 4       # Segments for gradient checkpointing
 no_grad_checkpoint = false
 # checkpoint_interval = 50           # Save adapter every N training steps
+max_queued_jobs = 32                  # Admission bound for queued/running training jobs.
+max_tracked_jobs = 1024               # In-memory bound including terminal job records.
+tracked_job_ttl_secs = 604800         # Retain terminal records for seven days.
 #
 # Optimizer: the default is Muon (momentum-orthogonalized SGD) — it
 # converges LoRA fine-tunes in fewer steps than AdamW at roughly half the
@@ -198,32 +209,27 @@ enabled = true                        # Reuse KV cache blocks for shared prompt 
 enabled = false                       # Self-speculative decoding for direct non-streaming
                                       # generation. Direct SSE streams temporarily use settled
                                       # single-token decode even when this is enabled.
+method = "off"                         # off, skip_layer, or mtp. enabled=true with off retains
+                                      # the legacy skip_layer fallback.
 num_speculative_tokens = 256          # Upper bound on drafted tokens per step (the paged
                                       # skip-layer draft adapts within this budget)
 draft_layers = 8                      # First N layers used as draft model
                                       # Also settable via KILN_SPEC_ENABLED, KILN_SPEC_NUM_TOKENS,
                                       # KILN_SPEC_DRAFT_LAYERS env vars
 
+[streaming_prefill]
+enabled = false                       # Typed long-prefill policy. Runtime propagation into all
+                                      # model/training paths is still being consolidated; until
+                                      # that lands, lower layers may retain backend auto-policy.
+tile_tokens = 8192                    # Positive multiple of 64.
+last_token_lm_head = true             # Compute only the final-token LM head for tiled prefill.
+
 [eval]
-# Root directory for eval suites, datasets, and judgment stores.
-# Defaults to "<state_dir>/eval" when omitted. Subdirectories:
-#   <root>/suites/       — versioned EvalSuite JSON (SuiteRegistry)
-#   <root>/datasets/     — uploaded SFT/GRPO JSONL + manifest.json
-#   <root>/judgments/    — A/B preference rows + manifest (judge LoRA flywheel)
-# Override via KILN_EVAL_ROOT.
-# root = "/var/kiln/eval"
-
-# Cap on terminal eval jobs retained in memory. Older entries past
-# `tracked_job_ttl` (shared with training) are GC'd by the eval worker so
-# long-running servers don't grow `state.eval_jobs` unbounded.
-# max_tracked_eval_jobs = 256
-
-# Default generation parameters used when a suite or request does not override.
-# Identical knobs to the request-level `generation` block on /v1/eval/run.
-# [eval.generation]
-# temperature = 0.0
-# max_tokens = 512
-# seed = 42
+# Directory containing named suite JSON. Omit for <adapter_dir>/.eval/suites.
+# eval_dir = "/var/lib/kiln/eval/suites"
+max_queued_jobs = 32                  # Admission bound for queued/running eval jobs.
+max_tracked_jobs = 1024               # In-memory bound including terminal eval records.
+# webhook_url = "https://example.com/eval-hook" # Optional terminal-state callback.
 
 # §10.6 self-improvement flywheel scheduler. Omit the section (or the
 # interval) to keep the weekly loop manual (`kiln self-improve`).

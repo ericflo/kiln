@@ -11,7 +11,7 @@ This guide gets you from a fresh machine to your first Kiln inference. Stop afte
 | **Container** | You prefer the prebuilt GHCR image and already run NVIDIA GPU workloads with Docker. | Pull `ghcr.io/ericflo/kiln-server:latest`, mount your local `Qwen/Qwen3.5-4B` directory, then follow [Running with Docker](#running-with-docker). |
 | **Source / CLI** | You are contributing, scripting, or want to build the binary yourself. | Optionally build `kiln` from source, then download `Qwen/Qwen3.5-4B`, start `kiln serve`, and continue through steps 2-5. |
 
-After first inference, continue to [SFT training](#6-submit-sft-training), the [GRPO guide](docs/GRPO_GUIDE.md), [evaluating an adapter](#10-evaluate-your-adapter), [advanced API examples](#9-advanced-api-examples), or [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html).
+After first inference, continue to [SFT training](#6-submit-sft-training), the [GRPO guide](docs/GRPO_GUIDE.md), [evaluating an adapter](#10-evaluate-your-adapter), [advanced API examples](#9-advanced-api-examples), the [complete documentation](https://ericflo.github.io/kiln/docs/), or [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html).
 
 ## Prerequisites
 
@@ -1006,7 +1006,7 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 
 ## Configuration
 
-Kiln uses a TOML config file. See [`kiln.example.toml`](kiln.example.toml) for all options. The built-in server, CLI, and desktop defaults are checked against the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json).
+Kiln uses a typed TOML config file. The complete [Configuration Reference](docs/CONFIGURATION.md) documents every field, exact default, validation rule, environment override, and known migration limitation. Use [`kiln.example.toml`](kiln.example.toml) as a deployable starting point. The built-in server, CLI, and desktop defaults are checked against the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json).
 
 Key settings:
 

@@ -1,0 +1,17 @@
+{
+  "name": "kiln-docs-site-builder",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "markdown-it": "14.3.0",
+    "puppeteer-core": "24.31.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

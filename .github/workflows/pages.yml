@@ -4,14 +4,20 @@ on:
   push:
     branches: [main]
     paths:
-      - 'docs/site/**'
+      - '*.md'
+      - 'docs/**'
       - 'assets/**'
-      - 'README.md'
-      - 'QUICKSTART.md'
       - 'contracts/thinking-budget-v1.schema.json'
       - 'contracts/thinking-budget-v1.conformance.json'
+      - 'contracts/runtime-defaults-v1.json'
+      - 'crates/kiln-server/src/ui/index.html'
+      - 'desktop/ui/dashboard.html'
+      - 'desktop/ui/settings.html'
+      - 'kiln.example.toml'
       - 'scripts/check_docs_site_smoke.mjs'
+      - 'scripts/check_thinking_budget_contract.mjs'
       - 'scripts/check_release_versions.py'
+      - 'scripts/docs-site/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -30,6 +36,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: actions/configure-pages@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: scripts/docs-site/package-lock.json
+      - name: Install pinned documentation tooling
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "true"
+          PUPPETEER_SKIP_CHROME_DOWNLOAD: "true"
+        run: npm ci --prefix scripts/docs-site
       - name: Check thinking-budget schema and documentation
         run: node scripts/check_thinking_budget_contract.mjs
       - name: Check release version drift
@@ -43,18 +59,17 @@ jobs:
           fi
           echo "CHROME_BIN=$CHROME_BIN" >> "$GITHUB_ENV"
           echo "PUPPETEER_EXECUTABLE_PATH=$CHROME_BIN" >> "$GITHUB_ENV"
-      - name: Check docs site mobile smoke
+      - name: Test and build documentation
+        run: |
+          npm test --prefix scripts/docs-site
+          node scripts/docs-site/build.mjs --out _site
+      - name: Check assembled documentation site
         env:
           PUPPETEER_SKIP_DOWNLOAD: "true"
-        run: npx --yes --package puppeteer@latest node scripts/check_docs_site_smoke.mjs
-      - name: Assemble site
-        run: |
-          mkdir -p _site
-          cp -r docs/site/. _site/
-          mkdir -p _site/assets
-          cp assets/logo.png _site/assets/logo.png
-          mkdir -p _site/contracts
-          cp contracts/thinking-budget-v1.schema.json contracts/thinking-budget-v1.conformance.json _site/contracts/
+          PUPPETEER_SKIP_CHROME_DOWNLOAD: "true"
+          KILN_DOCS_SITE_ROOT: _site
+          KILN_DOCS_REQUIRE_GENERATED: "true"
+        run: node scripts/check_docs_site_smoke.mjs
       - uses: actions/upload-pages-artifact@v5
         with:
           path: _site

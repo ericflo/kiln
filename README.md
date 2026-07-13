@@ -11,6 +11,7 @@
 
 <p align="center">
   <a href="https://ericflo.github.io/kiln/">Website</a> &middot;
+  <a href="https://ericflo.github.io/kiln/docs/">Documentation</a> &middot;
   <a href="https://ericflo.github.io/kiln/demo/">Demo</a> &middot;
   <a href="QUICKSTART.md">Quickstart</a> &middot;
   <a href="https://ericflo.github.io/kiln/cli.html">CLI Guide</a> &middot;
@@ -20,7 +21,7 @@
   <a href="https://ericflo.github.io/kiln/troubleshooting.html">Troubleshooting</a> &middot;
   <a href="ARCHITECTURE.md">Architecture</a> &middot;
   <a href="BENCHMARKS.md">Benchmarks</a> &middot;
-  <a href="kiln.example.toml">Configuration</a> &middot;
+  <a href="docs/CONFIGURATION.md">Configuration</a> &middot;
   <a href="CHANGELOG.md">Changelog</a> &middot;
   <a href="CONTRIBUTING.md">Contributing</a> &middot;
   <a href="LICENSE">License</a>
@@ -844,7 +845,7 @@ crates/
 
 ## Configuration
 
-Kiln uses a TOML config file. Environment variables override config values. Unknown TOML fields, malformed environment values, non-Unicode inputs, and invalid semantic values stop startup and identify the rejected field or variable and value; Kiln never silently retains a default for a malformed override. See [`kiln.example.toml`](kiln.example.toml) for all options. The server, CLI, and desktop share the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json), including the local port. The default `stable` GPU ownership contract and the restart-only maintenance workflow are documented in [Serving Profiles](docs/SERVING_PROFILES.md).
+Kiln uses a typed TOML config file. Environment overrides are resolved during startup. Unknown TOML fields, malformed environment values, non-Unicode inputs, and invalid semantic values stop startup and identify the rejected field or variable and value; Kiln never silently retains a default for a malformed override. See the complete [Configuration Reference](docs/CONFIGURATION.md) for every field, default, validation rule, and currently supported override, and use [`kiln.example.toml`](kiln.example.toml) as a deployable starting point. The server, CLI, and desktop share the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json), including the local port. The default `stable` GPU ownership contract and the restart-only maintenance workflow are documented in [Serving Profiles](docs/SERVING_PROFILES.md).
 
 | Setting | Env Var | Default | Description |
 |---|---|---|---|

@@ -1,29 +1,38 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, extname, relative, sep, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import process from 'node:process';
 
 const repoRoot = resolve(import.meta.dirname, '..');
+const configuredSiteRoot = process.env.KILN_DOCS_SITE_ROOT?.trim() || 'docs/site';
+const siteRoot = resolve(repoRoot, configuredSiteRoot);
+const generatedDocsRequired = process.env.KILN_DOCS_REQUIRE_GENERATED === 'true';
+const staticOnly = process.env.KILN_DOCS_SMOKE_STATIC_ONLY === 'true';
 const mobileViewport = { width: 390, height: 844, deviceScaleFactor: 2, isMobile: true };
+const desktopViewport = { width: 1440, height: 900, deviceScaleFactor: 1 };
 const mobileOverflowTolerancePx = 2;
 
+function publishedPath(relativePath) {
+  const path = relative(repoRoot, resolve(siteRoot, relativePath)).split(sep).join('/');
+  return relativePath.endsWith('/') && !path.endsWith('/') ? `${path}/` : path;
+}
+
 const pages = [
-  { label: 'Home', path: 'docs/site/index.html', currentLabel: null },
-  { label: 'Quickstart', path: 'docs/site/quickstart.html', currentLabel: 'Quickstart' },
-  { label: 'GRPO Guide', path: 'docs/site/grpo.html', currentLabel: 'GRPO Guide' },
-  { label: 'API Reference', path: 'docs/site/api.html', currentLabel: 'API Reference' },
-  { label: 'CLI Reference', path: 'docs/site/cli.html', currentLabel: 'CLI Reference' },
-  { label: 'Troubleshooting', path: 'docs/site/troubleshooting.html', currentLabel: 'Troubleshooting' },
-  { label: 'Architecture', path: 'docs/site/architecture.html', currentLabel: 'Architecture' },
-  { label: 'Demo', path: 'docs/site/demo/index.html', currentLabel: 'Demo' },
+  { label: 'Home', path: publishedPath('index.html'), currentLabel: null },
+  { label: 'Quickstart', path: publishedPath('quickstart.html'), currentLabel: 'Quickstart' },
+  { label: 'GRPO Guide', path: publishedPath('grpo.html'), currentLabel: 'GRPO Guide' },
+  { label: 'API Reference', path: publishedPath('api.html'), currentLabel: 'API Reference' },
+  { label: 'CLI Reference', path: publishedPath('cli.html'), currentLabel: 'CLI Reference' },
+  { label: 'Troubleshooting', path: publishedPath('troubleshooting.html'), currentLabel: 'Troubleshooting' },
+  { label: 'Architecture', path: publishedPath('architecture.html'), currentLabel: 'Architecture' },
+  { label: 'Demo', path: publishedPath('demo/index.html'), currentLabel: 'Demo' },
 ];
 
 const expectedNavLabels = [
   'Quickstart',
+  'Documentation',
   'GRPO Guide',
   'API Reference',
   'CLI Reference',
@@ -33,19 +42,21 @@ const expectedNavLabels = [
 ];
 
 const expectedFooterLinks = [
-  { label: 'Quickstart', localPath: 'docs/site/quickstart.html' },
-  { label: 'GRPO Guide', localPath: 'docs/site/grpo.html' },
-  { label: 'API Reference', localPath: 'docs/site/api.html' },
-  { label: 'CLI Reference', localPath: 'docs/site/cli.html' },
-  { label: 'Demo', localPath: 'docs/site/demo/' },
-  { label: 'Troubleshooting', localPath: 'docs/site/troubleshooting.html' },
-  { label: 'Architecture', localPath: 'docs/site/architecture.html' },
+  { label: 'Documentation', localPath: publishedPath('docs/') },
+  { label: 'Quickstart', localPath: publishedPath('quickstart.html') },
+  { label: 'GRPO Guide', localPath: publishedPath('grpo.html') },
+  { label: 'API Reference', localPath: publishedPath('api.html') },
+  { label: 'CLI Reference', localPath: publishedPath('cli.html') },
+  { label: 'Demo', localPath: publishedPath('demo/') },
+  { label: 'Troubleshooting', localPath: publishedPath('troubleshooting.html') },
+  { label: 'Architecture', localPath: publishedPath('architecture.html') },
   { label: 'Changelog', href: 'https://github.com/ericflo/kiln/blob/main/CHANGELOG.md' },
   { label: 'License', href: 'https://github.com/ericflo/kiln/blob/main/LICENSE' },
 ];
 
 const expectedEmbeddedUiHelpLinks = [
   { label: 'Quickstart', href: 'https://ericflo.github.io/kiln/quickstart.html' },
+  { label: 'Documentation', href: 'https://ericflo.github.io/kiln/docs/' },
   { label: 'GRPO Guide', href: 'https://ericflo.github.io/kiln/grpo.html' },
   { label: 'API Reference', href: 'https://ericflo.github.io/kiln/api.html' },
   { label: 'CLI Reference', href: 'https://ericflo.github.io/kiln/cli.html' },
@@ -66,12 +77,29 @@ const expectedEmbeddedUiAccessibleControls = [
   { selector: '#merge-output-name', labelTerms: ['output name'], descriptionTerms: ['saved adapter name', 'path-safe'] },
 ];
 
-const demoPagePath = 'docs/site/demo/index.html';
-const quickstartPagePath = 'docs/site/quickstart.html';
-const apiPagePath = 'docs/site/api.html';
-const cliPagePath = 'docs/site/cli.html';
-const architecturePagePath = 'docs/site/architecture.html';
-const troubleshootingPagePath = 'docs/site/troubleshooting.html';
+const demoPagePath = publishedPath('demo/index.html');
+const quickstartPagePath = publishedPath('quickstart.html');
+const apiPagePath = publishedPath('api.html');
+const cliPagePath = publishedPath('cli.html');
+const architecturePagePath = publishedPath('architecture.html');
+const troubleshootingPagePath = publishedPath('troubleshooting.html');
+
+const generatedDocsPages = [
+  {
+    label: 'Documentation hub',
+    path: publishedPath('docs/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/',
+    h1: 'Complete Kiln documentation',
+    terms: ['Configuration Reference', 'Thinking Budget Contract', 'CI and Local Qualification Policy'],
+  },
+  {
+    label: 'Configuration Reference',
+    path: publishedPath('docs/configuration/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/configuration/',
+    h1: 'Configuration Reference',
+    terms: ['KILN_<SECTION>_<FIELD>', 'Strict failure behavior', 'KILN_SERVER_HOST'],
+  },
+];
 
 const expectedQuickstartSections = [
   { label: 'Desktop App path', terms: ['desktop app', 'recommended'] },
@@ -526,6 +554,20 @@ function validateEmbeddedUiHelpLinks() {
   });
   if (missingLinks.length > 0) {
     fail(`crates/kiln-server/src/ui/index.html: embedded UI help nav missing links: ${missingLinks.map(({ label }) => label).join(', ')}`);
+  }
+}
+
+function validateDesktopDocumentationLinks() {
+  const expectedLinks = [
+    'desktop/ui/dashboard.html',
+    'desktop/ui/settings.html',
+  ];
+  const documentationLink = /<a\b[^>]*href="https:\/\/ericflo\.github\.io\/kiln\/docs\/"[^>]*>\s*Documentation\s*<\/a>/i;
+  const missing = expectedLinks.filter((sourcePath) => (
+    !documentationLink.test(readFileSync(resolve(repoRoot, sourcePath), 'utf8'))
+  ));
+  if (missing.length > 0) {
+    fail(`desktop UI surfaces missing the Documentation entry point: ${missing.join(', ')}`);
   }
 }
 
@@ -1207,7 +1249,6 @@ function hrefFragment(href) {
 }
 
 function docsSiteHtmlPaths() {
-  const docsSiteRoot = resolve(repoRoot, 'docs/site');
   const htmlPaths = [];
 
   function visit(directoryPath) {
@@ -1222,7 +1263,7 @@ function docsSiteHtmlPaths() {
     }
   }
 
-  visit(docsSiteRoot);
+  visit(siteRoot);
   return htmlPaths;
 }
 
@@ -1246,7 +1287,7 @@ function resolveLocalHref(sourceHtmlPath, href) {
   if (hrefPath === '') return resolve(repoRoot, sourceHtmlPath);
 
   const resolvedPath = hrefPath.startsWith('/')
-    ? resolve(repoRoot, `.${hrefPath}`)
+    ? resolve(siteRoot, `.${hrefPath}`)
     : resolve(sourceDir, hrefPath);
 
   if (hrefPath.endsWith('/')) {
@@ -1261,7 +1302,7 @@ function resolveLocalHref(sourceHtmlPath, href) {
 }
 
 function expectedCanonicalHref(localPath) {
-  const siteRelativePath = localPath.replace(/^docs\/site\//, '');
+  const siteRelativePath = relative(siteRoot, resolve(repoRoot, localPath)).split(sep).join('/');
   if (siteRelativePath === 'index.html') return 'https://ericflo.github.io/kiln/';
   if (siteRelativePath === 'demo/index.html') return 'https://ericflo.github.io/kiln/demo/';
   return `https://ericflo.github.io/kiln/${siteRelativePath}`;
@@ -1638,40 +1679,54 @@ function validateDemoReadmeInventory() {
   }
 }
 
-async function loadPuppeteer() {
-  try {
-    const module = await import('puppeteer');
-    return module.default || module;
-  } catch (error) {
-    if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
+function validateGeneratedDocsArtifacts() {
+  const requiredPaths = [
+    publishedPath('docs/index.html'),
+    publishedPath('docs/configuration/index.html'),
+    publishedPath('docs/search-index.json'),
+    publishedPath('css/docs.css'),
+    publishedPath('js/docs.js'),
+    publishedPath('sitemap.xml'),
+  ];
+  const missing = requiredPaths.filter((path) => !existsSync(resolve(repoRoot, path)));
+  if (missing.length > 0) {
+    if (!generatedDocsRequired) return false;
+    fail(`generated documentation artifact is incomplete: ${missing.join(', ')}`);
   }
 
-  const installDir = '/tmp/kiln-docs-site-smoke-puppeteer';
-  const packageJson = join(installDir, 'package.json');
-  const puppeteerPackageJson = join(installDir, 'node_modules/puppeteer/package.json');
-  await mkdir(installDir, { recursive: true });
-  if (!existsSync(packageJson)) {
-    await writeFile(packageJson, '{"private":true,"type":"commonjs"}\n');
+  let searchIndex;
+  try {
+    searchIndex = JSON.parse(readFileSync(resolve(siteRoot, 'docs/search-index.json'), 'utf8'));
+  } catch (error) {
+    fail(`generated documentation search index is invalid JSON: ${error.message}`);
   }
-  if (!existsSync(puppeteerPackageJson)) {
-    execFileSync('npm', ['install', '--silent', '--no-save', 'puppeteer@latest'], {
-      cwd: installDir,
-      stdio: 'inherit',
-      env: { ...process.env, PUPPETEER_SKIP_DOWNLOAD: 'true' },
-    });
+  if (!Array.isArray(searchIndex) || searchIndex.length === 0) {
+    fail('generated documentation search index must contain published documents');
   }
+  const configuration = searchIndex.find((entry) => entry?.slug === 'configuration');
+  if (!configuration || configuration.title !== 'Configuration Reference') {
+    fail('generated documentation search index is missing the Configuration Reference');
+  }
+
+  const sitemap = readFileSync(resolve(siteRoot, 'sitemap.xml'), 'utf8');
+  for (const url of generatedDocsPages.map((page) => page.canonical)) {
+    if (!sitemap.includes(`<loc>${url}</loc>`)) {
+      fail(`generated sitemap is missing ${url}`);
+    }
+  }
+  return true;
+}
+
+async function loadPuppeteer() {
+  const packageJson = resolve(repoRoot, 'scripts/docs-site/package.json');
   const require = createRequire(packageJson);
   try {
-    return require('puppeteer');
+    const module = require('puppeteer-core');
+    return module.default || module;
   } catch (error) {
-    if (error?.code !== 'ERR_REQUIRE_ESM') throw error;
+    if (error?.code !== 'MODULE_NOT_FOUND') throw error;
+    fail('Missing pinned puppeteer-core dependency; run npm ci --prefix scripts/docs-site.');
   }
-
-  const module = await import(pathToFileURL(join(
-    installDir,
-    'node_modules/puppeteer/lib/puppeteer/puppeteer.js',
-  )).href);
-  return module.default || module;
 }
 
 function chromiumPath() {
@@ -1744,6 +1799,91 @@ function formatLikelyOverflowingElements(elements) {
     .join('; ');
 }
 
+async function validateGeneratedDocsBrowser(browser) {
+  const viewports = [
+    { label: 'desktop', value: desktopViewport },
+    { label: 'mobile', value: mobileViewport },
+  ];
+
+  for (const viewport of viewports) {
+    const page = await browser.newPage();
+    await page.setViewport(viewport.value);
+    try {
+      for (const expected of generatedDocsPages) {
+        await page.goto(pathToFileURL(resolve(repoRoot, expected.path)).href, {
+          waitUntil: 'load',
+          timeout: 10000,
+        });
+        const result = await page.evaluate((pageSpec) => {
+          const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
+          const bodyText = normalize(document.body.innerText);
+          const h1 = normalize(document.querySelector('h1')?.textContent);
+          const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '';
+          const logo = document.querySelector('.docs-brand img');
+          const configurationLink = Array.from(document.querySelectorAll('main a[href]'))
+            .find((link) => normalize(link.textContent).includes('Configuration Reference'));
+          const current = document.querySelector('.docs-sidebar a[aria-current="page"]');
+
+          return {
+            bodyText,
+            h1,
+            canonical,
+            hasMain: Boolean(document.querySelector('main#main-content')),
+            hasTopbar: Boolean(document.querySelector('.docs-topbar')),
+            hasSidebar: Boolean(document.querySelector('aside.docs-sidebar')),
+            hasSearch: Boolean(document.querySelector('[data-docs-search] input[type="search"]')),
+            hasStylesheet: Array.from(document.styleSheets)
+              .some((stylesheet) => stylesheet.href?.endsWith('/css/docs.css')),
+            logoLoaded: Boolean(logo?.complete && logo.naturalWidth > 0 && logo.naturalHeight > 0),
+            configurationHref: configurationLink?.getAttribute('href') || '',
+            currentText: normalize(current?.textContent),
+            hasConfigTable: Boolean(document.querySelector('.docs-table-scroll table')),
+            hasMobileMenu: Boolean(document.querySelector('button[data-docs-menu]')),
+            scrollWidth: document.documentElement.scrollWidth,
+            clientWidth: document.documentElement.clientWidth,
+            missingTerms: pageSpec.terms.filter((term) => !bodyText.includes(term)),
+          };
+        }, expected);
+
+        if (result.h1 !== expected.h1) {
+          fail(`${expected.path}: ${viewport.label} h1 must be ${expected.h1}, got ${result.h1 || '(missing)'}`);
+        }
+        if (result.canonical !== expected.canonical) {
+          fail(`${expected.path}: canonical href must be ${expected.canonical}, got ${result.canonical || '(missing)'}`);
+        }
+        if (!result.hasMain || !result.hasTopbar || !result.hasSidebar || !result.hasSearch) {
+          fail(`${expected.path}: ${viewport.label} generated documentation shell is incomplete`);
+        }
+        if (!result.hasStylesheet || !result.logoLoaded) {
+          fail(`${expected.path}: ${viewport.label} generated documentation assets did not load`);
+        }
+        if (!result.hasMobileMenu) {
+          fail(`${expected.path}: generated documentation navigation is missing its menu control`);
+        }
+        if (result.missingTerms.length > 0) {
+          fail(`${expected.path}: ${viewport.label} content missing terms: ${result.missingTerms.join(', ')}`);
+        }
+        if (result.scrollWidth > result.clientWidth + mobileOverflowTolerancePx) {
+          fail(`${expected.path}: ${viewport.label} horizontal overflow: scrollWidth ${result.scrollWidth} > clientWidth ${result.clientWidth} + tolerance ${mobileOverflowTolerancePx}`);
+        }
+        if (expected.label === 'Documentation hub' && result.configurationHref !== './configuration/') {
+          fail(`${expected.path}: documentation hub must link to ./configuration/`);
+        }
+        if (expected.label === 'Configuration Reference') {
+          if (result.currentText !== 'Configuration Reference') {
+            fail(`${expected.path}: configuration sidebar current-page state is missing`);
+          }
+          if (!result.hasConfigTable) {
+            fail(`${expected.path}: configuration reference is missing its responsive field table`);
+          }
+        }
+      }
+    } finally {
+      await page.close();
+    }
+  }
+}
+
 async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
@@ -1760,18 +1900,22 @@ async function runSmoke() {
   validateQuickstartServerBinaryPath();
   validateQuickstartCliReference();
   validateEmbeddedUiHelpLinks();
+  validateDesktopDocumentationLinks();
   validateCliHelpOnboardingCopy();
   validateLaunchSentinel();
   validateDemoReadmeInventory();
+  const hasGeneratedDocs = validateGeneratedDocsArtifacts();
   validateDocsSiteCanonicalLinks();
   validateDocsSiteLocalLinks();
   validateMarkdownLocalLinks();
+  if (staticOnly) return;
 
   const puppeteer = await loadPuppeteer();
   const browser = await launchChromiumWithRetry(puppeteer);
 
   try {
     await validateEmbeddedUiControlAccessibleNames(browser);
+    if (hasGeneratedDocs) await validateGeneratedDocsBrowser(browser);
 
     const page = await browser.newPage();
     await page.setViewport(mobileViewport);

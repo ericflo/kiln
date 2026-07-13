@@ -1,0 +1,255 @@
+{
+  "version": 1,
+  "site": {
+    "title": "Kiln Documentation",
+    "base_url": "https://ericflo.github.io/kiln",
+    "repository_url": "https://github.com/ericflo/kiln",
+    "product_guides": [
+      {
+        "title": "Quickstart",
+        "href": "../quickstart.html",
+        "description": "Install Kiln, start a model, and send the first request."
+      },
+      {
+        "title": "API Reference",
+        "href": "../api.html",
+        "description": "Serving, training, eval, adapter, and diagnostics endpoints."
+      },
+      {
+        "title": "CLI Reference",
+        "href": "../cli.html",
+        "description": "Terminal workflows for serving, training, evals, and adapters."
+      },
+      {
+        "title": "Troubleshooting",
+        "href": "../troubleshooting.html",
+        "description": "Diagnose model loading, backend, health, timeout, and adapter problems."
+      },
+      {
+        "title": "Demo",
+        "href": "../demo/",
+        "description": "Reproducible serving and online-learning walkthroughs."
+      }
+    ]
+  },
+  "sections": [
+    { "id": "start", "title": "Start Here" },
+    { "id": "serving", "title": "Serving" },
+    { "id": "training", "title": "Training and Evals" },
+    { "id": "interop", "title": "Interoperability" },
+    { "id": "integrity", "title": "Integrity and Artifacts" },
+    { "id": "operations", "title": "Operations and Development" }
+  ],
+  "documents": [
+    {
+      "source": "README.md",
+      "slug": "overview",
+      "title": "Kiln Overview",
+      "section": "start",
+      "description": "Product scope, supported workflows, installation paths, and operational model."
+    },
+    {
+      "source": "QUICKSTART.md",
+      "slug": "quickstart-reference",
+      "title": "Complete Quickstart",
+      "section": "start",
+      "description": "The complete installation, serving, training, adapter, Docker, and systemd walkthrough."
+    },
+    {
+      "source": "docs/CONFIGURATION.md",
+      "slug": "configuration",
+      "title": "Configuration Reference",
+      "section": "start",
+      "description": "Every supported TOML field and environment override, with defaults and validation rules."
+    },
+    {
+      "source": "CHANGELOG.md",
+      "slug": "changelog",
+      "title": "Changelog",
+      "section": "start",
+      "description": "Release-by-release product, compatibility, and behavior changes."
+    },
+    {
+      "source": "SECURITY.md",
+      "slug": "security",
+      "title": "Security Policy",
+      "section": "start",
+      "description": "Supported versions, vulnerability reporting, and deployment boundaries."
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "slug": "architecture-reference",
+      "title": "Architecture Deep Dive",
+      "section": "serving",
+      "description": "The complete server, batching, model, memory, training, and backend architecture."
+    },
+    {
+      "source": "BENCHMARKS.md",
+      "slug": "benchmarks",
+      "title": "Benchmarks",
+      "section": "serving",
+      "description": "Serving acceptance methodology, reproducibility requirements, and measured results."
+    },
+    {
+      "source": "docs/SERVING_PROFILES.md",
+      "slug": "serving-profiles",
+      "title": "Serving Profiles",
+      "section": "serving",
+      "description": "Stable, experimental, and maintenance GPU ownership contracts."
+    },
+    {
+      "source": "docs/THINKING_BUDGET_CONTRACT.md",
+      "slug": "thinking-budgets",
+      "title": "Thinking Budget Contract",
+      "section": "serving",
+      "description": "Token and wall-clock reasoning limits across APIs, streaming, and clients."
+    },
+    {
+      "source": "docs/GRPO_GUIDE.md",
+      "slug": "grpo",
+      "title": "GRPO Training Guide",
+      "section": "training",
+      "description": "Generate, score, train, inspect, resume, and audit GRPO runs."
+    },
+    {
+      "source": "docs/EVAL_GUIDE.md",
+      "slug": "evals",
+      "title": "Eval Guide",
+      "section": "training",
+      "description": "Suites, scorers, comparisons, datasets, post-training gates, and judge training."
+    },
+    {
+      "source": "docs/ECHO_GUIDE.md",
+      "slug": "echo",
+      "title": "ECHO Guide",
+      "section": "training",
+      "description": "Environment-feedback training requests, diagnostics, and operating modes."
+    },
+    {
+      "source": "docs/NATIVE_SFT_PROFILE.md",
+      "slug": "native-sft-profile",
+      "title": "Native SFT Profile",
+      "section": "training",
+      "description": "The fixed native online-LoRA update and precision contract."
+    },
+    {
+      "source": "docs/sft-ingestion.md",
+      "slug": "sft-ingestion",
+      "title": "SFT Ingestion and Row Identity",
+      "section": "training",
+      "description": "Row admission, invalid-input policy, content identity, and receipts."
+    },
+    {
+      "source": "docs/sft-tokenization.md",
+      "slug": "sft-tokenization",
+      "title": "SFT Tokenization and Loss",
+      "section": "training",
+      "description": "Canonical chat rendering, assistant-only labels, and parity fixtures."
+    },
+    {
+      "source": "docs/training-checkpoints.md",
+      "slug": "training-checkpoints",
+      "title": "Native Training Checkpoints",
+      "section": "training",
+      "description": "Exact checkpoint publication, validation, cancellation, and resume semantics."
+    },
+    {
+      "source": "docs/HF_TRL_INTEROP.md",
+      "slug": "hf-trl-interoperability",
+      "title": "HF/TRL Interoperability",
+      "section": "interop",
+      "description": "Immutable exports, pinned runners, verified PEFT imports, and identity checks."
+    },
+    {
+      "source": "docs/OPD_TEACHER_JSONL.md",
+      "slug": "opd-teacher-jsonl",
+      "title": "OPD Teacher JSONL",
+      "section": "interop",
+      "description": "Offline teacher corpus format, validation, identity, and training usage."
+    },
+    {
+      "source": "docs/VLLM_TEACHER_IDENTITY.md",
+      "slug": "vllm-teacher-identity",
+      "title": "Immutable vLLM Teachers",
+      "section": "interop",
+      "description": "Register and verify exact remote teacher identities without floating aliases."
+    },
+    {
+      "source": "docs/ADAPTER_MANIFEST.md",
+      "slug": "adapter-manifest",
+      "title": "Adapter Manifest",
+      "section": "integrity",
+      "description": "Adapter artifact layout, checksums, metadata, and validation rules."
+    },
+    {
+      "source": "docs/BASE_WEIGHT_PROVENANCE.md",
+      "slug": "base-weight-provenance",
+      "title": "Base-Weight Provenance",
+      "section": "integrity",
+      "description": "Immutable model shard identity and receipt propagation."
+    },
+    {
+      "source": "docs/EXECUTION_PROVENANCE.md",
+      "slug": "execution-provenance",
+      "title": "Execution Provenance",
+      "section": "integrity",
+      "description": "Executable, backend, model, configuration, and kernel identity records."
+    },
+    {
+      "source": "docs/REPLAY_INTEGRITY.md",
+      "slug": "request-lineage-integrity",
+      "title": "Request-Lineage Integrity",
+      "section": "integrity",
+      "description": "What lineage hashes prove, and the boundary between replay and reproduction."
+    },
+    {
+      "source": "docs/TRAIN_RECEIPT_SCHEMA.md",
+      "slug": "training-receipt-schema",
+      "title": "Training Receipt Schema",
+      "section": "integrity",
+      "description": "Versioned training receipt fields, evidence, and compatibility rules."
+    },
+    {
+      "source": "docs/qualification.md",
+      "slug": "hardware-qualification",
+      "title": "Local Hardware Qualification",
+      "section": "operations",
+      "description": "Run, validate, compare, and publish hardware qualification receipts."
+    },
+    {
+      "source": "CONTRIBUTING.md",
+      "slug": "contributing",
+      "title": "Contributing",
+      "section": "operations",
+      "description": "Scope, development setup, testing, review, and contribution standards."
+    },
+    {
+      "source": "docs/ci-policy.md",
+      "slug": "ci-policy",
+      "title": "CI and Local Qualification Policy",
+      "section": "operations",
+      "description": "The boundary between inexpensive hosted checks and local accelerator evidence."
+    },
+    {
+      "source": "docs/release-version-policy.md",
+      "slug": "release-version-policy",
+      "title": "Release Version Policy",
+      "section": "operations",
+      "description": "Version ownership, synchronization, and release drift checks."
+    },
+    {
+      "source": "docs/SUBSTRATE_QUICKSTART.md",
+      "slug": "tensor-substrate-quickstart",
+      "title": "Tensor Substrate Quickstart",
+      "section": "operations",
+      "description": "Implement backend-portable tensor operations and validate their contracts."
+    },
+    {
+      "source": "docs/backend-capability-report.md",
+      "slug": "backend-capabilities",
+      "title": "Backend Capability Report",
+      "section": "operations",
+      "description": "Current CUDA, ROCm, Vulkan, Metal, and CPU feature coverage."
+    }
+  ]
+}
