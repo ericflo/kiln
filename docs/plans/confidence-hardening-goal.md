@@ -394,15 +394,14 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
   supported profile permits them.
 - [ ] Exercise prefix reuse, cancellation, slow consumers, adapter load/unload,
   memory pressure, and maintenance-mode resize.
-- [ ] Run a 30-minute development soak after each material serving change.
+- [x] Run a 30-minute development soak after each material serving change.
   - The source-bound `serving-rocm-development-soak-v1` gate now holds one
     graph-on, fixed-capacity server process under mixed bucket/concurrency waves
     and periodic cancellation. It fills the bounded prefix cache before the
     measurement baseline, then fails on device faults, graph/sync failures,
     unexplained ITL outliers, unaccounted blocks, cache-residency drift, dirty
     teardown, or more than 512 MiB of post-warmup GPU/RSS growth. Attributed
-    gaps remain visible in the receipt. This item remains open until its
-    30-minute receipt passes on the current pushed source.
+    gaps remain visible in the receipt.
   - The first clean run on `6da0aea9` failed after 148.5 measured seconds when
     RSS growth reached 537.45 MiB, 25.45 MiB above the unchanged limit. Its 116
     requests, three cancellations, 1,085 graph replays, and all correctness,
@@ -415,8 +414,13 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
     gate: cycles five, six, and eight still added 146,829,312, 126,554,112,
     and 146,071,552 RSS bytes respectively. The graph runner captured and
     released request-owned graphs throughout the repeated workload, so graph
-    lifecycle churn is the next bounded runtime hypothesis; no later baseline
-    may hide this continuing growth.
+    lifecycle churn was the bounded runtime hypothesis; no later baseline may
+    hide continuing growth. Commit `53a582aa` replaced request-owned native
+    graphs with reusable persistent slots and joined the decode worker before
+    accelerator teardown. Its clean pushed-source receipt ran 1,811 measured
+    seconds and passed with 35.7 MiB RSS growth, 90.9 MiB GPU growth, 8,734
+    replays, 551 measured slot reuses, zero unexplained gaps or typed failures,
+    and clean unforced shutdown.
 - [ ] Run a final 24-hour mixed-load soak for the ROCm phase.
 - [ ] Require every ITL gap above `max(250 ms, 5 * rolling p50 ITL)` to have a
   bounded reason code. The final unexplained count must be zero.
@@ -1310,6 +1314,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-12 | Fail-closed ROCm soak memory convergence | `sha256:31e9a1667393` | this commit | portable + Strix Halo ROCm/gfx1151 development probe | 28 focused qualification tests; strict workload validation; eight-cycle real-device convergence probe | failed as designed | Before the measured clock starts, the harness now requires at least four complete workload cycles and two consecutive endpoints within 64 MiB GPU-used and 16 MiB server-RSS deltas. It fails after eight cycles and preserves partial cycle, request, cancellation, final-delta, and maximum-delta evidence rather than emitting misleading zeros. The first dirty-tree probe reached the full 39-entry prefix-cache state and then failed after all eight cycles with no forced/nonzero shutdown or snapshot residue. RSS remained nonconvergent: observed cycles five, six, and eight added 146,829,312, 126,554,112, and 146,071,552 bytes. The unchanged 512 MiB measured bound was never entered. Repeated request-owned HIP graph capture/release is now the bounded runtime hypothesis to test; this row is harness evidence, not a passed soak or a causal claim. |
 
 | 2026-07-12 | Bounded reusable ROCm graph slots | `sha256:95dcb35b1c7a` | this commit | Strix Halo ROCm/gfx1151 + portable qualification contract | exact lifecycle parity hardware test; release binary `sha256:c824e37fd6ba`; 60-second full-workload development smoke; focused shutdown/qualification tests | passed development smoke | A matched graph-off control grew server RSS by only 4,141,056 bytes across eight complete cycles, while graph-on request-owned capture/release repeatedly added roughly 121-140 MiB, isolating the nonconvergence to native HIP graph churn. ROCm graphs now belong to a bounded reusable slot rather than a logical request row. Rebinding refreshes the exact persistent recurrent/conv buffers in place, makes the new row adopt those handles, resets continuity, and prefers an idle slot that already owns the requested geometry. Request completion leaves graph-bearing slots idle; adapter invalidation destroys graphs before their buffers. The real lifecycle parity test crossed graph buckets, cancellation, unrelated fresh recurrent/KV state, original-prefix continuation, and adapter invalidation with three captures, 96 replays, exact hidden/logit/token parity, and zero fallback. The full graph-on smoke used an explicit 12-graph bound, converged in four cycles with two stable endpoints, then measured 38 requests over 69.96 seconds: RSS grew 421,888 bytes, GPU use 13,656,064 bytes, retained graphs stayed 10 -> 10, slots 3 -> 3, all three ended idle, and 20 measured reuses occurred with zero request/fault/graph/fallback/sync/unexplained-gap failures. It also exposed and fixed a detached-worker teardown race whose core showed `RocmSlice::drop` calling `hipFreeAsync` concurrently with HIP finalization; the server now closes and joins the decode worker before accelerator teardown, and the reproducer exited zero without force or residue. This source-matched dirty-worktree smoke validates the fix but is not the required clean 30-minute receipt. |
+
+| 2026-07-12 | Clean 30-minute reusable-slot ROCm soak | `sha256:95dcb35b1c7a` | `53a582aa` | Strix Halo ROCm/gfx1151 | `qualification/receipts/rocm/strix-halo/20260713t011231883902z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1.json`; strict current-source/artifact/commit validation | passed | The clean pushed-source workload converged after four complete cycles with three stable endpoints, then ran 1,094 requests across 151 waves for 1,811.16 measured seconds, including 30 confirmed cancellations and prompt lengths from 136 to 3,160 tokens. It completed 8,734 graph replays, created no new graph slot after baseline, reused slots 551 times, kept three slots resident and idle at final drain, and bounded lazy graph residency from 9 to the configured maximum of 12. RSS grew 37,416,960 bytes and GPU use 95,281,152 bytes, both far below the unchanged 512 MiB gate. All requests and 35,008 output tokens completed with zero request, batching, device-fault, non-finite, graph capture/replay/fallback, synchronization, unexplained-ITL, KV-ownership, cache-lease, or residue failures. The 51 ITL outliers were all attributed; p99/p99.9 ITL were 414.6/509.3 ms. External-yield synchronization had a 0.771 ms maximum. Shutdown was unforced, returned zero after joining the decode worker, and removed the private snapshot. Hosted CI run `29216920797` and qualification-contract run `29216920787` are green with all accelerator jobs skipped. This closes the recurring 30-minute ROCm development gate for the material graph-lifecycle change; the final 24-hour phase soak remains open. |
 
 ## Known Starting Defects
 
