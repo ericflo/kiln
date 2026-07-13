@@ -269,11 +269,15 @@ num_speculative_tokens = 4            # Draft-window default and hard ceiling. P
 draft_layers = 8                      # Retained qualification geometry; it has no serving route.
 
 [streaming_prefill]
-enabled = false                       # Typed long-prefill policy. Runtime propagation into all
-                                      # model/training paths is still being consolidated; until
-                                      # that lands, lower layers may retain backend auto-policy.
-tile_tokens = 8192                    # Positive multiple of 64.
-last_token_lm_head = true             # Compute only the final-token LM head for tiled prefill.
+mode = "auto"                         # auto uses backend policy; enabled forces every non-empty
+                                      # prompt; disabled is the monolithic-prefill isolation control.
+threshold_tokens = "auto"             # auto or a positive integer. A concrete value changes only
+                                      # CUDA/ROCm/Metal's existing automatic crossover.
+tile_tokens = "auto"                  # Base inference/non-tape tile; auto uses backend policy.
+tape_tile_tokens = "auto"             # Native training tape tile. An explicit base tile is inherited.
+detached_full_attn_tile_tokens = "auto" # Detached full-attention training tile. An explicit base
+                                      # tile is inherited by ordinary, boundary, and replay routes.
+last_token_lm_head = true             # Final inference tile computes only its last LM-head row.
 
 [eval]
 # Directory containing named suite JSON. Omit for <adapter_dir>/.eval/suites.

@@ -60,7 +60,7 @@
       "slug": "configuration",
       "title": "Configuration Reference",
       "section": "start",
-      "description": "Every supported TOML field and environment override, with defaults and validation rules."
+      "description": "Every supported TOML field and environment override, including backend-resolved batching and streaming-prefill policy, provenance, defaults, and validation."
     },
     {
       "source": "CHANGELOG.md",

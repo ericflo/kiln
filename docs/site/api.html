@@ -299,6 +299,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#copy-paste-first-requests">First requests</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#power-user-requests">Power-user requests</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#server-status">Server status</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#streaming-prefill-runtime">Streaming prefill</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#generation">Generation</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#thinking-budgets">Thinking budgets</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-lifecycle">LoRA lifecycle</a>
@@ -325,14 +326,14 @@
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/decode</code> &mdash; live decode tokens/sec and inter-token latency stats used by the dashboard.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history with effective thinking-budget provenance and outcomes for the dashboard's request panel.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, typed batching intent/backend/effective policy, actor activity, direct-rendezvous worker/route status, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective training and KV-cache policy, memory-budget partitions, and generation defaults.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, typed batching and streaming-prefill intent/backend/effective policy, actor activity, direct-rendezvous worker/route status, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective training and KV-cache policy, memory-budget partitions, and generation defaults.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest and execution-provenance record.</div>
         </div>
         <div class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Check runtime configuration</h3>
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/config | python3 -m json.tool</code></pre>
           <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-            The response keeps batching intent, backend policy, effective actor construction, startup
+            The response keeps batching and streaming-prefill intent, backend policy, effective execution, startup
             capacity resolution, the current safe memory sample, and the budget derived from effective
             capacity separate. Every <code>*_gib</code> value uses
             1 GiB = 1,073,741,824 bytes and is paired with an exact <code>*_bytes</code> value where the
@@ -464,6 +465,114 @@
                 <a href="docs/configuration/" class="link">complete Configuration Reference</a> for strict
                 grammar and the eight deprecated aliases. In particular, malformed legacy
                 <code>KILN_DECODE_BATCH_WAIT_US</code> now fails startup instead of silently selecting zero.
+              </p>
+            </section>
+            <section id="streaming-prefill-runtime" class="pt-4" style="border-top: 1px solid var(--line);">
+              <h4 class="font-semibold mb-2"><code>streaming_prefill</code>: immutable tiled-prefill policy</h4>
+              <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
+  "streaming_prefill": {
+    "dispatch": {
+      "configured_mode": "auto",
+      "configured_source": "default",
+      "backend_policy": {
+        "policy": "prompt_tokens_at_least",
+        "minimum_prompt_tokens": 2048
+      },
+      "effective": {
+        "policy": "prompt_tokens_at_least",
+        "minimum_prompt_tokens": 2048
+      },
+      "effective_source": "backend_policy"
+    },
+    "threshold_tokens": {
+      "configured": null,
+      "configured_source": "default",
+      "backend_policy": 2048,
+      "effective_for_auto_mode": 2048,
+      "override_applied_to_backend_auto_policy": false
+    },
+    "tile_tokens": {
+      "configured": null,
+      "configured_source": "default",
+      "backend_policy": 1024,
+      "effective": 1024,
+      "effective_source": "backend_policy"
+    },
+    "tape_tile_tokens": {
+      "configured": null,
+      "configured_source": "default",
+      "backend_policy": 1024,
+      "effective": 1024,
+      "effective_source": "backend_policy"
+    },
+    "detached_full_attn_tile_tokens": {
+      "configured": null,
+      "configured_source": "default",
+      "backend_policy": 8192,
+      "effective": 8192,
+      "effective_source": "backend_policy"
+    },
+    "detached_full_attn_boundary_tile_tokens": {
+      "backend_policy": 8192,
+      "effective": 8192,
+      "effective_source": "backend_policy"
+    },
+    "detached_full_attn_tape_replay_tile_tokens": {
+      "backend_policy": 8192,
+      "effective": 8192,
+      "effective_source": "backend_policy"
+    },
+    "last_token_lm_head": {
+      "configured": true,
+      "configured_source": "default",
+      "effective": true,
+      "effective_source": "default"
+    },
+    "immutable_after_startup": true,
+    "restart_required_to_change": true
+  }
+}</code></pre>
+              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                This example is the ROCm default. <code>configured_mode</code> is
+                <code>auto</code>, <code>enabled</code>, or <code>disabled</code>. Auto dispatch is
+                threshold-based and inclusive on CUDA, ROCm, and Metal; CPU and Vulkan report
+                <code>policy="never"</code>. Enabled selects every non-empty prompt, while disabled is
+                the clean monolithic-prefill isolation control. A concrete threshold changes only a
+                backend that already has threshold-based auto dispatch; it cannot turn CPU or Vulkan
+                auto policy on. Dispatch eligibility creates multiple physical tiles only when the
+                sequence exceeds the effective tile for that route. There is no single
+                <code>effective_enabled</code> field because automatic dispatch depends on each prompt length.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Backend defaults for <code>(base, tape, detached, boundary, replay)</code> are CPU
+                <code>(8192,8192,8192,8192,8192)</code>, CUDA
+                <code>(1024,1024,8192,65536,65536)</code>, ROCm
+                <code>(1024,1024,8192,8192,8192)</code>, Metal
+                <code>(2048,2048,8192,8192,8192)</code>, and Vulkan
+                <code>(2048,2048,8192,8192,8192)</code>. Base tiles cover ordinary inference and
+                non-tape GDN segments; tape tiles cover tape-authoritative native training; detached
+                tiles cover materialized full-attention training routes. Every concrete tile is a
+                positive multiple of 64.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                A concrete base tile feeds any <code>auto</code> tape or detached field. That inherited
+                detached value also feeds boundary and tape-replay variants. A concrete detached value
+                overrides all three detached variants directly. The effective source makes this explicit
+                as <code>inherited_from_tile_tokens_config_file</code> or
+                <code>inherited_from_tile_tokens_environment</code>; untouched values report
+                <code>backend_policy</code>. <code>last_token_lm_head</code> controls whether the final
+                inference tile projects only its last row.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Startup resolves and injects this one object into inference, SFT/GRPO/OPD training,
+                training admission, and checkpoint planning. Those paths never re-read the public
+                streaming environment names, and every change requires restart. Health repeats the
+                object at <code>prefill_runtime.streaming_prefill</code>; trusted debug exposes it at
+                top-level <code>streaming_prefill</code>. Canonical names are mechanically derived as
+                <code>KILN_STREAMING_PREFILL_&lt;FIELD&gt;</code>. The
+                <a href="docs/configuration/" class="link">Configuration Reference</a> lists the six
+                strict deprecated aliases, legacy TOML <code>enabled</code> compatibility, conflict
+                behavior, and operational examples.
               </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">

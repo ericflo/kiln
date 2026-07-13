@@ -842,6 +842,14 @@ enabled = false
 method = "off"
 num_speculative_tokens = 4
 draft_layers = 8
+
+[streaming_prefill]
+mode = "auto"                              # backend-qualified long-prefill dispatch
+threshold_tokens = "auto"                  # backend crossover, or a positive override
+tile_tokens = "auto"                       # ordinary inference/non-tape tile
+tape_tile_tokens = "auto"                  # tape-authoritative training tile
+detached_full_attn_tile_tokens = "auto"    # materialized full-attention tile
+last_token_lm_head = true
 ```
 
 Startup selects the built-in `Qwen3.5-4B` defaults profile and logs it. The
@@ -865,6 +873,12 @@ tool-call rendering.
 | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | `auto` or 1–65536 fallback rows, clamped to effective decode width |
 | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | `auto` or non-negative collection delay in microseconds |
 | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | `auto` or strict boolean mixed-position fallback cohorts |
+| `KILN_STREAMING_PREFILL_MODE` | `auto`, `enabled`, or `disabled` tiled-prefill dispatch |
+| `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` | `auto` or a positive automatic-dispatch crossover |
+| `KILN_STREAMING_PREFILL_TILE_TOKENS` | `auto` or a positive multiple-of-64 base tile |
+| `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` | `auto` or a positive multiple-of-64 tape tile |
+| `KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS` | `auto` or a positive multiple-of-64 detached full-attention tile |
+| `KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD` | Strict boolean final-tile LM-head optimization |
 | `KILN_MEMORY_GPU_MEMORY_GB` | Override GPU VRAM detection |
 | `KILN_MEMORY_NUM_BLOCKS` | Override KV cache block count |
 | `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS` | Override gradient checkpoint segments |
@@ -907,6 +921,31 @@ backend availability, actor activity, worker activity, and route availability.
 See
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for the complete schema,
 validation, provenance, restart, and compatibility contract.
+
+Streaming prefill follows the same authority boundary. After the backend is
+selected, startup resolves one immutable `StreamingPrefillRuntimeConfig` and
+injects its private execution policy into `ModelRunner` and the server-owned
+training runtime. Inference, SFT, GRPO, OPD, checkpoint planning, GDN segment
+forwards, tape forwards, and detached full-attention forwards consume that
+value; none reads public streaming environment variables while work is in
+flight. A restart is required to change it.
+
+`auto` dispatches at 2048 prompt tokens on CUDA, ROCm, and Metal, and never on
+CPU or Vulkan. The base/tape defaults are 1024/1024 on CUDA and ROCm,
+2048/2048 on Metal and Vulkan, and 8192/8192 on CPU. Detached full-attention
+defaults to 8192 everywhere; CUDA alone raises its boundary and tape-replay
+variants to 65536. An explicit base tile is inherited by any `auto` tape or
+detached field, including detached boundary/replay variants. A separate
+detached value overrides all three detached variants. Every concrete tile is a
+positive multiple of the 64-token GDN chunk size.
+
+The resolved structure is intentionally richer than one enabled flag. It
+retains configured source, backend policy, effective dispatch rule, threshold
+override applicability, each effective tile and inheritance source, and the
+last-token LM-head selector. `/v1/config` exposes it at `streaming_prefill`,
+health at `prefill_runtime.streaming_prefill`, and trusted debug at top-level
+`streaming_prefill`. This makes a long-prefill pause attributable to scheduling,
+tiled model work, or memory activity without guessing from an ambient shell.
 
 ## Key Data Structures
 

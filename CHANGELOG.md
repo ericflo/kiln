@@ -62,6 +62,21 @@
   Health and trusted debug expose the same facts. A worker may be active while
   unroutable because the actor is active; sampled, non-streaming, and
   actor-routed requests bypass this narrow fallback.
+- streaming-prefill configuration: `[streaming_prefill]` now owns automatic,
+  forced, and disabled dispatch; the prompt threshold; base, tape, and detached
+  full-attention tiles; and final-tile LM-head behavior. Canonical environment
+  names derive mechanically from those six fields. Six old spellings remain
+  strict warning aliases, and legacy TOML `enabled` is accepted only when it
+  agrees with any explicit `mode`. Invalid, non-Unicode, or conflicting values
+  stop startup.
+- streaming-prefill authority and diagnostics: startup resolves one immutable
+  backend-qualified policy and injects it into inference, native training, and
+  checkpoint planning without lower model/trainer environment rereads. Explicit
+  base tiles feed specialized `auto` routes; detached overrides cover ordinary,
+  boundary, and tape-replay full-attention routes. `/v1/config` exposes the
+  complete configured/backend/effective/source object at `streaming_prefill`,
+  health at `prefill_runtime.streaming_prefill`, and trusted debug at top-level
+  `streaming_prefill`. Every change requires restart.
 - speculative serving: all speculative request and Desktop routes are now
   fail-closed pending local accelerator qualification. `kiln config` and
   startup reject every effective non-off policy before model loading,

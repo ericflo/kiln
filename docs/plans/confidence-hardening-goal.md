@@ -891,10 +891,13 @@ Current audit findings and migration order (2026-07-12):
   contains more than 250 model/tensor/memory/kernel tuning knobs, at least 32
   training knobs, and additional server/request-handler reads. Many are read
   per request, per decode step, per SDPA/GEMM, or per optimizer parameter.
-- Several strict TOML fields remain mirrors rather than authorities. Streaming
-  prefill, GPU-memory sizing, and gradient-checkpoint policy are accepted and
-  validated at startup, then ignored by paths that reread permissive
-  environment parsers. Speculative decoding now has one startup authority:
+- Several strict TOML fields remain mirrors rather than authorities.
+  GPU-memory sizing and gradient-checkpoint policy are accepted and validated
+  at startup, then ignored by paths that reread permissive environment parsers.
+  Streaming prefill has crossed the startup boundary: its backend dispatch,
+  threshold, inference/training tiles, and last-token selector resolve once and
+  are injected into model and trainer execution. Speculative decoding also has
+  one startup authority:
   the typed configuration is validated once, retained in immutable application
   state, and reported by `/v1/config`. Serving is fail-closed to every non-off
   method before model allocation; request dispatch contains no speculative
@@ -915,8 +918,9 @@ Current audit findings and migration order (2026-07-12):
   process environment. Model, tensor, kernel, scheduler, training, eval, UI,
   and request code receive immutable typed policy. Qualification-only controls
   use one explicit internal namespace/profile and are included in provenance.
-- The startup loader now owns one declarative registry for all 67 public fixed
-  typed leaves. Canonical names derive mechanically from section and field,
+- The startup loader now owns one declarative registry for all 74 fixed typed
+  leaves with public environment overrides, alongside eight explicitly
+  config-file-only leaves. Canonical names derive mechanically from section and field,
   compatibility aliases parse strictly and warn without values, every present
   alias must agree with a canonical value, and typed CLI overrides no longer
   mutate process environment. Eight structured eval/agent leaves remain
@@ -964,6 +968,20 @@ from canonical names or strict deprecated aliases, retain source/backend/final
 diagnostics, and are injected into the worker. This closes that bounded runtime
 read set; it does not complete the repository-wide configuration or one-
 scheduler checkboxes above.
+
+Streaming-prefill checkpoint (2026-07-13): six source-tracked
+`[streaming_prefill]` fields now resolve after backend selection into one
+immutable execution policy shared by inference, native SFT/GRPO/OPD, training
+admission, and checkpoint planning. Canonical environment names are mechanical;
+six old spellings and legacy TOML `enabled` are strict compatibility inputs.
+The lower streaming-policy model/trainer rereads and stale use of the exact-GDN
+backward tile as a streaming fallback were removed. The separate
+`KILN_EXACT_GDN_TILE_BACKWARD` and `KILN_EXACT_GDN_BACKWARD_TILE_TOKENS`
+training controls intentionally remain for a later typed-training-config slice.
+Config, health, and trusted debug preserve configured/backend/effective
+dispatch, tile inheritance, and restart semantics. This closes that bounded
+runtime read set; it does not complete the repository-wide configuration
+checkboxes or constitute accelerator qualification.
 
 ### 8.2 One scheduling model
 

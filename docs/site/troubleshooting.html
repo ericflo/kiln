@@ -278,6 +278,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#desktop-app-first-launch">Desktop first launch</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#wrong-binary-or-gpu-path">GPU path</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#memory-budget-or-sampler">Memory budget</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#streaming-prefill-pauses-or-oom">Prefill pauses/OOM</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#model-weights-not-found">Model weights</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#health-not-green">Health</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#long-prefill-timeouts">Long-prefill timeouts</a>
@@ -448,6 +449,63 @@ curl -s http://localhost:8420/metrics \
           <code>(8,100,true)</code>, and Vulkan <code>(64,5000,true)</code>, with width clamped to effective
           decode width. Malformed canonical or deprecated values fail startup instead of silently selecting a
           fallback.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <h2 id="streaming-prefill-pauses-or-oom" class="text-xl font-semibold mb-4">ROCm long prefill pauses or runs out of memory</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>A long ROCm prompt pauses before its first token, a native training step stalls at a long sequence, or a prefill fails with an allocation/OOM error. Short prompts may be unaffected because automatic tiled prefill starts at an inclusive 2048-token crossover.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li>Inspect <code>/v1/config.streaming_prefill</code> and health <code>prefill_runtime.streaming_prefill</code>; require identical dispatch, tiles, sources, and restart flags.</li>
+              <li>On ROCm defaults, expect auto dispatch at <code>&gt;=2048</code>, base/tape tiles of 1024, and detached/boundary/replay tiles of 8192.</li>
+              <li>Separate ordinary inference/base tiles, tape-authoritative training tiles, and detached materialized full-attention routes. Tuning the wrong field cannot explain that path.</li>
+              <li>Correlate the gap with actor phase timing, model segment/tile timing, external-yield synchronization, allocator reclaim, physical KV resize, live memory samples, and primary versus host-backed peak memory.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix or isolate</div>
+            <p>Restart with <code>mode="disabled"</code> for one monolithic A/B. Then restore <code>auto</code> and change only the threshold or one route-specific tile per run. Reduce the relevant tile in multiples of 64 for a measured OOM; do not broadly raise the timeout or infer VRAM rebalancing from a temporal gap alone.</p>
+          </div>
+        </div>
+<pre class="mt-5"><code># kiln.toml: isolate tiled execution
+[streaming_prefill]
+mode = "disabled"
+
+# Separate ROCm tuning arm
+[streaming_prefill]
+mode = "auto"
+threshold_tokens = 4096
+tile_tokens = 2048
+tape_tile_tokens = "auto"
+detached_full_attn_tile_tokens = "auto"
+last_token_lm_head = true
+
+kiln config --file kiln.toml
+kiln serve --config kiln.toml
+curl -s http://localhost:8420/v1/config | jq '.streaming_prefill'
+curl -s http://localhost:8420/health | jq '.prefill_runtime.streaming_prefill'
+curl -s http://localhost:8420/metrics \
+  | grep -E 'kiln_batching_engine_|kiln_gpu_memory_|kiln_kv_'</code></pre>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          In the tuning example, the explicit base tile is inherited by both specialized <code>auto</code>
+          fields and by detached boundary/replay variants. Set <code>tape_tile_tokens</code> or
+          <code>detached_full_attn_tile_tokens</code> explicitly when you need a route to differ. Every
+          value is immutable after startup; changing the file or shell without restart has no effect.
+          Canonical names follow <code>KILN_STREAMING_PREFILL_&lt;FIELD&gt;</code>. Deprecated shorter names
+          parse strictly, warn, and fail startup if they conflict with a canonical value.
+        </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Backend auto policy is CUDA/ROCm/Metal at 2048 and CPU/Vulkan never. Base/tape defaults are
+          CUDA/ROCm 1024, Metal/Vulkan 2048, and CPU 8192. Detached defaults are 8192; CUDA boundary and
+          replay use 65536. Forcing <code>enabled</code> on CPU or Vulkan is an explicit diagnostic, not
+          proof that the route is supported or faster. Qualify ROCm and Vulkan on the local Strix Halo,
+          CUDA on the named CUDA machines, and Metal on the Mac; hosted GPU CI is not hardware evidence.
         </p>
       </article>
 

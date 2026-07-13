@@ -277,6 +277,7 @@
         <div class="flex flex-wrap gap-2 text-sm">
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#single-process-server">Single-process server</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#request-path-and-batching">Request path</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#streaming-prefill-authority">Streaming prefill</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#gated-deltanet-hybrid">Gated DeltaNet hybrid</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-hot-swap-training-queue">LoRA hot-swap</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#gpu-backend-crates">GPU backends</a>
@@ -307,6 +308,60 @@ training request
   -> axum HTTP/API
   -> LoRA training queue
   -> hot-swapped adapter path</code></pre>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Prefill execution</div>
+        <h2 id="streaming-prefill-authority" class="text-2xl font-semibold mb-4">One streaming-prefill authority for inference and training</h2>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          Typed TOML and canonical startup overrides enter one strict loader. After backend selection,
+          Kiln combines operator intent with <code>StreamingPrefillBackendPolicy</code> to produce an
+          immutable <code>StreamingPrefillRuntimeConfig</code>. Its private execution policy is injected
+          into <code>ModelRunner</code> and the server-owned training runtime. Ordinary inference,
+          SFT/GRPO/OPD admission, checkpoint planning, GDN segment forwards, tape-authoritative
+          forwards, and detached full-attention routes consume that value. None of those paths rereads
+          public streaming environment variables.
+        </p>
+        <pre class="mt-5"><code>typed [streaming_prefill] + source attribution
+  -> selected-backend dispatch and tile defaults
+  -> immutable StreamingPrefillRuntimeConfig
+  -> ModelRunner + native training runtime + checkpoint identity
+  -> inference base tiles / tape tiles / detached full-attention tiles</code></pre>
+        <div class="grid md:grid-cols-3 gap-5 check-list mt-5" style="color: var(--fg-dim);">
+          <div>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Dispatch</h3>
+            <p><code>auto</code> starts at 2048 prompt tokens on CUDA, ROCm, and Metal, and remains off on CPU/Vulkan. <code>enabled</code> selects every non-empty prompt; <code>disabled</code> is the monolithic A/B control. A threshold override adjusts only an existing automatic crossover; eligible work physically splits only when its sequence exceeds the route tile.</p>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Route-specific tiles</h3>
+            <p>The base tile covers inference and non-tape GDN work, the tape tile covers tape-authoritative training, and the detached tile covers materialized full attention. All concrete values are positive multiples of the 64-token recurrent chunk.</p>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Inheritance</h3>
+            <p>An explicit base feeds specialized fields left on <code>auto</code>. A detached override feeds ordinary, boundary, and tape-replay full-attention variants. Effective-source diagnostics preserve whether a value came from backend policy, file, environment, or base inheritance.</p>
+          </div>
+        </div>
+        <div class="overflow-x-auto mt-5">
+          <table class="w-full text-sm" style="color: var(--fg-dim);">
+            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Backend</th><th class="text-left p-2">Auto dispatch</th><th class="text-left p-2">Base / tape</th><th class="text-left p-2">Detached / boundary / replay</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">CPU</td><td class="p-2">never</td><td class="p-2">8192 / 8192</td><td class="p-2">8192 / 8192 / 8192</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">CUDA</td><td class="p-2">&ge; 2048</td><td class="p-2">1024 / 1024</td><td class="p-2">8192 / 65536 / 65536</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">ROCm</td><td class="p-2">&ge; 2048</td><td class="p-2">1024 / 1024</td><td class="p-2">8192 / 8192 / 8192</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Metal</td><td class="p-2">&ge; 2048</td><td class="p-2">2048 / 2048</td><td class="p-2">8192 / 8192 / 8192</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Vulkan</td><td class="p-2">never</td><td class="p-2">2048 / 2048</td><td class="p-2">8192 / 8192 / 8192</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-5 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          The complete resolved object appears at <code>/v1/config.streaming_prefill</code>,
+          health <code>prefill_runtime.streaming_prefill</code>, and trusted-debug top-level
+          <code>streaming_prefill</code>. It has no single enabled boolean because auto dispatch is
+          prompt-length dependent. It includes configured/backend/effective dispatch, threshold
+          applicability, every effective tile and source, last-token LM-head policy, immutability, and
+          restart requirement. This is process-lifetime policy; a running request or training job never
+          observes a changed shell or file.
+        </p>
       </article>
 
       <article class="card p-6">

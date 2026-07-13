@@ -87,6 +87,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **Muon optimizer (default)** — momentum-orthogonalized SGD with fused on-device Newton-Schulz kernels for every backend (CUDA, ROCm, Vulkan, Metal). Muon keeps one momentum buffer per parameter; AdamW keeps first and second moments. AdamW and SGD remain selectable per request via `{"optimizer": {"kind": "adam_w"}}` / `{"kind": "sgd"}`. Omit `learning_rate` and native SFT resolves `1e-3` for Muon or `1e-4` for AdamW/SGD.
 - **Atomic LoRA transitions** — `experimental` supports live hot-swap; `maintenance` supports drained activation; `stable` rejects real weight transitions before GPU ownership changes.
 - **Continuous batching** with token-budgeted prefill — long prompts yield after every bounded quantum so ready decode rows keep advancing.
+- **Typed tiled-prefill policy** — backend dispatch, inference tiles, tape-training tiles, detached full-attention tiles, and last-token LM-head behavior resolve once at startup with provenance and no mid-request environment rereads.
 - **128K+ context** on 24GB — Qwen3.5-4B's hybrid architecture (24 linear attention + 8 full attention layers) means KV cache is 4x smaller than a pure transformer.
 - **Paged KV cache** — virtual memory-style block allocation eliminates fragmentation.
 - **FP8 KV cache** — optional quantization doubles effective context length.
@@ -598,7 +599,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
 | POST | `/v1/judgments/render_prompt` | Render the canonical pairwise judging prompt (debug aid) |
 | GET | `/v1/models` | List available models |
-| GET | `/v1/config` | Current server configuration, serving-profile source, and every effective profile policy |
+| GET | `/v1/config` | Current server configuration, serving-profile source, typed batching and streaming-prefill policy/provenance, and every effective profile policy |
 | GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of the complete base-weight shard manifest and execution-provenance record, active model/adapters, config hashes, env flags, batching, thinking defaults, and cache counts; enabled only with `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
 | GET | `/ui/` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
@@ -865,6 +866,12 @@ Kiln uses a typed TOML config file. Environment overrides are resolved during st
 | `batching.direct_decode_rendezvous_max_batch` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | `auto` (backend policy) | Fallback cohort width (`auto` or 1–65536), always clamped to effective decode width. Auto is CUDA 1, CPU/ROCm/Metal 8, Vulkan 64. Restart required |
 | `batching.direct_decode_rendezvous_wait_us` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | `auto` (backend policy) | Non-negative collection delay in microseconds. Auto is Metal 100, Vulkan 5000, and 0 elsewhere. Malformed canonical or legacy input fails startup. Restart required |
 | `batching.direct_decode_rendezvous_mixed_seq_lens` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | `auto` (backend policy) | Allow different decode positions in one fallback cohort. Auto is true on Metal/Vulkan and false elsewhere. Restart required |
+| `streaming_prefill.mode` | `KILN_STREAMING_PREFILL_MODE` | `auto` (backend policy) | `auto`, `enabled`, or `disabled`. Auto dispatches at 2048 prompt tokens on CUDA/ROCm/Metal and never on CPU/Vulkan. Enabled applies to every non-empty prompt; disabled is the monolithic isolation control. Restart required |
+| `streaming_prefill.threshold_tokens` | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` | `auto` (backend policy) | `auto` or a positive integer. Overrides an existing CUDA/ROCm/Metal crossover but cannot enable CPU/Vulkan automatic dispatch. Restart required |
+| `streaming_prefill.tile_tokens` | `KILN_STREAMING_PREFILL_TILE_TOKENS` | `auto` (backend policy) | Base inference/non-tape tile, `auto` or a positive multiple of 64. A concrete base is inherited by specialized tiles left on auto. Restart required |
+| `streaming_prefill.tape_tile_tokens` | `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` | `auto` (backend policy) | Tape-authoritative native-training tile, `auto` or a positive multiple of 64. Restart required |
+| `streaming_prefill.detached_full_attn_tile_tokens` | `KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS` | `auto` (backend policy) | Detached materialized full-attention tile; a concrete value also controls boundary and tape-replay variants. Restart required |
+| `streaming_prefill.last_token_lm_head` | `KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD` | true | Compute only the last LM-head row on the final inference tile. Restart required |
 | `server.deterministic` | `KILN_SERVER_DETERMINISTIC` | false | Serving repeatability envelope. Strict boolean parsing rejects malformed values. True freezes the process-wide determinism selector and forces effective decode width 1 even when a wider batch is configured, preventing request-cohort changes from selecting different BF16 batched-GEMM shapes at close greedy-logit boundaries. This does not by itself make every accelerator kernel bitwise deterministic |
 | `server.default_thinking_enabled` | `KILN_SERVER_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
 | `server.default_thinking_budget_tokens` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block. The environment value must be a non-negative base-10 integer or `unlimited`; malformed values stop startup |
@@ -925,6 +932,19 @@ bypass it. Under defaults, only Metal routes through the fallback because every
 real backend enables the worker but Metal alone disables the actor.
 The eight deprecated pre-consolidation aliases still parse strictly and warn,
 but new deployments should use the mechanically derived names in the table.
+
+Streaming prefill has a parallel startup-only provenance contract. The
+selected backend supplies automatic dispatch plus base, tape, detached,
+detached-boundary, and detached-replay tile defaults. CUDA/ROCm use 1024-token
+base and tape tiles, Metal/Vulkan use 2048, and CPU uses 8192. Detached defaults
+are 8192 except that CUDA boundary/replay paths use 65536. An explicit base tile
+feeds any specialized `auto` field; a detached override feeds all three
+detached variants. The resolved object is at `/v1/config.streaming_prefill`,
+`/health.prefill_runtime.streaming_prefill`, and trusted debug
+`streaming_prefill`. It records configured/backend/effective values and
+sources, including inheritance, rather than collapsing prompt-dependent auto
+dispatch into a misleading boolean. Inference and native training consume this
+same immutable policy and do not re-read its public environment names.
 
 The current deterministic serving contract is deliberately narrower than
 cross-backend bitwise determinism: it removes concurrent decode-shape variation

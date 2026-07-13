@@ -92,6 +92,50 @@ vocabulary. A direct-rendezvous variant must disable the actor, restart, prove
 streaming effectively-greedy requests. Actor, sampled, and non-streaming runs
 cannot qualify this fallback path.
 
+Streaming-prefill qualification has the same source-bound rule. Declare the
+complete `[streaming_prefill]` table in the committed variant, restart between
+arms, and require these three serialized objects to be equal before device
+work:
+
+```text
+GET /v1/config -> .streaming_prefill
+GET /health -> .prefill_runtime.streaming_prefill
+GET /v1/debug/model-state -> .streaming_prefill   # trusted-debug variant only
+```
+
+The attestation must retain configured source, backend dispatch, effective
+dispatch and authority, threshold applicability, base/tape/detached effective
+tiles and inheritance sources, derived detached boundary/replay tiles,
+last-token LM-head policy, and both restart flags. New manifests use only
+`KILN_STREAMING_PREFILL_MODE`,
+`KILN_STREAMING_PREFILL_THRESHOLD_TOKENS`,
+`KILN_STREAMING_PREFILL_TILE_TOKENS`,
+`KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS`,
+`KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS`, and
+`KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD`. The six shorter historical names
+and legacy TOML `enabled` exist for deployment compatibility, not new evidence.
+
+A correctness arm should cover the prompt-length boundary immediately below
+and at the effective threshold, compare forced `disabled` monolithic output
+with forced `enabled` tiled output, exercise a prompt longer than one base tile,
+and cover training work longer than the effective tape and detached tiles when
+that backend supports the route. Record exact tokens/losses, cancellation and
+settlement, TTFT/prefill time, per-stage timing, peak primary and host-backed
+memory, allocator reclaim/resize events, device synchronizations, and any
+non-finite or ownership failures. Do not interpret `mode="enabled"` on CPU or
+Vulkan as support by itself; it is an explicit test route and still needs real
+backend evidence.
+
+For pause or OOM diagnosis, run one variable per arm: backend `auto`, forced
+`disabled`, then a changed threshold or one tile. An explicit base tile feeds
+`auto` tape and detached routes, so either set those specialized values
+explicitly or record their inherited effective values. Attribute a pause only
+when the trace shows the corresponding scheduler wait, tile computation,
+external-yield synchronization, allocator reclaim, physical KV resize, or
+memory-pressure event. A temporal gap alone is not evidence of VRAM
+rebalancing. These ROCm, Vulkan, CUDA, and Metal runs belong on the named local
+machines; hosted GPU CI is neither required nor accepted as qualification.
+
 ## Refresh The GRPO Reference Oracle
 
 The compact fixture at

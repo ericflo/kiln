@@ -3,7 +3,7 @@
 This document is the canonical operator reference for Kiln's typed server
 configuration. It describes the configuration accepted by the current
 `KilnConfig` and `RequestLogConfig` implementations, including current defaults,
-validation, working environment-variable aliases, and known migration gaps.
+validation, working environment-variable aliases, and runtime provenance.
 
 Kiln's intended public environment-variable naming rule is mechanical:
 
@@ -68,10 +68,10 @@ The `-v`/`-vv` and `--quiet` logging flags override `logging.level` for the
 running command. `RUST_LOG`, when present, takes precedence over that resolved
 level when the tracing filter is built.
 
-Environment resolution is intended to happen once at startup. Restart the
-server after changing a file or environment value. The split-brain migration
-limitations documented below still contain lower-level environment reads; they
-are limitations, not a supported live-reconfiguration mechanism.
+Environment resolution happens once at startup. Restart the server after
+changing a file or environment value. Model, training, and request execution
+receive resolved policy rather than re-reading public configuration from the
+process environment.
 
 ### Strict failure behavior
 
@@ -108,18 +108,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 14 top-level sections and 79 fixed leaf
+The accepted TOML surface contains 14 top-level sections and 82 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 79 fixed fields:
+credential. Of the 82 fixed fields:
 
-- 71 implement the canonical mechanical environment name;
-- 50 also retain one or more deprecated compatibility spellings (51 aliases
+- 74 implement the canonical mechanical environment name;
+- 52 also retain one or more deprecated compatibility spellings (54 aliases
   total);
 - 8 are config-file-only and have no environment override;
-- the 51 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
+- the 54 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 79 fixed fields and both dynamic credential fields.
+The tables below cover all 82 fixed fields and both dynamic credential fields.
 
 ## `[server]`
 
@@ -450,20 +450,96 @@ harness result-path contract before model loading.
 
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
 |---|---|---|---|---|
-| `streaming_prefill.enabled` | boolean; `false` | `KILN_STREAMING_PREFILL_ENABLED` (implemented) | `KILN_STREAMING_PREFILL` (deprecated compatibility) | Environment value forces streaming on or off when spelled `1`/`true`/`yes` or `0`/`false`/`no`. Do not use `on` or `off`: the typed loader accepts them, but the lower reader treats them as absent. Without a recognized override, runtime backend policy automatically enables it for CUDA and ROCm prompts of at least 2048 tokens and Metal prompts of at least 2048 tokens; Vulkan and CPU default off. |
-| `streaming_prefill.tile_tokens` | unsigned integer; `8192` | `KILN_STREAMING_PREFILL_TILE_TOKENS` (implemented) | `KILN_STREAMING_TILE_TOKENS` (deprecated compatibility) | Must be a positive multiple of 64. Use an undecorated decimal value because the lower runtime re-read does not trim whitespace. Runtime backend defaults, absent a recognized environment override, are currently 1024 on CUDA/ROCm and 2048 on Metal/Vulkan rather than this generic typed default. |
-| `streaming_prefill.last_token_lm_head` | boolean; `true` | `KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD` (implemented) | `KILN_STREAMING_LAST_TOKEN_LM_HEAD` (deprecated compatibility) | When true, the final streaming tile computes the LM head only for its last row. Use `0`, `false`, or `no` to disable it; the lower reader incorrectly treats centralized-valid `off` as true. |
+| `streaming_prefill.mode` | string enum; `"auto"` | `KILN_STREAMING_PREFILL_MODE` (implemented) | `KILN_STREAMING_PREFILL` and `KILN_STREAMING_PREFILL_ENABLED` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive with surrounding whitespace ignored. `auto` delegates dispatch to backend policy, `enabled` selects every non-empty prompt, and `disabled` selects none. The canonical environment name accepts only those three words. Deprecated aliases also accept the strict boolean forms listed above, mapping true to `enabled` and false to `disabled`. Legacy TOML `enabled = true` or `enabled = false` remains accepted; if `mode` is also present, both must express the same non-auto intent or startup fails. |
+| `streaming_prefill.threshold_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` (implemented) | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` | In `auto` mode, an integer replaces the backend crossover only when that backend already has a threshold-based automatic policy. It does not make CPU or Vulkan auto-dispatch streaming. `0`, negative values, and strings other than `auto` fail startup. `enabled` and `disabled` modes ignore this crossover for dispatch while retaining it in diagnostics. |
+| `streaming_prefill.tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_TILE_TOKENS` (implemented) | `KILN_STREAMING_TILE_TOKENS` (deprecated compatibility) | Base tile for ordinary tiled prefill and non-tape GDN segment execution. Concrete values must be positive multiples of 64. When this field is concrete and either specialized tile below is `auto`, that specialized route inherits this base value rather than its backend default. |
+| `streaming_prefill.tape_tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` (implemented) | `KILN_TAPE_STREAMING_TILE_TOKENS` (deprecated compatibility) | Tile used by tape-authoritative training forward paths. Concrete values must be positive multiples of 64. `auto` inherits an explicit `tile_tokens`; when both are `auto`, backend policy owns the value. |
+| `streaming_prefill.detached_full_attn_tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS` (implemented) | `KILN_DETACHED_FULL_ATTN_TILE_TOKENS` (deprecated compatibility) | Tile for detached materialized full-attention training work. A concrete value also controls its derived boundary-forward and tape-replay variants. `auto` inherits an explicit `tile_tokens`; when both are `auto`, each variant keeps its backend default. Every concrete value must be a positive multiple of 64. |
+| `streaming_prefill.last_token_lm_head` | boolean; `true` | `KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD` (implemented) | `KILN_STREAMING_LAST_TOKEN_LM_HEAD` (deprecated compatibility) | When true, the final inference streaming tile computes the LM head only for its last row. All centralized strict boolean spellings, including `on` and `off`, work identically. |
 
-**Known migration limitation:** these typed fields are currently documentation
-and validation mirrors. Lower model helpers read only the deprecated
-`KILN_STREAMING_*` spellings directly and otherwise use backend policy; TOML
-and canonical `KILN_STREAMING_PREFILL_*` values are not yet forwarded.
-Use `KILN_STREAMING_PREFILL=0` to force streaming off today rather than relying
-on the typed default, because the backend can auto-enable it for long prompts.
-Use bare decimal tile sizes; avoid the centralized-only `on`/`off` boolean
-spellings until the duplicate parsers are removed.
-Internal threshold and training-tile controls are intentionally not part of
-this public configuration surface.
+Every deprecated alias is parsed strictly and emits a value-free startup
+warning naming its canonical replacement. When a canonical name is present,
+each present alias must normalize to the same typed value or startup fails and
+names both variables. For `mode`, if both deprecated aliases are present
+without `KILN_STREAMING_PREFILL_MODE`, both are validated and the historical
+higher-precedence `KILN_STREAMING_PREFILL_ENABLED` value wins over
+`KILN_STREAMING_PREFILL`. A malformed lower-precedence alias still fails; it is
+never ignored because another spelling is present.
+
+The selected backend supplies the following `auto` policy. Dispatch thresholds
+are inclusive. Tile counts are tokens:
+
+| Backend | Automatic dispatch | Base | Tape | Detached full attention | Detached boundary | Detached tape replay |
+|---|---:|---:|---:|---:|---:|---:|
+| CPU | never | 8192 | 8192 | 8192 | 8192 | 8192 |
+| CUDA | prompt tokens >= 2048 | 1024 | 1024 | 8192 | 65536 | 65536 |
+| ROCm | prompt tokens >= 2048 | 1024 | 1024 | 8192 | 8192 | 8192 |
+| Metal | prompt tokens >= 2048 | 2048 | 2048 | 8192 | 8192 | 8192 |
+| Vulkan | never | 2048 | 2048 | 8192 | 8192 | 8192 |
+
+`mode = "enabled"` can deliberately force non-empty CPU or Vulkan inputs onto
+the streaming path; this is an operator override, not a claim that the route is
+qualified or faster on that backend. Conversely, `mode = "disabled"` is the
+clean isolation control for a monolithic-prefill A/B. A threshold override
+only adjusts an existing CUDA, ROCm, or Metal automatic crossover. Dispatch
+eligibility and physical splitting are distinct: an eligible route creates
+multiple tiles only when its sequence is longer than the effective tile for
+that route.
+
+Startup resolves this section once after backend selection and injects the same
+immutable execution policy into inference, native SFT/GRPO/OPD admission and
+training forwards, and checkpoint planning identity. No model or trainer path
+re-reads these public environment names. Every change requires a restart; an
+existing job or request cannot observe a mid-process change.
+
+`GET /v1/config` exposes the complete resolved object at
+`streaming_prefill`. Health repeats it at
+`prefill_runtime.streaming_prefill`, and trusted debug exposes it at top-level
+`streaming_prefill`. The object separates:
+
+- configured mode/source, backend dispatch rule, effective dispatch rule, and
+  effective authority;
+- configured/backend/effective threshold, including whether an override
+  actually changed a threshold-based backend policy;
+- configured/backend/effective values and sources for base, tape, detached,
+  detached-boundary, and detached-replay tiles;
+- last-token LM-head configured/effective state and source; and
+- `immutable_after_startup` plus `restart_required_to_change`.
+
+An inherited specialized tile reports a closed source such as
+`inherited_from_tile_tokens_config_file`; an untouched automatic value reports
+`backend_policy`. There is intentionally no single `effective_enabled` boolean:
+in automatic mode dispatch depends on the current prompt length.
+
+Examples:
+
+```toml
+# Keep backend dispatch and tile policy (recommended default).
+[streaming_prefill]
+mode = "auto"
+threshold_tokens = "auto"
+tile_tokens = "auto"
+tape_tile_tokens = "auto"
+detached_full_attn_tile_tokens = "auto"
+last_token_lm_head = true
+```
+
+```toml
+# Isolate a suspected tiled-prefill pause.
+[streaming_prefill]
+mode = "disabled"
+```
+
+```toml
+# ROCm tuning experiment: stream from 4096 tokens, use one base tile for all
+# ordinary, tape, detached, boundary, and replay routes through inheritance.
+[streaming_prefill]
+mode = "auto"
+threshold_tokens = 4096
+tile_tokens = 2048
+tape_tile_tokens = "auto"
+detached_full_attn_tile_tokens = "auto"
+```
 
 ## `[adapters]`
 
@@ -614,9 +690,9 @@ Kiln currently exposes several complementary, partial views:
 Explicit source tracking (`default`, `config_file`, or `environment`) currently
 exists for `server.serving_profile`, `server.deterministic`,
 `server.stream_stall_grace_ms`, the three server batching/prefill budgets,
-`server.max_decode_batch`, all eight `[batching]` fields, and
-`memory.reclaim_mode`. Other fields have resolved values but do not yet carry
-per-field source metadata.
+`server.max_decode_batch`, all eight `[batching]` fields, all six
+`[streaming_prefill]` fields, and `memory.reclaim_mode`. Other fields have
+resolved values but do not yet carry per-field source metadata.
 
 The `kiln_env_config_hash` binds the serialized effective typed configuration
 and the process's complete `KILN_*` environment map. It is an identity digest,
@@ -624,19 +700,15 @@ not a human-readable effective-config dump.
 
 There is not yet one endpoint or CLI mode that dumps every effective field,
 its source, backend-derived adjustment, and restart requirement. Until that
-lands, use the typed validation command plus startup/runtime diagnostics, and
-account for the migration limitations below.
+lands, use the typed validation command plus startup/runtime diagnostics.
 
 ## Known configuration migration limitations
 
 These are current implementation facts, not recommended architecture:
 
-1. **Streaming prefill:** `[streaming_prefill]` is parsed and validated, but
-   lower model helpers read `KILN_STREAMING_*` and backend policy directly.
-   TOML-only values do not control dispatch.
-2. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
+1. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
    typed object with provenance and backend-derived values.
-3. **Deprecated aliases:** 51 non-canonical spellings across 50 fields remain
+2. **Deprecated aliases:** 54 non-canonical spellings across 52 fields remain
    temporarily for compatibility, including `KILN_DEFAULT_NO_THINK`. Each use
    warns at startup; canonical and compatibility names cannot silently
    disagree.

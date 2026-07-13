@@ -1002,11 +1002,11 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | POST | `/v1/judgments/{name}/rows` | Append one A/B/Tie/Skip preference |
 | POST | `/v1/judgments/{name}/compile` | Compile judgments into an SFT dataset for a judge LoRA |
 | POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
-| GET | `/v1/config` | Current server configuration, source attribution, typed batching intent/backend/effective policy plus actor activity, and effective serving/decode policy fields |
+| GET | `/v1/config` | Current server configuration, source attribution, typed batching and streaming-prefill intent/backend/effective policy, actor activity, and effective serving/decode policy fields |
 
 ## Configuration
 
-Kiln uses a typed TOML config file. The complete [Configuration Reference](docs/CONFIGURATION.md) documents every field, exact default, validation rule, environment override, and known migration limitation. Use [`kiln.example.toml`](kiln.example.toml) as a deployable starting point. The built-in server, CLI, and desktop defaults are checked against the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json).
+Kiln uses a typed TOML config file. The complete [Configuration Reference](docs/CONFIGURATION.md) documents every field, exact default, validation rule, environment override, provenance, and restart requirement. Use [`kiln.example.toml`](kiln.example.toml) as a deployable starting point. The built-in server, CLI, and desktop defaults are checked against the versioned [runtime-defaults contract](contracts/runtime-defaults-v1.json).
 
 Key settings:
 
@@ -1025,6 +1025,12 @@ Key settings:
 | `batching.direct_decode_rendezvous_max_batch` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | `auto` | Fallback rows per rendezvous (`auto` or 1–65536), clamped to effective decode width; auto is 1 CUDA, 8 CPU/ROCm/Metal, 64 Vulkan |
 | `batching.direct_decode_rendezvous_wait_us` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | `auto` | Collection delay in microseconds (`auto` or non-negative integer); auto is 100 Metal, 5000 Vulkan, 0 elsewhere |
 | `batching.direct_decode_rendezvous_mixed_seq_lens` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | `auto` | Whether a fallback cohort can mix decode positions (`auto` or boolean); auto is true on Metal/Vulkan and false elsewhere |
+| `streaming_prefill.mode` | `KILN_STREAMING_PREFILL_MODE` | `auto` | Backend-qualified tiled-prefill dispatch. Auto selects prompts of at least 2048 tokens on CUDA/ROCm/Metal and none on CPU/Vulkan; `enabled` forces every non-empty prompt and `disabled` is the monolithic isolation control |
+| `streaming_prefill.threshold_tokens` | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` | `auto` | Positive automatic crossover override. It adjusts CUDA/ROCm/Metal but cannot make CPU/Vulkan auto-dispatch streaming |
+| `streaming_prefill.tile_tokens` | `KILN_STREAMING_PREFILL_TILE_TOKENS` | `auto` | Base tile (`auto` or positive multiple of 64). A concrete base is inherited by specialized tiles left on auto |
+| `streaming_prefill.tape_tile_tokens` | `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` | `auto` | Tape-authoritative native-training tile (`auto` or positive multiple of 64) |
+| `streaming_prefill.detached_full_attn_tile_tokens` | `KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS` | `auto` | Detached full-attention tile; a concrete value also controls its boundary and tape-replay variants |
+| `streaming_prefill.last_token_lm_head` | `KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD` | true | Compute only the last LM-head row on the final inference tile |
 | `server.deterministic` | `KILN_SERVER_DETERMINISTIC` | false | Strict serving-repeatability mode; freezes the process-wide determinism selector and forces effective decode width 1. It does not make every accelerator kernel bitwise deterministic |
 | `server.default_thinking_budget_tokens` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default token budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
 | `server.default_thinking_budget_ms` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
@@ -1044,7 +1050,9 @@ contract with:
 curl -s http://localhost:8420/v1/config \
   | jq '.batching'
 curl -s http://localhost:8420/health \
-  | jq '.decode_runtime.batching_configuration, .decode_runtime.batching_engine, .decode_runtime.direct_decode_rendezvous'
+  | jq '.decode_runtime.batching_configuration, .decode_runtime.batching_engine, .decode_runtime.direct_decode_rendezvous, .prefill_runtime.streaming_prefill'
+curl -s http://localhost:8420/v1/config \
+  | jq '.streaming_prefill'
 ```
 
 The `batching.configuration` response path preserves configured intent and
@@ -1057,6 +1065,17 @@ actor-absent direct streaming effectively-greedy requests; sampled,
 non-streaming, and actor-routed work bypasses it. The complete strict grammar,
 deprecated aliases, backend matrices, decode-width clamps, and debug shape are in the
 [Configuration Reference](docs/CONFIGURATION.md).
+
+Streaming prefill is also immutable startup policy. `auto` uses backend
+dispatch and tiles; concrete thresholds and tiles are strict decimal values,
+and every tile must be a positive multiple of 64. Startup injects the same
+resolved policy into inference and native training, so changing TOML or an
+environment override requires a restart. The config endpoint reports
+configured, backend, effective, and inherited values at `streaming_prefill`;
+health repeats the object at `prefill_runtime.streaming_prefill`. Use
+`mode = "disabled"` for a clean monolithic-prefill comparison when diagnosing a
+pause, then change one threshold or tile at a time and retain both diagnostic
+objects with the measurement.
 
 ## Running with Docker
 
