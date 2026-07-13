@@ -1467,6 +1467,7 @@ fn resolve_bench_spec_method_with_force(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_memory::vram::LinuxDrmVendor;
 
     #[test]
     fn vram_probe_selector_tracks_selected_benchmark_device() {
