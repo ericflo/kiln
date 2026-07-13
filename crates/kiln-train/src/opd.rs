@@ -7219,7 +7219,6 @@ mod tests {
             std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
             std::env::remove_var("KILN_OPD_USE_CHAT_TEMPLATE_RENDER");
         }
         let tokenizer = off_policy_smoke_tokenizer()?;

@@ -5141,6 +5141,31 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && !trainer_source.contains("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS"),
         "retired exact-GDN environment controls must not return to the trainer"
     );
+    for (path, source) in [
+        ("crates/kiln-train/src/trainer.rs", trainer_source.as_str()),
+        ("crates/kiln-train/src/opd.rs", opd_source.as_str()),
+        (
+            "crates/kiln-train/src/grpo_tape_shim.rs",
+            grpo_tape_source.as_str(),
+        ),
+        (
+            "crates/kiln-model/src/tape_forward.rs",
+            tape_forward_source.as_str(),
+        ),
+    ] {
+        assert!(
+            !source.contains("KILN_USE_TAPE_AUTHORITATIVE"),
+            "retired tape-authoritative environment control must not return to {path}"
+        );
+    }
+    assert!(
+        !trainer_source.contains("tape_authoritative_enabled")
+            && trainer_source
+                .matches("ensure_tape_forward_backward_supported(")
+                .count()
+                >= 6,
+        "SFT and every GRPO entry/step path must use the shared backend-and-dtype tape guard"
+    );
     let embedding_activation_cast_section = source_between(
         &forward_source,
         "fn cast_embedding_output_to_policy_activation(",

@@ -6771,6 +6771,7 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
     // adapter I/O, which bridges kt->candle locally inside save/load.
     let device = training_device_for_weights(weights, runtime)?;
     let backend = training_backend_for_device(device);
+    ensure_tape_forward_backward_supported("GRPO", weights, backend.as_ref())?;
     // Training-session residency: upload a one-device copy of the weights
     // when the substrate needs it (Vulkan hybrid). Shadow `weights` so the
     // whole body trains against the resident copy; it drops at return.
@@ -9376,6 +9377,7 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
     // I/O, which bridges kt->candle locally inside save/load.
     let device = training_device_for_weights(weights, runtime)?;
     let backend = training_backend_for_device(device);
+    ensure_tape_forward_backward_supported("streamed GRPO", weights, backend.as_ref())?;
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
     let streaming_prefill = runtime.resolved_streaming_prefill_policy(device);
     let training_runtime_planning_identity =
@@ -11140,6 +11142,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
             echo_env_ce: None,
         });
     }
+    ensure_tape_forward_backward_supported("GRPO group step", weights, backend)?;
     let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(tgroup));
     let group_max_seq_len = tgroup
         .completions
@@ -11230,41 +11233,6 @@ fn train_tokenized_grpo_group_with_grad_norms(
             .get(1..)
             .map_or(0, |m| m.iter().filter(|&&v| v).count());
         let mut comp_echo_env_ce: Option<f64> = None;
-
-        // CP-4 (#1082): tape-authoritative eligibility for THIS completion. When
-        // eligible, the kt `Tape` records the FULL forward, so gradient
-        // checkpointing (the candle reverse-segment loop) is unnecessary — we
-        // route to the non-checkpointed tape branch below even when `segments`
-        // is `Some`. Backend eligibility is advertised through
-        // `TrainingLossBackend`; dtype eligibility comes from
-        // `TrainingPrecisionPolicy`. Per-completion loss-shape exclusions stay
-        // local because they depend on ECHO/no-policy-loss semantics rather than
-        // backend identity.
-        #[cfg(any(
-            feature = "cuda",
-            feature = "metal",
-            feature = "vulkan",
-            feature = "rocm"
-        ))]
-        // ECHO env-CE no longer excludes (resurrection PR2 #1512: the fused
-        // loss roots carry the env rows); only no_policy_loss remains
-        // un-wired. (This lift was authored with #1512 but lost in a stash
-        // conflict before commit — restored here. Without it the ensure!
-        // below killed exactly the env-token runs #1512 enabled, AFTER the
-        // rollout forwards.)
-        let tape_auth_eligible = tape_authoritative_enabled()
-            && backend_supports_tape_forward_backward(backend)
-            && base_dtype_supports_tape_for_backend(weights, backend);
-        // No loss-shape exclusions remain: ECHO env-CE is wired (#1512/#1518)
-        // and no_policy_loss is the §5.5 verifier-free mode (env rows drive,
-        // PG masked) wired in this change.
-        #[cfg(not(any(
-            feature = "cuda",
-            feature = "metal",
-            feature = "vulkan",
-            feature = "rocm"
-        )))]
-        let tape_auth_eligible = false;
 
         let kl_reference_log_probs = if skip_kl_reference {
             // KL is disabled, so the placeholder is never inspected by the
@@ -11379,14 +11347,6 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // candle drop). `grpo_step_forward_backward_tape_authoritative_kt`
         // returns `GradSource::Kt`, consumed kt-native by the dispatchers.
         let loss_val: f64;
-        anyhow::ensure!(
-            tape_auth_eligible,
-            "GRPO requires the kt tape-authoritative path (backend tape support, \
-             compatible base dtype, no no_policy_loss) post candle-drop (#1082). \
-             (Submission-time and trainer-entry validation should have rejected \
-             this config before any GPU work; reaching this point is a bug worth \
-             reporting.)"
-        );
         let (grads, policy_log_probs): (GradSource, Tensor) = {
             #[cfg(any(
                 feature = "cuda",
@@ -11478,9 +11438,8 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 feature = "rocm"
             )))]
             {
-                // `tape_auth_eligible` is a const `false` without a GPU backend
-                // feature, so the ensure! above already bailed; this arm is
-                // unreachable but keeps `loss_val` definitely-assigned.
+                // The group-entry capability check already bailed without a GPU
+                // backend feature. This arm keeps `loss_val` definitely assigned.
                 let _ = (
                     &behavior_log_probs,
                     &kl_reference_log_probs,
@@ -15346,75 +15305,14 @@ fn tiled_training_tile_size(
 // a6531830 (shim hoist), and the InjectTensorGradient flip
 // commit itself. (#1082)
 
-/// Run one training step WITHOUT gradient checkpointing (original behavior).
-///
-/// # CP-4 (#1082) `KILN_USE_TAPE_FORWARD` integration
-///
-/// When the `KILN_USE_TAPE_FORWARD` env var is set (and the build has
-/// the `cuda` feature), the forward pass + `loss.backward()` run inside
-/// `kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store`.
-/// The bridge:
-///
-/// * Opens a thread-local `kiln_autograd::Tape` scope so the
-///   `try_tape_{rms_norm,matmul,silu,embedding,swiglu}_cuda` adapters
-///   in `kiln-model::forward` record onto an actual tape (the adapters
-///   no-op when no scope is active).
-/// * Opens a `(candle_id ↔ kt_id)` IO-mapping scope so those adapters
-///   can register their input/output ID pairs as they record.
-/// * Runs `loss.backward()` on the candle side as usual, then walks
-///   the recorded tape with seeds taken from the candle `GradStore`
-///   and merges the per-kt-input grads back into the same store.
-///
-/// End-to-end: parameters that flow through one or more tape adapters
-/// get their `dL/dparam` populated in the same candle `GradStore`
-/// that this function returns. The optimizer step downstream sees the
-/// bridged grad transparently.
-///
-/// **Default (unset / `0` / `false` / `no` / empty) behaviour is
-/// unchanged.** The env var is read once via
-/// `kiln_autograd::tape_forward_enabled()` (cached after first read).
-/// When unset, the bridge is not opened and `standard_forward_backward`
-/// runs the same forward + `loss.backward()` it has always run.
-/// True unless `KILN_USE_TAPE_AUTHORITATIVE` is set to a disable value —
-/// **DEFAULTS ON** (CP-4 is the production training path). Read FRESH each call
-/// (not cached) so tests can toggle it; checked once per training step, off the
-/// hot path. When on, the SFT/GRPO/OPD steps drive backward through the kt
-/// `Tape` (tape-authoritative) instead of candle's `loss.backward()`. Set the
-/// env to `0`/`false`/`no`/off/empty to opt out for debugging/comparison. The
-/// dispatch sites pair this env gate with
-/// `TrainingLossBackend::runtime_tape_forward_backward_route` and
-/// `TrainingPrecisionPolicy`, so backend and dtype eligibility stay
-/// backend-owned. (#1082 CP-4.)
-// `pub(crate)` so the OPD trainer (`opd.rs`) can reuse the EXACT same gate
-// for its tape-authoritative dispatch — single source of truth for the
-// `KILN_USE_TAPE_AUTHORITATIVE` env semantics (#1082 CP-4 endgame).
-#[cfg(any(
-    feature = "cuda",
-    feature = "metal",
-    feature = "vulkan",
-    feature = "rocm"
-))]
-pub(crate) fn tape_authoritative_enabled() -> bool {
-    std::env::var("KILN_USE_TAPE_AUTHORITATIVE")
-        .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no" | "off"))
-        .unwrap_or(true)
-}
-
 /// (#1082) Whether the kt tape grad-delivery path supports this base model's
 /// dtype on this device. The decisive dtype is the **activation** dtype, which
 /// follows the BASE model weights (`embed_tokens` dtype) — NOT the LoRA Vars,
 /// which now FOLLOW the base dtype (see `initialize_seeded`).
 ///
-/// - `BF16` base ⇒ always supported. CUDA/Metal/Vulkan all record BF16-only
-///   fused kernels (`gdn_gates_bf16`, rms_norm, silu, rotary, …); production
-///   (Qwen3.5-4B) is BF16 → kt path. (Unchanged.)
-/// - `F32` base ⇒ supported **only on Vulkan** (user-approved, #1082). Vulkan's
-///   kt tape adapters accept `BF16 | F32` activations, and with the LoRA Vars
-///   now matching the F32 base (`initialize_seeded`), `try_tape_lora_linear_kt`
-///   fires and delivers real grads. On CUDA/Metal the fused FFI/MSL kernels are
-///   genuinely BF16-only, so F32 falls through to the candle path (or bails),
-///   exactly as before — this gate NEVER newly-permits F32 on CUDA/Metal.
-/// - anything else ⇒ unsupported.
+/// BF16 is supported by the kt tape adapters. F32 is supported only when the
+/// backend-owned precision policy declares F32 activations for mixed base
+/// weights. Other dtypes fail before training work begins.
 #[cfg(any(
     feature = "cuda",
     feature = "metal",
@@ -15439,23 +15337,43 @@ fn base_dtype_supports_tape_for_policy(
     feature = "vulkan",
     feature = "rocm"
 ))]
-fn base_dtype_supports_tape_for_backend(
+fn ensure_tape_forward_backward_supported(
+    workload: &str,
     weights: &GpuWeights,
     backend: &dyn BackendRuntime,
-) -> bool {
-    base_dtype_supports_tape_for_policy(weights, training_precision_policy_for_backend(backend))
+) -> Result<()> {
+    let route = TrainingLossBackend::runtime_tape_forward_backward_route(backend);
+    anyhow::ensure!(
+        matches!(route, TrainingTapeRoute::KtTapeAuthoritative),
+        "{workload}: kt tape-authoritative training is required, but the backend \
+         advertises tape route `{}`",
+        route.as_str()
+    );
+    let precision_policy = training_precision_policy_for_backend(backend);
+    anyhow::ensure!(
+        base_dtype_supports_tape_for_policy(weights, precision_policy),
+        "{workload}: base activation dtype {:?} is incompatible with backend \
+         training precision policy `{}` for kt tape-authoritative training",
+        weights.embed_tokens.dtype(),
+        precision_policy.name
+    );
+    Ok(())
 }
 
-#[cfg(any(
+#[cfg(not(any(
     feature = "cuda",
     feature = "metal",
     feature = "vulkan",
     feature = "rocm"
-))]
-fn backend_supports_tape_forward_backward(backend: &dyn BackendRuntime) -> bool {
-    matches!(
-        TrainingLossBackend::runtime_tape_forward_backward_route(backend),
-        TrainingTapeRoute::KtTapeAuthoritative
+)))]
+fn ensure_tape_forward_backward_supported(
+    workload: &str,
+    _weights: &GpuWeights,
+    _backend: &dyn BackendRuntime,
+) -> Result<()> {
+    anyhow::bail!(
+        "{workload}: kt tape-authoritative training requires a CUDA, ROCm, Metal, \
+         or Vulkan backend build"
     )
 }
 
@@ -16344,19 +16262,7 @@ pub fn standard_forward_backward_with_policy(
         feature = "rocm"
     ))]
     {
-        anyhow::ensure!(
-            backend_supports_tape_forward_backward(backend),
-            "standard_forward_backward: kt tape-authoritative SFT requires a backend \
-             that advertises kt tape-authoritative forward/backward support \
-             (the candle CPU `loss.backward()` path was removed in #1082)."
-        );
-        anyhow::ensure!(
-            base_dtype_supports_tape_for_backend(weights, backend),
-            "standard_forward_backward: kt tape-authoritative SFT requires a BF16 \
-             base model on CUDA/Metal, or a BF16/F32 base on Vulkan (the kt fused \
-             tape adapters are BF16-only on CUDA/Metal; F32 base trains on Vulkan \
-             only, #1082)."
-        );
+        ensure_tape_forward_backward_supported("standard_forward_backward", weights, backend)?;
         let (loss_val, kt_grads) = standard_forward_backward_tape_authoritative_kt(
             backend,
             input_ids,
@@ -20376,7 +20282,6 @@ pub(crate) mod tests {
             std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
         }
 
         // --- TAPE grads (ground-truth candidate), unperturbed params. ---
@@ -20600,10 +20505,6 @@ pub(crate) mod tests {
             }
         }
 
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
-        }
-
         // --- Two-tier classification ---
         //
         // The FD probe is BF16-quantized (the perturbed param round-trips
@@ -20788,8 +20689,8 @@ pub(crate) mod tests {
     /// for the candle-drop. `tape_grad_matches_finite_difference_bf16` proves a
     /// single step's grads are correct against finite-diff ground truth; this
     /// test proves that *stringing many such steps together actually trains the
-    /// model*: it runs a real AdamW SFT loop with `KILN_USE_TAPE_AUTHORITATIVE=1`
-    /// and asserts the loss trends meaningfully downward.
+    /// model*: it runs a real AdamW SFT loop through the backend-selected
+    /// tape-authoritative path and asserts the loss trends meaningfully downward.
     ///
     /// BF16 OVERFIT EDGE (why STEPS is bounded, why we break on non-finite):
     /// the tiny F-fixture has only 4 supervised tokens, so a *working* loop
@@ -20869,7 +20770,6 @@ pub(crate) mod tests {
             std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
         }
 
         // Production AdamW default (decoupled WD). LR 1e-3 — an order of
@@ -21140,10 +21040,6 @@ pub(crate) mod tests {
              descending, so tape-authoritative SFT is not training cleanly (a severed \
              loop holds the loss flat). Trajectory: {losses:?}"
         );
-
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
-        }
     }
 
     #[test]
@@ -21858,7 +21754,6 @@ pub(crate) mod tests {
             std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
             std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
             std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
         }
 
         let device = Device::Rocm(0);
@@ -23780,7 +23675,6 @@ pub(crate) mod tests {
             std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
         }
 
         let config = tiny_config_bf16();
@@ -23912,7 +23806,6 @@ pub(crate) mod tests {
             std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
         }
     }
 
@@ -24341,7 +24234,6 @@ pub(crate) mod tests {
             std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
         }
 
         let device = Device::Rocm(0);

@@ -2051,7 +2051,7 @@ fn tape_bridge_connected_three_op_adapter_chain() {
 // ======================================================================
 // CP-4 LoRA grad coverage (#1082) — `try_tape_lora_add_cuda` parity.
 //
-// The trainer flip in 43fe9c4 (`KILN_USE_TAPE_AUTHORITATIVE`) runs the SFT
+// The trainer flip in 43fe9c4 to tape-authoritative execution runs the SFT
 // step end-to-end and produces a bit-exact loss, but the parity gate
 // reports 0 LoRA `Var`s matching the candle reference — the LoRA delta-and-
 // add dispatches into `cuda_lora_add_training_{f32,bf16}` (CustomOp3) and

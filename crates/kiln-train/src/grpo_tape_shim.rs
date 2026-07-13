@@ -3,8 +3,8 @@
 //!
 //! # Why this module exists
 //!
-//! In the tape-authoritative training path (`KILN_USE_TAPE_AUTHORITATIVE`,
-//! the CP-4 production default) the loss is the backward ROOT: gradients are
+//! In the backend-selected tape-authoritative training path, the loss is the
+//! backward ROOT: gradients are
 //! driven by walking the kt `kiln_autograd::Tape` from the scalar loss, NOT by
 //! candle's `loss.backward()`. The SFT path roots the tape at
 //! `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda` (a fused

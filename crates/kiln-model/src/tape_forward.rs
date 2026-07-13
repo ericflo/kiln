@@ -1346,7 +1346,7 @@ pub fn try_tape_cross_entropy_from_logits_kt(
 /// `add_lora_delta_to_base` lands in either `cuda_lora_add_training_f32`,
 /// `cuda_lora_add_training_bf16`, `backend.lora_decode_add`, or the
 /// Phase-4.1 `CustomOp3` path — none of which the kt `Tape` walker sees.
-/// Under `KILN_USE_TAPE_AUTHORITATIVE`, the resulting candle `GradStore`
+/// Under tape-authoritative training, the resulting candle `GradStore`
 /// has no entries for the LoRA `Var`s (`proj.a`, `proj.b`), so the
 /// optimiser step is a no-op for the adapter parameters. With this
 /// adapter on, the fused backward emits grads for `proj.a` and `proj.b`

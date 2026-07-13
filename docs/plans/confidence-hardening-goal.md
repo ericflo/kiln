@@ -1013,10 +1013,9 @@ memory estimate and the Vulkan FLCE runtime chunk, so deleting only the
 estimator read or treating it as dead would recreate admission/execution drift.
 A later slice must replace both reads with one typed, shared, pure
 route/device-limit policy and prove that the admitted chunk is exactly the one
-executed. The dead or unsafe `KILN_USE_FLCE`,
-`KILN_USE_TAPE_AUTHORITATIVE`, and optimizer debug-fallback controls should
-still be deleted or moved behind explicit qualification hooks after their
-callers are independently proven. The following typed slice owns
+executed. The dead or unsafe `KILN_USE_FLCE` and optimizer debug-fallback
+controls should still be deleted or moved behind explicit qualification hooks
+after their callers are independently proven. The following typed slice owns
 GRPO shared-prefix-reference selection and OPD sampler segments;
 trace/debug/host-scan controls move behind explicit qualification hooks instead
 of public config.
@@ -1030,6 +1029,21 @@ CUDA-only tile value is no longer presented as part of
 runtime-environment ratchet and a focused negative source contract prevent the
 two spellings from returning. This is a code-surface and authority cleanup; it
 makes no accelerator performance or correctness claim.
+
+Tape-authority slice (completed 2026-07-13):
+`KILN_USE_TAPE_AUTHORITATIVE` had one production reader, only in GRPO, and no
+supported disabled route. A false value was checked fresh for each completion
+and produced a late error after shared or per-completion reference work; a
+concurrent mutation could therefore interrupt a partially updated group. SFT
+and OPD were already unconditionally kt-tape. The variable and its nine
+unscoped test mutations are deleted, including two tests that left a false
+value behind for unrelated parallel tests. Inline and streamed GRPO now call
+one backend-route and precision-policy guard before resident model or optimizer
+setup, and direct group execution repeats it before any reference forward. The
+environment ratchet and a focused source contract prevent the switch from
+returning. Local ROCm and Vulkan GRPO qualification must still prove the
+backend-selected route on this machine; this static slice alone makes no
+accelerator claim.
 
 ### 8.2 One scheduling model
 

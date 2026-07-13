@@ -2587,17 +2587,6 @@
     },
     {
       "api": "set_var",
-      "argument": "KILN_USE_TAPE_AUTHORITATIVE",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
       "argument": "KILN_USE_TAPE_FLASH_ATTN",
       "argument_kind": "literal",
       "count": 5,
@@ -2744,17 +2733,6 @@
       "argument": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK",
       "argument_kind": "literal",
       "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_USE_TAPE_AUTHORITATIVE",
-      "argument_kind": "literal",
-      "count": 8,
       "language": "rust",
       "operation": "set",
       "path": "crates/kiln-train/src/trainer.rs",
@@ -9067,17 +9045,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "KILN_USE_TAPE_AUTHORITATIVE",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var_os",
       "argument": "ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV",
       "argument_kind": "expression",
@@ -10048,9 +10015,9 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 559,
-    "process_mutation_entries": 266,
-    "read_call_sites": 952,
-    "read_entries": 646
+    "process_mutation_call_sites": 550,
+    "process_mutation_entries": 264,
+    "read_call_sites": 951,
+    "read_entries": 645
   }
 }

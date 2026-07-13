@@ -38,6 +38,13 @@
   could only mutate dead code. The corresponding backend precision field,
   generated capability-report column, source guard, and env-mutating test are
   gone; qualification now rejects reintroducing the two spellings.
+- training authority: removed `KILN_USE_TAPE_AUTHORITATIVE`. SFT and OPD were
+  already unconditionally tape-authoritative, while setting this switch false
+  made GRPO fail only after reference work because its candle fallback no
+  longer exists. GRPO now validates the backend tape route and precision policy
+  through one shared guard before resident setup and again before each direct
+  group step. Nine unscoped test mutations, including two leaked false values,
+  are removed.
 
 - inference: chat, streaming chat, multi-choice chat, and batch generation now
   accept `thinking_budget_tokens` and `thinking_budget_ms`. Kiln closes an open
