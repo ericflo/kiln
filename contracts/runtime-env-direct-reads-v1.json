@@ -321,17 +321,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_DETACHED_FULL_ATTN_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
       "argument": "KILN_DISABLE_GDN_KERNEL",
       "argument_kind": "literal",
       "count": 1,
@@ -368,17 +357,6 @@
       "argument": "KILN_DROP_PROJECTION_ORIGINALS",
       "argument_kind": "literal",
       "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_EXACT_GDN_BACKWARD_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 3,
       "language": "rust",
       "operation": "remove",
       "path": "crates/kiln-model/src/forward.rs",
@@ -442,61 +420,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_STREAMING_LAST_TOKEN_LM_HEAD",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_STREAMING_PREFILL",
-      "argument_kind": "literal",
-      "count": 4,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 4,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_TAPE_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 4,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
       "argument": "KILN_VK_NATIVE_TRAINING",
       "argument_kind": "literal",
       "count": 2,
@@ -519,17 +442,6 @@
     },
     {
       "api": "set_var",
-      "argument": "KILN_DETACHED_FULL_ATTN_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
       "argument": "KILN_DISABLE_MARLIN_BF16_DROP",
       "argument_kind": "literal",
       "count": 3,
@@ -544,17 +456,6 @@
       "argument": "KILN_DROP_PROJECTION_ORIGINALS",
       "argument_kind": "literal",
       "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_EXACT_GDN_BACKWARD_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 2,
       "language": "rust",
       "operation": "set",
       "path": "crates/kiln-model/src/forward.rs",
@@ -599,61 +500,6 @@
       "argument": "KILN_METAL_GRAPH_STABLE_PAGED_METADATA",
       "argument_kind": "literal",
       "count": 4,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_STREAMING_LAST_TOKEN_LM_HEAD",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_STREAMING_PREFILL",
-      "argument_kind": "literal",
-      "count": 3,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 3,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_TAPE_STREAMING_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 2,
       "language": "rust",
       "operation": "set",
       "path": "crates/kiln-model/src/forward.rs",
@@ -5198,7 +5044,7 @@
       "api": "var",
       "argument": "name",
       "argument_kind": "expression",
-      "count": 2,
+      "count": 1,
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-model/src/forward.rs",
@@ -6242,39 +6088,6 @@
     {
       "api": "var",
       "argument": "KILN_SPLIT_Q_GATE_OUTPUT_CHUNK_FEATURES",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_STREAMING_LAST_TOKEN_LM_HEAD",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_STREAMING_PREFILL",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS",
       "argument_kind": "literal",
       "count": 1,
       "language": "rust",
@@ -10532,9 +10345,9 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 611,
-    "process_mutation_entries": 292,
-    "read_call_sites": 972,
-    "read_entries": 664
+    "process_mutation_call_sites": 577,
+    "process_mutation_entries": 278,
+    "read_call_sites": 968,
+    "read_entries": 661
   }
 }
