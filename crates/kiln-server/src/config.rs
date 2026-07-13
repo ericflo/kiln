@@ -3485,6 +3485,8 @@ mod tests {
             Ok(raw.to_owned())
         }
 
+        static CANONICAL_ALIAS: [EnvAlias; 1] = [EnvAlias::value("KILN_SERVER_HOST")];
+
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         environment.set("KILN_SERVER_HOST", "127.0.0.9");
@@ -3492,7 +3494,7 @@ mod tests {
         let field = PublicEnvField {
             section: "server",
             field: "host",
-            supported_aliases: &[EnvAlias::value("KILN_SERVER_HOST")],
+            supported_aliases: &CANONICAL_ALIAS,
             apply: count_apply,
         };
 
