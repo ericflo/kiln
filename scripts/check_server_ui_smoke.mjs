@@ -157,6 +157,47 @@ function checkRuntimeConfigSchemaContract(source) {
     'directRendezvousRuntime.actor_active',
     'directRendezvousRuntime.worker_active',
     'directRendezvousRuntime.route_available',
+    'cfg.streaming_prefill',
+    'streamingPrefill.dispatch',
+    'streamingPrefill.threshold_tokens',
+    'streamingPrefill.tile_tokens',
+    'streamingPrefill.tape_tile_tokens',
+    'streamingPrefill.detached_full_attn_tile_tokens',
+    'streamingPrefill.detached_full_attn_boundary_tile_tokens',
+    'streamingPrefill.detached_full_attn_tape_replay_tile_tokens',
+    'streamingPrefill.last_token_lm_head',
+    'streamingDispatch.configured_mode',
+    'streamingDispatch.configured_source',
+    'streamingDispatch.backend_policy',
+    'streamingDispatch.effective',
+    'streamingDispatch.effective_source',
+    'streamingThreshold.configured',
+    'streamingThreshold.configured_source',
+    'streamingThreshold.override_applied_to_backend_auto_policy',
+    'streamingBaseTile.configured_source',
+    'streamingBaseTile.backend_policy',
+    'streamingBaseTile.effective',
+    'streamingBaseTile.effective_source',
+    'streamingTapeTile.configured_source',
+    'streamingTapeTile.backend_policy',
+    'streamingTapeTile.effective',
+    'streamingTapeTile.effective_source',
+    'streamingDetachedTile.configured_source',
+    'streamingDetachedTile.backend_policy',
+    'streamingDetachedTile.effective',
+    'streamingDetachedTile.effective_source',
+    'streamingBoundaryTile.backend_policy',
+    'streamingBoundaryTile.effective',
+    'streamingBoundaryTile.effective_source',
+    'streamingReplayTile.backend_policy',
+    'streamingReplayTile.effective',
+    'streamingReplayTile.effective_source',
+    'streamingLastTokenLmHead.configured',
+    'streamingLastTokenLmHead.configured_source',
+    'streamingLastTokenLmHead.effective',
+    'streamingLastTokenLmHead.effective_source',
+    'streamingPrefill.immutable_after_startup',
+    'streamingPrefill.restart_required_to_change',
   ]) {
     if (!renderer.includes(field)) fail(`Runtime-config renderer does not consume ${field}`);
   }
@@ -171,7 +212,7 @@ function checkRuntimeConfigSchemaContract(source) {
     if (renderer.includes(stale)) fail(`Runtime-config renderer still depends on stale contract wording ${stale}`);
   }
 
-  // The direct-rendezvous fields were added after the original runtime-config
+  // Newer policy diagnostics were added after the original runtime-config
   // response. Older servers and partial diagnostic payloads must keep the
   // dashboard usable while rendering unknown values, never throw during the
   // first paint or leak JavaScript's `undefined` into operator-facing text.
@@ -252,6 +293,9 @@ function checkRuntimeConfigSchemaContract(source) {
     if (/undefined/.test(html)) fail(`Runtime-config renderer exposed undefined for ${label}`);
     if (!/Direct-stream greedy fallback/.test(html)) {
       fail(`Runtime-config renderer omitted the fallback scope for ${label}`);
+    }
+    if (!/Streaming prefill/.test(html)) {
+      fail(`Runtime-config renderer omitted streaming-prefill diagnostics for ${label}`);
     }
     if (label === 'automatic unavailable fallback response') {
       if ((html.match(/<strong>auto<\/strong>/g) || []).length < 3) {
@@ -1191,6 +1235,61 @@ async function startServer({
             route_available: false,
           },
         },
+        streaming_prefill: {
+          dispatch: {
+            configured_mode: 'auto',
+            configured_source: 'config_file',
+            backend_policy: { policy: 'prompt_tokens_at_least', minimum_prompt_tokens: 2_048 },
+            effective: { policy: 'prompt_tokens_at_least', minimum_prompt_tokens: 4_096 },
+            effective_source: 'environment',
+          },
+          threshold_tokens: {
+            configured: 4_096,
+            configured_source: 'environment',
+            backend_policy: 2_048,
+            effective_for_auto_mode: 4_096,
+            override_applied_to_backend_auto_policy: true,
+          },
+          tile_tokens: {
+            configured: 4_096,
+            configured_source: 'config_file',
+            backend_policy: 2_048,
+            effective: 4_096,
+            effective_source: 'config_file',
+          },
+          tape_tile_tokens: {
+            configured: null,
+            configured_source: 'default',
+            backend_policy: 2_048,
+            effective: 4_096,
+            effective_source: 'inherited_from_tile_tokens_config_file',
+          },
+          detached_full_attn_tile_tokens: {
+            configured: null,
+            configured_source: 'default',
+            backend_policy: 8_192,
+            effective: 4_096,
+            effective_source: 'inherited_from_tile_tokens_config_file',
+          },
+          detached_full_attn_boundary_tile_tokens: {
+            backend_policy: 8_192,
+            effective: 4_096,
+            effective_source: 'inherited_from_tile_tokens_config_file',
+          },
+          detached_full_attn_tape_replay_tile_tokens: {
+            backend_policy: 8_192,
+            effective: 4_096,
+            effective_source: 'inherited_from_tile_tokens_config_file',
+          },
+          last_token_lm_head: {
+            configured: true,
+            configured_source: 'default',
+            effective: true,
+            effective_source: 'default',
+          },
+          immutable_after_startup: true,
+          restart_required_to_change: true,
+        },
         training: {
           runtime_device: 'vulkan:0',
           model_weight_device: 'cpu',
@@ -2100,6 +2199,36 @@ async function expectDirectDecodeRendezvousRuntimeConfig(page, scenarioLabel) {
   await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mixed lengths configured[\s\S]*off[\s\S]*config_file/, `${prefix} should render configured mixed-length policy and source`);
   await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mixed lengths backend[\s\S]*on[\s\S]*backend_policy/, `${prefix} should render backend mixed-length policy and source`);
   await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mixed lengths effective[\s\S]*off[\s\S]*config_file/, `${prefix} should render effective mixed-length policy and source`);
+}
+
+async function expectStreamingPrefillRuntimeConfig(page, scenarioLabel) {
+  const prefix = `${scenarioLabel} streaming-prefill runtime config`;
+  await page.waitForFunction(() => Array.from(document.querySelectorAll('#runtime-config-body .rc-group'))
+    .some((group) => group.querySelector('.rc-group-title')?.textContent?.trim() === 'Streaming prefill'),
+  { timeout: 5000 }).catch(() => fail(`${prefix} group did not render`));
+  const groupText = await page.$$eval('#runtime-config-body .rc-group', (groups) => groups
+    .find((group) => group.querySelector('.rc-group-title')?.textContent?.trim() === 'Streaming prefill')
+    ?.innerText || '');
+  for (const [pattern, message] of [
+    [/Dispatch input[\s\S]*uncached prompt tokens/, 'should identify the uncached-token dispatch input'],
+    [/Policy consumers[\s\S]*inference \+ training/, 'should identify the shared inference and training policy'],
+    [/Mode configured[\s\S]*auto[\s\S]*config_file/, 'should render configured mode and source'],
+    [/Dispatch backend[\s\S]*at least 2,048 tokens[\s\S]*backend_policy/, 'should render backend dispatch and source'],
+    [/Dispatch effective[\s\S]*at least 4,096 tokens[\s\S]*environment/, 'should render effective dispatch and source'],
+    [/Threshold configured[\s\S]*4,096 tokens[\s\S]*environment/, 'should render configured threshold and source'],
+    [/Threshold backend[\s\S]*2,048 tokens[\s\S]*backend_policy/, 'should render backend threshold and source'],
+    [/Threshold effective[\s\S]*4,096 tokens[\s\S]*environment/, 'should render effective threshold and source'],
+    [/Threshold override[\s\S]*applied/, 'should render threshold override resolution'],
+    [/Base configured[\s\S]*4,096 tokens[\s\S]*config_file[\s\S]*Base backend[\s\S]*2,048 tokens[\s\S]*backend_policy[\s\S]*Base effective[\s\S]*4,096 tokens[\s\S]*config_file/, 'should render configured, backend, and effective base tiles'],
+    [/Tape configured[\s\S]*auto[\s\S]*default[\s\S]*Tape backend[\s\S]*2,048 tokens[\s\S]*backend_policy[\s\S]*Tape effective[\s\S]*4,096 tokens[\s\S]*inherited_from_tile_tokens_config_file/, 'should render tape-tile inheritance'],
+    [/Detached configured[\s\S]*auto[\s\S]*default[\s\S]*Detached backend[\s\S]*8,192 tokens[\s\S]*backend_policy[\s\S]*Detached effective[\s\S]*4,096 tokens[\s\S]*inherited_from_tile_tokens_config_file/, 'should render detached-tile inheritance'],
+    [/Boundary configured[\s\S]*derived from detached[\s\S]*inherited_from_tile_tokens_config_file[\s\S]*Boundary backend[\s\S]*8,192 tokens[\s\S]*backend_policy[\s\S]*Boundary effective[\s\S]*4,096 tokens[\s\S]*inherited_from_tile_tokens_config_file/, 'should render derived boundary tiles and source'],
+    [/Replay configured[\s\S]*derived from detached[\s\S]*inherited_from_tile_tokens_config_file[\s\S]*Replay backend[\s\S]*8,192 tokens[\s\S]*backend_policy[\s\S]*Replay effective[\s\S]*4,096 tokens[\s\S]*inherited_from_tile_tokens_config_file/, 'should render derived tape-replay tiles and source'],
+    [/Last-token configured[\s\S]*on[\s\S]*default[\s\S]*Last-token effective[\s\S]*on[\s\S]*default/, 'should render last-token LM-head resolution'],
+    [/Startup policy[\s\S]*immutable[\s\S]*Change requires restart[\s\S]*required/, 'should render immutable and restart-required lifecycle flags'],
+  ]) {
+    if (!pattern.test(groupText)) fail(`${prefix} ${message}; got ${JSON.stringify(groupText)}`);
+  }
 }
 
 async function expectActiveTrainingTab(page, tabName, message) {
@@ -3414,7 +3543,8 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     // ---- Hidden diagnostics: the runtime-config expander on the Server
     // status card fetches GET /v1/config on first open and renders the real
     // ConfigResponse fields (capacity resolution, live memory, governor,
-    // checkpoint policy, KV cache geometry, and exact budget partitions).
+    // batching, streaming-prefill and checkpoint policy, KV geometry, and
+    // exact budget partitions).
     await clickAndWait(page, '#runtime-config > summary', 'Could not open the runtime config expander');
     await waitForPanelText(page, '#runtime-config-body', /linux-drm-sysfs-unified/, 'Runtime config should render the device-scoped memory source');
     await waitForPanelText(page, '#runtime-config-body', /Physical[\s\S]*25\.75 GiB/, 'Runtime config should render physical capacity');
@@ -3432,6 +3562,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#runtime-config-body', /Prefill effective[\s\S]*16[\s\S]*effective_decode_width/, 'Runtime config should render bounded effective prefill quantum and source');
     await waitForPanelText(page, '#runtime-config-body', /Burst prefill[\s\S]*on/, 'Runtime config should render backend burst-prefill policy');
     await expectDirectDecodeRendezvousRuntimeConfig(page, 'Desktop');
+    await expectStreamingPrefillRuntimeConfig(page, 'Desktop');
     await waitForPanelText(page, '#runtime-config-body', /Runtime device[\s\S]*vulkan:0/, 'Runtime config should render the native-training runtime device');
     await waitForPanelText(page, '#runtime-config-body', /Weight device[\s\S]*cpu/, 'Runtime config should render the frozen model-weight device');
     await waitForPanelText(page, '#runtime-config-body', /Native training[\s\S]*unavailable/, 'Runtime config should render fail-closed native-training support');
@@ -3443,9 +3574,10 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       '#runtime-config [data-rc-raw-pre]',
       (el) => !el.hidden
         && /"memory_budget"/.test(el.textContent || '')
-        && /"direct_decode_rendezvous"/.test(el.textContent || ''),
+        && /"direct_decode_rendezvous"/.test(el.textContent || '')
+        && /"streaming_prefill"/.test(el.textContent || ''),
     );
-    if (!configRawShown) fail('Runtime config raw JSON toggle should reveal the pretty-printed /v1/config payload including direct rendezvous state');
+    if (!configRawShown) fail('Runtime config raw JSON toggle should reveal the pretty-printed /v1/config payload including resolved batching and streaming-prefill state');
 
     // Regression (the "pie chart disappears" bug): the VRAM donut and header
     // stats must survive subsequent 2s health polls. The donut used to render

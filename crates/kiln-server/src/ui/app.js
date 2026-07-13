@@ -1844,8 +1844,9 @@ function renderServerStatus(h) {
 
 /* =====================================================================
    Runtime config expander — GET /v1/config (device-scoped capacity,
-   live usable memory, governor policy, batching resolution, KV geometry,
-   training policy, and exact memory-budget partitions).
+   live usable memory, governor policy, batching and streaming-prefill
+   resolution, KV geometry, training policy, and exact memory-budget
+   partitions).
    The <details> shell is static in index.html as a SIBLING of the keyed
    #server-status region: renderServerStatus innerHTML-swaps that element
    whenever its content key changes (and pollHealth's failure path
@@ -1911,6 +1912,15 @@ function renderRuntimeConfigBody(cfg) {
   const directRendezvousWaitUs = directRendezvousConfiguration.wait_us || {};
   const directRendezvousMixedSeqLens = directRendezvousConfiguration.mixed_seq_lens || {};
   const directRendezvousRuntime = batching.direct_decode_rendezvous || {};
+  const streamingPrefill = cfg.streaming_prefill || {};
+  const streamingDispatch = streamingPrefill.dispatch || {};
+  const streamingThreshold = streamingPrefill.threshold_tokens || {};
+  const streamingBaseTile = streamingPrefill.tile_tokens || {};
+  const streamingTapeTile = streamingPrefill.tape_tile_tokens || {};
+  const streamingDetachedTile = streamingPrefill.detached_full_attn_tile_tokens || {};
+  const streamingBoundaryTile = streamingPrefill.detached_full_attn_boundary_tile_tokens || {};
+  const streamingReplayTile = streamingPrefill.detached_full_attn_tape_replay_tile_tokens || {};
+  const streamingLastTokenLmHead = streamingPrefill.last_token_lm_head || {};
   const srcChip = s => s == null ? '' : ` <span class="rc-source" title="Where this value came from">${escapeHtml(String(s))}</span>`;
   const flagChip = (label, title) => ` <span class="rc-source"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(label)}</span>`;
   const onOff = v => v ? 'on' : 'off';
@@ -1928,6 +1938,46 @@ function renderRuntimeConfigBody(cfg) {
     if (!hasOwn(object, field)) return '—';
     return object[field] == null ? 'auto' : enabledState(object[field]);
   };
+  const tokens = value => (typeof value === 'number' && isFinite(value))
+    ? `${num(value)} tokens`
+    : '—';
+  const configuredTokens = object => {
+    if (!hasOwn(object, 'configured')) return '—';
+    return object.configured == null ? 'auto' : tokens(object.configured);
+  };
+  const optionalTokens = (object, field) => {
+    if (!hasOwn(object, field)) return '—';
+    return object[field] == null ? 'none' : tokens(object[field]);
+  };
+  const streamingDispatchRule = rule => {
+    if (!rule || typeof rule !== 'object') return '—';
+    if (rule.policy === 'never') return 'never';
+    if (rule.policy === 'all_non_empty') return 'all non-empty prompts';
+    if (rule.policy === 'prompt_tokens_at_least') {
+      return typeof rule.minimum_prompt_tokens === 'number' && isFinite(rule.minimum_prompt_tokens)
+        ? `at least ${num(rule.minimum_prompt_tokens)} tokens`
+        : 'at configured threshold';
+    }
+    return rule.policy == null ? '—' : String(rule.policy).replaceAll('_', ' ');
+  };
+  const streamingConfiguredMode = streamingDispatch.configured_mode == null
+    ? '—'
+    : String(streamingDispatch.configured_mode);
+  const streamingThresholdOverride = hasOwn(streamingThreshold, 'override_applied_to_backend_auto_policy')
+    ? streamingThreshold.override_applied_to_backend_auto_policy ? 'applied' : 'not applied'
+    : '—';
+  const streamingEffectiveThresholdSource = !hasOwn(streamingThreshold, 'effective_for_auto_mode')
+    ? null
+    : streamingThreshold.override_applied_to_backend_auto_policy === true
+      ? streamingThreshold.configured_source
+      : 'backend_policy';
+  const derivedTileInput = object => hasOwn(object, 'effective') ? 'derived from detached' : '—';
+  const immutableState = streamingPrefill.immutable_after_startup === true
+    ? 'immutable'
+    : streamingPrefill.immutable_after_startup === false ? 'mutable' : '—';
+  const restartState = streamingPrefill.restart_required_to_change === true
+    ? 'required'
+    : streamingPrefill.restart_required_to_change === false ? 'not required' : '—';
   const policySource = (object, field) => hasOwn(object, field) ? srcChip('backend_policy') : '';
   const gib = v => (typeof v === 'number' && isFinite(v)) ? v.toFixed(2) + ' GiB' : '—';
   const memory = (gibValue, bytesValue) => {
@@ -2008,6 +2058,37 @@ function renderRuntimeConfigBody(cfg) {
         <div class="rc-group-title">KV cache</div>
         ${runtimeConfigRow('Blocks', `<strong>${num(kv.num_blocks)}</strong>${srcChip(kv.num_blocks_source)}`, 'Paged-attention blocks allocated by the running backend, either automatically sized or explicitly configured.')}
         ${runtimeConfigRow('FP8 cache', `<strong>${onOff(kv.fp8_enabled)}</strong>`, 'Whether the KV cache stores keys/values in FP8 (halves cache memory per token).')}
+      </div>
+      <div class="rc-group">
+        <div class="rc-group-title">Streaming prefill</div>
+        ${runtimeConfigRow('Dispatch input', '<strong>uncached prompt tokens</strong>', 'Dispatch is based on the prompt suffix not already satisfied by the prefix cache.')}
+        ${runtimeConfigRow('Policy consumers', '<strong>inference + training</strong>', 'Inference and native training share this exact resolved process-lifetime policy.')}
+        ${runtimeConfigRow('Mode configured', `<strong>${escapeHtml(streamingConfiguredMode)}</strong>${srcChip(streamingDispatch.configured_source)}`, 'Typed startup mode before backend policy resolution.')}
+        ${runtimeConfigRow('Dispatch backend', `<strong>${escapeHtml(streamingDispatchRule(streamingDispatch.backend_policy))}</strong>${policySource(streamingDispatch, 'backend_policy')}`, 'Backend-selected automatic dispatch rule.')}
+        ${runtimeConfigRow('Dispatch effective', `<strong>${escapeHtml(streamingDispatchRule(streamingDispatch.effective))}</strong>${srcChip(streamingDispatch.effective_source)}`, 'Immutable dispatch rule used by inference and native training.')}
+        ${runtimeConfigRow('Threshold configured', `<strong>${configuredTokens(streamingThreshold)}</strong>${srcChip(streamingThreshold.configured_source)}`, 'Optional automatic-mode threshold override.')}
+        ${runtimeConfigRow('Threshold backend', `<strong>${optionalTokens(streamingThreshold, 'backend_policy')}</strong>${policySource(streamingThreshold, 'backend_policy')}`, 'Backend automatic-dispatch threshold; none means the backend never dispatches automatically.')}
+        ${runtimeConfigRow('Threshold effective', `<strong>${optionalTokens(streamingThreshold, 'effective_for_auto_mode')}</strong>${srcChip(streamingEffectiveThresholdSource)}`, 'Threshold used when the configured mode is auto.')}
+        ${runtimeConfigRow('Threshold override', `<strong>${streamingThresholdOverride}</strong>`, 'Whether the configured threshold replaced a threshold-bearing backend auto policy.')}
+        ${runtimeConfigRow('Base configured', `<strong>${configuredTokens(streamingBaseTile)}</strong>${srcChip(streamingBaseTile.configured_source)}`, 'Configured base streaming tile size; auto delegates to backend policy.')}
+        ${runtimeConfigRow('Base backend', `<strong>${tokens(streamingBaseTile.backend_policy)}</strong>${policySource(streamingBaseTile, 'backend_policy')}`, 'Backend base streaming tile size.')}
+        ${runtimeConfigRow('Base effective', `<strong>${tokens(streamingBaseTile.effective)}</strong>${srcChip(streamingBaseTile.effective_source)}`, 'Resolved base streaming tile size.')}
+        ${runtimeConfigRow('Tape configured', `<strong>${configuredTokens(streamingTapeTile)}</strong>${srcChip(streamingTapeTile.configured_source)}`, 'Configured tape-forward tile size; auto inherits an explicit base tile before using backend policy.')}
+        ${runtimeConfigRow('Tape backend', `<strong>${tokens(streamingTapeTile.backend_policy)}</strong>${policySource(streamingTapeTile, 'backend_policy')}`, 'Backend tape-forward tile size.')}
+        ${runtimeConfigRow('Tape effective', `<strong>${tokens(streamingTapeTile.effective)}</strong>${srcChip(streamingTapeTile.effective_source)}`, 'Resolved tape-forward tile size and inheritance source.')}
+        ${runtimeConfigRow('Detached configured', `<strong>${configuredTokens(streamingDetachedTile)}</strong>${srcChip(streamingDetachedTile.configured_source)}`, 'Configured detached full-attention tile size; auto inherits an explicit base tile before using backend policy.')}
+        ${runtimeConfigRow('Detached backend', `<strong>${tokens(streamingDetachedTile.backend_policy)}</strong>${policySource(streamingDetachedTile, 'backend_policy')}`, 'Backend detached full-attention tile size.')}
+        ${runtimeConfigRow('Detached effective', `<strong>${tokens(streamingDetachedTile.effective)}</strong>${srcChip(streamingDetachedTile.effective_source)}`, 'Resolved detached full-attention tile size and inheritance source.')}
+        ${runtimeConfigRow('Boundary configured', `<strong>${derivedTileInput(streamingBoundaryTile)}</strong>${srcChip(streamingBoundaryTile.effective_source)}`, 'Boundary tiles are derived from the detached full-attention configuration rather than configured independently.')}
+        ${runtimeConfigRow('Boundary backend', `<strong>${tokens(streamingBoundaryTile.backend_policy)}</strong>${policySource(streamingBoundaryTile, 'backend_policy')}`, 'Backend detached full-attention boundary tile size.')}
+        ${runtimeConfigRow('Boundary effective', `<strong>${tokens(streamingBoundaryTile.effective)}</strong>${srcChip(streamingBoundaryTile.effective_source)}`, 'Resolved detached full-attention boundary tile size and inheritance source.')}
+        ${runtimeConfigRow('Replay configured', `<strong>${derivedTileInput(streamingReplayTile)}</strong>${srcChip(streamingReplayTile.effective_source)}`, 'Tape-replay tiles are derived from the detached full-attention configuration rather than configured independently.')}
+        ${runtimeConfigRow('Replay backend', `<strong>${tokens(streamingReplayTile.backend_policy)}</strong>${policySource(streamingReplayTile, 'backend_policy')}`, 'Backend detached full-attention tape-replay tile size.')}
+        ${runtimeConfigRow('Replay effective', `<strong>${tokens(streamingReplayTile.effective)}</strong>${srcChip(streamingReplayTile.effective_source)}`, 'Resolved detached full-attention tape-replay tile size and inheritance source.')}
+        ${runtimeConfigRow('Last-token configured', `<strong>${enabledState(streamingLastTokenLmHead.configured)}</strong>${srcChip(streamingLastTokenLmHead.configured_source)}`, 'Whether streaming prefill computes the LM head only for the final prompt token.')}
+        ${runtimeConfigRow('Last-token effective', `<strong>${enabledState(streamingLastTokenLmHead.effective)}</strong>${srcChip(streamingLastTokenLmHead.effective_source)}`, 'Resolved final-token LM-head projection policy for streaming inference tiles.')}
+        ${runtimeConfigRow('Startup policy', `<strong>${immutableState}</strong>`, 'The resolved policy does not change during this server process.')}
+        ${runtimeConfigRow('Change requires restart', `<strong>${restartState}</strong>`, 'Configuration changes take effect on the next server start.')}
       </div>
       <div class="rc-group">
         <div class="rc-group-title">Batching</div>
