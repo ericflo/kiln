@@ -799,7 +799,7 @@ fn stream_stall_grace_is_strict_startup_config_not_actor_environment() {
     let config = read("crates/kiln-server/src/config.rs");
     for required in [
         "pub stream_stall_grace_ms: StreamStallGrace",
-        "config.apply_stream_stall_grace_env_override()?",
+        "config.apply_env_overrides()?",
         "STREAM_STALL_GRACE_MIN_MS",
         "STREAM_STALL_GRACE_MAX_MS",
         "ConfigValueSource::Environment",
