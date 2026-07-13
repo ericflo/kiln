@@ -1069,8 +1069,11 @@ deprecated aliases, backend matrices, decode-width clamps, and debug shape are i
 Streaming prefill is also immutable startup policy. `auto` uses backend
 dispatch and tiles; concrete thresholds and tiles are strict decimal values,
 and every tile must be a positive multiple of 64. Startup injects the same
-resolved policy into inference and native training, so changing TOML or an
-environment override requires a restart. The config endpoint reports
+resolved policy into generation, prompt-logprob scoring, native training, local
+OPD teachers, MTP alignment, and the benchmark, so changing TOML or an
+environment override requires a restart. The canonical prompt-logprob teacher
+revision hashes every resolved policy field; a change invalidates
+identity-bound logit caches and OPD resume bindings. The config endpoint reports
 configured, backend, effective, and inherited values at `streaming_prefill`;
 health repeats the object at `prefill_runtime.streaming_prefill`. Use
 `mode = "disabled"` for a clean monolithic-prefill comparison when diagnosing a

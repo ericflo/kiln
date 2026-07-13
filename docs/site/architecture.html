@@ -317,16 +317,19 @@ training request
           Typed TOML and canonical startup overrides enter one strict loader. After backend selection,
           Kiln combines operator intent with <code>StreamingPrefillBackendPolicy</code> to produce an
           immutable <code>StreamingPrefillRuntimeConfig</code>. Its private execution policy is injected
-          into <code>ModelRunner</code> and the server-owned training runtime. Ordinary inference,
-          SFT/GRPO/OPD admission, checkpoint planning, GDN segment forwards, tape-authoritative
-          forwards, and detached full-attention routes consume that value. None of those paths rereads
-          public streaming environment variables.
+          into <code>ModelRunner</code> and the server-owned training runtime. Ordinary generation,
+          prompt-logprob scoring, SFT/GRPO/OPD admission, local teachers, MTP alignment, checkpoint
+          planning, GDN segment forwards, tape-authoritative forwards, detached full-attention routes,
+          and the benchmark consume that value. None of those paths rereads public streaming
+          environment variables; server-owned teacher construction fails closed if the value is absent.
         </p>
         <pre class="mt-5"><code>typed [streaming_prefill] + source attribution
   -> selected-backend dispatch and tile defaults
   -> immutable StreamingPrefillRuntimeConfig
   -> ModelRunner + native training runtime + checkpoint identity
-  -> inference base tiles / tape tiles / detached full-attention tiles</code></pre>
+  -> inference base tiles / tape tiles / detached full-attention tiles
+  -> generation / prompt-logprob + local teacher / MTP alignment
+  -> inference-contract-v2 teacher and logit-cache identity</code></pre>
         <div class="grid md:grid-cols-3 gap-5 check-list mt-5" style="color: var(--fg-dim);">
           <div>
             <h3 class="font-semibold mb-2" style="color: var(--fg);">Dispatch</h3>
@@ -360,7 +363,9 @@ training request
           prompt-length dependent. It includes configured/backend/effective dispatch, threshold
           applicability, every effective tile and source, last-token LM-head policy, immutability, and
           restart requirement. This is process-lifetime policy; a running request or training job never
-          observes a changed shell or file.
+          observes a changed shell or file. The canonical Kiln prompt-logprob teacher identity hashes
+          every resolved field under inference-contract v2. Changing the policy therefore changes the
+          teacher revision and invalidates identity-bound logit caches and OPD resume bindings.
         </p>
       </article>
 

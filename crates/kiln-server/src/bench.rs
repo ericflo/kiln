@@ -25,23 +25,23 @@ use kiln_model::backend::{self as runtime_backend, LinearBackend, ResidencyBacke
 use kiln_model::forward::{
     GpuWeights,
     LinearAttentionState,
+    StreamingPrefillExecutionPolicy,
     lm_head_sample_backend_decode_if,
     model_forward_head_backend_decode_if,
-    model_forward_kt,
+    model_forward_kt_with_policy,
     model_forward_paged_batched_decode_hidden,
     model_forward_paged_last_token,
     model_forward_paged_last_token_greedy,
     model_forward_paged_last_token_hidden,
     model_forward_paged_last_token_with_last_hidden,
     model_forward_paged_next_token_greedy,
-    model_forward_paged_streaming,
-    model_forward_paged_streaming_last_token_hidden,
-    model_forward_paged_streaming_last_token_with_last_hidden,
+    model_forward_paged_streaming_last_token_hidden_with_policy,
+    model_forward_paged_streaming_last_token_with_last_hidden_with_policy,
+    model_forward_paged_streaming_with_policy,
     // Phase 7 #1082: kt twin entry point + allocator stub for the first
     // end-to-end PagedKvCacheKt production wiring (latency bench decode
     // loop). Both are CUDA-only and only kick in when the env gate
     // `KILN_USE_KT_PAGED_KV_CACHE` is on; behavior is identical otherwise.
-    streaming_prefill_enabled_for,
 };
 use kiln_model::kv_cache::KvCache;
 use kiln_model::sampling::{greedy_sample, sample_step};
@@ -50,10 +50,11 @@ use kiln_model::speculative::{
     speculative_mtp_decode_step,
 };
 use kiln_model::{
-    BackendCapabilityQueries, BackendIdentity, ModelRunner, ReplayBackend, ReplayNativePrimitive,
-    ReplayRequest, ServerTrainingDispatchPolicy, SpeculativeDecodePolicy, Support,
+    BackendCapabilityQueries, BackendIdentity, ModelRunner, ModelRunnerRuntimeOptions,
+    ReplayBackend, ReplayNativePrimitive, ReplayRequest, ServerTrainingDispatchPolicy,
+    SpeculativeDecodePolicy, Support,
 };
-use kiln_server::config::SpecMethod;
+use kiln_server::config::{KilnConfig, SpecMethod};
 
 /// Block size used for the paged-path benchmark. Matches the real server default.
 const PAGED_BLOCK_SIZE: usize = 64;
@@ -277,6 +278,7 @@ impl PromptSubset {
 
 /// Parse command-line arguments.
 struct BenchArgs {
+    config_path: Option<String>,
     model_path: String,
     max_output_tokens: usize,
     prompt_tokens: usize,
@@ -339,6 +341,7 @@ fn parse_args() -> Result<BenchArgs> {
     }
 
     let args: Vec<String> = std::env::args().collect();
+    let mut config_path = None;
     let mut model_path = String::new();
     let mut max_output_tokens = 128;
     let mut prompt_tokens = 512;
@@ -357,6 +360,9 @@ fn parse_args() -> Result<BenchArgs> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--config" => {
+                config_path = Some(value(&args, &mut i, "--config")?.to_string());
+            }
             "--model-path" => {
                 model_path = value(&args, &mut i, "--model-path")?.to_string();
             }
@@ -409,6 +415,9 @@ fn parse_args() -> Result<BenchArgs> {
             }
             "--help" | "-h" => {
                 eprintln!("Usage: kiln-bench --model-path <path> [options]");
+                eprintln!(
+                    "  --config <path>           Path to kiln.toml (defaults to normal discovery)"
+                );
                 eprintln!("  --model-path <path>       Path to Qwen3.5-4B weights directory");
                 eprintln!(
                     "  --max-output-tokens <n>   Max tokens to generate per request (default: 128)"
@@ -479,6 +488,7 @@ fn parse_args() -> Result<BenchArgs> {
     );
 
     Ok(BenchArgs {
+        config_path,
         model_path,
         max_output_tokens,
         prompt_tokens,
@@ -790,6 +800,7 @@ fn bench_latency(
     tokenizer: &KilnTokenizer,
     prompt_tokens: usize,
     max_output_tokens: usize,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<LatencyResult> {
     let prompt = build_prompt(tokenizer, prompt_tokens, 0);
     let prompt_token_ids = tokenizer
@@ -825,7 +836,7 @@ fn bench_latency(
 
     // Prefill: forward pass on all prompt tokens
     let prefill_start = Instant::now();
-    let logits = model_forward_kt(
+    let logits = model_forward_kt_with_policy(
         &*backend,
         &prompt_token_ids,
         weights,
@@ -833,6 +844,7 @@ fn bench_latency(
         Some(&mut kv_cache),
         Some(&mut linear_state),
         None,
+        streaming_prefill,
     )
     .context("prefill forward pass failed")?;
     kv_cache.advance(actual_prompt_tokens);
@@ -857,7 +869,7 @@ fn bench_latency(
         }
 
         let step_start = Instant::now();
-        let logits = model_forward_kt(
+        let logits = model_forward_kt_with_policy(
             &*backend,
             &[next_token],
             weights,
@@ -865,6 +877,7 @@ fn bench_latency(
             Some(&mut kv_cache),
             Some(&mut linear_state),
             None,
+            streaming_prefill,
         )
         .context("decode forward pass failed")?;
         kv_cache.advance(1);
@@ -945,6 +958,7 @@ fn bench_latency_paged(
     max_output_tokens: usize,
     seed: u64,
     temperature: f32,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<LatencyResult> {
     let prompt = build_prompt(tokenizer, prompt_tokens, seed);
     let prompt_token_ids = tokenizer
@@ -1050,14 +1064,13 @@ fn bench_latency_paged(
          ({actual_prompt_tokens} prompt tokens, temperature={temperature})..."
     );
 
-    // Prefill: forward pass on all prompt tokens via paged path. Long Metal
-    // prompts use tiled streaming prefill by default; env overrides can force
-    // either path.
+    // Prefill: forward pass on all prompt tokens via the paged path and the
+    // startup-resolved dispatch policy.
     let prefill_start = Instant::now();
-    let streaming_prefill = streaming_prefill_enabled_for(&device_kt, actual_prompt_tokens);
+    let use_streaming_prefill = streaming_prefill.enabled_for(actual_prompt_tokens);
     let mut next_token = if sampled_decode {
-        let hidden = if streaming_prefill {
-            model_forward_paged_streaming_last_token_hidden(
+        let hidden = if use_streaming_prefill {
+            model_forward_paged_streaming_last_token_hidden_with_policy(
                 &*backend,
                 &prompt_token_ids,
                 weights,
@@ -1067,6 +1080,7 @@ fn bench_latency_paged(
                 0,
                 Some(&mut linear_state),
                 None,
+                streaming_prefill,
             )
             .context("paged sampled prefill hidden pass (streaming) failed")?
         } else {
@@ -1102,8 +1116,8 @@ fn bench_latency_paged(
             sample_step(&logits, &sampling_params, Some(seed), &[])
                 .context("paged sampled prefill host sample failed")?
         }
-    } else if streaming_prefill {
-        let logits = model_forward_paged_streaming(
+    } else if use_streaming_prefill {
+        let logits = model_forward_paged_streaming_with_policy(
             &*backend,
             &prompt_token_ids,
             weights,
@@ -1113,6 +1127,7 @@ fn bench_latency_paged(
             0,
             Some(&mut linear_state),
             None,
+            streaming_prefill,
         )
         .context("paged prefill forward pass (streaming) failed")?;
         greedy_sample_kt(&logits)?
@@ -1531,6 +1546,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn benchmark_streaming_prefill_is_startup_policy_bound() {
+        let source = include_str!("bench.rs");
+        assert!(source.contains("KilnConfig::load(args.config_path.as_deref())"));
+        assert!(source.contains("with_streaming_prefill_policy(streaming_prefill)"));
+        assert!(source.contains("streaming_prefill: Some(streaming_prefill)"));
+        for compatibility_call in [
+            concat!("model_forward_", "kt("),
+            concat!("streaming_prefill_enabled_", "for("),
+            concat!("model_forward_paged_streaming", "("),
+        ] {
+            assert!(
+                !source.contains(compatibility_call),
+                "benchmark retained compatibility policy call {compatibility_call}"
+            );
+        }
+    }
+
     fn default_speculative_policy_for_test() -> SpeculativeDecodePolicy {
         SpeculativeDecodePolicy::default()
     }
@@ -1755,6 +1788,7 @@ fn bench_latency_skiplayer(
     max_output_tokens: usize,
     seed: u64,
     temperature: f32,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<LatencyResult> {
     use rand::SeedableRng;
 
@@ -1808,7 +1842,7 @@ fn bench_latency_skiplayer(
 
     // Prefill: full forward pass, no speculative draft yet.
     let prefill_start = Instant::now();
-    let logits = model_forward_kt(
+    let logits = model_forward_kt_with_policy(
         &*backend,
         &prompt_token_ids,
         weights,
@@ -1816,6 +1850,7 @@ fn bench_latency_skiplayer(
         Some(&mut kv_cache),
         Some(&mut linear_state),
         None,
+        streaming_prefill,
     )
     .context("skip-layer prefill forward pass failed")?;
     kv_cache.advance(actual_prompt_tokens);
@@ -1966,6 +2001,7 @@ fn bench_latency_paged_skiplayer(
     max_output_tokens: usize,
     seed: u64,
     temperature: f32,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<LatencyResult> {
     let speculative = benchmark_speculative_config(config)?;
     let num_speculative_tokens = speculative.num_speculative_tokens;
@@ -2004,9 +2040,7 @@ fn bench_latency_paged_skiplayer(
         device_kt,
     )?;
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
-    // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
-    // and `streaming_prefill_enabled_for` now take a kt `&Device`, so pass
-    // `&device_kt` directly (no candle bridge).
+    // #1082 forward-flip: the linear state takes a kt `&Device` directly.
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
@@ -2027,8 +2061,8 @@ fn bench_latency_paged_skiplayer(
     );
 
     let prefill_start = Instant::now();
-    let logits = if streaming_prefill_enabled_for(&device_kt, actual_prompt_tokens) {
-        model_forward_paged_streaming(
+    let logits = if streaming_prefill.enabled_for(actual_prompt_tokens) {
+        model_forward_paged_streaming_with_policy(
             &*backend,
             &prompt_token_ids,
             weights,
@@ -2038,6 +2072,7 @@ fn bench_latency_paged_skiplayer(
             0,
             Some(&mut linear_state),
             None,
+            streaming_prefill,
         )
         .context("paged skip-layer prefill forward pass (streaming) failed")?
     } else {
@@ -2214,6 +2249,7 @@ fn bench_latency_paged_mtp(
     chat_template: bool,
     prompt_subset: PromptSubset,
     temperature: f32,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<LatencyResult> {
     use rand::SeedableRng;
 
@@ -2281,9 +2317,7 @@ fn bench_latency_paged_mtp(
         device_kt,
     )?;
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
-    // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
-    // and `streaming_prefill_enabled_for` now take a kt `&Device`, so pass
-    // `&device_kt` directly (no candle bridge).
+    // #1082 forward-flip: the linear state takes a kt `&Device` directly.
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
@@ -2308,35 +2342,36 @@ fn bench_latency_paged_mtp(
     // Prefill: paged forward returning (logits, last-position hidden state)
     // so we can seed h_prev for the first MTP draft step.
     let prefill_start = Instant::now();
-    let (prefill_logits, prefill_h_prev_kt) =
-        if streaming_prefill_enabled_for(&device_kt, actual_prompt_tokens) {
-            model_forward_paged_streaming_last_token_with_last_hidden(
-                &*backend,
-                &prompt_token_ids,
-                weights,
-                config,
-                &base_cache,
-                &base_block_table,
-                0,
-                Some(&mut linear_state),
-                None,
-            )
-            .context("MTP prefill (streaming paged with last-hidden) failed")?
-        } else {
-            model_forward_paged_last_token_with_last_hidden(
-                &*backend,
-                &prompt_token_ids,
-                weights,
-                config,
-                &base_cache,
-                &base_block_table,
-                0,
-                Some(&mut linear_state),
-                None,
-                None,
-            )
-            .context("MTP prefill (paged with last-hidden) failed")?
-        };
+    let (prefill_logits, prefill_h_prev_kt) = if streaming_prefill.enabled_for(actual_prompt_tokens)
+    {
+        model_forward_paged_streaming_last_token_with_last_hidden_with_policy(
+            &*backend,
+            &prompt_token_ids,
+            weights,
+            config,
+            &base_cache,
+            &base_block_table,
+            0,
+            Some(&mut linear_state),
+            None,
+            streaming_prefill,
+        )
+        .context("MTP prefill (streaming paged with last-hidden) failed")?
+    } else {
+        model_forward_paged_last_token_with_last_hidden(
+            &*backend,
+            &prompt_token_ids,
+            weights,
+            config,
+            &base_cache,
+            &base_block_table,
+            0,
+            Some(&mut linear_state),
+            None,
+            None,
+        )
+        .context("MTP prefill (paged with last-hidden) failed")?
+    };
 
     // #1082 forward-flip: the paged-with-last-hidden entry now returns kt
     // tensors. The MTP step (`speculative_mtp_decode_step`) and the candle
@@ -2525,6 +2560,7 @@ fn bench_training(
     num_steps: usize,
     server_training_dispatch: ServerTrainingDispatchPolicy,
     vram_probe_selector: VramProbeSelector,
+    runtime: &kiln_train::TrainingRuntimeContext,
 ) -> Result<TrainingResult> {
     use kiln_train::{ChatMessage, SftConfig, SftExample};
 
@@ -2583,6 +2619,14 @@ fn bench_training(
 
     let adapter_dir = std::env::temp_dir().join("kiln-bench-adapters");
     std::fs::create_dir_all(&adapter_dir)?;
+    let prepared = kiln_train::sft_ingestion::prepare_sft_examples(
+        examples,
+        tokenizer,
+        config.invalid_row_policy,
+        "kiln-bench",
+        None,
+    )
+    .context("admit benchmark SFT examples")?;
 
     let progress_cb = Some(Box::new(|progress: kiln_train::trainer::TrainingProgress| {
         eprintln!(
@@ -2597,29 +2641,37 @@ fn bench_training(
 
     #[cfg(feature = "cuda")]
     let result = if native_route_enabled {
-        kiln_train::cuda_train::cuda_native_sft_train(
-            &examples,
+        kiln_train::cuda_train::cuda_native_sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
+            &prepared.examples,
+            &prepared.ingestion,
             &config,
             model_config,
             weights,
             tokenizer,
             &adapter_dir,
+            &adapter_dir,
+            &adapter_dir,
             "bench-adapter",
             progress_cb,
             None,
+            runtime,
         )
     } else {
-        kiln_train::trainer::sft_train(
-            &examples,
+        kiln_train::trainer::sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
+            &prepared.examples,
+            &prepared.ingestion,
             &config,
             model_config,
             weights,
             tokenizer,
             &adapter_dir,
+            &adapter_dir,
+            &adapter_dir,
             "bench-adapter",
             progress_cb,
             None,
             None,
+            runtime,
         )
     };
     #[cfg(not(feature = "cuda"))]
@@ -2633,17 +2685,21 @@ fn bench_training(
                  built without --features cuda; falling back to kt-tape SFT"
             );
         }
-        kiln_train::trainer::sft_train(
-            &examples,
+        kiln_train::trainer::sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
+            &prepared.examples,
+            &prepared.ingestion,
             &config,
             model_config,
             weights,
             tokenizer,
             &adapter_dir,
+            &adapter_dir,
+            &adapter_dir,
             "bench-adapter",
             progress_cb,
             None,
             None,
+            runtime,
         )
     };
     let elapsed = start.elapsed();
@@ -2807,6 +2863,7 @@ fn bench_selected_latency(
     gpu_weights: &GpuWeights,
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<LatencyResult> {
     match spec_method {
         SpecMethod::Mtp => {
@@ -2821,6 +2878,7 @@ fn bench_selected_latency(
                 args.chat_template,
                 args.prompt_subset,
                 args.temperature,
+                streaming_prefill,
             )
             .context("MTP latency benchmark failed")
         }
@@ -2835,6 +2893,7 @@ fn bench_selected_latency(
                     args.max_output_tokens,
                     args.seed,
                     args.temperature,
+                    streaming_prefill,
                 )
                 .context("paged skip-layer latency benchmark failed")
             } else {
@@ -2847,6 +2906,7 @@ fn bench_selected_latency(
                     args.max_output_tokens,
                     args.seed,
                     args.temperature,
+                    streaming_prefill,
                 )
                 .context("skip-layer latency benchmark failed")
             }
@@ -2862,6 +2922,7 @@ fn bench_selected_latency(
                     args.max_output_tokens,
                     args.seed,
                     args.temperature,
+                    streaming_prefill,
                 )
                 .context("paged latency benchmark failed")
             } else {
@@ -2872,6 +2933,7 @@ fn bench_selected_latency(
                     tokenizer,
                     args.prompt_tokens,
                     args.max_output_tokens,
+                    streaming_prefill,
                 )
                 .context("latency benchmark failed")
             }
@@ -2892,6 +2954,13 @@ fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    let startup_config = KilnConfig::load(args.config_path.as_deref())
+        .context("load benchmark startup configuration")?;
+    let gradient_checkpoint_policy = kiln_train::GradientCheckpointPolicy::from_parts(
+        startup_config.training.grad_checkpoint_segments,
+        startup_config.training.no_grad_checkpoint,
+    )
+    .context("resolve benchmark gradient-checkpoint policy")?;
     let model_path = Path::new(&args.model_path);
 
     // Compact banner — the rich box+GPU panel lives in `kiln serve`. Bench is
@@ -2911,14 +2980,27 @@ fn main() -> Result<()> {
     // hosts never report or budget against whichever GPU an auto probe finds first.
     let device_kt = kiln_server::device::select_device_kt()?;
     let vram_probe_selector = vram_probe_selector_for_device(&device_kt);
+    let backend = runtime_backend::for_device_kt(&device_kt);
+    let backend_name = BackendIdentity::runtime_name(backend.as_ref());
+    if backend_name == "cpu" {
+        anyhow::bail!(
+            "No accelerated backend available — benchmarks require CUDA, Metal, or Vulkan"
+        );
+    }
+    let backend_capabilities = BackendCapabilityQueries::backend_capabilities(backend.as_ref());
+    let streaming_prefill_runtime = startup_config
+        .streaming_prefill
+        .resolve(backend_capabilities.streaming_prefill);
+    let streaming_prefill = streaming_prefill_runtime.execution_policy();
 
     // GPU info
     let vram = detect_vram_for(vram_probe_selector);
     let bench_runtime = kiln_train::TrainingRuntimeContext::new_for_device(
         device_kt,
         vram,
-        kiln_train::GradientCheckpointPolicy::Auto,
-    );
+        gradient_checkpoint_policy,
+    )
+    .with_streaming_prefill_policy(streaming_prefill);
     kiln_train::ensure_memory_governor_for_runtime(device_kt, &bench_runtime)
         .context("failed to initialize benchmark memory governor")?;
     let gpu_info = GpuInfo {
@@ -2948,16 +3030,6 @@ fn main() -> Result<()> {
     )
     .context("failed to load model weights")?;
 
-    // The kt-typed `from_model_weights_kt` constructor and `for_device_kt`
-    // runtime backend selector accept the selected device directly.
-    let backend = runtime_backend::for_device_kt(&device_kt);
-    let backend_name = BackendIdentity::runtime_name(backend.as_ref());
-    if backend_name == "cpu" {
-        anyhow::bail!(
-            "No accelerated backend available — benchmarks require CUDA, Metal, or Vulkan"
-        );
-    }
-    let backend_capabilities = BackendCapabilityQueries::backend_capabilities(backend.as_ref());
     let native_mtp_allowed = backend_capabilities
         .decode
         .mtp_speculative_generation
@@ -3047,13 +3119,26 @@ fn main() -> Result<()> {
             warmup_idx + 1,
             args.latency_warmup_runs
         ));
-        let _ = bench_selected_latency(spec_method, &args, &gpu_weights, &model_config, &tokenizer)
-            .with_context(|| format!("latency warmup run {} failed", warmup_idx + 1))?;
+        let _ = bench_selected_latency(
+            spec_method,
+            &args,
+            &gpu_weights,
+            &model_config,
+            &tokenizer,
+            streaming_prefill,
+        )
+        .with_context(|| format!("latency warmup run {} failed", warmup_idx + 1))?;
     }
 
-    let latency =
-        bench_selected_latency(spec_method, &args, &gpu_weights, &model_config, &tokenizer)
-            .context("latency benchmark failed")?;
+    let latency = bench_selected_latency(
+        spec_method,
+        &args,
+        &gpu_weights,
+        &model_config,
+        &tokenizer,
+        streaming_prefill,
+    )
+    .context("latency benchmark failed")?;
 
     if args.latency_only {
         let results = BenchmarkResults {
@@ -3086,6 +3171,7 @@ fn main() -> Result<()> {
             args.training_steps,
             backend_capabilities.training.server_dispatch,
             vram_probe_selector,
+            &bench_runtime,
         ) {
             Ok(result) => {
                 let mut stderr = std::io::stderr();
@@ -3121,7 +3207,18 @@ fn main() -> Result<()> {
     };
 
     // Create runner for throughput benchmarks (takes ownership of weights)
-    let runner = ModelRunner::new(gpu_weights, runner_tokenizer, model_config.clone());
+    let runner = ModelRunner::new_with_runtime_options(
+        gpu_weights,
+        runner_tokenizer,
+        model_config.clone(),
+        ModelRunnerRuntimeOptions {
+            cuda_graphs: false,
+            rocm_graphs: true,
+            metal_graphs: true,
+            max_decode_batch: None,
+            streaming_prefill: Some(streaming_prefill),
+        },
+    );
 
     // Inference throughput at different run counts
     section_header("Inference throughput");

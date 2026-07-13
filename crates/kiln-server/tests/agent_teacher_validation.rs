@@ -72,6 +72,7 @@ fn make_state() -> (AppState, tempfile::TempDir) {
             &state.tokenizer,
             &state.model_config,
             "cpu",
+            state.streaming_prefill_runtime_config.execution_policy(),
             hash,
             hash,
         )

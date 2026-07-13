@@ -378,7 +378,7 @@ const expectedArchitectureSections = [
   { label: 'single-process server', terms: ['single process', 'rust binary', 'axum http api'] },
   { label: 'request path and batching', terms: ['request path and batching', 'iteration-level scheduler', 'continuous batching'] },
   { label: 'immutable batching authority', terms: ['BatchingRuntimeConfig', 'None of those paths rereads', 'actor_active', 'direct streaming effectively-greedy', 'worker liveness', 'route availability', 'decode_runtime.batching_configuration', 'decode_runtime.direct_decode_rendezvous'] },
-  { label: 'immutable streaming-prefill authority', terms: ['one streaming-prefill authority for inference and training', 'StreamingPrefillRuntimeConfig', 'none of those paths rereads', 'SFT/GRPO/OPD', 'checkpoint planning', 'base tiles / tape tiles / detached full-attention tiles', 'CPU/Vulkan', '8192 / 65536 / 65536', 'prefill_runtime.streaming_prefill', 'prompt-length dependent'] },
+  { label: 'immutable streaming-prefill authority', terms: ['one streaming-prefill authority for inference and training', 'StreamingPrefillRuntimeConfig', 'none of those paths rereads', 'SFT/GRPO/OPD', 'checkpoint planning', 'base tiles / tape tiles / detached full-attention tiles', 'prompt-logprob', 'local teacher', 'MTP alignment', 'inference-contract-v2', 'logit-cache identity', 'CPU/Vulkan', '8192 / 65536 / 65536', 'prefill_runtime.streaming_prefill', 'prompt-length dependent'] },
   { label: 'Gated DeltaNet/GDN hybrid', terms: ['gated deltanet', 'gdn', 'hybrid'] },
   { label: 'paged KV/block manager', terms: ['paged kv', 'block manager'] },
   { label: 'Qwen3.5-4B', terms: ['Qwen3.5-4B'] },

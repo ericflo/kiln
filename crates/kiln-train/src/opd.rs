@@ -2272,8 +2272,38 @@ pub fn build_local_teacher_fixture_with_coordination(
     tokenizer_hash: Option<String>,
     gpu_step_coordination: Option<&crate::trainer::GpuStepCoordination>,
 ) -> Result<crate::logit_source::FixtureLogitSource> {
+    let streaming_prefill = kiln_model::forward::StreamingPrefillExecutionPolicy::for_device(
+        weights.embed_tokens.device(),
+    );
+    build_local_teacher_fixture_with_coordination_and_policy(
+        teacher_id,
+        prompts_and_active,
+        weights,
+        model_config,
+        teacher_lora,
+        top_k,
+        tokenizer_hash,
+        gpu_step_coordination,
+        streaming_prefill,
+    )
+}
+
+/// Coordinated local-teacher materialization with an owning runtime's
+/// startup-resolved streaming-prefill policy.
+#[allow(clippy::too_many_arguments)]
+pub fn build_local_teacher_fixture_with_coordination_and_policy(
+    teacher_id: impl Into<String>,
+    prompts_and_active: &[(Vec<u32>, Vec<usize>)],
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    teacher_lora: Option<&kiln_model::lora_loader::LoraWeights>,
+    top_k: usize,
+    tokenizer_hash: Option<String>,
+    gpu_step_coordination: Option<&crate::trainer::GpuStepCoordination>,
+    streaming_prefill: kiln_model::forward::StreamingPrefillExecutionPolicy,
+) -> Result<crate::logit_source::FixtureLogitSource> {
     use kiln_model::backend;
-    use kiln_model::forward::{LinearAttentionState, model_forward_kt};
+    use kiln_model::forward::{LinearAttentionState, model_forward_kt_with_policy};
 
     // (#1082) `embed_tokens.device()` is kt; `LinearAttentionState::new` below
     // takes a kt device, and `for_device_kt` selects the backend from a kt
@@ -2316,7 +2346,7 @@ pub fn build_local_teacher_fixture_with_coordination(
             "local teacher prompt",
             || {
                 let mut linear_state = LinearAttentionState::new(model_config, &device)?;
-                let logits = model_forward_kt(
+                let logits = model_forward_kt_with_policy(
                     &*backend_rt,
                     tokens,
                     weights,
@@ -2324,6 +2354,7 @@ pub fn build_local_teacher_fixture_with_coordination(
                     None,
                     Some(&mut linear_state),
                     teacher_lora,
+                    streaming_prefill,
                 )
                 .context("local-teacher forward pass")?;
                 // logits shape: [1, T, V]. Detach autograd — no gradients needed.
@@ -2383,14 +2414,15 @@ fn forward_topk_at_positions(
     teacher_lora: Option<&kiln_model::lora_loader::LoraWeights>,
     top_k: usize,
     caps: &crate::logit_source::LogitSourceCaps,
+    streaming_prefill: kiln_model::forward::StreamingPrefillExecutionPolicy,
 ) -> Result<Vec<(Vec<u32>, Vec<f32>)>> {
     use kiln_model::backend;
-    use kiln_model::forward::{LinearAttentionState, model_forward_kt};
+    use kiln_model::forward::{LinearAttentionState, model_forward_kt_with_policy};
 
     let device = weights.embed_tokens.device();
     let backend_rt = backend::for_device_kt(&device);
     let mut linear_state = LinearAttentionState::new(model_config, &device)?;
-    let logits = model_forward_kt(
+    let logits = model_forward_kt_with_policy(
         &*backend_rt,
         tokens,
         weights,
@@ -2398,6 +2430,7 @@ fn forward_topk_at_positions(
         None,
         Some(&mut linear_state),
         teacher_lora,
+        streaming_prefill,
     )
     .context("live-teacher forward pass")?;
     let logits = logits.detach();
@@ -2498,6 +2531,7 @@ pub struct LiveLocalTeacher {
     identity: crate::TeacherIdentityV1,
     caps: crate::logit_source::LogitSourceCaps,
     default_top_k: usize,
+    streaming_prefill: kiln_model::forward::StreamingPrefillExecutionPolicy,
 }
 
 impl std::fmt::Debug for LiveLocalTeacher {
@@ -2519,6 +2553,32 @@ impl LiveLocalTeacher {
         teacher_lora: Option<kiln_model::lora_loader::LoraWeights>,
         identity: crate::TeacherIdentityV1,
         top_k: usize,
+    ) -> Result<Self> {
+        let streaming_prefill = kiln_model::forward::StreamingPrefillExecutionPolicy::for_device(
+            weights.embed_tokens.device(),
+        );
+        Self::new_with_streaming_prefill_policy(
+            teacher_id,
+            weights,
+            model_config,
+            teacher_lora,
+            identity,
+            top_k,
+            streaming_prefill,
+        )
+    }
+
+    /// Build a live local teacher with the owning runtime's startup-resolved
+    /// streaming-prefill policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_streaming_prefill_policy(
+        teacher_id: impl Into<String>,
+        weights: kiln_model::forward::GpuWeights,
+        model_config: kiln_core::config::ModelConfig,
+        teacher_lora: Option<kiln_model::lora_loader::LoraWeights>,
+        identity: crate::TeacherIdentityV1,
+        top_k: usize,
+        streaming_prefill: kiln_model::forward::StreamingPrefillExecutionPolicy,
     ) -> Result<Self> {
         let vocab_size = model_config.vocab_size;
         anyhow::ensure!(
@@ -2546,6 +2606,7 @@ impl LiveLocalTeacher {
             identity,
             caps,
             default_top_k: top_k,
+            streaming_prefill,
         })
     }
 }
@@ -2578,6 +2639,7 @@ impl crate::logit_source::LogitSource for LiveLocalTeacher {
             self.teacher_lora.as_ref(),
             requested_k,
             &self.caps,
+            self.streaming_prefill,
         )
         .map_err(|e| {
             LogitSourceError::invalid(&teacher_id, format!("live teacher forward: {e:#}"))
@@ -2619,12 +2681,10 @@ impl crate::logit_source::LogitSource for LiveLocalTeacher {
 ///
 /// Sample a student rollout under the active LoRA.
 ///
-/// Uses the segmented forward path (`model_forward_segment`) so that
-/// `KILN_STREAMING_PREFILL=1` actually applies — without it the
-/// monolithic GDN prefill materializes F32 intermediates over the
-/// full prompt length which blows past a 48 GiB GPU once the teacher
-/// is also resident. The trade-off is O(N²): we re-run the prefix
-/// forward at every decode step instead of carrying a KV cache.
+/// Uses the segmented forward path with the run's immutable streaming policy
+/// so long prompts bound GDN scratch while the teacher is also resident. The
+/// trade-off is O(N²): we re-run the prefix forward at every decode step
+/// instead of carrying a KV cache.
 /// For the short rollouts OPD uses (~32-256 tokens) this is the
 /// memory-safe choice. KV-cached decode can be added later as a
 /// fast-path when more VRAM is available.
@@ -2640,10 +2700,12 @@ fn sample_student_rollout(
     temperature: f32,
     top_p: f32,
     seed: Option<u64>,
+    streaming_prefill: kiln_model::forward::StreamingPrefillExecutionPolicy,
 ) -> Result<Vec<u32>> {
     use kiln_core::sampling::SamplingParams;
     use kiln_model::forward::{
-        LinearAttentionState, model_forward_embed, model_forward_final_norm, model_forward_segment,
+        LinearAttentionState, model_forward_embed, model_forward_final_norm,
+        model_forward_segment_with_policy,
     };
     use kiln_model::sampling::sample_step;
 
@@ -2690,7 +2752,7 @@ fn sample_student_rollout(
         let mut linear_state = LinearAttentionState::new_for_inference(model_config, &device)?;
         let mut current = embed_hidden;
         for &(start, end) in &segments {
-            current = model_forward_segment(
+            current = model_forward_segment_with_policy(
                 backend,
                 current,
                 weights,
@@ -2700,6 +2762,7 @@ fn sample_student_rollout(
                 end,
                 Some(&mut linear_state),
                 Some(lora),
+                streaming_prefill,
             )
             .with_context(|| format!("on-policy rollout segment [{start},{end})"))?;
             // Detach between chunks so the candle buffer cache can
@@ -3637,7 +3700,7 @@ fn opd_checkpoint_auxiliary_state(
     teacher_caps: &LogitSourceCaps,
     teacher_provenance: &OpdTeacherProvenance,
     use_chat_template_rollout_prefixes: bool,
-    runtime: &crate::TrainingRuntimeContext,
+    training_runtime_planning_identity: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     let hashes =
         kiln_core::config_hashes::ConfigHashes::from_model_tokenizer(model_config, tokenizer, None);
@@ -3661,7 +3724,7 @@ fn opd_checkpoint_auxiliary_state(
         "teacher_content_revision": teacher_provenance.content_revision(),
         "training_precision_policy": training_precision_policy.name,
         "use_chat_template_rollout_prefixes": use_chat_template_rollout_prefixes,
-        "checkpoint_planning": runtime.checkpoint_planning_identity(),
+        "checkpoint_planning": training_runtime_planning_identity,
     }))
 }
 
@@ -3895,6 +3958,9 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
     let backend_rt = crate::trainer::training_backend_for_device(device_kt);
     let training_precision_policy =
         crate::trainer::training_precision_policy_for_backend(backend_rt.as_ref());
+    let streaming_prefill_policy = runtime.resolved_streaming_prefill_policy(device_kt);
+    let training_runtime_planning_identity =
+        runtime.checkpoint_planning_identity_for_device(device_kt);
 
     // Bind every per-step plan to the process-lifetime capacity supplied by
     // the caller. OPD sequence lengths vary with sampled rollouts, but the
@@ -4326,7 +4392,7 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
             &teacher_caps,
             &teacher_provenance,
             use_chat_template_render,
-            runtime,
+            &training_runtime_planning_identity,
         )?,
     };
     if let (Some(checkpoint), Some(loop_state)) =
@@ -4505,6 +4571,7 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                                     config.temperature as f32,
                                     config.top_p as f32,
                                     step_seed,
+                                    streaming_prefill_policy,
                                 )
                                 .with_context(|| {
                                     format!("on-policy rollout for prompt {prompt_idx}")
@@ -4699,6 +4766,7 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                                             teacher_active_opt,
                                             echo_spec.as_ref(),
                                             segs,
+                                            streaming_prefill_policy,
                                         )?
                                     } else {
                                         opd_step_forward_backward_tape_authoritative(
@@ -4716,6 +4784,7 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                                             teacher_tokens_opt,
                                             teacher_active_opt,
                                             echo_spec.as_ref(),
+                                            streaming_prefill_policy,
                                         )?
                                     };
                                 if let Some(env_ce) = step_env_ce {
@@ -5031,8 +5100,9 @@ fn opd_step_forward_backward_tape_authoritative(
     teacher_tokens: Option<&[u32]>,
     teacher_active_positions: Option<&[usize]>,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
+    streaming_prefill: kiln_model::forward::StreamingPrefillExecutionPolicy,
 ) -> Result<(f64, usize, kiln_autograd::GradStore, Option<f64>)> {
-    use kiln_model::forward::model_forward_no_head;
+    use kiln_model::forward::model_forward_no_head_with_policy;
 
     // Teacher fetch + mask / top_k resolution — identical to the candle path
     // (shared helper). This is the (potentially network/IPC) teacher query;
@@ -5063,13 +5133,14 @@ fn opd_step_forward_backward_tape_authoritative(
                 kiln_model::forward::LinearAttentionState::new(model_config, device).map_err(
                     |e| kiln_kt_bridge::BridgeError::new(format!("opd tape: linear_state: {e:#}")),
                 )?;
-            let normed = model_forward_no_head(
+            let normed = model_forward_no_head_with_policy(
                 backend_rt,
                 input_ids,
                 weights,
                 model_config,
                 Some(&mut linear_state),
                 Some(&lora_weights),
+                streaming_prefill,
             )
             .context("opd tape-authoritative forward")
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
@@ -5261,9 +5332,11 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
     teacher_active_positions: Option<&[usize]>,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
     segments: &[(usize, usize)],
+    streaming_prefill: kiln_model::forward::StreamingPrefillExecutionPolicy,
 ) -> Result<(f64, usize, kiln_autograd::GradStore, Option<f64>)> {
     use kiln_model::forward::{
-        LinearAttentionState, model_forward_embed, model_forward_final_norm, model_forward_segment,
+        LinearAttentionState, model_forward_embed, model_forward_final_norm,
+        model_forward_segment_with_policy,
     };
     use kiln_opd_loss_kernel as opd_loss;
 
@@ -5294,7 +5367,7 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
     {
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
         for &(start, end) in segments {
-            current = model_forward_segment(
+            current = model_forward_segment_with_policy(
                 backend_rt,
                 current,
                 weights,
@@ -5304,6 +5377,7 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
                 end,
                 Some(&mut linear_state),
                 Some(&lora_detached),
+                streaming_prefill,
             )?
             .detach();
             boundaries.push(current.clone());
@@ -5521,7 +5595,7 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
             kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
                 let mut seg_ls = LinearAttentionState::new(model_config, device)
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                model_forward_segment(
+                model_forward_segment_with_policy(
                     backend_rt,
                     seg_input,
                     weights,
@@ -5531,6 +5605,7 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
                     end,
                     Some(&mut seg_ls),
                     Some(lora_ref),
+                    streaming_prefill,
                 )
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
             })
@@ -5786,8 +5861,28 @@ mod tests {
         );
         assert!(opd_checkpoint_segments_for_step(&disabled, None, 4, &model, 4096).is_none());
         assert_ne!(
-            tight.checkpoint_planning_identity(),
-            disabled.checkpoint_planning_identity()
+            tight.checkpoint_planning_identity_for_device(kiln_tensor::Device::Cpu),
+            disabled.checkpoint_planning_identity_for_device(kiln_tensor::Device::Cpu)
+        );
+
+        let forced_streaming = kiln_model::forward::StreamingPrefillExecutionPolicy::resolve(
+            kiln_model::backend::StreamingPrefillBackendPolicy::for_device(
+                kiln_tensor::Device::Cpu,
+            ),
+            kiln_model::forward::StreamingPrefillMode::Enabled,
+            Some(256),
+            Some(128),
+            None,
+            None,
+            false,
+        );
+        let identity = roomy
+            .with_streaming_prefill_policy(forced_streaming)
+            .checkpoint_planning_identity_for_device(kiln_tensor::Device::Cpu);
+        assert_eq!(identity["streaming_prefill_policy"]["mode"], "enabled");
+        assert_eq!(
+            identity["streaming_prefill_policy"]["base_tile_tokens"],
+            128
         );
         Ok(())
     }
@@ -7923,6 +8018,7 @@ mod tests {
                 None,
                 None,
                 None,
+                kiln_model::forward::StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("tape-authoritative OPD step");
 
@@ -8060,6 +8156,7 @@ mod tests {
                 None,
                 None,
                 &segments,
+                kiln_model::forward::StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("checkpointed tape-authoritative OPD step");
 
@@ -8175,6 +8272,7 @@ mod tests {
                 None,
                 None,
                 None,
+                kiln_model::forward::StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("opd_step_forward_backward_tape_authoritative (F32 Vulkan OPD)");
 
@@ -8316,6 +8414,7 @@ mod tests {
                 None,
                 None,
                 None,
+                kiln_model::forward::StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("opd_step_forward_backward_tape_authoritative (BF16 Vulkan OPD)");
 

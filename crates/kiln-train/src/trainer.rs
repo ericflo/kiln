@@ -5018,7 +5018,7 @@ fn run_mtp_alignment_phase(
                 .and_then(|c2| c2.matmul(&fc_t))
                 .and_then(|f2| f2.unsqueeze(0))
                 .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: fc matmul: {e}")))?;
-            let block_out = kiln_model::forward::transformer_block(
+            let block_out = kiln_model::forward::transformer_block_with_policy(
                 backend,
                 &fused,
                 &mtp.layer,
@@ -5033,6 +5033,7 @@ fn run_mtp_alignment_phase(
                 None,
                 0,
                 Some((&mtp_lora_view, lora_scale)),
+                streaming_prefill,
             )
             .map_err(to_err)?;
             let normed = kiln_model::forward::rms_norm(
@@ -10650,6 +10651,82 @@ fn jsonl_byte_progress(total_bytes: u64, offset: u64) -> (usize, usize, f32) {
 /// `DEFAULT_BLOCK_SIZE`).
 const GRPO_REF_PAGED_BLOCK_SIZE: usize = 64;
 
+fn grpo_shared_prefix_tile_tokens(
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+    seq_len: usize,
+) -> Result<Option<usize>> {
+    if !streaming_prefill.enabled_for(seq_len) {
+        return Ok(None);
+    }
+    let tile_tokens = streaming_prefill.base_tile_tokens_for(seq_len);
+    anyhow::ensure!(
+        tile_tokens > 0,
+        "GRPO shared-prefix streaming tile size must be greater than zero"
+    );
+    Ok((tile_tokens < seq_len).then_some(tile_tokens))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn model_forward_paged_normed_hidden_with_policy(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    paged_cache: &PagedKvCacheKt,
+    block_table: &BlockTable,
+    start_pos: usize,
+    mut linear_state: Option<&mut LinearAttentionState>,
+    ema_ref_lora: Option<&LoraWeights>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        !token_ids.is_empty(),
+        "GRPO shared-prefix paged forward requires at least one token"
+    );
+    let Some(tile_tokens) = grpo_shared_prefix_tile_tokens(streaming_prefill, token_ids.len())?
+    else {
+        return model_forward_paged_normed_hidden(
+            backend,
+            token_ids,
+            weights,
+            model_config,
+            paged_cache,
+            block_table,
+            start_pos,
+            linear_state,
+            ema_ref_lora,
+        );
+    };
+
+    let mut tile_hidden = Vec::with_capacity(token_ids.len().div_ceil(tile_tokens));
+    let mut cursor = 0usize;
+    while cursor < token_ids.len() {
+        let end = (cursor + tile_tokens).min(token_ids.len());
+        tile_hidden.push(
+            model_forward_paged_normed_hidden(
+                backend,
+                &token_ids[cursor..end],
+                weights,
+                model_config,
+                paged_cache,
+                block_table,
+                start_pos + cursor,
+                linear_state.as_deref_mut(),
+                ema_ref_lora,
+            )
+            .with_context(|| {
+                format!(
+                    "GRPO shared-prefix streaming tile [{cursor}, {end}) of {}",
+                    token_ids.len()
+                )
+            })?,
+        );
+        cursor = end;
+    }
+    let refs: Vec<&Tensor> = tile_hidden.iter().collect();
+    cat_tensors(&refs, 1).context("GRPO shared-prefix: concatenate streaming hidden tiles")
+}
+
 /// Compute the reference-policy log probs for every completion in a GRPO
 /// group, sharing the prompt-prefix forward across all completions.
 ///
@@ -10683,6 +10760,7 @@ fn compute_ref_log_probs_shared_prefix(
     model_config: &ModelConfig,
     ema_ref_lora: Option<&LoraWeights>,
     device: &Device,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<Vec<Tensor>> {
     if tgroup.completions.is_empty() {
         return Ok(Vec::new());
@@ -10752,7 +10830,7 @@ fn compute_ref_log_probs_shared_prefix(
 
     // Phase 1: prompt forward — populates the paged cache for positions
     // [0..prompt_len) and advances the GDN linear state past the prompt.
-    let prompt_hidden = model_forward_paged_normed_hidden(
+    let prompt_hidden = model_forward_paged_normed_hidden_with_policy(
         backend,
         prompt_ids,
         weights,
@@ -10762,6 +10840,7 @@ fn compute_ref_log_probs_shared_prefix(
         0,
         Some(&mut linear_state),
         ema_ref_lora,
+        streaming_prefill,
     )
     .context("GRPO shared-prefix: prompt forward")?;
 
@@ -10808,7 +10887,7 @@ fn compute_ref_log_probs_shared_prefix(
         let completion_ids = &comp.input_ids[prompt_len..];
 
         let comp_hidden = {
-            let kt = model_forward_paged_normed_hidden(
+            let kt = model_forward_paged_normed_hidden_with_policy(
                 backend,
                 completion_ids,
                 weights,
@@ -10818,6 +10897,7 @@ fn compute_ref_log_probs_shared_prefix(
                 prompt_len,
                 Some(&mut linear_state),
                 ema_ref_lora,
+                streaming_prefill,
             )
             .with_context(|| format!("GRPO shared-prefix: completion {comp_idx} forward"))?;
             // (#1082) kt forward output flows straight into the kt log-prob path.
@@ -11108,6 +11188,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
             model_config,
             ema_ref_lora,
             device,
+            streaming_prefill_policy,
         )
         .context("GRPO shared-prefix reference forward")?;
         let elapsed = started.elapsed();
@@ -17189,6 +17270,52 @@ pub(crate) mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[cfg(feature = "cuda")]
     pub(crate) static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn production_training_blocks_use_explicit_streaming_policy() {
+        let source = include_str!("trainer.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("trainer has production source before tests");
+        assert!(
+            !production.contains(concat!("forward::transformer_block", "(")),
+            "production training retained the compatibility transformer-block policy"
+        );
+        assert!(production.contains("forward::transformer_block_with_policy("));
+    }
+
+    #[test]
+    fn grpo_shared_prefix_uses_injected_streaming_tile_policy() {
+        let forced = StreamingPrefillExecutionPolicy::resolve(
+            kiln_model::backend::StreamingPrefillBackendPolicy::for_device(Device::Cpu),
+            kiln_model::forward::StreamingPrefillMode::Enabled,
+            None,
+            Some(128),
+            None,
+            None,
+            true,
+        );
+        assert_eq!(
+            grpo_shared_prefix_tile_tokens(forced, 257).unwrap(),
+            Some(128)
+        );
+        assert_eq!(grpo_shared_prefix_tile_tokens(forced, 128).unwrap(), None);
+
+        let disabled = StreamingPrefillExecutionPolicy::resolve(
+            kiln_model::backend::StreamingPrefillBackendPolicy::for_device(Device::Cpu),
+            kiln_model::forward::StreamingPrefillMode::Disabled,
+            None,
+            Some(64),
+            None,
+            None,
+            true,
+        );
+        assert_eq!(
+            grpo_shared_prefix_tile_tokens(disabled, 4096).unwrap(),
+            None
+        );
+    }
 
     #[cfg(unix)]
     #[test]

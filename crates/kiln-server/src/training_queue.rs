@@ -1910,6 +1910,17 @@ fn release_opd_teacher(
         .map_err(|error| format!("{phase}: {error:#}"))
 }
 
+fn server_streaming_prefill_policy(
+    runtime: &TrainingRuntimeContext,
+) -> std::result::Result<kiln_model::StreamingPrefillExecutionPolicy, String> {
+    runtime
+        .configured_streaming_prefill_policy()
+        .ok_or_else(|| {
+            "server training runtime is missing the startup-resolved streaming-prefill policy"
+                .to_string()
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_opd(
     req: &OpdRequest,
@@ -1927,6 +1938,7 @@ fn run_opd(
     gpu_step_coordination: trainer::GpuStepCoordination,
     runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
+    let streaming_prefill = server_streaming_prefill_policy(runtime)?;
     req.config
         .validate_runtime_contract()
         .map_err(|error| format!("OPD request has unsupported configuration: {error:#}"))?;
@@ -2058,6 +2070,7 @@ fn run_opd(
                     req.config.top_k,
                     req.config.training_mode,
                     &gpu_step_coordination,
+                    streaming_prefill,
                 )?,
                 crate::api::teachers::TeacherKind::Remote => materialized_remote_teacher
                     .clone()
@@ -2239,6 +2252,7 @@ fn build_multi_tenant_merge_teacher(
     model_config: &kiln_core::config::ModelConfig,
     top_k: usize,
     gpu_step_coordination: &trainer::GpuStepCoordination,
+    streaming_prefill: kiln_model::StreamingPrefillExecutionPolicy,
 ) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
     let mut unified = kiln_train::logit_source::FixtureLogitSource::uniform_topk(
         teacher_id.to_string(),
@@ -2271,17 +2285,19 @@ fn build_multi_tenant_merge_teacher(
             })
             .map_err(|error| format!("distill_merge teacher adapter load: {error:#}"))?;
 
-        let source_fixture = kiln_train::opd::build_local_teacher_fixture_with_coordination(
-            format!("{teacher_id}:{}", source.adapter),
-            &tokenized,
-            weights,
-            model_config,
-            Some(&teacher_lora),
-            top_k,
-            None,
-            Some(gpu_step_coordination),
-        )
-        .map_err(|e| format!("build_local_teacher_fixture for {}: {e:#}", source.adapter));
+        let source_fixture =
+            kiln_train::opd::build_local_teacher_fixture_with_coordination_and_policy(
+                format!("{teacher_id}:{}", source.adapter),
+                &tokenized,
+                weights,
+                model_config,
+                Some(&teacher_lora),
+                top_k,
+                None,
+                Some(gpu_step_coordination),
+                streaming_prefill,
+            )
+            .map_err(|e| format!("build_local_teacher_fixture for {}: {e:#}", source.adapter));
         let teacher_release = release_teacher_lora(
             Some(teacher_lora),
             weights,
@@ -2564,6 +2580,7 @@ fn build_self_distill_teacher(
     model_config: &kiln_core::config::ModelConfig,
     top_k: usize,
     gpu_step_coordination: &trainer::GpuStepCoordination,
+    streaming_prefill: kiln_model::StreamingPrefillExecutionPolicy,
 ) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
     // Tokenization and target alignment complete before any forward so a bad
     // prompt cannot create a partial fixture or silently change the dataset.
@@ -2576,17 +2593,19 @@ fn build_self_distill_teacher(
     // top-K at teacher_only positions, then re-insert under the
     // exact student sequence at the student positions — same logprob
     // values, different key.
-    let teacher_fixture = kiln_train::opd::build_local_teacher_fixture_with_coordination(
-        teacher_id.to_string(),
-        &teacher_only,
-        weights,
-        model_config,
-        None,
-        top_k,
-        None,
-        Some(gpu_step_coordination),
-    )
-    .map_err(|e| format!("self-distill local-teacher forward: {e:#}"))?;
+    let teacher_fixture =
+        kiln_train::opd::build_local_teacher_fixture_with_coordination_and_policy(
+            teacher_id.to_string(),
+            &teacher_only,
+            weights,
+            model_config,
+            None,
+            top_k,
+            None,
+            Some(gpu_step_coordination),
+            streaming_prefill,
+        )
+        .map_err(|e| format!("self-distill local-teacher forward: {e:#}"))?;
 
     let mut student_fixture = kiln_train::logit_source::FixtureLogitSource::uniform_topk(
         teacher_id.to_string(),
@@ -2650,6 +2669,7 @@ fn build_local_teacher_for(
     top_k: usize,
     training_mode: kiln_train::opd::OpdTrainingMode,
     gpu_step_coordination: &trainer::GpuStepCoordination,
+    streaming_prefill: kiln_model::StreamingPrefillExecutionPolicy,
 ) -> std::result::Result<std::sync::Arc<dyn kiln_train::logit_source::LogitSource>, String> {
     let pinned_identity = spec.identity.as_ref().ok_or_else(|| {
         format!(
@@ -2741,13 +2761,14 @@ fn build_local_teacher_for(
     // demand.
     if on_policy {
         let construct = || {
-            kiln_train::opd::LiveLocalTeacher::new(
+            kiln_train::opd::LiveLocalTeacher::new_with_streaming_prefill_policy(
                 spec.alias.clone(),
                 weights.clone(),
                 model_config.clone(),
                 teacher_lora,
                 pinned_identity.clone(),
                 top_k,
+                streaming_prefill,
             )
         };
         let device = weights.embed_tokens.device();
@@ -2761,7 +2782,7 @@ fn build_local_teacher_for(
     // OFF-POLICY: the assistant turns are fixed, so pre-compute the fixture keyed
     // by exact sequence (cheaper — one forward per prompt up front).
     let prompts_and_active = prompts_and_active.expect("off-policy prompts were tokenized");
-    let fixture = kiln_train::opd::build_local_teacher_fixture_with_coordination(
+    let fixture = kiln_train::opd::build_local_teacher_fixture_with_coordination_and_policy(
         spec.alias.clone(),
         &prompts_and_active,
         weights,
@@ -2770,6 +2791,7 @@ fn build_local_teacher_for(
         top_k,
         spec.tokenizer_hash.clone(),
         Some(gpu_step_coordination),
+        streaming_prefill,
     )
     .map_err(|e| format!("build_local_teacher_fixture failed: {e:#}"));
     let teacher_release = release_teacher_lora(
@@ -2810,6 +2832,7 @@ fn run_distill_refresh(
     gpu_step_coordination: trainer::GpuStepCoordination,
     runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
+    let streaming_prefill = server_streaming_prefill_policy(runtime)?;
     req.config
         .validate_runtime_contract()
         .map_err(|error| format!("DistillRefresh has unsupported OPD config: {error:#}"))?;
@@ -2949,6 +2972,7 @@ fn run_distill_refresh(
             req.config.top_k,
             req.config.training_mode,
             &gpu_step_coordination,
+            streaming_prefill,
         )
         .map_err(|e| format!("distill_refresh phase 2 local-teacher build: {e}"))?,
         crate::api::teachers::TeacherKind::Remote => materialized_remote_teacher
@@ -3038,6 +3062,7 @@ fn run_distill_merge(
     gpu_step_coordination: trainer::GpuStepCoordination,
     runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
+    let streaming_prefill = server_streaming_prefill_policy(runtime)?;
     req.config
         .validate_runtime_contract()
         .map_err(|error| format!("distill_merge has unsupported OPD config: {error:#}"))?;
@@ -3099,6 +3124,7 @@ fn run_distill_merge(
             model_config,
             req.config.top_k,
             &gpu_step_coordination,
+            streaming_prefill,
         )?);
 
     let mut merge_config = req.config.clone();
@@ -3269,6 +3295,7 @@ fn run_distill_pump(
     gpu_step_coordination: trainer::GpuStepCoordination,
     runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
+    let streaming_prefill = server_streaming_prefill_policy(runtime)?;
     req.config
         .validate_runtime_contract()
         .map_err(|error| format!("distill_pump has unsupported OPD config: {error:#}"))?;
@@ -3329,6 +3356,7 @@ fn run_distill_pump(
             req.config.top_k,
             req.config.training_mode,
             &gpu_step_coordination,
+            streaming_prefill,
         )
         .map_err(|e| format!("distill_pump local-teacher build: {e}"))?,
         crate::api::teachers::TeacherKind::Remote => materialized_remote_teacher
@@ -3531,6 +3559,7 @@ fn run_distill_self(
     gpu_step_coordination: trainer::GpuStepCoordination,
     runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
+    let streaming_prefill = server_streaming_prefill_policy(runtime)?;
     req.config
         .validate_runtime_contract()
         .map_err(|error| format!("distill_self has unsupported OPD config: {error:#}"))?;
@@ -3595,6 +3624,7 @@ fn run_distill_self(
             model_config,
             req.config.top_k,
             &gpu_step_coordination,
+            streaming_prefill,
         )?);
 
     let mut self_config = req.config.clone();
@@ -5084,6 +5114,54 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::TEST_ENV_LOCK as ENV_LOCK;
+
+    #[test]
+    fn server_teacher_policy_requires_and_preserves_startup_resolution() {
+        let runtime = TrainingRuntimeContext::new_for_device(
+            kiln_tensor::Device::Cpu,
+            kiln_memory::vram::GpuVramInfo {
+                total_bytes: 8 * 1024 * 1024 * 1024,
+                source: kiln_memory::vram::VramSource::ConfigOverride,
+                unified: false,
+            },
+            kiln_train::GradientCheckpointPolicy::Auto,
+        );
+        assert!(server_streaming_prefill_policy(&runtime).is_err());
+
+        let expected = kiln_model::StreamingPrefillExecutionPolicy::resolve(
+            kiln_model::backend::StreamingPrefillBackendPolicy::for_device(
+                kiln_tensor::Device::Cpu,
+            ),
+            kiln_model::StreamingPrefillMode::Enabled,
+            Some(512),
+            Some(128),
+            None,
+            None,
+            false,
+        );
+        let runtime = runtime.with_streaming_prefill_policy(expected);
+        assert_eq!(server_streaming_prefill_policy(&runtime).unwrap(), expected);
+    }
+
+    #[test]
+    fn production_server_teacher_paths_reject_compatibility_policy_constructors() {
+        let source = include_str!("training_queue.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("training queue has production source before tests");
+        for compatibility_call in [
+            concat!("build_local_teacher_fixture_with_coordination", "("),
+            concat!("LiveLocalTeacher::", "new("),
+        ] {
+            assert!(
+                !production.contains(compatibility_call),
+                "server teacher path retained compatibility constructor {compatibility_call}"
+            );
+        }
+        assert!(production.contains("build_local_teacher_fixture_with_coordination_and_policy("));
+        assert!(production.contains("LiveLocalTeacher::new_with_streaming_prefill_policy("));
+    }
 
     #[test]
     fn sft_worker_requires_explicit_fail_closed_mtp_policy() {

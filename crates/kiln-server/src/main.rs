@@ -769,6 +769,7 @@ async fn main() -> Result<()> {
                 &tokenizer,
                 &model_config,
                 runner.backend_name(),
+                runner.streaming_prefill_policy(),
                 &executable_sha256,
                 &numerical_runtime_sha256,
             )

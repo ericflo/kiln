@@ -3,13 +3,14 @@
 //! The model alias returned by OpenAI-compatible endpoints is not a content
 //! identity. This module binds the exact loader-owned model bytes, numeric
 //! tokenizer vocabulary, tokenizer processing config, model config, backend,
-//! and prompt-logprob semantics into the canonical identity shared with remote
-//! training clients.
+//! startup-resolved streaming-prefill policy, and prompt-logprob semantics into
+//! the canonical identity shared with remote training clients.
 
 use anyhow::{Context, Result, ensure};
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::lora_loader::{LoraSourceIdentity, LoraWeights};
+use kiln_model::{StreamingPrefillExecutionPolicy, StreamingPrefillMode};
 use kiln_tensor::Device;
 use kiln_train::{TeacherAdapterIdentityV1, TeacherIdentityV1};
 use serde::Serialize;
@@ -30,7 +31,7 @@ pub(crate) const PROMPT_LOGPROB_PROJECTION_BYTE_BUDGET: usize = 64 * 1024 * 1024
 pub(crate) const MAX_PROMPT_LOGPROB_PROJECTION_CHUNK_TOKENS: usize = 32;
 pub(crate) const MAX_COMPLETION_PROMPT_TOKENS: usize = 4096;
 
-const INFERENCE_CONTRACT_SCHEMA: &str = "kiln.prompt-logprobs.inference-config.v1";
+const INFERENCE_CONTRACT_SCHEMA: &str = "kiln.prompt-logprobs.inference-config.v2";
 const CAUSAL_ALIGNMENT: &str =
     "response prompt_logprobs[p] scores observed prompt token p from logits row p-1";
 const LOGPROB_SEMANTICS: &str = "raw model logits; full-vocabulary log-softmax; finite f32 wire values; rank from original logits";
@@ -51,6 +52,7 @@ struct KilnInferenceContract<'a> {
     schema: &'static str,
     model_config: &'a ModelConfig,
     backend: &'a str,
+    streaming_prefill: StreamingPrefillInferenceContract,
     executable_sha256: &'a str,
     numerical_runtime_sha256: &'a str,
     causal_alignment: &'static str,
@@ -59,17 +61,53 @@ struct KilnInferenceContract<'a> {
     hard_caps: PromptLogprobHardCaps,
 }
 
+#[derive(Serialize)]
+struct StreamingPrefillInferenceContract {
+    mode: &'static str,
+    threshold_tokens: Option<usize>,
+    base_tile_tokens: usize,
+    tape_tile_tokens: usize,
+    detached_full_attn_tile_tokens: usize,
+    detached_full_attn_boundary_tile_tokens: usize,
+    detached_full_attn_tape_replay_tile_tokens: usize,
+    last_token_lm_head: bool,
+}
+
+impl From<StreamingPrefillExecutionPolicy> for StreamingPrefillInferenceContract {
+    fn from(policy: StreamingPrefillExecutionPolicy) -> Self {
+        let mode = match policy.mode() {
+            StreamingPrefillMode::Auto => "auto",
+            StreamingPrefillMode::Enabled => "enabled",
+            StreamingPrefillMode::Disabled => "disabled",
+        };
+        Self {
+            mode,
+            threshold_tokens: policy.threshold_tokens(),
+            base_tile_tokens: policy.base_tile_tokens(),
+            tape_tile_tokens: policy.tape_tile_tokens(),
+            detached_full_attn_tile_tokens: policy.detached_full_attn_tile_tokens(),
+            detached_full_attn_boundary_tile_tokens: policy
+                .detached_full_attn_boundary_tile_tokens(),
+            detached_full_attn_tape_replay_tile_tokens: policy
+                .detached_full_attn_tape_replay_tile_tokens(),
+            last_token_lm_head: policy.last_token_lm_head(),
+        }
+    }
+}
+
 /// Build the canonical base-model identity published by Kiln completions.
 ///
 /// `base_model_source_sha256` must be the loader-owned digest captured before
-/// parsing and verified again immediately after GPU upload. Prefixed hashes
-/// are normalized only after strict lowercase SHA-256 validation.
+/// parsing and verified again immediately after GPU upload. `streaming_prefill`
+/// must be the exact immutable policy installed on the scoring runner. Prefixed
+/// hashes are normalized only after strict lowercase SHA-256 validation.
 pub fn build_base_teacher_identity(
     served_model_id: &str,
     base_model_source_sha256: &str,
     tokenizer: &KilnTokenizer,
     model_config: &ModelConfig,
     backend: &str,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
     executable_sha256: &str,
     numerical_runtime_sha256: &str,
 ) -> Result<TeacherIdentityV1> {
@@ -114,6 +152,7 @@ pub fn build_base_teacher_identity(
     let inference_config_sha256 = inference_config_sha256(
         model_config,
         backend,
+        streaming_prefill,
         executable_sha256,
         numerical_runtime_sha256,
     )?;
@@ -198,6 +237,7 @@ pub fn build_local_adapter_teacher_identity_from_source(
 fn inference_config_sha256(
     model_config: &ModelConfig,
     backend: &str,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
     executable_sha256: &str,
     numerical_runtime_sha256: &str,
 ) -> Result<String> {
@@ -205,6 +245,7 @@ fn inference_config_sha256(
         schema: INFERENCE_CONTRACT_SCHEMA,
         model_config,
         backend,
+        streaming_prefill: streaming_prefill.into(),
         executable_sha256,
         numerical_runtime_sha256,
         causal_alignment: CAUSAL_ALIGNMENT,
@@ -721,6 +762,10 @@ mod tests {
         config
     }
 
+    fn streaming_prefill_policy() -> StreamingPrefillExecutionPolicy {
+        StreamingPrefillExecutionPolicy::for_device(Device::Cpu)
+    }
+
     fn base_identity() -> TeacherIdentityV1 {
         build_base_teacher_identity(
             "kiln-test",
@@ -728,6 +773,7 @@ mod tests {
             &tokenizer(),
             &model_config(),
             "cpu",
+            streaming_prefill_policy(),
             EXECUTABLE_HASH,
             RUNTIME_HASH,
         )
@@ -743,6 +789,7 @@ mod tests {
             &tokenizer,
             &model_config(),
             "vulkan",
+            streaming_prefill_policy(),
             EXECUTABLE_HASH,
             RUNTIME_HASH,
         )
@@ -778,6 +825,7 @@ mod tests {
             &tokenizer(),
             &config,
             "cpu",
+            streaming_prefill_policy(),
             EXECUTABLE_HASH,
             RUNTIME_HASH,
         )
@@ -785,6 +833,45 @@ mod tests {
 
         assert_eq!(identity.vocab_size(), 768);
         assert_eq!(identity.max_top_k(), 256);
+    }
+
+    #[test]
+    fn base_identity_is_bound_to_the_exact_streaming_prefill_policy() {
+        let tokenizer = tokenizer();
+        let default_policy = streaming_prefill_policy();
+        let forced_streaming_policy = StreamingPrefillExecutionPolicy::resolve(
+            kiln_model::StreamingPrefillBackendPolicy::for_device(Device::Cpu),
+            StreamingPrefillMode::Enabled,
+            Some(17),
+            Some(19),
+            Some(23),
+            Some(29),
+            false,
+        );
+        let build = |policy| {
+            build_base_teacher_identity(
+                "kiln-test",
+                &format!("sha256:{}", "a".repeat(64)),
+                &tokenizer,
+                &model_config(),
+                "cpu",
+                policy,
+                EXECUTABLE_HASH,
+                RUNTIME_HASH,
+            )
+            .unwrap()
+        };
+
+        let default_identity = build(default_policy);
+        let configured_identity = build(forced_streaming_policy);
+        assert_ne!(
+            default_identity.inference_config_sha256(),
+            configured_identity.inference_config_sha256()
+        );
+        assert_ne!(
+            default_identity.content_revision(),
+            configured_identity.content_revision()
+        );
     }
 
     #[test]
@@ -848,6 +935,7 @@ mod tests {
             &tokenizer(),
             &config,
             "cpu",
+            streaming_prefill_policy(),
             EXECUTABLE_HASH,
             RUNTIME_HASH,
         )
@@ -878,6 +966,7 @@ mod tests {
             &tokenizer,
             &model_config(),
             "cpu",
+            streaming_prefill_policy(),
             EXECUTABLE_HASH,
             RUNTIME_HASH,
         )
@@ -903,6 +992,7 @@ mod tests {
                 &tokenizer(),
                 &model_config(),
                 "cpu",
+                streaming_prefill_policy(),
                 EXECUTABLE_HASH,
                 RUNTIME_HASH,
             )
@@ -922,6 +1012,7 @@ mod tests {
             &tokenizer(),
             &model_config(),
             "",
+            streaming_prefill_policy(),
             EXECUTABLE_HASH,
             RUNTIME_HASH,
         )
@@ -932,31 +1023,157 @@ mod tests {
     #[test]
     fn inference_contract_is_stable_and_backend_bound() {
         let config = model_config();
-        let cpu = inference_config_sha256(&config, "cpu", EXECUTABLE_HASH, RUNTIME_HASH).unwrap();
+        let streaming_prefill = streaming_prefill_policy();
+        let cpu = inference_config_sha256(
+            &config,
+            "cpu",
+            streaming_prefill,
+            EXECUTABLE_HASH,
+            RUNTIME_HASH,
+        )
+        .unwrap();
         assert_eq!(
             cpu,
-            inference_config_sha256(&config, "cpu", EXECUTABLE_HASH, RUNTIME_HASH).unwrap()
+            inference_config_sha256(
+                &config,
+                "cpu",
+                streaming_prefill,
+                EXECUTABLE_HASH,
+                RUNTIME_HASH,
+            )
+            .unwrap()
         );
         assert_ne!(
             cpu,
-            inference_config_sha256(&config, "vulkan", EXECUTABLE_HASH, RUNTIME_HASH).unwrap()
+            inference_config_sha256(
+                &config,
+                "vulkan",
+                streaming_prefill,
+                EXECUTABLE_HASH,
+                RUNTIME_HASH,
+            )
+            .unwrap()
         );
         assert_ne!(
             cpu,
-            inference_config_sha256(&config, "cpu", &"f".repeat(64), RUNTIME_HASH).unwrap()
+            inference_config_sha256(
+                &config,
+                "cpu",
+                streaming_prefill,
+                &"f".repeat(64),
+                RUNTIME_HASH,
+            )
+            .unwrap()
         );
         assert_ne!(
             cpu,
-            inference_config_sha256(&config, "cpu", EXECUTABLE_HASH, &"f".repeat(64)).unwrap()
+            inference_config_sha256(
+                &config,
+                "cpu",
+                streaming_prefill,
+                EXECUTABLE_HASH,
+                &"f".repeat(64),
+            )
+            .unwrap()
         );
 
         let mut different_context = config;
         different_context.max_position_embeddings += 1;
         assert_ne!(
             cpu,
-            inference_config_sha256(&different_context, "cpu", EXECUTABLE_HASH, RUNTIME_HASH,)
-                .unwrap()
+            inference_config_sha256(
+                &different_context,
+                "cpu",
+                streaming_prefill,
+                EXECUTABLE_HASH,
+                RUNTIME_HASH,
+            )
+            .unwrap()
         );
+    }
+
+    #[test]
+    fn inference_contract_binds_every_streaming_prefill_policy_field() {
+        let config = model_config();
+        let backend_policy = kiln_model::StreamingPrefillBackendPolicy {
+            auto_dispatch: kiln_model::StreamingPrefillAutoDispatch::PromptTokensAtLeast(101),
+            base_tile_tokens: 103,
+            tape_tile_tokens: 107,
+            detached_full_attn_tile_tokens: 109,
+            detached_full_attn_boundary_tile_tokens: 113,
+            detached_full_attn_tape_replay_tile_tokens: 127,
+        };
+        let hash = |policy| {
+            inference_config_sha256(&config, "cpu", policy, EXECUTABLE_HASH, RUNTIME_HASH).unwrap()
+        };
+        let baseline_policy = StreamingPrefillExecutionPolicy::from_backend_policy(backend_policy);
+        let baseline = hash(baseline_policy);
+        let distinct_policies = [
+            StreamingPrefillExecutionPolicy::resolve(
+                backend_policy,
+                StreamingPrefillMode::Disabled,
+                None,
+                None,
+                None,
+                None,
+                true,
+            ),
+            StreamingPrefillExecutionPolicy::from_backend_policy(
+                kiln_model::StreamingPrefillBackendPolicy {
+                    auto_dispatch: kiln_model::StreamingPrefillAutoDispatch::PromptTokensAtLeast(
+                        131,
+                    ),
+                    ..backend_policy
+                },
+            ),
+            StreamingPrefillExecutionPolicy::from_backend_policy(
+                kiln_model::StreamingPrefillBackendPolicy {
+                    base_tile_tokens: 137,
+                    ..backend_policy
+                },
+            ),
+            StreamingPrefillExecutionPolicy::from_backend_policy(
+                kiln_model::StreamingPrefillBackendPolicy {
+                    tape_tile_tokens: 139,
+                    ..backend_policy
+                },
+            ),
+            StreamingPrefillExecutionPolicy::from_backend_policy(
+                kiln_model::StreamingPrefillBackendPolicy {
+                    detached_full_attn_tile_tokens: 149,
+                    ..backend_policy
+                },
+            ),
+            StreamingPrefillExecutionPolicy::from_backend_policy(
+                kiln_model::StreamingPrefillBackendPolicy {
+                    detached_full_attn_boundary_tile_tokens: 151,
+                    ..backend_policy
+                },
+            ),
+            StreamingPrefillExecutionPolicy::from_backend_policy(
+                kiln_model::StreamingPrefillBackendPolicy {
+                    detached_full_attn_tape_replay_tile_tokens: 157,
+                    ..backend_policy
+                },
+            ),
+            StreamingPrefillExecutionPolicy::resolve(
+                backend_policy,
+                StreamingPrefillMode::Auto,
+                None,
+                None,
+                None,
+                None,
+                false,
+            ),
+        ];
+
+        for policy in distinct_policies {
+            assert_ne!(
+                baseline,
+                hash(policy),
+                "policy difference was not identity-bound"
+            );
+        }
     }
 
     #[test]

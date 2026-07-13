@@ -70,13 +70,18 @@
   agrees with any explicit `mode`. Invalid, non-Unicode, or conflicting values
   stop startup.
 - streaming-prefill authority and diagnostics: startup resolves one immutable
-  backend-qualified policy and injects it into inference, native training, and
-  checkpoint planning without lower model/trainer environment rereads. Explicit
+  backend-qualified policy and injects it into generation, prompt-logprob
+  scoring, native training, local OPD teachers, MTP alignment, checkpoint
+  planning, and the benchmark without lower model/trainer environment rereads.
+  Server teacher construction fails closed without the startup value. Explicit
   base tiles feed specialized `auto` routes; detached overrides cover ordinary,
   boundary, and tape-replay full-attention routes. `/v1/config` exposes the
   complete configured/backend/effective/source object at `streaming_prefill`,
   health at `prefill_runtime.streaming_prefill`, and trusted debug at top-level
-  `streaming_prefill`. Every change requires restart.
+  `streaming_prefill`. Kiln prompt-logprob teacher identity now uses
+  inference-contract v2 and hashes every resolved field, so policy changes
+  invalidate teacher revisions, logit caches, and OPD resume bindings. Every
+  change requires restart.
 - speculative serving: all speculative request and Desktop routes are now
   fail-closed pending local accelerator qualification. `kiln config` and
   startup reject every effective non-off policy before model loading,

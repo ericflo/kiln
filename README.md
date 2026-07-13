@@ -644,8 +644,11 @@ and non-finite logits or scores fail the request instead of producing partial
 JSON. The optional `model` must exactly match the one served model. Every real
 response carries a canonical identity binding the loader-owned base bytes,
 numeric tokenizer vocabulary/config, executable, numerical runtime, backend,
-and scoring limits. Scoring remains base-model only and rejects an active LoRA
-until the loaded-adapter revision barrier is implemented.
+scoring limits, and the complete startup-resolved streaming-prefill execution
+policy. The local inference-contract v2 hash changes with any policy field,
+preventing a different tiling policy from reusing teacher or logit-cache
+provenance. Scoring remains base-model only and rejects an active LoRA until the
+loaded-adapter revision barrier is implemented.
 The runtime digest includes OS/kernel build, stable CPU model/features and
 microcode, loaded numerical-library mappings, and accelerator/driver evidence.
 External probes have a five-second deadline, bounded output, process-group
@@ -943,8 +946,13 @@ detached variants. The resolved object is at `/v1/config.streaming_prefill`,
 `/health.prefill_runtime.streaming_prefill`, and trusted debug
 `streaming_prefill`. It records configured/backend/effective values and
 sources, including inheritance, rather than collapsing prompt-dependent auto
-dispatch into a misleading boolean. Inference and native training consume this
-same immutable policy and do not re-read its public environment names.
+dispatch into a misleading boolean. Ordinary generation, prompt-logprob
+scoring, native training, local OPD teachers, MTP alignment, and the benchmark
+consume this same immutable policy and do not re-read its public environment
+names. The canonical Kiln prompt-logprob teacher identity hashes every resolved
+policy field under inference-contract v2, so changing this section changes the
+teacher revision and invalidates identity-bound logit caches and OPD resume
+bindings.
 
 The current deterministic serving contract is deliberately narrower than
 cross-backend bitwise determinism: it removes concurrent decode-shape variation

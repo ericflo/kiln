@@ -942,8 +942,13 @@ positive multiple of the 64-token GDN chunk size.
 The resolved structure is intentionally richer than one enabled flag. It
 retains configured source, backend policy, effective dispatch rule, threshold
 override applicability, each effective tile and inheritance source, and the
-last-token LM-head selector. `/v1/config` exposes it at `streaming_prefill`,
-health at `prefill_runtime.streaming_prefill`, and trusted debug at top-level
+last-token LM-head selector. Ordinary generation, prompt-logprob scoring,
+native training, local OPD teachers, MTP alignment, checkpoint planning, and
+the benchmark all consume this one value. The prompt-logprob teacher identity
+hashes every field under inference-contract v2, so policy drift changes the
+teacher revision and cannot reuse identity-bound logits. `/v1/config` exposes
+the policy at `streaming_prefill`, health at
+`prefill_runtime.streaming_prefill`, and trusted debug at top-level
 `streaming_prefill`. This makes a long-prefill pause attributable to scheduling,
 tiled model work, or memory activity without guessing from an ambient shell.
 

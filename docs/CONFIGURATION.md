@@ -487,10 +487,21 @@ multiple tiles only when its sequence is longer than the effective tile for
 that route.
 
 Startup resolves this section once after backend selection and injects the same
-immutable execution policy into inference, native SFT/GRPO/OPD admission and
-training forwards, and checkpoint planning identity. No model or trainer path
-re-reads these public environment names. Every change requires a restart; an
-existing job or request cannot observe a mid-process change.
+immutable execution policy into ordinary generation, prompt-logprob scoring,
+native SFT/GRPO/OPD admission and training forwards, local OPD teachers, MTP
+alignment, checkpoint planning, and the benchmark harness. Server-owned
+training and teacher construction fail closed if that startup policy is
+missing. No production model or trainer path re-reads these public environment
+names. Every change requires a restart; an existing job or request cannot
+observe a mid-process change.
+
+Kiln prompt-logprob teacher identity uses
+`kiln.prompt-logprobs.inference-config.v2` and hashes the complete resolved
+execution policy: mode, threshold, every base/tape/detached tile variant, and
+last-token LM-head behavior. Changing any of these fields therefore changes
+`inference_config_sha256`, the canonical teacher content revision, and every
+identity-bound logit-cache key. A deployment must re-register the teacher and
+must not resume an OPD checkpoint pinned to the previous revision.
 
 `GET /v1/config` exposes the complete resolved object at
 `streaming_prefill`. Health repeats it at

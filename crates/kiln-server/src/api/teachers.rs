@@ -974,6 +974,7 @@ mod tests {
             &state.tokenizer,
             &state.model_config,
             "cpu",
+            state.streaming_prefill_runtime_config.execution_policy(),
             HASH_B,
             HASH_C,
         )

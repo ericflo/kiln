@@ -974,6 +974,9 @@ kiln serve --config kiln.toml</code></pre>
           identity can be pinned, and the response is capped at 65,536 candidates. Scoring takes exclusive
           GPU admission, explicitly settles each projection chunk and final scorer state, and drains a timed-out
           worker before responding. Failed or panicked settlement quarantines the backend and retains admission.
+          Every response carries a canonical teacher identity whose inference-contract v2 hash binds the complete
+          startup-resolved streaming-prefill policy. Changing mode, threshold, any tile, or final-tile LM-head
+          behavior changes the teacher revision and invalidates identity-bound logit caches and OPD resume bindings.
           The current path performs correctness-first O(TV) host readback rather than vLLM's selected-only O(TK)
           transfer path.
         </p>

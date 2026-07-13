@@ -5223,13 +5223,14 @@ fn score_real_prompt_logprob_rows(
             backend,
         )?,
     );
-    let normalized_hidden = kiln_model::forward::model_forward_no_head(
+    let normalized_hidden = kiln_model::forward::model_forward_no_head_with_policy(
         backend,
         scored_tokens,
         &runner.weights,
         &runner.config,
         ownership.linear_state.as_mut(),
         None,
+        runner.streaming_prefill_policy(),
     )
     .context("prompt-logprobs forward pass")?;
     ownership.normalized_hidden = Some(normalized_hidden);
@@ -15192,6 +15193,22 @@ mod tests {
                     <= PROMPT_LOGPROB_PROJECTION_BYTE_BUDGET
             );
         }
+    }
+
+    #[test]
+    fn real_prompt_logprob_scoring_is_bound_to_the_runner_streaming_prefill_policy() {
+        let source = include_str!("completions.rs");
+        let scorer = source
+            .split_once("fn score_real_prompt_logprob_rows(")
+            .expect("real prompt-logprob scorer must remain present")
+            .1
+            .split_once("\nasync fn real_prompt_logprobs(")
+            .expect("real prompt-logprob scorer boundary must remain present")
+            .0;
+
+        assert!(scorer.contains("model_forward_no_head_with_policy("));
+        assert!(scorer.contains("runner.streaming_prefill_policy()"));
+        assert!(!scorer.contains("model_forward_no_head("));
     }
 
     #[test]
