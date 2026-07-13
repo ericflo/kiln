@@ -5392,11 +5392,10 @@ function renderThinkingBudgetPreview() {
   const invalid = tokens.invalid || time.invalid;
   const state = document.getElementById('chat-thinking-budget-preview-state');
   let stateText = '';
-  if (!enabled) stateText = 'inactive';
-  else if (invalid) stateText = 'incomplete';
-  else if (playgroundThinkingBudgetDefaults.error) {
+  if (playgroundThinkingBudgetDefaults.error) {
     stateText = playgroundThinkingBudgetDefaults.loaded ? 'refresh failed' : 'defaults unavailable';
-  }
+  } else if (!enabled) stateText = 'inactive';
+  else if (invalid) stateText = 'incomplete';
   if (state) state.textContent = stateText;
   preview.classList.toggle('is-inactive', !enabled);
   preview.classList.toggle('has-error', enabled && (invalid || !!playgroundThinkingBudgetDefaults.error));

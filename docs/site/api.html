@@ -872,7 +872,8 @@
                 <code>live_memory_admission_required=true</code> means the exact tuple is revalidated
                 against live capacity and rejected if it does not fit; admission does not lower the
                 requested rank, substitute an optimizer, or alter the backend range. CPU can expose
-                portable F32 tuples while all four server workloads remain unsupported. Hybrid Vulkan
+                portable F32 tuples, including Muon rank 2+ before the model ceiling, while all four
+                server workloads remain unsupported. Hybrid Vulkan
                 can expose raw native hooks or tuples while CPU-host weights or a workload route make
                 <code>workloads[].supported=false</code>. Product rounding is immutable round-to-nearest.
                 Stochastic rounding is an
@@ -972,7 +973,7 @@
           </div>
         </div>
         <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-dim);">
-          The loader hashes every immutable startup-snapshot shard once and retains a strict <code>kiln.base-weight-shards.v1</code> manifest. Health returns only its aggregate, algorithm, count, and total bytes; the gated debug endpoint returns filenames, exact sizes, and complete per-shard SHA-256 values. Training and eval artifacts reuse this in-memory identity without reading model files mid-inference. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/BASE_WEIGHT_PROVENANCE.md">base-weight provenance contract</a>.
+          The loader hashes every immutable startup-snapshot shard once and retains a strict <code>kiln.base-weight-shards.v1</code> manifest. Health returns only its aggregate, algorithm, count, and total bytes; the gated debug endpoint returns filenames, exact sizes, and complete per-shard SHA-256 values. Training and eval artifacts reuse this in-memory identity without reading model files mid-inference. Legacy aggregate-only checkpoints cannot establish exact shard identity. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/BASE_WEIGHT_PROVENANCE.md">base-weight provenance contract</a>.
         </p>
         <p class="mt-4 text-sm leading-relaxed" style="color:var(--fg-dim)">
           Production startup also constructs a strict <code>kiln.execution-provenance.v1</code> record over the backend/device, numerical runtime, exact executable, optional source revision, model/tokenizer/template, precision, compiled kernel contract, and effective configuration/environment digests. Health exposes only the bounded identity summary and fails readiness if a real backend lacks a valid record; the gated debug endpoint returns the complete record. Secret-bearing <code>KILN_*</code> values contribute redacted presence markers rather than secret material. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/EXECUTION_PROVENANCE.md">execution provenance contract</a>.

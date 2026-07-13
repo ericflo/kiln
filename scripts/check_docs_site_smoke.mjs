@@ -2628,13 +2628,19 @@ async function runSmoke() {
         }
 
         const missingSections = expectedApiSections
-          .filter((section) => !section.terms.every((term) => {
+          .map((section) => ({
+            label: section.label,
+            missingTerms: section.terms.filter((term) => {
             const normalizedTerm = term.toLowerCase();
-            return apiResult.headings.includes(normalizedTerm) || apiResult.bodyText.includes(normalizedTerm);
+              return !apiResult.headings.includes(normalizedTerm)
+                && !apiResult.bodyText.includes(normalizedTerm);
+            }),
           }))
-          .map((section) => section.label);
+          .filter((section) => section.missingTerms.length > 0);
         if (missingSections.length > 0) {
-          fail(`${sitePage.path}: missing API cold-reader sections: ${missingSections.join(', ')}`);
+          fail(`${sitePage.path}: missing API cold-reader sections: ${missingSections
+            .map((section) => `${section.label} (${section.missingTerms.join(', ')})`)
+            .join('; ')}`);
         }
 
         const missingCodeExamples = expectedApiCodeExamples
