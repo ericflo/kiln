@@ -17275,9 +17275,9 @@ pub(crate) mod tests {
     fn production_training_blocks_use_explicit_streaming_policy() {
         let source = include_str!("trainer.rs");
         let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("trainer has production source before tests");
+            .rsplit_once("\n#[cfg(test)]\npub(crate) mod tests {")
+            .map(|(production, _)| production)
+            .expect("trainer has a final test module after production source");
         assert!(
             !production.contains(concat!("forward::transformer_block", "(")),
             "production training retained the compatibility transformer-block policy"
