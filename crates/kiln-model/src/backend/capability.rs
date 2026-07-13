@@ -1231,7 +1231,247 @@ pub struct BackendFallbackCapabilities {
     pub decode_hot_path: FallbackPolicy,
     pub decode_hot_path_debug_env: Option<&'static str>,
     pub training_optimizer: FallbackPolicy,
-    pub training_optimizer_debug_env: Option<&'static str>,
+}
+
+/// Optimizer operation selected by a training request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrainingOptimizerKind {
+    Sgd,
+    AdamW,
+    Muon,
+}
+
+impl TrainingOptimizerKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Sgd => "sgd",
+            Self::AdamW => "adam_w",
+            Self::Muon => "muon",
+        }
+    }
+}
+
+/// Parameter write policy required by an optimizer request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrainingOptimizerRounding {
+    RoundToNearest,
+    Stochastic,
+}
+
+impl TrainingOptimizerRounding {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RoundToNearest => "round_to_nearest",
+            Self::Stochastic => "stochastic",
+        }
+    }
+}
+
+/// Optimizer request used by admission and execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TrainingOptimizerRequest {
+    pub kind: TrainingOptimizerKind,
+    pub parameter_dtype: kiln_tensor::DType,
+    pub rounding: TrainingOptimizerRounding,
+    pub lora_rank: usize,
+}
+
+/// Backend-owned executable optimizer-implementation support matrix.
+///
+/// Product-executable tuples must be resolved together with
+/// [`TrainingPrecisionPolicy`] through `resolve_optimizer_request`; a dtype in
+/// this matrix is not independently an executable product promise. CPU entries
+/// describe the reference implementation; accelerator entries require native
+/// optimizer hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrainingOptimizerSupport {
+    pub sgd_parameter_dtypes: &'static [kiln_tensor::DType],
+    pub adamw_parameter_dtypes: &'static [kiln_tensor::DType],
+    pub muon_parameter_dtypes: &'static [kiln_tensor::DType],
+    pub muon_min_lora_rank: Option<usize>,
+    pub muon_max_lora_rank: Option<usize>,
+    pub rounding_modes: &'static [TrainingOptimizerRounding],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainingOptimizerSupportError {
+    UnsupportedBaseWeightDType {
+        actual: kiln_tensor::DType,
+        supported: &'static [kiln_tensor::DType],
+    },
+    UnsupportedRequest {
+        request: TrainingOptimizerRequest,
+        supported_dtypes: &'static [kiln_tensor::DType],
+        supported_rounding: &'static [TrainingOptimizerRounding],
+        muon_min_lora_rank: Option<usize>,
+        muon_max_lora_rank: Option<usize>,
+    },
+}
+
+impl std::fmt::Display for TrainingOptimizerSupportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedBaseWeightDType { actual, supported } => write!(
+                formatter,
+                "base-weight dtype {actual} is unsupported for this training backend (supported training dtypes: {supported:?}); inference dtype support is separate"
+            ),
+            Self::UnsupportedRequest {
+                request,
+                supported_dtypes,
+                supported_rounding,
+                muon_min_lora_rank,
+                muon_max_lora_rank,
+            } => {
+                write!(
+                    formatter,
+                    "optimizer `{}` is unsupported for resolved LoRA parameter dtype {}, rounding `{}`, and rank {}; no permitted optimizer implementation is available (supported dtypes: {supported_dtypes:?}, supported rounding: {supported_rounding:?}, Muon rank range: ",
+                    request.kind.label(),
+                    request.parameter_dtype,
+                    request.rounding.label(),
+                    request.lora_rank,
+                )?;
+                match (muon_min_lora_rank, muon_max_lora_rank) {
+                    (Some(minimum), Some(maximum)) => write!(formatter, "{minimum}..={maximum}")?,
+                    (Some(minimum), None) => write!(formatter, "{minimum}..=unbounded")?,
+                    (None, Some(maximum)) => write!(formatter, "1..={maximum}")?,
+                    (None, None) => write!(formatter, "1..=unbounded")?,
+                }
+                write!(formatter, ")")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TrainingOptimizerSupportError {}
+
+impl TrainingOptimizerSupport {
+    pub fn for_device(device: kiln_tensor::Device) -> Self {
+        match device {
+            kiln_tensor::Device::Cpu => Self::for_backend("cpu", device),
+            kiln_tensor::Device::Cuda(_) if cfg!(feature = "cuda") => {
+                Self::for_backend("cuda", device)
+            }
+            kiln_tensor::Device::Rocm(_) if cfg!(feature = "rocm") => {
+                Self::for_backend("rocm", device)
+            }
+            kiln_tensor::Device::Metal(_) if cfg!(feature = "metal") => {
+                Self::for_backend("metal", device)
+            }
+            kiln_tensor::Device::Vulkan(_) if cfg!(feature = "vulkan") => {
+                Self::for_backend("vulkan", device)
+            }
+            _ => Self::for_backend("unsupported", device),
+        }
+    }
+
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        const NONE: &[kiln_tensor::DType] = &[];
+        const F32_BF16: &[kiln_tensor::DType] =
+            &[kiln_tensor::DType::F32, kiln_tensor::DType::BF16];
+        const ROUND_TO_NEAREST: &[TrainingOptimizerRounding] =
+            &[TrainingOptimizerRounding::RoundToNearest];
+        const F32: &[kiln_tensor::DType] = &[kiln_tensor::DType::F32];
+
+        match (name, device) {
+            ("cpu", kiln_tensor::Device::Cpu) => Self {
+                sgd_parameter_dtypes: F32,
+                adamw_parameter_dtypes: F32,
+                muon_parameter_dtypes: F32,
+                muon_min_lora_rank: Some(2),
+                muon_max_lora_rank: None,
+                rounding_modes: ROUND_TO_NEAREST,
+            },
+            ("cuda", kiln_tensor::Device::Cuda(_)) | ("rocm", kiln_tensor::Device::Rocm(_)) => {
+                Self {
+                    sgd_parameter_dtypes: F32_BF16,
+                    adamw_parameter_dtypes: F32_BF16,
+                    muon_parameter_dtypes: F32_BF16,
+                    muon_min_lora_rank: Some(2),
+                    muon_max_lora_rank: Some(48),
+                    rounding_modes: ROUND_TO_NEAREST,
+                }
+            }
+            ("metal", kiln_tensor::Device::Metal(_)) => Self {
+                sgd_parameter_dtypes: NONE,
+                adamw_parameter_dtypes: F32_BF16,
+                muon_parameter_dtypes: F32_BF16,
+                muon_min_lora_rank: Some(2),
+                muon_max_lora_rank: Some(32),
+                rounding_modes: ROUND_TO_NEAREST,
+            },
+            ("vulkan", kiln_tensor::Device::Vulkan(_)) => Self {
+                sgd_parameter_dtypes: F32_BF16,
+                adamw_parameter_dtypes: F32_BF16,
+                muon_parameter_dtypes: F32_BF16,
+                muon_min_lora_rank: Some(2),
+                muon_max_lora_rank: Some(32),
+                rounding_modes: ROUND_TO_NEAREST,
+            },
+            _ => Self {
+                sgd_parameter_dtypes: NONE,
+                adamw_parameter_dtypes: NONE,
+                muon_parameter_dtypes: NONE,
+                muon_min_lora_rank: Some(usize::MAX),
+                muon_max_lora_rank: Some(0),
+                rounding_modes: &[],
+            },
+        }
+    }
+
+    pub fn parameter_dtypes(self, kind: TrainingOptimizerKind) -> &'static [kiln_tensor::DType] {
+        match kind {
+            TrainingOptimizerKind::Sgd => self.sgd_parameter_dtypes,
+            TrainingOptimizerKind::AdamW => self.adamw_parameter_dtypes,
+            TrainingOptimizerKind::Muon => self.muon_parameter_dtypes,
+        }
+    }
+
+    pub fn supports(self, request: TrainingOptimizerRequest) -> bool {
+        let dtypes = self.parameter_dtypes(request.kind);
+        let rank_supported = request.lora_rank > 0
+            && (!matches!(request.kind, TrainingOptimizerKind::Muon)
+                || (self
+                    .muon_min_lora_rank
+                    .is_none_or(|minimum| request.lora_rank >= minimum)
+                    && self
+                        .muon_max_lora_rank
+                        .is_none_or(|maximum| request.lora_rank <= maximum)));
+        dtypes.contains(&request.parameter_dtype)
+            && self.rounding_modes.contains(&request.rounding)
+            && rank_supported
+    }
+
+    pub fn resolve_optimizer_request(
+        self,
+        precision: TrainingPrecisionPolicy,
+        kind: TrainingOptimizerKind,
+        base_weight_dtype: kiln_tensor::DType,
+        rounding: TrainingOptimizerRounding,
+        lora_rank: usize,
+    ) -> Result<TrainingOptimizerRequest, TrainingOptimizerSupportError> {
+        if !precision.base_weight_dtypes.contains(&base_weight_dtype) {
+            return Err(TrainingOptimizerSupportError::UnsupportedBaseWeightDType {
+                actual: base_weight_dtype,
+                supported: precision.base_weight_dtypes,
+            });
+        }
+        let request = TrainingOptimizerRequest {
+            kind,
+            parameter_dtype: precision.lora_parameter_dtype_for_base_weight(base_weight_dtype),
+            rounding,
+            lora_rank,
+        };
+        if !self.supports(request) {
+            return Err(TrainingOptimizerSupportError::UnsupportedRequest {
+                request,
+                supported_dtypes: self.parameter_dtypes(kind),
+                supported_rounding: self.rounding_modes,
+                muon_min_lora_rank: self.muon_min_lora_rank,
+                muon_max_lora_rank: self.muon_max_lora_rank,
+            });
+        }
+        Ok(request)
+    }
 }
 
 /// Training capability and dtype policy surface.
@@ -1239,8 +1479,27 @@ pub struct BackendFallbackCapabilities {
 pub struct BackendTrainingCapabilities {
     pub hooks: TrainingCapabilities,
     pub precision: TrainingPrecisionPolicy,
+    pub optimizer: TrainingOptimizerSupport,
     pub server_dispatch: ServerTrainingDispatchPolicy,
     pub acceleration_profile: TrainingAccelerationProfilePolicy,
+}
+
+impl BackendTrainingCapabilities {
+    pub fn resolve_optimizer_request(
+        self,
+        kind: TrainingOptimizerKind,
+        base_weight_dtype: kiln_tensor::DType,
+        rounding: TrainingOptimizerRounding,
+        lora_rank: usize,
+    ) -> Result<TrainingOptimizerRequest, TrainingOptimizerSupportError> {
+        self.optimizer.resolve_optimizer_request(
+            self.precision,
+            kind,
+            base_weight_dtype,
+            rounding,
+            lora_rank,
+        )
+    }
 }
 
 /// Server-side native training route selected by backend policy.
@@ -1510,6 +1769,7 @@ impl BackendCapabilities {
             training: BackendTrainingCapabilities {
                 hooks: TrainingLossBackend::runtime_training_capabilities(backend),
                 precision: TrainingLossBackend::runtime_training_precision_policy(backend),
+                optimizer: TrainingOptimizerSupport::for_backend(name, device),
                 server_dispatch: ServerTrainingDispatchPolicy::for_backend(name, device),
                 acceleration_profile: TrainingAccelerationProfilePolicy::for_backend(name, device),
             },
@@ -2309,7 +2569,6 @@ impl BackendFallbackCapabilities {
             decode_hot_path: decode_hot_path_fallback_policy(name, device),
             decode_hot_path_debug_env: decode_hot_path_debug_fallback_env(name, device),
             training_optimizer: training_optimizer_fallback_policy(name, device),
-            training_optimizer_debug_env: training_optimizer_debug_fallback_env(name, device),
         }
     }
 
@@ -2384,10 +2643,13 @@ fn decode_hot_path_debug_fallback_env(
     }
 }
 
-fn training_optimizer_fallback_policy(name: &str, _device: kiln_tensor::Device) -> FallbackPolicy {
-    match name {
-        "cpu" => FallbackPolicy::CorrectnessAllowed,
-        "cuda" | "metal" | "vulkan" | "rocm" => FallbackPolicy::NativeRequired,
+fn training_optimizer_fallback_policy(name: &str, device: kiln_tensor::Device) -> FallbackPolicy {
+    match (name, device) {
+        ("cpu", kiln_tensor::Device::Cpu) => FallbackPolicy::CorrectnessAllowed,
+        ("cuda", kiln_tensor::Device::Cuda(_))
+        | ("rocm", kiln_tensor::Device::Rocm(_))
+        | ("metal", kiln_tensor::Device::Metal(_))
+        | ("vulkan", kiln_tensor::Device::Vulkan(_)) => FallbackPolicy::NativeRequired,
         _ => FallbackPolicy::ErrorInHotPath,
     }
 }
@@ -2412,19 +2674,6 @@ fn env_truthy(name: &str) -> bool {
             .as_deref(),
         Some("1") | Some("true") | Some("yes")
     )
-}
-
-fn training_optimizer_debug_fallback_env(
-    name: &str,
-    _device: kiln_tensor::Device,
-) -> Option<&'static str> {
-    match name {
-        "cuda" => Some("KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK"),
-        "metal" => Some("KILN_METAL_TRAINING_OPTIMIZER_FALLBACK"),
-        "vulkan" => Some("KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK"),
-        "rocm" => Some("KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK"),
-        _ => None,
-    }
 }
 
 fn backend_kind_for_runtime(name: &str, device: kiln_tensor::Device) -> kiln_tensor::Backend {

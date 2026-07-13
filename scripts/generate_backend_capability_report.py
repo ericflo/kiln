@@ -109,6 +109,7 @@ CAPABILITY_DESCRIPTOR_STRUCTS = [
     "ReplayCapabilities",
     "ReplayAuthority",
     "BackendFallbackCapabilities",
+    "TrainingOptimizerSupport",
 ]
 
 RESIDENT_RESOURCE_DESCRIPTOR_STRUCTS = [
@@ -851,28 +852,73 @@ def training_optimizer_fallback_policy_report() -> dict[str, Any]:
     return {
         "cpu": {
             "default_policy": "CorrectnessAllowed",
-            "debug_opt_in": "not required",
-            "enforcement": "CPU is the reference optimizer path",
+            "optimizer_parameter_dtypes": {
+                "sgd": ["F32"],
+                "adam_w": ["F32"],
+                "muon": ["F32"],
+            },
+            "product_executable_base_to_lora": {"F32": "F32"},
+            "product_executable_optimizer_kinds": ["sgd", "adam_w", "muon"],
+            "rounding_modes": ["round_to_nearest"],
+            "muon_min_lora_rank": 2,
+            "muon_max_lora_rank": None,
+            "enforcement": "CPU is the F32 reference optimizer path",
         },
         "cuda": {
             "default_policy": "NativeRequired",
-            "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK=1",
-            "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines",
+            "optimizer_parameter_dtypes": {
+                "sgd": ["F32", "BF16"],
+                "adam_w": ["F32", "BF16"],
+                "muon": ["F32", "BF16"],
+            },
+            "product_executable_base_to_lora": {"F32": "F32", "BF16": "BF16"},
+            "product_executable_optimizer_kinds": ["sgd", "adam_w", "muon"],
+            "rounding_modes": ["round_to_nearest"],
+            "muon_min_lora_rank": 2,
+            "muon_max_lora_rank": 48,
+            "enforcement": "SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported",
         },
         "rocm": {
             "default_policy": "NativeRequired",
-            "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK=1",
-            "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines",
+            "optimizer_parameter_dtypes": {
+                "sgd": ["F32", "BF16"],
+                "adam_w": ["F32", "BF16"],
+                "muon": ["F32", "BF16"],
+            },
+            "product_executable_base_to_lora": {"F32": "F32", "BF16": "BF16"},
+            "product_executable_optimizer_kinds": ["sgd", "adam_w", "muon"],
+            "rounding_modes": ["round_to_nearest"],
+            "muon_min_lora_rank": 2,
+            "muon_max_lora_rank": 48,
+            "enforcement": "SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported",
         },
         "metal": {
             "default_policy": "NativeRequired",
-            "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_TRAINING_OPTIMIZER_FALLBACK=1",
-            "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines",
+            "optimizer_parameter_dtypes": {
+                "sgd": [],
+                "adam_w": ["F32", "BF16"],
+                "muon": ["F32", "BF16"],
+            },
+            "product_executable_base_to_lora": {"BF16": "BF16"},
+            "product_executable_optimizer_kinds": ["adam_w", "muon"],
+            "rounding_modes": ["round_to_nearest"],
+            "muon_min_lora_rank": 2,
+            "muon_max_lora_rank": 32,
+            "enforcement": "SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported",
         },
         "vulkan": {
             "default_policy": "NativeRequired",
-            "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK=1",
-            "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines",
+            "optimizer_parameter_dtypes": {
+                "sgd": ["F32", "BF16"],
+                "adam_w": ["F32", "BF16"],
+                "muon": ["F32", "BF16"],
+            },
+            "product_executable_base_to_lora": {"F32": "F32", "BF16": "F32"},
+            "product_executable_optimizer_kinds": ["sgd", "adam_w", "muon"],
+            "rounding_modes": ["round_to_nearest"],
+            "muon_min_lora_rank": 2,
+            "muon_max_lora_rank": 32,
+            "enforcement": "SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported",
         },
     }
 
@@ -947,25 +993,25 @@ def training_precision_policy_report() -> dict[str, Any]:
         },
         "cuda": {
             "name": "cuda_native_float",
-            "activation_dtypes": ["F32", "BF16", "F16"],
-            "base_weight_dtypes": ["F32", "BF16", "F16"],
+            "activation_dtypes": ["F32", "BF16"],
+            "base_weight_dtypes": ["F32", "BF16"],
             "lora_parameter_dtypes": ["F32", "BF16"],
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
             "mixed_rms_norm_weight_dtype": None,
             "mixed_precision": True,
-            "notes": "CUDA keeps kt tape authoritative and routes BF16/F16/F32 leaves through CUDA-native kernels where available.",
+            "notes": "CUDA keeps kt tape authoritative for F32/BF16 training; F16 remains an inference-only dtype until every training leaf and optimizer is native.",
         },
         "rocm": {
             "name": "rocm_native_float",
-            "activation_dtypes": ["F32", "BF16", "F16"],
-            "base_weight_dtypes": ["F32", "BF16", "F16"],
+            "activation_dtypes": ["F32", "BF16"],
+            "base_weight_dtypes": ["F32", "BF16"],
             "lora_parameter_dtypes": ["F32", "BF16"],
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
             "mixed_rms_norm_weight_dtype": None,
             "mixed_precision": True,
-            "notes": "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
+            "notes": "ROCm mirrors CUDA's F32/BF16 kt-tape envelope; F16 remains inference-only until every training leaf and optimizer is native.",
         },
         "metal": {
             "name": "metal_bf16_uma",
@@ -976,7 +1022,7 @@ def training_precision_policy_report() -> dict[str, Any]:
             "optimizer_parameter_dtypes": ["F32", "BF16"],
             "mixed_rms_norm_weight_dtype": None,
             "mixed_precision": True,
-            "notes": "Metal training is BF16-focused on UMA buffers, with F32 loss accumulation and F32/BF16 AdamW residency.",
+            "notes": "Metal training is BF16-focused on UMA buffers, with F32 loss accumulation and F32/BF16 AdamW/Muon residency; SGD is unsupported.",
         },
         "vulkan": {
             "name": "vulkan_mixed_f32_bf16",
@@ -2664,6 +2710,9 @@ def optimizer_dispatch_report(backends: dict[str, Any]) -> dict[str, Any]:
             "adamw_step": "overridden"
             if "runtime_dispatch_adamw_step" in functions or "dispatch_adamw_step" in overrides
             else "default_decline",
+            "muon_step": "overridden"
+            if "runtime_dispatch_muon_step" in functions or "dispatch_muon_step" in overrides
+            else "default_decline",
         }
     return report
 
@@ -2836,14 +2885,29 @@ def markdown(data: dict[str, Any]) -> str:
             f"{info['enforcement']} |"
         )
     lines.append("")
-    lines.append("## Training Optimizer Fallback")
+    lines.append("## Training Optimizer Product Resolution and Fallback")
     lines.append("")
-    lines.append("| Backend | Default Policy | Debug Opt-In | Enforcement |")
-    lines.append("|---|---|---|---|")
+    lines.append(
+        "Product-executable tuples combine the base-weight precision policy with optimizer-implementation support. "
+        "The listed parameter dtypes use the reference implementation on CPU and required native hooks on accelerators; "
+        "they are not independently a promise that the product resolver can produce that LoRA dtype."
+    )
+    lines.append("")
+    lines.append("| Backend | Default Policy | Product Base -> LoRA | Product Kinds | Optimizer Parameter Dtypes (SGD / AdamW / Muon) | Muon Rank | Rounding | Enforcement |")
+    lines.append("|---|---|---|---|---|---:|---|---|")
     for backend, info in data["training_optimizer_fallback_policy"].items():
+        supported = info["optimizer_parameter_dtypes"]
+        resolved = ", ".join(
+            f"{base}->{lora}"
+            for base, lora in info["product_executable_base_to_lora"].items()
+        )
         lines.append(
-            f"| `{backend}` | `{info['default_policy']}` | `{info['debug_opt_in']}` | "
-            f"{info['enforcement']} |"
+            f"| `{backend}` | `{info['default_policy']}` | "
+            f"`{resolved}` | "
+            f"`{', '.join(info['product_executable_optimizer_kinds'])}` | "
+            f"`{', '.join(supported['sgd']) or 'none'} / {', '.join(supported['adam_w']) or 'none'} / {', '.join(supported['muon']) or 'none'}` | "
+            f"`{info['muon_min_lora_rank']}..={info['muon_max_lora_rank'] if info['muon_max_lora_rank'] is not None else 'unbounded'}` | "
+            f"`{', '.join(info['rounding_modes'])}` | {info['enforcement']} |"
         )
     lines.append("")
     lines.append("## Streaming Prefill Backend Policy")
@@ -2901,10 +2965,13 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Optimizer Dispatch")
     lines.append("")
-    lines.append("| Backend | SGD Step | AdamW Step |")
-    lines.append("|---|---|---|")
+    lines.append("| Backend | SGD Step | AdamW Step | Muon Step |")
+    lines.append("|---|---|---|---|")
     for backend, info in data["optimizer_dispatch"].items():
-        lines.append(f"| `{backend}` | `{info['sgd_step']}` | `{info['adamw_step']}` |")
+        lines.append(
+            f"| `{backend}` | `{info['sgd_step']}` | `{info['adamw_step']}` | "
+            f"`{info['muon_step']}` |"
+        )
     lines.append("")
     lines.append("## Mismatch Audit")
     lines.append("")

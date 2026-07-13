@@ -938,6 +938,14 @@ impl Default for Optimizer {
 }
 
 impl Optimizer {
+    pub const fn kind(self) -> kiln_model::TrainingOptimizerKind {
+        match self {
+            Self::Sgd => kiln_model::TrainingOptimizerKind::Sgd,
+            Self::AdamW { .. } => kiln_model::TrainingOptimizerKind::AdamW,
+            Self::Muon { .. } => kiln_model::TrainingOptimizerKind::Muon,
+        }
+    }
+
     /// Fail closed on optimizer values that would make an update undefined or
     /// silently non-finite. Public admission calls this before queueing work;
     /// trainer entry points repeat it for direct Rust callers.
@@ -2965,6 +2973,32 @@ mod tests {
         assert!(matches!(adamw, Optimizer::AdamW { .. }));
         let sgd: Optimizer = serde_json::from_str(r#"{"kind": "sgd"}"#).unwrap();
         assert_eq!(sgd, Optimizer::Sgd);
+    }
+
+    #[test]
+    fn optimizer_hyperparameters_fail_closed_before_execution() {
+        assert!(Optimizer::default().validate_hyperparameters().is_ok());
+        assert!(Optimizer::Sgd.validate_hyperparameters().is_ok());
+        assert!(
+            Optimizer::AdamW {
+                beta1: f32::NAN,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: 0.0,
+            }
+            .validate_hyperparameters()
+            .is_err()
+        );
+        assert!(
+            Optimizer::Muon {
+                momentum: 0.95,
+                nesterov: true,
+                ns_iters: 0,
+                weight_decay: 0.0,
+            }
+            .validate_hyperparameters()
+            .is_err()
+        );
     }
 
     #[test]

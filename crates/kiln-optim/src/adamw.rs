@@ -72,9 +72,14 @@ pub struct AdamW {
 impl AdamW {
     /// Construct AdamW with explicit hyperparameters.
     pub fn new(hp: AdamWHyperparameters) -> Self {
+        Self::new_with_rounding(hp, StochasticRoundingPolicy::RoundToNearest)
+    }
+
+    /// Construct AdamW with an explicit programmatic rounding policy.
+    pub fn new_with_rounding(hp: AdamWHyperparameters, rounding: StochasticRoundingPolicy) -> Self {
         AdamW {
             hp,
-            rounding: StochasticRoundingPolicy::from_env(),
+            rounding,
             moments: HashMap::new(),
         }
     }
@@ -218,7 +223,7 @@ impl OptimStep for AdamW {
         // 11 — `self.moments` keyed on `tensor_id` survives the swap.
         //
         // #1082 box L416: when the master is BF16 and the policy is
-        // `Stochastic` (`KILN_BF16_STOCHASTIC_ROUND=1`), the f32→bf16
+        // `Stochastic` (only through an explicit programmatic policy), the f32→bf16
         // master write rounds stochastically — round up/down with
         // probability proportional to the truncated mantissa — so the
         // update is unbiased in expectation under small learning rates

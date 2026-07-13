@@ -1016,10 +1016,10 @@ estimator read or treating it as dead would recreate admission/execution drift.
 A later slice must replace both reads with one typed, shared, pure
 route/device-limit policy and prove that the admitted chunk is exactly the one
 executed. The unsafe SFT route switch has now been removed and bound through
-admission and execution as described below. Optimizer debug-fallback controls
-still need to be deleted or moved behind explicit qualification hooks after
-their callers are independently proven. The following typed slice owns GRPO
-shared-prefix-reference selection and OPD sampler segments;
+admission and execution as described below. Optimizer debug-fallback and
+stochastic-rounding controls are now retired by the optimizer-authority slice
+below. The following typed slice owns GRPO shared-prefix-reference selection
+and OPD sampler segments;
 trace/debug/host-scan controls move behind explicit qualification hooks instead
 of public config.
 
@@ -1070,6 +1070,32 @@ Phase A validation example and live-script override were removed, and the
 runtime-environment contract at `a193db663` records 950 reads and 539
 process-mutation call sites. This remains a portable authority/correctness
 checkpoint: it does not close ROCm, Vulkan, CUDA, or Metal execution gates.
+
+Optimizer-authority slice (completed 2026-07-13): native training now resolves
+one typed backend optimizer contract from exact backend name, device family,
+resident base dtype, derived LoRA dtype, optimizer kind, rounding policy, and
+LoRA rank. CUDA/ROCm accept F32/BF16 SGD and AdamW plus Muon ranks 2..=48;
+Metal rejects SGD and accepts F32/BF16 AdamW plus Muon ranks 2..=32; Vulkan's
+raw F32/BF16 hooks resolve through its F32-LoRA product policy and cap Muon at
+32; CPU is the F32 reference path with Muon rank at least two. F16 remains
+inference-only. Executable optimizer parameter dtypes and product-executable
+base-to-LoRA tuples are reported separately so the generated capability report
+does not overclaim; CPU uses its reference implementation while accelerators
+require native hooks.
+
+The four backend-specific optimizer-fallback switches, the global hot-path
+fallback switch, and the BF16 stochastic-rounding environment switch are
+deleted with no replacement alias. Product construction is immutable
+round-to-nearest; explicit low-level reference callers retain a programmatic
+rounding API.
+Legacy stochastic checkpoints fail closed. Submission, dequeue, direct SFT,
+inline and streamed GRPO, and OPD all validate hyperparameters and the exact
+optimizer tuple before physical-memory probing, data, teacher, governor,
+checkpoint, resident-weight, LoRA, or optimizer-state work, then revalidate
+against one explicitly initialized native execution backend. Backend/device
+mismatches and Vulkan initialization downgrades fail closed rather than
+acquiring CPU authority.
+This is a portable authority checkpoint, not accelerator qualification.
 
 ### 8.2 One scheduling model
 
@@ -1516,6 +1542,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-13 | Phase 8.1 typed direct-decode rendezvous checkpoint | `sha256:54bc0dbac60e36fcc9c3cc1a4b41ed055b58890036e15b041fbc27d937e79a0c` | `a9bd8330f` + documentation follow-up | portable static + documentation portal; accelerator execution pending | 79-field typed-config registry contract; exact runtime-environment ratchet at 972 reads/611 mutations; 8/8 docs builder tests; 30-document/5-asset validation; static and desktop/mobile Chrome 150 docs smoke; release/link guard; syntax and diff hygiene | passed static checkpoint | Four additional `[batching]` fields make direct streaming effectively-greedy rendezvous mode, maximum width, wait, and mixed-sequence policy startup-authoritative. Canonical names are mechanical; the four old `KILN_DECODE_BATCH*` spellings warn, conflict-check, and fail strictly, including malformed legacy wait values that previously became zero. Every real backend auto-enables the worker; CPU/CUDA/ROCm/Metal/Vulkan preserve exact `(8,0,false)`, `(1,0,false)`, `(8,0,false)`, `(8,100,true)`, and `(64,5000,true)` policies, with width clamped to effective decode width. Configuration diagnostics remain separate from live backend/actor/worker/route state across config, health, debug, CLI, UI, and the website. Worker activity is not routing authority: actor activity shadows the fallback, sampled and non-streaming work bypass it, and under defaults only Metal routes to it. This static checkpoint makes no accelerator correctness or throughput claim and does not close the one-scheduler gate. |
 | 2026-07-13 | Complete streaming-prefill execution authority | `sha256:a62f2d8c69d65dc7340580a75f9dc1a7b5f0f70b50955052b16988eeb9d5ee58` | this commit | portable static + documentation portal; accelerator execution pending | exact runtime-environment contract at 963 reads/566 mutations; 342 qualification-tooling tests; generated backend-capability report check; Rust 2024 formatting and diff hygiene; production compatibility-call audits; independent execution-path and identity review; 8/8 docs builder tests, 30-document/5-asset validation, generated-site desktop/mobile Chromium smoke, and complete website/API/reference updates; bounded Cargo admission at the unchanged 15 GiB floor; final CPU CI `29268429061`, qualification `29268429011`, and dashboard/UI smoke `29268887496` green | passed static checkpoint | One startup-resolved policy now reaches ordinary generation, prompt logprobs, GRPO shared-prefix reference forwards, SFT/GRPO/OPD tape and checkpoint replay, local/privileged/merge/live OPD teachers, MTP alignment, and every benchmark prefill. Server teacher construction fails closed without an injected policy. The prompt-logprob teacher fingerprint now uses inference-contract v2 and hashes every execution-policy field, preventing incompatible policy configurations from sharing content identity or logit-cache provenance. The benchmark accepts `--config`, resolves once against selected backend capabilities, and shares that policy with its direct forwards, training runtime, and `ModelRunner`. Standalone compatibility APIs retain backend defaults; production source guards reject their use. The permanent configuration reference, README, quickstart, architecture, changelog, and website API/architecture pages document identity invalidation and restart behavior. The final hosted runs are inexpensive portable validation and make no accelerator claim. |
 | 2026-07-13 | Phase 8.1 backend-owned SFT loss routing | `sha256:5de0c1ca68da7b49382d8d8eee1c4961b87e397eb32dc8a7daf7ec885c239fa5` | `a193db663` + test/docs follow-up (admission `307327fca`; budget repair `4c09c043b`) | portable CPU/static; accelerator execution pending | route-specific saturating estimator and boundary tests; admission/queue/trainer/receipt/identity source contracts; exact runtime-environment contract at 950 reads/539 mutations; qualification run `29274470176`; CPU CI runs `29272421238`, `29273482966`, and `29274469856`; 8/8 docs builder tests and generated static/browser smoke | passed portable checkpoint | The first admission commit removed `KILN_USE_FLCE`, selected the backend capability, charged route-specific loss residency, and rejected checkpointed `full_logits`. CPU CI `29272421238` passed 1,021 tests before one focused budget-boundary assertion exposed that a legal maximum-segment plan was still rejected at 30 GiB. `4c09c043b` added explicit 30 GiB reject/31 GiB accept coverage and made CI `29273482966` green. `a193db663` pinned the enum through queue and trainer revalidation, SFT receipt state, and planning identity v4; removed the obsolete Phase A bench/live override; and passed portable CI `29274469856` plus the 342-test qualification contract. The follow-up adds direct v3/v4 resume rejection tests and publishes the contract across the permanent website. These hosted runs make no ROCm, Vulkan, CUDA, Metal, correctness, or throughput claim. |
+| 2026-07-13 | Phase 8.1 immutable optimizer authority | `sha256:da62190c4a4dedd29e1fcb6cec02f1aacb807c124b52b5ae691ae99e17b0737a` | this commit | portable static; accelerator execution pending | exact runtime-environment ratchet at 944 reads/530 mutations; seven focused environment-contract tests; generated backend-capability report self-test/generate/check; release-version and Python compilation checks; Rust 2024 formatting and diff hygiene; independent tuple, identity, admission-order, checkpoint, and compatibility-wrapper review; bounded Cargo admission at the unchanged 15 GiB floor | passed static checkpoint | One typed contract now binds exact backend/device identity, resident base dtype, resolved LoRA dtype, optimizer kind, rank, and immutable round-to-nearest execution. CPU uses the F32 reference implementation; CUDA/ROCm, Metal, and Vulkan require their exact supported native hooks, with F16 excluded from training. Submission and dequeue plus direct SFT, inline/streamed GRPO, and OPD fail before physical-memory probes, corpus work, or accelerator ownership and revalidate against the initialized backend. The four backend fallback variables, global training fallback variable, and stochastic-rounding variable have no alias or replacement; legacy stochastic checkpoints fail closed. Review caught and repaired a false broad source assertion, non-exhaustive device matching, Vulkan authority contamination after failed initialization, a CUDA streamed-JSONL open before admission, and standalone memory probes before the cheap tuple guard. Missing expected LoRA gradients remain a separately recorded tape-authority defect. Cargo correctly refused with 8 GiB available, so this checkpoint makes no compiled, accelerator-correctness, or throughput claim; inexpensive hosted CPU validation must be monitored after push. |
 
 ## Known Starting Defects
 

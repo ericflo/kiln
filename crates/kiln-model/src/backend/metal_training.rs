@@ -22,21 +22,14 @@ pub(super) fn training_capabilities_static() -> TrainingCapabilities {
         "Metal TensorId membership registry; kt Metal tensors own UMA buffers";
     caps.lora_delta_training =
         "kt-tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors";
-    caps.sgd_step = "declined; portable optimizer fallback";
+    caps.sgd_step = "declined; native optimizer dispatch required";
     caps.adamw_step = "Metal in-place AdamW for resident F32/BF16 tensors";
-    caps.native_training = "shared trainer.rs kt-tape path with Metal residency/AdamW hooks";
+    caps.native_training = "shared trainer.rs kt-tape path with Metal residency/AdamW/Muon hooks";
     caps
 }
 
 pub(super) fn training_precision_policy() -> TrainingPrecisionPolicy {
     TrainingPrecisionPolicy::metal()
-}
-
-fn bf16_stochastic_rounding_enabled() -> bool {
-    std::env::var("KILN_BF16_STOCHASTIC_ROUND")
-        .ok()
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -87,15 +80,10 @@ pub(super) fn dispatch_adamw_step(
         );
     }
 
-    // F32 + BF16 run on-device (BF16 with round-to-nearest, matching Vulkan's
-    // BF16 dispatch_adamw_step arm plus the default round-to-nearest host
-    // policy). BF16 declines only when stochastic rounding is explicitly
-    // requested, so the host's stochastic-rounding master update is preserved.
+    // F32 + BF16 run on-device with the product's immutable
+    // round-to-nearest write policy.
     let dt = param.dtype();
     if dt == kiln_tensor::DType::F16 {
-        return Ok(false);
-    }
-    if dt == kiln_tensor::DType::BF16 && bf16_stochastic_rounding_enabled() {
         return Ok(false);
     }
 
@@ -174,15 +162,10 @@ pub(super) fn dispatch_muon_step(
         return Ok(false);
     }
 
-    // F32 + BF16 run on-device (BF16 with round-to-nearest, matching the AdamW
-    // arm and the default round-to-nearest host policy). F16 declines, as does
-    // BF16 when stochastic rounding is explicitly requested, preserving the
-    // host's stochastic-rounding master update.
+    // F32 + BF16 run on-device with the product's immutable
+    // round-to-nearest write policy. F16 declines.
     let dt = param.dtype();
     if dt == kiln_tensor::DType::F16 {
-        return Ok(false);
-    }
-    if dt == kiln_tensor::DType::BF16 && bf16_stochastic_rounding_enabled() {
         return Ok(false);
     }
 

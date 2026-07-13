@@ -65,9 +65,14 @@ pub struct Sgd {
 
 impl Sgd {
     pub fn new(hp: SgdHyperparameters) -> Self {
+        Self::new_with_rounding(hp, StochasticRoundingPolicy::RoundToNearest)
+    }
+
+    /// Construct SGD with an explicit programmatic rounding policy.
+    pub fn new_with_rounding(hp: SgdHyperparameters, rounding: StochasticRoundingPolicy) -> Self {
         Sgd {
             hp,
-            rounding: StochasticRoundingPolicy::from_env(),
+            rounding,
             velocities: HashMap::new(),
         }
     }

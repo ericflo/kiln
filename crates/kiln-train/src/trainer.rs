@@ -74,9 +74,10 @@ use kiln_model::backend::GrpoLossRoute;
 ))]
 use kiln_model::backend::TrainingTapeRoute;
 use kiln_model::backend::{
-    self, BackendIdentity, BackendRuntime, ExternalYieldBackend, FallbackPolicy,
-    FinalRmsNormBackwardRoute, GrpoKlAuxiliaryRoute, OptimizerBackend, ResidencyBackend,
-    SftFlceLossRoute, TrainingLossBackend, TrainingPrecisionPolicy,
+    self, BackendIdentity, BackendRuntime, ExternalYieldBackend, FinalRmsNormBackwardRoute,
+    GrpoKlAuxiliaryRoute, OptimizerBackend, ResidencyBackend, SftFlceLossRoute,
+    TrainingLossBackend, TrainingOptimizerRequest, TrainingOptimizerRounding,
+    TrainingOptimizerSupport, TrainingPrecisionPolicy,
 };
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
@@ -414,6 +415,83 @@ pub(crate) fn training_precision_policy_for_backend(
     backend: &dyn BackendRuntime,
 ) -> TrainingPrecisionPolicy {
     TrainingLossBackend::runtime_training_precision_policy(backend)
+}
+
+/// Validate the exact optimizer kind, derived LoRA dtype, and immutable write
+/// policy before any resident model, trainable parameter, or optimizer-state
+/// allocation. The per-step fallback guard remains necessary for dynamic
+/// residency/dispatch failures.
+pub(crate) fn ensure_training_optimizer_supported(
+    workload: &str,
+    backend: &dyn BackendRuntime,
+    optimizer: Optimizer,
+    base_weight_dtype: kiln_tensor::DType,
+    lora_rank: usize,
+) -> Result<TrainingOptimizerRequest> {
+    let capabilities = BackendCapabilityQueries::backend_capabilities(backend);
+    capabilities
+        .training
+        .resolve_optimizer_request(
+            optimizer.kind(),
+            base_weight_dtype,
+            TrainingOptimizerRounding::RoundToNearest,
+            lora_rank,
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{workload} optimizer is unsupported by backend `{}`: {error}",
+                BackendIdentity::runtime_name(backend)
+            )
+        })
+}
+
+/// Cheap public-entry validation for optimizer hyperparameters and the exact
+/// backend/dtype/rank tuple. Call this before source inspection or governor
+/// initialization; execution paths repeat the capability check before their
+/// first resident allocation so capability drift still fails closed.
+pub(crate) fn ensure_training_optimizer_device_supported(
+    workload: &str,
+    weights: &GpuWeights,
+    runtime_device: Device,
+    optimizer: Optimizer,
+    lora_rank: usize,
+) -> Result<()> {
+    optimizer
+        .validate_hyperparameters()
+        .with_context(|| format!("{workload}: invalid optimizer configuration"))?;
+    TrainingOptimizerSupport::for_device(runtime_device)
+        .resolve_optimizer_request(
+            TrainingPrecisionPolicy::for_device_family(runtime_device),
+            optimizer.kind(),
+            weights.embed_tokens.dtype(),
+            TrainingOptimizerRounding::RoundToNearest,
+            lora_rank,
+        )
+        .with_context(|| {
+            format!(
+                "{workload} optimizer is unsupported for configured runtime device {runtime_device}"
+            )
+        })?;
+    Ok(())
+}
+
+pub(crate) fn ensure_training_optimizer_entry_supported(
+    workload: &str,
+    weights: &GpuWeights,
+    runtime: &crate::TrainingRuntimeContext,
+    optimizer: Optimizer,
+    lora_rank: usize,
+) -> Result<Device> {
+    let runtime_device = training_device_for_weights(weights, runtime)
+        .with_context(|| format!("{workload}: resolve runtime device"))?;
+    ensure_training_optimizer_device_supported(
+        workload,
+        weights,
+        runtime_device,
+        optimizer,
+        lora_rank,
+    )?;
+    Ok(runtime_device)
 }
 
 fn training_activation_bytes_per_elem_for_policy(
@@ -1808,7 +1886,7 @@ fn checkpoint_read_step(tensor: &KtTensor, label: &str) -> Result<u32> {
 /// `None` for SGD (stateless), `Some(KtAdamW-backed state)` for AdamW.
 /// Consolidates the three identical production blocks that previously
 /// `match`ed `config.optimizer` + pre-allocated candle moment `Var`s.
-fn make_opt_state(
+pub(crate) fn make_opt_state(
     params: &TrainableLoraParams,
     optimizer: Optimizer,
     lr: f64,
@@ -5134,12 +5212,11 @@ fn training_device_for_weights(
 /// inference. Training cannot use that shortcut: an explicit CPU runtime stays
 /// CPU, and an accelerated runtime is accepted only when the resident weight
 /// device matches it exactly.
-pub(crate) fn training_backend_for_device(device: Device) -> std::sync::Arc<dyn BackendRuntime> {
-    if device == Device::Cpu {
-        std::sync::Arc::new(backend::cpu::CpuBackend::new(device))
-    } else {
-        backend::for_device_kt(&device)
-    }
+pub(crate) fn training_backend_for_device(
+    device: Device,
+) -> Result<std::sync::Arc<dyn BackendRuntime>> {
+    backend::for_explicit_device_kt(device)
+        .with_context(|| format!("initialize exact native training backend for {device}"))
 }
 
 /// Confirm training will use the already resident serving weights.
@@ -5397,6 +5474,22 @@ pub fn sft_train_to_with_checkpoint_root(
     config
         .validate_native_contract()
         .context("validate native SFT profile before row admission")?;
+    ensure_training_optimizer_device_supported(
+        "SFT",
+        weights,
+        weights.embed_tokens.device(),
+        config.optimizer,
+        config.lora_rank,
+    )?;
+    let runtime =
+        crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
+    ensure_training_optimizer_entry_supported(
+        "SFT",
+        weights,
+        &runtime,
+        config.optimizer,
+        config.lora_rank,
+    )?;
     let prepared = crate::sft_ingestion::prepare_sft_examples(
         examples.iter().cloned(),
         tokenizer,
@@ -5404,7 +5497,7 @@ pub fn sft_train_to_with_checkpoint_root(
         "rust_api",
         None,
     )?;
-    sft_train_to_with_checkpoint_root_and_ingestion(
+    sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
         &prepared.examples,
         &prepared.ingestion,
         config,
@@ -5418,6 +5511,7 @@ pub fn sft_train_to_with_checkpoint_root(
         progress_cb,
         replay_ctx,
         gpu_step_coordination,
+        &runtime,
     )
 }
 
@@ -5442,6 +5536,13 @@ pub fn sft_train_to_with_checkpoint_root_and_ingestion(
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    ensure_training_optimizer_device_supported(
+        "SFT",
+        weights,
+        weights.embed_tokens.device(),
+        config.optimizer,
+        config.lora_rank,
+    )?;
     let runtime =
         crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
     sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
@@ -5480,8 +5581,13 @@ pub fn sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
     gpu_step_coordination: Option<GpuStepCoordination>,
     runtime: &crate::TrainingRuntimeContext,
 ) -> Result<PathBuf> {
-    let runtime_device =
-        training_device_for_weights(weights, runtime).context("resolve SFT runtime device")?;
+    let runtime_device = ensure_training_optimizer_entry_supported(
+        "SFT",
+        weights,
+        runtime,
+        config.optimizer,
+        config.lora_rank,
+    )?;
     crate::ensure_memory_governor_for_runtime(runtime_device, runtime)
         .context("initialize SFT memory governor")?;
     config
@@ -5557,7 +5663,15 @@ fn sft_train_prepared_to_with_checkpoint_root(
     // touch left is the safetensors adapter I/O, which bridges the kt device
     // to candle locally inside `load_from_safetensors`/`save_peft`.
     let device = training_device_for_weights(weights, runtime)?;
-    let backend = training_backend_for_device(device);
+    let backend = training_backend_for_device(device)?;
+    let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
+    ensure_training_optimizer_supported(
+        "SFT",
+        backend.as_ref(),
+        config.optimizer,
+        weights.embed_tokens.dtype(),
+        config.lora_rank,
+    )?;
     let backend_loss_route = TrainingLossBackend::runtime_sft_flce_loss_route(backend.as_ref());
     let sft_loss_route = runtime
         .admitted_sft_loss_route()
@@ -5576,7 +5690,6 @@ fn sft_train_prepared_to_with_checkpoint_root(
     // drift has already failed closed before this potentially large copy.
     let resident_weights = resident_training_weights(weights, &device)?;
     let weights = resident_weights.as_ref().unwrap_or(weights);
-    let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
     let checkpoint_boundary_policy = runtime.checkpoint_boundary_policy();
     let streaming_prefill = runtime.resolved_streaming_prefill_policy(device);
     let training_runtime_planning_identity =
@@ -6647,6 +6760,13 @@ pub fn grpo_train_to_with_checkpoint_root(
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    ensure_training_optimizer_device_supported(
+        "GRPO",
+        weights,
+        weights.embed_tokens.device(),
+        config.optimizer,
+        config.lora_rank,
+    )?;
     let runtime =
         crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
     grpo_train_to_with_checkpoint_root_and_runtime(
@@ -6683,8 +6803,13 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
     gpu_step_coordination: Option<GpuStepCoordination>,
     runtime: &crate::TrainingRuntimeContext,
 ) -> Result<PathBuf> {
-    let runtime_device =
-        training_device_for_weights(weights, runtime).context("resolve GRPO runtime device")?;
+    let runtime_device = ensure_training_optimizer_entry_supported(
+        "GRPO",
+        weights,
+        runtime,
+        config.optimizer,
+        config.lora_rank,
+    )?;
     crate::ensure_memory_governor_for_runtime(runtime_device, runtime)
         .context("initialize GRPO memory governor")?;
     let run_started = Instant::now();
@@ -6786,8 +6911,16 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
     // so keep `device` kt downstream. The only candle touch is safetensors
     // adapter I/O, which bridges kt->candle locally inside save/load.
     let device = training_device_for_weights(weights, runtime)?;
-    let backend = training_backend_for_device(device);
+    let backend = training_backend_for_device(device)?;
     ensure_tape_forward_backward_supported("GRPO", weights, backend.as_ref())?;
+    let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
+    ensure_training_optimizer_supported(
+        "GRPO",
+        backend.as_ref(),
+        config.optimizer,
+        weights.embed_tokens.dtype(),
+        config.lora_rank,
+    )?;
     // Training-session residency: upload a one-device copy of the weights
     // when the substrate needs it (Vulkan hybrid). Shadow `weights` so the
     // whole body trains against the resident copy; it drops at return.
@@ -6799,7 +6932,6 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
         || resident_training_weights(weights, &device),
     )?;
     let weights = resident_weights.as_ref().unwrap_or(weights);
-    let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
     let streaming_prefill = runtime.resolved_streaming_prefill_policy(device);
     let training_runtime_planning_identity =
         runtime.checkpoint_planning_identity_for_device(device);
@@ -9205,6 +9337,13 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    ensure_training_optimizer_device_supported(
+        "streamed GRPO",
+        weights,
+        weights.embed_tokens.device(),
+        config.optimizer,
+        config.lora_rank,
+    )?;
     let runtime =
         crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
     grpo_train_jsonl_to_with_checkpoint_root_and_runtime(
@@ -9241,6 +9380,13 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root_and_runtime(
     gpu_step_coordination: Option<GpuStepCoordination>,
     runtime: &crate::TrainingRuntimeContext,
 ) -> Result<PathBuf> {
+    ensure_training_optimizer_entry_supported(
+        "streamed GRPO",
+        weights,
+        runtime,
+        config.optimizer,
+        config.lora_rank,
+    )?;
     let dataset_source = PinnedGrpoJsonlSource::open(dataset_path)?;
     grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
         &dataset_source,
@@ -9279,8 +9425,13 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
     let dataset_path = dataset_source.display_path();
-    let runtime_device = training_device_for_weights(weights, runtime)
-        .context("resolve streamed GRPO runtime device")?;
+    let runtime_device = ensure_training_optimizer_entry_supported(
+        "streamed GRPO",
+        weights,
+        runtime,
+        config.optimizer,
+        config.lora_rank,
+    )?;
     crate::ensure_memory_governor_for_runtime(runtime_device, runtime)
         .context("initialize streamed GRPO memory governor")?;
     let run_started = Instant::now();
@@ -9392,9 +9543,16 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
     // keep `device` kt downstream. The only candle touch is safetensors adapter
     // I/O, which bridges kt->candle locally inside save/load.
     let device = training_device_for_weights(weights, runtime)?;
-    let backend = training_backend_for_device(device);
+    let backend = training_backend_for_device(device)?;
     ensure_tape_forward_backward_supported("streamed GRPO", weights, backend.as_ref())?;
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
+    ensure_training_optimizer_supported(
+        "streamed GRPO",
+        backend.as_ref(),
+        config.optimizer,
+        weights.embed_tokens.dtype(),
+        config.lora_rank,
+    )?;
     let streaming_prefill = runtime.resolved_streaming_prefill_policy(device);
     let training_runtime_planning_identity =
         runtime.checkpoint_planning_identity_for_device(device);
@@ -13914,44 +14072,20 @@ pub fn optimizer_step_dispatch(
     }
 }
 
-fn training_optimizer_debug_fallback_enabled(debug_env: Option<&'static str>) -> bool {
-    kiln_core::env_flag::env_flag("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK", false)
-        || debug_env
-            .map(|env_var| kiln_core::env_flag::env_flag(env_var, false))
-            .unwrap_or(false)
-}
-
-fn training_optimizer_fallback_policy(
-    backend: &dyn BackendRuntime,
-    _device: kiln_tensor::Device,
-) -> FallbackPolicy {
-    let fallback = BackendCapabilityQueries::backend_capabilities(backend).fallback;
-    if training_optimizer_debug_fallback_enabled(fallback.training_optimizer_debug_env) {
-        return FallbackPolicy::WarnAndCount;
-    }
-    fallback.training_optimizer
-}
-
 fn ensure_training_optimizer_fallback_allowed(
     backend: &dyn BackendRuntime,
     device: kiln_tensor::Device,
     optimizer_name: &'static str,
 ) -> Result<()> {
-    let policy = training_optimizer_fallback_policy(backend, device);
+    let policy = BackendCapabilityQueries::backend_capabilities(backend)
+        .fallback
+        .training_optimizer;
     if policy.allows_fallback() {
-        if matches!(policy, FallbackPolicy::WarnAndCount) {
-            tracing::warn!(
-                backend = BackendIdentity::runtime_name(backend),
-                device = %device.short_name(),
-                optimizer = optimizer_name,
-                "training optimizer using explicit debug fallback"
-            );
-        }
         return Ok(());
     }
     anyhow::bail!(
         "{optimizer_name} optimizer fallback policy {:?} for {} training hot path on {}; \
-         native optimizer dispatch required (set KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 to opt in)",
+         native optimizer dispatch is required and no runtime fallback override is supported",
         policy,
         BackendIdentity::runtime_name(backend),
         device.short_name()
@@ -17099,14 +17233,6 @@ pub(crate) mod tests {
         GpuLinearAttentionWeights, model_forward_kt, model_forward_segment,
     };
 
-    /// Serializes tests in this binary that mutate the global optimizer fallback
-    /// environment controls (`KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK` and the
-    /// backend-specific `KILN_{CUDA,METAL,VULKAN,ROCM}_TRAINING_OPTIMIZER_FALLBACK`
-    /// variables). `cargo test` runs tests in this binary as parallel threads in
-    /// a single process, so one test's mutation can otherwise leak into another.
-    /// `cargo nextest run` runs each test in its own process, making this mutex a
-    /// no-op there.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[cfg(feature = "cuda")]
     pub(crate) static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -17743,57 +17869,46 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn training_optimizer_fallback_policy_defaults_to_native_required_on_gpus() {
+    fn training_optimizer_fallback_policy_is_immutable() {
         assert_eq!(
             kiln_model::BackendFallbackCapabilities::for_backend("cpu", kiln_tensor::Device::Cpu)
                 .training_optimizer,
-            FallbackPolicy::CorrectnessAllowed
+            kiln_model::FallbackPolicy::CorrectnessAllowed
         );
-        assert_eq!(
-            kiln_model::BackendFallbackCapabilities::for_backend("cpu", kiln_tensor::Device::Cpu)
-                .training_optimizer_debug_env,
-            None
-        );
-        for (backend_name, device, debug_env) in [
-            (
-                "cuda",
-                kiln_tensor::Device::Cuda(0),
-                "KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK",
-            ),
-            (
-                "metal",
-                kiln_tensor::Device::Metal(0),
-                "KILN_METAL_TRAINING_OPTIMIZER_FALLBACK",
-            ),
-            (
-                "vulkan",
-                kiln_tensor::Device::Vulkan(0),
-                "KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK",
-            ),
-            (
-                "rocm",
-                kiln_tensor::Device::Rocm(0),
-                "KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK",
-            ),
+        for (backend_name, device) in [
+            ("cuda", kiln_tensor::Device::Cuda(0)),
+            ("metal", kiln_tensor::Device::Metal(0)),
+            ("vulkan", kiln_tensor::Device::Vulkan(0)),
+            ("rocm", kiln_tensor::Device::Rocm(0)),
         ] {
             let fallback =
                 kiln_model::BackendFallbackCapabilities::for_backend(backend_name, device);
-            assert_eq!(fallback.training_optimizer, FallbackPolicy::NativeRequired);
             assert_eq!(
-                fallback.training_optimizer_debug_env,
-                Some(debug_env),
-                "{backend_name} training optimizer debug fallback env drifted"
+                fallback.training_optimizer,
+                kiln_model::FallbackPolicy::NativeRequired,
+                "{backend_name} must require native optimizer dispatch"
             );
         }
+        assert_eq!(
+            kiln_model::BackendFallbackCapabilities::for_backend("cuda", kiln_tensor::Device::Cpu,)
+                .training_optimizer,
+            kiln_model::FallbackPolicy::ErrorInHotPath,
+            "a backend-name/device mismatch must fail closed"
+        );
     }
 
     #[test]
-    fn training_optimizer_debug_fallback_opt_in_warns_and_counts() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let prior = std::env::var("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK").ok();
-        unsafe {
-            std::env::set_var("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK", "1");
-        }
+    fn accelerator_optimizer_fallback_fails_without_mutable_override() {
+        let cpu = NamedTestBackend::runtime("cpu");
+        assert!(
+            ensure_training_optimizer_fallback_allowed(
+                cpu.as_ref(),
+                kiln_tensor::Device::Cpu,
+                "AdamW"
+            )
+            .is_ok()
+        );
+
         for (backend_name, device) in [
             ("cuda", kiln_tensor::Device::Cuda(0)),
             ("metal", kiln_tensor::Device::Metal(0)),
@@ -17801,65 +17916,73 @@ pub(crate) mod tests {
             ("rocm", kiln_tensor::Device::Rocm(0)),
         ] {
             let backend = NamedTestBackend::runtime(backend_name);
-            let policy = training_optimizer_fallback_policy(backend.as_ref(), device);
-            assert_eq!(policy, FallbackPolicy::WarnAndCount);
-            assert!(policy.allows_fallback());
+            let error =
+                ensure_training_optimizer_fallback_allowed(backend.as_ref(), device, "AdamW")
+                    .expect_err("accelerator host optimizer fallback must fail");
+            let message = error.to_string();
+            assert!(message.contains("native optimizer dispatch is required"));
+            assert!(message.contains("no runtime fallback override is supported"));
         }
-        restore_env("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK", prior);
     }
 
     #[test]
-    fn training_optimizer_backend_debug_fallback_uses_policy_env() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let keys = [
-            "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK",
-            "KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK",
-            "KILN_METAL_TRAINING_OPTIMIZER_FALLBACK",
-            "KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK",
-            "KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK",
-        ];
-        let prior = keys
-            .iter()
-            .map(|&key| (key, std::env::var(key).ok()))
-            .collect::<Vec<_>>();
-        unsafe {
-            for &key in &keys {
-                std::env::remove_var(key);
-            }
-        }
+    fn training_optimizer_support_rejects_before_allocation() {
+        let metal = NamedTestBackend::runtime("metal");
+        let error = ensure_training_optimizer_supported(
+            "test",
+            metal.as_ref(),
+            Optimizer::Sgd,
+            kiln_tensor::DType::F32,
+            4,
+        )
+        .expect_err("Metal SGD must be rejected by immutable capability policy");
+        assert!(error.to_string().contains("optimizer `sgd` is unsupported"));
 
         let cuda = NamedTestBackend::runtime("cuda");
-        let metal = NamedTestBackend::runtime("metal");
-        assert_eq!(
-            training_optimizer_fallback_policy(cuda.as_ref(), kiln_tensor::Device::Cuda(0)),
-            FallbackPolicy::NativeRequired
+        assert!(
+            ensure_training_optimizer_supported(
+                "test",
+                cuda.as_ref(),
+                Optimizer::default(),
+                kiln_tensor::DType::F32,
+                4,
+            )
+            .is_ok()
         );
-        unsafe {
-            std::env::set_var("KILN_METAL_TRAINING_OPTIMIZER_FALLBACK", "1");
+        for rejected_rank in [1, 49] {
+            let error = ensure_training_optimizer_supported(
+                "test",
+                cuda.as_ref(),
+                Optimizer::default(),
+                kiln_tensor::DType::F32,
+                rejected_rank,
+            )
+            .expect_err("native CUDA Muon rank must stay within 2..=48");
+            assert!(error.to_string().contains(&format!("rank {rejected_rank}")));
         }
-        assert_eq!(
-            training_optimizer_fallback_policy(metal.as_ref(), kiln_tensor::Device::Metal(0)),
-            FallbackPolicy::WarnAndCount
+        assert!(
+            ensure_training_optimizer_supported(
+                "test",
+                cuda.as_ref(),
+                Optimizer::default(),
+                kiln_tensor::DType::F32,
+                48,
+            )
+            .is_ok()
         );
-        assert_eq!(
-            training_optimizer_fallback_policy(cuda.as_ref(), kiln_tensor::Device::Cuda(0)),
-            FallbackPolicy::NativeRequired,
-            "Metal optimizer fallback env should not apply to CUDA policy"
+        let error = ensure_training_optimizer_supported(
+            "test",
+            cuda.as_ref(),
+            Optimizer::default(),
+            kiln_tensor::DType::F16,
+            4,
+        )
+        .expect_err("F16 native training must fail before allocation");
+        assert!(
+            error
+                .to_string()
+                .contains("inference dtype support is separate")
         );
-
-        for (key, value) in prior {
-            restore_env(key, value);
-        }
-    }
-
-    fn restore_env(key: &str, prior: Option<String>) {
-        unsafe {
-            if let Some(value) = prior {
-                std::env::set_var(key, value);
-            } else {
-                std::env::remove_var(key);
-            }
-        }
     }
 
     // (#1082) kt CPU test-tensor constructors. The candle `tensor_new` /
@@ -19915,9 +20038,16 @@ pub(crate) mod tests {
 
     impl NamedTestBackend {
         fn runtime(name: &'static str) -> std::sync::Arc<dyn BackendRuntime> {
+            let device = match name {
+                "cuda" => Device::Cuda(0),
+                "rocm" => Device::Rocm(0),
+                "metal" => Device::Metal(0),
+                "vulkan" => Device::Vulkan(0),
+                _ => cpu_device(),
+            };
             std::sync::Arc::new(Self {
                 name,
-                device: cpu_device(),
+                device,
                 fail_external_yield_sync: false,
             })
         }
@@ -19937,16 +20067,7 @@ pub(crate) mod tests {
         }
 
         fn runtime_device(&self) -> kiln_tensor::Device {
-            // Test mock always constructs with `Device::Cpu` via
-            // `NamedTestBackend::runtime`, so the kt identity is the
-            // CPU variant. Avoiding the `kiln_kt_bridge` crate keeps
-            // the dep edge to `kiln-train` unchanged for this trait
-            // signature migration. (#1082)
-            debug_assert!(
-                matches!(self.device, Device::Cpu),
-                "NamedTestBackend mock only constructs with Device::Cpu"
-            );
-            kiln_tensor::Device::Cpu
+            self.device
         }
 
         fn runtime_as_any(&self) -> &dyn std::any::Any {
@@ -23835,7 +23956,7 @@ pub(crate) mod tests {
 
     #[test]
     fn explicit_cpu_training_backend_does_not_autoselect_vulkan() {
-        let backend = training_backend_for_device(Device::Cpu);
+        let backend = training_backend_for_device(Device::Cpu).unwrap();
         assert_eq!(BackendIdentity::runtime_name(backend.as_ref()), "cpu");
     }
 

@@ -1392,6 +1392,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "ReplayCapabilities",
         "ReplayAuthority",
         "BackendFallbackCapabilities",
+        "TrainingOptimizerSupport",
     ] {
         assert!(
             capability_descriptors.contains_key(name),
@@ -2545,11 +2546,11 @@ fn generated_capability_report_lists_optimizer_dispatch_policy() {
     let dispatch = report["optimizer_dispatch"]
         .as_object()
         .expect("optimizer_dispatch should be an object");
-    for (backend, sgd, adamw) in [
-        ("cuda", "overridden", "overridden"),
-        ("rocm", "overridden", "overridden"),
-        ("metal", "default_decline", "overridden"),
-        ("vulkan", "overridden", "overridden"),
+    for (backend, sgd, adamw, muon) in [
+        ("cuda", "overridden", "overridden", "overridden"),
+        ("rocm", "overridden", "overridden", "overridden"),
+        ("metal", "default_decline", "overridden", "overridden"),
+        ("vulkan", "overridden", "overridden", "overridden"),
     ] {
         let info = dispatch
             .get(backend)
@@ -2559,18 +2560,67 @@ fn generated_capability_report_lists_optimizer_dispatch_policy() {
             info["adamw_step"], adamw,
             "{backend} AdamW dispatch drifted"
         );
+        assert_eq!(info["muon_step"], muon, "{backend} Muon dispatch drifted");
     }
 
     let fallback = report["training_optimizer_fallback_policy"]
         .as_object()
         .expect("training_optimizer_fallback_policy should be an object");
     assert_eq!(fallback["cpu"]["default_policy"], "CorrectnessAllowed");
+    assert_eq!(
+        fallback["cpu"]["optimizer_parameter_dtypes"]["adam_w"],
+        serde_json::json!(["F32"])
+    );
+    assert_eq!(
+        fallback["cpu"]["rounding_modes"],
+        serde_json::json!(["round_to_nearest"])
+    );
+    assert_eq!(fallback["cpu"]["muon_min_lora_rank"], 2);
+    assert!(fallback["cpu"]["muon_max_lora_rank"].is_null());
     for backend in ["cuda", "rocm", "metal", "vulkan"] {
         assert_eq!(
             fallback[backend]["default_policy"], "NativeRequired",
             "{backend} optimizer fallback policy should require native dispatch"
         );
+        assert!(
+            fallback[backend].get("debug_opt_in").is_none(),
+            "{backend} optimizer fallback policy must not advertise a mutable override"
+        );
+        assert_eq!(
+            fallback[backend]["rounding_modes"],
+            serde_json::json!(["round_to_nearest"]),
+            "{backend} product optimizer rounding must be immutable"
+        );
+        assert_eq!(fallback[backend]["muon_min_lora_rank"], 2);
     }
+    assert_eq!(fallback["cuda"]["muon_max_lora_rank"], 48);
+    assert_eq!(fallback["rocm"]["muon_max_lora_rank"], 48);
+    assert_eq!(fallback["metal"]["muon_max_lora_rank"], 32);
+    assert_eq!(fallback["vulkan"]["muon_max_lora_rank"], 32);
+    assert_eq!(
+        fallback["metal"]["optimizer_parameter_dtypes"]["sgd"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        fallback["metal"]["optimizer_parameter_dtypes"]["adam_w"],
+        serde_json::json!(["F32", "BF16"])
+    );
+    assert_eq!(
+        fallback["metal"]["optimizer_parameter_dtypes"]["muon"],
+        serde_json::json!(["F32", "BF16"])
+    );
+    assert_eq!(
+        fallback["metal"]["product_executable_base_to_lora"],
+        serde_json::json!({"BF16": "BF16"})
+    );
+    assert_eq!(
+        fallback["metal"]["product_executable_optimizer_kinds"],
+        serde_json::json!(["adam_w", "muon"])
+    );
+    assert_eq!(
+        fallback["vulkan"]["product_executable_base_to_lora"],
+        serde_json::json!({"F32": "F32", "BF16": "F32"})
+    );
 
     let conformance_gates = report["conformance_gates"]
         .as_array()
@@ -4904,8 +4954,8 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
 
     let trainer_policy_section = source_between(
         &trainer_source,
-        "fn training_optimizer_fallback_policy(",
         "fn ensure_training_optimizer_fallback_allowed(",
+        "/// (#1082) LoRA grad-norm observer dispatcher",
     );
     assert!(
         trainer_policy_section.contains("BackendCapabilityQueries::backend_capabilities"),
@@ -4920,21 +4970,12 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "trainer optimizer fallback policy should not branch directly on device kind"
     );
     assert!(
-        trainer_policy_section.contains("training_optimizer_debug_env"),
-        "trainer optimizer debug fallback opt-in should be read from BackendFallbackCapabilities"
-    );
-    let trainer_debug_policy_section = source_between(
-        &trainer_source,
-        "fn training_optimizer_debug_fallback_enabled(",
-        "fn training_optimizer_fallback_policy(",
-    );
-    assert!(
-        !trainer_debug_policy_section.contains("\"cuda\"")
-            && !trainer_debug_policy_section.contains("\"metal\"")
-            && !trainer_debug_policy_section.contains("\"vulkan\"")
-            && !trainer_debug_policy_section.contains("\"rocm\"")
-            && !trainer_debug_policy_section.contains("match backend_name"),
-        "trainer optimizer debug fallback opt-in should not keep a local backend-name env table"
+        trainer_policy_section.contains(".fallback")
+            && trainer_policy_section.contains(".training_optimizer")
+            && trainer_policy_section.contains("no runtime fallback override is supported")
+            && !trainer_policy_section.contains("env_flag")
+            && !trainer_policy_section.contains("WarnAndCount"),
+        "trainer optimizer fallback must be an immutable capability decision with no debug opt-in"
     );
 
     let orchestration_identity_sources =
@@ -5823,6 +5864,417 @@ fn retired_sft_loss_route_override_stays_out_of_live_surfaces() {
             "{path} must not restore evidence or registration for the retired phase-A bench"
         );
     }
+}
+
+#[test]
+fn retired_training_optimizer_fallback_overrides_stay_out_of_live_surfaces() {
+    let root = workspace_root();
+    let mut retired_overrides = vec![
+        ["KILN", "TRAINING", "HOT", "PATH", "DEBUG", "FALLBACK"].join("_"),
+        ["KILN", "BF16", "STOCHASTIC", "ROUND"].join("_"),
+    ];
+    for backend in ["CUDA", "METAL", "VULKAN", "ROCM"] {
+        retired_overrides.push(["KILN", backend, "TRAINING", "OPTIMIZER", "FALLBACK"].join("_"));
+    }
+    let retired_capability_field = ["training", "optimizer", "debug", "env"].join("_");
+
+    for path in [
+        "contracts/runtime-env-direct-reads-v1.json",
+        "crates/kiln-model/src/backend/capability.rs",
+        "crates/kiln-model/src/backend/mod.rs",
+        "crates/kiln-model/src/backend/metal_training.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs",
+        "crates/kiln-optim/src/adamw.rs",
+        "crates/kiln-optim/src/lib.rs",
+        "crates/kiln-optim/src/lion_muon.rs",
+        "crates/kiln-optim/src/policy.rs",
+        "crates/kiln-optim/src/sgd.rs",
+        "crates/kiln-train/src/trainer.rs",
+        "scripts/generate_backend_capability_report.py",
+        "docs/backend-capability-report.json",
+        "docs/backend-capability-report.md",
+    ] {
+        let source = fs::read_to_string(root.join(path))
+            .unwrap_or_else(|err| panic!("{path} should be readable: {err}"));
+        for retired_override in &retired_overrides {
+            assert!(
+                !source.contains(retired_override),
+                "{path} must not restore the retired optimizer fallback override {retired_override}"
+            );
+        }
+        assert!(
+            !source.contains(&retired_capability_field),
+            "{path} must not restore an optimizer fallback environment capability field"
+        );
+    }
+}
+
+#[test]
+fn training_optimizer_capability_is_bound_before_admission_and_allocation() {
+    let root = workspace_root();
+    let capability = fs::read_to_string(root.join("crates/kiln-model/src/backend/capability.rs"))
+        .expect("backend capability source should be readable");
+    let api = fs::read_to_string(root.join("crates/kiln-server/src/api/training.rs"))
+        .expect("training API source should be readable");
+    let queue = fs::read_to_string(root.join("crates/kiln-server/src/training_queue.rs"))
+        .expect("training queue source should be readable");
+    let trainer = fs::read_to_string(root.join("crates/kiln-train/src/trainer.rs"))
+        .expect("trainer source should be readable");
+    let cuda_train = fs::read_to_string(root.join("crates/kiln-train/src/cuda_train.rs"))
+        .expect("CUDA training source should be readable");
+    let opd = fs::read_to_string(root.join("crates/kiln-train/src/opd.rs"))
+        .expect("OPD source should be readable");
+    let checkpoint = fs::read_to_string(root.join("crates/kiln-train/src/checkpoint.rs"))
+        .expect("checkpoint source should be readable");
+    let backend = fs::read_to_string(root.join("crates/kiln-model/src/backend/mod.rs"))
+        .expect("backend source should be readable");
+
+    let training_capabilities = source_between(
+        &capability,
+        "pub struct BackendTrainingCapabilities {",
+        "/// Server-side native training route selected by backend policy.",
+    );
+    assert!(
+        training_capabilities.contains("pub optimizer: TrainingOptimizerSupport")
+            && capability.contains("pub fn resolve_optimizer_request(")
+            && capability.contains("pub struct TrainingOptimizerRequest")
+            && capability.contains("pub rounding: TrainingOptimizerRounding")
+            && capability.contains("pub lora_rank: usize")
+            && capability.contains("pub muon_min_lora_rank: Option<usize>")
+            && capability.contains("pub muon_max_lora_rank: Option<usize>")
+            && capability.contains("pub fn supports(self, request: TrainingOptimizerRequest)"),
+        "backend training capabilities must own the typed optimizer kind/dtype/rounding/rank matrix"
+    );
+    let fallback_capabilities = source_between(
+        &capability,
+        "pub struct BackendFallbackCapabilities {",
+        "/// Optimizer operation selected by a training request.",
+    );
+    let retired_optimizer_debug_field = ["training_optimizer", "debug_env"].join("_");
+    assert!(
+        !fallback_capabilities.contains("TrainingOptimizerSupport")
+            && !fallback_capabilities.contains(&retired_optimizer_debug_field),
+        "optimizer support belongs to training capabilities and fallback must not expose an optimizer override"
+    );
+
+    let admission_guard = source_between(
+        &api,
+        "pub(crate) fn enforce_training_optimizer_admission(",
+        "fn effective_checkpoint_segments(",
+    );
+    for required in [
+        "runner.weights.embed_tokens.dtype()",
+        "runner.weights.embed_tokens.device()",
+        "capabilities.device != base_weight_device",
+        ".resolve_optimizer_request(",
+        "optimizer.kind()",
+        "optimizer.validate_hyperparameters()",
+        "TrainingOptimizerRounding::RoundToNearest",
+        "lora_rank",
+    ] {
+        assert!(
+            admission_guard.contains(required),
+            "server optimizer admission must bind actual dtype and capability input {required}"
+        );
+    }
+    let api_error_mapping = source_between(
+        &api,
+        "fn training_optimizer_support_api_error(",
+        "pub(crate) fn enforce_training_optimizer_admission(",
+    );
+    assert!(
+        api_error_mapping.contains("TrainingOptimizerSupportError::UnsupportedBaseWeightDType")
+            && api_error_mapping.contains("ApiError::training_backend_unsupported")
+            && api_error_mapping.contains("TrainingOptimizerSupportError::UnsupportedRequest")
+            && api_error_mapping.contains("ApiError::training_invalid_request"),
+        "optimizer capability failures must preserve request-vs-substrate HTTP semantics"
+    );
+    let admission_entry = source_between(
+        &api,
+        "fn prepare_training_entry_admission(",
+        "match &mut entry.job {",
+    );
+    assert!(
+        admission_entry
+            .contains("enforce_training_optimizer_admission(state, optimizer, lora_rank)?"),
+        "all native job variants must reject unsupported optimizers before data preparation and preflight"
+    );
+
+    let queue_revalidation = queue
+        .find("enforce_training_optimizer_admission(")
+        .expect("queue should revalidate optimizer capability");
+    let reservation = queue
+        .find("let _mem_reservation =")
+        .expect("queue should own a governor reservation boundary");
+    assert!(
+        queue_revalidation < reservation,
+        "queued optimizer capability drift must fail before governor reservation"
+    );
+    let teacher_resolution = queue_revalidation
+        + queue[queue_revalidation..]
+            .find("resolve_pinned_teacher_for_job(")
+            .expect("queue should resolve the pinned teacher after optimizer revalidation");
+    assert!(
+        queue_revalidation < teacher_resolution
+            && queue[queue_revalidation..teacher_resolution]
+                .contains("prepared_data_is_valid.is_ok()"),
+        "queued optimizer/data/route revalidation must gate teacher resolution"
+    );
+
+    let trainer_guard = source_between(
+        &trainer,
+        "pub(crate) fn ensure_training_optimizer_supported(",
+        "fn training_activation_bytes_per_elem_for_policy(",
+    );
+    assert!(
+        trainer_guard.contains(".training")
+            && trainer_guard.contains(".resolve_optimizer_request(")
+            && trainer_guard.contains("optimizer.kind()")
+            && trainer_guard.contains("TrainingOptimizerRounding::RoundToNearest")
+            && !trainer_guard.contains("match optimizer"),
+        "trainer must independently revalidate the admitted optimizer contract"
+    );
+    let device_guard = source_between(
+        &trainer,
+        "pub(crate) fn ensure_training_optimizer_device_supported(",
+        "pub(crate) fn ensure_training_optimizer_entry_supported(",
+    );
+    assert!(
+        device_guard.contains("TrainingOptimizerSupport::for_device(runtime_device)")
+            && device_guard.contains("TrainingPrecisionPolicy::for_device_family(runtime_device)")
+            && device_guard.contains("optimizer.validate_hyperparameters()")
+            && !device_guard.contains("training_backend_for_device("),
+        "device-local optimizer admission must be pure and must not initialize an accelerator backend"
+    );
+    let entry_guard = source_between(
+        &trainer,
+        "pub(crate) fn ensure_training_optimizer_entry_supported(",
+        "fn training_activation_bytes_per_elem_for_policy(",
+    );
+    assert!(
+        entry_guard.contains("training_device_for_weights(weights, runtime)")
+            && entry_guard.contains("ensure_training_optimizer_device_supported(")
+            && !entry_guard.contains("training_backend_for_device("),
+        "runtime-bound optimizer admission must resolve exact device identity and delegate to the pure device guard"
+    );
+    assert!(
+        backend.contains("pub fn native_backend_identity_matches(")
+            && backend.contains("validate_explicit_backend_identity(")
+            && backend.contains("explicit backend for {requested_device} downgraded")
+            && trainer.contains("backend::for_explicit_device_kt(device)"),
+        "execution must construct one explicit backend and reject CPU/portable identity downgrade"
+    );
+    assert!(
+        checkpoint.contains("rounding_mode == Some(\"round_to_nearest\")")
+            && checkpoint.contains("legacy stochastic-rounding checkpoints cannot be resumed"),
+        "checkpoint resume must fail closed instead of changing legacy stochastic optimizer semantics"
+    );
+    let opd_train = source_between(
+        &opd,
+        "pub fn opd_train_to_with_checkpoint_root_and_runtime(",
+        "fn write_opd_train_receipt(",
+    );
+
+    for (label, source) in [
+        (
+            "raw SFT standalone",
+            source_between(
+                &trainer,
+                "pub fn sft_train_to_with_checkpoint_root(",
+                "/// Standalone convenience wrapper for already-admitted SFT rows.",
+            ),
+        ),
+        (
+            "admitted SFT standalone",
+            source_between(
+                &trainer,
+                "pub fn sft_train_to_with_checkpoint_root_and_ingestion(",
+                "/// Server-owned SFT entry point with immutable process-lifetime runtime inputs.",
+            ),
+        ),
+        (
+            "inline GRPO standalone",
+            source_between(
+                &trainer,
+                "pub fn grpo_train_to_with_checkpoint_root(",
+                "/// Server-owned inline GRPO entry point with immutable runtime inputs.",
+            ),
+        ),
+        (
+            "streamed GRPO standalone",
+            source_between(
+                &trainer,
+                "pub fn grpo_train_jsonl_to_with_checkpoint_root(",
+                "/// Server-owned streamed GRPO entry point with immutable runtime inputs.",
+            ),
+        ),
+        (
+            "OPD standalone",
+            source_between(
+                &opd,
+                "pub fn opd_train_to_with_checkpoint_root(",
+                "/// Server-owned OPD entry point with immutable process-lifetime runtime inputs.",
+            ),
+        ),
+        (
+            "CUDA admitted SFT standalone",
+            source_between(
+                &cuda_train,
+                "pub fn cuda_native_sft_train_to_with_checkpoint_root_and_ingestion(",
+                "/// CUDA server entry for admitted SFT rows with immutable runtime inputs.",
+            ),
+        ),
+        (
+            "CUDA inline GRPO standalone",
+            source_between(
+                &cuda_train,
+                "pub fn cuda_native_grpo_train_to_with_checkpoint_root(",
+                "/// CUDA server entry for inline GRPO with immutable runtime inputs.",
+            ),
+        ),
+        (
+            "CUDA streamed GRPO standalone",
+            source_between(
+                &cuda_train,
+                "pub fn cuda_native_grpo_train_jsonl_to_with_checkpoint_root(",
+                "/// CUDA server entry for streamed GRPO with immutable runtime inputs.",
+            ),
+        ),
+    ] {
+        let guard = source
+            .find("ensure_training_optimizer_device_supported(")
+            .unwrap_or_else(|| panic!("{label} should run device-local optimizer admission"));
+        let runtime_probe = source
+            .find("standalone_training_runtime_for_weight_device(")
+            .unwrap_or_else(|| panic!("{label} should contain its standalone runtime probe"));
+        assert!(
+            guard < runtime_probe,
+            "{label} must reject an unsupported optimizer before probing physical memory"
+        );
+    }
+
+    for (label, source, before_marker) in [
+        (
+            "raw SFT",
+            source_between(
+                &trainer,
+                "pub fn sft_train_to_with_checkpoint_root(",
+                "/// Standalone convenience wrapper for already-admitted SFT rows.",
+            ),
+            "prepare_sft_examples(",
+        ),
+        (
+            "SFT runtime",
+            source_between(
+                &trainer,
+                "pub fn sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(",
+                "fn sft_train_prepared_to_with_checkpoint_root(",
+            ),
+            "ensure_memory_governor_for_runtime(",
+        ),
+        (
+            "inline GRPO",
+            source_between(
+                &trainer,
+                "pub fn grpo_train_to_with_checkpoint_root_and_runtime(",
+                "/// Standalone streamed GRPO training from a JSONL file.",
+            ),
+            "ensure_memory_governor_for_runtime(",
+        ),
+        (
+            "streamed GRPO path",
+            source_between(
+                &trainer,
+                "pub fn grpo_train_jsonl_to_with_checkpoint_root_and_runtime(",
+                "/// Streamed GRPO entry point for a caller-pinned file identity.",
+            ),
+            "PinnedGrpoJsonlSource::open(",
+        ),
+        (
+            "CUDA streamed GRPO compatibility path",
+            source_between(
+                &cuda_train,
+                "pub fn cuda_native_grpo_train_jsonl_to_with_checkpoint_root_and_runtime(",
+                "/// CUDA server entry for streamed GRPO pinned to one admitted file handle.",
+            ),
+            "PinnedGrpoJsonlSource::open(",
+        ),
+        (
+            "streamed GRPO pinned source",
+            source_between(
+                &trainer,
+                "pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(",
+                "fn validate_streamed_grpo_checkpoint_descriptor(",
+            ),
+            "ensure_memory_governor_for_runtime(",
+        ),
+        (
+            "OPD",
+            opd_train.clone(),
+            "ensure_memory_governor_for_runtime(",
+        ),
+    ] {
+        let guard = source
+            .find("ensure_training_optimizer_entry_supported(")
+            .unwrap_or_else(|| panic!("{label} should run cheap optimizer admission"));
+        let boundary = source.find(before_marker).unwrap_or_else(|| {
+            panic!("{label} should contain early-work boundary {before_marker}")
+        });
+        assert!(
+            guard < boundary,
+            "{label} must reject before {before_marker}"
+        );
+    }
+    for (label, source, allocation_marker) in [
+        (
+            "SFT",
+            source_between(
+                &trainer,
+                "fn sft_train_prepared_to_with_checkpoint_root(",
+                "/// Standalone staged-output GRPO",
+            ),
+            "let resident_weights = resident_training_weights(",
+        ),
+        (
+            "inline GRPO",
+            source_between(
+                &trainer,
+                "pub fn grpo_train_to_with_checkpoint_root_and_runtime(",
+                "/// Server-owned streamed GRPO entry point",
+            ),
+            "let resident_weights = run_coordinated_grpo_gpu_phase(",
+        ),
+        (
+            "streamed GRPO",
+            source_between(
+                &trainer,
+                "pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(",
+                "fn validate_streamed_grpo_checkpoint_descriptor(",
+            ),
+            "let resident_weights = run_coordinated_grpo_gpu_phase(",
+        ),
+    ] {
+        let guard = source
+            .find("ensure_training_optimizer_supported(")
+            .unwrap_or_else(|| panic!("{label} should revalidate optimizer support"));
+        let allocation = source
+            .find(allocation_marker)
+            .unwrap_or_else(|| panic!("{label} should contain allocation marker"));
+        assert!(
+            guard < allocation,
+            "{label} optimizer support must fail before resident allocation"
+        );
+    }
+    assert!(
+        opd_train
+            .find("ensure_training_optimizer_supported(")
+            .is_some_and(|guard| {
+                opd_train
+                    .find("run_coordinated_opd_gpu_phase(")
+                    .is_some_and(|allocation| guard < allocation)
+            }),
+        "OPD optimizer support must fail before trainable/optimizer allocation"
+    );
 }
 
 #[test]

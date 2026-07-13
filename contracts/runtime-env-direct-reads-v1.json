@@ -1156,28 +1156,6 @@
       "surface": "build-script"
     },
     {
-      "api": "remove_var",
-      "argument": "KILN_BF16_STOCHASTIC_ROUND",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-optim/src/policy.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_BF16_STOCHASTIC_ROUND",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-optim/src/policy.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "set_var",
       "argument": "NVCC",
       "argument_kind": "literal",
@@ -2619,50 +2597,6 @@
       "surface": "source"
     },
     {
-      "api": "remove_var",
-      "argument": "key",
-      "argument_kind": "expression",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "key",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_METAL_TRAINING_OPTIMIZER_FALLBACK",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "set_var",
       "argument": "KILN_USE_TAPE_FLASH_ATTN",
       "argument_kind": "literal",
@@ -3970,17 +3904,6 @@
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-model/src/backend/metal_config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_BF16_STOCHASTIC_ROUND",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/metal_training.rs",
       "phase": "runtime",
       "surface": "source"
     },
@@ -7154,17 +7077,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_BF16_STOCHASTIC_ROUND",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-optim/src/policy.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "var",
       "argument_kind": "expression",
       "count": 2,
@@ -8815,17 +8727,6 @@
     },
     {
       "api": "env_flag",
-      "argument": "env_var",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
       "argument": "KILN_DEBUG_SFT_ACTIVE_ROWS",
       "argument_kind": "literal",
       "count": 1,
@@ -8861,28 +8762,6 @@
       "api": "env_flag",
       "argument": "KILN_TRACE_SFT_TIMINGS",
       "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "key",
-      "argument_kind": "expression",
       "count": 1,
       "language": "rust",
       "operation": "read",
@@ -8939,17 +8818,6 @@
       "argument": "KILN_TENSOR_VULKAN_TEST",
       "argument_kind": "literal",
       "count": 3,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK",
-      "argument_kind": "literal",
-      "count": 1,
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-train/src/trainer.rs",
@@ -9927,9 +9795,9 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 539,
-    "process_mutation_entries": 257,
-    "read_call_sites": 950,
-    "read_entries": 644
+    "process_mutation_call_sites": 530,
+    "process_mutation_entries": 251,
+    "read_call_sites": 944,
+    "read_entries": 638
   }
 }

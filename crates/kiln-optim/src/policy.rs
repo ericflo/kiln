@@ -57,8 +57,9 @@ impl Default for MomentLocation {
 /// Rounding policy for BF16 master updates.
 ///
 /// Per the Phase 6.5 issue bullet: stochastic rounding preserves the
-/// in-expectation update under small learning rates. Gated by
-/// `KILN_BF16_STOCHASTIC_ROUND=1`.
+/// in-expectation update under small learning rates. Product training uses
+/// round-to-nearest until a typed, checkpoint-bound policy is introduced;
+/// explicit programmatic callers may select stochastic rounding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum StochasticRoundingPolicy {
@@ -74,25 +75,6 @@ impl StochasticRoundingPolicy {
         match self {
             StochasticRoundingPolicy::RoundToNearest => "round_to_nearest",
             StochasticRoundingPolicy::Stochastic { .. } => "stochastic",
-        }
-    }
-
-    /// Read from the env. Returns `Stochastic { seed: 42 }` for
-    /// `KILN_BF16_STOCHASTIC_ROUND=1|true|yes`; otherwise
-    /// `RoundToNearest`. The seed default is intentionally fixed so
-    /// runs are reproducible at the same seed; callers can override
-    /// with [`Self::stochastic_with_seed`].
-    pub fn from_env() -> Self {
-        match std::env::var("KILN_BF16_STOCHASTIC_ROUND").ok().as_deref() {
-            Some(v) => {
-                let v = v.trim().to_ascii_lowercase();
-                if matches!(v.as_str(), "1" | "true" | "yes") {
-                    StochasticRoundingPolicy::Stochastic { seed: 42 }
-                } else {
-                    StochasticRoundingPolicy::RoundToNearest
-                }
-            }
-            None => StochasticRoundingPolicy::RoundToNearest,
         }
     }
 
@@ -147,27 +129,5 @@ mod tests {
             StochasticRoundingPolicy::default(),
             StochasticRoundingPolicy::RoundToNearest
         );
-    }
-
-    #[test]
-    fn round_policy_from_env() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap();
-        unsafe { std::env::remove_var("KILN_BF16_STOCHASTIC_ROUND") };
-        assert_eq!(
-            StochasticRoundingPolicy::from_env(),
-            StochasticRoundingPolicy::RoundToNearest
-        );
-        unsafe { std::env::set_var("KILN_BF16_STOCHASTIC_ROUND", "1") };
-        assert!(matches!(
-            StochasticRoundingPolicy::from_env(),
-            StochasticRoundingPolicy::Stochastic { .. }
-        ));
-        unsafe { std::env::set_var("KILN_BF16_STOCHASTIC_ROUND", "no") };
-        assert_eq!(
-            StochasticRoundingPolicy::from_env(),
-            StochasticRoundingPolicy::RoundToNearest
-        );
-        unsafe { std::env::remove_var("KILN_BF16_STOCHASTIC_ROUND") };
     }
 }

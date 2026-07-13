@@ -232,6 +232,59 @@ fn sft_loss_route_for_state(
         .map(|runner| runner.sft_flce_loss_route())
 }
 
+fn training_optimizer_support_api_error(
+    backend: &str,
+    error: kiln_model::TrainingOptimizerSupportError,
+) -> ApiError {
+    match error {
+        kiln_model::TrainingOptimizerSupportError::UnsupportedBaseWeightDType { .. } => {
+            ApiError::training_backend_unsupported(format!(
+                "backend `{backend}` cannot train its resident base-weight dtype: {error}"
+            ))
+        }
+        kiln_model::TrainingOptimizerSupportError::UnsupportedRequest { .. } => {
+            ApiError::training_invalid_request(format!(
+                "optimizer request is unsupported by backend `{backend}`: {error}"
+            ))
+        }
+    }
+}
+
+pub(crate) fn enforce_training_optimizer_admission(
+    state: &AppState,
+    optimizer: kiln_train::Optimizer,
+    lora_rank: usize,
+) -> Result<(), ApiError> {
+    optimizer.validate_hyperparameters().map_err(|error| {
+        ApiError::training_invalid_request(format!("invalid optimizer configuration: {error:#}"))
+    })?;
+    let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
+        return Ok(());
+    };
+    let runner = runner.read().map_err(|_| {
+        ApiError::internal("model runner lock poisoned while validating training optimizer")
+    })?;
+    let capabilities = runner.backend_capabilities();
+    let base_weight_device = runner.weights.embed_tokens.device();
+    if capabilities.device != base_weight_device {
+        return Err(ApiError::training_backend_unsupported(format!(
+            "training backend `{}` reports device {} but resident weights are on {}; native optimizer admission requires an exact backend identity",
+            capabilities.backend, capabilities.device, base_weight_device
+        )));
+    }
+    let base_weight_dtype = runner.weights.embed_tokens.dtype();
+    capabilities
+        .training
+        .resolve_optimizer_request(
+            optimizer.kind(),
+            base_weight_dtype,
+            kiln_model::TrainingOptimizerRounding::RoundToNearest,
+            lora_rank,
+        )
+        .map(|_| ())
+        .map_err(|error| training_optimizer_support_api_error(capabilities.backend, error))
+}
+
 fn effective_checkpoint_segments(config: kiln_train::CheckpointConfig) -> usize {
     if config.enabled {
         config.num_segments
@@ -3137,6 +3190,20 @@ fn prepare_training_entry_admission(
         PreparedDistillMergeSource, PreparedSftAdmission, PreparedTrainingData, QueuedJob,
     };
 
+    let (optimizer, lora_rank) = match &entry.job {
+        QueuedJob::Sft(req) => (req.config.optimizer, req.config.lora_rank),
+        QueuedJob::Grpo(req) => (req.config.optimizer, req.config.lora_rank),
+        QueuedJob::Opd(req) => (req.config.optimizer, req.config.lora_rank),
+        QueuedJob::DistillRefresh(req) => (req.config.optimizer, req.config.lora_rank),
+        QueuedJob::DistillMerge(req) => (req.config.optimizer, req.config.lora_rank),
+        QueuedJob::DistillPump(req) => (
+            req.config.optimizer,
+            req.rank.unwrap_or(req.config.lora_rank),
+        ),
+        QueuedJob::DistillSelf(req) => (req.config.optimizer, req.config.lora_rank),
+    };
+    enforce_training_optimizer_admission(state, optimizer, lora_rank)?;
+
     match &mut entry.job {
         QueuedJob::Sft(req) => {
             if !matches!(entry.prepared_data, PreparedTrainingData::None) {
@@ -4442,6 +4509,37 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::TEST_ENV_LOCK as ENV_LOCK;
+
+    #[test]
+    fn optimizer_support_errors_preserve_structured_http_semantics() {
+        let substrate = training_optimizer_support_api_error(
+            "cuda",
+            kiln_model::TrainingOptimizerSupportError::UnsupportedBaseWeightDType {
+                actual: kiln_tensor::DType::F16,
+                supported: &[kiln_tensor::DType::F32, kiln_tensor::DType::BF16],
+            },
+        );
+        assert_eq!(substrate.code, "training_backend_unsupported");
+        assert_eq!(substrate.status, axum::http::StatusCode::NOT_IMPLEMENTED);
+
+        let request = training_optimizer_support_api_error(
+            "metal",
+            kiln_model::TrainingOptimizerSupportError::UnsupportedRequest {
+                request: kiln_model::TrainingOptimizerRequest {
+                    kind: kiln_model::TrainingOptimizerKind::Sgd,
+                    parameter_dtype: kiln_tensor::DType::BF16,
+                    rounding: kiln_model::TrainingOptimizerRounding::RoundToNearest,
+                    lora_rank: 4,
+                },
+                supported_dtypes: &[],
+                supported_rounding: &[kiln_model::TrainingOptimizerRounding::RoundToNearest],
+                muon_min_lora_rank: Some(2),
+                muon_max_lora_rank: Some(32),
+            },
+        );
+        assert_eq!(request.code, "training_invalid_request");
+        assert_eq!(request.status, axum::http::StatusCode::BAD_REQUEST);
+    }
 
     #[tokio::test]
     async fn training_routes_reject_oversized_json_before_handler_admission() {

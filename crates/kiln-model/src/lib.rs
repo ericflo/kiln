@@ -63,7 +63,8 @@ pub use backend::capability::{
     SpeculativeDecodePolicy, StartupCapabilities, StorageCapabilities,
     StreamingPrefillAutoDispatch, StreamingPrefillBackendPolicy, Support,
     TrainingAccelerationEnvFlagPolicy, TrainingAccelerationProfileLogMessage,
-    TrainingAccelerationProfilePolicy,
+    TrainingAccelerationProfilePolicy, TrainingOptimizerKind, TrainingOptimizerRequest,
+    TrainingOptimizerRounding, TrainingOptimizerSupport, TrainingOptimizerSupportError,
 };
 pub use backend::residency::{
     ReplayStability, ResidentOwnership, ResidentRegistry, ResidentResource, ResidentResourceFamily,

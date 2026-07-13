@@ -152,6 +152,13 @@ pub fn cuda_native_sft_train_to_with_checkpoint_root_and_ingestion(
     progress_cb: Option<ProgressCallback>,
     gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    crate::trainer::ensure_training_optimizer_device_supported(
+        "SFT",
+        weights,
+        weights.embed_tokens.device(),
+        config.optimizer,
+        config.lora_rank,
+    )?;
     let runtime =
         crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
     cuda_native_sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
@@ -311,6 +318,13 @@ pub fn cuda_native_grpo_train_to_with_checkpoint_root(
     progress_cb: Option<ProgressCallback>,
     gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    crate::trainer::ensure_training_optimizer_device_supported(
+        "GRPO",
+        weights,
+        weights.embed_tokens.device(),
+        config.optimizer,
+        config.lora_rank,
+    )?;
     let runtime =
         crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
     cuda_native_grpo_train_to_with_checkpoint_root_and_runtime(
@@ -466,6 +480,13 @@ pub fn cuda_native_grpo_train_jsonl_to_with_checkpoint_root(
     progress_cb: Option<ProgressCallback>,
     gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    crate::trainer::ensure_training_optimizer_device_supported(
+        "streamed GRPO",
+        weights,
+        weights.embed_tokens.device(),
+        config.optimizer,
+        config.lora_rank,
+    )?;
     let runtime =
         crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
     cuda_native_grpo_train_jsonl_to_with_checkpoint_root_and_runtime(
@@ -500,6 +521,13 @@ pub fn cuda_native_grpo_train_jsonl_to_with_checkpoint_root_and_runtime(
     gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
     runtime: &crate::TrainingRuntimeContext,
 ) -> Result<PathBuf> {
+    crate::trainer::ensure_training_optimizer_entry_supported(
+        "streamed GRPO",
+        weights,
+        runtime,
+        config.optimizer,
+        config.lora_rank,
+    )?;
     let dataset_source = crate::trainer::PinnedGrpoJsonlSource::open(dataset_path)?;
     cuda_native_grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
         &dataset_source,

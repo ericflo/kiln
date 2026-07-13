@@ -1497,7 +1497,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "BackendFallbackCapabilities": {
-      "field_count": 5,
+      "field_count": 4,
       "fields": [
         {
           "name": "generic_device_op",
@@ -1514,16 +1514,12 @@
         {
           "name": "training_optimizer",
           "type": "FallbackPolicy"
-        },
-        {
-          "name": "training_optimizer_debug_env",
-          "type": "Option<&'static str>"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "BackendTrainingCapabilities": {
-      "field_count": 4,
+      "field_count": 5,
       "fields": [
         {
           "name": "hooks",
@@ -1532,6 +1528,10 @@
         {
           "name": "precision",
           "type": "TrainingPrecisionPolicy"
+        },
+        {
+          "name": "optimizer",
+          "type": "TrainingOptimizerSupport"
         },
         {
           "name": "server_dispatch",
@@ -2188,6 +2188,36 @@
         {
           "name": "sgd_step_on_device",
           "type": "&'static str"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "TrainingOptimizerSupport": {
+      "field_count": 6,
+      "fields": [
+        {
+          "name": "sgd_parameter_dtypes",
+          "type": "&'static [kiln_tensor::DType]"
+        },
+        {
+          "name": "adamw_parameter_dtypes",
+          "type": "&'static [kiln_tensor::DType]"
+        },
+        {
+          "name": "muon_parameter_dtypes",
+          "type": "&'static [kiln_tensor::DType]"
+        },
+        {
+          "name": "muon_min_lora_rank",
+          "type": "Option<usize>"
+        },
+        {
+          "name": "muon_max_lora_rank",
+          "type": "Option<usize>"
+        },
+        {
+          "name": "rounding_modes",
+          "type": "&'static [TrainingOptimizerRounding]"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
@@ -3840,8 +3870,8 @@
         "crates/kiln-model/src/backend/vulkan_training.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
-      "genuine": true,
-      "migration": "complete",
+      "genuine": false,
+      "migration": "partial",
       "migration_signals": [
         {
           "evidence": [
@@ -3851,8 +3881,8 @@
           ],
           "expected": 0,
           "name": "training_precision_for_device_family_removed_from_production",
-          "observed": 0,
-          "passed": true
+          "observed": 1,
+          "passed": false
         },
         {
           "evidence": [
@@ -3894,7 +3924,9 @@
         }
       ],
       "phase": 6,
-      "remaining": [],
+      "remaining": [
+        "production training paths still call TrainingPrecisionPolicy::for_device_family"
+      ],
       "report_sections": [
         "Training Optimizer Fallback",
         "Training Loss Routing",
@@ -3902,7 +3934,7 @@
         "Optimizer Dispatch",
         "Conformance And Performance Gates"
       ],
-      "status": "covered",
+      "status": "partial",
       "title": "Finish shared training integration"
     },
     {
@@ -4007,18 +4039,22 @@
   "optimizer_dispatch": {
     "cuda": {
       "adamw_step": "overridden",
+      "muon_step": "overridden",
       "sgd_step": "overridden"
     },
     "metal": {
       "adamw_step": "overridden",
+      "muon_step": "overridden",
       "sgd_step": "default_decline"
     },
     "rocm": {
       "adamw_step": "overridden",
+      "muon_step": "overridden",
       "sgd_step": "overridden"
     },
     "vulkan": {
       "adamw_step": "overridden",
+      "muon_step": "overridden",
       "sgd_step": "overridden"
     }
   },
@@ -4632,29 +4668,155 @@
   },
   "training_optimizer_fallback_policy": {
     "cpu": {
-      "debug_opt_in": "not required",
       "default_policy": "CorrectnessAllowed",
-      "enforcement": "CPU is the reference optimizer path"
+      "enforcement": "CPU is the F32 reference optimizer path",
+      "muon_max_lora_rank": null,
+      "muon_min_lora_rank": 2,
+      "optimizer_parameter_dtypes": {
+        "adam_w": [
+          "F32"
+        ],
+        "muon": [
+          "F32"
+        ],
+        "sgd": [
+          "F32"
+        ]
+      },
+      "product_executable_base_to_lora": {
+        "F32": "F32"
+      },
+      "product_executable_optimizer_kinds": [
+        "sgd",
+        "adam_w",
+        "muon"
+      ],
+      "rounding_modes": [
+        "round_to_nearest"
+      ]
     },
     "cuda": {
-      "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK=1",
       "default_policy": "NativeRequired",
-      "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
+      "enforcement": "SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported",
+      "muon_max_lora_rank": 48,
+      "muon_min_lora_rank": 2,
+      "optimizer_parameter_dtypes": {
+        "adam_w": [
+          "F32",
+          "BF16"
+        ],
+        "muon": [
+          "F32",
+          "BF16"
+        ],
+        "sgd": [
+          "F32",
+          "BF16"
+        ]
+      },
+      "product_executable_base_to_lora": {
+        "BF16": "BF16",
+        "F32": "F32"
+      },
+      "product_executable_optimizer_kinds": [
+        "sgd",
+        "adam_w",
+        "muon"
+      ],
+      "rounding_modes": [
+        "round_to_nearest"
+      ]
     },
     "metal": {
-      "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_TRAINING_OPTIMIZER_FALLBACK=1",
       "default_policy": "NativeRequired",
-      "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
+      "enforcement": "SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported",
+      "muon_max_lora_rank": 32,
+      "muon_min_lora_rank": 2,
+      "optimizer_parameter_dtypes": {
+        "adam_w": [
+          "F32",
+          "BF16"
+        ],
+        "muon": [
+          "F32",
+          "BF16"
+        ],
+        "sgd": []
+      },
+      "product_executable_base_to_lora": {
+        "BF16": "BF16"
+      },
+      "product_executable_optimizer_kinds": [
+        "adam_w",
+        "muon"
+      ],
+      "rounding_modes": [
+        "round_to_nearest"
+      ]
     },
     "rocm": {
-      "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK=1",
       "default_policy": "NativeRequired",
-      "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
+      "enforcement": "SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported",
+      "muon_max_lora_rank": 48,
+      "muon_min_lora_rank": 2,
+      "optimizer_parameter_dtypes": {
+        "adam_w": [
+          "F32",
+          "BF16"
+        ],
+        "muon": [
+          "F32",
+          "BF16"
+        ],
+        "sgd": [
+          "F32",
+          "BF16"
+        ]
+      },
+      "product_executable_base_to_lora": {
+        "BF16": "BF16",
+        "F32": "F32"
+      },
+      "product_executable_optimizer_kinds": [
+        "sgd",
+        "adam_w",
+        "muon"
+      ],
+      "rounding_modes": [
+        "round_to_nearest"
+      ]
     },
     "vulkan": {
-      "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK=1",
       "default_policy": "NativeRequired",
-      "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
+      "enforcement": "SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported",
+      "muon_max_lora_rank": 32,
+      "muon_min_lora_rank": 2,
+      "optimizer_parameter_dtypes": {
+        "adam_w": [
+          "F32",
+          "BF16"
+        ],
+        "muon": [
+          "F32",
+          "BF16"
+        ],
+        "sgd": [
+          "F32",
+          "BF16"
+        ]
+      },
+      "product_executable_base_to_lora": {
+        "BF16": "F32",
+        "F32": "F32"
+      },
+      "product_executable_optimizer_kinds": [
+        "sgd",
+        "adam_w",
+        "muon"
+      ],
+      "rounding_modes": [
+        "round_to_nearest"
+      ]
     }
   },
   "training_precision_policy": {
@@ -4680,13 +4842,11 @@
     "cuda": {
       "activation_dtypes": [
         "F32",
-        "BF16",
-        "F16"
+        "BF16"
       ],
       "base_weight_dtypes": [
         "F32",
-        "BF16",
-        "F16"
+        "BF16"
       ],
       "lora_parameter_dtypes": [
         "F32",
@@ -4696,7 +4856,7 @@
       "mixed_precision": true,
       "mixed_rms_norm_weight_dtype": null,
       "name": "cuda_native_float",
-      "notes": "CUDA keeps kt tape authoritative and routes BF16/F16/F32 leaves through CUDA-native kernels where available.",
+      "notes": "CUDA keeps kt tape authoritative for F32/BF16 training; F16 remains an inference-only dtype until every training leaf and optimizer is native.",
       "optimizer_parameter_dtypes": [
         "F32",
         "BF16"
@@ -4717,7 +4877,7 @@
       "mixed_precision": true,
       "mixed_rms_norm_weight_dtype": null,
       "name": "metal_bf16_uma",
-      "notes": "Metal training is BF16-focused on UMA buffers, with F32 loss accumulation and F32/BF16 AdamW residency.",
+      "notes": "Metal training is BF16-focused on UMA buffers, with F32 loss accumulation and F32/BF16 AdamW/Muon residency; SGD is unsupported.",
       "optimizer_parameter_dtypes": [
         "F32",
         "BF16"
@@ -4726,13 +4886,11 @@
     "rocm": {
       "activation_dtypes": [
         "F32",
-        "BF16",
-        "F16"
+        "BF16"
       ],
       "base_weight_dtypes": [
         "F32",
-        "BF16",
-        "F16"
+        "BF16"
       ],
       "lora_parameter_dtypes": [
         "F32",
@@ -4742,7 +4900,7 @@
       "mixed_precision": true,
       "mixed_rms_norm_weight_dtype": null,
       "name": "rocm_native_float",
-      "notes": "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
+      "notes": "ROCm mirrors CUDA's F32/BF16 kt-tape envelope; F16 remains inference-only until every training leaf and optimizer is native.",
       "optimizer_parameter_dtypes": [
         "F32",
         "BF16"

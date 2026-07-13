@@ -21,7 +21,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | Phase 3 | Unify resident resource semantics | `covered` | `landed` | `complete` | yes | `crates/kiln-model/src/backend/residency.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/vulkan_residency.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
 | Phase 4 | Unify matmul and linear dispatch | `covered` | `landed` | `complete` | yes | `crates/kiln-model/src/backend/capability.rs`, `crates/kiln-model/src/backend/mod.rs`, `crates/kiln-blas/src/cublaslt_handle.rs`, `crates/kiln-rocblas/src/hipblaslt_handle.rs`, `crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
 | Phase 5 | Move replay into the authoritative graph layer | `covered` | `landed` | `complete` | yes | `crates/kiln-graph/src/replay_plan.rs`, `crates/kiln-graph-cuda/src/lib.rs`, `crates/kiln-graph-metal/src/lib.rs`, `crates/kiln-graph-vulkan/src/lib.rs`, `crates/kiln-model/src/cuda_graph.rs`, `crates/kiln-model/src/rocm_graph.rs`, `crates/kiln-model/src/metal_graph.rs`, `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-vulkan-kernel/src/cmd_batch.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
-| Phase 6 | Finish shared training integration | `covered` | `landed` | `complete` | yes | `crates/kiln-train/src/trainer.rs`, `crates/kiln-train/src/sft_tape_shim.rs`, `crates/kiln-train/src/grpo_tape_shim.rs`, `crates/kiln-train/src/opd_tape_shim.rs`, `crates/kiln-model/src/backend/metal_training.rs`, `crates/kiln-model/src/backend/vulkan_training.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
+| Phase 6 | Finish shared training integration | `partial` | `landed` | `partial` | no | `crates/kiln-train/src/trainer.rs`, `crates/kiln-train/src/sft_tape_shim.rs`, `crates/kiln-train/src/grpo_tape_shim.rs`, `crates/kiln-train/src/opd_tape_shim.rs`, `crates/kiln-model/src/backend/metal_training.rs`, `crates/kiln-model/src/backend/vulkan_training.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | production training paths still call TrainingPrecisionPolicy::for_device_family |
 | Phase 7 | Decompose backend modules | `covered` | `landed` | `complete` | yes | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_attention.rs`, `crates/kiln-model/src/backend/metal_gdn.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_training.rs`, `crates/kiln-model/src/backend/vulkan.rs`, `crates/kiln-model/src/backend/vulkan_residency.rs`, `crates/kiln-model/src/backend/vulkan_tensor_bridge.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
 | Phase 8 | Conformance and performance gates | `fixture_required` | `landed` | `partial` | no | `docs/backend-capability-report.md`, `docs/backend-capability-report.json`, `docs/backend-latency-fixtures.json`, `docs/backend-latency-result-schema.md`, `scripts/check_unification_gates.sh`, `scripts/run_backend_latency_fixture.py`, `scripts/write_backend_latency_result_artifact.py`, `scripts/import_backend_latency_artifact.py`, `scripts/lock_backend_latency_thresholds.py`, `scripts/check_backend_latency_fixtures.py`, `scripts/plan_backend_latency_fixture_dispatch.py`, `scripts/generate_backend_capability_report.py`, `crates/kiln-model/tests/backend_capability_contract.rs` | hardware_latency_thresholds remains fixture_required until real known-hardware result artifacts satisfy --require-covered |
 
@@ -183,13 +183,14 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `DecodeCapabilities` | 8 | `resident_decode`, `paged_decode_graph_outputs`, `mtp_speculative_generation`, `speculative_policy`, `linear_argmax`, `linear_argmax_batch`, `linear_sample`, `linear_sample_batch` |
 | `SpeculativeDecodePolicy` | 3 | `mtp_max_prompt_tokens`, `long_prompt_skip_layer_min_prompt_tokens`, `long_prompt_skip_layer_min_output_tokens` |
 | `DecodeBatcherPolicy` | 20 | `rendezvous_default_enabled`, `max_batch`, `engine_max_decode_batch`, `wait_micros`, `allow_mixed_seq_lens`, `rowwise_retry_env`, `require_native_decode_attention`, `allow_portable_lora_decode`, `prefer_direct_paged_decode_attention`, `direct_paged_decode_attention_env_gate`, `allow_prefix_cache_split_snapshot`, `paged_decode_requires_contiguous_kv_chunks`, `use_greedy_token_decode`, `use_native_sampled_contiguous_decode`, `sampled_contiguous_decode_requires_resident_decode`, `partition_noncontiguous_gdn_kv_tiles`, `use_decode_width_prefill_admission`, `burst_prefill_admission`, `batching_engine_default_enabled`, `warm_resident_decode_pool_on_startup` |
-| `BackendTrainingCapabilities` | 4 | `hooks`, `precision`, `server_dispatch`, `acceleration_profile` |
+| `BackendTrainingCapabilities` | 5 | `hooks`, `precision`, `optimizer`, `server_dispatch`, `acceleration_profile` |
 | `ServerTrainingDispatchPolicy` | 3 | `native_route`, `native_training_env`, `native_training_default_enabled` |
 | `TrainingAccelerationProfilePolicy` | 8 | `log_message`, `linear`, `sdpa`, `rmsnorm_inference`, `rmsnorm_training`, `flce_provider`, `resident_activation`, `sgd_step_on_device` |
 | `TrainingAccelerationEnvFlagPolicy` | 2 | `env`, `default_on` |
 | `ReplayCapabilities` | 3 | `resident_decode`, `paged_decode_graph_outputs`, `authority` |
 | `ReplayAuthority` | 4 | `backend`, `production_authority`, `native_primitive`, `graph_crate_role` |
-| `BackendFallbackCapabilities` | 5 | `generic_device_op`, `decode_hot_path`, `decode_hot_path_debug_env`, `training_optimizer`, `training_optimizer_debug_env` |
+| `BackendFallbackCapabilities` | 4 | `generic_device_op`, `decode_hot_path`, `decode_hot_path_debug_env`, `training_optimizer` |
+| `TrainingOptimizerSupport` | 6 | `sgd_parameter_dtypes`, `adamw_parameter_dtypes`, `muon_parameter_dtypes`, `muon_min_lora_rank`, `muon_max_lora_rank`, `rounding_modes` |
 
 ## Resident Resource Descriptors
 
@@ -235,15 +236,17 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `metal` | `NativeRequired` | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK=1` | batched/sample decode errors before generic fallback when no Metal native path produced tokens |
 | `vulkan` | `NativeRequired` | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1` | ordinary batched decode errors before generic fallback; active LoRA may use the capability-gated portable paged-attention route, with sparse vulkan_lora_paged_decode_fallback warnings |
 
-## Training Optimizer Fallback
+## Training Optimizer Product Resolution and Fallback
 
-| Backend | Default Policy | Debug Opt-In | Enforcement |
-|---|---|---|---|
-| `cpu` | `CorrectnessAllowed` | `not required` | CPU is the reference optimizer path |
-| `cuda` | `NativeRequired` | `KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK=1` | SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines |
-| `rocm` | `NativeRequired` | `KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK=1` | SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines |
-| `metal` | `NativeRequired` | `KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_TRAINING_OPTIMIZER_FALLBACK=1` | SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines |
-| `vulkan` | `NativeRequired` | `KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK=1` | SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines |
+Product-executable tuples combine the base-weight precision policy with optimizer-implementation support. The listed parameter dtypes use the reference implementation on CPU and required native hooks on accelerators; they are not independently a promise that the product resolver can produce that LoRA dtype.
+
+| Backend | Default Policy | Product Base -> LoRA | Product Kinds | Optimizer Parameter Dtypes (SGD / AdamW / Muon) | Muon Rank | Rounding | Enforcement |
+|---|---|---|---|---|---:|---|---|
+| `cpu` | `CorrectnessAllowed` | `F32->F32` | `sgd, adam_w, muon` | `F32 / F32 / F32` | `2..=unbounded` | `round_to_nearest` | CPU is the F32 reference optimizer path |
+| `cuda` | `NativeRequired` | `F32->F32, BF16->BF16` | `sgd, adam_w, muon` | `F32, BF16 / F32, BF16 / F32, BF16` | `2..=48` | `round_to_nearest` | SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported |
+| `rocm` | `NativeRequired` | `F32->F32, BF16->BF16` | `sgd, adam_w, muon` | `F32, BF16 / F32, BF16 / F32, BF16` | `2..=48` | `round_to_nearest` | SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported |
+| `metal` | `NativeRequired` | `BF16->BF16` | `adam_w, muon` | `none / F32, BF16 / F32, BF16` | `2..=32` | `round_to_nearest` | SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported |
+| `vulkan` | `NativeRequired` | `F32->F32, BF16->F32` | `sgd, adam_w, muon` | `F32, BF16 / F32, BF16 / F32, BF16` | `2..=32` | `round_to_nearest` | SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported |
 
 ## Streaming Prefill Backend Policy
 
@@ -260,8 +263,8 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed RMSNorm Weight | Mixed |
 |---|---|---|---|---|---|---|---|---|
 | `cpu` | `cpu_f32_reference` | `F32` | `F32` | `F32` | `F32` | `F32` | `none` | no |
-| `cuda` | `cuda_native_float` | `F32,BF16,F16` | `F32,BF16,F16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | yes |
-| `rocm` | `rocm_native_float` | `F32,BF16,F16` | `F32,BF16,F16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | yes |
+| `cuda` | `cuda_native_float` | `F32,BF16` | `F32,BF16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | yes |
+| `rocm` | `rocm_native_float` | `F32,BF16` | `F32,BF16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | yes |
 | `metal` | `metal_bf16_uma` | `BF16` | `BF16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | yes |
 | `vulkan` | `vulkan_mixed_f32_bf16` | `F32` | `F32,BF16` | `F32` | `F32` | `F32,BF16` | `BF16` | yes |
 
@@ -277,12 +280,12 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 ## Optimizer Dispatch
 
-| Backend | SGD Step | AdamW Step |
-|---|---|---|
-| `cuda` | `overridden` | `overridden` |
-| `rocm` | `overridden` | `overridden` |
-| `metal` | `default_decline` | `overridden` |
-| `vulkan` | `overridden` | `overridden` |
+| Backend | SGD Step | AdamW Step | Muon Step |
+|---|---|---|---|
+| `cuda` | `overridden` | `overridden` | `overridden` |
+| `rocm` | `overridden` | `overridden` | `overridden` |
+| `metal` | `default_decline` | `overridden` | `overridden` |
+| `vulkan` | `overridden` | `overridden` | `overridden` |
 
 ## Mismatch Audit
 

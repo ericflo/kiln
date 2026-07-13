@@ -248,6 +248,17 @@ impl TrainingCheckpointPrecision {
             self.stochastic_rounding.is_object(),
             "training checkpoint stochastic_rounding must be a JSON object"
         );
+        let rounding_mode = self.stochastic_rounding.get("mode").and_then(Value::as_str);
+        let legacy_disabled = rounding_mode.is_none()
+            && self
+                .stochastic_rounding
+                .get("enabled")
+                .and_then(Value::as_bool)
+                == Some(false);
+        ensure!(
+            rounding_mode == Some("round_to_nearest") || legacy_disabled,
+            "training checkpoint optimizer rounding is unsupported: product training requires `round_to_nearest`; legacy stochastic-rounding checkpoints cannot be resumed"
+        );
         Ok(())
     }
 }
@@ -1184,6 +1195,19 @@ mod tests {
                 role: CheckpointFileRole::LossHistory,
             },
         ]
+    }
+
+    #[test]
+    fn checkpoint_precision_rejects_legacy_stochastic_rounding() {
+        let mut precision = manifest().precision_policy;
+        precision.stochastic_rounding = serde_json::json!({"mode": "stochastic", "seed": 7});
+        let error = precision.validate().unwrap_err().to_string();
+        assert!(error.contains("legacy stochastic-rounding checkpoints cannot be resumed"));
+
+        precision.stochastic_rounding = serde_json::json!({"mode": "round_to_nearest"});
+        precision.validate().unwrap();
+        precision.stochastic_rounding = serde_json::json!({"enabled": false});
+        precision.validate().unwrap();
     }
 
     #[test]

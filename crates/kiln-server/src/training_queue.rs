@@ -4413,29 +4413,47 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
     // identities and require every dynamic source to have its submit-time
     // materialization before any governor reservation, KV resize, or pooled
     // allocator reclamation.
-    let prepared_data_is_valid = verify_prepared_training_data(&entry.job, &entry.prepared_data)
-        .and_then(|()| match (&entry.job, &entry.prepared_data) {
-            (QueuedJob::Sft(_), PreparedTrainingData::Sft(prepared)) => {
-                let execution_route = runner_arc
-                    .read()
-                    .map_err(|_| {
-                        "model runner lock poisoned while revalidating admitted SFT loss route"
-                            .to_string()
-                    })?
-                    .sft_flce_loss_route();
-                ensure_sft_loss_route_unchanged(prepared.loss_route, execution_route)
-            }
-            _ => Ok(()),
-        });
+    let (queued_optimizer, queued_lora_rank) = match &entry.job {
+        QueuedJob::Sft(req) => (req.config.optimizer, req.config.lora_rank),
+        QueuedJob::Grpo(req) => (req.config.optimizer, req.config.lora_rank),
+        QueuedJob::Opd(req) => (req.config.optimizer, req.config.lora_rank),
+        QueuedJob::DistillRefresh(req) => (req.config.optimizer, req.config.lora_rank),
+        QueuedJob::DistillMerge(req) => (req.config.optimizer, req.config.lora_rank),
+        QueuedJob::DistillPump(req) => (
+            req.config.optimizer,
+            req.rank.unwrap_or(req.config.lora_rank),
+        ),
+        QueuedJob::DistillSelf(req) => (req.config.optimizer, req.config.lora_rank),
+    };
+    let prepared_data_is_valid = crate::api::training::enforce_training_optimizer_admission(
+        &state,
+        queued_optimizer,
+        queued_lora_rank,
+    )
+    .map_err(|error| format!("queued training optimizer capability changed: {error}"))
+    .and_then(|()| verify_prepared_training_data(&entry.job, &entry.prepared_data))
+    .and_then(|()| match (&entry.job, &entry.prepared_data) {
+        (QueuedJob::Sft(_), PreparedTrainingData::Sft(prepared)) => {
+            let execution_route = runner_arc
+                .read()
+                .map_err(|_| {
+                    "model runner lock poisoned while revalidating admitted SFT loss route"
+                        .to_string()
+                })?
+                .sft_flce_loss_route();
+            ensure_sft_loss_route_unchanged(prepared.loss_route, execution_route)
+        }
+        _ => Ok(()),
+    });
 
     // Resolve only the immutable submit-time binding. Registry deletion or
     // replacement while this job waited in the FIFO is a terminal failure,
     // never permission to silently train against a different teacher.
-    let pinned_teacher = resolve_pinned_teacher_for_job(
-        &entry.job,
-        &entry.teacher_bindings,
-        &state.teacher_registry,
-    );
+    let pinned_teacher = if publication.is_ok() && prepared_data_is_valid.is_ok() {
+        resolve_pinned_teacher_for_job(&entry.job, &entry.teacher_bindings, &state.teacher_registry)
+    } else {
+        Ok(None)
+    };
 
     // A registration-time probe is stale by definition once a job has waited
     // in the queue. Revalidate a pinned remote deployment before memory
@@ -4505,11 +4523,11 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
     let staged_result: std::result::Result<PathBuf, String> = if let Err(err) = publication.as_ref()
     {
         Err(err.clone())
+    } else if let Err(err) = prepared_data_is_valid.as_ref() {
+        Err(err.clone())
     } else if let Err(err) = pinned_teacher.as_ref() {
         Err(err.clone())
     } else if let Err(err) = prepared_remote_teacher.as_ref() {
-        Err(err.clone())
-    } else if let Err(err) = prepared_data_is_valid.as_ref() {
         Err(err.clone())
     } else if let Err(err) = memory_ready {
         Err(err)

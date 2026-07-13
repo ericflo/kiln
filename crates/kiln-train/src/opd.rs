@@ -3808,6 +3808,16 @@ pub fn opd_train_to_with_checkpoint_root(
     progress_cb: Option<crate::trainer::ProgressCallback>,
     gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
 ) -> Result<std::path::PathBuf> {
+    config
+        .validate_runtime_contract()
+        .context("opd_train: unsupported configuration before runtime initialization")?;
+    crate::trainer::ensure_training_optimizer_device_supported(
+        "OPD",
+        weights,
+        weights.embed_tokens.device(),
+        config.optimizer,
+        config.lora_rank,
+    )?;
     let runtime =
         crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
     opd_train_to_with_checkpoint_root_and_runtime(
@@ -3847,9 +3857,13 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
     config
         .validate_runtime_contract()
         .context("opd_train: unsupported configuration")?;
-    let runtime_device = runtime
-        .resolve_device_for_weights(weights.embed_tokens.device())
-        .context("opd_train: resolve runtime device")?;
+    let runtime_device = crate::trainer::ensure_training_optimizer_entry_supported(
+        "OPD",
+        weights,
+        runtime,
+        config.optimizer,
+        config.lora_rank,
+    )?;
     crate::ensure_memory_governor_for_runtime(runtime_device, runtime)
         .context("opd_train: initialize memory governor")?;
     let teacher_caps = teacher.capabilities();
@@ -3955,9 +3969,16 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
     // through. The per-step forward/backward (`opd_step_forward_backward_tape_authoritative`)
     // now takes the kt device directly; the candle round-trip bridge is gone.
     let device_kt = runtime_device;
-    let backend_rt = crate::trainer::training_backend_for_device(device_kt);
+    let backend_rt = crate::trainer::training_backend_for_device(device_kt)?;
     let training_precision_policy =
         crate::trainer::training_precision_policy_for_backend(backend_rt.as_ref());
+    crate::trainer::ensure_training_optimizer_supported(
+        "OPD",
+        backend_rt.as_ref(),
+        config.optimizer,
+        weights.embed_tokens.dtype(),
+        config.lora_rank,
+    )?;
     let streaming_prefill_policy = runtime.resolved_streaming_prefill_policy(device_kt);
     let training_runtime_planning_identity =
         runtime.checkpoint_planning_identity_for_device(device_kt);
@@ -4134,37 +4155,12 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                 training_precision_policy,
             )?;
 
-            // (#1082) `allocate_adamw_state` flipped to the kt-native AdamW
-            // state and takes the resolved hyperparameters + kt device.
-            let opt_state = match config.optimizer {
-                Optimizer::Sgd => None,
-                Optimizer::AdamW {
-                    beta1,
-                    beta2,
-                    eps,
-                    weight_decay,
-                } => Some(params.allocate_adamw_state(
-                    learning_rate,
-                    beta1,
-                    beta2,
-                    eps,
-                    weight_decay,
-                    &device_kt,
-                )?),
-                Optimizer::Muon {
-                    momentum,
-                    nesterov,
-                    ns_iters,
-                    weight_decay,
-                } => Some(params.allocate_muon_state(
-                    learning_rate,
-                    momentum,
-                    nesterov,
-                    ns_iters,
-                    weight_decay,
-                    &device_kt,
-                )?),
-            };
+            let opt_state = crate::trainer::make_opt_state(
+                &params,
+                config.optimizer,
+                learning_rate,
+                &device_kt,
+            )?;
             Ok((params, opt_state))
         },
     )?;

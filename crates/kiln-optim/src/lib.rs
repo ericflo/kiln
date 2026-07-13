@@ -12,8 +12,8 @@
 //!   `AdamW`, `Sgd`, `Lion`, `Muon`.
 //! - [`MomentLocation`] enum — `Device` / `PinnedHost` / `MmappedDisk`,
 //!   per the issue's "Optimizer-state location seam" bullet.
-//! - [`StochasticRoundingPolicy`] — read at step time; toggled by
-//!   `KILN_BF16_STOCHASTIC_ROUND=1`.
+//! - [`StochasticRoundingPolicy`] — explicit programmatic policy for reference
+//!   updates; ordinary product construction is round-to-nearest.
 //! - [`AdamW`] CPU reference impl. F32-master + F32-moments, runs on
 //!   `Parameter::backward_storage`. The migration target for the
 //!   existing `crates/kiln-train/src/trainer.rs`

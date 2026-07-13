@@ -371,11 +371,6 @@ impl TrainingCapabilities {
 const TRAINING_DTYPE_F32: &[kiln_tensor::DType] = &[kiln_tensor::DType::F32];
 const TRAINING_DTYPE_F32_BF16: &[kiln_tensor::DType] =
     &[kiln_tensor::DType::F32, kiln_tensor::DType::BF16];
-const TRAINING_DTYPE_FLOAT_NATIVE: &[kiln_tensor::DType] = &[
-    kiln_tensor::DType::F32,
-    kiln_tensor::DType::BF16,
-    kiln_tensor::DType::F16,
-];
 const TRAINING_DTYPE_BF16_FOCUSED: &[kiln_tensor::DType] = &[kiln_tensor::DType::BF16];
 
 /// Backend precision contract for shared kt-tape training.
@@ -415,28 +410,28 @@ impl TrainingPrecisionPolicy {
     pub const fn cuda() -> Self {
         Self {
             name: "cuda_native_float",
-            activation_dtypes: TRAINING_DTYPE_FLOAT_NATIVE,
-            base_weight_dtypes: TRAINING_DTYPE_FLOAT_NATIVE,
+            activation_dtypes: TRAINING_DTYPE_F32_BF16,
+            base_weight_dtypes: TRAINING_DTYPE_F32_BF16,
             lora_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             mixed_rms_norm_weight_dtype: None,
             mixed_precision: true,
-            notes: "CUDA keeps kt tape authoritative and routes BF16/F16/F32 leaves through CUDA-native kernels where available.",
+            notes: "CUDA keeps kt tape authoritative for F32/BF16 training; F16 remains an inference-only dtype until every training leaf and optimizer is native.",
         }
     }
 
     pub const fn rocm() -> Self {
         Self {
             name: "rocm_native_float",
-            activation_dtypes: TRAINING_DTYPE_FLOAT_NATIVE,
-            base_weight_dtypes: TRAINING_DTYPE_FLOAT_NATIVE,
+            activation_dtypes: TRAINING_DTYPE_F32_BF16,
+            base_weight_dtypes: TRAINING_DTYPE_F32_BF16,
             lora_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             mixed_rms_norm_weight_dtype: None,
             mixed_precision: true,
-            notes: "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
+            notes: "ROCm mirrors CUDA's F32/BF16 kt-tape envelope; F16 remains inference-only until every training leaf and optimizer is native.",
         }
     }
 
@@ -468,7 +463,6 @@ impl TrainingPrecisionPolicy {
         }
     }
 
-    #[cfg(test)]
     pub const fn for_device_family(device: kiln_tensor::Device) -> Self {
         match device {
             kiln_tensor::Device::Cuda(_) => Self::cuda(),
@@ -1833,13 +1827,51 @@ pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
 /// tensor sentinel. This is the selector for fallible, explicitly initialized
 /// inference runtimes; compatibility owners may continue using runtime
 /// autodetection through `for_device_kt`.
+pub const fn native_backend_name_for_device(device: kiln_tensor::Device) -> Option<&'static str> {
+    match device {
+        kiln_tensor::Device::Cpu => Some("cpu"),
+        kiln_tensor::Device::Cuda(_) => Some("cuda"),
+        kiln_tensor::Device::Rocm(_) => Some("rocm"),
+        kiln_tensor::Device::Metal(_) => Some("metal"),
+        kiln_tensor::Device::Vulkan(_) => Some("vulkan"),
+        _ => None,
+    }
+}
+
+pub fn native_backend_identity_matches(
+    requested_device: kiln_tensor::Device,
+    runtime_name: &str,
+    runtime_device: kiln_tensor::Device,
+) -> bool {
+    runtime_device == requested_device
+        && native_backend_name_for_device(requested_device) == Some(runtime_name)
+}
+
+fn validate_explicit_backend_identity(
+    requested_device: kiln_tensor::Device,
+    backend: Arc<dyn BackendRuntime>,
+) -> Result<Arc<dyn BackendRuntime>> {
+    let runtime_name = BackendIdentity::runtime_name(backend.as_ref());
+    let runtime_device = BackendIdentity::runtime_device(backend.as_ref());
+    anyhow::ensure!(
+        native_backend_identity_matches(requested_device, runtime_name, runtime_device),
+        "explicit backend for {requested_device} downgraded to `{runtime_name}` on {runtime_device}; an exact native backend identity is required"
+    );
+    Ok(backend)
+}
+
 pub fn for_explicit_device_kt(device: kiln_tensor::Device) -> Result<Arc<dyn BackendRuntime>> {
     match device {
-        kiln_tensor::Device::Cpu => Ok(Arc::new(cpu::CpuBackend::new(device))),
+        kiln_tensor::Device::Cpu => {
+            validate_explicit_backend_identity(device, Arc::new(cpu::CpuBackend::new(device)))
+        }
         kiln_tensor::Device::Cuda(_) => {
             #[cfg(feature = "cuda")]
             {
-                return Ok(Arc::new(cuda::CudaBackend::new(device)));
+                return validate_explicit_backend_identity(
+                    device,
+                    Arc::new(cuda::CudaBackend::new(device)),
+                );
             }
             #[cfg(not(feature = "cuda"))]
             anyhow::bail!("explicit CUDA runtime requested from a build without the cuda feature");
@@ -1847,7 +1879,10 @@ pub fn for_explicit_device_kt(device: kiln_tensor::Device) -> Result<Arc<dyn Bac
         kiln_tensor::Device::Rocm(_) => {
             #[cfg(feature = "rocm")]
             {
-                return Ok(Arc::new(rocm::RocmBackend::new(device)));
+                return validate_explicit_backend_identity(
+                    device,
+                    Arc::new(rocm::RocmBackend::new(device)),
+                );
             }
             #[cfg(not(feature = "rocm"))]
             anyhow::bail!("explicit ROCm runtime requested from a build without the rocm feature");
@@ -1855,7 +1890,10 @@ pub fn for_explicit_device_kt(device: kiln_tensor::Device) -> Result<Arc<dyn Bac
         kiln_tensor::Device::Metal(_) => {
             #[cfg(feature = "metal")]
             {
-                return Ok(Arc::new(metal::MetalBackend::new(device)));
+                return validate_explicit_backend_identity(
+                    device,
+                    Arc::new(metal::MetalBackend::new(device)),
+                );
             }
             #[cfg(not(feature = "metal"))]
             anyhow::bail!(
@@ -1869,10 +1907,12 @@ pub fn for_explicit_device_kt(device: kiln_tensor::Device) -> Result<Arc<dyn Bac
                     vulkan::vulkan_is_available(),
                     "explicit Vulkan runtime requested but no Vulkan device is available"
                 );
+                let backend = validate_explicit_backend_identity(
+                    device,
+                    Arc::new(vulkan::VulkanBackend::new(kiln_tensor::Device::Cpu)),
+                )?;
                 mark_vulkan_active();
-                return Ok(Arc::new(vulkan::VulkanBackend::new(
-                    kiln_tensor::Device::Cpu,
-                )));
+                return Ok(backend);
             }
             #[cfg(not(feature = "vulkan"))]
             anyhow::bail!(
@@ -1976,6 +2016,30 @@ mod tests {
             BackendIdentity::runtime_device(backend.as_ref()),
             kiln_tensor::Device::Cpu
         );
+    }
+
+    #[test]
+    fn explicit_backend_identity_rejects_portable_or_cross_device_downgrades() {
+        for (device, name) in [
+            (kiln_tensor::Device::Cpu, "cpu"),
+            (kiln_tensor::Device::Cuda(0), "cuda"),
+            (kiln_tensor::Device::Rocm(0), "rocm"),
+            (kiln_tensor::Device::Metal(0), "metal"),
+            (kiln_tensor::Device::Vulkan(0), "vulkan"),
+        ] {
+            assert!(native_backend_identity_matches(device, name, device));
+            assert!(!native_backend_identity_matches(device, "portable", device));
+        }
+        assert!(!native_backend_identity_matches(
+            kiln_tensor::Device::Vulkan(0),
+            "cpu",
+            kiln_tensor::Device::Cpu,
+        ));
+        assert!(!native_backend_identity_matches(
+            kiln_tensor::Device::Vulkan(1),
+            "vulkan",
+            kiln_tensor::Device::Vulkan(0),
+        ));
     }
 
     #[derive(Debug)]
@@ -2179,11 +2243,14 @@ mod tests {
     fn training_precision_policies_capture_backend_differences() {
         let cuda = TrainingPrecisionPolicy::cuda();
         assert!(cuda.activation_dtypes.contains(&kiln_tensor::DType::BF16));
-        assert!(cuda.activation_dtypes.contains(&kiln_tensor::DType::F16));
+        assert!(!cuda.activation_dtypes.contains(&kiln_tensor::DType::F16));
+        assert!(!cuda.base_weight_dtypes.contains(&kiln_tensor::DType::F16));
         assert!(cuda.mixed_precision);
 
         let rocm = TrainingPrecisionPolicy::rocm();
         assert!(rocm.mixed_precision);
+        assert!(!rocm.activation_dtypes.contains(&kiln_tensor::DType::F16));
+        assert!(!rocm.base_weight_dtypes.contains(&kiln_tensor::DType::F16));
 
         let metal = TrainingPrecisionPolicy::metal();
         assert_eq!(metal.activation_dtypes, &[kiln_tensor::DType::BF16]);
@@ -2203,6 +2270,221 @@ mod tests {
                 .contains(&kiln_tensor::DType::BF16)
         );
         assert!(vulkan.mixed_precision);
+    }
+
+    #[test]
+    fn training_optimizer_support_is_exact_by_kind_dtype_rounding_and_rank() {
+        use capability::{
+            TrainingOptimizerKind, TrainingOptimizerRequest, TrainingOptimizerRounding,
+            TrainingOptimizerSupport,
+        };
+
+        let request = |kind, parameter_dtype, rounding, lora_rank| TrainingOptimizerRequest {
+            kind,
+            parameter_dtype,
+            rounding,
+            lora_rank,
+        };
+        let metal = TrainingOptimizerSupport::for_backend("metal", kiln_tensor::Device::Metal(0));
+        assert!(!metal.supports(request(
+            TrainingOptimizerKind::Sgd,
+            kiln_tensor::DType::BF16,
+            TrainingOptimizerRounding::RoundToNearest,
+            4,
+        )));
+        for kind in [TrainingOptimizerKind::AdamW, TrainingOptimizerKind::Muon] {
+            assert!(metal.supports(request(
+                kind,
+                kiln_tensor::DType::BF16,
+                TrainingOptimizerRounding::RoundToNearest,
+                4,
+            )));
+            assert!(!metal.supports(request(
+                kind,
+                kiln_tensor::DType::BF16,
+                TrainingOptimizerRounding::Stochastic,
+                4,
+            )));
+        }
+        assert!(metal.supports(request(
+            TrainingOptimizerKind::Muon,
+            kiln_tensor::DType::BF16,
+            TrainingOptimizerRounding::RoundToNearest,
+            32,
+        )));
+        assert!(!metal.supports(request(
+            TrainingOptimizerKind::Muon,
+            kiln_tensor::DType::BF16,
+            TrainingOptimizerRounding::RoundToNearest,
+            33,
+        )));
+        assert!(!metal.supports(request(
+            TrainingOptimizerKind::Muon,
+            kiln_tensor::DType::BF16,
+            TrainingOptimizerRounding::RoundToNearest,
+            1,
+        )));
+        assert!(metal.supports(request(
+            TrainingOptimizerKind::Muon,
+            kiln_tensor::DType::BF16,
+            TrainingOptimizerRounding::RoundToNearest,
+            2,
+        )));
+
+        for (backend, device) in [
+            ("cuda", kiln_tensor::Device::Cuda(0)),
+            ("rocm", kiln_tensor::Device::Rocm(0)),
+            ("vulkan", kiln_tensor::Device::Vulkan(0)),
+        ] {
+            let support = TrainingOptimizerSupport::for_backend(backend, device);
+            for kind in [
+                TrainingOptimizerKind::Sgd,
+                TrainingOptimizerKind::AdamW,
+                TrainingOptimizerKind::Muon,
+            ] {
+                assert!(support.supports(request(
+                    kind,
+                    kiln_tensor::DType::F32,
+                    TrainingOptimizerRounding::RoundToNearest,
+                    4,
+                )));
+                assert!(!support.supports(request(
+                    kind,
+                    kiln_tensor::DType::F16,
+                    TrainingOptimizerRounding::RoundToNearest,
+                    4,
+                )));
+            }
+        }
+
+        let cpu_support = TrainingOptimizerSupport::for_backend("cpu", kiln_tensor::Device::Cpu);
+        assert!(cpu_support.supports(request(
+            TrainingOptimizerKind::AdamW,
+            kiln_tensor::DType::F32,
+            TrainingOptimizerRounding::RoundToNearest,
+            4,
+        )));
+        assert!(!cpu_support.supports(request(
+            TrainingOptimizerKind::Muon,
+            kiln_tensor::DType::F32,
+            TrainingOptimizerRounding::RoundToNearest,
+            1,
+        )));
+        assert!(cpu_support.supports(request(
+            TrainingOptimizerKind::Muon,
+            kiln_tensor::DType::F32,
+            TrainingOptimizerRounding::RoundToNearest,
+            2,
+        )));
+        assert!(!cpu_support.supports(request(
+            TrainingOptimizerKind::AdamW,
+            kiln_tensor::DType::BF16,
+            TrainingOptimizerRounding::RoundToNearest,
+            4,
+        )));
+        assert!(!cpu_support.supports(request(
+            TrainingOptimizerKind::AdamW,
+            kiln_tensor::DType::F32,
+            TrainingOptimizerRounding::Stochastic,
+            4,
+        )));
+
+        for (backend, device) in [
+            ("cuda", kiln_tensor::Device::Cuda(0)),
+            ("rocm", kiln_tensor::Device::Rocm(0)),
+        ] {
+            let support = TrainingOptimizerSupport::for_backend(backend, device);
+            assert!(support.supports(request(
+                TrainingOptimizerKind::Muon,
+                kiln_tensor::DType::BF16,
+                TrainingOptimizerRounding::RoundToNearest,
+                48,
+            )));
+            assert!(!support.supports(request(
+                TrainingOptimizerKind::Muon,
+                kiln_tensor::DType::BF16,
+                TrainingOptimizerRounding::RoundToNearest,
+                1,
+            )));
+            assert!(support.supports(request(
+                TrainingOptimizerKind::Muon,
+                kiln_tensor::DType::BF16,
+                TrainingOptimizerRounding::RoundToNearest,
+                2,
+            )));
+            assert!(!support.supports(request(
+                TrainingOptimizerKind::Muon,
+                kiln_tensor::DType::BF16,
+                TrainingOptimizerRounding::RoundToNearest,
+                49,
+            )));
+        }
+        let vulkan =
+            TrainingOptimizerSupport::for_backend("vulkan", kiln_tensor::Device::Vulkan(0));
+        assert!(vulkan.supports(request(
+            TrainingOptimizerKind::Muon,
+            kiln_tensor::DType::F32,
+            TrainingOptimizerRounding::RoundToNearest,
+            32,
+        )));
+        assert!(!vulkan.supports(request(
+            TrainingOptimizerKind::Muon,
+            kiln_tensor::DType::F32,
+            TrainingOptimizerRounding::RoundToNearest,
+            33,
+        )));
+        assert!(!vulkan.supports(request(
+            TrainingOptimizerKind::Muon,
+            kiln_tensor::DType::F32,
+            TrainingOptimizerRounding::RoundToNearest,
+            1,
+        )));
+        assert!(vulkan.supports(request(
+            TrainingOptimizerKind::Muon,
+            kiln_tensor::DType::F32,
+            TrainingOptimizerRounding::RoundToNearest,
+            2,
+        )));
+
+        let mismatched = TrainingOptimizerSupport::for_backend("cuda", kiln_tensor::Device::Cpu);
+        assert!(!mismatched.supports(request(
+            TrainingOptimizerKind::AdamW,
+            kiln_tensor::DType::F32,
+            TrainingOptimizerRounding::RoundToNearest,
+            4,
+        )));
+
+        let cpu_backend = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
+        let common =
+            capability::BackendCapabilityQueries::backend_capabilities(&cpu_backend).training;
+        let metal_training = capability::BackendTrainingCapabilities {
+            precision: TrainingPrecisionPolicy::metal(),
+            optimizer: metal,
+            ..common
+        };
+        assert!(matches!(
+            metal_training.resolve_optimizer_request(
+                TrainingOptimizerKind::Sgd,
+                kiln_tensor::DType::BF16,
+                TrainingOptimizerRounding::RoundToNearest,
+                4,
+            ),
+            Err(capability::TrainingOptimizerSupportError::UnsupportedRequest { .. })
+        ));
+        let cuda_training = capability::BackendTrainingCapabilities {
+            precision: TrainingPrecisionPolicy::cuda(),
+            optimizer: TrainingOptimizerSupport::for_backend("cuda", kiln_tensor::Device::Cuda(0)),
+            ..common
+        };
+        assert!(matches!(
+            cuda_training.resolve_optimizer_request(
+                TrainingOptimizerKind::AdamW,
+                kiln_tensor::DType::F16,
+                TrainingOptimizerRounding::RoundToNearest,
+                4,
+            ),
+            Err(capability::TrainingOptimizerSupportError::UnsupportedBaseWeightDType { .. })
+        ));
     }
 
     #[test]
@@ -2480,7 +2762,6 @@ mod tests {
             caps.fallback.training_optimizer,
             FallbackPolicy::CorrectnessAllowed
         );
-        assert_eq!(caps.fallback.training_optimizer_debug_env, None);
 
         let vulkan_probe = ResidentActivationProbeBackend {
             name: "vulkan",
@@ -2511,10 +2792,6 @@ mod tests {
         assert_eq!(
             vulkan_caps.fallback.training_optimizer,
             FallbackPolicy::NativeRequired
-        );
-        assert_eq!(
-            vulkan_caps.fallback.training_optimizer_debug_env,
-            Some("KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK")
         );
     }
 

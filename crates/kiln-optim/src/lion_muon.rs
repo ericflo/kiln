@@ -251,8 +251,8 @@ fn stochastic_round_rng16(seed: u64, step: u64, idx: usize) -> u16 {
 }
 
 /// Build a master `Tensor` from f32 values, in `dtype`, then move it to
-/// `device`. BF16 honours `rounding` (stochastic rounding under
-/// `KILN_BF16_STOCHASTIC_ROUND=1`, varied by `step`).
+/// `device`. BF16 honors an explicitly supplied stochastic policy, varied by
+/// `step`; ordinary product construction uses round-to-nearest.
 fn build_master_tensor(
     dtype: DType,
     shape: &[usize],
@@ -372,13 +372,32 @@ pub struct MuonState {
 
 impl Muon {
     pub fn new(lr: f32, momentum: f32, nesterov: bool, ns_iters: u32, weight_decay: f32) -> Self {
+        Self::new_with_rounding(
+            lr,
+            momentum,
+            nesterov,
+            ns_iters,
+            weight_decay,
+            StochasticRoundingPolicy::RoundToNearest,
+        )
+    }
+
+    /// Construct Muon with an explicit programmatic rounding policy.
+    pub fn new_with_rounding(
+        lr: f32,
+        momentum: f32,
+        nesterov: bool,
+        ns_iters: u32,
+        weight_decay: f32,
+        rounding: StochasticRoundingPolicy,
+    ) -> Self {
         Muon {
             lr,
             momentum,
             nesterov,
             ns_iters,
             weight_decay,
-            rounding: StochasticRoundingPolicy::from_env(),
+            rounding,
             momenta: HashMap::new(),
         }
     }
