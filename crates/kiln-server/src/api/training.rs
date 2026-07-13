@@ -3215,10 +3215,9 @@ fn prepare_training_entry_admission(
                 prepared.max_seq_len,
                 EstimateOptions {
                     max_supervised_tokens: Some(prepared.max_supervised_tokens),
-                    recompute_boundaries:
-                        training_preflight::recompute_checkpoint_boundaries_for_seq_len(
-                            prepared.max_seq_len,
-                        ),
+                    sft_checkpoint_boundary_policy: Some(
+                        state.training_runtime.checkpoint_boundary_policy(),
+                    ),
                     optimizer: req.config.optimizer,
                     ..Default::default()
                 },
@@ -5672,7 +5671,7 @@ mod tests {
         };
         let options = EstimateOptions {
             max_supervised_tokens: Some(512),
-            recompute_boundaries: true,
+            sft_checkpoint_boundary_policy: Some(kiln_train::CheckpointBoundaryPolicy::default()),
             activation_bytes_per_elem: Some(10),
             streaming_gdn_tile_tokens: Some(1024),
             optimizer: kiln_train::Optimizer::default(),

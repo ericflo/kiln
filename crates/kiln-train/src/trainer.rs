@@ -5569,6 +5569,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
     let weights = resident_weights.as_ref().unwrap_or(weights);
     let backend = training_backend_for_device(device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
+    let checkpoint_boundary_policy = runtime.checkpoint_boundary_policy();
     let streaming_prefill = runtime.resolved_streaming_prefill_policy(device);
     let training_runtime_planning_identity =
         runtime.checkpoint_planning_identity_for_device(device);
@@ -6137,6 +6138,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                             &label_mask,
                             segs,
                             &device,
+                            checkpoint_boundary_policy,
                             streaming_prefill,
                         )?;
                         loss_val = lv;
@@ -6155,7 +6157,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                         // the non-checkpointed `standard_forward_backward` path;
                         // reaching here means a CPU run requested checkpointing, which
                         // the candle-drop endgame does not support yet.
-                        let _ = segs;
+                        let _ = (segs, checkpoint_boundary_policy);
                         anyhow::bail!(
                             "gradient checkpointing requires a GPU feature (`cuda`, \
                              `metal`, or `vulkan`); the kt-tape checkpointed reverse \
@@ -13735,21 +13737,6 @@ fn log_sft_timing_begin(enabled: bool, phase: &str, seq_len: usize, segments: us
     }
 }
 
-fn recompute_checkpoint_boundaries(seq_len: usize) -> bool {
-    if let Some(forced) = kiln_core::env_flag::env_tristate("KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES")
-    {
-        return forced;
-    }
-    let threshold = std::env::var("KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(8192);
-    seq_len >= threshold
-}
-
-const CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES: u64 = 6 * 1024 * 1024 * 1024;
-
 fn dtype_size_bytes(dtype: DType) -> usize {
     match dtype {
         DType::BF16 | DType::F16 => 2,
@@ -13759,40 +13746,6 @@ fn dtype_size_bytes(dtype: DType) -> usize {
         DType::I64 => 8,
         _ => 4,
     }
-}
-
-fn checkpoint_boundary_anchor_stride(
-    seq_len: usize,
-    num_segments: usize,
-    hidden_size: usize,
-    boundary_dtype: DType,
-) -> usize {
-    if let Some(explicit) = std::env::var("KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-    {
-        return explicit;
-    }
-
-    if num_segments <= 1 {
-        return 1;
-    }
-
-    let cache_target_bytes = std::env::var("KILN_CHECKPOINT_BOUNDARY_CACHE_GB")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .map(|gb| (gb * 1024.0 * 1024.0 * 1024.0) as u64)
-        .unwrap_or(CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES)
-        .max(1);
-    let boundary_bytes = (seq_len as u64)
-        .saturating_mul(hidden_size as u64)
-        .saturating_mul(dtype_size_bytes(boundary_dtype).max(1) as u64)
-        .max(1);
-    let max_anchors = (cache_target_bytes / boundary_bytes).max(2) as usize;
-    let replay_anchor_slots = max_anchors.saturating_sub(1).max(1);
-    num_segments.div_ceil(replay_anchor_slots).max(1)
 }
 
 struct StoredCheckpointBoundaries {
@@ -15859,6 +15812,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     label_mask: &[bool],
     segments: &[(usize, usize)],
     device: &Device,
+    checkpoint_boundary_policy: crate::CheckpointBoundaryPolicy,
     streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
     let num_segments = segments.len();
@@ -15901,14 +15855,14 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     // layer's recurrence is internal to its own full-sequence pass.
     let boundary_start = Instant::now();
     let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
-    let spool_boundaries = if recompute_checkpoint_boundaries(input_ids.len()) {
+    let spool_boundaries = if checkpoint_boundary_policy.recompute_for(input_ids.len()) {
         let resident_device_storage =
             ResidencyBackend::runtime_supports_resident_activation(backend);
-        let anchor_stride = checkpoint_boundary_anchor_stride(
+        let anchor_stride = checkpoint_boundary_policy.anchor_stride_for_shape(
             input_ids.len(),
             num_segments,
             model_config.hidden_size,
-            embed_hidden.dtype(),
+            dtype_size_bytes(embed_hidden.dtype()),
         );
         if trace_timings {
             eprintln!(

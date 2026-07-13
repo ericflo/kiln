@@ -11,7 +11,7 @@
 use kiln_core::config::{DType, ModelConfig};
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_memory::vram::{GpuVramInfo, VramSource};
-use kiln_train::{GrpoGroup, Optimizer, SftExample};
+use kiln_train::{CheckpointBoundaryPolicy, GrpoGroup, Optimizer, SftExample};
 
 /// What the trainer can rely on being deduplicated across CPU and GPU.
 ///
@@ -150,7 +150,10 @@ pub struct WorkingSet {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EstimateOptions {
     pub max_supervised_tokens: Option<usize>,
-    pub recompute_boundaries: bool,
+    /// SFT's startup-resolved sparse-boundary policy. GRPO and OPD leave this
+    /// as `None` because they retain every checkpoint boundary during reverse
+    /// replay.
+    pub sft_checkpoint_boundary_policy: Option<CheckpointBoundaryPolicy>,
     pub activation_bytes_per_elem: Option<usize>,
     pub streaming_gdn_tile_tokens: Option<usize>,
     /// Persistent optimizer state that must coexist with params and grads.
@@ -173,7 +176,6 @@ pub struct LoraRankCeiling {
 }
 
 const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
-const CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES: u64 = 6 * BYTES_PER_GB;
 /// Default safety margin: 1 GB. Large enough to absorb scratch
 /// allocations the closed-form pieces don't model directly (DRM
 /// import buffers, allocator slack, kernel staging buffers).
@@ -183,17 +185,6 @@ const FLCE_FALLBACK_SCRATCH_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 
 fn usize_to_u64_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
-}
-
-fn gib_to_bytes_saturating(gib: f64) -> u64 {
-    let bytes = gib * BYTES_PER_GB as f64;
-    if !bytes.is_finite() || bytes >= u64::MAX as f64 {
-        u64::MAX
-    } else if bytes <= 0.0 {
-        0
-    } else {
-        bytes as u64
-    }
 }
 
 fn dtype_bytes(dtype: DType) -> u64 {
@@ -274,14 +265,16 @@ fn boundary_state_bytes(
     cfg: &ModelConfig,
     max_seq_len: usize,
     num_segments: usize,
-    recompute_boundaries: bool,
+    sft_checkpoint_boundary_policy: Option<CheckpointBoundaryPolicy>,
     activation_bytes_per_elem: u64,
 ) -> u64 {
     let elem = activation_bytes_per_elem.max(1);
-    if recompute_boundaries {
+    if let Some(policy) = sft_checkpoint_boundary_policy
+        && policy.recompute_for(max_seq_len)
+    {
         let h = usize_to_u64_saturating(cfg.hidden_size);
         let t = usize_to_u64_saturating(max_seq_len);
-        let anchor_stride = checkpoint_boundary_anchor_stride_for_shape(
+        let anchor_stride = policy.anchor_stride_for_shape(
             max_seq_len,
             num_segments,
             cfg.hidden_size,
@@ -309,41 +302,6 @@ fn boundary_state_bytes(
         .saturating_mul(h)
         .saturating_mul(t)
         .saturating_mul(elem)
-}
-
-pub fn checkpoint_boundary_anchor_stride_for_shape(
-    max_seq_len: usize,
-    num_segments: usize,
-    hidden_size: usize,
-    activation_bytes_per_elem: usize,
-) -> usize {
-    if let Some(explicit) = std::env::var("KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-    {
-        return explicit;
-    }
-
-    if num_segments <= 1 {
-        return 1;
-    }
-
-    let cache_target_bytes = std::env::var("KILN_CHECKPOINT_BOUNDARY_CACHE_GB")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .map(gib_to_bytes_saturating)
-        .unwrap_or(CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES)
-        .max(1);
-    let boundary_bytes = usize_to_u64_saturating(max_seq_len)
-        .saturating_mul(usize_to_u64_saturating(hidden_size))
-        .saturating_mul(usize_to_u64_saturating(activation_bytes_per_elem.max(1)))
-        .max(1);
-    let max_anchors =
-        usize::try_from((cache_target_bytes / boundary_bytes).max(2)).unwrap_or(usize::MAX);
-    let replay_anchor_slots = max_anchors.saturating_sub(1).max(1);
-    num_segments.div_ceil(replay_anchor_slots).max(1)
 }
 
 pub fn checkpoint_boundary_anchor_count(num_segments: usize, anchor_stride: usize) -> usize {
@@ -675,7 +633,7 @@ pub fn estimate_step_working_set_with_options(
             cfg,
             max_seq_len,
             num_segments,
-            options.recompute_boundaries,
+            options.sft_checkpoint_boundary_policy,
             activation_bytes_per_elem,
         ),
         flce_intermediates: flce_chunk_intermediate_bytes(cfg, flce_tokens),
@@ -1102,19 +1060,6 @@ pub fn approximate_max_supervised_tokens_sft(
         })
         .max()
         .unwrap_or(0)
-}
-
-pub fn recompute_checkpoint_boundaries_for_seq_len(max_seq_len: usize) -> bool {
-    if let Some(forced) = kiln_core::env_flag::env_tristate("KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES")
-    {
-        return forced;
-    }
-    let threshold = std::env::var("KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(8192);
-    max_seq_len >= threshold
 }
 
 pub fn approximate_max_seq_len_grpo(
@@ -1610,7 +1555,7 @@ mod tests {
             true,
             EstimateOptions {
                 max_supervised_tokens: Some(512),
-                recompute_boundaries: true,
+                sft_checkpoint_boundary_policy: Some(CheckpointBoundaryPolicy::default()),
                 activation_bytes_per_elem: Some(2),
                 ..Default::default()
             },
@@ -1629,7 +1574,7 @@ mod tests {
             true,
             EstimateOptions {
                 max_supervised_tokens: Some(512),
-                recompute_boundaries: true,
+                sft_checkpoint_boundary_policy: Some(CheckpointBoundaryPolicy::default()),
                 activation_bytes_per_elem: Some(2),
                 ..Default::default()
             },
@@ -1653,7 +1598,7 @@ mod tests {
         let available = 21 * BYTES_PER_GB;
         let options = EstimateOptions {
             max_supervised_tokens: Some(512),
-            recompute_boundaries: true,
+            sft_checkpoint_boundary_policy: Some(CheckpointBoundaryPolicy::default()),
             activation_bytes_per_elem: Some(10),
             ..Default::default()
         };
@@ -1682,7 +1627,7 @@ mod tests {
         let available = 30 * BYTES_PER_GB;
         let options = EstimateOptions {
             max_supervised_tokens: Some(512),
-            recompute_boundaries: true,
+            sft_checkpoint_boundary_policy: Some(CheckpointBoundaryPolicy::default()),
             activation_bytes_per_elem: Some(10),
             streaming_gdn_tile_tokens: Some(1024),
             ..Default::default()
@@ -1730,7 +1675,6 @@ mod tests {
             false,
             EstimateOptions {
                 max_supervised_tokens: Some(512),
-                recompute_boundaries: false,
                 ..Default::default()
             },
         );
@@ -1777,11 +1721,6 @@ mod tests {
 
     #[test]
     fn estimator_recompute_boundaries_does_not_scale_with_segment_count() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE");
-            std::env::remove_var("KILN_CHECKPOINT_BOUNDARY_CACHE_GB");
-        }
         let cfg = qwen_4b();
         let seq_len = 104_412;
         let cached =
@@ -1795,7 +1734,7 @@ mod tests {
             false,
             EstimateOptions {
                 max_supervised_tokens: None,
-                recompute_boundaries: true,
+                sft_checkpoint_boundary_policy: Some(CheckpointBoundaryPolicy::default()),
                 ..Default::default()
             },
         );
@@ -1827,6 +1766,28 @@ mod tests {
             * dtype_bytes(cfg.dtype);
         assert_eq!(estimate.breakdown.boundary_states, expected);
 
+        let disabled_sft = estimate_step_working_set_with_options(
+            &cfg,
+            seq_len,
+            16,
+            num_segments,
+            WeightResidency::SingleCopy,
+            true,
+            EstimateOptions {
+                sft_checkpoint_boundary_policy: Some(
+                    CheckpointBoundaryPolicy::from_parts(
+                        kiln_train::CheckpointBoundaryRecomputeMode::Disabled,
+                        1,
+                        None,
+                        1,
+                    )
+                    .expect("disabled SFT boundary policy"),
+                ),
+                ..Default::default()
+            },
+        );
+        assert_eq!(disabled_sft.breakdown.boundary_states, expected);
+
         let sparse = estimate_step_working_set_with_options(
             &cfg,
             seq_len,
@@ -1835,7 +1796,7 @@ mod tests {
             WeightResidency::SingleCopy,
             true,
             EstimateOptions {
-                recompute_boundaries: true,
+                sft_checkpoint_boundary_policy: Some(CheckpointBoundaryPolicy::default()),
                 ..Default::default()
             },
         );
@@ -1847,14 +1808,16 @@ mod tests {
 
     #[test]
     fn recompute_boundary_estimate_charges_sparse_anchors_and_segment_input() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE");
-            std::env::remove_var("KILN_CHECKPOINT_BOUNDARY_CACHE_GB");
-        }
         let cfg = qwen_4b();
         let seq_len = 8192usize;
         let num_segments = 32usize;
+        let policy = CheckpointBoundaryPolicy::from_parts(
+            kiln_train::CheckpointBoundaryRecomputeMode::Enabled,
+            1,
+            Some(4),
+            1,
+        )
+        .expect("explicit sparse-boundary policy");
         let estimate = estimate_step_working_set_with_options(
             &cfg,
             seq_len,
@@ -1864,19 +1827,15 @@ mod tests {
             true,
             EstimateOptions {
                 max_supervised_tokens: None,
-                recompute_boundaries: true,
+                sft_checkpoint_boundary_policy: Some(policy),
                 ..Default::default()
             },
         );
         let h = cfg.hidden_size as u64;
         let t = seq_len as u64;
         let elem = dtype_bytes(cfg.dtype);
-        let anchor_stride = checkpoint_boundary_anchor_stride_for_shape(
-            seq_len,
-            num_segments,
-            cfg.hidden_size,
-            elem as usize,
-        );
+        let anchor_stride =
+            policy.anchor_stride_for_shape(seq_len, num_segments, cfg.hidden_size, elem as usize);
         let anchor_count = checkpoint_boundary_anchor_count(num_segments, anchor_stride) as u64;
         let expected = anchor_count * h * t * elem + 2 * h * t * 4 + h * t * elem;
         assert_eq!(estimate.breakdown.boundary_states, expected);
