@@ -2552,9 +2552,6 @@ fn ensure_training_backend_admission(state: &AppState) -> Result<(), ApiError> {
 const MAX_MATERIALIZED_OPD_DATASET_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_MATERIALIZED_OPD_PROMPTS: usize = 100_000;
 const MAX_MATERIALIZED_OPD_PROMPT_BYTES: u64 = 64 * 1024 * 1024;
-static TRAINING_DATA_ADMISSION_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
-    std::sync::OnceLock::new();
-
 fn sft_materialized_weight_bytes(
     examples: &[kiln_train::SftExample],
     ingestion: &kiln_train::SftIngestionReceipt,
@@ -3562,8 +3559,7 @@ fn admit_training_jobs_with_summary(
     mut pending: Vec<(TrainingJobInfo, QueueEntry)>,
 ) -> Result<TrainingAdmissionResult, ApiError> {
     ensure_training_backend_admission(state)?;
-    let admission_lock = TRAINING_DATA_ADMISSION_LOCK.get_or_init(|| std::sync::Mutex::new(()));
-    let _admission_guard = match admission_lock.try_lock() {
+    let _admission_guard = match state.training_data_admission_lock.try_lock() {
         Ok(guard) => guard,
         Err(std::sync::TryLockError::WouldBlock) => {
             return Err(ApiError::training_admission_busy());

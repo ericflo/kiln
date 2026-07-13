@@ -2439,6 +2439,9 @@ pub struct AppState {
     /// FIFO training queue — jobs are enqueued here and executed sequentially
     /// by a background worker.
     pub training_queue: SharedTrainingQueue,
+    /// Serializes bounded training-data validation and materialization for this
+    /// server instance without coupling independent `AppState` instances.
+    pub(crate) training_data_admission_lock: Arc<std::sync::Mutex<()>>,
     /// §3.2 / §4 teacher registry — alias → `TeacherSpec`. Persists
     /// to `adapter_dir/teachers.json` so registrations survive restart.
     /// Consulted by every OPD / distill_* handler that takes a
@@ -3068,6 +3071,7 @@ impl AppState {
             kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState::unavailable("mock_backend"),
             gpu_lock: Arc::new(RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
+            training_data_admission_lock: Arc::new(std::sync::Mutex::new(())),
             teacher_registry: Arc::new(crate::api::teachers::TeacherRegistry::new()),
             teacher_credentials: Arc::new(crate::config::TeachersConfig::default()),
             vram_info: kiln_memory::vram::GpuVramInfo {
@@ -4163,6 +4167,7 @@ impl AppState {
             kv_autoscaler,
             gpu_lock,
             training_queue: crate::training_queue::new_shared_queue(),
+            training_data_admission_lock: Arc::new(std::sync::Mutex::new(())),
             teacher_registry: teacher_registry_for_real.clone(),
             teacher_credentials: Arc::new(crate::config::TeachersConfig::default()),
             vram_info,
