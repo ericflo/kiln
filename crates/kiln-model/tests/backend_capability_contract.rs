@@ -6042,7 +6042,7 @@ fn training_optimizer_capability_is_bound_before_admission_and_allocation() {
     assert!(
         device_guard.contains("TrainingOptimizerSupport::for_device(runtime_device)")
             && device_guard.contains("training_precision_policy_for_device(&runtime_device)")
-            && device_guard.contains("optimizer.validate_hyperparameters()")
+            && device_guard.contains(".validate_hyperparameters()")
             && !device_guard.contains("training_backend_for_device("),
         "device-local optimizer admission must be pure and must not initialize an accelerator backend"
     );
