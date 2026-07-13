@@ -331,24 +331,38 @@ training request
           effective decode-width resolution. The state boundary applies actor selection, the decode-forward
           boundary applies true batched versus rowwise decode, and the actor receives only its projected
           strict-prefix and prompt-admission policy. None of those paths rereads public batching environment
-          variables. <code>auto</code> preserves
+          variables. The same resolved object constructs the direct-stream rendezvous worker without a
+          second environment parser. <code>auto</code> preserves
           backend qualification: CUDA, ROCm, Vulkan, and CPU enable the actor while Metal disables it;
           CUDA/Vulkan fill effective decode width before decode, while ROCm/Metal/CPU use a latency-oriented
           quantum of 4, clamped to that width. CUDA alone carries backend-owned burst admission.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          The rendezvous worker is a narrow compatibility path, not a second general scheduler. It can
+          combine only direct streaming effectively-greedy decode steps, and only when the batching actor is
+          absent. Sampled and non-streaming direct requests bypass it. Its backend-qualified automatic
+          <code>(max batch, wait microseconds, mixed positions)</code> tuples are CPU
+          <code>(8,0,false)</code>, CUDA <code>(1,0,false)</code>, ROCm <code>(8,0,false)</code>, Metal
+          <code>(8,100,true)</code>, and Vulkan <code>(64,5000,true)</code>; all enable the worker and the
+          width is clamped to effective decode width. Because actor auto-selection is off only on Metal,
+          default routing reaches this worker only on Metal. Other default processes may keep the worker
+          active but shadowed by the actor.
         </p>
         <pre class="mt-5"><code>typed TOML / canonical startup override
   -> strict parse + source attribution
   -> backend policy + effective max decode batch
   -> immutable BatchingRuntimeConfig
-  -> optional batching actor
+  -> optional batching actor + direct-stream fallback worker
   -> live snapshot + request performance metadata</code></pre>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          <code>GET /v1/config</code> returns the configuration plus <code>actor_active</code> under
-          <code>batching</code>;
-          health repeats it at <code>decode_runtime.batching_configuration</code>, and trusted debug adds it
-          at <code>batching_engine.configuration</code>. Configured intent, backend default, effective value,
-          clamp authority, and actual actor construction remain distinct so performance evidence cannot
-          silently inherit an old shell override.
+          <code>GET /v1/config</code> returns the configuration, <code>actor_active</code>, and actual
+          <code>direct_decode_rendezvous</code> state under <code>batching</code>. Health repeats policy at
+          <code>decode_runtime.batching_configuration</code> and state at
+          <code>decode_runtime.direct_decode_rendezvous</code>; trusted debug uses
+          <code>batching_engine.configuration</code> and
+          <code>batching_engine.direct_decode_rendezvous</code>. Configured intent, backend default,
+          effective value, clamp authority, actor construction, worker liveness, and route availability
+          remain distinct so performance evidence cannot silently inherit an old shell override.
         </p>
       </article>
 

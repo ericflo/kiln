@@ -325,7 +325,7 @@
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/decode</code> &mdash; live decode tokens/sec and inter-token latency stats used by the dashboard.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history with effective thinking-budget provenance and outcomes for the dashboard's request panel.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, typed batching intent/backend/effective policy and actor activity, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective training and KV-cache policy, memory-budget partitions, and generation defaults.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, typed batching intent/backend/effective policy, actor activity, direct-rendezvous worker/route status, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective training and KV-cache policy, memory-budget partitions, and generation defaults.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest and execution-provenance record.</div>
         </div>
         <div class="endpoint mt-4">
@@ -361,9 +361,46 @@
         "effective": 4,
         "effective_source": "backend_policy"
       },
+      "direct_decode_rendezvous": {
+        "mode": {
+          "configured": "auto",
+          "configured_source": "default",
+          "backend_policy_enabled": true,
+          "effective_enabled": true,
+          "effective_source": "backend_policy"
+        },
+        "max_batch": {
+          "configured": null,
+          "configured_source": "default",
+          "backend_policy": 8,
+          "effective": 8,
+          "effective_source": "backend_policy"
+        },
+        "wait_us": {
+          "configured": null,
+          "configured_source": "default",
+          "backend_policy": 0,
+          "effective": 0,
+          "effective_source": "backend_policy"
+        },
+        "mixed_seq_lens": {
+          "configured": null,
+          "configured_source": "default",
+          "backend_policy": false,
+          "effective": false,
+          "effective_source": "backend_policy"
+        }
+      },
       "burst_prefill_admission": false
     },
-    "actor_active": true
+    "actor_active": true,
+    "direct_decode_rendezvous": {
+      "scope": "direct_streaming_greedy_only",
+      "backend_available": true,
+      "actor_active": true,
+      "worker_active": true,
+      "route_available": false
+    }
   }
 }</code></pre>
               <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
@@ -394,14 +431,39 @@
                 has no operator field. Every batching setting is startup-only and requires restart.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>configuration.direct_decode_rendezvous</code> is the immutable fallback policy.
+                Its mode is <code>auto</code>, <code>enabled</code>, or <code>disabled</code>; max batch
+                is <code>auto</code> or 1&ndash;65536 and is always clamped to effective decode width;
+                wait is <code>auto</code> or any non-negative microsecond integer; mixed sequence lengths
+                is <code>auto</code> or a boolean. All real backends auto-enable the worker. Automatic
+                <code>(max_batch, wait_us, mixed_seq_lens)</code> values are CPU <code>(8,0,false)</code>,
+                CUDA <code>(1,0,false)</code>, ROCm <code>(8,0,false)</code>, Metal
+                <code>(8,100,true)</code>, and Vulkan <code>(64,5000,true)</code>.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                The sibling <code>batching.direct_decode_rendezvous</code> is actual process state, not
+                another configuration object. It reports <code>scope</code>,
+                <code>backend_available</code>, optional <code>backend_unavailable_reason</code> (currently
+                <code>mock_backend</code>), <code>actor_active</code>, <code>worker_active</code>, and
+                <code>route_available</code>. The scope is exactly direct streaming effectively-greedy
+                requests. Sampled requests, non-streaming requests, and all actor-routed work bypass it.
+                A worker can be active while its route is unavailable because the actor is active. With
+                all defaults, only Metal has this fallback route available because actor auto-selection is
+                disabled there; explicitly disabling the actor can expose it on another real backend.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 <code>GET /health</code> repeats the same immutable object at
                 <code>decode_runtime.batching_configuration</code> beside the optional live
-                <code>batching_engine</code> snapshot. The gated trusted
+                <code>batching_engine</code> snapshot and reports fallback state at
+                <code>decode_runtime.direct_decode_rendezvous</code>. <code>GET /v1/health</code> is the
+                same response. The gated trusted
                 debug response retains <code>batching_engine.enabled</code> for actual activity and adds
-                the object at <code>batching_engine.configuration</code>. Canonical startup overrides are
+                the object at <code>batching_engine.configuration</code>, with fallback state at
+                <code>batching_engine.direct_decode_rendezvous</code>. Canonical startup overrides are
                 mechanically derived as <code>KILN_BATCHING_&lt;FIELD&gt;</code>; see the
                 <a href="docs/configuration/" class="link">complete Configuration Reference</a> for strict
-                grammar and the four deprecated aliases.
+                grammar and the eight deprecated aliases. In particular, malformed legacy
+                <code>KILN_DECODE_BATCH_WAIT_US</code> now fails startup instead of silently selecting zero.
               </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">

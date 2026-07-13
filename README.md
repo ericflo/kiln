@@ -861,6 +861,10 @@ Kiln uses a typed TOML config file. Environment overrides are resolved during st
 | `batching.rowwise_decode` | `KILN_BATCHING_ROWWISE_DECODE` | false | Emergency correctness comparison that issues one forward per ready row instead of one true batched forward. It normally reduces throughput. Restart required |
 | `batching.prefix_aware_admission` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` | true | Defer a queued same-adapter strict descendant while its active shorter prefix can become reusable; independent rows remain admissible. Restart required |
 | `batching.prefill_admission_quantum` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` | `auto` (backend policy) | Prompts admitted per actor cycle before returning to decode (`auto` or 1–65536). Auto uses effective decode width on CUDA/Vulkan and 4 on ROCm/Metal/CPU, then clamps to the effective decode width. Restart required |
+| `batching.direct_decode_rendezvous_mode` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` | `auto` (enabled on real backends) | Fallback worker for actor-absent direct streaming effectively-greedy requests only. Sampled, non-streaming, and actor-routed requests bypass it. Restart required |
+| `batching.direct_decode_rendezvous_max_batch` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | `auto` (backend policy) | Fallback cohort width (`auto` or 1–65536), always clamped to effective decode width. Auto is CUDA 1, CPU/ROCm/Metal 8, Vulkan 64. Restart required |
+| `batching.direct_decode_rendezvous_wait_us` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | `auto` (backend policy) | Non-negative collection delay in microseconds. Auto is Metal 100, Vulkan 5000, and 0 elsewhere. Malformed canonical or legacy input fails startup. Restart required |
+| `batching.direct_decode_rendezvous_mixed_seq_lens` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | `auto` (backend policy) | Allow different decode positions in one fallback cohort. Auto is true on Metal/Vulkan and false elsewhere. Restart required |
 | `server.deterministic` | `KILN_SERVER_DETERMINISTIC` | false | Serving repeatability envelope. Strict boolean parsing rejects malformed values. True freezes the process-wide determinism selector and forces effective decode width 1 even when a wider batch is configured, preventing request-cohort changes from selecting different BF16 batched-GEMM shapes at close greedy-logit boundaries. This does not by itself make every accelerator kernel bitwise deterministic |
 | `server.default_thinking_enabled` | `KILN_SERVER_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
 | `server.default_thinking_budget_tokens` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block. The environment value must be a non-negative base-10 integer or `unlimited`; malformed values stop startup |
@@ -902,15 +906,24 @@ effective decode ceilings. The effective source is one of `backend_policy`,
 an intentional reproducibility run distinguishable from an accidentally
 serialized throughput run without inspecting process environment.
 
-The batching actor has the same startup-only provenance contract. The
+Batching has the same startup-only provenance contract. The
 `batching` object from `GET /v1/config` contains `configuration` plus
-`actor_active`; health
-repeats the configuration at `decode_runtime.batching_configuration`, and the
-trusted debug response places it at `batching_engine.configuration`. The
+`actor_active` and the actual direct-fallback status at
+`direct_decode_rendezvous`; health repeats the configuration at
+`decode_runtime.batching_configuration` and fallback status at
+`decode_runtime.direct_decode_rendezvous`, while trusted debug uses
+`batching_engine.configuration` and
+`batching_engine.direct_decode_rendezvous`. The
 configuration reports mode intent, backend default, effective actor selection,
 rowwise and prefix-aware toggles, configured/backend/effective admission
-quantum, every value source, and the backend-owned burst-admission decision.
-The four deprecated pre-consolidation aliases still parse strictly and warn,
+quantum, direct-rendezvous mode/width/wait/mixed-length policy, every value
+source, and the backend-owned burst-admission decision. A worker can be active
+while `route_available=false` because actor activity shadows this fallback
+route for real chat completions. The direct route is otherwise limited to direct streaming
+effectively-greedy requests; sampled, non-streaming, and actor-routed requests
+bypass it. Under defaults, only Metal routes through the fallback because every
+real backend enables the worker but Metal alone disables the actor.
+The eight deprecated pre-consolidation aliases still parse strictly and warn,
 but new deployments should use the mechanically derived names in the table.
 
 The current deterministic serving contract is deliberately narrower than

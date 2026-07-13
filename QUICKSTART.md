@@ -1021,6 +1021,10 @@ Key settings:
 | `batching.rowwise_decode` | `KILN_BATCHING_ROWWISE_DECODE` | false | Emergency correctness comparison that replaces a true multi-row forward with one forward per row and normally lowers throughput |
 | `batching.prefix_aware_admission` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` | true | Lets a shorter active same-adapter prompt become a reusable strict prefix before admitting its queued descendant; unrelated rows still proceed |
 | `batching.prefill_admission_quantum` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` | `auto` | Prompt admissions per actor cycle (`auto` or 1–65536). Auto uses effective decode width on CUDA/Vulkan and 4 on ROCm/Metal/CPU, then clamps to the effective decode width |
+| `batching.direct_decode_rendezvous_mode` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` | `auto` | Enable, disable, or delegate the fallback worker for actor-absent direct streaming effectively-greedy requests; auto enables it on every real backend |
+| `batching.direct_decode_rendezvous_max_batch` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | `auto` | Fallback rows per rendezvous (`auto` or 1–65536), clamped to effective decode width; auto is 1 CUDA, 8 CPU/ROCm/Metal, 64 Vulkan |
+| `batching.direct_decode_rendezvous_wait_us` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | `auto` | Collection delay in microseconds (`auto` or non-negative integer); auto is 100 Metal, 5000 Vulkan, 0 elsewhere |
+| `batching.direct_decode_rendezvous_mixed_seq_lens` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | `auto` | Whether a fallback cohort can mix decode positions (`auto` or boolean); auto is true on Metal/Vulkan and false elsewhere |
 | `server.deterministic` | `KILN_SERVER_DETERMINISTIC` | false | Strict serving-repeatability mode; freezes the process-wide determinism selector and forces effective decode width 1. It does not make every accelerator kernel bitwise deterministic |
 | `server.default_thinking_budget_tokens` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default token budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
 | `server.default_thinking_budget_ms` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
@@ -1032,7 +1036,7 @@ Key settings:
 | `request_log.enabled` | `KILN_REQUEST_LOG_ENABLED` | true | Durable JSONL log of every inference request/response (the mine→train corpus) |
 | `request_log.dir` | `KILN_REQUEST_LOG_DIR` | `<adapter_dir>/.requests` | Request log directory (size-rotated, gzipped, retention-capped) |
 
-All four batching values are immutable startup policy. Validate them with
+All eight batching values are immutable startup policy. Validate them with
 `kiln config --file kiln.toml`, restart the server, then inspect the resolved
 contract with:
 
@@ -1040,13 +1044,18 @@ contract with:
 curl -s http://localhost:8420/v1/config \
   | jq '.batching'
 curl -s http://localhost:8420/health \
-  | jq '.decode_runtime.batching_configuration, .decode_runtime.batching_engine'
+  | jq '.decode_runtime.batching_configuration, .decode_runtime.batching_engine, .decode_runtime.direct_decode_rendezvous'
 ```
 
-The `batching.configuration` response path preserves configured intent and source separately
-from backend policy and the effective result; `batching.actor_active` says
-whether the actor actually exists. The complete field grammar, deprecated
-aliases, backend matrix, quantum-clamp rules, and debug shape are in the
+The `batching.configuration` response path preserves configured intent and
+source separately from backend policy and the effective result;
+`batching.actor_active` says whether the actor actually exists. Its nested
+`direct_decode_rendezvous` object is immutable policy, while the sibling object
+reports `scope`, backend/actor/worker state, and `route_available`. A worker may
+be active but unroutable while the actor is active. The route applies only to
+actor-absent direct streaming effectively-greedy requests; sampled,
+non-streaming, and actor-routed work bypasses it. The complete strict grammar,
+deprecated aliases, backend matrices, decode-width clamps, and debug shape are in the
 [Configuration Reference](docs/CONFIGURATION.md).
 
 ## Running with Docker

@@ -52,23 +52,45 @@ and attests these exact runtime targets before measurement:
 ```text
 GET /v1/config -> .batching.configuration
 GET /v1/config -> .batching.actor_active
+GET /v1/config -> .batching.direct_decode_rendezvous
 GET /health -> .decode_runtime.batching_configuration
 GET /health -> .decode_runtime.batching_engine
+GET /health -> .decode_runtime.direct_decode_rendezvous
 ```
 
-The first and third objects must be equal. `actor_active` and the live health
-snapshot must agree about whether an actor exists. The attestation records mode
+The immutable objects at `/v1/config`
+`.batching.configuration` and `/health`
+`.decode_runtime.batching_configuration` must be equal. The two actual
+direct-rendezvous objects at `/v1/config`
+`.batching.direct_decode_rendezvous` and `/health`
+`.decode_runtime.direct_decode_rendezvous` must also be equal. `actor_active`
+must agree with whether the optional live health `batching_engine` snapshot is
+present and enabled; the snapshot is not itself equal to that boolean. The
+attestation records mode
 intent, backend default, effective selection and source; rowwise and
 prefix-aware values and sources; admission quantum intent, backend default,
 effective clamp and source; and backend-owned burst admission. A malformed
 value, a canonical/deprecated-alias conflict, an unexpected source, or a
-missing actor in an actor-required variant fails before device work.
+missing actor in an actor-required variant fails before device work. The direct
+rendezvous policy within `batching.configuration` records configured,
+backend-policy, effective, and source values for mode, max batch, wait
+microseconds, and mixed sequence lengths. Its sibling status object records the
+exact scope plus backend, actor, worker, and route availability. A worker may be
+active while the route is unavailable because the actor is active.
 
 Use only canonical mechanically derived names in new workload manifests:
 `KILN_BATCHING_MODE`, `KILN_BATCHING_ROWWISE_DECODE`,
 `KILN_BATCHING_PREFIX_AWARE_ADMISSION`, and
-`KILN_BATCHING_PREFILL_ADMISSION_QUANTUM`. The four historical spellings are
-compatibility inputs for existing deployments, not qualification vocabulary.
+`KILN_BATCHING_PREFILL_ADMISSION_QUANTUM`, plus
+`KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE`,
+`KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH`,
+`KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US`, and
+`KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS`. The eight historical
+spellings are compatibility inputs for existing deployments, not qualification
+vocabulary. A direct-rendezvous variant must disable the actor, restart, prove
+`scope="direct_streaming_greedy_only"` and `route_available=true`, and send only
+streaming effectively-greedy requests. Actor, sampled, and non-streaming runs
+cannot qualify this fallback path.
 
 ## Refresh The GRPO Reference Oracle
 

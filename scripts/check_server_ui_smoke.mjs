@@ -129,6 +129,34 @@ function checkRuntimeConfigSchemaContract(source) {
     'prefillAdmissionQuantum.effective',
     'prefillAdmissionQuantum.effective_source',
     'batchingConfiguration.burst_prefill_admission',
+    'batchingConfiguration.direct_decode_rendezvous',
+    'directRendezvousMode.configured',
+    'directRendezvousMode.configured_source',
+    'directRendezvousMode.backend_policy_enabled',
+    'directRendezvousMode.effective_enabled',
+    'directRendezvousMode.effective_source',
+    'directRendezvousMaxBatch.configured',
+    'directRendezvousMaxBatch.configured_source',
+    'directRendezvousMaxBatch.backend_policy',
+    'directRendezvousMaxBatch.effective',
+    'directRendezvousMaxBatch.effective_source',
+    'directRendezvousWaitUs.configured',
+    'directRendezvousWaitUs.configured_source',
+    'directRendezvousWaitUs.backend_policy',
+    'directRendezvousWaitUs.effective',
+    'directRendezvousWaitUs.effective_source',
+    'directRendezvousMixedSeqLens.configured',
+    'directRendezvousMixedSeqLens.configured_source',
+    'directRendezvousMixedSeqLens.backend_policy',
+    'directRendezvousMixedSeqLens.effective',
+    'directRendezvousMixedSeqLens.effective_source',
+    'batching.direct_decode_rendezvous',
+    'directRendezvousRuntime.scope',
+    'directRendezvousRuntime.backend_available',
+    'directRendezvousRuntime.backend_unavailable_reason',
+    'directRendezvousRuntime.actor_active',
+    'directRendezvousRuntime.worker_active',
+    'directRendezvousRuntime.route_available',
   ]) {
     if (!renderer.includes(field)) fail(`Runtime-config renderer does not consume ${field}`);
   }
@@ -141,6 +169,98 @@ function checkRuntimeConfigSchemaContract(source) {
     'KILN_GRAD_CHECKPOINT_SEGMENTS',
   ]) {
     if (renderer.includes(stale)) fail(`Runtime-config renderer still depends on stale contract wording ${stale}`);
+  }
+
+  // The direct-rendezvous fields were added after the original runtime-config
+  // response. Older servers and partial diagnostic payloads must keep the
+  // dashboard usable while rendering unknown values, never throw during the
+  // first paint or leak JavaScript's `undefined` into operator-facing text.
+  const context = vm.createContext({
+    escapeHtml: (value) => String(value),
+    runtimeConfigRow: (label, valueHtml) => `${label}:${valueHtml}`,
+    isFinite,
+  });
+  vm.runInContext(`${renderer}\nthis.renderRuntimeConfigBody = renderRuntimeConfigBody;`, context);
+  for (const [label, config] of [
+    ['missing response fields', {}],
+    ['pre-rendezvous batching response', {
+      batching: {
+        configuration: {
+          mode: {
+            configured: 'auto',
+            configured_source: 'default',
+            backend_policy_enabled: true,
+            effective_enabled: true,
+            effective_source: 'backend_policy',
+          },
+        },
+        actor_active: true,
+      },
+    }],
+    ['automatic unavailable fallback response', {
+      batching: {
+        configuration: {
+          direct_decode_rendezvous: {
+            mode: {
+              configured: 'auto',
+              configured_source: 'default',
+              backend_policy_enabled: false,
+              effective_enabled: false,
+              effective_source: 'backend_policy',
+            },
+            max_batch: {
+              configured: null,
+              configured_source: 'default',
+              backend_policy: 1,
+              effective: 1,
+              effective_source: 'backend_policy',
+            },
+            wait_us: {
+              configured: null,
+              configured_source: 'default',
+              backend_policy: 0,
+              effective: 0,
+              effective_source: 'backend_policy',
+            },
+            mixed_seq_lens: {
+              configured: null,
+              configured_source: 'default',
+              backend_policy: false,
+              effective: false,
+              effective_source: 'backend_policy',
+            },
+          },
+        },
+        actor_active: false,
+        direct_decode_rendezvous: {
+          scope: 'direct_streaming_greedy_only',
+          backend_available: false,
+          backend_unavailable_reason: 'mock_backend',
+          actor_active: false,
+          worker_active: false,
+          route_available: false,
+        },
+      },
+    }],
+  ]) {
+    let html;
+    try {
+      html = context.renderRuntimeConfigBody(config);
+    } catch (error) {
+      fail(`Runtime-config renderer crashed for ${label}: ${error.message}`);
+    }
+    if (/undefined/.test(html)) fail(`Runtime-config renderer exposed undefined for ${label}`);
+    if (!/Direct-stream greedy fallback/.test(html)) {
+      fail(`Runtime-config renderer omitted the fallback scope for ${label}`);
+    }
+    if (label === 'automatic unavailable fallback response') {
+      if ((html.match(/<strong>auto<\/strong>/g) || []).length < 3) {
+        fail('Runtime-config renderer should display null fallback values as auto');
+      }
+      if (!/mock_backend/.test(html)) {
+        fail('Runtime-config renderer should display the backend unavailable reason');
+      }
+    }
   }
 }
 
@@ -1030,9 +1150,46 @@ async function startServer({
               effective: 16,
               effective_source: 'effective_decode_width',
             },
+            direct_decode_rendezvous: {
+              mode: {
+                configured: 'enabled',
+                configured_source: 'environment',
+                backend_policy_enabled: true,
+                effective_enabled: true,
+                effective_source: 'environment',
+              },
+              max_batch: {
+                configured: 32,
+                configured_source: 'config_file',
+                backend_policy: 64,
+                effective: 16,
+                effective_source: 'effective_decode_width',
+              },
+              wait_us: {
+                configured: null,
+                configured_source: 'default',
+                backend_policy: 5_000,
+                effective: 5_000,
+                effective_source: 'backend_policy',
+              },
+              mixed_seq_lens: {
+                configured: false,
+                configured_source: 'config_file',
+                backend_policy: true,
+                effective: false,
+                effective_source: 'config_file',
+              },
+            },
             burst_prefill_admission: true,
           },
           actor_active: true,
+          direct_decode_rendezvous: {
+            scope: 'direct_streaming_greedy_only',
+            backend_available: true,
+            actor_active: true,
+            worker_active: true,
+            route_available: false,
+          },
         },
         training: {
           runtime_device: 'vulkan:0',
@@ -1903,6 +2060,28 @@ async function waitForPanelText(page, selector, pattern, message) {
   ).catch(() => fail(`${message}: ${selector} did not render text matching ${pattern}`));
 }
 
+async function expectDirectDecodeRendezvousRuntimeConfig(page, scenarioLabel) {
+  const prefix = `${scenarioLabel} runtime config`;
+  const selector = '#runtime-config-body';
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Scope[\s\S]*direct streaming greedy only/, `${prefix} should identify the fallback's narrow scope`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Backend[\s\S]*available/, `${prefix} should render backend availability`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Primary actor gate[\s\S]*active/, `${prefix} should render the primary actor state used by fallback routing`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Worker[\s\S]*active/, `${prefix} should render fallback worker activity`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Route[\s\S]*unavailable[\s\S]*shadowed by primary actor/, `${prefix} should distinguish a shadowed worker from an available route`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mode configured[\s\S]*enabled[\s\S]*environment/, `${prefix} should render configured fallback mode and source`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mode backend[\s\S]*on[\s\S]*backend_policy/, `${prefix} should render backend fallback mode and source`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mode effective[\s\S]*on[\s\S]*environment/, `${prefix} should render effective fallback mode and source`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Max batch configured[\s\S]*32[\s\S]*config_file/, `${prefix} should render configured fallback width and source`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Max batch backend[\s\S]*64[\s\S]*backend_policy/, `${prefix} should render backend fallback width and source`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Max batch effective[\s\S]*16[\s\S]*effective_decode_width/, `${prefix} should render bounded fallback width and source`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Wait configured[\s\S]*auto[\s\S]*default/, `${prefix} should render automatic fallback wait and source`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Wait backend[\s\S]*5,000 us[\s\S]*backend_policy/, `${prefix} should render backend fallback wait and source`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Wait effective[\s\S]*5,000 us[\s\S]*backend_policy/, `${prefix} should render effective fallback wait and source`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mixed lengths configured[\s\S]*off[\s\S]*config_file/, `${prefix} should render configured mixed-length policy and source`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mixed lengths backend[\s\S]*on[\s\S]*backend_policy/, `${prefix} should render backend mixed-length policy and source`);
+  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mixed lengths effective[\s\S]*off[\s\S]*config_file/, `${prefix} should render effective mixed-length policy and source`);
+}
+
 async function expectActiveTrainingTab(page, tabName, message) {
   await page.waitForFunction(
     (name) => {
@@ -2320,6 +2499,10 @@ async function runMobileOnboardingSmoke(baseUrl) {
     await expectHeaderHelpLinks(page, { visible: true });
     await expectNoForbiddenPublicityCopy(page, 'Mobile server dashboard');
     await expectMobilePanelFlow(page);
+    await goToPrimaryTab(page, 'overview');
+    await clickAndWait(page, '#runtime-config > summary', 'Could not open the runtime config expander on mobile');
+    await expectDirectDecodeRendezvousRuntimeConfig(page, 'Mobile');
+    await expectNoMobileOverflow(page);
     await goToPrimaryTab(page, 'training');
     // The desktop pass earlier submitted jobs on this same server, so the
     // empty-queue→SFT landing (asserted there) doesn't apply here. Make the
@@ -2403,6 +2586,8 @@ async function runModelColdStartSmoke(baseUrl, { setModelsCold, getModelsRequest
     const coldSnippets = await page.$eval('#connect-snippets', (el) => el.textContent || '');
     if (!coldSnippets.includes('Qwen3.5-4B')) fail('Connect snippets should render the fallback model id during cold start');
     if (coldSnippets.includes('Qwen3.5-4B-resolved')) fail('Connect snippets must not know the real model id before /v1/models answers');
+    await clickAndWait(page, '#runtime-config > summary', 'Could not open the runtime config expander during model cold start');
+    await expectDirectDecodeRendezvousRuntimeConfig(page, 'Cold-start');
 
     // Heal. The piggybacked retry on the 2s health poll must upgrade the
     // copyable model-id field and the rendered snippets without a reload.
@@ -2522,6 +2707,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
         await page.click('#runtime-config [data-rc-refresh]')
           .catch(() => fail('Could not click the runtime config Retry button after the APIs healed'));
         await waitForPanelText(page, '#runtime-config-body', /linux-drm-sysfs-unified/, 'Runtime config did not recover after Retry');
+        await expectDirectDecodeRendezvousRuntimeConfig(page, 'Recovered failure');
         await recoverPanel('#decode-perf-panel', /No streaming completions/i, 'Decode panel did not recover after the APIs healed');
         await recoverPanel('#recent-requests-panel', /No recent requests yet\./, 'Recent requests did not recover after the APIs healed');
         await goToPrimaryTab(page, 'training');
@@ -3237,13 +3423,14 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#runtime-config-body', /Reclaim[\s\S]*off[\s\S]*requested automatic/, 'Runtime config should distinguish effective reclaim from a profile-constrained request');
     await waitForPanelText(page, '#runtime-config-body', /1,024/, 'Runtime config should render the KV cache block count');
     await waitForPanelText(page, '#runtime-config-body', /FP8 cache/, 'Runtime config should render the fp8 cache mode');
-    await waitForPanelText(page, '#runtime-config-body', /Actor[\s\S]*active/, 'Runtime config should render batching actor activity');
+    await waitForPanelText(page, '#runtime-config-body', /Primary actor[\s\S]*active/, 'Runtime config should render primary batching actor activity');
     await waitForPanelText(page, '#runtime-config-body', /Mode configured[\s\S]*auto[\s\S]*default/, 'Runtime config should render configured batching mode and source');
     await waitForPanelText(page, '#runtime-config-body', /Mode effective[\s\S]*on[\s\S]*backend_policy/, 'Runtime config should render effective batching mode and source');
     await waitForPanelText(page, '#runtime-config-body', /Prefix admission[\s\S]*on[\s\S]*environment/, 'Runtime config should render prefix-aware admission and source');
     await waitForPanelText(page, '#runtime-config-body', /Prefill configured[\s\S]*32[\s\S]*config_file/, 'Runtime config should render configured prefill admission quantum and source');
     await waitForPanelText(page, '#runtime-config-body', /Prefill effective[\s\S]*16[\s\S]*effective_decode_width/, 'Runtime config should render bounded effective prefill quantum and source');
     await waitForPanelText(page, '#runtime-config-body', /Burst prefill[\s\S]*on/, 'Runtime config should render backend burst-prefill policy');
+    await expectDirectDecodeRendezvousRuntimeConfig(page, 'Desktop');
     await waitForPanelText(page, '#runtime-config-body', /Runtime device[\s\S]*vulkan:0/, 'Runtime config should render the native-training runtime device');
     await waitForPanelText(page, '#runtime-config-body', /Weight device[\s\S]*cpu/, 'Runtime config should render the frozen model-weight device');
     await waitForPanelText(page, '#runtime-config-body', /Native training[\s\S]*unavailable/, 'Runtime config should render fail-closed native-training support');
@@ -3253,9 +3440,11 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await clickAndWait(page, '#runtime-config [data-rc-raw]', 'Could not toggle the runtime config raw JSON');
     const configRawShown = await page.$eval(
       '#runtime-config [data-rc-raw-pre]',
-      (el) => !el.hidden && /"memory_budget"/.test(el.textContent || ''),
+      (el) => !el.hidden
+        && /"memory_budget"/.test(el.textContent || '')
+        && /"direct_decode_rendezvous"/.test(el.textContent || ''),
     );
-    if (!configRawShown) fail('Runtime config raw JSON toggle should reveal the pretty-printed /v1/config payload');
+    if (!configRawShown) fail('Runtime config raw JSON toggle should reveal the pretty-printed /v1/config payload including direct rendezvous state');
 
     // Regression (the "pie chart disappears" bug): the VRAM donut and header
     // stats must survive subsequent 2s health polls. The donut used to render

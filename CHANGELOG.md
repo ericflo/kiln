@@ -33,10 +33,20 @@
 - typed batching configuration: `[batching]` now owns actor selection, true
   batched versus rowwise decode, strict-prefix-aware admission, and the prompt
   admission quantum. Canonical overrides derive mechanically as
-  `KILN_BATCHING_<FIELD>`; the four older actor spellings remain strict,
+  `KILN_BATCHING_<FIELD>`; the four older primary-actor spellings remain strict,
   warning compatibility aliases. Values resolve once after backend and
   effective decode-width selection, require restart, and are injected into the
   actor without production runtime environment rereads.
+- direct decode rendezvous configuration: the actor-absent direct streaming
+  effectively-greedy compatibility worker now consumes four additional typed
+  `[batching]` startup fields for mode, maximum batch, wait microseconds, and
+  mixed sequence lengths. Canonical names derive as
+  `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_<FIELD>`; the four old
+  `KILN_DECODE_BATCH*` names are strict warning aliases. Conflicts and malformed
+  values fail startup, including malformed legacy wait values that previously
+  became zero. Backend defaults remain CPU `(8,0,false)`, CUDA `(1,0,false)`,
+  ROCm `(8,0,false)`, Metal `(8,100,true)`, and Vulkan `(64,5000,true)`, with
+  every auto mode enabled and maximum batch clamped to effective decode width.
 - batching diagnostics: `/v1/config.batching` separates immutable configured
   intent, value provenance, backend defaults, effective actor selection,
   decode-width quantum clamping, and `actor_active`. Health repeats the same
@@ -45,6 +55,13 @@
   automatic admission, ROCm/Metal/CPU preserve the latency-oriented quantum of
   four, CUDA preserves backend-owned burst admission, and all are constrained
   by the final effective decode width.
+- direct rendezvous diagnostics: immutable configured/backend/effective policy
+  is at `batching.configuration.direct_decode_rendezvous`; sibling status at
+  `batching.direct_decode_rendezvous` reports the exact scope, backend
+  availability/reason, actor activity, worker activity, and route availability.
+  Health and trusted debug expose the same facts. A worker may be active while
+  unroutable because the actor is active; sampled, non-streaming, and
+  actor-routed requests bypass this narrow fallback.
 - speculative serving: all speculative request and Desktop routes are now
   fail-closed pending local accelerator qualification. `kiln config` and
   startup reject every effective non-off policy before model loading,

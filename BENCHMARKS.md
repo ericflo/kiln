@@ -56,6 +56,10 @@ mode = "enabled"
 rowwise_decode = false
 prefix_aware_admission = true
 prefill_admission_quantum = "auto"
+direct_decode_rendezvous_mode = "auto"
+direct_decode_rendezvous_max_batch = "auto"
+direct_decode_rendezvous_wait_us = "auto"
+direct_decode_rendezvous_mixed_seq_lens = "auto"
 ```
 
 After every restart, capture the exact target before sending measured traffic:
@@ -75,6 +79,18 @@ request: deterministic mode, the combined token budget, or a narrower decode
 ceiling can lower the width and admission quantum. A deliberate actor-off,
 rowwise, prefix-aware, or explicit-quantum A/B must use a distinct run ID and
 state that intervention in the receipt notes.
+
+The direct rendezvous settings do not tune an actor-backed throughput run. The
+worker can be active in that process, but
+`batching.direct_decode_rendezvous.route_available` must be false while
+`actor_active=true`. Only an actor-disabled, streaming, effectively-greedy
+request can use that route; sampled, non-streaming, and other direct work bypass
+it. A fallback-specific A/B must therefore disable the actor, restart, require
+`route_available=true`, and record the nested configured/backend/effective
+mode, maximum batch, wait, and mixed-sequence values. Do not infer routing from
+`worker_active` alone. Backend `auto` tuples are CPU `(8,0,false)`, CUDA
+`(1,0,false)`, ROCm `(8,0,false)`, Metal `(8,100,true)`, and Vulkan
+`(64,5000,true)`, with maximum batch clamped to effective decode width.
 
 ```bash
 RUN_ID=qwen35-4b-greedy-short-20260710

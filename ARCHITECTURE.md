@@ -861,6 +861,10 @@ tool-call rendering.
 | `KILN_BATCHING_ROWWISE_DECODE` | Strict boolean emergency rowwise comparison |
 | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` | Strict boolean strict-prefix admission policy |
 | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` | `auto` or 1–65536 prompt admissions per actor cycle |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` | `auto`, `enabled`, or `disabled` fallback direct-stream worker |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | `auto` or 1–65536 fallback rows, clamped to effective decode width |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | `auto` or non-negative collection delay in microseconds |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | `auto` or strict boolean mixed-position fallback cohorts |
 | `KILN_MEMORY_GPU_MEMORY_GB` | Override GPU VRAM detection |
 | `KILN_MEMORY_NUM_BLOCKS` | Override KV cache block count |
 | `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS` | Override gradient checkpoint segments |
@@ -869,21 +873,38 @@ tool-call rendering.
 | `KILN_LOGGING_FORMAT` | Override log format (`json` or `pretty`) |
 
 The canonical startup override rule is mechanical:
-`KILN_<SECTION>_<FIELD>`. The four older batching-actor spellings are deprecated
+`KILN_<SECTION>_<FIELD>`. The eight older batching spellings are deprecated
 compatibility aliases, warn at startup, and cannot disagree with their
 canonical counterpart. Startup resolves one immutable
 `BatchingRuntimeConfig`. The state boundary uses its mode to construct the
 actor, the decode-forward boundary applies its rowwise selector, and the actor
 receives only the projected admission policy it owns. None of those production
-paths rereads the process variables. `auto` enables the actor on CUDA, ROCm,
+paths rereads the process variables. The same resolved object constructs the
+fallback direct-stream rendezvous worker without an environment reread. `auto`
+enables the actor on CUDA, ROCm,
 Vulkan, and CPU but disables it on Metal. CUDA/Vulkan use effective decode
 width as the automatic admission quantum; ROCm/Metal/CPU use 4, clamped to that
 effective width. CUDA alone uses backend-owned burst admission.
 
+The fallback worker's separate `auto` policy is enabled on every real backend.
+Its `(max_batch, wait_us, mixed_seq_lens)` defaults are CPU `(8, 0, false)`,
+CUDA `(1, 0, false)`, ROCm `(8, 0, false)`, Metal `(8, 100, true)`, and Vulkan
+`(64, 5000, true)`; width is then clamped to effective decode width. It is a
+narrow compatibility route, not the production scheduling abstraction. Only
+direct streaming effectively-greedy requests can submit to it, and only when
+the batching actor is absent. Sampled, non-streaming, and actor-routed requests
+bypass it. The worker is constructed independently, so it can be active but
+unroutable while the actor is active.
+
 Runtime observability preserves intent separately from execution:
-`GET /v1/config` returns `configuration` and `actor_active` under `batching`,
-health returns the same policy at `decode_runtime.batching_configuration`, and
-trusted debug adds it at `batching_engine.configuration`. See
+`GET /v1/config` returns `configuration`, `actor_active`, and actual fallback
+state under `batching`; health returns the same policy at
+`decode_runtime.batching_configuration` and fallback state at
+`decode_runtime.direct_decode_rendezvous`; trusted debug uses
+`batching_engine.configuration` and
+`batching_engine.direct_decode_rendezvous`. The actual state distinguishes
+backend availability, actor activity, worker activity, and route availability.
+See
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for the complete schema,
 validation, provenance, restart, and compatibility contract.
 

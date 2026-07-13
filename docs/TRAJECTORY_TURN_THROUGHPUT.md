@@ -26,6 +26,10 @@ mode = "enabled"
 rowwise_decode = false
 prefix_aware_admission = true
 prefill_admission_quantum = "auto"
+direct_decode_rendezvous_mode = "auto"
+direct_decode_rendezvous_max_batch = "auto"
+direct_decode_rendezvous_wait_us = "auto"
+direct_decode_rendezvous_mixed_seq_lens = "auto"
 
 [prefix_cache]
 enabled = true
@@ -57,6 +61,10 @@ admission quantum is backend-owned: it is the effective decode width on CUDA
 and Vulkan, and 4 on ROCm, Metal, and CPU, always clamped to that effective
 width. The response records the exact backend, configured, effective, clamp,
 and source values so two runs cannot silently compare different policies.
+The captured direct-rendezvous worker may be active, but this actor-backed
+trajectory run requires its sibling `route_available=false`. That fallback is
+only for actor-absent direct streaming effectively-greedy work; it is not part
+of this benchmark path.
 
 ## Benchmark
 
@@ -102,5 +110,5 @@ For an A/B run, create a second TOML file whose only change is
 command using the same turn selection, adapter, `max_tokens`, and batch
 settings. Capture `/v1/config.batching` after each restart and keep it with the
 corresponding report. Do not toggle the deprecated
-`KILN_BATCH_PREFIX_AWARE_ADMISSION` alias between live requests; batching
-configuration is immutable for the process lifetime.
+`KILN_BATCH_PREFIX_AWARE_ADMISSION` alias between live requests; all eight
+batching values are immutable for the process lifetime.

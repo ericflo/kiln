@@ -131,6 +131,19 @@ prefill_admission_quantum = "auto"    # Number of queued prompts admitted per ac
                                       # KILN_BATCHING_PREFILL_ADMISSION_QUANTUM.
                                       # /v1/config batching.configuration reports configured,
                                       # backend-policy, effective, source, and actor-active state.
+direct_decode_rendezvous_mode = "auto" # Fallback worker for actor-absent direct streaming effectively-greedy
+                                      # requests only. Auto enables the worker on every real backend.
+                                      # It is not used by sampled, non-streaming, or actor-routed work.
+                                      # Override strictly with
+                                      # KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE.
+direct_decode_rendezvous_max_batch = "auto" # auto or 1..=65536 rows, then clamped to the
+                                      # effective max_decode_batch. Backend auto values are CUDA 1,
+                                      # CPU/ROCm/Metal 8, and Vulkan 64.
+direct_decode_rendezvous_wait_us = "auto" # auto or any non-negative integer microsecond delay.
+                                      # Auto is 100 on Metal, 5000 on Vulkan, and 0 elsewhere.
+direct_decode_rendezvous_mixed_seq_lens = "auto" # auto or native TOML boolean. Auto is true on
+                                      # Metal/Vulkan and false on CPU/CUDA/ROCm. All four direct
+                                      # rendezvous controls are startup-only and require restart.
 
 [model]
 # path = "/path/to/model"            # Required for real inference (omit for mock mode)
