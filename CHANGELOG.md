@@ -29,9 +29,10 @@
   integral policy shared by SFT memory admission and execution, eliminating
   trainer/preflight parsing drift and runtime environment rereads. GRPO and OPD
   do not execute the SFT sparse-boundary route, but every mode records the
-  policy in training checkpoint planning identity v3; policy or v2/v3 schema
-  drift rejects exact resume. `/v1/config`, health, trusted debug, and the
-  dashboard expose the same runtime policy.
+  policy in training checkpoint planning identity. GRPO and OPD remain v3;
+  SFT extends the object to v4 with its pinned backend loss route. Policy or
+  schema drift rejects exact resume. `/v1/config`, health, trusted debug, and
+  the dashboard expose the same checkpoint-boundary policy.
 - training cleanup: removed `KILN_EXACT_GDN_TILE_BACKWARD` and
   `KILN_EXACT_GDN_BACKWARD_TILE_TOKENS`. Their selector had no production
   caller after the tiled-reverse implementation was removed, so the variables
@@ -47,12 +48,20 @@
   are removed.
 - SFT loss authority and admission: removed the process-global
   `KILN_USE_FLCE` route override. SFT now consumes the selected backend's typed
-  loss route for every step, and admission carries that same route together
-  with the active-token and checkpoint-boundary estimates. Route-specific
-  upper bounds charge CUDA/ROCm F32 head promotion, Vulkan's maximum legal
-  chunk workspace, or full-logits CE forward/backward residency. Full-logits
-  checkpoint plans are rejected before queue publication and again before any
-  trainer forward because checkpoint tails do not run inside an active tape.
+  loss route for every step. There is no replacement TOML/request field,
+  derived environment name, or compatibility alias. Admission pins that route
+  together with the active-token and checkpoint-boundary estimates. The queue
+  revalidates it against the resident runner before memory reservation, and the
+  trainer revalidates it against its execution backend before allocation.
+  Route-specific upper bounds charge CUDA/ROCm F32 head promotion, Vulkan's
+  maximum legal chunk workspace, or full-logits CE forward/backward residency.
+  Full-logits checkpoint plans are rejected before queue publication and again
+  before any trainer forward because checkpoint tails do not run inside an
+  active tape.
+  HTTP 413 details identify the selected loss workspace; new SFT receipts
+  record `runtime.sft_loss_route`, and exact SFT checkpoints bind the route in
+  planning identity v4. The obsolete Phase A validation example and live
+  script override are removed.
 
 - inference: chat, streaming chat, multi-choice chat, and batch generation now
   accept `thinking_budget_tokens` and `thinking_budget_ms`. Kiln closes an open

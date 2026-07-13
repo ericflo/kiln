@@ -403,6 +403,40 @@ typed PCI-address or UUID identity.
 Training GPU work is also governed by `server.serving_profile`; the default
 `stable` profile does not grant training GPU ownership.
 
+### Backend-owned SFT loss route is not configuration
+
+There is intentionally no `[training]` field for the native SFT loss route.
+The resident backend reports one typed capability: CUDA and ROCm report
+`kt_tape_flce`, Vulkan reports `vulkan_active_rows`, and Metal reports
+`full_logits`. These values are capability and artifact names, not accepted
+TOML enums, request fields, CLI flags, or `/v1/config` controls. Because no
+configuration field exists, the mechanical naming rule does not produce an
+environment variable for this choice.
+
+The old `KILN_USE_FLCE` input has been removed. It is not a deprecated alias,
+the typed loader does not consume it, and setting it has no effect on current
+SFT loss selection. Operators should remove it from service definitions rather
+than translating it to a new name. Backend loss routing is not an A/B switch.
+
+SFT admission resolves the route from the resident model runner and applies a
+route-specific, saturating memory upper bound. CUDA/ROCm account for kt-tape
+FLCE buffers and any F32 head promotion; Vulkan accounts for its maximum legal
+active-row chunk and F32 workspace; `full_logits` accounts for dense `[T, V]`
+logits and cross-entropy forward/backward residency. Overflow saturates toward
+rejection. An over-budget request returns HTTP 413 with estimated and available
+capacity and a breakdown containing `loss workspace ... (route=<route>)`.
+
+The admitted enum is stored with the queued SFT job. The worker revalidates it
+against the resident runner before memory reservation or reclamation, and the
+trainer revalidates it against its execution backend before resident or
+trainable allocations. The pinned value drives each forward/backward step,
+appears in new SFT receipts as `runtime.sft_loss_route`, and participates in
+the SFT exact-resume planning identity. `full_logits` is not compatible with a
+multi-segment checkpoint plan; that combination returns
+`training_invalid_request` before queue publication and is checked again by the
+trainer. These are immutable execution contracts, not omitted configuration
+knobs.
+
 ### SFT checkpoint-boundary policy
 
 These four fields control activation boundaries inside gradient-checkpointed
@@ -433,10 +467,13 @@ queued and running jobs retain the policy installed at startup.
 Sparse checkpoint-boundary replay is currently SFT-only. Native GRPO and OPD
 retain all `num_segments + 1` boundaries and do not use these fields to choose
 their live boundary layout. The common training runtime still records the
-resolved policy in exact-resume planning identity for SFT, GRPO, and OPD under
-`kiln.training-checkpoint-planning.v3`. A changed value, including one that is
-execution-inert for GRPO or OPD today, is therefore exact-resume drift. See
-[Native Training Checkpoints](training-checkpoints.md#checkpoint-planning-identity).
+resolved policy in exact-resume planning identity. GRPO and OPD use
+`kiln.training-checkpoint-planning.v3`. SFT extends the same object to v4 with
+its pinned backend loss route. A changed boundary value, including one that is
+execution-inert for GRPO or OPD today, is therefore exact-resume drift. An SFT
+v3 identity also cannot authorize continuation under v4 because it cannot
+prove the admitted loss implementation. See [Native Training
+Checkpoints](training-checkpoints.md#checkpoint-planning-identity).
 
 The resolved object has this stable JSON shape:
 

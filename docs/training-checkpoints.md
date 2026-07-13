@@ -141,10 +141,9 @@ evidence sources.
 ## Checkpoint planning identity
 
 Every exact SFT, GRPO, and OPD checkpoint binds the immutable
-`TrainingRuntimeContext` used to plan the run. The nested planning object uses
-schema `kiln.training-checkpoint-planning.v3` and records effective VRAM,
-gradient-checkpoint policy, runtime device, resolved streaming-prefill policy,
-and this complete checkpoint-boundary policy:
+`TrainingRuntimeContext` used to plan the run. Every planning identity records
+effective VRAM, gradient-checkpoint policy, runtime device, resolved
+streaming-prefill policy, and this complete checkpoint-boundary policy:
 
 ```json
 {
@@ -155,18 +154,43 @@ and this complete checkpoint-boundary policy:
 }
 ```
 
-SFT and GRPO store the object under
-`auxiliary_state.training_runtime_planning_identity`; OPD retains the same
-object under its existing `auxiliary_state.checkpoint_planning` key. Exact
-resume compares the complete auxiliary state rather than silently adopting the
-new process policy. A checkpoint whose nested object is schema v2, lacks the
-boundary policy, or contains any different mode, threshold, stride, or cache
-target is rejected as planning drift before continuation.
+GRPO and OPD use schema `kiln.training-checkpoint-planning.v3`. SFT uses
+`kiln.training-checkpoint-planning.v4`, which adds the backend-owned loss route:
+
+```json
+{
+  "schema": "kiln.training-checkpoint-planning.v4",
+  "sft_loss_route": "kt_tape_flce",
+  "checkpoint_boundary_policy": {
+    "recompute_mode": "auto",
+    "recompute_threshold_tokens": 8192,
+    "anchor_stride": null,
+    "cache_target_bytes": 6442450944
+  }
+}
+```
+
+The other current route values are `vulkan_active_rows` and `full_logits`.
+The enum comes from the admitted backend capability, not checkpoint JSON,
+request input, TOML, CLI, or process environment. SFT admission pins it in the
+queued job, the worker compares it with the resident runner before memory
+reservation, and the trainer compares it with its execution backend before
+allocation. The pinned value then drives every loss step and this v4 identity.
+
+SFT and GRPO store the planning object under
+`auxiliary_state.training_runtime_planning_identity`; OPD retains it under its
+existing `auxiliary_state.checkpoint_planning` key. Exact resume compares the
+complete auxiliary state rather than silently adopting the new process policy.
+A checkpoint that lacks the boundary policy or contains any different mode,
+threshold, stride, cache target, runtime route, or schema is rejected as
+planning drift before continuation.
 
 This nested version change does not change the outer
 `TrainingCheckpointManifest` envelope, which remains checkpoint schema v1.
 Older artifacts can still be inspected and checksum-validated, but a v2
-planning identity cannot authorize exact continuation under v3. Start a fresh
+planning identity cannot authorize exact continuation under v3, and an SFT v3
+identity cannot authorize continuation under SFT v4 because it cannot prove
+which loss implementation admission budgeted and execution used. Start a fresh
 training run to create a resumable checkpoint with the current planning
 contract; do not edit the manifest or auxiliary JSON.
 
@@ -185,6 +209,13 @@ part of their common v3 runtime identity. Changing one of the four startup
 fields therefore rejects exact GRPO or OPD resume too, even though the setting
 is execution-inert for those modes today. This conservative rule prevents a
 future boundary-layout expansion from reinterpreting an older checkpoint.
+
+For SFT, `kt_tape_flce` and `vulkan_active_rows` are compatible with a
+multi-segment plan. `full_logits` is not: checkpoint tails execute outside an
+active kt tape, so admission rejects more than one segment and the trainer
+rechecks the invariant before a forward. This compatibility fact is part of
+planning, but route names are not operator controls. The retired
+`KILN_USE_FLCE` spelling has no alias or current effect.
 
 ## Integration status
 
@@ -231,7 +262,12 @@ next step boundary. SFT restores:
 - loss history, partial epoch loss, divergence state, and gradient diagnostics;
 - effective configuration, precision policy, data identity, model config,
   base-weight shard bytes, tokenizer identity, backend runtime, and the derived
-  per-example gradient-checkpoint plan.
+  per-example gradient-checkpoint plan;
+- the pinned backend loss route through SFT planning identity v4.
+
+Completed SFT runs also expose the executed route at
+`train_receipt.json -> runtime.sft_loss_route`; the receipt field is not a
+replacement for the checksummed planning identity used by resume.
 
 The native parameter codec validates the complete tensor set, shape, dtype,
 finite values, and optimizer step before mutation. It restores both

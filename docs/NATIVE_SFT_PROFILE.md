@@ -61,6 +61,89 @@ Requests containing general-trainer knobs such as
 `lr_scheduler_type`, `warmup_steps`, or `max_grad_norm` are rejected rather
 than ignored or approximately emulated.
 
+## Backend-owned SFT loss routing
+
+The SFT loss implementation is a backend capability, not a request field or
+operator-selected mode. The current capability mapping is:
+
+| Backend | Reported route | Gradient-checkpoint compatibility |
+| --- | --- | --- |
+| CUDA | `kt_tape_flce` | Uncheckpointed and checkpointed |
+| ROCm | `kt_tape_flce` | Uncheckpointed and checkpointed |
+| Vulkan | `vulkan_active_rows` | Uncheckpointed and checkpointed |
+| Metal | `full_logits` | Uncheckpointed only; a multi-segment checkpoint plan is rejected |
+
+This table describes the source-declared execution contract. It is not a
+hardware-qualification receipt and does not establish correctness or
+performance on a particular device, driver, or model.
+
+`kt_tape_flce` makes the fused, chunked cross-entropy operation a root on the
+kt autograd tape. `vulkan_active_rows` gathers supervised rows and uses the
+Vulkan active-row loss shaders. `full_logits` materializes the portable
+sequence-by-vocabulary logits and their cross-entropy forward/backward state.
+Checkpoint tails execute outside an active kt tape, so `full_logits` cannot be
+used with more than one gradient-checkpoint segment. Admission rejects that
+combination with `training_invalid_request`; the trainer independently checks
+the same invariant before a forward.
+
+The route is deliberately absent from `SftConfig`, the request JSON, and the
+typed `[training]` configuration. Consequently there is no TOML field and no
+mechanically derived environment name for it. The former `KILN_USE_FLCE`
+switch has been removed: it is not a compatibility alias, is not accepted by
+the typed loader, and has no effect on current SFT routing. Changing the
+process environment cannot override the resident backend's capability.
+
+### Admission and execution binding
+
+Before publishing a queue entry, the server reads the route from the resident
+model runner and uses that exact enum in the SFT working-set estimate. The
+estimate is intentionally route-specific:
+
+- `kt_tape_flce` charges low-precision CUDA/ROCm F32 head promotion when
+  required, the active-row gather, bounded vocabulary-chunk temporaries, and
+  the full hidden gradient;
+- `vulkan_active_rows` charges the largest legal vocabulary chunk, its F32
+  weight slice and transpose, active-row buffers, and the full hidden gradient;
+  and
+- `full_logits` charges the dense `[T, V]` logits plus the portable
+  cross-entropy forward and backward residency, including cast-back storage
+  for a low-precision model.
+
+Sequence length, maximum supervised-token count, LoRA and optimizer state,
+streaming-prefill scratch, and the resolved checkpoint-boundary layout are
+combined with this workspace. All size arithmetic saturates toward rejection,
+so overflow cannot wrap a request into an apparently small allocation. For a
+checkpoint-compatible route, automatic planning tries legal segment counts
+and admits only a plan whose complete upper bound fits. `full_logits` remains
+a one-segment plan and is never made admissible by silently selecting an
+unsupported checkpoint route.
+
+A request that exceeds the available training budget returns HTTP 413 before
+queue publication. Its message includes estimated and available GiB plus a
+breakdown containing `loss workspace ... (route=<route>)`, activation and
+boundary memory, LoRA parameters and gradients, optimizer state, and residency
+scratch. Operators can therefore distinguish a loss-route workspace problem
+from a rank, sequence-length, or general capacity problem without changing a
+hidden switch.
+
+Admission does not merely sample a route and forget it. The selected enum is
+stored in `PreparedSftAdmission`. After any queue wait, the worker compares it
+with the resident runner again before governor reservation, KV replacement, or
+allocator reclamation. The job-local `TrainingRuntimeContext` then carries the
+pinned route into the trainer, which compares it with a freshly constructed
+execution backend before resident-weight or trainable allocation. A mismatch
+fails the job instead of estimating one algorithm and executing another. Every
+standard and checkpointed SFT step receives the pinned enum rather than
+re-reading backend state or process environment.
+
+New SFT receipts record the executed enum at
+`train_receipt.json -> runtime.sft_loss_route`. The field is optional only so
+readers can consume legacy and non-SFT receipts. Exact SFT checkpoints bind the
+same enum in `kiln.training-checkpoint-planning.v4`; changing it, or attempting
+to resume an SFT checkpoint with the older v3 planning identity, is planning
+drift. GRPO and OPD continue to use the common v3 planning identity because
+this SFT route is not their loss-routing authority.
+
 ## Optimizers and learning rate
 
 The profile supports Muon, AdamW, and plain SGD. Muon is the default. If
@@ -165,10 +248,12 @@ main-phase continuation guarantee.
 
 `train_receipt.json -> config` contains the full effective profile, resolved
 learning rate, optimizer settings, seed, LoRA shape, row policy, and checkpoint
-settings. `runtime.training_precision` records the concrete dtype contract.
+settings. `runtime.training_precision` records the concrete dtype contract and
+`runtime.sft_loss_route` records the backend-owned loss implementation.
 Exact `.kiln-checkpoint` manifests additionally bind the fixed scheduler state,
 optimizer state, data order/cursor, RNG state, admitted-corpus identity, model
-artifacts, tokenizer/template, and execution provenance.
+artifacts, tokenizer/template, execution provenance, and the SFT v4 planning
+identity that contains the pinned loss route.
 
 An ordinary PEFT adapter is a serving artifact, not an exact training
 checkpoint. See [Exact Training Checkpoints](training-checkpoints.md) and

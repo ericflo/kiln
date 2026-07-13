@@ -90,13 +90,23 @@ const generatedDocsPages = [
     path: publishedPath('docs/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/',
     h1: 'Complete Kiln documentation',
-    terms: ['Configuration Reference', 'Thinking Budget Contract', 'CI and Local Qualification Policy'],
+    terms: [
+      'Configuration Reference',
+      'Architecture Deep Dive',
+      'Native SFT Profile',
+      'SFT Ingestion and Row Identity',
+      'SFT Tokenization and Loss',
+      'Native Training Checkpoints',
+      'Thinking Budget Contract',
+      'CI and Local Qualification Policy',
+    ],
   },
   {
     label: 'Configuration Reference',
     path: publishedPath('docs/configuration/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/configuration/',
     h1: 'Configuration Reference',
+    anchors: ['backend-owned-sft-loss-route-is-not-configuration'],
     terms: [
       'KILN_<SECTION>_<FIELD>',
       'Strict failure behavior',
@@ -166,6 +176,20 @@ const generatedDocsPages = [
       'Zero, negative, overflowing, malformed, and non-UTF-8 environment values stop startup',
       'Zero and strings other than auto fail startup',
       'must be finite, positive, convert to at least one byte',
+      'Backend-owned SFT loss route is not configuration',
+      'kt_tape_flce',
+      'vulkan_active_rows',
+      'full_logits',
+      'not accepted TOML enums',
+      'mechanical naming rule does not produce an environment variable for this choice',
+      'KILN_USE_FLCE',
+      'not a deprecated alias',
+      'typed loader does not consume it',
+      'HTTP 413',
+      'loss workspace ... (route=<route>)',
+      'training_invalid_request',
+      'runtime.sft_loss_route',
+      'SFT extends the same object to v4',
       'kiln.training-checkpoint-planning.v3',
       'exact-resume drift',
       'GET /v1/config',
@@ -174,6 +198,86 @@ const generatedDocsPages = [
       'GET /v1/debug/model-state',
       'training.checkpoint_boundary_policy',
       'Runtime Config training group',
+    ],
+  },
+  {
+    label: 'Architecture Deep Dive',
+    path: publishedPath('docs/architecture-reference/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/architecture-reference/',
+    h1: 'Architecture Deep Dive',
+    anchors: ['backend-owned-sft-loss-routing'],
+    terms: [
+      'Backend-owned SFT loss routing',
+      'TrainingLossBackend',
+      'kt_tape_flce',
+      'vulkan_active_rows',
+      'full_logits',
+      'route-specific saturating working-set estimate',
+      'PreparedSftAdmission.loss_route',
+      'resident-runner recheck before governor reservation/reclamation',
+      'fresh execution-backend recheck before resident/trainable allocation',
+      'loss workspace',
+      'HTTP 413',
+      'training_invalid_request',
+      'KILN_USE_FLCE',
+      'no mechanically derived environment name',
+      'runtime.sft_loss_route',
+      'SFT exact checkpoint planning identity v4',
+      'GRPO and OPD retain planning identity v3',
+    ],
+  },
+  {
+    label: 'Native SFT Profile',
+    path: publishedPath('docs/native-sft-profile/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/native-sft-profile/',
+    h1: 'Native SFT Profile',
+    anchors: ['backend-owned-sft-loss-routing'],
+    terms: [
+      'Backend-owned SFT loss routing',
+      'SftConfig',
+      'kt_tape_flce',
+      'vulkan_active_rows',
+      'full_logits',
+      'multi-segment checkpoint plan is rejected',
+      'training_invalid_request',
+      'not a hardware-qualification receipt',
+      'no TOML field',
+      'no mechanically derived environment name',
+      'KILN_USE_FLCE',
+      'not a compatibility alias',
+      'typed loader',
+      'HTTP 413',
+      'loss workspace ... (route=<route>)',
+      'PreparedSftAdmission',
+      'before governor reservation, KV replacement, or allocator reclamation',
+      'TrainingRuntimeContext',
+      'freshly constructed execution backend',
+      'runtime.sft_loss_route',
+      'kiln.training-checkpoint-planning.v4',
+      'older v3 planning identity',
+      'GRPO and OPD continue to use the common v3 planning identity',
+    ],
+  },
+  {
+    label: 'Native Training Checkpoints',
+    path: publishedPath('docs/training-checkpoints/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/training-checkpoints/',
+    h1: 'Native Training Checkpoints',
+    anchors: ['checkpoint-planning-identity'],
+    terms: [
+      'GRPO and OPD use schema kiln.training-checkpoint-planning.v3',
+      'SFT uses kiln.training-checkpoint-planning.v4',
+      'sft_loss_route',
+      'kt_tape_flce',
+      'vulkan_active_rows',
+      'full_logits',
+      'worker compares it with the resident runner before memory reservation',
+      'trainer compares it with its execution backend before allocation',
+      'planning drift',
+      'SFT v3 identity cannot authorize continuation under SFT v4',
+      'KILN_USE_FLCE',
+      'no alias or current effect',
+      'runtime.sft_loss_route',
     ],
   },
 ];
@@ -303,7 +407,7 @@ const expectedApiSections = [
   { label: 'typed batching diagnostics', terms: ['batching', 'actor_active', 'configured_source', 'backend_policy_enabled', 'prefill_admission_quantum', 'effective_decode_width', 'burst_prefill_admission', 'direct_decode_rendezvous', 'direct_streaming_greedy_only', 'worker_active', 'route_available', 'decode_runtime.batching_configuration', 'decode_runtime.direct_decode_rendezvous', 'batching_engine.configuration', 'batching_engine.direct_decode_rendezvous', 'CPU (8,0,false)', 'CUDA (1,0,false)', 'ROCm (8,0,false)', 'Metal (8,100,true)', 'Vulkan (64,5000,true)'] },
   { label: 'typed streaming-prefill diagnostics', terms: ['streaming_prefill', 'configured_mode', 'prompt_tokens_at_least', 'effective_for_auto_mode', 'override_applied_to_backend_auto_policy', 'tape_tile_tokens', 'detached_full_attn_boundary_tile_tokens', 'detached_full_attn_tape_replay_tile_tokens', 'last_token_lm_head', 'inherited_from_tile_tokens_config_file', 'prefill_runtime.streaming_prefill', 'restart_required_to_change', '(1024,1024,8192,65536,65536)', '(1024,1024,8192,8192,8192)', '(2048,2048,8192,8192,8192)'] },
   { label: 'typed SFT checkpoint-boundary diagnostics', terms: ['checkpoint_boundary_policy', 'recompute_mode', 'recompute_threshold_tokens', 'anchor_stride', 'cache_target_bytes', '/v1/config', '/health', '/v1/health', '/v1/debug/model-state', 'Runtime Config training group', 'immutability', 'restart requirement'] },
-  { label: 'SFT checkpoint-boundary startup and resume contract', terms: ['recompute_checkpoint_boundaries', 'checkpoint_boundary_anchor_stride', 'checkpoint_boundary_cache_gb', 'defaults to auto', 'inclusive sequence threshold defaults to 8,192 tokens', 'default 6 GiB', 'explicit positive strides', 'four historical unsectioned names are deprecated', 'parsed strictly', 'must agree with a present canonical value', 'kiln.training-checkpoint-planning.v3', 'planning drift', 'cannot resume exactly', 'outer checkpoint envelope remains schema v1'] },
+  { label: 'SFT checkpoint-boundary startup and resume contract', terms: ['recompute_checkpoint_boundaries', 'checkpoint_boundary_anchor_stride', 'checkpoint_boundary_cache_gb', 'defaults to auto', 'inclusive sequence threshold defaults to 8,192 tokens', 'default 6 GiB', 'explicit positive strides', 'four historical unsectioned names are deprecated', 'parsed strictly', 'must agree with a present canonical value', 'sft_loss_route', 'kiln.training-checkpoint-planning.v4', 'prior SFT v3 checkpoints fail closed', 'GRPO and OPD', 'kiln.training-checkpoint-planning.v3', 'planning drift', 'cannot resume exactly', 'outer checkpoint envelope remains schema v1'] },
   { label: 'copy-paste first requests', terms: ['copy-paste first requests'] },
   { label: 'power-user requests', terms: ['power-user requests'] },
   { label: 'OpenAI-compatible generation', terms: ['openai-compatible generation'] },
@@ -415,6 +519,7 @@ const expectedArchitectureSections = [
   { label: 'Qwen3.5-4B', terms: ['Qwen3.5-4B'] },
   { label: 'LoRA hot-swap', terms: ['lora hot-swap', 'iteration boundary'] },
   { label: 'training queue', terms: ['training queue', 'fifo background queue'] },
+  { label: 'backend-owned SFT loss routing', terms: ['backend-owned sft loss routing', 'SftFlceLossRoute', 'kt_tape_flce', 'vulkan_active_rows', 'full_logits', 'no TOML field', 'no mechanically derived environment name', 'KILN_USE_FLCE', 'no compatibility alias', 'loss workspace ... (route=<route>)', 'HTTP 413', 'training_invalid_request', 'PreparedSftAdmission', 'before governor reservation / KV replacement / allocator reclamation', 'fresh execution-backend comparison', 'runtime.sft_loss_route', 'kiln.training-checkpoint-planning.v4', 'prior SFT v3', 'GRPO and OPD remain', 'kiln.training-checkpoint-planning.v3'] },
   { label: 'GPU backend crates', terms: ['gpu backend crates', 'kiln-flash-attn', 'kiln-vulkan-kernel'] },
   { label: 'where-to-go-next links', terms: ['where to go next', 'deep dive', 'grpo guide', 'quickstart', 'troubleshooting'] },
 ];
@@ -434,7 +539,10 @@ const expectedArchitectureLinks = [
   { label: 'troubleshooting', href: 'troubleshooting.html' },
   { label: 'API reference', href: 'api.html' },
   { label: 'GRPO guide', href: 'grpo.html' },
+  { label: 'generated Native SFT profile', href: 'https://ericflo.github.io/kiln/docs/native-sft-profile/#backend-owned-sft-loss-routing' },
 ];
+
+const expectedArchitectureFragments = ['backend-owned-sft-loss-routing'];
 
 const expectedTroubleshootingSections = [
   { label: 'first-run diagnostic framing', terms: ['first-run', 'diagnostic'] },
@@ -469,6 +577,106 @@ const expectedTroubleshootingLinks = [
 
 function fail(message) {
   throw new Error(message);
+}
+
+function normalizedHtmlText(html) {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&hellip;/g, '...')
+    .replace(/&rarr;/g, '->')
+    .replace(/&mdash;/g, '-')
+    .replace(/&ndash;/g, '-')
+    .replace(/&rsquo;/g, "'")
+    .replace(/&lsquo;/g, "'")
+    .replace(/&ldquo;/g, '"')
+    .replace(/&rdquo;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function missingNormalizedTerms(text, terms) {
+  const normalized = text.toLowerCase();
+  return terms.filter((term) => !normalized.includes(term.toLowerCase()));
+}
+
+function validateSftLossRouteDocumentationSourceContract() {
+  const manifest = JSON.parse(readFileSync(resolve(repoRoot, 'docs/site/docs-manifest.json'), 'utf8'));
+  const expectedTrainingOrder = [
+    'native-sft-profile',
+    'sft-ingestion',
+    'sft-tokenization',
+    'training-checkpoints',
+    'grpo',
+    'echo',
+    'evals',
+  ];
+  const trainingSlugs = manifest.documents
+    .filter((document) => document.section === 'training')
+    .map((document) => document.slug);
+  const orderedTrainingSlugs = trainingSlugs.filter((slug) => expectedTrainingOrder.includes(slug));
+  if (JSON.stringify(orderedTrainingSlugs) !== JSON.stringify(expectedTrainingOrder)) {
+    fail(`docs/site/docs-manifest.json: training references must lead with ${expectedTrainingOrder.join(', ')}`);
+  }
+
+  const requiredDescriptions = new Map([
+    ['configuration', ['mechanically derived environment override', 'backend-owned policy', 'SFT loss routing']],
+    ['architecture-reference', ['route-bound training', 'checkpoint identity']],
+    ['native-sft-profile', ['backend-owned loss route', 'memory admission', 'receipt', 'checkpoint identity']],
+    ['training-checkpoints', ['route-bound SFT planning identity']],
+  ]);
+  for (const [slug, terms] of requiredDescriptions) {
+    const description = manifest.documents.find((document) => document.slug === slug)?.description || '';
+    const missing = missingNormalizedTerms(description, terms);
+    if (missing.length > 0) {
+      fail(`docs/site/docs-manifest.json: ${slug} description missing route discoverability terms: ${missing.join(', ')}`);
+    }
+  }
+
+  const configurationSource = readFileSync(resolve(repoRoot, 'docs/CONFIGURATION.md'), 'utf8');
+  const retiredOverrideTableRows = configurationSource
+    .split('\n')
+    .filter((line) => line.trimStart().startsWith('|') && line.includes('KILN_USE_FLCE'));
+  if (retiredOverrideTableRows.length > 0) {
+    fail('docs/CONFIGURATION.md: retired KILN_USE_FLCE must not appear as a supported or deprecated configuration-table entry');
+  }
+
+  const staticArchitecturePath = resolve(repoRoot, 'docs/site/architecture.html');
+  const staticArchitectureHtml = readFileSync(staticArchitecturePath, 'utf8');
+  const staticArchitectureText = normalizedHtmlText(staticArchitectureHtml);
+  const routeSection = expectedArchitectureSections
+    .find((section) => section.label === 'backend-owned SFT loss routing');
+  const missingArchitectureTerms = missingNormalizedTerms(staticArchitectureText, routeSection.terms);
+  if (missingArchitectureTerms.length > 0) {
+    fail(`docs/site/architecture.html: backend-owned SFT route contract missing terms: ${missingArchitectureTerms.join(', ')}`);
+  }
+  if (!staticArchitectureHtml.includes('id="backend-owned-sft-loss-routing"')) {
+    fail('docs/site/architecture.html: missing stable #backend-owned-sft-loss-routing anchor');
+  }
+  const nativeSftLink = expectedArchitectureLinks
+    .find((link) => link.label === 'generated Native SFT profile')?.href;
+  if (!nativeSftLink || !staticArchitectureHtml.includes(`href="${nativeSftLink}"`)) {
+    fail('docs/site/architecture.html: missing generated Native SFT profile route-contract link');
+  }
+
+  const apiText = normalizedHtmlText(readFileSync(resolve(repoRoot, 'docs/site/api.html'), 'utf8'));
+  const missingApiTerms = missingNormalizedTerms(apiText, [
+    'sft_loss_route',
+    'kiln.training-checkpoint-planning.v4',
+    'prior SFT v3 checkpoints fail closed',
+    'GRPO and OPD',
+    'kiln.training-checkpoint-planning.v3',
+  ]);
+  if (missingApiTerms.length > 0) {
+    fail(`docs/site/api.html: SFT v4 versus GRPO/OPD v3 checkpoint wording missing terms: ${missingApiTerms.join(', ')}`);
+  }
 }
 
 function validateReadmeStartupBanner() {
@@ -1777,8 +1985,7 @@ function validateDemoReadmeInventory() {
 
 function validateGeneratedDocsArtifacts() {
   const requiredPaths = [
-    publishedPath('docs/index.html'),
-    publishedPath('docs/configuration/index.html'),
+    ...generatedDocsPages.map((page) => page.path),
     publishedPath('docs/search-index.json'),
     publishedPath('css/docs.css'),
     publishedPath('js/docs.js'),
@@ -1799,9 +2006,43 @@ function validateGeneratedDocsArtifacts() {
   if (!Array.isArray(searchIndex) || searchIndex.length === 0) {
     fail('generated documentation search index must contain published documents');
   }
-  const configuration = searchIndex.find((entry) => entry?.slug === 'configuration');
-  if (!configuration || configuration.title !== 'Configuration Reference') {
-    fail('generated documentation search index is missing the Configuration Reference');
+  for (const expected of generatedDocsPages.filter((page) => page.label !== 'Documentation hub')) {
+    const slug = expected.path.split('/').filter(Boolean).at(-2);
+    const entry = searchIndex.find((candidate) => candidate?.slug === slug);
+    if (!entry || entry.title !== expected.label) {
+      fail(`generated documentation search index is missing ${expected.label}`);
+    }
+  }
+
+  const expectedTrainingOrder = [
+    'native-sft-profile',
+    'sft-ingestion',
+    'sft-tokenization',
+    'training-checkpoints',
+    'grpo',
+    'echo',
+    'evals',
+  ];
+  const trainingSearchOrder = searchIndex
+    .filter((entry) => entry?.kind === 'reference' && expectedTrainingOrder.includes(entry.slug))
+    .map((entry) => entry.slug);
+  if (JSON.stringify(trainingSearchOrder) !== JSON.stringify(expectedTrainingOrder)) {
+    fail(`generated documentation search index has the wrong training reference order: ${trainingSearchOrder.join(', ')}`);
+  }
+
+  for (const expected of generatedDocsPages) {
+    const htmlPath = resolve(repoRoot, expected.path);
+    const html = readFileSync(htmlPath, 'utf8');
+    const missingTerms = missingNormalizedTerms(normalizedHtmlText(html), expected.terms);
+    if (missingTerms.length > 0) {
+      fail(`${expected.path}: generated documentation content missing terms: ${missingTerms.join(', ')}`);
+    }
+    const ids = new Set(Array.from(html.matchAll(/\bid\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'=<>`]+))/gi))
+      .map((match) => decodeHtmlAttribute(match[1] ?? match[2] ?? match[3] ?? '')));
+    const missingAnchors = (expected.anchors || []).filter((anchor) => !ids.has(anchor));
+    if (missingAnchors.length > 0) {
+      fail(`${expected.path}: generated documentation content missing anchors: ${missingAnchors.join(', ')}`);
+    }
   }
 
   const sitemap = readFileSync(resolve(siteRoot, 'sitemap.xml'), 'utf8');
@@ -1938,6 +2179,8 @@ async function validateGeneratedDocsBrowser(browser) {
             scrollWidth: document.documentElement.scrollWidth,
             clientWidth: document.documentElement.clientWidth,
             missingTerms: pageSpec.terms.filter((term) => !bodyText.includes(term)),
+            missingAnchors: (pageSpec.anchors || [])
+              .filter((anchor) => !document.getElementById(anchor)),
           };
         }, expected);
 
@@ -1958,6 +2201,9 @@ async function validateGeneratedDocsBrowser(browser) {
         }
         if (result.missingTerms.length > 0) {
           fail(`${expected.path}: ${viewport.label} content missing terms: ${result.missingTerms.join(', ')}`);
+        }
+        if (result.missingAnchors.length > 0) {
+          fail(`${expected.path}: ${viewport.label} content missing anchors: ${result.missingAnchors.join(', ')}`);
         }
         if (result.scrollWidth > result.clientWidth + mobileOverflowTolerancePx) {
           fail(`${expected.path}: ${viewport.label} horizontal overflow: scrollWidth ${result.scrollWidth} > clientWidth ${result.clientWidth} + tolerance ${mobileOverflowTolerancePx}`);
@@ -2000,6 +2246,7 @@ async function runSmoke() {
   validateCliHelpOnboardingCopy();
   validateLaunchSentinel();
   validateDemoReadmeInventory();
+  validateSftLossRouteDocumentationSourceContract();
   const hasGeneratedDocs = validateGeneratedDocsArtifacts();
   validateDocsSiteCanonicalLinks();
   validateDocsSiteLocalLinks();
@@ -2421,12 +2668,15 @@ async function runSmoke() {
             href: link.getAttribute('href'),
             text: normalize(link.textContent),
           }));
+          const fragmentIds = Array.from(document.querySelectorAll('[id]'))
+            .map((element) => element.id);
 
           return {
             bodyText,
             headings,
             copyableCodeBlocks,
             links,
+            fragmentIds,
           };
         });
 
@@ -2453,6 +2703,12 @@ async function runSmoke() {
           .map((link) => link.label);
         if (missingLinks.length > 0) {
           fail(`${sitePage.path}: missing architecture next-step links: ${missingLinks.join(', ')}`);
+        }
+
+        const missingFragments = expectedArchitectureFragments
+          .filter((fragment) => !architectureResult.fragmentIds.includes(fragment));
+        if (missingFragments.length > 0) {
+          fail(`${sitePage.path}: missing stable architecture fragments: ${missingFragments.join(', ')}`);
         }
       }
 

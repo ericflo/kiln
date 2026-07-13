@@ -5683,19 +5683,25 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
 #[test]
 fn sft_loss_route_is_bound_from_admission_through_artifacts() {
     let root = workspace_root();
-    let api = fs::read_to_string(root.join("crates/kiln-server/src/api/training.rs"))
-        .expect("training API source should be readable");
-    let queue = fs::read_to_string(root.join("crates/kiln-server/src/training_queue.rs"))
-        .expect("training queue source should be readable");
-    let trainer = fs::read_to_string(root.join("crates/kiln-train/src/trainer.rs"))
-        .expect("trainer source should be readable");
-    let train_lib = fs::read_to_string(root.join("crates/kiln-train/src/lib.rs"))
-        .expect("training library source should be readable");
+    let api_path = root.join("crates/kiln-server/src/api/training.rs");
+    let api_functions = parse_functions(&api_path);
+    let queue_path = root.join("crates/kiln-server/src/training_queue.rs");
+    let queue = fs::read_to_string(&queue_path).expect("training queue source should be readable");
+    let queue_functions = parse_functions(&queue_path);
+    let trainer_path = root.join("crates/kiln-train/src/trainer.rs");
+    let trainer = fs::read_to_string(&trainer_path).expect("trainer source should be readable");
+    let trainer_functions = parse_functions(&trainer_path);
+    let train_lib_path = root.join("crates/kiln-train/src/lib.rs");
+    let train_lib_functions = parse_functions(&train_lib_path);
     let receipt = fs::read_to_string(root.join("crates/kiln-train/src/train_receipt.rs"))
         .expect("training receipt source should be readable");
 
+    let admission_body = &api_functions
+        .get("prepare_training_entry_admission")
+        .expect("training API should define prepare_training_entry_admission")
+        .body;
     let sft_admission = source_between(
-        &api,
+        admission_body,
         "QueuedJob::Sft(req) => {",
         "QueuedJob::Grpo(req) => {",
     );
@@ -5704,58 +5710,84 @@ fn sft_loss_route_is_bound_from_admission_through_artifacts() {
             && sft_admission.matches("loss_route,").count() >= 2,
         "SFT API admission should resolve one route and pin it in both the estimate and prepared queue data"
     );
-    for required in [
-        "pub loss_route: kiln_model::backend::SftFlceLossRoute",
-        "ensure_sft_loss_route_unchanged(prepared.loss_route, execution_route)",
-        "runtime.with_admitted_sft_loss_route(prepared.loss_route)",
-    ] {
-        assert!(
-            queue.contains(required),
-            "queued SFT execution should preserve and revalidate its admitted route: {required}"
-        );
-    }
-    let route_revalidation = queue
+    assert!(
+        queue.contains("pub loss_route: kiln_model::backend::SftFlceLossRoute"),
+        "prepared SFT admission should store the typed route"
+    );
+    let execute_job = &queue_functions
+        .get("execute_job")
+        .expect("training queue should define execute_job")
+        .body;
+    assert!(
+        execute_job
+            .contains("ensure_sft_loss_route_unchanged(prepared.loss_route, execution_route)"),
+        "queued SFT execution should revalidate its admitted route"
+    );
+    let route_revalidation = execute_job
         .find("let prepared_data_is_valid =")
         .expect("queue should revalidate prepared data");
-    let memory_reservation = queue
+    let memory_reservation = execute_job
         .find("let _mem_reservation =")
         .expect("queue should create its memory reservation");
     assert!(
         route_revalidation < memory_reservation,
         "SFT route drift must fail before governor reservation or memory reclamation"
     );
+    let run_sft = &queue_functions
+        .get("run_sft")
+        .expect("training queue should define run_sft")
+        .body;
+    assert!(
+        run_sft.contains("runtime.with_admitted_sft_loss_route(prepared.loss_route)"),
+        "SFT dispatch should install the admitted route in its job-local runtime"
+    );
 
+    let sft_trainer = &trainer_functions
+        .get("sft_train_prepared_to_with_checkpoint_root")
+        .expect("trainer should define sft_train_prepared_to_with_checkpoint_root")
+        .body;
     for required in [
         ".admitted_sft_loss_route()",
         ".unwrap_or(backend_loss_route)",
         "sft_loss_route == backend_loss_route",
         "runtime.with_admitted_sft_loss_route(sft_loss_route)",
         "standard_forward_backward_with_policy_and_loss_route(",
-        "sft_loss_route: SftFlceLossRoute",
     ] {
         assert!(
-            trainer.contains(required),
+            sft_trainer.contains(required),
             "SFT trainer should execute only the pinned, revalidated route: {required}"
         );
     }
-    let trainer_route_revalidation = trainer
+    assert!(
+        trainer.contains("sft_loss_route: SftFlceLossRoute"),
+        "SFT step helpers should accept the pinned typed route"
+    );
+    let trainer_route_revalidation = sft_trainer
         .find("let backend_loss_route =")
         .expect("trainer should resolve the execution backend loss route");
-    let resident_weight_allocation = trainer
+    let resident_weight_allocation = sft_trainer
         .find("let resident_weights = resident_training_weights(")
         .expect("trainer should materialize training-session resident weights");
     assert!(
         trainer_route_revalidation < resident_weight_allocation,
         "fresh-backend route drift must fail before job-local resident-weight allocation"
     );
+    let planning_identity = &train_lib_functions
+        .get("checkpoint_planning_identity")
+        .expect("training runtime should define checkpoint_planning_identity")
+        .body;
     assert!(
-        train_lib.contains("kiln.training-checkpoint-planning.v4")
-            && train_lib.contains("\"sft_loss_route\".to_string()"),
+        planning_identity.contains("kiln.training-checkpoint-planning.v4")
+            && planning_identity.contains("\"sft_loss_route\".to_string()"),
         "SFT exact-resume identity should include the pinned loss route"
     );
+    let receipt_writer = &trainer_functions
+        .get("write_sft_train_receipt_best_effort")
+        .expect("trainer should define write_sft_train_receipt_best_effort")
+        .body;
     assert!(
         receipt.contains("pub sft_loss_route: Option<kiln_model::backend::SftFlceLossRoute>")
-            && trainer.contains("receipt.runtime.sft_loss_route = Some(sft_loss_route)"),
+            && receipt_writer.contains("receipt.runtime.sft_loss_route = Some(sft_loss_route)"),
         "new SFT success and failure receipts should record the executed route"
     );
 }

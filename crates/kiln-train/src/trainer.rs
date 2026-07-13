@@ -17382,6 +17382,170 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    fn sft_route_planning_identity(route: Option<SftFlceLossRoute>) -> serde_json::Value {
+        let runtime = crate::TrainingRuntimeContext::new_for_device(
+            Device::Cpu,
+            kiln_memory::vram::GpuVramInfo {
+                total_bytes: 0,
+                source: kiln_memory::vram::VramSource::None,
+                unified: false,
+            },
+            crate::GradientCheckpointPolicy::Auto,
+        );
+        let runtime = match route {
+            Some(route) => runtime.with_admitted_sft_loss_route(route),
+            None => runtime,
+        };
+        runtime.checkpoint_planning_identity_for_device(Device::Cpu)
+    }
+
+    fn sft_route_resume_descriptor(
+        planning_identity: serde_json::Value,
+    ) -> Result<SftCheckpointDescriptor> {
+        let shard_manifest = kiln_core::model_provenance::BaseWeightShardManifest::new(vec![
+            kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                "model.safetensors",
+                16,
+                [0x11; 32],
+            )?,
+        ])?;
+        let base_model_weights_sha256 = shard_manifest.aggregate_sha256.clone();
+        Ok(SftCheckpointDescriptor {
+            adapter_name: "sft-route-resume".to_string(),
+            effective_config: serde_json::json!({
+                "training_profile": crate::NATIVE_SFT_PROFILE_V1,
+                "seed": 17,
+            }),
+            precision_policy: crate::checkpoint::TrainingCheckpointPrecision {
+                parameter_dtype: "f32".to_string(),
+                optimizer_state_dtype: "none".to_string(),
+                activation_dtype: "f32".to_string(),
+                gradient_dtype: "f32".to_string(),
+                stochastic_rounding: serde_json::json!({"mode": "round_to_nearest"}),
+            },
+            data: crate::checkpoint::TrainingCheckpointData {
+                source_kind: "sft-valid-example-order-v1".to_string(),
+                content_sha256: "0".repeat(64),
+                item_count: 2,
+            },
+            init_seed: 17,
+            shuffle_seed: 17,
+            optimizer: Optimizer::Sgd,
+            learning_rate: 1e-3,
+            total_steps: 2,
+            base_model_weights_sha256: Some(base_model_weights_sha256.clone()),
+            auxiliary_state: serde_json::json!({
+                "base_model_weights_sha256": base_model_weights_sha256,
+                "base_weight_shard_manifest": shard_manifest,
+                "execution_provenance": crate::train_receipt::test_execution_provenance(),
+                "training_runtime_planning_identity": planning_identity,
+            }),
+        })
+    }
+
+    fn sft_route_resume_checkpoint(
+        descriptor: &SftCheckpointDescriptor,
+    ) -> Result<crate::checkpoint::ValidatedTrainingCheckpoint> {
+        let progress = crate::checkpoint::TrainingCheckpointProgress {
+            global_step: 1,
+            total_steps: 2,
+            epoch_index: 0,
+            cursor_in_epoch: 1,
+            data_order: epoch_order(17, 0, 2)
+                .into_iter()
+                .map(|index| index as u64)
+                .collect(),
+        };
+        Ok(crate::checkpoint::ValidatedTrainingCheckpoint {
+            root: PathBuf::new(),
+            manifest: descriptor.manifest(progress)?,
+        })
+    }
+
+    fn sft_route_resume_loop_state() -> SftCheckpointLoopState {
+        SftCheckpointLoopState::capture(
+            1,
+            0,
+            1,
+            &[0.5],
+            0.5,
+            0.5,
+            1,
+            None,
+            f64::INFINITY,
+            &crate::train_receipt::LoraGradNormAccumulator::default(),
+        )
+    }
+
+    #[test]
+    fn sft_exact_resume_accepts_identical_v4_loss_route_identity() -> Result<()> {
+        let identity = sft_route_planning_identity(Some(SftFlceLossRoute::KtTapeFlce));
+        assert_eq!(identity["schema"], "kiln.training-checkpoint-planning.v4");
+        assert_eq!(identity["sft_loss_route"], "kt_tape_flce");
+
+        let descriptor = sft_route_resume_descriptor(identity)?;
+        let checkpoint = sft_route_resume_checkpoint(&descriptor)?;
+        descriptor.validate_resume(&checkpoint, &sft_route_resume_loop_state())
+    }
+
+    #[test]
+    fn sft_exact_resume_rejects_legacy_v3_planning_identity() -> Result<()> {
+        let current_identity = sft_route_planning_identity(Some(SftFlceLossRoute::KtTapeFlce));
+        let checkpoint_identity = sft_route_planning_identity(None);
+        assert_eq!(
+            current_identity["schema"],
+            "kiln.training-checkpoint-planning.v4"
+        );
+        assert_eq!(
+            checkpoint_identity["schema"],
+            "kiln.training-checkpoint-planning.v3"
+        );
+        assert!(checkpoint_identity.get("sft_loss_route").is_none());
+
+        let current = sft_route_resume_descriptor(current_identity)?;
+        let checkpoint_descriptor = sft_route_resume_descriptor(checkpoint_identity)?;
+        let checkpoint = sft_route_resume_checkpoint(&checkpoint_descriptor)?;
+        let error = current
+            .validate_resume(&checkpoint, &sft_route_resume_loop_state())
+            .expect_err("v3 SFT planning identity must not resume a route-bound v4 run");
+        assert!(
+            error
+                .to_string()
+                .contains("model/tokenizer/runtime identity differs")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sft_exact_resume_rejects_different_v4_loss_route_identity() -> Result<()> {
+        let current_identity = sft_route_planning_identity(Some(SftFlceLossRoute::KtTapeFlce));
+        let checkpoint_identity =
+            sft_route_planning_identity(Some(SftFlceLossRoute::VulkanActiveRows));
+        assert_eq!(
+            current_identity["schema"],
+            "kiln.training-checkpoint-planning.v4"
+        );
+        assert_eq!(
+            checkpoint_identity["schema"],
+            "kiln.training-checkpoint-planning.v4"
+        );
+        assert_eq!(current_identity["sft_loss_route"], "kt_tape_flce");
+        assert_eq!(checkpoint_identity["sft_loss_route"], "vulkan_active_rows");
+
+        let current = sft_route_resume_descriptor(current_identity)?;
+        let checkpoint_descriptor = sft_route_resume_descriptor(checkpoint_identity)?;
+        let checkpoint = sft_route_resume_checkpoint(&checkpoint_descriptor)?;
+        let error = current
+            .validate_resume(&checkpoint, &sft_route_resume_loop_state())
+            .expect_err("SFT route drift must invalidate exact resume");
+        assert!(
+            error
+                .to_string()
+                .contains("model/tokenizer/runtime identity differs")
+        );
+        Ok(())
+    }
+
     #[test]
     fn staged_base_resolution_never_uses_the_output_being_rewritten() {
         let durable = tempfile::tempdir().unwrap();

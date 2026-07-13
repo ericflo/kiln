@@ -223,7 +223,10 @@ Both gradients are wrt `final_hidden`, so a linear combination is exact. Impleme
 - `student_hidden` is already on device — it's exactly the tensor the existing analytic tail already takes.
 - The vocab-chunk matmul (`head_t` × `hidden_chunk`) is amortized across action and env masks; the env-CE term piggybacks on the same logit chunks.
 - Backward through the per-segment recompute is unchanged — `upstream_grad` shape is identical, just numerically different.
-- Same FLCE toggles (`KILN_USE_FLCE`, `KILN_CUDA_FLCE`, `KILN_VULKAN_FLCE`) apply.
+- Loss execution must extend the typed backend capability route used by the
+  parent GRPO objective. Admission pins that route, estimates its concrete
+  workspace, and execution revalidates it; ECHO must not add or inherit an
+  environment-selected FLCE route.
 
 **For Vulkan-native** (`vk_train.rs::vk_native_grpo_train`, `vk_train.rs:3471`), the implementation is separate because `vk_train.rs` runs on `VkTensor`, not candle `Tensor`, and **does not import `kiln-flce-kernel`** (verified — `grep -n kiln_flce_kernel crates/kiln-train/src/vk_train.rs` returns nothing). The math is the same — log-softmax of the env-position logits, gather the target tokens, mean over `|O|` — but it's expressed via VK shader dispatches. This lands as a new `vk_train::echo_step_vk` function next to `grpo_active_rows_and_labels` (`vk_train.rs:181`). Treat as ~half a day of focused VK work in Phase 1; the algorithm is simple and reuses existing VK matmul / softmax dispatches.
 
@@ -317,13 +320,17 @@ pub struct LossConfig {
 The TOML surface mirrors:
 
 ```toml
-[training.loss]
-# echo on by default (lambda = 0.05); set [training.loss.echo] = false to disable
 [training.loss.echo]
+enabled = true
 lambda = 0.05
 env_mask_mode = "env_only"     # | "full_obs"
 warning_filter = true
 ```
+
+This is one typed object with defaults, validation, and provenance, not a bag
+of independent tuning variables. A request-level loss object may override the
+server default for one admitted job, but the queued effective config must
+contain the fully resolved values.
 
 CLI flags on `cuda_grpo_ablation` (`crates/kiln-train/examples/cuda_grpo_ablation.rs`):
 
@@ -331,7 +338,16 @@ CLI flags on `cuda_grpo_ablation` (`crates/kiln-train/examples/cuda_grpo_ablatio
 - `--no-echo` (sets `echo: null`)
 - `--echo-env-mask-mode <env_only|full_obs>` (default env_only)
 
-Env-var overrides for experimentation: `KILN_ECHO_LAMBDA`, `KILN_ECHO_ENABLED`, `KILN_ECHO_ENV_MASK_MODE`. Same convention as `KILN_USE_FLCE` and friends.
+Do not add ad hoc `KILN_ECHO_*` variables. If fixed server-default fields are
+given environment overrides, their canonical names must derive mechanically
+from the complete config path, for example
+`KILN_TRAINING_LOSS_ECHO_ENABLED`,
+`KILN_TRAINING_LOSS_ECHO_LAMBDA`, and
+`KILN_TRAINING_LOSS_ECHO_ENV_MASK_MODE`, through the central typed loader.
+The loader must fail strictly on malformed/conflicting inputs, record source
+provenance, and inject the resolved object without runtime environment rereads.
+Backend loss-route selection remains a separate typed capability and has no
+TOML or environment override.
 
 ### 3.5 — Backend coverage — what lives where
 

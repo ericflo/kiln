@@ -280,6 +280,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#streaming-prefill-authority">Streaming prefill</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#gated-deltanet-hybrid">Gated DeltaNet hybrid</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-hot-swap-training-queue">LoRA hot-swap</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#backend-owned-sft-loss-routing">SFT loss routing</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#gpu-backend-crates">GPU backends</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
         </div>
@@ -481,6 +482,53 @@ training request
 kiln adapters list</code></pre>
         <p class="text-xs mt-3" style="color: var(--fg-mute);">
           See the <a href="cli.html">CLI Reference</a> for the full <code>kiln</code> command surface.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">SFT loss authority</div>
+        <h2 id="backend-owned-sft-loss-routing" class="text-2xl font-semibold mb-4">Backend-owned SFT loss routing</h2>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          The selected training backend owns one typed <code>SftFlceLossRoute</code> capability. It is
+          deliberately absent from the SFT request, <code>SftConfig</code>, and typed
+          <code>[training]</code> configuration, so there is no TOML field and no mechanically derived
+          environment name. The former <code>KILN_USE_FLCE</code> switch is removed: it has no
+          compatibility alias and no current routing effect.
+        </p>
+        <div class="overflow-x-auto mt-5">
+          <table class="w-full text-sm" style="color: var(--fg-dim);">
+            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Backend</th><th class="text-left p-2">Loss route</th><th class="text-left p-2">Checkpointed SFT</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">CUDA</td><td class="p-2"><code>kt_tape_flce</code></td><td class="p-2">compatible</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">ROCm</td><td class="p-2"><code>kt_tape_flce</code></td><td class="p-2">compatible</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Vulkan</td><td class="p-2"><code>vulkan_active_rows</code></td><td class="p-2">compatible</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Metal</td><td class="p-2"><code>full_logits</code></td><td class="p-2">uncheckpointed only</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">CPU/reference</td><td class="p-2"><code>full_logits</code></td><td class="p-2">not a production native-SFT route</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          This capability matrix defines routing and admission behavior; it is not hardware
+          qualification evidence. Route-specific saturating admission accounts for the loss workspace.
+          A rejected memory estimate reports <code>loss workspace ... (route=&lt;route&gt;)</code> in the
+          HTTP 413 detail. <code>full_logits</code> materializes dense <code>[T,V]</code> logits, so a
+          multi-segment checkpoint plan fails before queue publication with
+          <code>training_invalid_request</code> instead of silently selecting a different loss path.
+        </p>
+        <pre class="mt-5"><code>resident TrainingLossBackend capability
+  -> route-specific saturating preflight + checkpoint compatibility guard
+  -> PreparedSftAdmission pins SftFlceLossRoute
+  -> queue recheck before governor reservation / KV replacement / allocator reclamation
+  -> pinned TrainingRuntimeContext
+  -> fresh execution-backend comparison before resident or trainable allocation
+  -> every standard or checkpointed SFT step uses the admitted route</code></pre>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Completed SFT receipts expose the decision as <code>runtime.sft_loss_route</code>. Exact SFT
+          checkpoints bind it under <code>kiln.training-checkpoint-planning.v4</code>; prior SFT v3
+          identities fail closed as planning drift, while GRPO and OPD remain on
+          <code>kiln.training-checkpoint-planning.v3</code>. The generated
+          <a href="https://ericflo.github.io/kiln/docs/native-sft-profile/#backend-owned-sft-loss-routing">Native SFT Profile</a>
+          is the complete normative contract.
         </p>
       </article>
 

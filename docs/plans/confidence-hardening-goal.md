@@ -1003,9 +1003,11 @@ spellings. Startup converts the cache target to integral bytes once; preflight
 and training use the same pure recompute and shape-stride functions, and no
 runtime path rereads the environment. Config, health, trusted debug, and the
 dashboard expose the installed policy. Exact-resume planning identity is now
-`kiln.training-checkpoint-planning.v3`; a v2 identity or any policy difference
-is drift for SFT, GRPO, and OPD. Sparse replay itself remains SFT-only, while
-GRPO and OPD retain every checkpoint boundary.
+`kiln.training-checkpoint-planning.v3` for GRPO and OPD. SFT subsequently
+extends that object to v4 with the pinned backend loss route. A v2 identity,
+an SFT v3 identity, or any applicable policy difference is drift under the
+current contract. Sparse replay itself remains SFT-only, while GRPO and OPD
+retain every checkpoint boundary.
 
 The follow-up audit corrected one unsafe classification: Vulkan
 `KILN_VK_FLCE_CHUNK_LEN` is not estimator-only. It controls both admission's
@@ -1013,10 +1015,11 @@ memory estimate and the Vulkan FLCE runtime chunk, so deleting only the
 estimator read or treating it as dead would recreate admission/execution drift.
 A later slice must replace both reads with one typed, shared, pure
 route/device-limit policy and prove that the admitted chunk is exactly the one
-executed. The dead or unsafe `KILN_USE_FLCE` and optimizer debug-fallback
-controls should still be deleted or moved behind explicit qualification hooks
-after their callers are independently proven. The following typed slice owns
-GRPO shared-prefix-reference selection and OPD sampler segments;
+executed. The unsafe SFT route switch has now been removed and bound through
+admission and execution as described below. Optimizer debug-fallback controls
+still need to be deleted or moved behind explicit qualification hooks after
+their callers are independently proven. The following typed slice owns GRPO
+shared-prefix-reference selection and OPD sampler segments;
 trace/debug/host-scan controls move behind explicit qualification hooks instead
 of public config.
 
@@ -1044,6 +1047,29 @@ environment ratchet and a focused source contract prevent the switch from
 returning. Local ROCm and Vulkan GRPO qualification must still prove the
 backend-selected route on this machine; this static slice alone makes no
 accelerator claim.
+
+SFT loss-route authority slice (completed 2026-07-13): commits `307327fca`,
+`4c09c043b`, and `a193db663` removed `KILN_USE_FLCE` without an alias or
+replacement and made the backend's typed capability the only SFT loss-routing
+authority. CUDA/ROCm report `kt_tape_flce`, Vulkan reports
+`vulkan_active_rows`, and Metal reports `full_logits`; those declarations are
+capability contracts, not new hardware qualification. Admission now includes
+the exact route in a saturating upper bound for active-token loss workspace,
+checkpoint boundaries, LoRA/optimizer state, and streaming scratch. Its HTTP
+413 breakdown names the selected loss workspace, while a multi-segment
+`full_logits` plan returns `training_invalid_request` before publication and is
+checked again before a trainer forward.
+
+The admitted enum is stored with `PreparedSftAdmission`, revalidated against
+the resident runner before governor reservation or reclamation, installed in a
+job-local `TrainingRuntimeContext`, and compared with the execution backend
+before resident or trainable allocation. Every SFT loss step receives the
+pinned enum. New SFT receipts expose `runtime.sft_loss_route`, and exact SFT
+planning identity is v4 with that route; GRPO and OPD remain v3. The obsolete
+Phase A validation example and live-script override were removed, and the
+runtime-environment contract at `a193db663` records 950 reads and 539
+process-mutation call sites. This remains a portable authority/correctness
+checkpoint: it does not close ROCm, Vulkan, CUDA, or Metal execution gates.
 
 ### 8.2 One scheduling model
 
@@ -1489,6 +1515,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-13 | Phase 8.1 fail-closed speculative-decoding authority checkpoint | `sha256:7e04e9b7a159fea147fd0cb240402764d96b6aa0a84ec236e4feda398a647184` | this commit | portable static + Strix Halo host policy; accelerator execution pending | 342 qualification-tooling tests; exact runtime-environment ratchet at 981 reads/625 mutations; 8/8 docs builder tests; 30-document/5-asset site validation and static smoke; release, runtime-default, and thinking-budget contracts; edition-correct Rust formatting and diff hygiene; independent compile/signature, serving-route, ownership, and documentation audits; bounded Cargo admission at the unchanged 15 GiB floor | passed static checkpoint | The loaded typed configuration is the only speculative serving authority. `kiln config`, binary startup before model allocation, and the public real-state constructor reject every effective non-off method with one stable lifecycle/qualification reason. Completion dispatch has no speculative branch and retains ordinary batching; the production loader uses `load_mtp=false`, no speculative prewarm exists, backend native-MTP capability remains diagnostic only, and Desktop cannot enable the feature. The model and server default plus hard ceiling are K=4 pending local K=1/2/4 evidence. Every public high-level `ModelRunner` speculative entry point fails before work; low-level research steps have no serving call site, and the repository's direct caller is the isolated qualification bench, whose enabled arms require the harness contract and strictly validate geometry before allocation. The earlier owner-unsafe exact-K probe, dead admission state, and dead acceptance telemetry were removed. `/v1/config` distinguishes configured intent from serving `off`/unroutable status and intentionally exposes no live routing, admission, scope, or weight-readiness authority. Server SFT now normalizes omitted `train_mtp` to false, rejects explicit true before publication, and checks the invariant again in the worker, preventing deferred MTP upload and uncoordinated alignment during live inference. The hidden Metal override and MTP argmax environment toggle are removed; CUDA and Metal native MTP remain declined. Bounded Cargo correctly refused at 9 GiB available under the 15 GiB floor, so this checkpoint makes no compiled or GPU qualification claim and closes no accelerator gate. |
 | 2026-07-13 | Phase 8.1 typed direct-decode rendezvous checkpoint | `sha256:54bc0dbac60e36fcc9c3cc1a4b41ed055b58890036e15b041fbc27d937e79a0c` | `a9bd8330f` + documentation follow-up | portable static + documentation portal; accelerator execution pending | 79-field typed-config registry contract; exact runtime-environment ratchet at 972 reads/611 mutations; 8/8 docs builder tests; 30-document/5-asset validation; static and desktop/mobile Chrome 150 docs smoke; release/link guard; syntax and diff hygiene | passed static checkpoint | Four additional `[batching]` fields make direct streaming effectively-greedy rendezvous mode, maximum width, wait, and mixed-sequence policy startup-authoritative. Canonical names are mechanical; the four old `KILN_DECODE_BATCH*` spellings warn, conflict-check, and fail strictly, including malformed legacy wait values that previously became zero. Every real backend auto-enables the worker; CPU/CUDA/ROCm/Metal/Vulkan preserve exact `(8,0,false)`, `(1,0,false)`, `(8,0,false)`, `(8,100,true)`, and `(64,5000,true)` policies, with width clamped to effective decode width. Configuration diagnostics remain separate from live backend/actor/worker/route state across config, health, debug, CLI, UI, and the website. Worker activity is not routing authority: actor activity shadows the fallback, sampled and non-streaming work bypass it, and under defaults only Metal routes to it. This static checkpoint makes no accelerator correctness or throughput claim and does not close the one-scheduler gate. |
 | 2026-07-13 | Complete streaming-prefill execution authority | `sha256:a62f2d8c69d65dc7340580a75f9dc1a7b5f0f70b50955052b16988eeb9d5ee58` | this commit | portable static + documentation portal; accelerator execution pending | exact runtime-environment contract at 963 reads/566 mutations; 342 qualification-tooling tests; generated backend-capability report check; Rust 2024 formatting and diff hygiene; production compatibility-call audits; independent execution-path and identity review; 8/8 docs builder tests, 30-document/5-asset validation, generated-site desktop/mobile Chromium smoke, and complete website/API/reference updates; bounded Cargo admission at the unchanged 15 GiB floor; final CPU CI `29268429061`, qualification `29268429011`, and dashboard/UI smoke `29268887496` green | passed static checkpoint | One startup-resolved policy now reaches ordinary generation, prompt logprobs, GRPO shared-prefix reference forwards, SFT/GRPO/OPD tape and checkpoint replay, local/privileged/merge/live OPD teachers, MTP alignment, and every benchmark prefill. Server teacher construction fails closed without an injected policy. The prompt-logprob teacher fingerprint now uses inference-contract v2 and hashes every execution-policy field, preventing incompatible policy configurations from sharing content identity or logit-cache provenance. The benchmark accepts `--config`, resolves once against selected backend capabilities, and shares that policy with its direct forwards, training runtime, and `ModelRunner`. Standalone compatibility APIs retain backend defaults; production source guards reject their use. The permanent configuration reference, README, quickstart, architecture, changelog, and website API/architecture pages document identity invalidation and restart behavior. The final hosted runs are inexpensive portable validation and make no accelerator claim. |
+| 2026-07-13 | Phase 8.1 backend-owned SFT loss routing | `sha256:5de0c1ca68da7b49382d8d8eee1c4961b87e397eb32dc8a7daf7ec885c239fa5` | `a193db663` + test/docs follow-up (admission `307327fca`; budget repair `4c09c043b`) | portable CPU/static; accelerator execution pending | route-specific saturating estimator and boundary tests; admission/queue/trainer/receipt/identity source contracts; exact runtime-environment contract at 950 reads/539 mutations; qualification run `29274470176`; CPU CI runs `29272421238`, `29273482966`, and `29274469856`; 8/8 docs builder tests and generated static/browser smoke | passed portable checkpoint | The first admission commit removed `KILN_USE_FLCE`, selected the backend capability, charged route-specific loss residency, and rejected checkpointed `full_logits`. CPU CI `29272421238` passed 1,021 tests before one focused budget-boundary assertion exposed that a legal maximum-segment plan was still rejected at 30 GiB. `4c09c043b` added explicit 30 GiB reject/31 GiB accept coverage and made CI `29273482966` green. `a193db663` pinned the enum through queue and trainer revalidation, SFT receipt state, and planning identity v4; removed the obsolete Phase A bench/live override; and passed portable CI `29274469856` plus the 342-test qualification contract. The follow-up adds direct v3/v4 resume rejection tests and publishes the contract across the permanent website. These hosted runs make no ROCm, Vulkan, CUDA, Metal, correctness, or throughput claim. |
 
 ## Known Starting Defects
 

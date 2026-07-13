@@ -60,7 +60,7 @@
       "slug": "configuration",
       "title": "Configuration Reference",
       "section": "start",
-      "description": "Every supported TOML field and environment override, including backend-resolved batching and streaming-prefill policy, provenance, defaults, and validation."
+      "description": "Every supported typed TOML field and mechanically derived environment override, plus deliberately backend-owned policy such as SFT loss routing."
     },
     {
       "source": "CHANGELOG.md",
@@ -81,7 +81,7 @@
       "slug": "architecture-reference",
       "title": "Architecture Deep Dive",
       "section": "serving",
-      "description": "The complete server, batching, model, memory, training, and backend architecture."
+      "description": "The complete server, batching, model, memory, route-bound training, checkpoint identity, and backend architecture."
     },
     {
       "source": "BENCHMARKS.md",
@@ -105,32 +105,11 @@
       "description": "Token and wall-clock reasoning limits across APIs, streaming, and clients."
     },
     {
-      "source": "docs/GRPO_GUIDE.md",
-      "slug": "grpo",
-      "title": "GRPO Training Guide",
-      "section": "training",
-      "description": "Generate, score, train, inspect, resume, and audit GRPO runs."
-    },
-    {
-      "source": "docs/EVAL_GUIDE.md",
-      "slug": "evals",
-      "title": "Eval Guide",
-      "section": "training",
-      "description": "Suites, scorers, comparisons, datasets, post-training gates, and judge training."
-    },
-    {
-      "source": "docs/ECHO_GUIDE.md",
-      "slug": "echo",
-      "title": "ECHO Guide",
-      "section": "training",
-      "description": "Environment-feedback training requests, diagnostics, and operating modes."
-    },
-    {
       "source": "docs/NATIVE_SFT_PROFILE.md",
       "slug": "native-sft-profile",
       "title": "Native SFT Profile",
       "section": "training",
-      "description": "The fixed native online-LoRA update and precision contract."
+      "description": "The fixed native online-LoRA update, backend-owned loss route, memory admission, receipt, and checkpoint identity contract."
     },
     {
       "source": "docs/sft-ingestion.md",
@@ -151,7 +130,28 @@
       "slug": "training-checkpoints",
       "title": "Native Training Checkpoints",
       "section": "training",
-      "description": "Exact checkpoint publication, validation, cancellation, and resume semantics."
+      "description": "Exact publication, validation, cancellation, and resume semantics, including route-bound SFT planning identity."
+    },
+    {
+      "source": "docs/GRPO_GUIDE.md",
+      "slug": "grpo",
+      "title": "GRPO Training Guide",
+      "section": "training",
+      "description": "Generate, score, train, inspect, resume, and audit GRPO runs."
+    },
+    {
+      "source": "docs/ECHO_GUIDE.md",
+      "slug": "echo",
+      "title": "ECHO Guide",
+      "section": "training",
+      "description": "Environment-feedback training requests, diagnostics, and operating modes."
+    },
+    {
+      "source": "docs/EVAL_GUIDE.md",
+      "slug": "evals",
+      "title": "Eval Guide",
+      "section": "training",
+      "description": "Suites, scorers, comparisons, datasets, post-training gates, and judge training."
     },
     {
       "source": "docs/HF_TRL_INTEROP.md",

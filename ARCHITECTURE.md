@@ -459,6 +459,55 @@ One conversation is one microbatch and one update. There is no gradient
 accumulation, warmup, decay, or gradient clipping. Unknown general-trainer
 fields are rejected rather than ignored.
 
+#### Backend-owned SFT loss routing
+
+SFT does not select its cross-entropy implementation from request JSON, TOML,
+CLI input, or process environment. `TrainingLossBackend` reports a typed
+capability from the resident runner: CUDA and ROCm use `kt_tape_flce`, Vulkan
+uses `vulkan_active_rows`, and Metal uses `full_logits`. The generated
+[backend capability report](docs/backend-capability-report.md) is the
+inspectable source-level support matrix. It is not a substitute for a passing
+device qualification receipt.
+
+Submission and execution bind that capability through the complete lifecycle:
+
+```text
+resident ModelRunner capability
+  -> route-specific saturating working-set estimate
+  -> checkpoint-route compatibility check
+  -> queue entry with PreparedSftAdmission.loss_route
+  -> resident-runner recheck before governor reservation/reclamation
+  -> job-local TrainingRuntimeContext with the admitted route
+  -> fresh execution-backend recheck before resident/trainable allocation
+  -> every standard or checkpointed SFT loss step receives the pinned enum
+  -> train receipt + exact-checkpoint planning identity
+```
+
+Admission accounts for the actual algorithm rather than a generic loss
+constant. `kt_tape_flce` includes active-row and bounded chunk buffers, the
+full hidden gradient, and CUDA/ROCm F32 head promotion when required.
+`vulkan_active_rows` includes the largest legal F32 vocabulary chunk, its
+weight transpose, active-row buffers, and full hidden gradient. `full_logits`
+includes dense `[T, V]` logits and the portable cross-entropy forward/backward
+residency. Every multiplication and sum saturates toward rejection. Automatic
+checkpoint fitting may search multiple legal segment counts only for a
+checkpoint-compatible route; a `full_logits` plan remains one segment.
+
+An estimate above the current training budget returns HTTP 413 before queue
+publication. The error names the route in its `loss workspace` line alongside
+estimated/available capacity, activations and boundaries, LoRA gradients,
+optimizer state, and residency scratch. A multi-segment `full_logits` plan
+instead returns `training_invalid_request`, because checkpoint tails execute
+outside an active kt tape. The trainer repeats this invariant before a forward.
+
+The old `KILN_USE_FLCE` override is removed with no compatibility alias or
+replacement. There is no loss-route field under `[training]`, so there is no
+mechanically derived environment name. The selected route is observable in a
+new SFT `train_receipt.json` at `runtime.sft_loss_route` and in SFT exact
+checkpoint planning identity v4. It is intentionally not exposed as mutable
+intent by `/v1/config` or health. GRPO and OPD retain planning identity v3;
+their independent loss routes are not controlled by the SFT capability.
+
 ### GRPO (Group Relative Policy Optimization)
 
 Submit scored completions via `POST /v1/train/grpo`:
@@ -507,6 +556,11 @@ More segments = less VRAM but more computation. The number of segments is
 auto-tuned based on detected VRAM. Override it with
 `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS`, or disable checkpointing with
 `KILN_TRAINING_NO_GRAD_CHECKPOINT=1`.
+
+SFT auto-tuning is also constrained by the backend-owned loss route.
+`kt_tape_flce` and `vulkan_active_rows` support multi-segment execution;
+`full_logits` does not. Kiln rejects a checkpointed `full_logits` plan instead
+of estimating a fused route and executing the dense portable route.
 
 See `model_forward_segment()` in `crates/kiln-model/src/forward.rs`.
 
@@ -982,11 +1036,13 @@ training admission nor the trainer reads those variables: SFT memory preflight
 and boundary execution call the same policy methods, preventing estimate/runtime
 drift. GRPO and OPD do not execute the SFT boundary-spooling path.
 
-Every training mode still records this policy in the shared
-`kiln.training-checkpoint-planning.v3` identity. A field change, or a checkpoint
-carrying the former v2 planning schema, is exact-resume drift and fails closed
-rather than continuing with different memory/replay behavior. The immutable
-runtime object appears as `training.checkpoint_boundary_policy` in
+Every training mode records this policy in its planning identity. GRPO and OPD
+use `kiln.training-checkpoint-planning.v3`; SFT uses v4, which adds the pinned
+backend loss route described above. A field change, a checkpoint carrying the
+former v2 planning schema, or an SFT checkpoint carrying v3 is exact-resume
+drift and fails closed rather than continuing with different memory/replay or
+loss behavior. The immutable runtime object appears as
+`training.checkpoint_boundary_policy` in
 `GET /v1/config`, `GET /health`, and trusted `GET /v1/debug/model-state`; the
 serialized fields are `recompute_mode`, `recompute_threshold_tokens`,
 `anchor_stride` (`null` means automatic), and `cache_target_bytes`. The
