@@ -6204,7 +6204,7 @@ fn training_optimizer_capability_is_bound_before_admission_and_allocation() {
             source_between(
                 &trainer,
                 "pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(",
-                "fn validate_streamed_grpo_checkpoint_descriptor(",
+                "fn validate_tokenized_behavior_policy(",
             ),
             "ensure_memory_governor_for_runtime(",
         ),
@@ -6249,7 +6249,7 @@ fn training_optimizer_capability_is_bound_before_admission_and_allocation() {
             source_between(
                 &trainer,
                 "pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(",
-                "fn validate_streamed_grpo_checkpoint_descriptor(",
+                "fn validate_tokenized_behavior_policy(",
             ),
             "let resident_weights = run_coordinated_grpo_gpu_phase(",
         ),
