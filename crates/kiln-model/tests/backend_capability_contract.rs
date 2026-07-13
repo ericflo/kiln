@@ -3367,6 +3367,7 @@ fn lora_residency_call_sites_consume_residency_backend_facet() {
         .expect("trainer.rs should be readable");
     let lora_source = fs::read_to_string(root.join("crates/kiln-model/src/lora_loader.rs"))
         .expect("lora_loader.rs should be readable");
+    let trainer_functions = parse_functions(&root.join("crates/kiln-train/src/trainer.rs"));
     let lora_functions = parse_functions(&root.join("crates/kiln-model/src/lora_loader.rs"));
 
     assert!(
@@ -3388,11 +3389,23 @@ fn lora_residency_call_sites_consume_residency_backend_facet() {
         "impl OptimizerState",
         "/// (#1082) Build `Option<OptimizerState>`",
     );
-    let trainer_optimizer_updates = source_between(
-        &trainer_source,
-        "fn sgd_step(",
-        "/// Gradient checkpointing configuration.",
-    );
+    let trainer_optimizer_updates = [
+        "apply_sgd_update_kt",
+        "apply_adamw_update_kt",
+        "apply_muon_update_kt",
+        "sgd_step_from_map",
+        "optimizer_step_from_map",
+    ]
+    .into_iter()
+    .map(|name| {
+        trainer_functions
+            .get(name)
+            .unwrap_or_else(|| panic!("trainer.rs should define {name}"))
+            .body
+            .as_str()
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
     let lora_loader_section = ["register_with_backend", "evict_from_backend"]
         .into_iter()
         .map(|name| {
