@@ -26,8 +26,8 @@ use uuid::Uuid;
 use crate::config::{
     BatchTokenBudget, BatchingActorAdmissionConfig, BatchingBackendPolicy, BatchingConfig,
     ConfigValueSource, DEFAULT_ROWWISE_DECODE, DecodeBatchEffectiveSource, DecodeRuntimeConfig,
-    DeterministicInference, MaxDecodeBatch, MaxDecodeBatchDiagnostics, PrefillLayerBudget,
-    PrefillTokenBudget, StreamStallGrace,
+    DeterministicInference, DirectDecodeRendezvousBackendPolicy, MaxDecodeBatch,
+    MaxDecodeBatchDiagnostics, PrefillLayerBudget, PrefillTokenBudget, StreamStallGrace,
 };
 use crate::response_delivery::{
     DeliveryBarrierError, DeliveryBatch, DeliveryCommand, DeliveryKey, DeliveryResult,
@@ -1581,6 +1581,20 @@ impl BatchingEngineHandle {
                     .is_some_and(|policy| policy.use_decode_width_prefill_admission),
                 burst_prefill_admission: policy
                     .is_some_and(|policy| policy.burst_prefill_admission),
+                direct_decode_rendezvous: policy.map_or(
+                    DirectDecodeRendezvousBackendPolicy {
+                        enabled: false,
+                        max_batch: 1,
+                        wait_us: 0,
+                        mixed_seq_lens: false,
+                    },
+                    |policy| DirectDecodeRendezvousBackendPolicy {
+                        enabled: policy.rendezvous_default_enabled,
+                        max_batch: policy.max_batch,
+                        wait_us: policy.wait_micros,
+                        mixed_seq_lens: policy.allow_mixed_seq_lens,
+                    },
+                ),
             },
             max_decode_batch,
         );
@@ -4996,6 +5010,12 @@ mod tests {
                 batching_engine_default_enabled: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
+                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
+                    enabled: false,
+                    max_batch: 1,
+                    wait_us: 0,
+                    mixed_seq_lens: false,
+                },
             },
             8,
         );

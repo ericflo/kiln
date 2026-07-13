@@ -1614,6 +1614,41 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
             );
             println!(
                 "  {} {}",
+                style("Direct streaming rendezvous:").dim(),
+                config.batching.direct_decode_rendezvous_mode.mode()
+            );
+            println!(
+                "  {} {}",
+                style("Direct rendezvous max batch:").dim(),
+                config
+                    .batching
+                    .direct_decode_rendezvous_max_batch
+                    .configured()
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "auto".to_string())
+            );
+            println!(
+                "  {} {}",
+                style("Direct rendezvous wait (us):").dim(),
+                config
+                    .batching
+                    .direct_decode_rendezvous_wait_us
+                    .configured()
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "auto".to_string())
+            );
+            println!(
+                "  {} {}",
+                style("Direct rendezvous mixed lengths:").dim(),
+                config
+                    .batching
+                    .direct_decode_rendezvous_mixed_seq_lens
+                    .configured()
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "auto".to_string())
+            );
+            println!(
+                "  {} {}",
                 style("Rowwise decode:").dim(),
                 config.batching.rowwise_decode.enabled()
             );

@@ -2294,6 +2294,42 @@ pub enum ModelBackend {
     },
 }
 
+/// Runtime availability of the fallback direct-streaming greedy rendezvous.
+///
+/// The worker is intentionally constructed independently of the batching
+/// actor. It is routable only when the worker is live and the actor is absent;
+/// publishing both facts prevents an idle compatibility worker from being
+/// mistaken for the active production route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct DirectDecodeRendezvousRuntimeState {
+    pub scope: &'static str,
+    pub backend_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_unavailable_reason: Option<&'static str>,
+    pub actor_active: bool,
+    pub worker_active: bool,
+    pub route_available: bool,
+}
+
+impl DirectDecodeRendezvousRuntimeState {
+    pub const SCOPE: &'static str = "direct_streaming_greedy_only";
+
+    const fn resolve(backend_available: bool, actor_active: bool, worker_active: bool) -> Self {
+        Self {
+            scope: Self::SCOPE,
+            backend_available,
+            backend_unavailable_reason: if backend_available {
+                None
+            } else {
+                Some("mock_backend")
+            },
+            actor_active,
+            worker_active,
+            route_available: backend_available && !actor_active && worker_active,
+        }
+    }
+}
+
 /// Backend speculative capability facts captured once for diagnostics.
 /// Serving remains fail-closed, so this snapshot is not a routing authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2644,6 +2680,25 @@ pub fn ensure_accelerator_memory_floor(
 }
 
 impl AppState {
+    /// Report actual direct-rendezvous process state, distinct from configured
+    /// intent stored in [`Self::batching_runtime_config`].
+    pub fn direct_decode_rendezvous_runtime_state(&self) -> DirectDecodeRendezvousRuntimeState {
+        match self.backend.as_ref() {
+            ModelBackend::Mock { .. } => {
+                DirectDecodeRendezvousRuntimeState::resolve(false, false, false)
+            }
+            ModelBackend::Real {
+                batching_engine,
+                decode_batcher,
+                ..
+            } => DirectDecodeRendezvousRuntimeState::resolve(
+                true,
+                batching_engine.is_some(),
+                decode_batcher.is_some(),
+            ),
+        }
+    }
+
     pub fn loaded_adapter_identity(&self) -> Option<LoadedAdapterIdentity> {
         self.loaded_adapter.read().unwrap().clone()
     }
@@ -2972,6 +3027,12 @@ impl AppState {
                 batching_engine_default_enabled: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
+                direct_decode_rendezvous: crate::config::DirectDecodeRendezvousBackendPolicy {
+                    enabled: false,
+                    max_batch: 1,
+                    wait_us: 0,
+                    mixed_seq_lens: false,
+                },
             },
             decode_runtime_config.max_decode_batch.effective,
         );
@@ -3767,6 +3828,12 @@ impl AppState {
                 use_decode_width_prefill_admission: decode_batcher_policy
                     .use_decode_width_prefill_admission,
                 burst_prefill_admission: decode_batcher_policy.burst_prefill_admission,
+                direct_decode_rendezvous: crate::config::DirectDecodeRendezvousBackendPolicy {
+                    enabled: decode_batcher_policy.rendezvous_default_enabled,
+                    max_batch: decode_batcher_policy.max_batch,
+                    wait_us: decode_batcher_policy.wait_micros,
+                    mixed_seq_lens: decode_batcher_policy.allow_mixed_seq_lens,
+                },
             },
             max_decode_batch,
         );
@@ -3796,16 +3863,102 @@ impl AppState {
             prefill_admission_quantum_effective_source = %batching_runtime_config
                 .prefill_admission_quantum
                 .effective_source,
+            direct_decode_rendezvous_scope = DirectDecodeRendezvousRuntimeState::SCOPE,
+            direct_decode_rendezvous_mode_configured = %batching_runtime_config
+                .direct_decode_rendezvous
+                .mode
+                .configured,
+            direct_decode_rendezvous_mode_configured_source = %batching_runtime_config
+                .direct_decode_rendezvous
+                .mode
+                .configured_source,
+            direct_decode_rendezvous_mode_backend_policy_enabled = batching_runtime_config
+                .direct_decode_rendezvous
+                .mode
+                .backend_policy_enabled,
+            direct_decode_rendezvous_mode_effective_enabled = batching_runtime_config
+                .direct_decode_rendezvous
+                .mode
+                .effective_enabled,
+            direct_decode_rendezvous_mode_effective_source = %batching_runtime_config
+                .direct_decode_rendezvous
+                .mode
+                .effective_source,
+            direct_decode_rendezvous_max_batch_configured = ?batching_runtime_config
+                .direct_decode_rendezvous
+                .max_batch
+                .configured,
+            direct_decode_rendezvous_max_batch_configured_source = %batching_runtime_config
+                .direct_decode_rendezvous
+                .max_batch
+                .configured_source,
+            direct_decode_rendezvous_max_batch_backend_policy = batching_runtime_config
+                .direct_decode_rendezvous
+                .max_batch
+                .backend_policy,
+            direct_decode_rendezvous_max_batch_effective = batching_runtime_config
+                .direct_decode_rendezvous
+                .max_batch
+                .effective,
+            direct_decode_rendezvous_max_batch_effective_source = %batching_runtime_config
+                .direct_decode_rendezvous
+                .max_batch
+                .effective_source,
+            direct_decode_rendezvous_wait_us_configured = ?batching_runtime_config
+                .direct_decode_rendezvous
+                .wait_us
+                .configured,
+            direct_decode_rendezvous_wait_us_configured_source = %batching_runtime_config
+                .direct_decode_rendezvous
+                .wait_us
+                .configured_source,
+            direct_decode_rendezvous_wait_us_backend_policy = batching_runtime_config
+                .direct_decode_rendezvous
+                .wait_us
+                .backend_policy,
+            direct_decode_rendezvous_wait_us_effective = batching_runtime_config
+                .direct_decode_rendezvous
+                .wait_us
+                .effective,
+            direct_decode_rendezvous_wait_us_effective_source = %batching_runtime_config
+                .direct_decode_rendezvous
+                .wait_us
+                .effective_source,
+            direct_decode_rendezvous_mixed_seq_lens_configured = ?batching_runtime_config
+                .direct_decode_rendezvous
+                .mixed_seq_lens
+                .configured,
+            direct_decode_rendezvous_mixed_seq_lens_configured_source = %batching_runtime_config
+                .direct_decode_rendezvous
+                .mixed_seq_lens
+                .configured_source,
+            direct_decode_rendezvous_mixed_seq_lens_backend_policy = batching_runtime_config
+                .direct_decode_rendezvous
+                .mixed_seq_lens
+                .backend_policy,
+            direct_decode_rendezvous_mixed_seq_lens_effective = batching_runtime_config
+                .direct_decode_rendezvous
+                .mixed_seq_lens
+                .effective,
+            direct_decode_rendezvous_mixed_seq_lens_effective_source = %batching_runtime_config
+                .direct_decode_rendezvous
+                .mixed_seq_lens
+                .effective_source,
             burst_prefill_admission = batching_runtime_config.burst_prefill_admission,
             "batching runtime configuration resolved"
         );
+        let direct_decode_rendezvous = batching_runtime_config.direct_decode_rendezvous;
         let decode_batcher_config =
-            DecodeBatcherConfig::enabled_for_device_kt(&device_kt).then(|| {
-                DecodeBatcherConfig::from_env_for_policy_with_max_batch(
-                    decode_batcher_policy,
-                    max_decode_batch,
-                )
-            });
+            direct_decode_rendezvous
+                .mode
+                .effective_enabled
+                .then_some(DecodeBatcherConfig {
+                    max_batch: direct_decode_rendezvous.max_batch.effective,
+                    wait: std::time::Duration::from_micros(
+                        direct_decode_rendezvous.wait_us.effective,
+                    ),
+                    allow_mixed_seq_lens: direct_decode_rendezvous.mixed_seq_lens.effective,
+                });
         if decode_batcher_policy.warm_resident_decode_pool_on_startup
             && backend_capabilities.decode.resident_decode.is_native()
         {
@@ -3935,23 +4088,41 @@ impl AppState {
         let decode_batcher = if let Some(config) = decode_batcher_config {
             tracing::info!(
                 backend = backend_name,
+                scope = DirectDecodeRendezvousRuntimeState::SCOPE,
                 max_batch = config.max_batch,
                 wait_us = config.wait.as_micros() as u64,
                 mixed_seq_lens = config.allow_mixed_seq_lens,
-                "live greedy decode batcher enabled"
+                actor_active = batching_engine.is_some(),
+                "starting direct streaming greedy decode rendezvous worker"
             );
             match DecodeBatcher::spawn(runner.clone(), paged_cache.clone(), config) {
-                Ok(batcher) => Some(batcher),
+                Ok(batcher) => {
+                    tracing::info!(
+                        scope = DirectDecodeRendezvousRuntimeState::SCOPE,
+                        worker_active = true,
+                        route_available = batching_engine.is_none(),
+                        "direct streaming greedy decode rendezvous worker active"
+                    );
+                    Some(batcher)
+                }
                 Err(err) => {
                     tracing::warn!(
                         error = %err,
-                        "failed to spawn live decode batcher; continuing with rowwise decode"
+                        scope = DirectDecodeRendezvousRuntimeState::SCOPE,
+                        worker_active = false,
+                        route_available = false,
+                        "failed to spawn direct streaming greedy decode rendezvous worker; continuing without that compatibility route"
                     );
                     None
                 }
             }
         } else {
-            tracing::info!("live greedy decode batcher disabled");
+            tracing::info!(
+                scope = DirectDecodeRendezvousRuntimeState::SCOPE,
+                worker_active = false,
+                route_available = false,
+                "direct streaming greedy decode rendezvous worker disabled"
+            );
             None
         };
 
@@ -4907,6 +5078,38 @@ fn format_oom_remediation_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_decode_rendezvous_status_distinguishes_worker_from_route() {
+        let unavailable = DirectDecodeRendezvousRuntimeState::resolve(false, false, false);
+        assert_eq!(unavailable.scope, "direct_streaming_greedy_only");
+        assert_eq!(unavailable.backend_unavailable_reason, Some("mock_backend"));
+        assert!(!unavailable.backend_available);
+        assert!(!unavailable.actor_active);
+        assert!(!unavailable.worker_active);
+        assert!(!unavailable.route_available);
+
+        let impossible_mock_worker =
+            DirectDecodeRendezvousRuntimeState::resolve(false, false, true);
+        assert!(impossible_mock_worker.worker_active);
+        assert!(!impossible_mock_worker.route_available);
+
+        let disabled = DirectDecodeRendezvousRuntimeState::resolve(true, false, false);
+        assert!(disabled.backend_available);
+        assert_eq!(disabled.backend_unavailable_reason, None);
+        assert!(!disabled.actor_active);
+        assert!(!disabled.worker_active);
+        assert!(!disabled.route_available);
+
+        let routed = DirectDecodeRendezvousRuntimeState::resolve(true, false, true);
+        assert!(routed.worker_active);
+        assert!(routed.route_available);
+
+        let shadowed = DirectDecodeRendezvousRuntimeState::resolve(true, true, true);
+        assert!(shadowed.actor_active);
+        assert!(shadowed.worker_active);
+        assert!(!shadowed.route_available);
+    }
 
     fn test_adapter(name: &str) -> Option<LoadedAdapterIdentity> {
         test_adapter_revision(name, &format!("revision:{name}"))

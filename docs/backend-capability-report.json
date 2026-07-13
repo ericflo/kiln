@@ -1541,8 +1541,12 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "DecodeBatcherPolicy": {
-      "field_count": 19,
+      "field_count": 20,
       "fields": [
+        {
+          "name": "rendezvous_default_enabled",
+          "type": "bool"
+        },
         {
           "name": "max_batch",
           "type": "usize"

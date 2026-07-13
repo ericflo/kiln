@@ -6,7 +6,7 @@ use crate::config::{
     SpecMethod,
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
-use crate::state::{AppState, ModelBackend};
+use crate::state::{AppState, DirectDecodeRendezvousRuntimeState, ModelBackend};
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 const SPECULATIVE_SERVING_UNAVAILABLE_REASON: &str =
@@ -33,6 +33,7 @@ struct ConfigResponse {
 struct BatchingConfigResponse {
     configuration: BatchingRuntimeConfig,
     actor_active: bool,
+    direct_decode_rendezvous: DirectDecodeRendezvousRuntimeState,
 }
 
 #[derive(Serialize)]
@@ -242,6 +243,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
                     ..
                 }
             ),
+            direct_decode_rendezvous: state.direct_decode_rendezvous_runtime_state(),
         },
         speculative: build_speculative_config(&state),
         vram: build_vram_config(&state, memory_observation),
@@ -514,6 +516,30 @@ mod tests {
         );
         assert_eq!(json["batching"]["actor_active"], false);
         assert_eq!(
+            json["batching"]["direct_decode_rendezvous"]["scope"],
+            "direct_streaming_greedy_only"
+        );
+        assert_eq!(
+            json["batching"]["direct_decode_rendezvous"]["backend_available"],
+            false
+        );
+        assert_eq!(
+            json["batching"]["direct_decode_rendezvous"]["backend_unavailable_reason"],
+            "mock_backend"
+        );
+        assert_eq!(
+            json["batching"]["direct_decode_rendezvous"]["actor_active"],
+            false
+        );
+        assert_eq!(
+            json["batching"]["direct_decode_rendezvous"]["worker_active"],
+            false
+        );
+        assert_eq!(
+            json["batching"]["direct_decode_rendezvous"]["route_available"],
+            false
+        );
+        assert_eq!(
             json["batching"]["configuration"]["mode"]["configured"],
             "auto"
         );
@@ -532,6 +558,34 @@ mod tests {
         assert_eq!(
             json["batching"]["configuration"]["prefill_admission_quantum"]["effective"],
             4
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["direct_decode_rendezvous"]["mode"]["configured"],
+            "auto"
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["direct_decode_rendezvous"]["mode"]["backend_policy_enabled"],
+            false
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["direct_decode_rendezvous"]["mode"]["effective_enabled"],
+            false
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["direct_decode_rendezvous"]["max_batch"]["backend_policy"],
+            1
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["direct_decode_rendezvous"]["max_batch"]["effective"],
+            1
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["direct_decode_rendezvous"]["wait_us"]["effective"],
+            0
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["direct_decode_rendezvous"]["mixed_seq_lens"]["effective"],
+            false
         );
         assert_eq!(
             json["batching"]["configuration"]["burst_prefill_admission"],

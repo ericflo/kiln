@@ -998,6 +998,9 @@ pub struct SpeculativeDecodePolicy {
 /// Backend-owned defaults for the live decode rendezvous worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeBatcherPolicy {
+    /// Whether the direct-streaming rendezvous worker is selected when the
+    /// owning product leaves the setting on backend policy.
+    pub rendezvous_default_enabled: bool,
     /// LEGACY DecodeBatcher width (the in-runner row loop).
     pub max_batch: usize,
     /// Concurrent-decode width for the BATCHING ENGINE actor, when it
@@ -1717,6 +1720,7 @@ impl DecodeBatcherPolicy {
     pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
         match backend_kind_for_runtime(name, device) {
             kiln_tensor::Backend::Cuda => Self {
+                rendezvous_default_enabled: true,
                 max_batch: 1,
                 engine_max_decode_batch: Some(Self::DEFAULT_MAX_BATCH),
                 wait_micros: 0,
@@ -1740,6 +1744,7 @@ impl DecodeBatcherPolicy {
                 warm_resident_decode_pool_on_startup: false,
             },
             kiln_tensor::Backend::Metal => Self {
+                rendezvous_default_enabled: true,
                 max_batch: Self::DEFAULT_MAX_BATCH,
                 engine_max_decode_batch: None,
                 wait_micros: Self::METAL_WAIT_MICROS,
@@ -1761,6 +1766,7 @@ impl DecodeBatcherPolicy {
                 warm_resident_decode_pool_on_startup: false,
             },
             kiln_tensor::Backend::Vulkan => Self {
+                rendezvous_default_enabled: true,
                 max_batch: Self::VULKAN_MAX_BATCH,
                 engine_max_decode_batch: None,
                 wait_micros: Self::VULKAN_WAIT_MICROS,
@@ -1782,6 +1788,7 @@ impl DecodeBatcherPolicy {
                 warm_resident_decode_pool_on_startup: true,
             },
             kiln_tensor::Backend::Rocm => Self {
+                rendezvous_default_enabled: true,
                 max_batch: Self::DEFAULT_MAX_BATCH,
                 engine_max_decode_batch: None,
                 wait_micros: 0,
@@ -1814,6 +1821,7 @@ impl DecodeBatcherPolicy {
                 warm_resident_decode_pool_on_startup: false,
             },
             _ => Self {
+                rendezvous_default_enabled: true,
                 max_batch: Self::DEFAULT_MAX_BATCH,
                 engine_max_decode_batch: None,
                 wait_micros: 0,

@@ -17,7 +17,7 @@ use crate::config::{
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::recent_requests::RequestRecord;
-use crate::state::{AppState, ModelBackend};
+use crate::state::{AppState, DirectDecodeRendezvousRuntimeState, ModelBackend};
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -286,6 +286,7 @@ struct PromptCacheInfo {
 struct DecodeRuntimeInfo {
     configuration: DecodeRuntimeConfig,
     batching_configuration: BatchingRuntimeConfig,
+    direct_decode_rendezvous: DirectDecodeRendezvousRuntimeState,
     cuda_graphs: GraphInfo,
     rocm_graphs: RocmGraphInfo,
     metal_graphs: GraphInfo,
@@ -681,6 +682,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let decode_runtime = DecodeRuntimeInfo {
         configuration: state.decode_runtime_config,
         batching_configuration: state.batching_runtime_config,
+        direct_decode_rendezvous: state.direct_decode_rendezvous_runtime_state(),
         cuda_graphs,
         rocm_graphs,
         metal_graphs,
@@ -1502,6 +1504,30 @@ mod tests {
         assert_eq!(
             json["decode_runtime"]["batching_configuration"]["prefill_admission_quantum"]["effective"],
             4
+        );
+        assert_eq!(
+            json["decode_runtime"]["direct_decode_rendezvous"]["scope"],
+            "direct_streaming_greedy_only"
+        );
+        assert_eq!(
+            json["decode_runtime"]["direct_decode_rendezvous"]["backend_available"],
+            false
+        );
+        assert_eq!(
+            json["decode_runtime"]["direct_decode_rendezvous"]["backend_unavailable_reason"],
+            "mock_backend"
+        );
+        assert_eq!(
+            json["decode_runtime"]["direct_decode_rendezvous"]["actor_active"],
+            false
+        );
+        assert_eq!(
+            json["decode_runtime"]["direct_decode_rendezvous"]["worker_active"],
+            false
+        );
+        assert_eq!(
+            json["decode_runtime"]["direct_decode_rendezvous"]["route_available"],
+            false
         );
         for backend in ["cuda_graphs", "rocm_graphs", "metal_graphs"] {
             assert_eq!(json["decode_runtime"][backend]["enabled"], false);

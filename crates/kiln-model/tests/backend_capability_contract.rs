@@ -1748,6 +1748,10 @@ fn generated_capability_report_lists_request_descriptors() {
     );
     for (field, message) in [
         (
+            "rendezvous_default_enabled",
+            "DecodeBatcherPolicy should own direct-rendezvous enable defaults",
+        ),
+        (
             "use_decode_width_prefill_admission",
             "DecodeBatcherPolicy should own prefill admission width defaults",
         ),
@@ -3828,8 +3832,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         decode_buffer_max_batch_section
             .contains("BackendCapabilityQueries::backend_capabilities(backend)")
             && decode_buffer_max_batch_section.contains(".decode_batcher")
-            && decode_buffer_max_batch_section.contains(".max_batch"),
-        "decode buffer max-batch default should come from DecodeBatcherPolicy on the active backend"
+            && decode_buffer_max_batch_section.contains(".max_batch")
+            && !decode_buffer_max_batch_section.contains("std::env")
+            && !decode_buffer_max_batch_section.contains("KILN_DECODE_BUFFER_MAX_BATCH"),
+        "decode buffer max-batch should use injected/backend policy without a model-local environment override"
     );
     assert!(
         !decode_buffer_max_batch_section.contains("DecodeBatcherPolicy::for_backend")
@@ -3866,35 +3872,57 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
 
     let decode_batcher_config_section = source_between(
         &generate_source,
-        "pub fn from_env_for_backend_kt(",
-        "pub fn from_env_for_device_kt(",
+        "pub struct DecodeBatcherConfig {",
+        "fn env_flag_value(",
     );
     assert!(
-        decode_batcher_config_section.contains("DecodeBatcherPolicy::for_backend"),
-        "decode batcher backend-aware defaults should come from the shared policy object"
+        decode_batcher_config_section.contains("pub max_batch: usize")
+            && decode_batcher_config_section.contains("pub wait: std::time::Duration")
+            && decode_batcher_config_section.contains("pub allow_mixed_seq_lens: bool"),
+        "decode batcher should expose only its injected execution values"
+    );
+    for removed_constructor in [
+        "pub fn from_env() -> Self",
+        "from_env_for_policy(",
+        "from_env_for_policy_with_max_batch(",
+        "from_env_for_backend_kt(",
+        "from_env_for_device_kt(",
+        "enabled_for_device_kt(",
+    ] {
+        assert!(
+            !generate_source.contains(removed_constructor),
+            "decode batcher execution config must not retain runtime environment constructor {removed_constructor}"
+        );
+    }
+    for legacy_env in [
+        "KILN_DECODE_BATCHER",
+        "KILN_DECODE_BATCH_MAX",
+        "KILN_DECODE_BATCH_WAIT_US",
+        "KILN_DECODE_BATCH_MIXED_SEQ",
+    ] {
+        let quoted = format!("\"{legacy_env}\"");
+        assert!(
+            !generate_source.contains(&quoted),
+            "kiln-model generate must receive typed decode-batcher values instead of reading {legacy_env}"
+        );
+        assert!(
+            !server_state_source.contains(&quoted),
+            "kiln-server state must receive centralized typed configuration instead of reading {legacy_env}"
+        );
+    }
+    assert!(
+        capability_source.contains("pub rendezvous_default_enabled: bool"),
+        "DecodeBatcherPolicy should own the direct-rendezvous enable default"
     );
     assert!(
-        generate_source.contains("pub fn from_env_for_policy(policy: DecodeBatcherPolicy)"),
-        "decode batcher config should expose a policy-consuming constructor"
-    );
-    assert!(
-        generate_source.contains("pub fn from_env_for_policy_with_max_batch(")
-            && !generate_source.contains("env_positive_usize(\"KILN_MAX_DECODE_BATCH\")"),
-        "the server's validated shared decode ceiling should be injected instead of reread from env"
-    );
-    let server_startup_policy_section = source_between(
-        &server_state_source,
-        "let backend_name = runner.backend_name();",
-        "let decode_batcher = if let Some(config) = decode_batcher_config",
-    );
-    assert!(
-        server_startup_policy_section.contains("runner.backend_capabilities()")
-            && server_startup_policy_section.contains("decode_batcher_policy")
-            && server_startup_policy_section.contains("from_env_for_policy_with_max_batch")
-            && server_startup_policy_section.contains("warm_resident_decode_pool_on_startup")
-            && server_startup_policy_section.contains("batching_engine_default_enabled")
-            && server_startup_policy_section.contains("kv_cache_device_memory_pressure"),
-        "kiln-server startup decode defaults should consume BackendCapabilities/DecodeBatcherPolicy"
+        server_state_source.contains("runner.backend_capabilities()")
+            && server_state_source.contains("decode_batcher_policy")
+            && server_state_source.contains("decode_batcher_config")
+            && server_state_source.contains("DecodeBatcher::spawn")
+            && server_state_source.contains("warm_resident_decode_pool_on_startup")
+            && server_state_source.contains("batching_engine_default_enabled")
+            && server_state_source.contains("kv_cache_device_memory_pressure"),
+        "kiln-server startup should resolve backend policy once and inject decode-batcher execution config"
     );
     let server_prefix_cache_state_section = source_between(
         &server_state_source,

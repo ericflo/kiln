@@ -855,6 +855,13 @@ async fn main() -> Result<()> {
                 batching_engine_default_enabled: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
+                direct_decode_rendezvous:
+                    kiln_server::config::DirectDecodeRendezvousBackendPolicy {
+                        enabled: false,
+                        max_batch: 1,
+                        wait_us: 0,
+                        mixed_seq_lens: false,
+                    },
             },
             state.decode_runtime_config.max_decode_batch.effective,
         );

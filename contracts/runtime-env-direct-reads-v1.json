@@ -695,17 +695,6 @@
     },
     {
       "api": "set_var",
-      "argument": "KILN_DECODE_BATCH_MAX",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/generate.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
       "argument": "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK",
       "argument_kind": "literal",
       "count": 1,
@@ -6474,18 +6463,7 @@
       "api": "var",
       "argument": "name",
       "argument_kind": "expression",
-      "count": 3,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/generate.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DECODE_BATCH_WAIT_US",
-      "argument_kind": "literal",
-      "count": 1,
+      "count": 2,
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-model/src/generate.rs",
@@ -6528,17 +6506,6 @@
     {
       "api": "var",
       "argument": "KILN_ENABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/generate.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var_os",
-      "argument": "KILN_DECODE_BATCH_WAIT_US",
       "argument_kind": "literal",
       "count": 1,
       "language": "rust",
@@ -10565,9 +10532,9 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 613,
-    "process_mutation_entries": 293,
-    "read_call_sites": 975,
-    "read_entries": 666
+    "process_mutation_call_sites": 611,
+    "process_mutation_entries": 292,
+    "read_call_sites": 972,
+    "read_entries": 664
   }
 }

@@ -1003,13 +1003,6 @@ fn strict_prompt_prefix_split_pos(
     (split_pos > cached_tokens && split_pos < prompt_len).then_some(split_pos)
 }
 
-fn env_positive_usize(name: &str) -> Option<usize> {
-    std::env::var(name)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-}
-
 fn decode_buffer_max_batch(
     backend: &dyn BackendRuntime,
     scheduler_max_decode_batch: Option<usize>,
@@ -1017,18 +1010,14 @@ fn decode_buffer_max_batch(
     if let Some(required) = scheduler_max_decode_batch {
         return required.max(1);
     }
-    let explicit = env_positive_usize("KILN_DECODE_BUFFER_MAX_BATCH");
-    if let Some(value) = explicit {
-        return value;
-    }
-    // Scale the per-step decode buffer to the widest configured scheduler so
-    // the first large batch does not immediately error with `decode batch N
-    // exceeds buffer max_batch M`. Vulkan gets a wider unconfigured default
-    // because its resident path keeps scaling past b16 on this target.
-    let live_batcher_max = env_positive_usize("KILN_DECODE_BATCH_MAX").unwrap_or(0);
+    // Scale the per-step decode buffer to the backend's widest scheduler
+    // policy so the first large batch does not immediately error with `decode
+    // batch N exceeds buffer max_batch M`. The owning server injects its exact
+    // validated ceiling above; standalone consumers receive the backend-owned
+    // safe default unless they construct the runner with an explicit option.
     let policy = BackendCapabilityQueries::backend_capabilities(backend).decode_batcher;
     let backend_default = policy.engine_max_decode_batch.unwrap_or(policy.max_batch);
-    live_batcher_max.max(backend_default).max(1)
+    backend_default.max(1)
 }
 
 enum PrefillSampleSource {
@@ -1263,16 +1252,12 @@ enum StreamTokenDisposition {
 
 /// Configuration for the live greedy decode rendezvous worker.
 ///
-/// The worker is enabled by default. Metal uses a small default admission delay
-/// to collect compatible peers; CUDA drains immediately and defaults to one row
-/// per worker pass because the current coalesced CUDA GDN decode path is slower
-/// than rowwise scheduling. Set `KILN_DECODE_BATCHER=0` to force the legacy
-/// direct rowwise path, `KILN_DECODE_BATCH_WAIT_US` to override the admission
-/// delay, `KILN_DECODE_BATCH_MAX` to force this worker's batch size for A/B
-/// testing. The owning server supplies its validated shared actor/worker
-/// ceiling directly. Vulkan defaults to a longer wait because same-position peers tend
-/// to arrive just outside a short polling window after independent prefills.
-#[derive(Debug, Clone, Copy)]
+/// This is a pure execution value: the owning product resolves operator intent,
+/// backend defaults, and scheduler ceilings before constructing it. Metal's
+/// backend policy uses a small admission delay to collect compatible peers;
+/// CUDA drains immediately and defaults to one row per worker pass because the
+/// current coalesced CUDA GDN decode path is slower than rowwise scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeBatcherConfig {
     /// Maximum compatible rows to execute in one decode forward pass.
     pub max_batch: usize,
@@ -1281,86 +1266,6 @@ pub struct DecodeBatcherConfig {
     /// Whether one batch may contain rows at different decode positions.
     pub allow_mixed_seq_lens: bool,
 }
-
-impl Default for DecodeBatcherConfig {
-    fn default() -> Self {
-        Self {
-            max_batch: 8,
-            wait: std::time::Duration::ZERO,
-            allow_mixed_seq_lens: false,
-        }
-    }
-}
-
-impl DecodeBatcherConfig {
-    pub fn from_env() -> Self {
-        let mut config = Self::default();
-        if let Some(parsed) = env_positive_usize("KILN_DECODE_BATCH_MAX") {
-            config.max_batch = parsed;
-        }
-        if let Ok(value) = std::env::var("KILN_DECODE_BATCH_WAIT_US")
-            && let Ok(parsed) = value.parse::<u64>()
-        {
-            config.wait = std::time::Duration::from_micros(parsed);
-        }
-        if let Some(enabled) = env_flag_value("KILN_DECODE_BATCH_MIXED_SEQ") {
-            config.allow_mixed_seq_lens = enabled;
-        }
-        config
-    }
-
-    // (#1082) candle-typed `from_env_for_backend`/`from_env_for_device`/
-    // `enabled_for_device` deleted — the kt-typed variants below are the sole
-    // entry points now that callers (kiln-server state.rs) and tests use kt
-    // `Device`.
-
-    /// Builds the decode-batcher config from env, applying backend-aware
-    /// defaults derived from the backend policy.
-    pub fn from_env_for_policy(policy: DecodeBatcherPolicy) -> Self {
-        let mut config = Self::from_env();
-        if env_positive_usize("KILN_DECODE_BATCH_MAX").is_none() {
-            config.max_batch = policy.max_batch;
-        }
-        if std::env::var_os("KILN_DECODE_BATCH_WAIT_US").is_none() {
-            config.wait = std::time::Duration::from_micros(policy.wait_micros);
-        }
-        if env_flag_value("KILN_DECODE_BATCH_MIXED_SEQ").is_none() {
-            config.allow_mixed_seq_lens = policy.allow_mixed_seq_lens;
-        }
-        config
-    }
-
-    /// Apply the owning scheduler's validated hard ceiling to the backend and
-    /// model-only debug policy. This is the server entry point.
-    pub fn from_env_for_policy_with_max_batch(
-        policy: DecodeBatcherPolicy,
-        max_batch: usize,
-    ) -> Self {
-        let mut config = Self::from_env_for_policy(policy);
-        config.max_batch = config.max_batch.min(max_batch.max(1));
-        config
-    }
-
-    /// Builds the decode-batcher config from env, applying backend-aware
-    /// defaults derived from the kt `Device`.
-    pub fn from_env_for_backend_kt(device: &kiln_tensor::Device, backend_name: &str) -> Self {
-        Self::from_env_for_policy(DecodeBatcherPolicy::for_backend(backend_name, *device))
-    }
-
-    /// kt-typed parallel of [`Self::from_env_for_device`].
-    pub fn from_env_for_device_kt(device: &kiln_tensor::Device) -> Self {
-        Self::from_env_for_backend_kt(device, "")
-    }
-
-    /// kt-typed parallel of [`Self::enabled_for_device`].
-    pub fn enabled_for_device_kt(device: &kiln_tensor::Device) -> bool {
-        let _ = device;
-        env_flag_enabled("KILN_DECODE_BATCHER", true)
-    }
-}
-
-// (#1082) candle-typed `default_decode_batcher_*` helpers deleted. Backend
-// defaults now come from `DecodeBatcherPolicy`; env overrides stay here.
 
 fn env_flag_value(name: &str) -> Option<bool> {
     let value = std::env::var(name).ok()?;
@@ -11300,6 +11205,10 @@ mod tests {
             ),
         ] {
             let policy = DecodeBatcherPolicy::for_backend(backend_name, device);
+            assert!(
+                policy.rendezvous_default_enabled,
+                "{backend_name} rendezvous enable policy drifted"
+            );
             assert_eq!(
                 policy.max_batch, max_batch,
                 "{backend_name} max batch policy drifted"
@@ -11333,40 +11242,20 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_batcher_max_batch_env_policy() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvRestore::clear(&["KILN_DECODE_BATCH_MAX"]);
+    fn decode_batcher_config_preserves_injected_execution_values() {
+        let config = DecodeBatcherConfig {
+            max_batch: 12,
+            wait: std::time::Duration::from_micros(3_500),
+            allow_mixed_seq_lens: true,
+        };
 
-        let device = kiln_tensor::Device::Cpu;
-        let policy = DecodeBatcherPolicy::for_backend("vulkan", device);
-        assert_eq!(
-            DecodeBatcherConfig::from_env_for_backend_kt(&device, "vulkan").max_batch,
-            64
-        );
-        assert_eq!(
-            DecodeBatcherConfig::from_env_for_policy_with_max_batch(policy, 24).max_batch,
-            24
-        );
-        unsafe {
-            std::env::set_var("KILN_DECODE_BATCH_MAX", "12");
-        }
-        assert_eq!(
-            DecodeBatcherConfig::from_env_for_policy_with_max_batch(policy, 24).max_batch,
-            12
-        );
-        unsafe {
-            std::env::set_var("KILN_DECODE_BATCH_MAX", "48");
-        }
-        assert_eq!(
-            DecodeBatcherConfig::from_env_for_policy_with_max_batch(policy, 24).max_batch,
-            24
-        );
+        assert_eq!(config.max_batch, 12);
+        assert_eq!(config.wait, std::time::Duration::from_micros(3_500));
+        assert!(config.allow_mixed_seq_lens);
     }
 
     #[test]
     fn decode_buffer_width_honors_injected_scheduler_requirement() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvRestore::clear(&["KILN_DECODE_BUFFER_MAX_BATCH", "KILN_DECODE_BATCH_MAX"]);
         let vulkan = NamedTestBackend {
             name: "vulkan",
             device: kiln_tensor::Device::Cpu,
