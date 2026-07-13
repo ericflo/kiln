@@ -366,11 +366,11 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
   live request without exposing that event and latency.
 - [x] Add eager-versus-graph logit and token parity across sequence buckets,
   block-table changes, prefix reuse, cancellation, and adapter boundaries.
-  - A real gfx1151 test forces 64-token buckets, grows block tables through the
-    boundary, releases one owner, reuses populated prefix pages with a new
-    owner, invalidates at an adapter boundary, and requires exact hidden-state
-    hidden-state, full-logit, and greedy-token parity with an independent eager
-    cache.
+  - A real gfx1151 test uses the production exact 64-token FA2 geometry, grows
+    block tables through the boundary, releases one owner, reuses populated
+    prefix pages with a new owner, invalidates at an adapter boundary, and
+    requires exact hidden-state, full-logit, and greedy-token parity with an
+    independent eager cache.
 - [x] Treat graph fallback as a counted event with a bounded reason enum.
 
 ### 1.6 Latency observability
@@ -388,8 +388,17 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
 
 ### 1.7 Strix Halo ROCm qualification
 
-- [ ] Run correctness qualification with graphs disabled.
-- [ ] Run correctness qualification with pre-captured graphs enabled.
+- [x] Run correctness qualification with graphs disabled.
+- [x] Run correctness qualification with pre-captured graphs enabled.
+  - The clean source-bound `serving-rocm-graph-correctness-v1` run on
+    `eacf2350` exercised eight deterministic requests in each mode across four
+    prompt buckets. Graph-off recorded zero graph activity. Graph-on warmed
+    eight exact FA2 geometries, then completed all 188 expected measurement
+    replays with zero measurement captures, fallbacks, graph failures, request
+    failures, or active slots at drain. All 192 action tokens and selected-token
+    logprobs matched exactly; both modes produced canonical trace
+    `sha256:5742aa0ac45e964e4147456025b120ab4598735dd69fc1a6d7bb7111de60ce9a`.
+    The receipt passed strict local-artifact and known-commit validation.
 - [ ] Run mixed prompt lengths and concurrency 1, 8, 16, 32, and 64 where the
   supported profile permits them.
 - [ ] Exercise prefix reuse, cancellation, slow consumers, adapter load/unload,
@@ -1318,6 +1327,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-12 | Clean 30-minute reusable-slot ROCm soak | `sha256:95dcb35b1c7a` | `53a582aa` | Strix Halo ROCm/gfx1151 | `qualification/receipts/rocm/strix-halo/20260713t011231883902z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1.json`; strict current-source/artifact/commit validation | passed | The clean pushed-source workload converged after four complete cycles with three stable endpoints, then ran 1,094 requests across 151 waves for 1,811.16 measured seconds, including 30 confirmed cancellations and prompt lengths from 136 to 3,160 tokens. It completed 8,734 graph replays, created no new graph slot after baseline, reused slots 551 times, kept three slots resident and idle at final drain, and bounded lazy graph residency from 9 to the configured maximum of 12. RSS grew 37,416,960 bytes and GPU use 95,281,152 bytes, both far below the unchanged 512 MiB gate. All requests and 35,008 output tokens completed with zero request, batching, device-fault, non-finite, graph capture/replay/fallback, synchronization, unexplained-ITL, KV-ownership, cache-lease, or residue failures. The 51 ITL outliers were all attributed; p99/p99.9 ITL were 414.6/509.3 ms. External-yield synchronization had a 0.771 ms maximum. Shutdown was unforced, returned zero after joining the decode worker, and removed the private snapshot. Hosted CI run `29216920797` and qualification-contract run `29216920787` are green with all accelerator jobs skipped. This closes the recurring 30-minute ROCm development gate for the material graph-lifecycle change; the final 24-hour phase soak remains open. |
 | 2026-07-12 | Full-model ROCm eager/graph correctness counterexample | `sha256:3fa073dc7459` | this commit | Strix Halo ROCm/gfx1151 development probe | `serving-rocm-graph-correctness-v1`; exact public rollout action-token and selected-token-logprob comparison over four prompt buckets | failed as designed | The new source-bound local gate runs isolated deterministic graph-off and graph-on servers, warms each prompt, then repeats it through prefix reuse. It records exact public rollout provenance rather than accepting text similarity. The graph measurement genuinely executed 188 expected decode replays with three retained graph buckets, four slot reuses, eight prefix hits, zero graph failures/fallbacks, and clean unforced teardown. All four graph-on repeats nevertheless diverged from their own warm trace and the eager oracle. The first short-prompt mismatch occurred at action zero before measured decode replay: warm/eager selected token 15 at logprob -0.0060020443, while the graph-on strict-prefix reuse selected out-of-vocabulary token 248320 at logprob 0.0. A deep-copy and then synchronous CPU-copy experiment on exact-hit logits did not change the counterexample because these non-block-aligned prompts reuse a 128-token KV/GDN strict prefix and recompute the suffix. The remaining bounded hypothesis is graph decode corrupting or aliasing retained strict-prefix KV/GDN state after warmup. The graphs-disabled and pre-captured-graphs correctness gates remain open. |
 | 2026-07-13 | Persistent ROCm graph-state address correction | `sha256:2c730b2fe196` | `bcdad5ea` | Strix Halo ROCm/gfx1151 + portable contract | `qualification/receipts/rocm/strix-halo/20260713t031315378590z-rocm-strix-halo-serving-rocm-graph-corre-9c3737d14a-v1.json`; strict receipt/artifact/commit validation; 331 qualification tests; focused graph-slot ownership test | failed, narrowed counterexample | Capture warmup restored GDN state by replacing the request's tensor handles even though the reusable graph slot retained the original handles. The graph therefore recorded request-owned recurrent/conv addresses that were freed at request finish; a later replay wrote through those dangling addresses into a strict-prefix snapshot that had reused the allocation. Rollback now copies values into the persistent slot in place, and a regression asserts both recurrent and conv values are restored without changing either tensor ID. The clean pushed-source run eliminated the prior semantic corruption: graph warm/repeat was exact, all 192 public action token IDs matched eager, 188 measured replays completed through one idle reusable slot with three retained geometries, and eight prefix hits, four slot reuses, zero graph failures/fallbacks, and clean teardown were proven. The exact gate still rejected one narrower numerical difference in the 768-word bucket: at action index one both paths selected token 15, but eager reported logprob -0.0026816889 and graph reported -0.0036571058. This receipt remains failed and both final correctness checkboxes remain open. Hosted CI then exposed only a stale source invariant requiring the removed handle assignments; `6f7790cc` updates it to require in-place restore and reject handle replacement. |
+| 2026-07-13 | Exact full-model ROCm eager/graph qualification | `sha256:1c43038c9a38` | `eacf2350` (`e1a0ba15` runtime fix) | Strix Halo ROCm/gfx1151 | `qualification/receipts/rocm/strix-halo/20260713t035642923933z-rocm-strix-halo-serving-rocm-graph-corre-9c3737d14a-v1.json`; strict local-artifact/known-commit validation; 333 qualification tests; hosted CI and qualification contract | passed | The final mismatch was not replay state, stream ordering, arena reuse, or the eager LM head. ROCm graphs rounded `max_seqlen_k` to a coarse 512-token cache bucket while eager used the native 64-token FA2 split boundary. At logical length 2,395 this changed the split-K geometry from 2,432 to 2,560 and perturbed BF16 reductions. Graph keys now always match eager's exact FA2 geometry; the larger-bucket environment override was removed so correctness cannot silently become a tuning tradeoff. The source-bound run produced identical eager/graph canonical hashes across all 192 actions, zero token/logprob/output/repeat mismatches, 188 measured native replays, eight prefix hits, four graph-slot reuses, zero measurement captures, failures, fallbacks, or residue, and an idle bounded slot at clean drain. The runner also now allows a bounded successful process group to settle and ignores zombie-only groups while still killing and rejecting live descendants; this removed a false receipt failure without weakening process containment. Hosted CI `29222537358` and qualification-contract run `29222760395` are green. |
 
 ## Known Starting Defects
 
