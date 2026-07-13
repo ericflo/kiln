@@ -15324,67 +15324,14 @@ fn tiled_training_tile_size(
     Some(tile)
 }
 
-fn exact_gdn_reverse_tile_size(
-    weights: &GpuWeights,
-    device: &Device,
-    seq_len: usize,
-    seg_start: usize,
-    seg_end: usize,
-    streaming_prefill: StreamingPrefillExecutionPolicy,
-) -> Option<usize> {
-    if !kiln_core::env_flag::env_tristate("KILN_EXACT_GDN_TILE_BACKWARD").unwrap_or(true) {
-        return None;
-    }
-    if seg_end != seg_start + 1 {
-        return None;
-    }
-    if !matches!(
-        weights.layers[seg_start].attention,
-        GpuAttentionWeights::Linear(_)
-    ) {
-        return None;
-    }
-    if !streaming_prefill.enabled_for(seq_len) {
-        return None;
-    }
-    let tile = exact_gdn_backward_tile_tokens_for(device, streaming_prefill);
-    if tile == 0 || tile % GDN_CHUNK_SIZE != 0 || tile >= seq_len {
-        return None;
-    }
-    Some(tile)
-}
-
-fn exact_gdn_backward_tile_tokens_for(
-    device: &Device,
-    streaming_prefill: StreamingPrefillExecutionPolicy,
-) -> usize {
-    fn fallback_tile(device: &Device, streaming_prefill: StreamingPrefillExecutionPolicy) -> usize {
-        training_precision_policy_for_device(device)
-            .exact_gdn_backward_tile_tokens_or(streaming_prefill.base_tile_tokens())
-    }
-
-    match std::env::var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS") {
-        Ok(raw) => match raw.parse::<usize>() {
-            Ok(tile) if tile > 0 && tile % GDN_CHUNK_SIZE == 0 => tile,
-            _ => {
-                tracing::warn!(
-                    value = %raw,
-                    chunk_size = GDN_CHUNK_SIZE,
-                    "ignoring invalid KILN_EXACT_GDN_BACKWARD_TILE_TOKENS"
-                );
-                fallback_tile(device, streaming_prefill)
-            }
-        },
-        Err(_) => fallback_tile(device, streaming_prefill),
-    }
-}
-
-// (#1082) Deleted three orphaned residues of the removed exact_gdn tiled-reverse
+// (#1082) Deleted five orphaned residues of the removed exact_gdn tiled-reverse
 // machinery — all had zero callers after the candle-drop:
 //   * `profile_exact_gdn_reverse_tiles`
 //   * `exact_gdn_split_recurrent_backward_enabled`
 //   * `finish_exact_gdn_reverse_tile_stage` (its only call was to the already
 //     deleted `synchronize_checkpoint_boundary`)
+//   * `exact_gdn_reverse_tile_size`
+//   * `exact_gdn_backward_tile_tokens_for`
 
 // `InjectTensorGradient` (struct + impl candle_core::CustomOp1) was
 // deleted as part of the #1082 CP-4 step 2-3 caller flip. All 6 call
@@ -17211,16 +17158,13 @@ pub(crate) mod tests {
         GpuLinearAttentionWeights, model_forward_kt, model_forward_segment,
     };
 
-    /// Serializes tests in this binary that mutate residual training/debug
-    /// environment controls (`KILN_EXACT_GDN_TILE_BACKWARD`,
-    /// `KILN_EXACT_GDN_BACKWARD_TILE_TOKENS`,
-    /// `KILN_USE_FLCE`, `KILN_DISABLE_RMSNORM_KERNEL`,
-    /// `KILN_DISABLE_RMSNORM_BACKWARD`, `KILN_CUDA_FLCE`,
-    /// `KILN_VULKAN_FLCE`). `cargo test` runs tests in this
-    /// binary as parallel threads in a single process, so without this
-    /// mutex one test's `set_var` can leak into another test's
-    /// "monolithic baseline" forward pass. `cargo nextest run` runs each
-    /// test in its own process, so this mutex is a no-op there.
+    /// Serializes tests in this binary that mutate the global optimizer fallback
+    /// environment controls (`KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK` and the
+    /// backend-specific `KILN_{CUDA,METAL,VULKAN,ROCM}_TRAINING_OPTIMIZER_FALLBACK`
+    /// variables). `cargo test` runs tests in this binary as parallel threads in
+    /// a single process, so one test's mutation can otherwise leak into another.
+    /// `cargo nextest run` runs each test in its own process, making this mutex a
+    /// no-op there.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[cfg(feature = "cuda")]
     pub(crate) static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -19579,52 +19523,6 @@ pub(crate) mod tests {
         );
         assert!(!recorded.reinforce);
         assert!(matches!(recorded.kl_estimator, KlEstimator::K1));
-    }
-
-    #[test]
-    fn test_exact_gdn_backward_tile_override_is_independent_of_streaming_tile() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior_backward_tile = std::env::var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS").ok();
-        let cpu_policy = StreamingPrefillExecutionPolicy::resolve(
-            kiln_model::StreamingPrefillBackendPolicy::for_device(cpu_device()),
-            kiln_model::forward::StreamingPrefillMode::Auto,
-            None,
-            Some(256),
-            None,
-            None,
-            true,
-        );
-        let cuda_policy = StreamingPrefillExecutionPolicy::for_device(Device::Cuda(0));
-
-        unsafe {
-            std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
-        }
-        assert_eq!(
-            super::exact_gdn_backward_tile_tokens_for(&cpu_device(), cpu_policy),
-            256
-        );
-        assert_eq!(
-            super::exact_gdn_backward_tile_tokens_for(&Device::Cuda(0), cuda_policy),
-            1024
-        );
-
-        unsafe {
-            std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "128");
-        }
-        assert_eq!(
-            super::exact_gdn_backward_tile_tokens_for(&cpu_device(), cpu_policy),
-            128
-        );
-
-        unsafe {
-            std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "130");
-        }
-        assert_eq!(
-            super::exact_gdn_backward_tile_tokens_for(&cpu_device(), cpu_policy),
-            256
-        );
-
-        restore_env("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", prior_backward_tile);
     }
 
     fn minimal_training_tokenizer(template: &str) -> KilnTokenizer {

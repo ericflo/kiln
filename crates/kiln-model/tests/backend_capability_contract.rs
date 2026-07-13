@@ -2331,16 +2331,11 @@ fn generated_capability_report_lists_training_precision_policy() {
     assert_eq!(vulkan["name"], "vulkan_mixed_f32_bf16");
     assert_eq!(vulkan["loss_accumulation_dtype"], "F32");
     assert_eq!(vulkan["mixed_rms_norm_weight_dtype"], "BF16");
-    assert_eq!(vulkan["exact_gdn_backward_tile_tokens"], Value::Null);
     assert_eq!(vulkan["mixed_precision"], true);
     assert_eq!(
         policies["cuda"]["mixed_rms_norm_weight_dtype"],
         Value::Null,
         "CUDA should keep equal-dtype RMSNorm training policy"
-    );
-    assert_eq!(
-        policies["cuda"]["exact_gdn_backward_tile_tokens"], 1024,
-        "CUDA should own its exact-GDN backward tile default in the training policy"
     );
     for policy in policies.values() {
         let policy = policy
@@ -2357,15 +2352,10 @@ fn generated_capability_report_lists_training_precision_policy() {
         ] {
             assert!(
                 !policy.contains_key(field),
-                "prefill execution field {field} must not appear in training_precision_policy"
+                "execution field {field} must not appear in training_precision_policy"
             );
         }
     }
-    assert_eq!(
-        policies["metal"]["exact_gdn_backward_tile_tokens"],
-        Value::Null,
-        "Metal should inherit the streaming tile default for exact-GDN backward"
-    );
 
     let activation_dtypes = vulkan["activation_dtypes"]
         .as_array()
@@ -5108,19 +5098,6 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && compact_body(&opd_source).contains("backend_rt.as_ref()"),
         "SFT/GRPO/OPD production checkpoint sizing should consume backend precision policy"
     );
-    let exact_gdn_tile_section = source_between(
-        &trainer_source,
-        "fn exact_gdn_backward_tile_tokens_for(",
-        "// (#1082) Deleted three orphaned residues",
-    );
-    assert!(
-        exact_gdn_tile_section.contains("training_precision_policy_for_device"),
-        "exact-GDN backward tile defaults should read backend training policy"
-    );
-    assert!(
-        !exact_gdn_tile_section.contains("is_cuda_device"),
-        "exact-GDN backward tile defaults should not hard-code CUDA in the trainer"
-    );
     let streaming_tile_section = source_between(
         &forward_source,
         "pub fn streaming_tile_tokens_for(",
@@ -5145,6 +5122,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "impl TrainingPrecisionPolicy {",
     );
     for field in [
+        "exact_gdn_backward_tile_tokens",
         "streaming_prefill_tile_tokens",
         "tape_streaming_tile_tokens",
         "detached_full_attn_tile_tokens",
@@ -5155,9 +5133,14 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     ] {
         assert!(
             !training_precision_fields.contains(field),
-            "prefill execution field {field} must not appear in TrainingPrecisionPolicy"
+            "retired execution field {field} must not appear in TrainingPrecisionPolicy"
         );
     }
+    assert!(
+        !trainer_source.contains("KILN_EXACT_GDN_TILE_BACKWARD")
+            && !trainer_source.contains("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS"),
+        "retired exact-GDN environment controls must not return to the trainer"
+    );
     let embedding_activation_cast_section = source_between(
         &forward_source,
         "fn cast_embedding_output_to_policy_activation(",

@@ -2718,32 +2718,10 @@
       "surface": "source"
     },
     {
-      "api": "remove_var",
-      "argument": "KILN_EXACT_GDN_BACKWARD_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "set_var",
       "argument": "key",
       "argument_kind": "expression",
       "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_EXACT_GDN_BACKWARD_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 2,
       "language": "rust",
       "operation": "set",
       "path": "crates/kiln-train/src/trainer.rs",
@@ -9012,17 +8990,6 @@
       "surface": "source"
     },
     {
-      "api": "env_tristate",
-      "argument": "KILN_EXACT_GDN_TILE_BACKWARD",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "key",
       "argument_kind": "expression",
@@ -9060,17 +9027,6 @@
       "argument": "KILN_DEBUG_SFT_STATS_LABEL",
       "argument_kind": "literal",
       "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_EXACT_GDN_BACKWARD_TILE_TOKENS",
-      "argument_kind": "literal",
-      "count": 2,
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-train/src/trainer.rs",
@@ -10092,9 +10048,9 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 562,
-    "process_mutation_entries": 268,
-    "read_call_sites": 955,
-    "read_entries": 648
+    "process_mutation_call_sites": 559,
+    "process_mutation_entries": 266,
+    "read_call_sites": 952,
+    "read_entries": 646
   }
 }

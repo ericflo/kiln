@@ -980,11 +980,10 @@ Canonical environment names are mechanical; six old spellings and legacy TOML
 `enabled` are strict compatibility inputs. The lower streaming-policy
 model/trainer rereads and stale use of the exact-GDN backward tile as a
 streaming fallback were removed. Server-owned training and teacher construction
-fail closed if startup did not inject the resolved policy. The separate
-`KILN_EXACT_GDN_TILE_BACKWARD` and `KILN_EXACT_GDN_BACKWARD_TILE_TOKENS`
-training controls remain only pending the dead-control cleanup recorded below;
-the latest audit found no production caller for their tile selector, so they
-must be deleted rather than promoted to public configuration.
+fail closed if startup did not inject the resolved policy. The subsequent
+dead-control checkpoint deleted `KILN_EXACT_GDN_TILE_BACKWARD` and
+`KILN_EXACT_GDN_BACKWARD_TILE_TOKENS` after proving that their tile selector
+had no production caller; they were not promoted to public configuration.
 Config, health, and trusted debug preserve configured/backend/effective
 dispatch, tile inheritance, and restart semantics. This closes that bounded
 runtime read set; it does not complete the repository-wide configuration
@@ -1015,12 +1014,22 @@ estimator read or treating it as dead would recreate admission/execution drift.
 A later slice must replace both reads with one typed, shared, pure
 route/device-limit policy and prove that the admitted chunk is exactly the one
 executed. The dead or unsafe `KILN_USE_FLCE`,
-`KILN_USE_TAPE_AUTHORITATIVE`, optimizer debug-fallback, and exact-GDN tile
-controls should still be deleted or moved behind explicit qualification hooks
-after their callers are independently proven. The following typed slice owns
+`KILN_USE_TAPE_AUTHORITATIVE`, and optimizer debug-fallback controls should
+still be deleted or moved behind explicit qualification hooks after their
+callers are independently proven. The following typed slice owns
 GRPO shared-prefix-reference selection and OPD sampler segments;
 trace/debug/host-scan controls move behind explicit qualification hooks instead
 of public config.
+
+Exact-GDN dead-control slice (completed 2026-07-13): repository-wide call-site
+inspection proved that `exact_gdn_reverse_tile_size` had no caller and that its
+tile resolver was reachable only from that orphan and an environment-mutating
+unit test. Both functions and both environment reads are deleted. The obsolete
+CUDA-only tile value is no longer presented as part of
+`TrainingPrecisionPolicy` or the generated backend capability report. The
+runtime-environment ratchet and a focused negative source contract prevent the
+two spellings from returning. This is a code-surface and authority cleanup; it
+makes no accelerator performance or correctness claim.
 
 ### 8.2 One scheduling model
 

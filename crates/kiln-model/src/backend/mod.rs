@@ -392,7 +392,6 @@ pub struct TrainingPrecisionPolicy {
     pub loss_accumulation_dtype: kiln_tensor::DType,
     pub optimizer_parameter_dtypes: &'static [kiln_tensor::DType],
     pub mixed_rms_norm_weight_dtype: Option<kiln_tensor::DType>,
-    pub exact_gdn_backward_tile_tokens: Option<usize>,
     pub mixed_precision: bool,
     pub notes: &'static str,
 }
@@ -407,7 +406,6 @@ impl TrainingPrecisionPolicy {
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32,
             mixed_rms_norm_weight_dtype: None,
-            exact_gdn_backward_tile_tokens: None,
             mixed_precision: false,
             notes: "CPU reference training uses F32 tensors and portable optimizer math.",
         }
@@ -422,7 +420,6 @@ impl TrainingPrecisionPolicy {
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             mixed_rms_norm_weight_dtype: None,
-            exact_gdn_backward_tile_tokens: Some(1024),
             mixed_precision: true,
             notes: "CUDA keeps kt tape authoritative and routes BF16/F16/F32 leaves through CUDA-native kernels where available.",
         }
@@ -437,7 +434,6 @@ impl TrainingPrecisionPolicy {
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             mixed_rms_norm_weight_dtype: None,
-            exact_gdn_backward_tile_tokens: None,
             mixed_precision: true,
             notes: "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
         }
@@ -452,7 +448,6 @@ impl TrainingPrecisionPolicy {
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             mixed_rms_norm_weight_dtype: None,
-            exact_gdn_backward_tile_tokens: None,
             mixed_precision: true,
             notes: "Metal training is BF16-focused on UMA buffers, with F32 loss accumulation and F32/BF16 AdamW residency.",
         }
@@ -467,7 +462,6 @@ impl TrainingPrecisionPolicy {
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             mixed_rms_norm_weight_dtype: Some(kiln_tensor::DType::BF16),
-            exact_gdn_backward_tile_tokens: None,
             mixed_precision: true,
             notes: "Vulkan keeps training activations and LoRA parameters F32 while allowing BF16 base weights through explicit VkTensor buffer bridges.",
         }
@@ -548,10 +542,6 @@ impl TrainingPrecisionPolicy {
         } else {
             embedding_dtype
         }
-    }
-
-    pub fn exact_gdn_backward_tile_tokens_or(&self, fallback: usize) -> usize {
-        self.exact_gdn_backward_tile_tokens.unwrap_or(fallback)
     }
 }
 
@@ -2189,7 +2179,6 @@ mod tests {
         let cuda = TrainingPrecisionPolicy::cuda();
         assert!(cuda.activation_dtypes.contains(&kiln_tensor::DType::BF16));
         assert!(cuda.activation_dtypes.contains(&kiln_tensor::DType::F16));
-        assert_eq!(cuda.exact_gdn_backward_tile_tokens, Some(1024));
         assert!(cuda.mixed_precision);
 
         let rocm = TrainingPrecisionPolicy::rocm();
@@ -2207,7 +2196,6 @@ mod tests {
             vulkan.mixed_rms_norm_weight_dtype,
             Some(kiln_tensor::DType::BF16)
         );
-        assert_eq!(vulkan.exact_gdn_backward_tile_tokens, None);
         assert!(
             vulkan
                 .base_weight_dtypes

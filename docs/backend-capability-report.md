@@ -257,13 +257,13 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 ## Training Precision Policy
 
-| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed RMSNorm Weight | Exact GDN Backward Tile | Mixed |
-|---|---|---|---|---|---|---|---|---|---|
-| `cpu` | `cpu_f32_reference` | `F32` | `F32` | `F32` | `F32` | `F32` | `none` | `streaming_prefill.base_tile_tokens` | no |
-| `cuda` | `cuda_native_float` | `F32,BF16,F16` | `F32,BF16,F16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | `1024` | yes |
-| `rocm` | `rocm_native_float` | `F32,BF16,F16` | `F32,BF16,F16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | `streaming_prefill.base_tile_tokens` | yes |
-| `metal` | `metal_bf16_uma` | `BF16` | `BF16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | `streaming_prefill.base_tile_tokens` | yes |
-| `vulkan` | `vulkan_mixed_f32_bf16` | `F32` | `F32,BF16` | `F32` | `F32` | `F32,BF16` | `BF16` | `streaming_prefill.base_tile_tokens` | yes |
+| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed RMSNorm Weight | Mixed |
+|---|---|---|---|---|---|---|---|---|
+| `cpu` | `cpu_f32_reference` | `F32` | `F32` | `F32` | `F32` | `F32` | `none` | no |
+| `cuda` | `cuda_native_float` | `F32,BF16,F16` | `F32,BF16,F16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | yes |
+| `rocm` | `rocm_native_float` | `F32,BF16,F16` | `F32,BF16,F16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | yes |
+| `metal` | `metal_bf16_uma` | `BF16` | `BF16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | yes |
+| `vulkan` | `vulkan_mixed_f32_bf16` | `F32` | `F32,BF16` | `F32` | `F32` | `F32,BF16` | `BF16` | yes |
 
 ## Training Loss Routing
 

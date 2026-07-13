@@ -32,6 +32,12 @@
   policy in training checkpoint planning identity v3; policy or v2/v3 schema
   drift rejects exact resume. `/v1/config`, health, trusted debug, and the
   dashboard expose the same runtime policy.
+- training cleanup: removed `KILN_EXACT_GDN_TILE_BACKWARD` and
+  `KILN_EXACT_GDN_BACKWARD_TILE_TOKENS`. Their selector had no production
+  caller after the tiled-reverse implementation was removed, so the variables
+  could only mutate dead code. The corresponding backend precision field,
+  generated capability-report column, source guard, and env-mutating test are
+  gone; qualification now rejects reintroducing the two spellings.
 
 - inference: chat, streaming chat, multi-choice chat, and batch generation now
   accept `thinking_budget_tokens` and `thinking_budget_ms`. Kiln closes an open
