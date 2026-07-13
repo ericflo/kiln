@@ -481,6 +481,11 @@ async fn main() -> Result<()> {
     // --- Server startup ---
     let mut config = KilnConfig::load(args.config.as_deref())?;
     config.apply_serve_cli_overrides(serve_cli_overrides.0.as_deref(), serve_cli_overrides.1)?;
+    let gradient_checkpoint_policy = kiln_train::GradientCheckpointPolicy::from_parts(
+        config.training.grad_checkpoint_segments,
+        config.training.no_grad_checkpoint,
+    )
+    .context("failed to resolve typed gradient-checkpoint policy")?;
     kiln_tensor::DETERMINISTIC_CACHED
         .configure(config.server.deterministic.enabled())
         .context("failed to fix deterministic tensor behavior from startup configuration")?;
@@ -619,6 +624,28 @@ async fn main() -> Result<()> {
         let mut graph_options =
             resolve_model_runner_runtime_options(serving_policy, config.memory.cuda_graphs, None);
         let device_kt = select_device_with_options_kt(graph_options.cuda_graphs)?;
+        let vram_probe_selector =
+            kiln_server::state::ensure_accelerator_memory_probe_identity(device_kt)?;
+        let physical_vram = kiln_memory::vram::detect_vram_for(vram_probe_selector);
+        let capacity_resolution =
+            kiln_memory::vram::resolve_vram_capacity(physical_vram, config.memory.gpu_memory_gb);
+        kiln_server::state::ensure_accelerator_memory_capacity(
+            device_kt,
+            vram_probe_selector,
+            capacity_resolution.effective,
+        )?;
+        kiln_server::state::ensure_accelerator_memory_floor(
+            device_kt,
+            capacity_resolution.effective,
+            &config.memory,
+        )?;
+        kiln_memory::MemoryGovernor::configure_global(
+            vram_probe_selector,
+            config
+                .memory
+                .governor_config_for_capacity(capacity_resolution.effective.total_bytes),
+        )
+        .context("failed to configure the process-wide memory governor")?;
         let decode_batcher_policy = kiln_model::backend::for_device_kt(&device_kt)
             .backend_capabilities()
             .decode_batcher;
@@ -674,6 +701,10 @@ async fn main() -> Result<()> {
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message("initializing inference runtime");
         }
+        // The server owns the equivalent typed startup sequence above
+        // (identity, resolved cap, and process governor) and AppState starts
+        // its sampler. Embedded callers without that owner must use
+        // `InferenceMemoryRuntime` plus `new_with_initialized_runtime`.
         let mut runner = ModelRunner::new_with_runtime_options(
             gpu_weights,
             tokenizer.clone(),
@@ -761,11 +792,18 @@ async fn main() -> Result<()> {
             &config.prefix_cache,
             Some(base_teacher_identity),
             config.server.serving_profile,
+            gradient_checkpoint_policy,
         )
+        .context("failed to initialize real server state")?
     } else {
         // Mock mode: use scheduler + mock engine.
         tracing::debug!("no model path set — running in mock mode");
         tracing::debug!("training endpoints will return 503 in mock mode (no real weights)");
+        kiln_memory::MemoryGovernor::configure_global(
+            kiln_memory::vram::VramProbeSelector::None,
+            config.memory.governor_config_for_capacity(0),
+        )
+        .context("failed to configure the process-wide memory governor")?;
         let scheduler_config = SchedulerConfig {
             max_batch_tokens: config.server.max_batch_tokens.tokens(),
             max_batch_size: 64,
@@ -807,6 +845,15 @@ async fn main() -> Result<()> {
 
     // Apply server-level checkpoint_interval from config
     state.serving_profile = config.server.serving_profile;
+    state.memory_config = config.memory.clone();
+    state.training_runtime = kiln_train::TrainingRuntimeContext::new_for_device(
+        state
+            .training_runtime
+            .runtime_device()
+            .unwrap_or(kiln_tensor::Device::Cpu),
+        state.vram_info,
+        gradient_checkpoint_policy,
+    );
     state.checkpoint_interval = config.training.checkpoint_interval;
     state.training_webhook_url = config.training.webhook_url.clone();
     state.max_queued_training_jobs = config.training.max_queued_jobs;

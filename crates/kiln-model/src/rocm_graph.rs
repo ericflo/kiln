@@ -1215,7 +1215,8 @@ impl RocmGraphRunner {
             // capture and run eager rather than risk the allocation tipping the
             // box into OOM — the governor sees all-process usage, so this respects
             // whatever else is on the GPU. Decode stays correct either way.
-            if kiln_memory::MemoryGovernor::global().pressure()
+            if kiln_memory::MemoryGovernor::try_global_cached_pressure()
+                .unwrap_or(kiln_memory::MemoryPressure::Critical)
                 == kiln_memory::MemoryPressure::Critical
             {
                 return self.run_eager_fallback(
@@ -1485,7 +1486,8 @@ impl RocmGraphRunner {
                 );
             }
 
-            if kiln_memory::MemoryGovernor::global().pressure()
+            if kiln_memory::MemoryGovernor::try_global_cached_pressure()
+                .unwrap_or(kiln_memory::MemoryPressure::Critical)
                 == kiln_memory::MemoryPressure::Critical
             {
                 return self.run_eager_fallback(
@@ -1776,7 +1778,8 @@ impl RocmGraphRunner {
                 );
             }
 
-            if kiln_memory::MemoryGovernor::global().pressure()
+            if kiln_memory::MemoryGovernor::try_global_cached_pressure()
+                .unwrap_or(kiln_memory::MemoryPressure::Critical)
                 == kiln_memory::MemoryPressure::Critical
             {
                 return self.run_eager_fallback(

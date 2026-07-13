@@ -152,6 +152,42 @@ pub fn cuda_native_sft_train_to_with_checkpoint_root_and_ingestion(
     progress_cb: Option<ProgressCallback>,
     gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    let runtime =
+        crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
+    cuda_native_sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
+        examples,
+        ingestion,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        checkpoint_output_dir,
+        adapter_name,
+        progress_cb,
+        gpu_step_coordination,
+        &runtime,
+    )
+}
+
+/// CUDA server entry for admitted SFT rows with immutable runtime inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_native_sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
+    examples: &[SftExample],
+    ingestion: &crate::sft_ingestion::SftIngestionReceipt,
+    config: &SftConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
+    runtime: &crate::TrainingRuntimeContext,
+) -> Result<PathBuf> {
     tracing::info!(
         num_examples = examples.len(),
         rows_rejected = ingestion.rows_rejected,
@@ -160,7 +196,7 @@ pub fn cuda_native_sft_train_to_with_checkpoint_root_and_ingestion(
         path = "backend_runtime_via_sft_train",
         "cuda_native_sft_train: routing admitted rows through the trainer BackendRuntime path"
     );
-    crate::trainer::sft_train_to_with_checkpoint_root_and_ingestion(
+    crate::trainer::sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
         examples,
         ingestion,
         config,
@@ -174,6 +210,7 @@ pub fn cuda_native_sft_train_to_with_checkpoint_root_and_ingestion(
         progress_cb,
         None,
         gpu_step_coordination,
+        runtime,
     )
 }
 
@@ -274,6 +311,40 @@ pub fn cuda_native_grpo_train_to_with_checkpoint_root(
     progress_cb: Option<ProgressCallback>,
     gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    let runtime =
+        crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
+    cuda_native_grpo_train_to_with_checkpoint_root_and_runtime(
+        groups,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        checkpoint_output_dir,
+        adapter_name,
+        progress_cb,
+        gpu_step_coordination,
+        &runtime,
+    )
+}
+
+/// CUDA server entry for inline GRPO with immutable runtime inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_native_grpo_train_to_with_checkpoint_root_and_runtime(
+    groups: &[GrpoGroup],
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
+    runtime: &crate::TrainingRuntimeContext,
+) -> Result<PathBuf> {
     tracing::info!(
         num_groups = groups.len(),
         learning_rate = config.effective_learning_rate(),
@@ -283,7 +354,7 @@ pub fn cuda_native_grpo_train_to_with_checkpoint_root(
         path = "backend_runtime_via_grpo_train",
         "cuda_native_grpo_train: routing through the trainer BackendRuntime path"
     );
-    crate::trainer::grpo_train_to_with_checkpoint_root(
+    crate::trainer::grpo_train_to_with_checkpoint_root_and_runtime(
         groups,
         config,
         model_config,
@@ -296,6 +367,7 @@ pub fn cuda_native_grpo_train_to_with_checkpoint_root(
         progress_cb,
         None,
         gpu_step_coordination,
+        runtime,
     )
 }
 
@@ -394,17 +466,84 @@ pub fn cuda_native_grpo_train_jsonl_to_with_checkpoint_root(
     progress_cb: Option<ProgressCallback>,
     gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    let runtime =
+        crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
+    cuda_native_grpo_train_jsonl_to_with_checkpoint_root_and_runtime(
+        dataset_path,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        checkpoint_output_dir,
+        adapter_name,
+        progress_cb,
+        gpu_step_coordination,
+        &runtime,
+    )
+}
+
+/// CUDA server entry for streamed GRPO with immutable runtime inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_native_grpo_train_jsonl_to_with_checkpoint_root_and_runtime(
+    dataset_path: &Path,
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
+    runtime: &crate::TrainingRuntimeContext,
+) -> Result<PathBuf> {
+    let dataset_source = crate::trainer::PinnedGrpoJsonlSource::open(dataset_path)?;
+    cuda_native_grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
+        &dataset_source,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        checkpoint_output_dir,
+        adapter_name,
+        progress_cb,
+        gpu_step_coordination,
+        runtime,
+    )
+}
+
+/// CUDA server entry for streamed GRPO pinned to one admitted file handle.
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_native_grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
+    dataset_source: &crate::trainer::PinnedGrpoJsonlSource,
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
+    runtime: &crate::TrainingRuntimeContext,
+) -> Result<PathBuf> {
     tracing::info!(
-        dataset_path = %dataset_path.display(),
+        dataset_path = %dataset_source.display_path().display(),
         learning_rate = config.effective_learning_rate(),
         kl_coeff = config.kl_coeff,
         rank = config.lora_rank,
         adapter_name,
-        path = "backend_runtime_via_grpo_train_jsonl",
-        "cuda_native_grpo_train_jsonl: routing through the trainer BackendRuntime path"
+        path = "backend_runtime_via_grpo_train_pinned_jsonl",
+        "cuda_native_grpo_train_pinned_jsonl: routing through the trainer BackendRuntime path"
     );
-    crate::trainer::grpo_train_jsonl_to_with_checkpoint_root(
-        dataset_path,
+    crate::trainer::grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
+        dataset_source,
         config,
         model_config,
         weights,
@@ -416,5 +555,6 @@ pub fn cuda_native_grpo_train_jsonl_to_with_checkpoint_root(
         progress_cb,
         None,
         gpu_step_coordination,
+        runtime,
     )
 }

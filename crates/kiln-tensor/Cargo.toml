@@ -25,6 +25,9 @@ cc = "1"
 # kiln-tensor re-exports `TensorId` for backwards compatibility — all
 # existing `kiln_tensor::TensorId` callers continue to work unchanged.
 kiln-tensor-id = { workspace = true }
+# Central selected-device memory-probe identity. `kiln-memory` is a dep-light
+# leaf (tracing only), so this keeps one mapping without introducing a cycle.
+kiln-memory = { workspace = true }
 
 # Error machinery — Result wraps a thiserror enum, but a public callable
 # bail! macro mirrors candle's ergonomic shape so 491+ migration sites
@@ -124,6 +127,3 @@ rocm = ["dep:kiln-hip", "dep:kiln-rocblas"]
 # kiln-autograd backwards through the substrate end-to-end. Mirrors
 # the dev-dep wiring already used by kiln-optim's training tests.
 kiln-autograd = { workspace = true }
-# #26: on-box VRAM-reclaim isolation test measures all-process used via the
-# driver-counter snapshot. kiln-memory is dep-light (tracing only) → no cycle.
-kiln-memory = { workspace = true }

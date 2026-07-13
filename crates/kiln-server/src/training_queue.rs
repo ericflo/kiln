@@ -4,15 +4,14 @@
 //! conflicts between concurrent training jobs. Jobs are executed in submission order.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use kiln_memory::vram::VramSource;
 use kiln_train::trainer;
 use kiln_train::{
     self, DistillMergeRequest, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest,
-    GrpoRequest, LogitSource as _, OpdRequest, SftRequest, TrainingState,
+    GrpoRequest, LogitSource as _, OpdRequest, SftRequest, TrainingRuntimeContext, TrainingState,
 };
 use serde::Serialize;
 
@@ -183,6 +182,745 @@ pub enum QueuedJob {
     DistillSelf(DistillSelfRequest),
 }
 
+/// Submit-time training data pinned to the exact memory admission. Dynamic
+/// selectors and materialized JSONL sources must never be resolved for the
+/// first time after the worker has already reserved/reclaimed accelerator
+/// memory.
+pub enum PreparedTrainingData {
+    None,
+    /// Every SFT transport is reduced to one owned, tokenization-validated
+    /// corpus at admission. The worker never reopens a mutable source path.
+    Sft(PreparedSftAdmission),
+    /// Streamed GRPO is copied into a server-owned snapshot while it is
+    /// validated. The worker moves the admission-created file handle into the
+    /// trainer, so no pathname is reopened after admission.
+    GrpoJsonl(GrpoJsonlAdmissionReceipt),
+    /// OPD prompt selectors are resolved once at admission.
+    OpdPrompts(Vec<kiln_train::opd::OpdPrompt>),
+    /// Plain OPD JSONL is parsed and teacher fixtures are built once at
+    /// admission. The worker consumes this owned representation and never
+    /// reopens the caller-controlled path.
+    OpdOffPolicy(PreparedOffPolicyAdmission),
+    DistillRefreshPrompts(Vec<kiln_train::opd::OpdPrompt>),
+    DistillMergePrompts(Vec<PreparedDistillMergeSource>),
+    DistillPumpPrompts(Vec<kiln_train::opd::OpdPrompt>),
+}
+
+impl Default for PreparedTrainingData {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl PreparedTrainingData {
+    pub(crate) fn prompt_weight_bytes(prompts: &[kiln_train::opd::OpdPrompt]) -> u64 {
+        prompts
+            .iter()
+            .map(|prompt| {
+                serde_json::to_vec(prompt)
+                    .ok()
+                    .and_then(|bytes| u64::try_from(bytes.len()).ok())
+                    .unwrap_or(u64::MAX)
+            })
+            // Account for Vec/String capacities and serde/object overhead, not
+            // just compact JSON payload bytes.
+            .fold(0u64, |total, bytes| {
+                total.saturating_add(bytes.saturating_mul(4))
+            })
+    }
+
+    pub(crate) fn admission_weight_bytes(&self) -> u64 {
+        match self {
+            Self::None => 0,
+            // Count immutable snapshot storage and the trainer's bounded
+            // preflight host plan against one live-data admission contract.
+            Self::GrpoJsonl(receipt) => receipt.admission_weight_bytes(),
+            Self::Sft(prepared) => prepared.admission_weight_bytes,
+            Self::OpdPrompts(prompts)
+            | Self::DistillRefreshPrompts(prompts)
+            | Self::DistillPumpPrompts(prompts) => Self::prompt_weight_bytes(prompts),
+            Self::OpdOffPolicy(data) => data
+                .source_size_bytes
+                // Parsed examples, prompt clones, and top-K fixture maps can
+                // be substantially wider than their compact JSON source.
+                .saturating_mul(8)
+                .max(Self::prompt_weight_bytes(&data.prepared.prompts)),
+            Self::DistillMergePrompts(per_source) => per_source
+                .iter()
+                .map(|source| Self::prompt_weight_bytes(&source.prompts))
+                .fold(0u64, u64::saturating_add),
+        }
+    }
+}
+
+/// Conservative host peak for an exact-sequence top-K teacher fixture.
+///
+/// Every token is treated as an active row. The per-token fixed charge covers
+/// the retained sequence key, masks, positions, nested HashMap buckets/nodes,
+/// and Vec allocation metadata. Each top-K pair is charged twice: once for the
+/// retained `(u32, f32)` row and once for the materialization/fetch batch that
+/// overlaps insertion. `fixture_copies` accounts for flows such as privileged
+/// self-distillation that temporarily hold both teacher-keyed and student-keyed
+/// fixtures.
+pub(crate) fn conservative_teacher_fixture_bytes(
+    sequence_tokens: u64,
+    top_k: u64,
+    fixture_copies: u64,
+) -> Option<u64> {
+    const FIXTURE_SEQUENCE_OVERHEAD_BYTES: u64 = 512;
+    const FIXTURE_TOKEN_BOOKKEEPING_BYTES: u64 = 64;
+    const TOP_K_PAIR_PEAK_BYTES: u64 = 16;
+
+    let row_bytes = top_k
+        .checked_mul(TOP_K_PAIR_PEAK_BYTES)?
+        .checked_add(FIXTURE_TOKEN_BOOKKEEPING_BYTES)?;
+    sequence_tokens
+        .checked_mul(row_bytes)?
+        .checked_add(FIXTURE_SEQUENCE_OVERHEAD_BYTES)?
+        .checked_mul(fixture_copies)
+}
+
+pub(crate) const MAX_LIVE_PREPARED_TRAINING_BYTES: u64 = 512 * 1024 * 1024;
+static LIVE_PREPARED_TRAINING_BYTES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// RAII ownership of live training-data weight: materialized host objects,
+/// server-owned streamed snapshots, and conservatively projected teacher
+/// fixtures. It stays on the queue entry after pop, so a running job continues
+/// to count against process admission.
+#[derive(Default)]
+pub struct PreparedTrainingDataPermit {
+    bytes: u64,
+}
+
+impl PreparedTrainingDataPermit {
+    pub(crate) fn acquire(bytes: u64) -> Result<Self, (u64, u64)> {
+        if bytes == 0 {
+            return Ok(Self::default());
+        }
+        loop {
+            let current = LIVE_PREPARED_TRAINING_BYTES.load(Ordering::Acquire);
+            if current.saturating_add(bytes) > MAX_LIVE_PREPARED_TRAINING_BYTES {
+                return Err((current, bytes));
+            }
+            if LIVE_PREPARED_TRAINING_BYTES
+                .compare_exchange_weak(
+                    current,
+                    current + bytes,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return Ok(Self { bytes });
+            }
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    pub(crate) fn grow_to(&mut self, required_bytes: u64) -> Result<(), (u64, u64)> {
+        if required_bytes <= self.bytes {
+            return Ok(());
+        }
+        let additional = required_bytes - self.bytes;
+        loop {
+            let current = LIVE_PREPARED_TRAINING_BYTES.load(Ordering::Acquire);
+            if current.saturating_add(additional) > MAX_LIVE_PREPARED_TRAINING_BYTES {
+                return Err((current, additional));
+            }
+            if LIVE_PREPARED_TRAINING_BYTES
+                .compare_exchange_weak(
+                    current,
+                    current + additional,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                self.bytes = required_bytes;
+                return Ok(());
+            }
+        }
+    }
+}
+
+impl Drop for PreparedTrainingDataPermit {
+    fn drop(&mut self) {
+        if self.bytes > 0 {
+            LIVE_PREPARED_TRAINING_BYTES.fetch_sub(self.bytes, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Exact merge teacher materialized at admission. Both the replay prompts and
+/// the PEFT byte identity are immutable inputs to the admitted memory plan.
+pub struct PreparedDistillMergeSource {
+    pub source: kiln_train::DistillMergeSource,
+    pub prompts: Vec<kiln_train::opd::OpdPrompt>,
+    pub adapter_path: PathBuf,
+    pub source_identity: kiln_model::lora_loader::LoraSourceIdentity,
+}
+
+pub struct PreparedSftAdmission {
+    pub ingestion: kiln_train::SftIngestionReceipt,
+    pub max_seq_len: usize,
+    pub max_supervised_tokens: usize,
+    pub admission_weight_bytes: u64,
+}
+
+const GRPO_SNAPSHOT_ROOT_MARKER: &str = ".kiln-training-inputs-v1";
+const GRPO_SNAPSHOT_ROOT_MARKER_CONTENT: &[u8] = b"kiln-training-inputs-v1\n";
+const GRPO_SNAPSHOT_FILE_PREFIX: &str = "grpo-v1-";
+const GRPO_SNAPSHOT_FILE_SUFFIX: &str = ".jsonl";
+const MAX_STALE_GRPO_SNAPSHOTS_SCANNED_PER_PASS: usize = 1024;
+
+struct GrpoSnapshotProcessIdentity {
+    started_at: std::time::SystemTime,
+    owner_token: String,
+}
+
+fn grpo_snapshot_process_identity() -> &'static GrpoSnapshotProcessIdentity {
+    static IDENTITY: std::sync::OnceLock<GrpoSnapshotProcessIdentity> = std::sync::OnceLock::new();
+    IDENTITY.get_or_init(|| {
+        let started_at = std::time::SystemTime::now();
+        let started_nanos = started_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        GrpoSnapshotProcessIdentity {
+            started_at,
+            owner_token: format!("{}-{started_nanos}", std::process::id()),
+        }
+    })
+}
+
+fn snapshot_filename_is_owned_version(name: &str) -> bool {
+    name.starts_with(GRPO_SNAPSHOT_FILE_PREFIX) && name.ends_with(GRPO_SNAPSHOT_FILE_SUFFIX)
+}
+
+pub(crate) fn remove_regular_grpo_snapshot(path: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to remove non-regular GRPO snapshot {}",
+                path.display()
+            ),
+        ));
+    }
+    #[cfg(windows)]
+    if metadata.permissions().readonly() {
+        let mut permissions = metadata.permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    std::fs::remove_file(path)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StaleGrpoSnapshotCleanup {
+    scanned: usize,
+    removed: usize,
+}
+
+fn cleanup_stale_grpo_snapshots_before(
+    root: &Path,
+    current_owner_token: &str,
+    cutoff: std::time::SystemTime,
+    max_scanned: usize,
+) -> std::io::Result<StaleGrpoSnapshotCleanup> {
+    let current_prefix = format!("{GRPO_SNAPSHOT_FILE_PREFIX}{current_owner_token}-");
+    let mut report = StaleGrpoSnapshotCleanup::default();
+    for entry in std::fs::read_dir(root)? {
+        if report.scanned >= max_scanned {
+            break;
+        }
+        let entry = entry?;
+        report.scanned += 1;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !snapshot_filename_is_owned_version(name) {
+            continue;
+        }
+        if name.starts_with(&current_prefix) {
+            continue;
+        }
+        let metadata = match std::fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !metadata.file_type().is_file() {
+            tracing::warn!(
+                path = %entry.path().display(),
+                "ignoring non-regular entry in private GRPO snapshot root"
+            );
+            continue;
+        }
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(error) => {
+                tracing::warn!(
+                    path = %entry.path().display(),
+                    error = %error,
+                    "cannot age private GRPO snapshot; leaving it in place"
+                );
+                continue;
+            }
+        };
+        // Files created since startup may belong to a concurrent server. Never
+        // remove those, and never remove this process's owner-prefixed live
+        // receipts regardless of timestamp.
+        if modified >= cutoff {
+            continue;
+        }
+        remove_regular_grpo_snapshot(&entry.path())?;
+        report.removed += 1;
+    }
+    Ok(report)
+}
+
+/// Create and validate the private streamed-training input root, then perform
+/// one bounded stale-file pass. The version marker prevents cleanup from ever
+/// treating an arbitrary existing directory as Kiln-owned storage.
+pub(crate) fn prepare_grpo_snapshot_root(root: &Path) -> std::result::Result<PathBuf, String> {
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() => {
+            return Err(format!(
+                "GRPO snapshot root {} must be a real directory, not a symlink or special file",
+                root.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "inspect GRPO snapshot root {}: {error}",
+                root.display()
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder
+            .create(root)
+            .map_err(|error| format!("create GRPO snapshot root {}: {error}", root.display()))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(root)
+        .map_err(|error| format!("create GRPO snapshot root {}: {error}", root.display()))?;
+
+    let supplied_root_metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| format!("inspect GRPO snapshot root {}: {error}", root.display()))?;
+    if supplied_root_metadata.file_type().is_symlink()
+        || !supplied_root_metadata.file_type().is_dir()
+    {
+        return Err(format!(
+            "GRPO snapshot root {} must be a real directory, not a symlink or special file",
+            root.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("secure GRPO snapshot root {}: {error}", root.display()))?;
+    }
+    let root = std::fs::canonicalize(root).map_err(|error| {
+        format!(
+            "canonicalize GRPO snapshot root {}: {error}",
+            root.display()
+        )
+    })?;
+    let root_metadata = std::fs::symlink_metadata(&root)
+        .map_err(|error| format!("inspect GRPO snapshot root {}: {error}", root.display()))?;
+    if !root_metadata.file_type().is_dir() {
+        return Err(format!(
+            "GRPO snapshot root {} is not a directory",
+            root.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if root_metadata.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "GRPO snapshot root {} is accessible outside its owner",
+                root.display()
+            ));
+        }
+    }
+
+    let marker = root.join(GRPO_SNAPSHOT_ROOT_MARKER);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(mut file) => {
+            use std::io::Write as _;
+            file.write_all(GRPO_SNAPSHOT_ROOT_MARKER_CONTENT)
+                .and_then(|()| file.sync_all())
+                .map_err(|error| {
+                    format!(
+                        "write GRPO snapshot root marker {}: {error}",
+                        marker.display()
+                    )
+                })?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            use std::io::Read as _;
+            let marker_path_metadata = std::fs::symlink_metadata(&marker).map_err(|error| {
+                format!(
+                    "inspect GRPO snapshot root marker {}: {error}",
+                    marker.display()
+                )
+            })?;
+            if !marker_path_metadata.file_type().is_file() {
+                return Err(format!(
+                    "GRPO snapshot root marker {} is not a regular file",
+                    marker.display()
+                ));
+            }
+            #[cfg(unix)]
+            let file = {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                let mut options = std::fs::OpenOptions::new();
+                options
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+                options.open(&marker)
+            };
+            #[cfg(not(unix))]
+            let file = std::fs::File::open(&marker);
+            let mut file = file.map_err(|error| {
+                format!(
+                    "open GRPO snapshot root marker {}: {error}",
+                    marker.display()
+                )
+            })?;
+            let metadata = file.metadata().map_err(|error| {
+                format!(
+                    "inspect GRPO snapshot root marker {}: {error}",
+                    marker.display()
+                )
+            })?;
+            if !metadata.is_file()
+                || metadata.len() != GRPO_SNAPSHOT_ROOT_MARKER_CONTENT.len() as u64
+            {
+                return Err(format!(
+                    "GRPO snapshot root marker {} has an invalid type or size",
+                    marker.display()
+                ));
+            }
+            let mut contents = Vec::with_capacity(GRPO_SNAPSHOT_ROOT_MARKER_CONTENT.len());
+            file.read_to_end(&mut contents).map_err(|error| {
+                format!(
+                    "read GRPO snapshot root marker {}: {error}",
+                    marker.display()
+                )
+            })?;
+            if contents != GRPO_SNAPSHOT_ROOT_MARKER_CONTENT {
+                return Err(format!(
+                    "GRPO snapshot root marker {} has an unsupported version",
+                    marker.display()
+                ));
+            }
+        }
+        Err(error) => {
+            return Err(format!(
+                "create GRPO snapshot root marker {}: {error}",
+                marker.display()
+            ));
+        }
+    }
+
+    let identity = grpo_snapshot_process_identity();
+    let report = cleanup_stale_grpo_snapshots_before(
+        &root,
+        &identity.owner_token,
+        identity.started_at,
+        MAX_STALE_GRPO_SNAPSHOTS_SCANNED_PER_PASS,
+    )
+    .map_err(|error| format!("clean stale GRPO snapshots in {}: {error}", root.display()))?;
+    if report.removed > 0 {
+        tracing::info!(
+            root = %root.display(),
+            scanned = report.scanned,
+            removed = report.removed,
+            "removed stale private GRPO admission snapshots"
+        );
+    }
+    Ok(root)
+}
+
+pub(crate) fn new_grpo_snapshot_path(root: &Path) -> PathBuf {
+    let owner = &grpo_snapshot_process_identity().owner_token;
+    root.join(format!(
+        "{GRPO_SNAPSHOT_FILE_PREFIX}{owner}-{}{GRPO_SNAPSHOT_FILE_SUFFIX}",
+        uuid::Uuid::new_v4()
+    ))
+}
+
+#[derive(Debug)]
+pub struct GrpoJsonlAdmissionReceipt {
+    /// Private snapshot path created and owned by the server. This is also the
+    /// only path copied into the queued `GrpoRequest`.
+    pub path: PathBuf,
+    pub source_sha256: String,
+    pub size_bytes: u64,
+    pub groups: usize,
+    pub completions: usize,
+    pub max_seq_len: usize,
+    /// Conservative peak host allocation retained or overlapped by streamed
+    /// preflight. Admission charges this alongside the disk snapshot.
+    pub preflight_host_bytes: u64,
+    pub(crate) server_owned: bool,
+    snapshot_file: Option<std::fs::File>,
+}
+
+impl GrpoJsonlAdmissionReceipt {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_server_owned(
+        path: PathBuf,
+        snapshot_file: std::fs::File,
+        source_sha256: String,
+        size_bytes: u64,
+        groups: usize,
+        completions: usize,
+        max_seq_len: usize,
+        preflight_host_bytes: u64,
+    ) -> std::result::Result<Self, String> {
+        let metadata = snapshot_file
+            .metadata()
+            .map_err(|error| format!("inspect admitted GRPO descriptor: {error}"))?;
+        if !metadata.is_file() || metadata.len() != size_bytes {
+            return Err(format!(
+                "admitted GRPO descriptor must be a {size_bytes}-byte regular file"
+            ));
+        }
+        size_bytes
+            .checked_add(preflight_host_bytes)
+            .ok_or_else(|| "GRPO prepared-data admission weight overflow".to_string())?;
+        Ok(Self {
+            path,
+            source_sha256,
+            size_bytes,
+            groups,
+            completions,
+            max_seq_len,
+            preflight_host_bytes,
+            server_owned: true,
+            snapshot_file: Some(snapshot_file),
+        })
+    }
+
+    fn admission_weight_bytes(&self) -> u64 {
+        self.size_bytes.saturating_add(self.preflight_host_bytes)
+    }
+
+    fn pinned_source_from_handle(
+        &self,
+    ) -> std::result::Result<kiln_train::trainer::PinnedGrpoJsonlSource, String> {
+        let file = self
+            .snapshot_file
+            .as_ref()
+            .ok_or_else(|| "admitted GRPO descriptor was already consumed".to_string())?
+            .try_clone()
+            .map_err(|error| format!("duplicate admitted GRPO descriptor: {error}"))?;
+        kiln_train::trainer::PinnedGrpoJsonlSource::from_file(file, self.path.clone())
+            .map_err(|error| format!("pin admitted GRPO descriptor: {error:#}"))
+    }
+}
+
+impl Drop for GrpoJsonlAdmissionReceipt {
+    fn drop(&mut self) {
+        if !self.server_owned {
+            return;
+        }
+        let snapshot_file = self.snapshot_file.take();
+        #[cfg(unix)]
+        let path_still_owned = {
+            use std::os::unix::fs::MetadataExt as _;
+            match (
+                snapshot_file.as_ref().and_then(|file| file.metadata().ok()),
+                std::fs::symlink_metadata(&self.path).ok(),
+            ) {
+                (Some(descriptor), Some(path)) => {
+                    path.file_type().is_file()
+                        && descriptor.dev() == path.dev()
+                        && descriptor.ino() == path.ino()
+                }
+                _ => false,
+            }
+        };
+        // Windows refuses deletion while our handle is open. Closing first is
+        // also the least surprising ownership order on every platform.
+        drop(snapshot_file);
+        #[cfg(unix)]
+        if !path_still_owned {
+            return;
+        }
+        if let Err(error) = remove_regular_grpo_snapshot(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %self.path.display(),
+                error = %error,
+                "failed to remove server-owned GRPO admission snapshot"
+            );
+        }
+    }
+}
+
+pub struct PreparedOffPolicyAdmission {
+    pub prepared: kiln_train::PreparedOffPolicyDistillation,
+    pub source_sha256: String,
+    pub source_size_bytes: u64,
+    pub teacher_identity: Option<kiln_train::TeacherIdentityV1>,
+}
+
+fn verify_prepared_training_data(
+    job: &QueuedJob,
+    prepared: &PreparedTrainingData,
+) -> std::result::Result<(), String> {
+    match (job, prepared) {
+        (QueuedJob::Sft(request), PreparedTrainingData::Sft(prepared)) => {
+            if request.ingestion.as_ref() != Some(&prepared.ingestion)
+                || request.examples.len() != prepared.ingestion.rows_kept
+            {
+                return Err("queued SFT ingestion receipt changed after admission".to_string());
+            }
+            prepared
+                .ingestion
+                .validate()
+                .map_err(|error| format!("validate admitted SFT ingestion receipt: {error:#}"))
+        }
+        (QueuedJob::DistillSelf(_), PreparedTrainingData::None) => Ok(()),
+        (QueuedJob::Grpo(request), PreparedTrainingData::None)
+            if request.dataset_path.is_none() =>
+        {
+            Ok(())
+        }
+        (QueuedJob::Grpo(request), PreparedTrainingData::GrpoJsonl(receipt)) => {
+            if !receipt.server_owned {
+                return Err(
+                    "GRPO source receipt is not a server-owned immutable snapshot".to_string(),
+                );
+            }
+            let request_path = request
+                .dataset_path
+                .as_deref()
+                .ok_or_else(|| "GRPO source receipt has no request dataset_path".to_string())?;
+            if std::path::Path::new(request_path) != receipt.path.as_path() {
+                return Err(format!(
+                    "GRPO dataset_path changed after admission: admitted={}, queued={request_path}",
+                    receipt.path.display()
+                ));
+            }
+            let source = receipt.pinned_source_from_handle()?;
+            let current_bytes = source
+                .len()
+                .map_err(|error| format!("inspect admitted GRPO descriptor: {error:#}"))?;
+            if current_bytes != receipt.size_bytes {
+                return Err(format!(
+                    "GRPO descriptor changed after admission: expected {} bytes, found {current_bytes} bytes",
+                    receipt.size_bytes
+                ));
+            }
+            let current_sha256 = source
+                .sha256()
+                .map_err(|error| format!("rehash admitted GRPO descriptor: {error:#}"))?;
+            if current_sha256 != receipt.source_sha256 {
+                return Err(format!(
+                    "GRPO descriptor changed after admission: expected {}, found {}",
+                    receipt.source_sha256, current_sha256
+                ));
+            }
+            Ok(())
+        }
+        (QueuedJob::Opd(request), PreparedTrainingData::None) if request.dataset_path.is_none() => {
+            Ok(())
+        }
+        (QueuedJob::Opd(request), PreparedTrainingData::OpdPrompts(_))
+            if request
+                .dataset_path
+                .as_deref()
+                .is_some_and(crate::dataset_resolve::is_agent_traces_selector) =>
+        {
+            Ok(())
+        }
+        (QueuedJob::Opd(request), PreparedTrainingData::OpdOffPolicy(_))
+            if request.dataset_path.is_some() =>
+        {
+            Ok(())
+        }
+        (QueuedJob::DistillRefresh(_), PreparedTrainingData::DistillRefreshPrompts(_))
+        | (QueuedJob::DistillPump(_), PreparedTrainingData::DistillPumpPrompts(_)) => Ok(()),
+        (
+            QueuedJob::DistillMerge(request),
+            PreparedTrainingData::DistillMergePrompts(per_source),
+        ) => {
+            if request.sources.len() != per_source.len() {
+                return Err(format!(
+                    "distill_merge admitted {} sources but the queued request declares {}",
+                    per_source.len(),
+                    request.sources.len()
+                ));
+            }
+            for (declared, prepared) in request.sources.iter().zip(per_source) {
+                if declared.adapter != prepared.source.adapter
+                    || declared.weight.to_bits() != prepared.source.weight.to_bits()
+                {
+                    return Err(format!(
+                        "distill_merge source declaration changed after admission: admitted `{}` weight {}, queued `{}` weight {}",
+                        prepared.source.adapter,
+                        prepared.source.weight,
+                        declared.adapter,
+                        declared.weight
+                    ));
+                }
+            }
+            for source in per_source {
+                let current = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(
+                    &source.adapter_path,
+                )
+                .map_err(|error| {
+                    format!(
+                        "distill_merge source adapter `{}` cannot be revalidated at {} before execution: {error:#}",
+                        source.source.adapter,
+                        source.adapter_path.display()
+                    )
+                })?;
+                if current != source.source_identity {
+                    return Err(format!(
+                        "distill_merge source adapter `{}` changed after admission: expected revision {}, found {}",
+                        source.source.adapter,
+                        source.source_identity.content_revision(),
+                        current.content_revision()
+                    ));
+                }
+            }
+            Ok(())
+        }
+        _ => Err("queued training job is missing the data materialized by admission".to_string()),
+    }
+}
+
 impl QueuedJob {
     /// The registered teacher alias whose exact spec must be pinned when this
     /// job is admitted. Other job kinds either do not use a teacher or build
@@ -209,6 +947,14 @@ pub struct QueueEntry {
     /// worker requires exactly one matching snapshot for teacher-backed jobs
     /// and refuses to run if the alias was deleted or replaced while queued.
     pub teacher_bindings: Vec<crate::api::teachers::TeacherSpec>,
+    /// Data materialized by the authoritative admission boundary. Callers must
+    /// initialize this to `None`; `admit_training_jobs` fills it before queue
+    /// publication.
+    pub prepared_data: PreparedTrainingData,
+    /// Live process-data permit for `prepared_data` plus deferred runtime
+    /// fixture expansion. Admission fills this in; it remains held while the
+    /// popped entry executes.
+    pub prepared_data_permit: PreparedTrainingDataPermit,
     pub job: QueuedJob,
 }
 
@@ -325,6 +1071,17 @@ pub fn new_shared_queue() -> SharedTrainingQueue {
 /// `max_tracked_jobs` cap to prevent memory growth from a flood of terminal
 /// entries. See `gc_tracked_jobs` for the eviction predicate.
 pub fn spawn_training_worker(state: AppState, shutdown: ShutdownFlag) {
+    let snapshot_root = state.adapter_dir.join(".training-inputs");
+    if let Err(error) = prepare_grpo_snapshot_root(&snapshot_root) {
+        // Admission retries this same fail-closed setup before creating a
+        // snapshot. A startup cleanup failure must stay visible without taking
+        // serving down when training is unused.
+        tracing::warn!(
+            root = %snapshot_root.display(),
+            error = %error,
+            "failed to prepare private GRPO snapshot root at worker startup"
+        );
+    }
     tokio::spawn(async move {
         loop {
             // Check shutdown flag before pulling the next job
@@ -641,6 +1398,7 @@ fn run_sft(
     native_route_enabled: bool,
     native_route_env: Option<&'static str>,
     req: &SftRequest,
+    prepared_data: PreparedTrainingData,
     model_config: &kiln_core::config::ModelConfig,
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
@@ -651,65 +1409,12 @@ fn run_sft(
     replay_ctx: trainer::ReplayContext,
     job_id: &str,
     gpu_step_coordination: Option<trainer::GpuStepCoordination>,
+    runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
-    let prepared = if let Some(dataset_path) = req.dataset_path.as_deref() {
-        if dataset_path.trim().is_empty() {
-            return Err("SFT dataset_path training requires a non-empty path".to_string());
-        }
-        if !req.examples.is_empty() {
-            return Err(
-                "SFT request must use either examples or dataset_path, not both".to_string(),
-            );
-        }
-        let loaded = crate::sft_dataset::prepare_sft_jsonl(
-            std::path::Path::new(dataset_path),
-            tokenizer,
-            req.config.invalid_row_policy,
-            "dataset_path",
-            Some(dataset_path.to_string()),
-        )
-        .map_err(|e| format!("load SFT dataset_path {dataset_path:?}: {e:#}"))?;
-        let expected = req.ingestion.as_ref().ok_or_else(|| {
-            "queued SFT dataset_path job has no submit-time ingestion receipt".to_string()
-        })?;
-        if loaded.ingestion != *expected {
-            return Err(format!(
-                "SFT dataset_path {dataset_path:?} changed after admission: submit kept/rejected={}/{}, worker kept/rejected={}/{}",
-                expected.rows_kept,
-                expected.rows_rejected,
-                loaded.ingestion.rows_kept,
-                loaded.ingestion.rows_rejected
-            ));
-        }
-        tracing::info!(
-            job_id = %job_id,
-            dataset_path,
-            examples = loaded.examples.len(),
-            kept_corpus_sha256 = %loaded.ingestion.kept_corpus_sha256,
-            "revalidated SFT dataset_path against submit-time row manifest"
-        );
-        loaded
-    } else if let Some(ingestion) = req.ingestion.as_ref() {
-        let (max_seq_len, max_supervised_tokens) =
-            kiln_train::verify_prepared_sft_examples(&req.examples, tokenizer, ingestion)
-                .map_err(|error| format!("verify queued SFT examples: {error:#}"))?;
-        kiln_train::SftPreparedDataset {
-            examples: req.examples.clone(),
-            ingestion: ingestion.clone(),
-            max_seq_len,
-            max_supervised_tokens,
-        }
-    } else {
-        kiln_train::prepare_sft_examples(
-            req.examples.iter().cloned(),
-            tokenizer,
-            req.config.invalid_row_policy,
-            "inline",
-            None,
-        )
-        .map_err(|error| format!("ingest queued SFT examples: {error:#}"))?
+    let PreparedTrainingData::Sft(prepared) = prepared_data else {
+        return Err("queued SFT job is missing its admitted corpus".to_string());
     };
-    let examples = prepared.examples.as_slice();
+    let examples = req.examples.as_slice();
     let ingestion = &prepared.ingestion;
 
     if native_route_enabled {
@@ -721,7 +1426,7 @@ fn run_sft(
                 native_route_env,
                 "backend native training route enabled - routing to cuda_native_sft_train"
             );
-            return kiln_train::cuda_train::cuda_native_sft_train_to_with_checkpoint_root_and_ingestion(
+            return kiln_train::cuda_train::cuda_native_sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
                 examples,
                 ingestion,
                 &req.config,
@@ -734,6 +1439,7 @@ fn run_sft(
                 adapter_name,
                 Some(progress_cb),
                 gpu_step_coordination,
+                runtime,
             )
             .map_err(|e| format!("{e:#}"));
         }
@@ -748,7 +1454,7 @@ fn run_sft(
             );
         }
     }
-    trainer::sft_train_to_with_checkpoint_root_and_ingestion(
+    trainer::sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
         examples,
         ingestion,
         &req.config,
@@ -762,8 +1468,126 @@ fn run_sft(
         Some(progress_cb),
         Some(replay_ctx),
         gpu_step_coordination,
+        runtime,
     )
     .map_err(|e| format!("{e:#}"))
+}
+
+struct ExecutingGrpoSnapshot {
+    source: Option<kiln_train::trainer::PinnedGrpoJsonlSource>,
+    path: PathBuf,
+    cleanup_path_on_drop: bool,
+}
+
+impl ExecutingGrpoSnapshot {
+    fn source(&self) -> &kiln_train::trainer::PinnedGrpoJsonlSource {
+        self.source
+            .as_ref()
+            .expect("executing GRPO snapshot source remains live until drop")
+    }
+}
+
+impl Drop for ExecutingGrpoSnapshot {
+    fn drop(&mut self) {
+        // Close the exact admission-created descriptor before attempting the
+        // Windows read-only clear and deletion.
+        drop(self.source.take());
+        if self.cleanup_path_on_drop
+            && let Err(error) = remove_regular_grpo_snapshot(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %self.path.display(),
+                error = %error,
+                "failed to remove executing GRPO admission snapshot"
+            );
+        }
+    }
+}
+
+fn take_verified_grpo_snapshot(
+    mut receipt: GrpoJsonlAdmissionReceipt,
+) -> std::result::Result<ExecutingGrpoSnapshot, String> {
+    let file = receipt
+        .snapshot_file
+        .take()
+        .ok_or_else(|| "admitted GRPO descriptor was already consumed".to_string())?;
+    let source = kiln_train::trainer::PinnedGrpoJsonlSource::from_file(file, receipt.path.clone())
+        .map_err(|error| format!("pin admitted GRPO descriptor: {error:#}"))?;
+    let path = receipt.path.clone();
+    let cleanup_path_on_drop = receipt.server_owned;
+    receipt.server_owned = false;
+    let mut executing = ExecutingGrpoSnapshot {
+        source: Some(source),
+        path,
+        cleanup_path_on_drop,
+    };
+
+    let pinned_bytes = executing
+        .source()
+        .len()
+        .map_err(|error| format!("inspect pinned GRPO descriptor: {error:#}"))?;
+    if pinned_bytes != receipt.size_bytes {
+        return Err(format!(
+            "pinned GRPO descriptor has {pinned_bytes} bytes; admitted {} bytes",
+            receipt.size_bytes
+        ));
+    }
+    let pinned_sha256 = executing
+        .source()
+        .sha256()
+        .map_err(|error| format!("hash pinned GRPO descriptor: {error:#}"))?;
+    if pinned_sha256 != receipt.source_sha256 {
+        return Err(format!(
+            "pinned GRPO descriptor identity changed: expected {}, found {pinned_sha256}",
+            receipt.source_sha256
+        ));
+    }
+
+    // Unix keeps the inode alive through the descriptor, so retire the name
+    // before training. First compare descriptor/path identities: if a same-UID
+    // actor already replaced the path, leave their different inode untouched.
+    #[cfg(unix)]
+    if executing.cleanup_path_on_drop {
+        use std::os::unix::fs::MetadataExt as _;
+        let descriptor_metadata = executing
+            .source()
+            .metadata()
+            .map_err(|error| format!("inspect pinned GRPO descriptor: {error:#}"))?;
+        match std::fs::symlink_metadata(&executing.path) {
+            Ok(path_metadata)
+                if path_metadata.file_type().is_file()
+                    && path_metadata.dev() == descriptor_metadata.dev()
+                    && path_metadata.ino() == descriptor_metadata.ino() =>
+            {
+                std::fs::remove_file(&executing.path).map_err(|error| {
+                    format!(
+                        "unlink pinned GRPO snapshot {} before execution: {error}",
+                        executing.path.display()
+                    )
+                })?;
+                executing.cleanup_path_on_drop = false;
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    path = %executing.path.display(),
+                    "GRPO snapshot path no longer names the admitted inode; leaving replacement untouched"
+                );
+                executing.cleanup_path_on_drop = false;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                executing.cleanup_path_on_drop = false;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "inspect pinned GRPO snapshot path {}: {error}",
+                    executing.path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(executing)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -771,6 +1595,7 @@ fn run_grpo(
     native_route_enabled: bool,
     native_route_env: Option<&'static str>,
     req: &GrpoRequest,
+    prepared_data: PreparedTrainingData,
     model_config: &kiln_core::config::ModelConfig,
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
@@ -781,29 +1606,35 @@ fn run_grpo(
     replay_ctx: trainer::ReplayContext,
     job_id: &str,
     gpu_step_coordination: Option<trainer::GpuStepCoordination>,
+    runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
-    if let Some(dataset_path) = req.dataset_path.as_deref() {
-        if dataset_path.trim().is_empty() {
-            return Err("GRPO dataset_path streaming requires a non-empty path".to_string());
-        }
+    if req.dataset_path.is_some() {
         if !req.groups.is_empty() {
             return Err(
                 "GRPO request must use either groups or dataset_path, not both".to_string(),
             );
         }
+        let PreparedTrainingData::GrpoJsonl(receipt) = prepared_data else {
+            return Err("streamed GRPO is missing its server-owned dataset snapshot".to_string());
+        };
+        if !receipt.server_owned {
+            return Err("streamed GRPO dataset snapshot is not server-owned".to_string());
+        }
+        let dataset_path = receipt.path.clone();
+        let dataset_source = take_verified_grpo_snapshot(receipt)?;
         if native_route_enabled {
             #[cfg(feature = "cuda")]
             {
                 let native_route_env = native_route_env.unwrap_or("backend_native_training_policy");
                 tracing::info!(
                     job_id = %job_id,
-                    dataset_path,
+                    dataset_path = %dataset_path.display(),
                     native_route_env,
                     "backend native training route enabled - routing streamed GRPO dataset to \
-                     cuda_native_grpo_train_jsonl"
+                     cuda_native_grpo_train_pinned_jsonl"
                 );
-                return kiln_train::cuda_train::cuda_native_grpo_train_jsonl_to_with_checkpoint_root(
-                    std::path::Path::new(dataset_path),
+                return kiln_train::cuda_train::cuda_native_grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
+                    dataset_source.source(),
                     &req.config,
                     model_config,
                     weights,
@@ -814,6 +1645,7 @@ fn run_grpo(
                     adapter_name,
                     Some(progress_cb),
                     gpu_step_coordination.clone(),
+                    runtime,
                 )
                 .map_err(|e| format!("{e:#}"));
             }
@@ -831,11 +1663,11 @@ fn run_grpo(
         {
             tracing::info!(
                 job_id = %job_id,
-                dataset_path,
+                dataset_path = %dataset_path.display(),
                 "routing streamed GRPO dataset to generic trainer"
             );
-            return trainer::grpo_train_jsonl_to_with_checkpoint_root(
-                std::path::Path::new(dataset_path),
+            return trainer::grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
+                dataset_source.source(),
                 &req.config,
                 model_config,
                 weights,
@@ -847,9 +1679,13 @@ fn run_grpo(
                 Some(progress_cb),
                 Some(replay_ctx),
                 gpu_step_coordination,
+                runtime,
             )
             .map_err(|e| format!("{e:#}"));
         }
+    }
+    if !matches!(prepared_data, PreparedTrainingData::None) {
+        return Err("inline GRPO unexpectedly carries external prepared data".to_string());
     }
     if native_route_enabled {
         #[cfg(feature = "cuda")]
@@ -860,7 +1696,7 @@ fn run_grpo(
                 native_route_env,
                 "backend native training route enabled - routing GRPO to cuda_native_grpo_train"
             );
-            return kiln_train::cuda_train::cuda_native_grpo_train_to_with_checkpoint_root(
+            return kiln_train::cuda_train::cuda_native_grpo_train_to_with_checkpoint_root_and_runtime(
                 &req.groups,
                 &req.config,
                 model_config,
@@ -872,6 +1708,7 @@ fn run_grpo(
                 adapter_name,
                 Some(progress_cb),
                 gpu_step_coordination.clone(),
+                runtime,
             )
             .map_err(|e| format!("{e:#}"));
         }
@@ -886,7 +1723,7 @@ fn run_grpo(
             );
         }
     }
-    trainer::grpo_train_to_with_checkpoint_root(
+    trainer::grpo_train_to_with_checkpoint_root_and_runtime(
         &req.groups,
         &req.config,
         model_config,
@@ -899,6 +1736,7 @@ fn run_grpo(
         Some(progress_cb),
         Some(replay_ctx),
         gpu_step_coordination,
+        runtime,
     )
     .map_err(|e| format!("{e:#}"))
 }
@@ -1048,6 +1886,7 @@ fn release_opd_teacher(
 #[allow(clippy::too_many_arguments)]
 fn run_opd(
     req: &OpdRequest,
+    prepared_data: PreparedTrainingData,
     model_config: &kiln_core::config::ModelConfig,
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
@@ -1059,6 +1898,7 @@ fn run_opd(
     prepared_remote_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
     job_id: &str,
     gpu_step_coordination: trainer::GpuStepCoordination,
+    runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -1075,82 +1915,28 @@ fn run_opd(
     let mut dataset_source_sha256: Option<String> = None;
     let mut dataset_identity: Option<kiln_train::TeacherIdentityV1> = None;
     let mut owned_prompts: Option<Vec<kiln_train::opd::OpdPrompt>> = None;
-    if let Some(path) = req.dataset_path.as_deref() {
-        // `agent_traces:<filter>` selectors resolve to live prompt
-        // scaffolds from the §10.3 trace index — the student re-rolls
-        // them on-policy against the registered teacher (this is the
-        // `/v1/agent/self_improve` data path). Plain file paths remain
-        // pre-scored off-policy teacher JSONL.
-        if crate::dataset_resolve::is_agent_traces_selector(path) {
-            let resolved = crate::dataset_resolve::resolve_agent_trace_prompts(
-                adapter_dir,
-                path,
-                crate::recent_requests::now_unix_ms() as i64,
-            )
-            .map_err(|e| format!("resolve OPD dataset_path {path:?}: {e}"))?;
+    match (req.dataset_path.as_deref(), prepared_data) {
+        (None, PreparedTrainingData::None) => {}
+        (Some(path), PreparedTrainingData::OpdPrompts(resolved))
+            if crate::dataset_resolve::is_agent_traces_selector(path) =>
+        {
             tracing::info!(
                 job_id = %job_id,
                 dataset_path = %path,
                 prompts = resolved.len(),
-                "resolved agent-trace selector into OPD prompts"
+                "using submit-time materialized agent-trace OPD prompts"
             );
             owned_prompts = Some(resolved);
-        } else {
-            if !matches!(
-                req.config.training_mode,
-                kiln_train::opd::OpdTrainingMode::OffPolicy
-            ) {
-                return Err(
-                "OPD dataset_path is only supported with config.training_mode = \"off_policy\" \
-                 (or use an `agent_traces:` selector for on-policy training on pi sessions)"
-                    .into(),
-            );
-            }
-            let loaded = kiln_train::load_off_policy_distillation_dataset(path)
-                .map_err(|e| format!("load off-policy OPD dataset_path {path:?}: {e:#}"))?;
-            let contains_numeric_teacher_logits = loaded.examples.iter().any(|example| {
-                example
-                    .teacher_tokens
-                    .iter()
-                    .any(|token| token.logprob.is_some() || !token.top_logprobs.is_empty())
-            });
-            let manifest_identity = loaded
-                .manifest
-                .as_ref()
-                .map(|manifest| manifest.teacher_identity().clone());
-            if contains_numeric_teacher_logits && manifest_identity.is_none() {
-                return Err(format!(
-                    "off-policy OPD dataset_path {path:?} contains numeric teacher logits but has no canonical {} first record",
-                    kiln_train::OFF_POLICY_DISTILLATION_MANIFEST_SCHEMA_V1
-                ));
-            }
-            if let Some(identity) = manifest_identity.as_ref() {
-                let expected = teacher_spec.identity.as_ref().ok_or_else(|| {
-                    format!(
-                        "off-policy OPD dataset_path {path:?} declares teacher revision sha256:{}, but registered teacher {:?} has no authoritative identity",
-                        identity.content_revision(),
-                        teacher_spec.alias
-                    )
-                })?;
-                if identity != expected {
-                    return Err(format!(
-                        "off-policy OPD dataset_path {path:?} teacher revision sha256:{} does not match pinned registered teacher revision sha256:{}",
-                        identity.content_revision(),
-                        expected.content_revision()
-                    ));
-                }
-            }
-            let prepared = kiln_train::prepare_off_policy_distillation_dataset_with_identity(
-                &loaded.examples,
-                tokenizer,
-                req.teacher.clone(),
-                manifest_identity.clone(),
-                model_config.vocab_size,
-                req.config.top_k,
-                req.config.objective,
-                req.config.echo.as_ref(),
-            )
-            .map_err(|e| format!("prepare off-policy OPD dataset_path {path:?}: {e:#}"))?;
+        }
+        (Some(path), PreparedTrainingData::OpdOffPolicy(admission))
+            if !crate::dataset_resolve::is_agent_traces_selector(path) =>
+        {
+            let PreparedOffPolicyAdmission {
+                prepared,
+                source_sha256,
+                source_size_bytes: _,
+                teacher_identity,
+            } = admission;
             tracing::info!(
                 job_id = %job_id,
                 dataset_path = %path,
@@ -1159,13 +1945,18 @@ fn run_opd(
                 env_tokens = prepared.summary.env_tokens,
                 objective = ?prepared.summary.objective,
                 echo_combined = prepared.summary.echo_combined,
-                "loaded off-policy OPD teacher JSONL dataset"
+                "using submit-time materialized off-policy OPD teacher dataset"
             );
             dataset_teacher = Some(std::sync::Arc::new(prepared.teacher));
             dataset_summary = Some(prepared.summary);
-            dataset_source_sha256 = Some(loaded.source_sha256);
-            dataset_identity = manifest_identity;
+            dataset_source_sha256 = Some(source_sha256);
+            dataset_identity = teacher_identity;
             owned_prompts = Some(prepared.prompts);
+        }
+        _ => {
+            return Err(
+                "OPD queued data does not match the source materialized at admission".to_string(),
+            );
         }
     }
     let prompts: &[kiln_train::opd::OpdPrompt] =
@@ -1249,7 +2040,7 @@ fn run_opd(
 
     let trainer_progress_cb: trainer::ProgressCallback = progress_cb;
 
-    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root(
+    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root_and_runtime(
         prompts,
         &req.config,
         model_config,
@@ -1262,6 +2053,7 @@ fn run_opd(
         adapter_name,
         Some(trainer_progress_cb),
         Some(gpu_step_coordination.clone()),
+        runtime,
     )
     .map_err(|e| format!("opd_train failed: {e:#}"));
     let teacher_release = release_opd_teacher(
@@ -1338,12 +2130,19 @@ fn run_opd(
 fn load_declared_merge_source_lora(
     source_adapter: &str,
     src_dir: &std::path::Path,
+    expected_source: &kiln_model::lora_loader::LoraSourceIdentity,
     num_layers: usize,
     device: kiln_tensor::Device,
 ) -> std::result::Result<kiln_model::lora_loader::LoraWeights, String> {
-    kiln_model::lora_loader::LoraWeights::load(src_dir, num_layers, device).map_err(|e| {
+    kiln_model::lora_loader::LoraWeights::load_pinned(
+        src_dir,
+        num_layers,
+        device,
+        expected_source,
+    )
+    .map_err(|e| {
         format!(
-            "distill_merge: declared source adapter '{source_adapter}' failed to load from {}: {e}",
+            "distill_merge: declared source adapter '{source_adapter}' failed to load its admitted PEFT revision from {}: {e}",
             src_dir.display()
         )
     })
@@ -1400,20 +2199,14 @@ fn tokenize_teacher_prompts(
 /// teacher when iterating each prompt — no per-step LoRA swap, no
 /// multi-tenant inference server needed.
 ///
-/// Per-source `weight` (a `DistillMergeSource` field) is not yet
-/// applied — the unified fixture treats every (source, prompt) entry
-/// equally. Weighted loss aggregation is filed as a §3.4 follow-up.
-/// A declared source adapter and every one of its prompts are required:
-/// preparation fails closed rather than substituting the base model or
-/// silently scoring only a subset of the source dataset.
+/// Admission accepts only declarations whose normalized weights exactly match
+/// the materialized per-source row shares and whose rollout budget matches the
+/// executed prompt-epochs. The unified fixture can therefore execute the
+/// materialized row mixture without pretending to implement weighted sampling.
 #[allow(clippy::too_many_arguments)]
 fn build_multi_tenant_merge_teacher(
     teacher_id: &str,
-    per_source: &[(
-        kiln_train::DistillMergeSource,
-        Vec<kiln_train::opd::OpdPrompt>,
-    )],
-    adapter_dir: &std::path::Path,
+    per_source: &[PreparedDistillMergeSource],
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     weights: &kiln_model::forward::GpuWeights,
     model_config: &kiln_core::config::ModelConfig,
@@ -1427,18 +2220,23 @@ fn build_multi_tenant_merge_teacher(
     );
     let backend_device = weights.embed_tokens.device();
     let backend = kiln_model::backend::for_device_kt(&backend_device);
-    for (source, prompts) in per_source {
-        let tokenized =
-            tokenize_teacher_prompts("distill_merge", &source.adapter, prompts, tokenizer)?;
+    for prepared_source in per_source {
+        let source = &prepared_source.source;
+        let tokenized = tokenize_teacher_prompts(
+            "distill_merge",
+            &source.adapter,
+            &prepared_source.prompts,
+            tokenizer,
+        )?;
         // The source identity is the declared LoRA. Loading it is part of the
         // teacher contract, so failure cannot degrade to base-model scoring.
-        let src_dir = adapter_dir.join(&source.adapter);
         let device = weights.embed_tokens.device().clone();
         let teacher_lora = gpu_step_coordination
             .run_gpu_phase(&*backend, "OPD", "merge teacher adapter load", || {
                 load_declared_merge_source_lora(
                     &source.adapter,
-                    &src_dir,
+                    &prepared_source.adapter_path,
+                    &prepared_source.source_identity,
                     model_config.num_layers,
                     device,
                 )
@@ -1971,6 +2769,7 @@ fn build_local_teacher_for(
 #[allow(clippy::too_many_arguments)]
 fn run_distill_refresh(
     req: &DistillRefreshRequest,
+    prompts: Vec<kiln_train::opd::OpdPrompt>,
     model_config: &kiln_core::config::ModelConfig,
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
@@ -1980,9 +2779,9 @@ fn run_distill_refresh(
     progress_cb: trainer::ProgressCallback,
     teacher_spec: &crate::api::teachers::TeacherSpec,
     prepared_remote_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
-    dataset_registry: Option<&crate::eval::DatasetRegistry>,
     job_id: &str,
     gpu_step_coordination: trainer::GpuStepCoordination,
+    runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -1994,24 +2793,9 @@ fn run_distill_refresh(
         return Err("DistillRefresh: `behavioural_teacher` alias must be non-empty".into());
     }
 
-    // Resolve the new-knowledge source to an inline list of prompts.
-    // Dataset sources go through the shared resolver: `agent_traces:`
-    // selectors hit the §10.3 trace index, bare names the uploaded
-    // dataset registry.
-    let prompts: Vec<kiln_train::opd::OpdPrompt> = match &req.new_data {
-        kiln_train::NewKnowledgeSource::Inline { examples } => examples.clone(),
-        kiln_train::NewKnowledgeSource::Dataset { dataset } => {
-            crate::dataset_resolve::resolve_opd_dataset_selector(
-                dataset,
-                adapter_dir,
-                dataset_registry,
-                crate::recent_requests::now_unix_ms() as i64,
-            )
-            .map_err(|e| format!("DistillRefresh: resolve new_data dataset {dataset:?}: {e}"))?
-        }
-    };
+    // Admission resolves and owns the exact prompt set before reserving VRAM.
     if prompts.is_empty() {
-        return Err("DistillRefresh: new_data resolved to zero prompts".into());
+        return Err("DistillRefresh: admitted new_data contains zero prompts".into());
     }
 
     let materialized_remote_teacher =
@@ -2075,24 +2859,35 @@ fn run_distill_refresh(
         auto_load: false,
         checkpoint_interval: None,
         resume_checkpoint: None,
-        grad_checkpoint_segments: None,
+        grad_checkpoint_segments: req.config.grad_checkpoint_segments,
         seed: req.config.seed,
         optimizer: req.config.optimizer,
         adapter_smoke_test: false,
     };
     tracing::info!(job_id = %job_id, adapter = %midtrain_name, "phase 1 — SFT midtrain");
-    trainer::sft_train_to(
-        &midtrain_examples,
+    let prepared_midtrain = kiln_train::prepare_sft_examples(
+        midtrain_examples,
+        tokenizer,
+        midtrain_config.invalid_row_policy,
+        "distill_refresh",
+        None,
+    )
+    .map_err(|e| format!("distill_refresh phase 1 (SFT midtrain) ingestion failed: {e:#}"))?;
+    trainer::sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
+        &prepared_midtrain.examples,
+        &prepared_midtrain.ingestion,
         &midtrain_config,
         model_config,
         weights,
         tokenizer,
         adapter_dir,
         output_adapter_dir,
+        adapter_dir,
         &midtrain_name,
         Some(progress_cb),
         None,
         Some(gpu_step_coordination.clone()),
+        runtime,
     )
     .map_err(|e| format!("distill_refresh phase 1 (SFT midtrain) failed: {e:#}"))?;
 
@@ -2148,7 +2943,7 @@ fn run_distill_refresh(
         teacher = %req.behavioural_teacher,
         "phase 2 — OPD recover"
     );
-    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root(
+    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root_and_runtime(
         &prompts,
         &recover_config,
         model_config,
@@ -2161,6 +2956,7 @@ fn run_distill_refresh(
         adapter_name,
         None,
         Some(gpu_step_coordination.clone()),
+        runtime,
     )
     .map_err(|e| format!("distill_refresh phase 2 (OPD recover) failed: {e:#}"));
     let teacher_release = release_opd_teacher(
@@ -2197,12 +2993,13 @@ fn run_distill_refresh(
 
 /// `/v1/adapters/distill_merge` runtime — §3.4 behaviour-space merge.
 /// Each source LoRA is treated as a teacher over its retained
-/// training-prompt distribution. Multi-teacher reverse-KL with per-
-/// prompt routing (source-of-origin) plus DeepSeek-V4-style weighted
-/// averaging on shared prompts.
+/// training-prompt distribution. Multi-teacher reverse-KL routes each
+/// admitted prompt to its source-of-origin teacher; admission rejects
+/// token-identical prompts shared by multiple sources.
 #[allow(clippy::too_many_arguments)]
 fn run_distill_merge(
     req: &DistillMergeRequest,
+    per_source: Vec<PreparedDistillMergeSource>,
     model_config: &kiln_core::config::ModelConfig,
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
@@ -2212,6 +3009,7 @@ fn run_distill_merge(
     progress_cb: trainer::ProgressCallback,
     job_id: &str,
     gpu_step_coordination: trainer::GpuStepCoordination,
+    runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -2228,38 +3026,12 @@ fn run_distill_merge(
                 .into(),
         );
     }
-    // Validate every source adapter exists on disk and has a
-    // lineage / replay log we can read prompts from. We resolve the
-    // training prompts via each source's replay log — the §3.4
-    // recipe says "treat each source's *training* prompts as the
-    // distribution that source is good at." Missing replay history is
-    // fatal because substituting unrelated prompts changes the declared
-    // merge dataset.
-    let mut per_source: Vec<(
-        kiln_train::DistillMergeSource,
-        Vec<kiln_train::opd::OpdPrompt>,
-    )> = Vec::new();
-    for source in &req.sources {
-        let src_dir = adapter_dir.join(&source.adapter);
-        if !src_dir.exists() {
-            return Err(format!(
-                "distill_merge: source adapter {:?} not found on disk",
-                source.adapter
-            ));
-        }
-        let derived = derive_source_prompts(&src_dir, &source.adapter);
-        if derived.is_empty() {
-            return Err(format!(
-                "distill_merge: source adapter {:?} has no usable replay prompts; refusing to substitute unrelated seed data",
-                source.adapter
-            ));
-        }
-        let prompts = derived;
-        per_source.push((source.clone(), prompts));
-    }
+    // Replay logs were parsed and pinned at admission, before memory
+    // reclamation. Runtime consumes those exact prompts even if a source
+    // adapter's replay file changes while this job waits in the queue.
     let all_prompts: Vec<kiln_train::opd::OpdPrompt> = per_source
         .iter()
-        .flat_map(|(_, ps)| ps.iter().cloned())
+        .flat_map(|source| source.prompts.iter().cloned())
         .collect();
     if all_prompts.is_empty() {
         return Err("distill_merge: no prompts collected from any source".into());
@@ -2295,7 +3067,6 @@ fn run_distill_merge(
         std::sync::Arc::new(build_multi_tenant_merge_teacher(
             &teacher_id,
             &per_source,
-            adapter_dir,
             tokenizer,
             weights,
             model_config,
@@ -2310,7 +3081,7 @@ fn run_distill_merge(
     merge_config.output_name = Some(adapter_name.to_string());
     merge_config.auto_load = false;
 
-    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root(
+    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root_and_runtime(
         &all_prompts,
         &merge_config,
         model_config,
@@ -2323,6 +3094,7 @@ fn run_distill_merge(
         adapter_name,
         Some(progress_cb),
         Some(gpu_step_coordination.clone()),
+        runtime,
     )
     .map_err(|e| format!("distill_merge opd_train failed: {e:#}"));
     let teacher_release = release_opd_teacher(
@@ -2355,34 +3127,67 @@ fn run_distill_merge(
     Ok(output_dir)
 }
 
-/// Derive the training prompts that a source LoRA was trained on by
-/// reading its `replay.jsonl`. Returns an empty Vec on any I/O or
-/// parse failure — the caller falls back to the wide seed bank with
-/// a warning in that case. This is best-effort only; the proper §3.4
-/// path will use the source's training-prompt dataset directly.
-fn derive_source_prompts(
+/// Derive the training prompts that a source LoRA was trained on by reading its
+/// bounded `replay.jsonl`. I/O and parse failures are fatal: substituting a
+/// different corpus would invalidate both the merge semantics and its memory
+/// admission.
+pub(crate) fn derive_source_prompts(
     src_dir: &std::path::Path,
-    _src_name: &str,
-) -> Vec<kiln_train::opd::OpdPrompt> {
+    src_name: &str,
+) -> std::result::Result<Vec<kiln_train::opd::OpdPrompt>, String> {
+    use std::io::Read;
+
+    const MAX_REPLAY_BYTES: u64 = 64 * 1024 * 1024;
     let replay_path = src_dir.join("replay.jsonl");
-    let bytes = match std::fs::read(&replay_path) {
-        Ok(b) => b,
-        Err(_) => return Vec::new(),
-    };
-    let s = match std::str::from_utf8(&bytes) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
+    let file = std::fs::File::open(&replay_path).map_err(|error| {
+        format!(
+            "distill_merge: source adapter {src_name:?} has no readable replay log at {}: {error}",
+            replay_path.display()
+        )
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        format!(
+            "distill_merge: inspect source adapter {src_name:?} replay log {}: {error}",
+            replay_path.display()
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_REPLAY_BYTES {
+        return Err(format!(
+            "distill_merge: source adapter {src_name:?} replay log must be a regular file no larger than {MAX_REPLAY_BYTES} bytes (found {} bytes)",
+            metadata.len()
+        ));
+    }
+    let expected_bytes = metadata.len();
+    let mut bytes = Vec::with_capacity(expected_bytes as usize);
+    file.take(MAX_REPLAY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            format!(
+                "distill_merge: read source adapter {src_name:?} replay log {}: {error}",
+                replay_path.display()
+            )
+        })?;
+    if bytes.len() as u64 > MAX_REPLAY_BYTES || bytes.len() as u64 != expected_bytes {
+        return Err(format!(
+            "distill_merge: source adapter {src_name:?} replay log changed while it was being admitted: expected {expected_bytes} bytes, read {}",
+            bytes.len()
+        ));
+    }
+    let s = std::str::from_utf8(&bytes).map_err(|error| {
+        format!("distill_merge: source adapter {src_name:?} replay log is not UTF-8: {error}")
+    })?;
     let mut out = Vec::new();
-    for line in s.lines() {
+    for (line_index, line) in s.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let value: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "distill_merge: source adapter {src_name:?} replay line {} is invalid JSON: {error}",
+                line_index + 1
+            )
+        })?;
         // Replay records of kind "request" contain the original
         // request body, which carries either `examples` (SFT) or
         // `prompts` (OPD). Both shapes are OpdPrompt-compatible —
@@ -2414,7 +3219,7 @@ fn derive_source_prompts(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// `/v1/distill/pump` runtime — §3.5 27B → 4B Knowledge Pump.
@@ -2423,6 +3228,7 @@ fn derive_source_prompts(
 #[allow(clippy::too_many_arguments)]
 fn run_distill_pump(
     req: &DistillPumpRequest,
+    prompts: Vec<kiln_train::opd::OpdPrompt>,
     model_config: &kiln_core::config::ModelConfig,
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
@@ -2434,6 +3240,7 @@ fn run_distill_pump(
     prepared_remote_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>>,
     job_id: &str,
     gpu_step_coordination: trainer::GpuStepCoordination,
+    runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -2442,19 +3249,8 @@ fn run_distill_pump(
         return Err("distill_pump: teacher alias must be non-empty".into());
     }
 
-    // Resolve the pump mode to a concrete list of OPD prompts. The
-    // `Domain` and `Wide` modes use a tiny canonical seed bank — the
-    // full §3.5 canonical-domain corpora live on disk and ship in a
-    // separate artefact (Phase 3 deliverable); here we resolve to a
-    // handful of representative prompts so the runtime path exercises
-    // end-to-end without depending on the corpus deliverable.
-    let prompts: Vec<kiln_train::opd::OpdPrompt> = match &req.mode {
-        kiln_train::DistillPumpMode::Examples { examples } => examples.clone(),
-        kiln_train::DistillPumpMode::Domain { domain } => {
-            canonical_domain_seed_prompts(domain).map_err(|e| format!("distill_pump: {e}"))?
-        }
-        kiln_train::DistillPumpMode::Wide { wide: _ } => wide_seed_prompts(),
-    };
+    // Domain/Wide/Examples modes are resolved at admission so their exact
+    // prompt shape is part of the governor reservation.
     if prompts.is_empty() {
         return Err(format!(
             "distill_pump: mode {:?} resolved to zero prompts",
@@ -2520,7 +3316,7 @@ fn run_distill_pump(
     pump_config.output_name = Some(adapter_name.to_string());
     pump_config.auto_load = false;
 
-    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root(
+    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root_and_runtime(
         &prompts,
         &pump_config,
         model_config,
@@ -2533,6 +3329,7 @@ fn run_distill_pump(
         adapter_name,
         Some(progress_cb),
         Some(gpu_step_coordination.clone()),
+        runtime,
     )
     .map_err(|e| format!("distill_pump opd_train failed: {e:#}"));
     let teacher_release = release_opd_teacher(
@@ -2589,7 +3386,7 @@ const CANONICAL_PUMP_DOMAINS: &[&str] = &[
 /// full corpus lives on disk and ships in a separate Phase 3 artefact;
 /// these seeds let the runtime path exercise end-to-end against any
 /// registered teacher without depending on the corpus deliverable.
-fn canonical_domain_seed_prompts(
+pub(crate) fn canonical_domain_seed_prompts(
     domain: &str,
 ) -> std::result::Result<Vec<kiln_train::opd::OpdPrompt>, String> {
     use kiln_train::ChatMessage;
@@ -2675,7 +3472,7 @@ fn canonical_domain_seed_prompts(
 /// Tiny seed-prompt bank for the §3.5.2 wide-coverage pump. Covers
 /// every canonical domain in one short batch so the runtime path
 /// exercises the broad-pump shape too.
-fn wide_seed_prompts() -> Vec<kiln_train::opd::OpdPrompt> {
+pub(crate) fn wide_seed_prompts() -> Vec<kiln_train::opd::OpdPrompt> {
     let mut all = Vec::new();
     for domain in ["math", "code", "writing", "instruction"] {
         all.extend(
@@ -2705,6 +3502,7 @@ fn run_distill_self(
     progress_cb: trainer::ProgressCallback,
     job_id: &str,
     gpu_step_coordination: trainer::GpuStepCoordination,
+    runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
     req.config
         .validate_runtime_contract()
@@ -2776,7 +3574,7 @@ fn run_distill_self(
     self_config.output_name = Some(adapter_name.to_string());
     self_config.auto_load = false;
 
-    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root(
+    let train_result = kiln_train::opd::opd_train_to_with_checkpoint_root_and_runtime(
         &prompts,
         &self_config,
         model_config,
@@ -2789,6 +3587,7 @@ fn run_distill_self(
         adapter_name,
         Some(progress_cb),
         Some(gpu_step_coordination.clone()),
+        runtime,
     )
     .map_err(|e| format!("distill_self opd_train failed: {e:#}"));
     let teacher_release = release_opd_teacher(
@@ -2827,7 +3626,7 @@ struct TrainingMemoryRuntime {
     allocator_policy: kiln_model::GpuAllocatorMemoryProbePolicy,
     device: kiln_tensor::Device,
     kv_cache_reclaimable: bool,
-    vram_source: VramSource,
+    unified_memory: bool,
 }
 
 fn training_memory_runtime(state: &AppState) -> Option<TrainingMemoryRuntime> {
@@ -2853,15 +3652,12 @@ fn training_memory_runtime(state: &AppState) -> Option<TrainingMemoryRuntime> {
         device,
         kv_cache_reclaimable: capabilities.storage.kv_cache_device_memory_pressure
             && cache_device_matches_model,
-        vram_source: kiln_memory::vram::detect_vram().source,
+        unified_memory: state.vram_info.unified,
     })
 }
 
-fn allocator_can_expand_training_budget(vram_source: VramSource) -> bool {
-    !matches!(
-        vram_source,
-        VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon
-    )
+fn allocator_can_expand_training_budget(unified_memory: bool) -> bool {
+    !unified_memory
 }
 
 fn current_training_safe_bytes(
@@ -2878,7 +3674,7 @@ fn current_training_safe_bytes(
         .saturating_sub(governor.config().floor_bytes)
         .saturating_sub(other_reserved);
     let allocator = runtime
-        .filter(|runtime| allocator_can_expand_training_budget(runtime.vram_source))
+        .filter(|runtime| allocator_can_expand_training_budget(runtime.unified_memory))
         .and_then(|runtime| {
             crate::device_memory::allocator_safe_available_bytes_with_soft_reserved(
                 runtime.allocator_policy,
@@ -2930,10 +3726,79 @@ fn kv_shrink_target_for_training(
     (target < current_blocks).then_some(target)
 }
 
+struct ReservedTrainingKvReplacement<'a> {
+    plan: crate::kv_autoscaler::KvResizeStagingPlan,
+    _reservation: kiln_memory::Reservation<'a>,
+    replanned_after_contention: bool,
+    staging_available_bytes: u64,
+}
+
+fn try_claim_training_kv_replacement<'a>(
+    governor: &'a kiln_memory::MemoryGovernor,
+    current_reservation: Option<&kiln_memory::Reservation<'a>>,
+    bytes: u64,
+) -> Option<kiln_memory::Reservation<'a>> {
+    match current_reservation {
+        Some(current) => current.try_reserve_replacement_cached(bytes),
+        None => governor.try_reserve_cached(bytes),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_and_reserve_training_kv_replacement<'a>(
+    governor: &'a kiln_memory::MemoryGovernor,
+    current_reservation: Option<&kiln_memory::Reservation<'a>>,
+    current_blocks: usize,
+    requested_target_blocks: usize,
+    initial_staging_available_bytes: u64,
+    bytes_per_block: u64,
+    refresh_staging_available_bytes: impl FnOnce() -> u64,
+) -> Option<ReservedTrainingKvReplacement<'a>> {
+    let initial_plan = crate::kv_autoscaler::plan_resize_with_staging_headroom(
+        current_blocks,
+        requested_target_blocks,
+        1,
+        initial_staging_available_bytes,
+        bytes_per_block,
+    )?;
+    if let Some(reservation) = try_claim_training_kv_replacement(
+        governor,
+        current_reservation,
+        initial_plan.replacement_bytes,
+    ) {
+        return Some(ReservedTrainingKvReplacement {
+            plan: initial_plan,
+            _reservation: reservation,
+            replanned_after_contention: false,
+            staging_available_bytes: initial_staging_available_bytes,
+        });
+    }
+
+    let refreshed_staging_available_bytes = refresh_staging_available_bytes();
+    let replanned = crate::kv_autoscaler::plan_resize_with_staging_headroom(
+        current_blocks,
+        requested_target_blocks,
+        1,
+        refreshed_staging_available_bytes,
+        bytes_per_block,
+    )?;
+    let reservation = try_claim_training_kv_replacement(
+        governor,
+        current_reservation,
+        replanned.replacement_bytes,
+    )?;
+    Some(ReservedTrainingKvReplacement {
+        plan: replanned,
+        _reservation: reservation,
+        replanned_after_contention: true,
+        staging_available_bytes: refreshed_staging_available_bytes,
+    })
+}
+
 fn prepare_training_memory_for_job(
     state: &AppState,
     required_bytes: u64,
-    current_reservation_bytes: u64,
+    current_reservation: Option<&kiln_memory::Reservation<'_>>,
 ) -> Result<(), String> {
     state
         .ensure_backend_healthy()
@@ -2941,6 +3806,7 @@ fn prepare_training_memory_for_job(
     if required_bytes == 0 {
         return Ok(());
     }
+    let current_reservation_bytes = current_reservation.map_or(0, |guard| guard.bytes());
     let runtime = training_memory_runtime(state);
     let before = current_training_safe_bytes(runtime.as_ref(), current_reservation_bytes);
     if before < required_bytes {
@@ -2958,16 +3824,18 @@ fn prepare_training_memory_for_job(
             {
                 let staging_available =
                     current_kv_staging_available_bytes(runtime, current_reservation_bytes);
-                if let Some(plan) = crate::kv_autoscaler::plan_resize_with_staging_headroom(
+                let governor = kiln_memory::MemoryGovernor::global();
+                if let Some(claim) = plan_and_reserve_training_kv_replacement(
+                    governor,
+                    current_reservation,
                     current_blocks,
                     requested_target_blocks,
-                    1,
                     staging_available,
                     bytes_per_block,
+                    || current_kv_staging_available_bytes(runtime, current_reservation_bytes),
                 ) {
+                    let plan = claim.plan;
                     state.clear_real_prefix_cache();
-                    let _staging_reservation =
-                        kiln_memory::MemoryGovernor::global().reserve(plan.replacement_bytes);
                     match engine.resize_kv_blocking(
                         plan.target_blocks,
                         KvResizeReason::TrainingMemoryPreparation,
@@ -2978,7 +3846,8 @@ fn prepare_training_memory_for_job(
                             planned_target_blocks = plan.target_blocks,
                             achieved_blocks = achieved,
                             replacement_mb = plan.replacement_bytes / (1024 * 1024),
-                            staging_available_mb = staging_available / (1024 * 1024),
+                            staging_available_mb = claim.staging_available_bytes / (1024 * 1024),
+                            replanned_after_contention = claim.replanned_after_contention,
                             required_gb = required_bytes as f64 / 1e9,
                             reserved_gb = current_reservation_bytes as f64 / 1e9,
                             available_before_gb = before as f64 / 1e9,
@@ -2996,9 +3865,9 @@ fn prepare_training_memory_for_job(
                     tracing::warn!(
                         from_blocks = current_blocks,
                         requested_target_blocks,
-                        staging_available_mb = staging_available / (1024 * 1024),
+                        initial_staging_available_mb = staging_available / (1024 * 1024),
                         bytes_per_block,
-                        "training worker skipped KV shrink: full replacement pool lacks staging headroom"
+                        "training worker skipped KV shrink: replacement pool lacks atomically reserved staging headroom"
                     );
                 }
             }
@@ -3201,15 +4070,13 @@ fn snapshot_adapter_tree(
         if file_type.is_dir() {
             snapshot_adapter_tree(&source_path, &destination_path)?;
         } else if file_type.is_file() {
-            if std::fs::hard_link(&source_path, &destination_path).is_err() {
-                std::fs::copy(&source_path, &destination_path).map_err(|error| {
-                    format!(
-                        "copy adapter snapshot file {} to {}: {error}",
-                        source_path.display(),
-                        destination_path.display()
-                    )
-                })?;
-            }
+            std::fs::copy(&source_path, &destination_path).map_err(|error| {
+                format!(
+                    "copy adapter snapshot file {} to {}: {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
         } else {
             return Err(format!(
                 "adapter snapshot source {} is not a regular file or directory",
@@ -3301,6 +4168,7 @@ fn publish_training_checkpoints_locked(
 
 /// Execute a single training job (runs on a blocking thread).
 fn execute_job(state: AppState, mut entry: QueueEntry) {
+    let training_runtime = state.training_runtime;
     let job_id = entry.job_id.clone();
 
     {
@@ -3467,6 +4335,12 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
         _ => None,
     };
 
+    // A queued path/selector may have waited for hours. Revalidate streamed
+    // identities and require every dynamic source to have its submit-time
+    // materialization before any governor reservation, KV resize, or pooled
+    // allocator reclamation.
+    let prepared_data_is_valid = verify_prepared_training_data(&entry.job, &entry.prepared_data);
+
     // Resolve only the immutable submit-time binding. Registry deletion or
     // replacement while this job waited in the FIFO is a terminal failure,
     // never permission to silently train against a different teacher.
@@ -3509,10 +4383,12 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
     // the autoscaler's floor). RAII: drops at the end of this function scope —
     // after the match AND finalize — releasing the budget back to inference.
     // Read `reserved_bytes` (Copy) here, before `match entry.job` moves the job.
-    let binding_is_valid =
-        pinned_teacher.is_ok() && prepared_remote_teacher.is_ok() && publication.is_ok();
+    let binding_is_valid = pinned_teacher.is_ok()
+        && prepared_remote_teacher.is_ok()
+        && prepared_data_is_valid.is_ok()
+        && publication.is_ok();
     let _mem_reservation = (binding_is_valid && entry.reserved_bytes > 0).then(|| {
-        let total = kiln_memory::vram::detect_vram().total_bytes;
+        let total = state.vram_info.total_bytes;
         let bytes = if total > 0 {
             entry.reserved_bytes.min(total)
         } else {
@@ -3525,7 +4401,6 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
         kiln_memory::MemoryGovernor::global().reserve(bytes)
     });
 
-    let held_reservation_bytes = _mem_reservation.as_ref().map_or(0, |guard| guard.bytes());
     let memory_ready = if binding_is_valid {
         state
             .ensure_backend_healthy()
@@ -3534,7 +4409,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                 prepare_training_memory_for_job(
                     &state,
                     entry.reserved_bytes,
-                    held_reservation_bytes,
+                    _mem_reservation.as_ref(),
                 )
             })
     } else {
@@ -3546,6 +4421,8 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
     } else if let Err(err) = pinned_teacher.as_ref() {
         Err(err.clone())
     } else if let Err(err) = prepared_remote_teacher.as_ref() {
+        Err(err.clone())
+    } else if let Err(err) = prepared_data_is_valid.as_ref() {
         Err(err.clone())
     } else if let Err(err) = memory_ready {
         Err(err)
@@ -3580,6 +4457,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     native_route_enabled,
                     training_dispatch.native_training_env,
                     &req,
+                    std::mem::take(&mut entry.prepared_data),
                     &state.model_config,
                     &guard.weights,
                     &state.tokenizer,
@@ -3593,6 +4471,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                         state.gpu_lock.clone(),
                         backend_health.clone(),
                     )),
+                    &training_runtime,
                 )
             }
             QueuedJob::Grpo(mut req) => {
@@ -3619,6 +4498,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     native_route_enabled,
                     training_dispatch.native_training_env,
                     &req,
+                    std::mem::take(&mut entry.prepared_data),
                     &state.model_config,
                     &guard.weights,
                     &state.tokenizer,
@@ -3632,6 +4512,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                         state.gpu_lock.clone(),
                         backend_health.clone(),
                     )),
+                    &training_runtime,
                 )
             }
             QueuedJob::Opd(mut req) => {
@@ -3644,6 +4525,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     .expect("OPD admission requires a pinned teacher");
                 run_opd(
                     &req,
+                    std::mem::take(&mut entry.prepared_data),
                     &state.model_config,
                     &guard.weights,
                     &state.tokenizer,
@@ -3658,6 +4540,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                         state.gpu_lock.clone(),
                         backend_health.clone(),
                     ),
+                    &training_runtime,
                 )
             }
             QueuedJob::DistillRefresh(req) => {
@@ -3667,6 +4550,10 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     .expect("DistillRefresh admission requires a pinned teacher");
                 run_distill_refresh(
                     &req,
+                    match std::mem::take(&mut entry.prepared_data) {
+                        PreparedTrainingData::DistillRefreshPrompts(prompts) => prompts,
+                        _ => unreachable!("DistillRefresh prepared data checked above"),
+                    },
                     &state.model_config,
                     &guard.weights,
                     &state.tokenizer,
@@ -3676,18 +4563,22 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     progress_cb,
                     teacher_spec,
                     prepared_remote_teacher.clone(),
-                    state.dataset_registry.as_deref(),
                     &job_id,
                     trainer::GpuStepCoordination::new(
                         state.gpu_lock.clone(),
                         backend_health.clone(),
                     ),
+                    &training_runtime,
                 )
             }
             QueuedJob::DistillMerge(req) => {
                 let guard = runner_arc.read().unwrap();
                 run_distill_merge(
                     &req,
+                    match std::mem::take(&mut entry.prepared_data) {
+                        PreparedTrainingData::DistillMergePrompts(per_source) => per_source,
+                        _ => unreachable!("DistillMerge prepared data checked above"),
+                    },
                     &state.model_config,
                     &guard.weights,
                     &state.tokenizer,
@@ -3700,6 +4591,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                         state.gpu_lock.clone(),
                         backend_health.clone(),
                     ),
+                    &training_runtime,
                 )
             }
             QueuedJob::DistillPump(req) => {
@@ -3709,6 +4601,10 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     .expect("DistillPump admission requires a pinned teacher");
                 run_distill_pump(
                     &req,
+                    match std::mem::take(&mut entry.prepared_data) {
+                        PreparedTrainingData::DistillPumpPrompts(prompts) => prompts,
+                        _ => unreachable!("DistillPump prepared data checked above"),
+                    },
                     &state.model_config,
                     &guard.weights,
                     &state.tokenizer,
@@ -3723,6 +4619,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                         state.gpu_lock.clone(),
                         backend_health.clone(),
                     ),
+                    &training_runtime,
                 )
             }
             QueuedJob::DistillSelf(req) => {
@@ -3741,6 +4638,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                         state.gpu_lock.clone(),
                         backend_health.clone(),
                     ),
+                    &training_runtime,
                 )
             }
         }
@@ -4727,6 +5625,63 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn starting_adapter_snapshot_is_inode_and_content_independent() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = mock_state_in(tmp.path());
+        write_revisioned_adapter(tmp.path(), "target", 1.0);
+
+        let source_dir = tmp.path().join("target");
+        let source_model = source_dir.join("adapter_model.safetensors");
+        let starting_revision =
+            kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(&source_dir)
+                .unwrap()
+                .content_revision();
+        let source_bytes = std::fs::read(&source_model).unwrap();
+
+        let publication = prepare_training_publication(&state, "target", true).unwrap();
+        let snapshot_dir = publication
+            .output_root()
+            .join(kiln_train::trainer::STARTING_ADAPTER_SNAPSHOT_DIR);
+        let snapshot_model = snapshot_dir.join("adapter_model.safetensors");
+        let source_metadata = std::fs::metadata(&source_model).unwrap();
+        let snapshot_metadata = std::fs::metadata(&snapshot_model).unwrap();
+        let source_file_id = (source_metadata.dev(), source_metadata.ino());
+        assert_ne!(
+            source_file_id,
+            (snapshot_metadata.dev(), snapshot_metadata.ino()),
+            "starting-adapter snapshot must not share an inode with its source"
+        );
+        assert_eq!(std::fs::read(&snapshot_model).unwrap(), source_bytes);
+
+        // `std::fs::write` truncates and rewrites the existing source inode.
+        // A hard-linked snapshot would change underneath the trainer here.
+        write_revisioned_adapter(tmp.path(), "target", 2.0);
+
+        let rewritten_source = std::fs::metadata(&source_model).unwrap();
+        assert_eq!(
+            (rewritten_source.dev(), rewritten_source.ino()),
+            source_file_id,
+            "the regression must mutate the existing source inode"
+        );
+        assert_ne!(std::fs::read(&source_model).unwrap(), source_bytes);
+        assert_eq!(
+            std::fs::read(&snapshot_model).unwrap(),
+            source_bytes,
+            "in-place source mutation must not alter the pinned trainer input"
+        );
+        assert_eq!(
+            kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(&snapshot_dir)
+                .unwrap()
+                .content_revision(),
+            starting_revision,
+            "in-place source mutation must not alter the pinned adapter identity"
+        );
+    }
+
     #[test]
     fn staged_training_publication_replaces_idle_revision_and_checkpoints() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5183,9 +6138,13 @@ mod tests {
     #[test]
     fn declared_merge_source_lora_load_failure_is_fatal() {
         let dir = tempfile::tempdir().unwrap();
+        let expected_source =
+            kiln_model::lora_loader::LoraSourceIdentity::new("0".repeat(64), "1".repeat(64))
+                .unwrap();
         let err = match load_declared_merge_source_lora(
             "missing-source",
             dir.path(),
+            &expected_source,
             1,
             kiln_tensor::Device::Cpu,
         ) {
@@ -5436,15 +6395,8 @@ mod tests {
 
     #[test]
     fn unified_memory_does_not_let_allocator_expand_training_budget() {
-        assert!(!allocator_can_expand_training_budget(
-            kiln_memory::vram::VramSource::LinuxDrmSysfsUnified
-        ));
-        assert!(!allocator_can_expand_training_budget(
-            kiln_memory::vram::VramSource::AppleSilicon
-        ));
-        assert!(allocator_can_expand_training_budget(
-            kiln_memory::vram::VramSource::NvidiaSmi
-        ));
+        assert!(!allocator_can_expand_training_budget(true));
+        assert!(allocator_can_expand_training_budget(false));
     }
 
     fn tracked_job(job_id: &str, adapter: &str, correction_ids: Vec<String>) -> TrainingJobInfo {
@@ -5620,6 +6572,8 @@ mod tests {
             job_id: "job-1".into(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            prepared_data: Default::default(),
+            prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
@@ -5633,6 +6587,8 @@ mod tests {
             job_id: "job-2".into(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            prepared_data: Default::default(),
+            prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
@@ -5646,6 +6602,8 @@ mod tests {
             job_id: "job-3".into(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            prepared_data: Default::default(),
+            prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
@@ -5670,6 +6628,8 @@ mod tests {
             job_id: "job-1".into(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            prepared_data: Default::default(),
+            prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
@@ -5683,6 +6643,8 @@ mod tests {
             job_id: "job-2".into(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            prepared_data: Default::default(),
+            prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
@@ -5696,6 +6658,8 @@ mod tests {
             job_id: "job-3".into(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            prepared_data: Default::default(),
+            prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
@@ -5714,6 +6678,249 @@ mod tests {
 
         // Remove non-existent
         assert!(!q.remove("job-99"));
+    }
+
+    #[test]
+    fn grpo_source_receipt_rejects_same_size_mutation_before_execution() {
+        fn set_test_readonly(path: &std::path::Path, readonly: bool) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = if readonly { 0o400 } else { 0o600 };
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+            }
+            #[cfg(not(unix))]
+            {
+                let mut permissions = std::fs::metadata(path).unwrap().permissions();
+                permissions.set_readonly(readonly);
+                std::fs::set_permissions(path, permissions).unwrap();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("groups.jsonl");
+        std::fs::write(&path, b"first\n").unwrap();
+        let canonical = std::fs::canonicalize(&path).unwrap();
+        let source_sha256 = kiln_train::train_receipt::sha256_file(&canonical).unwrap();
+        let snapshot_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&canonical)
+            .unwrap();
+        set_test_readonly(&canonical, true);
+        let job = QueuedJob::Grpo(GrpoRequest {
+            dataset: None,
+            groups: Vec::new(),
+            dataset_path: Some(canonical.to_string_lossy().into_owned()),
+            config: Default::default(),
+            post_eval: None,
+        });
+        let prepared = PreparedTrainingData::GrpoJsonl(
+            GrpoJsonlAdmissionReceipt::new_server_owned(
+                canonical,
+                snapshot_file,
+                source_sha256,
+                6,
+                1,
+                1,
+                8,
+                1024,
+            )
+            .unwrap(),
+        );
+
+        verify_prepared_training_data(&job, &prepared).unwrap();
+        set_test_readonly(&path, false);
+        std::fs::write(&path, b"other\n").unwrap();
+        set_test_readonly(&path, true);
+        let error = verify_prepared_training_data(&job, &prepared).unwrap_err();
+        assert!(error.contains("changed after admission"), "{error}");
+    }
+
+    fn grpo_receipt_fixture(path: &Path) -> GrpoJsonlAdmissionReceipt {
+        let source_sha256 = kiln_train::train_receipt::sha256_file(path).unwrap();
+        let size_bytes = std::fs::metadata(path).unwrap().len();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        GrpoJsonlAdmissionReceipt::new_server_owned(
+            path.to_path_buf(),
+            file,
+            source_sha256,
+            size_bytes,
+            1,
+            1,
+            8,
+            1024,
+        )
+        .unwrap()
+    }
+
+    fn grpo_path_job(path: &Path) -> QueuedJob {
+        QueuedJob::Grpo(GrpoRequest {
+            dataset: None,
+            groups: Vec::new(),
+            dataset_path: Some(path.display().to_string()),
+            config: Default::default(),
+            post_eval: None,
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grpo_execution_uses_admission_handle_after_path_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("groups.jsonl");
+        let displaced = dir.path().join("displaced.jsonl");
+        std::fs::write(&path, b"first\n").unwrap();
+        let expected = kiln_train::train_receipt::sha256_file(&path).unwrap();
+        let prepared = PreparedTrainingData::GrpoJsonl(grpo_receipt_fixture(&path));
+        let job = grpo_path_job(&path);
+
+        std::fs::rename(&path, &displaced).unwrap();
+        std::fs::write(&path, b"other\n").unwrap();
+        verify_prepared_training_data(&job, &prepared).unwrap();
+        let PreparedTrainingData::GrpoJsonl(receipt) = prepared else {
+            unreachable!()
+        };
+        let executing = take_verified_grpo_snapshot(receipt).unwrap();
+        assert_eq!(executing.source().sha256().unwrap(), expected);
+        assert_eq!(executing.source().sha256().unwrap(), expected);
+        drop(executing);
+        assert_eq!(std::fs::read(&path).unwrap(), b"other\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grpo_execution_survives_pre_execution_delete_and_unlinks_live_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let deleted_path = dir.path().join("deleted.jsonl");
+        std::fs::write(&deleted_path, b"deleted-but-pinned\n").unwrap();
+        let expected_deleted = kiln_train::train_receipt::sha256_file(&deleted_path).unwrap();
+        let deleted_prepared = PreparedTrainingData::GrpoJsonl(grpo_receipt_fixture(&deleted_path));
+        let deleted_job = grpo_path_job(&deleted_path);
+        std::fs::remove_file(&deleted_path).unwrap();
+        verify_prepared_training_data(&deleted_job, &deleted_prepared).unwrap();
+        let PreparedTrainingData::GrpoJsonl(deleted_receipt) = deleted_prepared else {
+            unreachable!()
+        };
+        let deleted_execution = take_verified_grpo_snapshot(deleted_receipt).unwrap();
+        assert_eq!(
+            deleted_execution.source().sha256().unwrap(),
+            expected_deleted
+        );
+
+        let linked_path = dir.path().join("linked.jsonl");
+        std::fs::write(&linked_path, b"unlink-at-execution\n").unwrap();
+        let expected_linked = kiln_train::train_receipt::sha256_file(&linked_path).unwrap();
+        let linked_execution =
+            take_verified_grpo_snapshot(grpo_receipt_fixture(&linked_path)).unwrap();
+        assert!(!linked_path.exists());
+        assert_eq!(linked_execution.source().sha256().unwrap(), expected_linked);
+        assert_eq!(linked_execution.source().sha256().unwrap(), expected_linked);
+    }
+
+    #[test]
+    fn stale_grpo_snapshot_cleanup_is_versioned_bounded_and_owner_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare_grpo_snapshot_root(&dir.path().join(".training-inputs")).unwrap();
+        let identity = grpo_snapshot_process_identity();
+        let current = new_grpo_snapshot_path(&root);
+        std::fs::write(&current, b"live").unwrap();
+        let stale_paths: Vec<_> = (0..3)
+            .map(|index| root.join(format!("grpo-v1-old-owner-{index}.jsonl")))
+            .collect();
+        for path in &stale_paths {
+            std::fs::write(path, b"stale").unwrap();
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+        let unknown = root.join("unowned.jsonl");
+        std::fs::write(&unknown, b"leave-me").unwrap();
+        let cutoff = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
+
+        let bounded =
+            cleanup_stale_grpo_snapshots_before(&root, &identity.owner_token, cutoff, 1).unwrap();
+        assert!(bounded.scanned <= 1);
+        assert!(bounded.removed <= 1);
+        assert!(stale_paths.iter().filter(|path| path.exists()).count() >= 2);
+
+        let completed = cleanup_stale_grpo_snapshots_before(
+            &root,
+            &identity.owner_token,
+            cutoff,
+            MAX_STALE_GRPO_SNAPSHOTS_SCANNED_PER_PASS,
+        )
+        .unwrap();
+        assert!(completed.removed >= 2);
+        assert!(current.exists(), "current-process receipt must remain live");
+        assert!(
+            unknown.exists(),
+            "unversioned files are never cleanup candidates"
+        );
+        assert!(stale_paths.iter().all(|path| !path.exists()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_grpo_snapshot_cleanup_ignores_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = prepare_grpo_snapshot_root(&dir.path().join(".training-inputs")).unwrap();
+        let outside = dir.path().join("outside.jsonl");
+        std::fs::write(&outside, b"outside").unwrap();
+        let link = root.join("grpo-v1-old-owner-link.jsonl");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let report = cleanup_stale_grpo_snapshots_before(
+            &root,
+            &grpo_snapshot_process_identity().owner_token,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(1),
+            MAX_STALE_GRPO_SNAPSHOTS_SCANNED_PER_PASS,
+        )
+        .unwrap();
+        assert_eq!(report.removed, 0);
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(outside).unwrap(), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grpo_snapshot_root_rejects_symlink_without_changing_target_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.path().join(".training-inputs");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let error = prepare_grpo_snapshot_root(&link).unwrap_err();
+        assert!(error.contains("not a symlink"), "{error}");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grpo_snapshot_root_rejects_symlink_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".training-inputs");
+        std::fs::create_dir(&root).unwrap();
+        let outside = dir.path().join("outside-marker");
+        std::fs::write(&outside, GRPO_SNAPSHOT_ROOT_MARKER_CONTENT).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join(GRPO_SNAPSHOT_ROOT_MARKER)).unwrap();
+
+        let error = prepare_grpo_snapshot_root(&root).unwrap_err();
+        assert!(error.contains("not a regular file"), "{error}");
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            GRPO_SNAPSHOT_ROOT_MARKER_CONTENT
+        );
     }
 
     #[test]

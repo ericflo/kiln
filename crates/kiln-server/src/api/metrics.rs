@@ -9,6 +9,7 @@ use axum::{
 };
 
 use crate::batching_engine::BatchingEngineSnapshot;
+use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::metrics::SnapshotGauges;
 use crate::state::{AppState, ModelBackend};
 use kiln_train::TrainingState;
@@ -103,6 +104,9 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         state.prompt_token_cache.lock().unwrap().stats();
 
     let gauges = SnapshotGauges {
+        memory_governor: CachedMemoryGovernorObservation::capture_global_for(
+            state.vram_probe_selector,
+        ),
         backend_quarantined,
         external_yield_sync,
         scheduler_waiting,

@@ -277,6 +277,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#start-with-three-probes">Three probes</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#desktop-app-first-launch">Desktop first launch</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#wrong-binary-or-gpu-path">GPU path</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#memory-budget-or-sampler">Memory budget</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#model-weights-not-found">Model weights</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#health-not-green">Health</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#long-prefill-timeouts">Long-prefill timeouts</a>
@@ -374,9 +375,34 @@ curl -s http://localhost:8420/v1/chat/completions \
           </div>
           <div>
             <div class="label mb-2">Fix</div>
-            <p>Download the matching artifact from <a href="https://github.com/ericflo/kiln/releases">GitHub releases</a>. On Linux Vulkan hosts, use <code>KILN_VULKAN_DEVICE=0</code> or <code>GGML_VK_VISIBLE_DEVICES=0</code> to pin a device. On Linux with Docker, install NVIDIA Container Toolkit before using <code>--gpus all</code>.</p>
+            <p>Download the matching artifact from <a href="https://github.com/ericflo/kiln/releases">GitHub releases</a>. Linux Vulkan startup currently requires logical device <code>0</code> and exactly one matching physical DRM device; device-remapping variables such as <code>KILN_VULKAN_DEVICE</code> and <code>GGML_VK_VISIBLE_DEVICES</code> are rejected until backend and memory-probe selection share a PCI address or UUID. CUDA/ROCm container visibility variables are subject to the same interim guard, so use a bare-host GPU launch or CPU container until typed physical-device identity is available.</p>
           </div>
         </div>
+      </article>
+
+      <article class="card p-6">
+        <h2 id="memory-budget-or-sampler" class="text-xl font-semibold mb-4">Memory admission fails or Vulkan pauses under pressure</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>Startup refuses a KV allocation, memory headroom unexpectedly becomes zero, or a Vulkan process previously paused or destabilized the host while allocating its cache.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li>Inspect <code>/v1/config</code> at <code>vram.live</code>, including sample age, staleness, sampler health, and <code>raw_observations.host_backed</code>.</li>
+              <li>On Linux Vulkan, compare primary VRAM with the host-backed GTT tier. A 96 GiB firmware VRAM carveout does not mean Linux can safely allocate a 96 GiB host-resident KV cache.</li>
+              <li>Check host <code>MemAvailable</code> and every applicable cgroup <code>memory.max</code>/<code>memory.high</code> ancestor.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix</div>
+            <p>Reduce <code>memory.num_blocks</code> or <code>memory.inference_memory_fraction</code> in <code>kiln.toml</code>, reduce <code>prefix_cache.max_entries</code>, or disable the prefix cache. Free host memory or raise the deliberate cgroup limit. Do not bypass a missing, stale, or unhealthy sample: Kiln treats it as zero headroom so a zero-filled allocation cannot take down the process or host.</p>
+          </div>
+        </div>
+        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config | jq '.vram.live'
+curl -s http://localhost:8420/health | jq '.gpu_memory.live, .decode_runtime.memory_governor'
+curl -s http://localhost:8420/metrics | grep -E 'kiln_gpu_memory_(probe_failed|sample_|sampler_)|kiln_gpu_host_backed_memory_bytes'</code></pre>
       </article>
 
       <article class="card p-6">

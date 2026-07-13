@@ -142,9 +142,24 @@ model_id = "Qwen/Qwen3.5-4B"
                                       # `inference_memory_fraction` of free VRAM with
                                       # blocks; explicit values override this. Also
                                       # settable via KILN_MEMORY_NUM_BLOCKS env var.
-# gpu_memory_gb = 24.0               # Override detected VRAM (for testing)
+# gpu_memory_gb = 24.0               # Optional GiB capacity cap. It can reduce, but never
+                                      # expand, detected physical/safe unified capacity.
+                                      # KILN_MEMORY_GPU_MEMORY_GB is the canonical override.
 inference_memory_fraction = 0.7       # Fraction of VRAM for inference (rest for training)
-# training_memory_gb = 4.0           # Override auto-calculated training budget
+# training_memory_gb = 4.0           # Optional cap on the remaining training budget
+floor_gb = 1.0                        # Additional GiB of live free memory the process-wide governor
+                                      # withholds from allocation admission. It must be strictly
+                                      # smaller than effective accelerator capacity. This is
+                                      # separate from unified-memory OS headroom. Override via
+                                      # KILN_MEMORY_FLOOR_GB.
+probe_ms = 500                        # Minimum interval between cached OS/driver probes.
+                                      # Explicit post-allocation refreshes bypass the cache.
+                                      # Override via KILN_MEMORY_PROBE_MS.
+reclaim_mode = "off"                  # off | on-demand | automatic. On-demand permits
+                                      # explicit allocator reclaim; automatic also enables
+                                      # the pressure monitor when the serving profile permits
+                                      # allocator reclaim. Override via
+                                      # KILN_MEMORY_RECLAIM_MODE.
 # kv_cache_fp8 = true                # FP8 (E4M3) KV cache quantization — halves memory, ~2x longer context
                                       # Also settable via KILN_MEMORY_KV_CACHE_FP8=1 env var
 cuda_graphs = true                    # CUDA graph capture/replay policy. Non-CUDA backends
@@ -308,19 +323,19 @@ composed_cache_max_entries = 64       # Entry-count cap on the same composed-ada
 # -----------------------------------------------------------------------------
 # Unified-memory detection notes.
 # -----------------------------------------------------------------------------
-# Configure explicit capacity through `memory.gpu_memory_gb` and an explicit
+# Configure a downward-only capacity cap through `memory.gpu_memory_gb` and an explicit
 # training budget through `memory.training_memory_gb` above. Their canonical
 # startup overrides are `KILN_MEMORY_GPU_MEMORY_GB` and
 # `KILN_MEMORY_TRAINING_MEMORY_GB`; deprecated shorter aliases are documented
 # only in docs/CONFIGURATION.md.
 #
 # Unified-memory detection (Linux):
-#   On a Linux host with an integrated AMD/Intel GPU, the BIOS-configured VRAM
-#   carveout reported via /sys/class/drm/card*/device/mem_info_vram_total can far
-#   exceed physical RAM (the GTT heap pages against system memory). When kiln
-#   detects this — `mem_info_vram_total > MemTotal × 1.25`, OR a display
-#   controller + integrated AMD/Intel vendor + GTT ≥ 1 GB — it corrects the
-#   budget down to an automatically reserved fraction of physical memory so
-#   training sized against this number cannot exhaust system RAM. The "GPU memory budget" log
-#   line at startup includes a `vram_source = linux-drm-sysfs-unified` field so
-#   the corrected value is honest about its provenance.
+#   DRM VRAM/GTT counters can describe an address space much larger than the RAM
+#   that backs it. Kiln scopes the probe to the selected device, bounds capacity
+#   by host RAM and any finite cgroup v1/v2 limit, and reserves max(6 GiB, 25%)
+#   for the OS and CPU workloads. Live free capacity is also bounded by driver
+#   free memory, MemAvailable, and cgroup remaining memory. Missing host backing
+#   evidence fails closed. Apple Silicon applies the same reserve to physical
+#   unified memory. `gpu_memory_gb` is applied after detection and cannot raise
+#   any of these bounds. Runtime diagnostics preserve the unified topology and
+#   report when a requested cap was clamped.

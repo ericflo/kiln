@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::batching_engine::BatchingEngineSnapshot;
+use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::recent_requests::RequestThinkingBudget;
 
 const LATENCY_BUCKETS_SECONDS: [f64; 13] = [
@@ -1640,8 +1641,110 @@ impl Metrics {
         // 2=Tight, 3=Critical). Lets Prometheus/Grafana alert on memory pressure
         // and watch coexistence without shelling into nvtop.
         {
-            let g = kiln_memory::MemoryGovernor::global();
-            let s = g.snapshot();
+            let memory = gauges.memory_governor;
+            let s = memory.snapshot;
+            out.push_str(
+                "# HELP kiln_gpu_memory_probe_failed Whether the latest selected-device memory probe failed (1=yes).\n",
+            );
+            out.push_str("# TYPE kiln_gpu_memory_probe_failed gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_gpu_memory_probe_failed {}",
+                    u8::from(s.observations.probe_failed)
+                ),
+            );
+            let sample = memory.sample_status;
+            out.push_str(
+                "# HELP kiln_gpu_memory_sample_healthy Whether the cached memory sample is healthy for admission (1=yes).\n",
+            );
+            out.push_str("# TYPE kiln_gpu_memory_sample_healthy gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_gpu_memory_sample_healthy {}",
+                    u8::from(sample.healthy)
+                ),
+            );
+            out.push_str(
+                "# HELP kiln_gpu_memory_sample_stale Whether the cached memory sample exceeded its maximum age (1=yes).\n",
+            );
+            out.push_str("# TYPE kiln_gpu_memory_sample_stale gauge\n");
+            push_line(
+                &mut out,
+                &format!("kiln_gpu_memory_sample_stale {}", u8::from(sample.stale)),
+            );
+            out.push_str(
+                "# HELP kiln_gpu_memory_sample_age_seconds Age of the cached memory sample in seconds.\n",
+            );
+            out.push_str("# TYPE kiln_gpu_memory_sample_age_seconds gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_gpu_memory_sample_age_seconds {}",
+                    sample.age.as_secs_f64()
+                ),
+            );
+            out.push_str(
+                "# HELP kiln_gpu_memory_sample_max_age_seconds Maximum healthy cached memory sample age in seconds.\n",
+            );
+            out.push_str("# TYPE kiln_gpu_memory_sample_max_age_seconds gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_gpu_memory_sample_max_age_seconds {}",
+                    sample.max_age.as_secs_f64()
+                ),
+            );
+            out.push_str(
+                "# HELP kiln_gpu_memory_sampler_required Whether cached admission requires the background sampler (1=yes).\n",
+            );
+            out.push_str("# TYPE kiln_gpu_memory_sampler_required gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_gpu_memory_sampler_required {}",
+                    u8::from(sample.sampler_required)
+                ),
+            );
+            out.push_str(
+                "# HELP kiln_gpu_memory_sampler_running Whether the required background sampler is currently running (1=yes).\n",
+            );
+            out.push_str("# TYPE kiln_gpu_memory_sampler_running gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_gpu_memory_sampler_running {}",
+                    u8::from(sample.sampler_running)
+                ),
+            );
+            if let Some(tier) = s.observations.host_backed {
+                out.push_str(
+                    "# HELP kiln_gpu_host_backed_memory_bytes Safe host-backed accelerator memory by kind.\n",
+                );
+                out.push_str("# TYPE kiln_gpu_host_backed_memory_bytes gauge\n");
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_gpu_host_backed_memory_bytes{{kind=\"total\"}} {}",
+                        tier.total_bytes
+                    ),
+                );
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_gpu_host_backed_memory_bytes{{kind=\"used\"}} {}",
+                        tier.used_bytes
+                    ),
+                );
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_gpu_host_backed_memory_bytes{{kind=\"free\"}} {}",
+                        tier.free_bytes
+                    ),
+                );
+            }
             if s.total_bytes > 0 {
                 out.push_str(
                     "# HELP kiln_gpu_memory_bytes Live GPU memory by kind (all-process driver view).\n",
@@ -1663,21 +1766,21 @@ impl Metrics {
                     &mut out,
                     &format!(
                         "kiln_gpu_memory_bytes{{kind=\"available\"}} {}",
-                        g.available_bytes()
+                        memory.available_bytes
                     ),
                 );
                 push_line(
                     &mut out,
                     &format!(
                         "kiln_gpu_memory_bytes{{kind=\"soft_reserved\"}} {}",
-                        g.soft_reserved_bytes()
+                        memory.soft_reserved_bytes
                     ),
                 );
                 out.push_str(
                     "# HELP kiln_gpu_memory_pressure GPU memory pressure (0=Comfortable 1=Moderate 2=Tight 3=Critical).\n",
                 );
                 out.push_str("# TYPE kiln_gpu_memory_pressure gauge\n");
-                let level = match g.pressure() {
+                let level = match memory.pressure {
                     kiln_memory::MemoryPressure::Comfortable => 0,
                     kiln_memory::MemoryPressure::Moderate => 1,
                     kiln_memory::MemoryPressure::Tight => 2,
@@ -1686,7 +1789,7 @@ impl Metrics {
                 push_line(&mut out, &format!("kiln_gpu_memory_pressure {level}"));
             }
 
-            let reclaim = g.automatic_reclaim_stats();
+            let reclaim = memory.automatic_reclaim;
             out.push_str(
                 "# HELP kiln_memory_reclaim_attempts_total Automatic memory reclaim attempts by outcome.\n",
             );
@@ -1786,6 +1889,7 @@ impl Metrics {
 
 /// Dynamic gauge values snapshotted at render time.
 pub struct SnapshotGauges {
+    pub(crate) memory_governor: CachedMemoryGovernorObservation,
     pub backend_quarantined: bool,
     pub external_yield_sync: Vec<ExternalYieldSyncStats>,
     pub scheduler_waiting: usize,
@@ -1960,6 +2064,39 @@ fn prom_counter2(out: &mut String, name: &str, l1: &str, v1: &str, l2: &str, v2:
 mod tests {
     use super::*;
 
+    fn test_memory_governor_observation() -> CachedMemoryGovernorObservation {
+        CachedMemoryGovernorObservation {
+            snapshot: kiln_memory::MemorySnapshot {
+                total_bytes: 24_000_000_000,
+                used_bytes: 18_000_000_000,
+                free_bytes: 6_000_000_000,
+                source: kiln_memory::vram::VramSource::LinuxDrmSysfs,
+                unified: false,
+                observations: kiln_memory::MemorySnapshotObservations {
+                    host_backed: Some(kiln_memory::MemoryTierSnapshot {
+                        total_bytes: 8_000_000_000,
+                        used_bytes: 5_000_000_000,
+                        free_bytes: 3_000_000_000,
+                    }),
+                    ..kiln_memory::MemorySnapshotObservations::default()
+                },
+            },
+            available_bytes: 4_000_000_000,
+            soft_reserved_bytes: 2_000_000_000,
+            pressure: kiln_memory::MemoryPressure::Tight,
+            sample_status: kiln_memory::CachedSampleStatus {
+                age: std::time::Duration::from_millis(2_500),
+                max_age: std::time::Duration::from_secs(10),
+                stale: false,
+                sampler_required: true,
+                sampler_running: true,
+                healthy: true,
+            },
+            automatic_monitor_enabled: false,
+            automatic_reclaim: kiln_memory::AutomaticReclaimStats::default(),
+        }
+    }
+
     fn test_thinking_budget(
         configured: bool,
         tokens_source: &str,
@@ -2023,6 +2160,7 @@ mod tests {
         m.observe_thinking_budget(&inert, "stop");
 
         let gauges = SnapshotGauges {
+            memory_governor: test_memory_governor_observation(),
             backend_quarantined: true,
             external_yield_sync: vec![ExternalYieldSyncStats {
                 boundary: "batched decode step".to_string(),
@@ -2150,6 +2288,18 @@ mod tests {
         assert!(output.contains("kiln_vram_model_estimated_bytes 8000000000"));
         assert!(output.contains("kiln_vram_post_load_used_bytes 9000000000"));
         assert!(output.contains("kiln_vram_prefill_peak_used_bytes 19000000000"));
+        assert!(output.contains("kiln_gpu_memory_bytes{kind=\"total\"} 24000000000"));
+        assert!(output.contains("kiln_gpu_memory_bytes{kind=\"available\"} 4000000000"));
+        assert!(output.contains("kiln_gpu_memory_bytes{kind=\"soft_reserved\"} 2000000000"));
+        assert!(output.contains("kiln_gpu_memory_pressure 2"));
+        assert!(output.contains("kiln_gpu_memory_probe_failed 0"));
+        assert!(output.contains("kiln_gpu_memory_sample_healthy 1"));
+        assert!(output.contains("kiln_gpu_memory_sample_stale 0"));
+        assert!(output.contains("kiln_gpu_memory_sample_age_seconds 2.5"));
+        assert!(output.contains("kiln_gpu_memory_sample_max_age_seconds 10"));
+        assert!(output.contains("kiln_gpu_memory_sampler_required 1"));
+        assert!(output.contains("kiln_gpu_memory_sampler_running 1"));
+        assert!(output.contains("kiln_gpu_host_backed_memory_bytes{kind=\"free\"} 3000000000"));
         assert!(output.contains("kiln_memory_reclaim_attempts_total{outcome=\"reclaimed\"} 0"));
         assert!(output.contains("kiln_memory_reclaim_attempts_total{outcome=\"zero_yield\"} 0"));
         assert!(output.contains("kiln_memory_reclaim_suppressed_total 0"));
@@ -2333,6 +2483,7 @@ mod tests {
     fn test_base_adapter_rendering() {
         let m = Metrics::new();
         let gauges = SnapshotGauges {
+            memory_governor: CachedMemoryGovernorObservation::default(),
             backend_quarantined: false,
             external_yield_sync: Vec::new(),
             scheduler_waiting: 0,

@@ -288,72 +288,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_GRAD_CHECKPOINT_SEGMENTS",
-      "argument_kind": "literal",
-      "count": 7,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-memory/src/vram.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_NO_GRAD_CHECKPOINT",
-      "argument_kind": "literal",
-      "count": 7,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-memory/src/vram.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_TRAINING_MEMORY_RESERVE_GB",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-memory/src/vram.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_GRAD_CHECKPOINT_SEGMENTS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-memory/src/vram.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_NO_GRAD_CHECKPOINT",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-memory/src/vram.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_TRAINING_MEMORY_RESERVE_GB",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-memory/src/vram.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
       "argument": "KILN_C1_ATTR_PATH",
       "argument_kind": "literal",
       "count": 2,
@@ -2697,33 +2631,11 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_TRAINING_MEMORY_RESERVE_GB",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/training_preflight.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
       "argument": "KILN_VK_FLCE_CHUNK_LEN",
       "argument_kind": "literal",
       "count": 1,
       "language": "rust",
       "operation": "remove",
-      "path": "crates/kiln-server/src/training_preflight.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_TRAINING_MEMORY_RESERVE_GB",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
       "path": "crates/kiln-server/src/training_preflight.rs",
       "phase": "runtime",
       "surface": "source"
@@ -2769,28 +2681,6 @@
       "language": "rust",
       "operation": "set",
       "path": "crates/kiln-server/tests/agent_traces_bridge.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "name",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/tests/real_model_integration.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "name",
-      "argument_kind": "expression",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/tests/real_model_integration.rs",
       "phase": "runtime",
       "surface": "integration-test"
     },
@@ -3148,53 +3038,9 @@
     },
     {
       "api": "remove_var",
-      "argument": "self . 0",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
       "argument": "KILN_EXACT_GDN_BACKWARD_TILE_TOKENS",
       "argument_kind": "literal",
       "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_GPU_MEMORY_GB",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_GRAD_CHECKPOINT_SEGMENTS",
-      "argument_kind": "literal",
-      "count": 4,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_NO_GRAD_CHECKPOINT",
-      "argument_kind": "literal",
-      "count": 4,
       "language": "rust",
       "operation": "remove",
       "path": "crates/kiln-train/src/trainer.rs",
@@ -3217,28 +3063,6 @@
       "argument": "KILN_EXACT_GDN_BACKWARD_TILE_TOKENS",
       "argument_kind": "literal",
       "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_GPU_MEMORY_GB",
-      "argument_kind": "literal",
-      "count": 5,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_GRAD_CHECKPOINT_SEGMENTS",
-      "argument_kind": "literal",
-      "count": 1,
       "language": "rust",
       "operation": "set",
       "path": "crates/kiln-train/src/trainer.rs",
@@ -3283,17 +3107,6 @@
       "argument": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK",
       "argument_kind": "literal",
       "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_TRAIN_RESIDENT",
-      "argument_kind": "literal",
-      "count": 2,
       "language": "rust",
       "operation": "set",
       "path": "crates/kiln-train/src/trainer.rs",
@@ -4370,86 +4183,9 @@
       "surface": "build-script"
     },
     {
-      "api": "var",
-      "argument": "KILN_MEMORY_FLOOR_GB",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-memory/src/governor.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_MEMORY_PROBE_MS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-memory/src/governor.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var_os",
-      "argument": "MEMORY_RECLAIM_MODE_ENV",
+      "argument": "name",
       "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-memory/src/governor.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_GPU_MEMORY_GB",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-memory/src/vram.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_GRAD_CHECKPOINT_SEGMENTS",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-memory/src/vram.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_NO_GRAD_CHECKPOINT",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-memory/src/vram.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_NUM_BLOCKS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-memory/src/vram.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_TRAINING_MEMORY_RESERVE_GB",
-      "argument_kind": "literal",
       "count": 1,
       "language": "rust",
       "operation": "read",
@@ -8276,28 +8012,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_GRAD_CHECKPOINT_SEGMENTS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_NUM_BLOCKS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "DEBUG_ENDPOINT_ENV",
       "argument_kind": "expression",
       "count": 1,
@@ -8330,17 +8044,6 @@
       "surface": "source"
     },
     {
-      "api": "var_os",
-      "argument": "kiln_memory :: MEMORY_RECLAIM_MODE_ENV",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/health.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "KILN_ADAPTER_LIBRARY_URL",
       "argument_kind": "literal",
@@ -8370,28 +8073,6 @@
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-server/src/api/terminal.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_GRAD_CHECKPOINT_SEGMENTS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/training.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_NO_GRAD_CHECKPOINT",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/training.rs",
       "phase": "runtime",
       "surface": "source"
     },
@@ -8925,17 +8606,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_TRAINING_MEMORY_RESERVE_GB",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/training_preflight.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_VK_FLCE_CHUNK_LEN",
       "argument_kind": "literal",
       "count": 1,
@@ -8950,17 +8620,6 @@
       "argument": "KILN_QUALIFICATION",
       "argument_kind": "literal",
       "count": 9,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/tests/real_model_integration.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "var_os",
-      "argument": "name",
-      "argument_kind": "expression",
-      "count": 1,
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-server/tests/real_model_integration.rs",
@@ -9717,28 +9376,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_GRAD_CHECKPOINT_SEGMENTS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_NO_GRAD_CHECKPOINT",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_OPD_SAMPLER_SEGMENTS",
       "argument_kind": "literal",
       "count": 1,
@@ -10069,39 +9706,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_GPU_MEMORY_GB",
-      "argument_kind": "literal",
-      "count": 3,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_GRAD_CHECKPOINT_SEGMENTS",
-      "argument_kind": "literal",
-      "count": 6,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_NO_GRAD_CHECKPOINT",
-      "argument_kind": "literal",
-      "count": 6,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_QUALIFICATION",
       "argument_kind": "literal",
       "count": 5,
@@ -10160,17 +9764,6 @@
       "argument": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK",
       "argument_kind": "literal",
       "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_TRAIN_RESIDENT",
-      "argument_kind": "literal",
-      "count": 3,
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-train/src/trainer.rs",
@@ -11159,9 +10752,9 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 670,
-    "process_mutation_entries": 316,
-    "read_call_sites": 1027,
-    "read_entries": 697
+    "process_mutation_call_sites": 628,
+    "process_mutation_entries": 299,
+    "read_call_sites": 991,
+    "read_entries": 677
   }
 }

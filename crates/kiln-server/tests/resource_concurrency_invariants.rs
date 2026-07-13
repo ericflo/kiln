@@ -186,10 +186,10 @@ fn grpo_uses_settled_group_boundaries_instead_of_a_job_long_gpu_writer() {
 
     let run_grpo = source_between(&queue, "fn run_grpo(", "fn registered_teacher_descriptor(");
     for required in [
-        "return kiln_train::cuda_train::cuda_native_grpo_train_jsonl_to_with_checkpoint_root(",
-        "return trainer::grpo_train_jsonl_to_with_checkpoint_root(",
-        "return kiln_train::cuda_train::cuda_native_grpo_train_to_with_checkpoint_root(",
-        "\n    trainer::grpo_train_to_with_checkpoint_root(",
+        "return kiln_train::cuda_train::cuda_native_grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(",
+        "return trainer::grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(",
+        "return kiln_train::cuda_train::cuda_native_grpo_train_to_with_checkpoint_root_and_runtime(",
+        "\n    trainer::grpo_train_to_with_checkpoint_root_and_runtime(",
     ] {
         assert!(
             run_grpo.contains(required),
@@ -328,7 +328,7 @@ fn opd_routes_use_settled_phases_and_durable_exact_checkpoints() {
     ];
     for (route, source) in routes {
         assert!(
-            source.contains("opd_train_to_with_checkpoint_root("),
+            source.contains("opd_train_to_with_checkpoint_root_and_runtime("),
             "{route} must use the exact OPD checkpoint entry point"
         );
         assert!(
@@ -792,6 +792,184 @@ fn control_plane_uses_published_batching_snapshot_without_actor_await() {
             "batching snapshot cache must preserve the control/barrier contract: {required}"
         );
     }
+}
+
+#[test]
+fn memory_control_plane_uses_one_published_observation_without_probing() {
+    for path in [
+        "crates/kiln-server/src/api/health.rs",
+        "crates/kiln-server/src/api/metrics.rs",
+        "crates/kiln-server/src/api/config.rs",
+    ] {
+        let source = read(path);
+        assert!(
+            source.contains("CachedMemoryGovernorObservation::capture_global_for"),
+            "{path}: request handlers must capture one published governor observation"
+        );
+        for forbidden in [
+            "current_memory_snapshot_for(",
+            ".available_bytes()",
+            ".pressure()",
+            "let g = kiln_memory::MemoryGovernor::global();",
+            "MemoryGovernor::global()",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{path}: request-path memory observability must not call {forbidden}"
+            );
+        }
+    }
+
+    let metrics = read("crates/kiln-server/src/metrics.rs");
+    assert!(
+        !metrics.contains("MemoryGovernor::global()"),
+        "Prometheus rendering must only format the handler-captured observation"
+    );
+
+    let observation = read("crates/kiln-server/src/memory_observability.rs");
+    let cached_lookup = observation
+        .find("MemoryGovernor::try_global_cached_observation()")
+        .expect("global observations must start with one coherent non-initializing lookup");
+    let initialized_accessor = observation
+        .find("let governor = MemoryGovernor::global();")
+        .expect("initialized observations need the governor's pure policy derivations");
+    assert!(
+        cached_lookup < initialized_accessor,
+        "the request path must prove the global is initialized before accessing it"
+    );
+    assert!(
+        observation.contains("global_configuration().selector != selector"),
+        "published memory observations must belong to the AppState accelerator"
+    );
+    assert!(
+        observation.contains("available_bytes: observation.available_bytes")
+            && observation.contains("soft_reserved_bytes: observation.soft_reserved_bytes")
+            && observation.contains("pressure: observation.pressure"),
+        "control-plane memory fields must come from one governor-owned reservation generation"
+    );
+
+    let training = read("crates/kiln-server/src/api/training.rs");
+    let training_preflight = source_between(
+        &training,
+        "fn enforce_training_preflight(",
+        "fn validate_grpo_submission_source(",
+    );
+    assert!(
+        training_preflight.contains("let live_observation = governor.cached_observation();")
+            && training_preflight.contains("live_observation.available_bytes")
+            && training_preflight.contains("live_observation.soft_reserved_bytes")
+            && training_preflight.contains("!live_observation.sample_status.healthy"),
+        "training admission must derive live capacity and reservations from one governor observation"
+    );
+    assert!(
+        !training_preflight.contains("governor.available_bytes_for_snapshot(")
+            && !training_preflight.contains("governor.soft_reserved_bytes()"),
+        "training admission must not split its reservation-sensitive governor reads"
+    );
+
+    for gauge in [
+        "kiln_gpu_memory_sample_healthy",
+        "kiln_gpu_memory_sample_stale",
+        "kiln_gpu_memory_sample_age_seconds",
+        "kiln_gpu_memory_sample_max_age_seconds",
+        "kiln_gpu_memory_sampler_required",
+        "kiln_gpu_memory_sampler_running",
+    ] {
+        assert!(
+            metrics.contains(gauge),
+            "Prometheus rendering must expose cached-sample health gauge {gauge}"
+        );
+    }
+
+    let completions = read("crates/kiln-server/src/api/completions.rs");
+    assert!(
+        completions.contains("CachedMemoryGovernorObservation::capture_global_for(selector)"),
+        "post-prefill accounting must use the sampler-published selected-device observation"
+    );
+    for forbidden in [
+        "detect_used_vram_bytes(",
+        "detect_used_vram_bytes_for(",
+        "current_memory_snapshot(",
+        "current_memory_snapshot_for(",
+        "detect_vram(",
+        "detect_vram_for(",
+    ] {
+        assert!(
+            !completions.contains(forbidden),
+            "inference request paths must not perform synchronous memory probe I/O via {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn kv_autoscaler_claims_replacement_memory_before_every_physical_resize() {
+    let autoscaler = read("crates/kiln-server/src/kv_autoscaler.rs");
+    assert!(
+        autoscaler.contains("governor.try_reserve_cached(initial_plan.replacement_bytes)")
+            && autoscaler.contains("governor.try_reserve_cached(plan.replacement_bytes)"),
+        "initial and replanned KV replacement pools must use checked atomic reservations"
+    );
+    assert!(
+        autoscaler.contains("plan_and_reserve_resize_with_replan")
+            && autoscaler.contains("KvResizeReservationFailure::Contended")
+            && autoscaler.contains("retry_after_ms"),
+        "a lost KV staging reservation must deterministically replan once, then back off"
+    );
+    assert!(
+        !autoscaler.contains("gov.reserve(plan.replacement_bytes)"),
+        "KV physical resize must never proceed under an unchecked reservation"
+    );
+}
+
+#[test]
+fn explicit_inference_runtime_cannot_auto_promote_cpu_to_vulkan() {
+    let generate = read("crates/kiln-model/src/generate.rs");
+    let constructor = source_between(
+        &generate,
+        "pub fn new_with_initialized_runtime(",
+        "pub const fn inference_memory_runtime(",
+    );
+    assert!(
+        constructor.contains("backend::for_explicit_device_kt(memory_runtime.device())"),
+        "the initialized runtime must select its backend from the explicit device binding"
+    );
+    assert!(
+        !constructor.contains("new_with_runtime_options("),
+        "the explicit constructor must not re-enter CPU-as-Vulkan compatibility autodetection"
+    );
+
+    let backend = read("crates/kiln-model/src/backend/mod.rs");
+    let selector = source_between(
+        &backend,
+        "pub fn for_explicit_device_kt(",
+        "pub fn training_precision_policy_for_device_kt(",
+    );
+    assert!(
+        selector.contains("kiln_tensor::Device::Cpu => Ok(Arc::new(cpu::CpuBackend::new(device)))")
+    );
+}
+
+#[test]
+fn hybrid_vulkan_native_training_fails_before_dataset_admission() {
+    let training_api = read("crates/kiln-server/src/api/training.rs");
+    let admission = source_between(
+        &training_api,
+        "fn ensure_training_backend_admission(",
+        "const MAX_MATERIALIZED_OPD_DATASET_BYTES",
+    );
+    assert!(admission.contains("training_runtime"));
+    assert!(admission.contains("resolve_device_for_weights(weight_device)"));
+    assert!(admission.contains("ApiError::training_backend_unsupported"));
+
+    let training_runtime = read("crates/kiln-train/src/lib.rs");
+    assert!(
+        training_runtime
+            .contains("native Vulkan training is unavailable for CPU-host serving weights")
+    );
+    assert!(
+        !training_runtime.contains("KILN_TRAIN_RESIDENT"),
+        "known-incomplete Vulkan residency must not have an environment bypass"
+    );
 }
 
 #[test]

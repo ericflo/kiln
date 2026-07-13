@@ -71,6 +71,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+libc = "0.2"
 uuid = { workspace = true }
 chrono = { workspace = true }
 indicatif = "0.18"

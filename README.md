@@ -336,7 +336,7 @@ Start the source-built server (using the weights downloaded above):
 KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
 ```
 
-Vulkan builds auto-select a Vulkan physical device at startup. Use `KILN_VULKAN_DEVICE=0` to pin a zero-based Vulkan device index, or `GGML_VK_VISIBLE_DEVICES=0,1` to reuse llama.cpp-style visibility; invalid values are ignored with a warning and Kiln falls back to automatic selection or CPU if no Vulkan device is usable. ROCm builds use the HIP backend compiled into the binary; set `KILN_ROCM_ARCHS` at build time to control emitted gfx targets.
+Vulkan builds auto-select a Vulkan physical device at startup. Until backend selection and memory probes share a PCI-address or UUID identity, startup is deliberately restricted to logical device `0` with exactly one matching physical DRM device; `KILN_VULKAN_DEVICE` and `GGML_VK_VISIBLE_DEVICES` are rejected because they make ordinal-to-probe identity ambiguous. ROCm builds use the HIP backend compiled into the binary; set `KILN_ROCM_ARCHS` at build time to control emitted gfx targets.
 
 ```
   ┌─────────────────────────────────────┐

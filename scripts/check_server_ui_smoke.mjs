@@ -17,6 +17,7 @@ const uiDemoJsPath = resolve(uiDir, 'demo.js');
 const uiAppJsPath = resolve(uiDir, 'app.js');
 const thinkingBudgetContractPath = resolve(repoRoot, 'contracts/thinking-budget-v1.conformance.json');
 const thinkingBudgetContract = JSON.parse(await readFile(thinkingBudgetContractPath, 'utf8'));
+const GIB = 1024 ** 3;
 const uiVendorDir = resolve(uiDir, 'vendor');
 const uiVendorFiles = {
   'xterm.js': 'application/javascript',
@@ -85,6 +86,45 @@ function checkThinkingBudgetParserContract(source) {
     if (actual !== expected) {
       fail(`Server time parser returned ${String(actual)} for ${JSON.stringify(raw)}; expected ${String(expected)}`);
     }
+  }
+}
+
+function checkRuntimeConfigSchemaContract(source) {
+  const rendererStart = source.indexOf('function renderRuntimeConfigBody(cfg)');
+  const rendererEnd = source.indexOf('async function loadRuntimeConfig(', rendererStart);
+  if (rendererStart < 0 || rendererEnd < 0) fail('Server runtime-config renderer is missing');
+  const renderer = source.slice(rendererStart, rendererEnd);
+
+  for (const field of [
+    'physical_capacity_gib',
+    'configured_capacity_gib',
+    'effective_capacity_gib',
+    'usable_after_governor_floor_gib',
+    'capacity_limit_gib',
+    'floor_gib',
+    'probe_ms',
+    'reclaim_mode_requested',
+    'reclaim_mode_effective',
+    'reclaim_disabled_by_serving_profile',
+    'runtime_device',
+    'model_weight_device',
+    'native_training_supported',
+    'native_training_unavailable_reason',
+    'checkpoint_policy',
+    'training_budget_bytes',
+    'training_budget_gib',
+  ]) {
+    if (!renderer.includes(field)) fail(`Runtime-config renderer does not consume ${field}`);
+  }
+  for (const stale of [
+    'detected_gb',
+    'total_vram_gb',
+    'training_budget_gb',
+    'KILN_GPU_MEMORY_GB',
+    'KILN_NUM_BLOCKS',
+    'KILN_GRAD_CHECKPOINT_SEGMENTS',
+  ]) {
+    if (renderer.includes(stale)) fail(`Runtime-config renderer still depends on stale contract wording ${stale}`);
   }
 }
 
@@ -899,14 +939,82 @@ async function startServer({
     // expander share this immutable snapshot instead of polling it.
     if (url.pathname === '/v1/config') {
       json(res, {
-        vram: { detected_gb: 25.8, source: 'nvidia-smi' },
+        vram: {
+          probe_selector: 'linux-drm:amd:0',
+          unified: true,
+          physical_capacity_bytes: 25.75 * GIB,
+          physical_capacity_gib: 25.75,
+          physical_capacity_source: 'linux-drm-sysfs-unified',
+          configured_capacity_bytes: 24 * GIB,
+          configured_capacity_gib: 24.0,
+          effective_capacity_bytes: 24 * GIB,
+          effective_capacity_gib: 24.0,
+          effective_capacity_source: 'memory.gpu_memory_gb',
+          configured_capacity_clamped: false,
+          live: {
+            total_bytes: 25.75 * GIB,
+            total_gib: 25.75,
+            used_bytes: 9.5 * GIB,
+            used_gib: 9.5,
+            available_bytes: 16.25 * GIB,
+            available_gib: 16.25,
+            effective_capacity_available_bytes: 14.5 * GIB,
+            effective_capacity_available_gib: 14.5,
+            usable_after_governor_floor_bytes: 12.5 * GIB,
+            usable_after_governor_floor_gib: 12.5,
+            soft_reserved_bytes: 0,
+            soft_reserved_gib: 0,
+            pressure: 'Moderate',
+            source: 'linux-drm-sysfs-unified',
+            raw_observations: {
+              probe_failed: false,
+              driver_total_bytes: 64 * GIB,
+              driver_used_bytes: 9.5 * GIB,
+              driver_free_bytes: 54.5 * GIB,
+              driver_vram_total_bytes: 16 * GIB,
+              driver_vram_used_bytes: 4.5 * GIB,
+              driver_gtt_total_bytes: 48 * GIB,
+              driver_gtt_used_bytes: 5 * GIB,
+              host_total_bytes: 32 * GIB,
+              host_available_bytes: 18.25 * GIB,
+              cgroup_limit_bytes: 28 * GIB,
+              cgroup_current_bytes: 7.75 * GIB,
+              cgroup_remaining_bytes: 20.25 * GIB,
+              unified_reserve_bytes: 6.25 * GIB,
+            },
+          },
+          governor: {
+            floor_bytes: 2 * GIB,
+            floor_gib: 2.0,
+            capacity_limit_bytes: 24 * GIB,
+            capacity_limit_gib: 24.0,
+            probe_ms: 750,
+            reclaim_mode_requested: 'automatic',
+            reclaim_mode_effective: 'off',
+            reclaim_mode_source: 'config_file',
+            reclaim_disabled_by_serving_profile: true,
+          },
+        },
         kv_cache: { num_blocks: 1024, num_blocks_source: 'auto', fp8_enabled: true },
-        training: { checkpoint_segments: 4, checkpoint_segments_source: 'auto', checkpointing_enabled: true },
+        training: {
+          runtime_device: 'vulkan:0',
+          model_weight_device: 'cpu',
+          native_training_supported: false,
+          native_training_unavailable_reason: 'native Vulkan training is unavailable for CPU-host serving weights',
+          checkpoint_policy: { mode: 'explicit_segments', segments: 4 },
+          checkpoint_segments: 4,
+          checkpoint_segments_source: 'configured',
+          checkpointing_enabled: true,
+        },
         memory_budget: {
-          total_vram_gb: 25.8,
-          model_gb: 8.2,
-          kv_cache_gb: 2.1,
-          training_budget_gb: 4.0,
+          total_vram_bytes: 24 * GIB,
+          total_vram_gib: 24.0,
+          model_bytes: 8.25 * GIB,
+          model_gib: 8.25,
+          kv_cache_bytes: 2.125 * GIB,
+          kv_cache_gib: 2.125,
+          training_budget_bytes: 4 * GIB,
+          training_budget_gib: 4.0,
           inference_memory_fraction: 0.55,
         },
         generation: {
@@ -2375,7 +2483,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
         // The expander's Retry refetches /v1/config (no poll loop covers it).
         await page.click('#runtime-config [data-rc-refresh]')
           .catch(() => fail('Could not click the runtime config Retry button after the APIs healed'));
-        await waitForPanelText(page, '#runtime-config-body', /nvidia-smi/, 'Runtime config did not recover after Retry');
+        await waitForPanelText(page, '#runtime-config-body', /linux-drm-sysfs-unified/, 'Runtime config did not recover after Retry');
         await recoverPanel('#decode-perf-panel', /No streaming completions/i, 'Decode panel did not recover after the APIs healed');
         await recoverPanel('#recent-requests-panel', /No recent requests yet\./, 'Recent requests did not recover after the APIs healed');
         await goToPrimaryTab(page, 'training');
@@ -3080,13 +3188,23 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 
     // ---- Hidden diagnostics: the runtime-config expander on the Server
     // status card fetches GET /v1/config on first open and renders the real
-    // ConfigResponse fields (VRAM detection, KV cache geometry, budgets).
+    // ConfigResponse fields (capacity resolution, live memory, governor,
+    // checkpoint policy, KV cache geometry, and exact budget partitions).
     await clickAndWait(page, '#runtime-config > summary', 'Could not open the runtime config expander');
-    await waitForPanelText(page, '#runtime-config-body', /nvidia-smi/, 'Runtime config should render the VRAM detection source');
-    await waitForPanelText(page, '#runtime-config-body', /25\.8 GB/, 'Runtime config should render detected VRAM');
+    await waitForPanelText(page, '#runtime-config-body', /linux-drm-sysfs-unified/, 'Runtime config should render the device-scoped memory source');
+    await waitForPanelText(page, '#runtime-config-body', /Physical[\s\S]*25\.75 GiB/, 'Runtime config should render physical capacity');
+    await waitForPanelText(page, '#runtime-config-body', /Effective cap[\s\S]*24\.00 GiB/, 'Runtime config should render the effective capacity cap');
+    await waitForPanelText(page, '#runtime-config-body', /Usable[\s\S]*12\.50 GiB/, 'Runtime config should render live usable memory after the governor floor');
+    await waitForPanelText(page, '#runtime-config-body', /Probe cadence[\s\S]*750 ms/, 'Runtime config should render the governor probe cadence');
+    await waitForPanelText(page, '#runtime-config-body', /Reclaim[\s\S]*off[\s\S]*requested automatic/, 'Runtime config should distinguish effective reclaim from a profile-constrained request');
     await waitForPanelText(page, '#runtime-config-body', /1,024/, 'Runtime config should render the KV cache block count');
     await waitForPanelText(page, '#runtime-config-body', /FP8 cache/, 'Runtime config should render the fp8 cache mode');
-    await waitForPanelText(page, '#runtime-config-body', /Training reserve/, 'Runtime config should render the memory budget rows');
+    await waitForPanelText(page, '#runtime-config-body', /Runtime device[\s\S]*vulkan:0/, 'Runtime config should render the native-training runtime device');
+    await waitForPanelText(page, '#runtime-config-body', /Weight device[\s\S]*cpu/, 'Runtime config should render the frozen model-weight device');
+    await waitForPanelText(page, '#runtime-config-body', /Native training[\s\S]*unavailable/, 'Runtime config should render fail-closed native-training support');
+    await waitForPanelText(page, '#runtime-config-body', /Checkpoint policy[\s\S]*explicit segments/, 'Runtime config should render the typed checkpoint policy');
+    await waitForPanelText(page, '#runtime-config-body', /Training budget/, 'Runtime config should render the memory budget rows');
+    await waitForPanelText(page, '#runtime-config-body', /8,858,370,048 B/, 'Runtime config should render exact partition bytes alongside GiB');
     await clickAndWait(page, '#runtime-config [data-rc-raw]', 'Could not toggle the runtime config raw JSON');
     const configRawShown = await page.$eval(
       '#runtime-config [data-rc-raw-pre]',
@@ -3109,7 +3227,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       model: document.getElementById('header-model')?.textContent || '',
       uptime: document.getElementById('header-uptime')?.textContent || '',
       configOpen: document.getElementById('runtime-config')?.open === true,
-      configIntact: /nvidia-smi/.test(document.getElementById('runtime-config-body')?.textContent || ''),
+      configIntact: /linux-drm-sysfs-unified/.test(document.getElementById('runtime-config-body')?.textContent || ''),
       serverStatusBusy: document.getElementById('server-status')?.getAttribute('aria-busy'),
       busyFlips: window.__serverStatusBusyFlips || null,
     }));
@@ -4209,7 +4327,9 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
   }
 }
 
-checkThinkingBudgetParserContract(await readFile(uiAppJsPath, 'utf8'));
+const uiAppSource = await readFile(uiAppJsPath, 'utf8');
+checkThinkingBudgetParserContract(uiAppSource);
+checkRuntimeConfigSchemaContract(uiAppSource);
 
 const emptyAdapterScenario = await startServer({ availableAdapters: [] });
 try {

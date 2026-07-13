@@ -396,7 +396,8 @@ fn tiny_real_state_with_timeout(config: ModelConfig, request_timeout: Duration) 
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         Some(base_teacher_identity),
-    );
+    )
+    .expect("tiny real state should configure its memory runtime");
     // Production configuration is second-granularity. Integration tests use a
     // shorter duration so lifecycle regressions fail quickly and locally.
     state.request_timeout = request_timeout;
@@ -678,6 +679,8 @@ fn enqueue_empty_sft_job(state: &AppState, job_id: &str) {
         job_id: job_id.to_string(),
         reserved_bytes: 0,
         teacher_bindings: Vec::new(),
+        prepared_data: Default::default(),
+        prepared_data_permit: Default::default(),
         job: QueuedJob::Sft(SftRequest {
             examples: Vec::new(),
             dataset_path: None,
@@ -834,7 +837,8 @@ async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         None,
-    );
+    )
+    .expect("real test state should configure its memory runtime");
     enable_experimental_serving(&mut state);
     let state_for_assert = state.clone();
     let app = api::router(state);
@@ -926,38 +930,6 @@ async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {
 
 #[cfg(any(feature = "rocm", feature = "vulkan"))]
 static PUBLIC_TRAINING_QUALIFICATION_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(feature = "vulkan")]
-struct PublicTrainingEnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
-
-#[cfg(feature = "vulkan")]
-impl PublicTrainingEnvRestore {
-    fn set(pairs: &[(&'static str, &'static str)]) -> Self {
-        let prior = pairs
-            .iter()
-            .map(|(name, value)| {
-                let prior = std::env::var_os(name);
-                // These tests run behind one process-local lock and restore
-                // every value before releasing it.
-                unsafe { std::env::set_var(name, value) };
-                (*name, prior)
-            })
-            .collect();
-        Self(prior)
-    }
-}
-
-#[cfg(feature = "vulkan")]
-impl Drop for PublicTrainingEnvRestore {
-    fn drop(&mut self) {
-        for (name, value) in self.0.drain(..).rev() {
-            match value {
-                Some(value) => unsafe { std::env::set_var(name, value) },
-                None => unsafe { std::env::remove_var(name) },
-            }
-        }
-    }
-}
 
 #[cfg(any(feature = "rocm", feature = "vulkan"))]
 fn public_training_tokenizer() -> KilnTokenizer {
@@ -1099,7 +1071,8 @@ fn public_training_state(
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         Some(base_teacher_identity),
-    );
+    )
+    .expect("real test state should configure its memory runtime");
     enable_experimental_serving(&mut state);
     Ok(state)
 }
@@ -2029,7 +2002,6 @@ async fn public_sft_repeatability_and_exact_resume_route_vulkan() -> anyhow::Res
         "Vulkan qualification requested but no Vulkan device is available"
     );
     let _lock = PUBLIC_TRAINING_QUALIFICATION_ENV.lock().unwrap();
-    let _env = PublicTrainingEnvRestore::set(&[("KILN_TRAIN_RESIDENT", "1")]);
     qualify_public_sft_route(Device::Vulkan(0), "vulkan").await
 }
 
@@ -2060,7 +2032,6 @@ async fn public_grpo_exact_resume_routes_vulkan() -> anyhow::Result<()> {
         "Vulkan qualification requested but no Vulkan device is available"
     );
     let _lock = PUBLIC_TRAINING_QUALIFICATION_ENV.lock().unwrap();
-    let _env = PublicTrainingEnvRestore::set(&[("KILN_TRAIN_RESIDENT", "1")]);
     qualify_public_grpo_routes(Device::Vulkan(0), "vulkan").await
 }
 
@@ -2091,7 +2062,6 @@ async fn public_opd_exact_resume_route_vulkan() -> anyhow::Result<()> {
         "Vulkan qualification requested but no Vulkan device is available"
     );
     let _lock = PUBLIC_TRAINING_QUALIFICATION_ENV.lock().unwrap();
-    let _env = PublicTrainingEnvRestore::set(&[("KILN_TRAIN_RESIDENT", "1")]);
     qualify_public_opd_route(Device::Vulkan(0), "vulkan").await
 }
 
@@ -2118,7 +2088,8 @@ async fn test_real_model_chat_completion() {
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         None,
-    );
+    )
+    .expect("real test state should configure its memory runtime");
 
     let app = api::router(state);
 
@@ -2195,7 +2166,8 @@ async fn test_real_model_chat_completion_emits_exact_rollout_provenance() {
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         Some(base_identity),
-    );
+    )
+    .expect("real test state should configure its memory runtime");
     let state_for_assert = state.clone();
     let app = api::router(state);
     let request_body = json!({
@@ -2388,7 +2360,8 @@ async fn test_real_model_rollout_provenance_includes_terminal_eos_once() {
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         Some(base_identity),
-    );
+    )
+    .expect("real test state should configure its memory runtime");
     let app = api::router(state);
     let body = json!({
         "messages": [{"role": "user", "content": "t1"}],
@@ -2886,7 +2859,8 @@ async fn test_real_model_prompt_logprobs_match_full_forward_reference() {
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         Some(base_teacher_identity),
-    );
+    )
+    .expect("real test state should configure its memory runtime");
     let backend_health = match state.backend.as_ref() {
         ModelBackend::Real { backend_health, .. } => backend_health.clone(),
         ModelBackend::Mock { .. } => unreachable!("test constructed a real backend"),
@@ -3048,7 +3022,8 @@ async fn test_real_model_streaming_chat_completion() {
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         None,
-    );
+    )
+    .expect("real test state should configure its memory runtime");
 
     let app = api::router(state);
 
@@ -3170,7 +3145,8 @@ async fn test_request_timeout_configurable() {
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         None,
-    );
+    )
+    .expect("real test state should configure its memory runtime");
 
     assert_eq!(state.request_timeout.as_secs(), 42);
 }
@@ -3199,7 +3175,8 @@ async fn test_default_request_timeout() {
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         None,
-    );
+    )
+    .expect("real test state should configure its memory runtime");
 
     assert_eq!(state.request_timeout.as_secs(), 600);
 }
@@ -3228,7 +3205,8 @@ async fn test_health_with_real_backend() {
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         None,
-    );
+    )
+    .expect("real test state should configure its memory runtime");
 
     let app = api::router(state);
 
@@ -3299,7 +3277,8 @@ async fn test_real_model_chat_completion_metal() {
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         None,
-    );
+    )
+    .expect("real Metal test state should configure its memory runtime");
 
     let app = api::router(state);
 
@@ -3400,7 +3379,8 @@ async fn test_real_model_chat_completion_metal_bf16_fused() {
         "Qwen3.5-4B".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
         None,
-    );
+    )
+    .expect("real BF16 Metal test state should configure its memory runtime");
     let app = api::router(state);
     let body = json!({
         "messages": [{"role": "user", "content": "t1 t2 t3"}],

@@ -220,6 +220,8 @@ async fn submit_front_door(
                 job_id: job_id.clone(),
                 reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                prepared_data: Default::default(),
+                prepared_data_permit: Default::default(),
                 job: queued,
             },
         )],

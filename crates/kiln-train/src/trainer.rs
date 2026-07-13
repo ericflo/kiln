@@ -3905,13 +3905,13 @@ struct RewardFilterInputGroup {
     id: String,
     source_index: usize,
     source_line: Option<usize>,
-    rewards: Vec<f64>,
+    reward_variance: f64,
 }
 
 #[derive(Debug, Clone)]
 struct RewardFilterPlan {
-    kept_source_indices: BTreeSet<usize>,
-    kept_source_lines: BTreeSet<usize>,
+    kept_source_indices: Vec<usize>,
+    kept_source_lines: Vec<usize>,
     skip_training: bool,
     failure_reason: Option<String>,
     sidecar_path: PathBuf,
@@ -3921,11 +3921,13 @@ struct RewardFilterPlan {
 
 impl RewardFilterPlan {
     fn keeps_source_index(&self, source_index: usize) -> bool {
-        self.kept_source_indices.contains(&source_index)
+        self.kept_source_indices
+            .binary_search(&source_index)
+            .is_ok()
     }
 
     fn keeps_source_line(&self, line_no: usize) -> bool {
-        self.kept_source_lines.contains(&line_no)
+        self.kept_source_lines.binary_search(&line_no).is_ok()
     }
 }
 
@@ -3994,6 +3996,132 @@ fn reward_filter_variance(rewards: &[f64]) -> f64 {
         / rewards.len() as f64
 }
 
+#[derive(Debug)]
+struct StreamedRewardStatsAccumulator {
+    count: usize,
+    mean: f64,
+    sum_squared_deviation: f64,
+    min: f64,
+    max: f64,
+    group_count: usize,
+    all_pass_group_count: usize,
+    all_fail_group_count: usize,
+    degenerate_group_count: usize,
+    variance_histogram_counts: [usize; 6],
+}
+
+impl Default for StreamedRewardStatsAccumulator {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            mean: 0.0,
+            sum_squared_deviation: 0.0,
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            group_count: 0,
+            all_pass_group_count: 0,
+            all_fail_group_count: 0,
+            degenerate_group_count: 0,
+            variance_histogram_counts: [0; 6],
+        }
+    }
+}
+
+impl StreamedRewardStatsAccumulator {
+    fn observe_group<'a, I>(&mut self, rewards: I, all_pass_threshold: f64) -> f64
+    where
+        I: IntoIterator<Item = &'a f64>,
+    {
+        let mut group_count = 0usize;
+        let mut group_mean = 0.0;
+        let mut group_squared_deviation = 0.0;
+        let mut all_pass = true;
+        let mut all_fail = true;
+        for reward in rewards {
+            let reward = *reward;
+            group_count += 1;
+            let group_delta = reward - group_mean;
+            group_mean += group_delta / group_count as f64;
+            group_squared_deviation += group_delta * (reward - group_mean);
+
+            self.count += 1;
+            let delta = reward - self.mean;
+            self.mean += delta / self.count as f64;
+            self.sum_squared_deviation += delta * (reward - self.mean);
+            self.min = self.min.min(reward);
+            self.max = self.max.max(reward);
+            all_pass &= reward >= all_pass_threshold;
+            all_fail &= reward <= 0.0;
+        }
+        if group_count == 0 {
+            return 0.0;
+        }
+        self.group_count += 1;
+        self.all_pass_group_count += if all_pass { 1 } else { 0 };
+        self.all_fail_group_count += if all_fail { 1 } else { 0 };
+        let variance = (group_squared_deviation / group_count as f64).max(0.0);
+        if variance <= crate::train_receipt::REWARD_DEGENERATE_GROUP_VARIANCE_EPSILON {
+            self.degenerate_group_count += 1;
+        }
+        let bucket = if variance == 0.0 {
+            0
+        } else if variance <= 1e-6 {
+            1
+        } else if variance <= 0.01 {
+            2
+        } else if variance <= 0.25 {
+            3
+        } else if variance <= 1.0 {
+            4
+        } else {
+            5
+        };
+        self.variance_histogram_counts[bucket] += 1;
+        variance
+    }
+
+    fn finish(self) -> crate::train_receipt::RewardStatsReceipt {
+        if self.count == 0 {
+            return crate::train_receipt::RewardStatsReceipt::default();
+        }
+        let specs = [
+            ("zero", Some(0.0), Some(0.0)),
+            ("tiny", Some(f64::MIN_POSITIVE), Some(1e-6)),
+            ("low", Some(1e-6), Some(0.01)),
+            ("medium", Some(0.01), Some(0.25)),
+            ("high", Some(0.25), Some(1.0)),
+            ("extreme", Some(1.0), None),
+        ];
+        crate::train_receipt::RewardStatsReceipt {
+            count: self.count,
+            mean: Some(self.mean),
+            stdev: Some(
+                (self.sum_squared_deviation / self.count as f64)
+                    .max(0.0)
+                    .sqrt(),
+            ),
+            min: Some(self.min),
+            max: Some(self.max),
+            group_count: self.group_count,
+            all_pass_group_count: self.all_pass_group_count,
+            all_fail_group_count: self.all_fail_group_count,
+            degenerate_group_count: self.degenerate_group_count,
+            group_variance_histogram: specs
+                .into_iter()
+                .zip(self.variance_histogram_counts)
+                .map(|((label, min_inclusive, max_inclusive), count)| {
+                    crate::train_receipt::HistogramBucket {
+                        label: label.to_string(),
+                        min_inclusive,
+                        max_inclusive,
+                        count,
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
 fn reward_filter_on_empty_label(mode: RewardFilterOnEmpty) -> &'static str {
     match mode {
         RewardFilterOnEmpty::Fail => "fail",
@@ -4013,19 +4141,17 @@ fn build_reward_filter_plan(
     }
     validate_reward_filter_config(config)?;
 
-    let mut candidate_kept_ids = BTreeSet::new();
-    let mut candidate_kept_indices = BTreeSet::new();
+    let mut candidate_kept_count = 0usize;
     let mut decisions = Vec::new();
     for group in &groups {
-        let variance = reward_filter_variance(&group.rewards);
+        let variance = group.reward_variance;
         let (matched_filter, reject_reason) = reward_filter_group_matches(
             variance,
             config.reward_filter_var_min,
             config.reward_filter_var_max,
         );
         if matched_filter {
-            candidate_kept_ids.insert(group.id.clone());
-            candidate_kept_indices.insert(group.source_index);
+            candidate_kept_count = candidate_kept_count.saturating_add(1);
         }
         decisions.push(crate::train_receipt::RewardFilterGroupDecisionReceipt {
             id: group.id.clone(),
@@ -4038,7 +4164,7 @@ fn build_reward_filter_plan(
         });
     }
 
-    let empty_filter_triggered = candidate_kept_ids.len() < config.reward_filter_min_groups;
+    let empty_filter_triggered = candidate_kept_count < config.reward_filter_min_groups;
     let on_empty = config.reward_filter_on_empty;
     let empty_filter_action = if empty_filter_triggered {
         reward_filter_on_empty_label(on_empty)
@@ -4048,8 +4174,8 @@ fn build_reward_filter_plan(
 
     let mut kept_ids = Vec::new();
     let mut dropped_ids = Vec::new();
-    let mut kept_indices = BTreeSet::new();
-    let mut kept_lines = BTreeSet::new();
+    let mut kept_indices = Vec::new();
+    let mut kept_lines = Vec::new();
     let mut skip_training = false;
     let mut failure_reason = None;
 
@@ -4065,16 +4191,15 @@ fn build_reward_filter_plan(
                 }
                 failure_reason = Some(format!(
                     "reward variance filter kept {} group(s), below --min-groups {}; --on-empty-filter=fail",
-                    candidate_kept_ids.len(),
-                    config.reward_filter_min_groups
+                    candidate_kept_count, config.reward_filter_min_groups
                 ));
             }
             RewardFilterOnEmpty::TrainAll => {
                 kept_ids = groups.iter().map(|group| group.id.clone()).collect();
                 for group in &groups {
-                    kept_indices.insert(group.source_index);
+                    kept_indices.push(group.source_index);
                     if let Some(line) = group.source_line {
-                        kept_lines.insert(line);
+                        kept_lines.push(line);
                     }
                 }
                 for decision in &mut decisions {
@@ -4094,12 +4219,12 @@ fn build_reward_filter_plan(
             }
         }
     } else {
-        for group in &groups {
-            if candidate_kept_indices.contains(&group.source_index) {
+        for (group, decision) in groups.iter().zip(&decisions) {
+            if decision.matched_filter {
                 kept_ids.push(group.id.clone());
-                kept_indices.insert(group.source_index);
+                kept_indices.push(group.source_index);
                 if let Some(line) = group.source_line {
-                    kept_lines.insert(line);
+                    kept_lines.push(line);
                 }
             } else {
                 dropped_ids.push(group.id.clone());
@@ -4125,6 +4250,10 @@ fn build_reward_filter_plan(
         groups: decisions,
     };
     let sidecar_path = crate::train_receipt::write_reward_filter_sidecar(output_dir, &sidecar)?;
+    kept_indices.sort_unstable();
+    kept_indices.dedup();
+    kept_lines.sort_unstable();
+    kept_lines.dedup();
     Ok(Some(RewardFilterPlan {
         groups_kept: sidecar.groups_kept,
         groups_dropped: sidecar.groups_dropped,
@@ -4946,51 +5075,37 @@ fn run_mtp_alignment_phase(
     Ok(Some((trained, initial_ce, final_ce)))
 }
 
-/// The device training state (LoRA params, optimizer moments, linear
-/// state) must live on. Usually the weights' device — EXCEPT on the
-/// Vulkan hybrid substrate, where base weights are kt CPU-storage but
-/// the forward's ACTIVATIONS are Vulkan-resident (the embedding gather
-/// returns resident output by design). Training state must match the
-/// activations, not the frozen weights: a CPU LoRA pair against a
-/// Vulkan activation dies in the recorder with
-/// "inputs on different devices" (the operator-validation finding,
-/// 2026-06-11). Mixed frozen-weight projections are handled by the
-/// vulkan_matmul_bf16w host fallback.
-fn training_device_for_weights(weights: &GpuWeights) -> Device {
-    // Training-session residency experiment (2026-06-11, Strix Halo,
-    // probe-verified): the Vulkan backend has TWO half-substrates —
-    //   (A) kt CPU-device handles + backend kernel BRIDGES (production
-    //       inference; the bridges REQUIRE Device::Cpu inputs and return
-    //       CPU outputs), and
-    //   (B) Device::Vulkan kt-storage ops (the vk_*_proof tests; never
-    //       exercised on the FULL model forward).
-    // Training needs ONE of them complete. Uploading weights + training
-    // state to Vulkan(0) (this experiment, with GpuWeights::to_device_deep)
-    // pushes the forward off (A)'s bridges onto (B), which lacks ops —
-    // the GDN recurrent step dies on a host-composite piece
-    // (a=cpu [1,nv,T,dk] × b=vulkan [1,nv,dk,dv]). Completing (B) for the
-    // full model IS the residency port. Until then the one-device path is
-    // an explicit OPT-IN for porting work; the default stays on the
-    // weights' device, failing early and clean.
-    let device = weights.embed_tokens.device();
-    #[cfg(feature = "vulkan")]
-    {
-        if matches!(device, Device::Cpu)
-            && kiln_model::backend::vulkan_training_substrate_active()
-            && std::env::var("KILN_TRAIN_RESIDENT").is_ok_and(|v| v == "1")
-        {
-            return Device::Vulkan(0);
-        }
-    }
-    device
+/// Resolve the training device against the immutable runtime binding.
+/// Production training requires the runtime device to match the resident
+/// model-weight device exactly. In particular, CPU-host weights are not
+/// promoted into the incomplete hybrid Vulkan training substrate; every
+/// device mismatch fails closed before LoRA or optimizer allocation.
+fn training_device_for_weights(
+    weights: &GpuWeights,
+    runtime: &crate::TrainingRuntimeContext,
+) -> Result<Device> {
+    runtime.resolve_device_for_weights(weights.embed_tokens.device())
 }
 
-/// Upload a training-session resident copy of the weights when the
-/// training device differs from the weights' storage device (the Vulkan
-/// hybrid substrate). Returns `None` when no copy is needed — the caller
-/// keeps using the serving weights directly. The copy (~8 GB BF16 for
-/// Qwen3.5-4B) lives for the duration of the job and drops with the
-/// returned value; the serving weights are never touched.
+/// Construct the backend named by the immutable training runtime.
+///
+/// `kiln-model` retains CPU-as-Vulkan autodetection for compatibility
+/// inference. Training cannot use that shortcut: an explicit CPU runtime stays
+/// CPU, and an accelerated runtime is accepted only when the resident weight
+/// device matches it exactly.
+pub(crate) fn training_backend_for_device(device: Device) -> std::sync::Arc<dyn BackendRuntime> {
+    if device == Device::Cpu {
+        std::sync::Arc::new(backend::cpu::CpuBackend::new(device))
+    } else {
+        backend::for_device_kt(&device)
+    }
+}
+
+/// Confirm training will use the already resident serving weights.
+///
+/// Runtime device resolution rejects mismatches before this point. Keep this
+/// second gate at the former upload boundary so a future bypass cannot silently
+/// start an unqualified multi-GiB full-model copy.
 fn resident_training_weights(
     weights: &GpuWeights,
     training_device: &Device,
@@ -4998,16 +5113,17 @@ fn resident_training_weights(
     if weights.embed_tokens.device() == *training_device {
         return Ok(None);
     }
-    let started = Instant::now();
-    let resident = weights
-        .to_device_deep(*training_device)
-        .context("uploading training-session resident weights")?;
-    tracing::info!(
-        device = ?training_device,
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "uploaded training-session resident weights"
-    );
-    Ok(Some(resident))
+    if weights.embed_tokens.device() == Device::Cpu && matches!(training_device, Device::Vulkan(_))
+    {
+        anyhow::bail!(
+            "native Vulkan training is unavailable for CPU-host serving weights: the full-model resident Vulkan training substrate is not production-qualified"
+        );
+    }
+    anyhow::bail!(
+        "training device {} does not match resident model weight device {}; full-model training uploads are disabled",
+        training_device.short_name(),
+        weights.embed_tokens.device().short_name(),
+    )
 }
 
 /// Per-step GPU coordination that remains interruptible by the serving
@@ -5264,8 +5380,11 @@ pub fn sft_train_to_with_checkpoint_root(
     )
 }
 
-/// Train already-admitted SFT rows while binding the resulting checkpoint and
-/// receipt to their server-owned ingestion evidence.
+/// Standalone convenience wrapper for already-admitted SFT rows.
+///
+/// Server callers should use
+/// [`sft_train_to_with_checkpoint_root_and_ingestion_with_runtime`] so the run
+/// remains bound to their process-lifetime memory configuration.
 #[allow(clippy::too_many_arguments)]
 pub fn sft_train_to_with_checkpoint_root_and_ingestion(
     examples: &[SftExample],
@@ -5282,6 +5401,48 @@ pub fn sft_train_to_with_checkpoint_root_and_ingestion(
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    let runtime =
+        crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
+    sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
+        examples,
+        ingestion,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        checkpoint_output_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+        gpu_step_coordination,
+        &runtime,
+    )
+}
+
+/// Server-owned SFT entry point with immutable process-lifetime runtime inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
+    examples: &[SftExample],
+    ingestion: &crate::sft_ingestion::SftIngestionReceipt,
+    config: &SftConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+    gpu_step_coordination: Option<GpuStepCoordination>,
+    runtime: &crate::TrainingRuntimeContext,
+) -> Result<PathBuf> {
+    let runtime_device =
+        training_device_for_weights(weights, runtime).context("resolve SFT runtime device")?;
+    crate::ensure_memory_governor_for_runtime(runtime_device, runtime)
+        .context("initialize SFT memory governor")?;
     config
         .validate_native_contract()
         .context("validate native SFT profile")?;
@@ -5307,6 +5468,7 @@ pub fn sft_train_to_with_checkpoint_root_and_ingestion(
         progress_cb,
         replay_ctx,
         gpu_step_coordination,
+        runtime,
     )
 }
 
@@ -5325,6 +5487,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
     progress_cb: Option<ProgressCallback>,
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
+    runtime: &crate::TrainingRuntimeContext,
 ) -> Result<PathBuf> {
     let run_started = Instant::now();
     anyhow::ensure!(
@@ -5352,13 +5515,13 @@ fn sft_train_prepared_to_with_checkpoint_root(
     // forward/backward), so keep `device` kt downstream. The only candle
     // touch left is the safetensors adapter I/O, which bridges the kt device
     // to candle locally inside `load_from_safetensors`/`save_peft`.
-    let device = training_device_for_weights(weights);
+    let device = training_device_for_weights(weights, runtime)?;
     // Training-session residency: upload a one-device copy of the weights
     // when the substrate needs it (Vulkan hybrid). Shadow `weights` so the
     // whole body trains against the resident copy; it drops at return.
     let resident_weights = resident_training_weights(weights, &device)?;
     let weights = resident_weights.as_ref().unwrap_or(weights);
-    let backend = backend::for_device_kt(&device);
+    let backend = training_backend_for_device(device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
     let learning_rate = config.effective_learning_rate();
@@ -5724,6 +5887,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                     model_config.vocab_size,
                     2,
                     activation_bytes_per_elem,
+                    runtime,
                 );
                 let boundaries =
                     checkpoint_segments_for_config(weights, &device, seq_len, config_for_step);
@@ -5849,6 +6013,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                     model_config.vocab_size,
                     2, // BF16 base weights (canonical kiln inference dtype)
                     activation_bytes_per_elem,
+                    runtime,
                 );
                 let segments =
                     checkpoint_segments_for_config(weights, &device, input_ids.len(), ckpt_config);
@@ -6381,9 +6546,10 @@ pub fn grpo_train_to_with_coordination(
     )
 }
 
-/// Staged-output GRPO with a separate durable checkpoint root. Server jobs can
-/// use this entry point so final-adapter staging cleanup cannot discard a
-/// resume point that was already atomically published.
+/// Standalone staged-output GRPO with a separate durable checkpoint root.
+///
+/// Server callers should use [`grpo_train_to_with_checkpoint_root_and_runtime`]
+/// to bind every per-group plan to their process-lifetime memory configuration.
 #[allow(clippy::too_many_arguments)]
 pub fn grpo_train_to_with_checkpoint_root(
     groups: &[GrpoGroup],
@@ -6399,6 +6565,46 @@ pub fn grpo_train_to_with_checkpoint_root(
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    let runtime =
+        crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
+    grpo_train_to_with_checkpoint_root_and_runtime(
+        groups,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        checkpoint_output_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+        gpu_step_coordination,
+        &runtime,
+    )
+}
+
+/// Server-owned inline GRPO entry point with immutable runtime inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn grpo_train_to_with_checkpoint_root_and_runtime(
+    groups: &[GrpoGroup],
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+    gpu_step_coordination: Option<GpuStepCoordination>,
+    runtime: &crate::TrainingRuntimeContext,
+) -> Result<PathBuf> {
+    let runtime_device =
+        training_device_for_weights(weights, runtime).context("resolve GRPO runtime device")?;
+    crate::ensure_memory_governor_for_runtime(runtime_device, runtime)
+        .context("initialize GRPO memory governor")?;
     let run_started = Instant::now();
     anyhow::ensure!(
         config.checkpoint_interval != Some(0),
@@ -6497,8 +6703,8 @@ pub fn grpo_train_to_with_checkpoint_root(
     // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward),
     // so keep `device` kt downstream. The only candle touch is safetensors
     // adapter I/O, which bridges kt->candle locally inside save/load.
-    let device = training_device_for_weights(weights);
-    let backend = backend::for_device_kt(&device);
+    let device = training_device_for_weights(weights, runtime)?;
+    let backend = training_backend_for_device(device);
     // Training-session residency: upload a one-device copy of the weights
     // when the substrate needs it (Vulkan hybrid). Shadow `weights` so the
     // whole body trains against the resident copy; it drops at return.
@@ -6816,11 +7022,13 @@ pub fn grpo_train_to_with_checkpoint_root(
                     id: format!("group:{}", idx + 1),
                     source_index: idx + 1,
                     source_line: None,
-                    rewards: group
-                        .completions
-                        .iter()
-                        .map(|completion| completion.reward)
-                        .collect(),
+                    reward_variance: reward_filter_variance(
+                        &group
+                            .completions
+                            .iter()
+                            .map(|completion| completion.reward)
+                            .collect::<Vec<_>>(),
+                    ),
                 })
                 .collect(),
         )?;
@@ -7001,6 +7209,7 @@ pub fn grpo_train_to_with_checkpoint_root(
                     model_config.vocab_size,
                     2,
                     activation_bytes_per_elem,
+                    runtime,
                 );
                 let boundaries =
                     checkpoint_segments_for_config(weights, &device, max_seq_len, resolved);
@@ -7180,6 +7389,7 @@ pub fn grpo_train_to_with_checkpoint_root(
                 model_config.vocab_size,
                 2, // BF16 base weights
                 activation_bytes_per_elem,
+                runtime,
             );
             let segments =
                 checkpoint_segments_for_config(weights, &device, group_max_seq_len, ckpt_config);
@@ -7506,6 +7716,278 @@ pub fn grpo_train_to_with_checkpoint_root(
         .map_err(crate::train_receipt::annotate_training_error)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BoundedGrpoJsonlScanStats {
+    total_bytes: u64,
+    total_lines: usize,
+    groups: usize,
+    completions: usize,
+    max_row_bytes: u64,
+}
+
+fn scan_pinned_grpo_jsonl<F>(
+    dataset_source: &PinnedGrpoJsonlSource,
+    model_num_layers: usize,
+    filter_enabled: bool,
+    phase: &str,
+    mut visit_group: F,
+) -> Result<BoundedGrpoJsonlScanStats>
+where
+    F: FnMut(usize, usize, &GrpoGroup) -> Result<()>,
+{
+    use std::io::{BufRead as _, BufReader, Read as _};
+
+    let dataset_path = dataset_source.display_path();
+    let total_bytes = dataset_source.len()?;
+    let file = dataset_source.reader_from_start()?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut line_no = 0usize;
+    let mut bytes_read = 0u64;
+    let mut groups = 0usize;
+    let mut completions = 0usize;
+    let mut max_row_bytes = 0u64;
+
+    loop {
+        line.clear();
+        let read = (&mut reader)
+            .take(MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES + 1)
+            .read_line(&mut line)
+            .with_context(|| {
+                format!(
+                    "read GRPO JSONL dataset {} line {} during {phase}",
+                    dataset_path.display(),
+                    line_no.saturating_add(1)
+                )
+            })?;
+        if read == 0 {
+            break;
+        }
+        line_no = line_no
+            .checked_add(1)
+            .with_context(|| format!("GRPO JSONL line count overflow during {phase}"))?;
+        anyhow::ensure!(
+            line.len() as u64 <= MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES,
+            "GRPO JSONL line {line_no} exceeds the {} byte streamed preflight row limit during {phase}",
+            MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES
+        );
+        max_row_bytes = max_row_bytes.max(line.len() as u64);
+        bytes_read = bytes_read
+            .checked_add(read as u64)
+            .with_context(|| format!("GRPO JSONL byte count overflow during {phase}"))?;
+        anyhow::ensure!(
+            bytes_read <= total_bytes,
+            "GRPO JSONL dataset {} grew while scanning during {phase}",
+            dataset_path.display()
+        );
+        streamed_grpo_preflight_host_bytes(
+            groups,
+            completions,
+            max_row_bytes,
+            model_num_layers,
+            filter_enabled,
+        )
+        .with_context(|| {
+            format!("bound GRPO JSONL host memory before line {line_no} during {phase}")
+        })?;
+
+        let Some(group) = parse_grpo_jsonl_group_line(&line, line_no)? else {
+            continue;
+        };
+        validate_grpo_trajectory_roles(&group, line_no)?;
+        anyhow::ensure!(
+            !group.completions.is_empty()
+                && group.completions.len() <= crate::HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP,
+            "GRPO JSONL line {line_no} must contain 1..={} completions",
+            crate::HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP
+        );
+        groups = groups
+            .checked_add(1)
+            .with_context(|| format!("GRPO JSONL group count overflow during {phase}"))?;
+        completions = completions
+            .checked_add(group.completions.len())
+            .with_context(|| format!("GRPO JSONL completion count overflow during {phase}"))?;
+        streamed_grpo_preflight_host_bytes(
+            groups,
+            completions,
+            max_row_bytes,
+            model_num_layers,
+            filter_enabled,
+        )
+        .with_context(|| format!("bound GRPO JSONL metadata at line {line_no} during {phase}"))?;
+        visit_group(line_no, groups, &group)?;
+    }
+
+    anyhow::ensure!(
+        bytes_read == total_bytes,
+        "GRPO JSONL dataset {} changed length during {phase}: expected {total_bytes}, read {bytes_read}",
+        dataset_path.display()
+    );
+    Ok(BoundedGrpoJsonlScanStats {
+        total_bytes,
+        total_lines: line_no,
+        groups,
+        completions,
+        max_row_bytes,
+    })
+}
+
+/// First-pass reward metadata for dry-run validation. Global variance is
+/// supplied by a second disk pass so the legacy materialized receipt's fold
+/// order remains byte-for-byte stable without retaining every reward.
+#[derive(Debug)]
+struct DryRunRewardStatsAccumulator {
+    count: usize,
+    sum: f64,
+    min: f64,
+    max: f64,
+    group_count: usize,
+    all_pass_group_count: usize,
+    all_fail_group_count: usize,
+    degenerate_group_count: usize,
+    variance_histogram_counts: [usize; 6],
+}
+
+impl Default for DryRunRewardStatsAccumulator {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            sum: 0.0,
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            group_count: 0,
+            all_pass_group_count: 0,
+            all_fail_group_count: 0,
+            degenerate_group_count: 0,
+            variance_histogram_counts: [0; 6],
+        }
+    }
+}
+
+impl DryRunRewardStatsAccumulator {
+    fn observe_group(&mut self, group: &GrpoGroup, all_pass_threshold: f64) -> Result<f64> {
+        let group_count = group.completions.len();
+        anyhow::ensure!(group_count > 0, "GRPO reward group must not be empty");
+        let group_mean = group
+            .completions
+            .iter()
+            .map(|completion| completion.reward)
+            .sum::<f64>()
+            / group_count as f64;
+        let group_variance = group
+            .completions
+            .iter()
+            .map(|completion| {
+                let centered = completion.reward - group_mean;
+                centered * centered
+            })
+            .sum::<f64>()
+            / group_count as f64;
+
+        self.group_count = self
+            .group_count
+            .checked_add(1)
+            .context("GRPO dry-run reward group count overflow")?;
+        if group_variance <= crate::train_receipt::REWARD_DEGENERATE_GROUP_VARIANCE_EPSILON {
+            self.degenerate_group_count = self
+                .degenerate_group_count
+                .checked_add(1)
+                .context("GRPO dry-run degenerate group count overflow")?;
+        }
+        if group
+            .completions
+            .iter()
+            .all(|completion| completion.reward >= all_pass_threshold)
+        {
+            self.all_pass_group_count = self
+                .all_pass_group_count
+                .checked_add(1)
+                .context("GRPO dry-run all-pass group count overflow")?;
+        }
+        if group
+            .completions
+            .iter()
+            .all(|completion| completion.reward <= 0.0)
+        {
+            self.all_fail_group_count = self
+                .all_fail_group_count
+                .checked_add(1)
+                .context("GRPO dry-run all-fail group count overflow")?;
+        }
+        let histogram_bucket = if group_variance == 0.0 {
+            Some(0)
+        } else if group_variance > f64::MIN_POSITIVE && group_variance <= 1e-6 {
+            Some(1)
+        } else if group_variance > 1e-6 && group_variance <= 0.01 {
+            Some(2)
+        } else if group_variance > 0.01 && group_variance <= 0.25 {
+            Some(3)
+        } else if group_variance > 0.25 && group_variance <= 1.0 {
+            Some(4)
+        } else if group_variance > 1.0 {
+            Some(5)
+        } else {
+            None
+        };
+        if let Some(bucket) = histogram_bucket {
+            self.variance_histogram_counts[bucket] = self.variance_histogram_counts[bucket]
+                .checked_add(1)
+                .context("GRPO dry-run reward histogram count overflow")?;
+        }
+        for completion in &group.completions {
+            self.count = self
+                .count
+                .checked_add(1)
+                .context("GRPO dry-run reward count overflow")?;
+            self.sum += completion.reward;
+            self.min = self.min.min(completion.reward);
+            self.max = self.max.max(completion.reward);
+        }
+        Ok(group_variance)
+    }
+
+    fn mean(&self) -> Option<f64> {
+        (self.count > 0).then(|| self.sum / self.count as f64)
+    }
+
+    fn finish(self, squared_deviation_sum: f64) -> crate::train_receipt::RewardStatsReceipt {
+        if self.count == 0 {
+            return crate::train_receipt::RewardStatsReceipt::default();
+        }
+        let specs = [
+            ("zero", Some(0.0), Some(0.0)),
+            ("tiny", Some(f64::MIN_POSITIVE), Some(1e-6)),
+            ("low", Some(1e-6), Some(0.01)),
+            ("medium", Some(0.01), Some(0.25)),
+            ("high", Some(0.25), Some(1.0)),
+            ("extreme", Some(1.0), None),
+        ];
+        crate::train_receipt::RewardStatsReceipt {
+            count: self.count,
+            mean: Some(self.sum / self.count as f64),
+            stdev: Some((squared_deviation_sum / self.count as f64).sqrt()),
+            min: Some(self.min),
+            max: Some(self.max),
+            group_count: self.group_count,
+            all_pass_group_count: self.all_pass_group_count,
+            all_fail_group_count: self.all_fail_group_count,
+            degenerate_group_count: self.degenerate_group_count,
+            group_variance_histogram: specs
+                .into_iter()
+                .zip(self.variance_histogram_counts)
+                .map(|((label, min_inclusive, max_inclusive), count)| {
+                    crate::train_receipt::HistogramBucket {
+                        label: label.to_string(),
+                        min_inclusive,
+                        max_inclusive,
+                        count,
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Validate a streamed GRPO JSONL dataset and training configuration without
 /// loading model weights or running forward/backward.
 pub fn grpo_dry_run_jsonl(
@@ -7517,17 +7999,43 @@ pub fn grpo_dry_run_jsonl(
     adapter_name: &str,
     allow_empty_after_filter: bool,
 ) -> Result<GrpoDryRunReport> {
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
+    grpo_dry_run_jsonl_with_pass_hook(
+        dataset_path,
+        config,
+        model_config,
+        tokenizer,
+        adapter_dir,
+        adapter_name,
+        allow_empty_after_filter,
+        None,
+    )
+}
 
+#[allow(clippy::too_many_arguments)]
+fn grpo_dry_run_jsonl_with_pass_hook(
+    dataset_path: &Path,
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    adapter_name: &str,
+    allow_empty_after_filter: bool,
+    mut after_first_pass: Option<&mut dyn FnMut() -> Result<()>>,
+) -> Result<GrpoDryRunReport> {
     let run_started = Instant::now();
     let output_dir = adapter_dir.join(adapter_name);
     let receipt_path = output_dir.join(crate::train_receipt::TRAIN_RECEIPT_FILENAME);
-    let training_data = crate::train_receipt::TrainingDataReceipt {
+    let mut training_data = crate::train_receipt::TrainingDataReceipt {
         source: "jsonl_grpo_groups_dry_run".to_string(),
         path: Some(dataset_path.display().to_string()),
-        sha256: crate::train_receipt::sha256_file(dataset_path).ok(),
+        sha256: None,
     };
+    let dataset_source = PinnedGrpoJsonlSource::open(dataset_path);
+    let source_sha256 = dataset_source
+        .as_ref()
+        .map_err(|error| format!("{error:#}"))
+        .and_then(|source| source.sha256().map_err(|error| format!("{error:#}")));
+    training_data.sha256 = source_sha256.as_ref().ok().cloned();
     let requested_base_adapter_dir = config
         .base_adapter
         .as_deref()
@@ -7558,49 +8066,77 @@ pub fn grpo_dry_run_jsonl(
             config.allow_adapter_shape_conversion,
         )?;
 
-        let file = File::open(dataset_path)
-            .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
-        let mut reader = BufReader::new(file);
-        let mut line = String::new();
-        let mut line_no = 0usize;
-        let mut parsed_groups: Vec<(usize, GrpoGroup)> = Vec::new();
-        let mut reward_groups: Vec<Vec<f64>> = Vec::new();
-
-        loop {
-            line.clear();
-            let read = reader.read_line(&mut line).with_context(|| {
-                format!(
-                    "read GRPO JSONL dataset {} line {}",
-                    dataset_path.display(),
-                    line_no + 1
-                )
-            })?;
-            if read == 0 {
-                break;
-            }
-            line_no += 1;
-            let Some(group) = parse_grpo_jsonl_group_line(&line, line_no)? else {
-                continue;
-            };
-            validate_grpo_trajectory_roles(&group, line_no)?;
-            data_stats.groups_read = data_stats.groups_read.saturating_add(1);
-            data_stats.completions_read = data_stats
-                .completions_read
-                .saturating_add(group.completions.len());
-            reward_groups.push(
-                group
-                    .completions
-                    .iter()
-                    .map(|completion| completion.reward)
-                    .collect(),
-            );
-            parsed_groups.push((line_no, group));
-        }
-
-        reward_stats = crate::train_receipt::reward_stats_from_groups_with_threshold(
-            reward_groups.iter().map(Vec::as_slice),
-            config.reward_saturation_threshold,
+        let dataset_source = dataset_source
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+        let source_sha256 = source_sha256
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("hash GRPO JSONL dataset: {error}"))?;
+        let filter_enabled = reward_filter_enabled(config);
+        let mut reward_accumulator = DryRunRewardStatsAccumulator::default();
+        let mut reward_filter_inputs = Vec::new();
+        let first_scan = scan_pinned_grpo_jsonl(
+            dataset_source,
+            model_config.num_layers,
+            filter_enabled,
+            "dry-run reward preflight",
+            |line_no, source_index, group| {
+                data_stats.groups_read = source_index;
+                data_stats.completions_read = data_stats
+                    .completions_read
+                    .checked_add(group.completions.len())
+                    .context("GRPO dry-run completion count overflow")?;
+                let reward_variance =
+                    reward_accumulator.observe_group(group, config.reward_saturation_threshold)?;
+                if filter_enabled {
+                    reward_filter_inputs
+                        .try_reserve(1)
+                        .context("reserve bounded GRPO dry-run reward filter input")?;
+                    reward_filter_inputs.push(RewardFilterInputGroup {
+                        id: format!("line:{line_no}"),
+                        source_index,
+                        source_line: Some(line_no),
+                        reward_variance,
+                    });
+                }
+                Ok(())
+            },
+        )?;
+        anyhow::ensure!(
+            first_scan.groups == data_stats.groups_read
+                && first_scan.completions == data_stats.completions_read,
+            "GRPO dry-run reward preflight count mismatch"
         );
+        if let Some(hook) = after_first_pass.take() {
+            hook()?;
+        }
+        anyhow::ensure!(
+            dataset_source.sha256()? == source_sha256.as_str(),
+            "GRPO JSONL dataset changed after dry-run reward preflight"
+        );
+
+        let reward_mean = reward_accumulator.mean();
+        let mut squared_deviation_sum = 0.0;
+        let variance_scan = scan_pinned_grpo_jsonl(
+            dataset_source,
+            model_config.num_layers,
+            filter_enabled,
+            "dry-run reward variance pass",
+            |_line_no, _source_index, group| {
+                if let Some(mean) = reward_mean {
+                    for completion in &group.completions {
+                        let centered = completion.reward - mean;
+                        squared_deviation_sum += centered * centered;
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        anyhow::ensure!(
+            variance_scan == first_scan && dataset_source.sha256()? == source_sha256.as_str(),
+            "GRPO JSONL dataset changed during dry-run reward variance pass"
+        );
+        reward_stats = reward_accumulator.finish(squared_deviation_sum);
         crate::train_receipt::warn_reward_diagnostics(
             "grpo_dry_run",
             adapter_name,
@@ -7612,26 +8148,14 @@ pub fn grpo_dry_run_jsonl(
             config,
             &output_dir,
             "jsonl_grpo_groups_dry_run",
-            parsed_groups
-                .iter()
-                .enumerate()
-                .map(|(idx, (line_no, group))| RewardFilterInputGroup {
-                    id: format!("line:{line_no}"),
-                    source_index: idx + 1,
-                    source_line: Some(*line_no),
-                    rewards: group
-                        .completions
-                        .iter()
-                        .map(|completion| completion.reward)
-                        .collect(),
-                })
-                .collect(),
+            reward_filter_inputs,
         )?;
         if let Some(plan) = reward_filter_plan.as_ref() {
             record_reward_filter_plan(&mut data_stats, plan);
             data_stats.groups_filtered = data_stats
                 .groups_filtered
-                .saturating_add(plan.groups_dropped);
+                .checked_add(plan.groups_dropped)
+                .context("GRPO dry-run filtered group count overflow")?;
             tracing::info!(
                 kept = plan.groups_kept,
                 dropped = plan.groups_dropped,
@@ -7645,41 +8169,61 @@ pub fn grpo_dry_run_jsonl(
 
         let mut processed_groups = 0usize;
         let mut processed_completions = 0usize;
-        for (line_no, group) in &parsed_groups {
-            if let Some(plan) = reward_filter_plan.as_ref() {
-                if !plan.keeps_source_line(*line_no) {
-                    continue;
+        let validation_scan = scan_pinned_grpo_jsonl(
+            dataset_source,
+            model_config.num_layers,
+            filter_enabled,
+            "dry-run token and mask validation",
+            |line_no, _source_index, group| {
+                if let Some(plan) = reward_filter_plan.as_ref() {
+                    if !plan.keeps_source_line(line_no) || plan.skip_training {
+                        return Ok(());
+                    }
                 }
-                if plan.skip_training {
-                    continue;
+                if config.dynamic_sampling && is_degenerate_grpo_group(group) {
+                    dynamic_groups_filtered = dynamic_groups_filtered
+                        .checked_add(1)
+                        .context("GRPO dry-run dynamic filter count overflow")?;
+                    data_stats.groups_filtered = data_stats
+                        .groups_filtered
+                        .checked_add(1)
+                        .context("GRPO dry-run filtered group count overflow")?;
+                    return Ok(());
                 }
-            }
-            if config.dynamic_sampling && is_degenerate_grpo_group(group) {
-                dynamic_groups_filtered = dynamic_groups_filtered.saturating_add(1);
-                data_stats.groups_filtered = data_stats.groups_filtered.saturating_add(1);
-                continue;
-            }
 
-            let group_idx = processed_groups + 1;
-            let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
-            let tgroup =
-                tokenize_grpo_group_timed(&group, tokenizer, &mask_cfg, Some(&mut phase_timings))
-                    .with_context(|| {
+                let group_idx = processed_groups
+                    .checked_add(1)
+                    .context("GRPO dry-run processed group count overflow")?;
+                let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
+                let tgroup = tokenize_grpo_group_timed(
+                    group,
+                    tokenizer,
+                    &mask_cfg,
+                    Some(&mut phase_timings),
+                )
+                .with_context(|| {
                     format!("tokenize GRPO dry-run group {group_idx} at line {line_no}")
                 })?;
-            validate_tokenized_behavior_policy(&tgroup, config.behavior_policy).with_context(
-                || format!("validate GRPO dry-run group {group_idx} behavior provenance"),
-            )?;
-            validate_grpo_dry_run_masks(&tgroup, group_idx, *line_no)?;
-            let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
-            token_counts.add_from(&group_counts);
-            processed_groups = processed_groups.saturating_add(1);
-            processed_completions = processed_completions.saturating_add(tgroup.completions.len());
-        }
+                validate_tokenized_behavior_policy(&tgroup, config.behavior_policy).with_context(
+                    || format!("validate GRPO dry-run group {group_idx} behavior provenance"),
+                )?;
+                validate_grpo_dry_run_masks(&tgroup, group_idx, line_no)?;
+                let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
+                token_counts.add_from(&group_counts);
+                processed_groups = group_idx;
+                processed_completions = processed_completions
+                    .checked_add(tgroup.completions.len())
+                    .context("GRPO dry-run processed completion count overflow")?;
+                Ok(())
+            },
+        )?;
+        anyhow::ensure!(
+            validation_scan == first_scan && dataset_source.sha256()? == source_sha256.as_str(),
+            "GRPO JSONL dataset changed during dry-run token validation"
+        );
 
         data_stats.groups_trained = processed_groups;
         data_stats.completions_trained = processed_completions;
-
         let reward_filter_skipped = reward_filter_plan
             .as_ref()
             .is_some_and(|plan| plan.skip_training);
@@ -7699,10 +8243,6 @@ pub fn grpo_dry_run_jsonl(
                 token_counts.action_tokens > 0,
                 "GRPO dry run: dataset has no action tokens after mask construction"
             );
-            // ECHO + env tokens is trainable again (resurrection PR2):
-            // the env-CE term has a fused-root gradient, so the dry run no
-            // longer rejects ECHO-enabled datasets with environment tokens.
-            // The report's env-token counts stand on their own.
         }
 
         Ok(GrpoDryRunReport {
@@ -7764,10 +8304,273 @@ pub fn grpo_dry_run_jsonl(
     }
 }
 
+/// Maximum host-memory charge for the streamed GRPO preflight itself. Server
+/// admission additionally charges the immutable disk snapshot against its
+/// process-wide prepared-data cap.
+pub const MAX_STREAMED_GRPO_PREFLIGHT_HOST_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_STREAMED_GRPO_PREFLIGHT_GROUPS: usize = 1_000_000;
+pub const MAX_STREAMED_GRPO_PREFLIGHT_COMPLETIONS: usize = 16_000_000;
+
+/// Conservative host peak for streamed GRPO planning.
+///
+/// The charge covers the compact trainable entry, reward/filter decisions and
+/// sidecar serialization overlap, incremental identity hashing, one row's JSON
+/// plus tokenization transients, and one group's checkpoint-boundary scratch.
+/// Every operation is checked so adversarial counts fail before allocation.
+pub fn streamed_grpo_preflight_host_bytes(
+    groups: usize,
+    completions: usize,
+    max_row_bytes: u64,
+    model_num_layers: usize,
+    reward_filter_enabled: bool,
+) -> Result<u64> {
+    const BASE_BYTES: u64 = 256 * 1024;
+    const TRAINABLE_PLAN_BYTES_PER_GROUP: u64 = 384;
+    const FILTER_AND_SIDECAR_BYTES_PER_GROUP: u64 = 1_536;
+    const COMPLETION_DIAGNOSTIC_BYTES: u64 = 8;
+    const MAX_ROW_TRANSIENT_MULTIPLIER: u64 = 12;
+    const CHECKPOINT_SCRATCH_BYTES_PER_LAYER: u64 = 32;
+
+    anyhow::ensure!(
+        groups <= MAX_STREAMED_GRPO_PREFLIGHT_GROUPS,
+        "streamed GRPO preflight has {groups} groups; maximum is {MAX_STREAMED_GRPO_PREFLIGHT_GROUPS}"
+    );
+    anyhow::ensure!(
+        completions <= MAX_STREAMED_GRPO_PREFLIGHT_COMPLETIONS,
+        "streamed GRPO preflight has {completions} completions; maximum is {MAX_STREAMED_GRPO_PREFLIGHT_COMPLETIONS}"
+    );
+    anyhow::ensure!(
+        max_row_bytes <= MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES,
+        "streamed GRPO preflight row has {max_row_bytes} bytes; maximum is {}",
+        MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES
+    );
+
+    let per_group = TRAINABLE_PLAN_BYTES_PER_GROUP
+        .checked_add(if reward_filter_enabled {
+            FILTER_AND_SIDECAR_BYTES_PER_GROUP
+        } else {
+            0
+        })
+        .context("streamed GRPO per-group preflight charge overflow")?;
+    let group_bytes = u64::try_from(groups)
+        .context("streamed GRPO group count exceeds u64")?
+        .checked_mul(per_group)
+        .context("streamed GRPO group-plan charge overflow")?;
+    let completion_bytes = u64::try_from(completions)
+        .context("streamed GRPO completion count exceeds u64")?
+        .checked_mul(COMPLETION_DIAGNOSTIC_BYTES)
+        .context("streamed GRPO completion charge overflow")?;
+    let row_bytes = max_row_bytes
+        .checked_mul(MAX_ROW_TRANSIENT_MULTIPLIER)
+        .context("streamed GRPO row-transient charge overflow")?;
+    let checkpoint_bytes = u64::try_from(model_num_layers.max(1))
+        .context("streamed GRPO model layer count exceeds u64")?
+        .checked_mul(CHECKPOINT_SCRATCH_BYTES_PER_LAYER)
+        .context("streamed GRPO checkpoint scratch charge overflow")?;
+    let total = BASE_BYTES
+        .checked_add(group_bytes)
+        .and_then(|bytes| bytes.checked_add(completion_bytes))
+        .and_then(|bytes| bytes.checked_add(row_bytes))
+        .and_then(|bytes| bytes.checked_add(checkpoint_bytes))
+        .context("streamed GRPO preflight host-memory charge overflow")?;
+    anyhow::ensure!(
+        total <= MAX_STREAMED_GRPO_PREFLIGHT_HOST_BYTES,
+        "streamed GRPO preflight projects {total} host bytes; maximum is {MAX_STREAMED_GRPO_PREFLIGHT_HOST_BYTES}"
+    );
+    Ok(total)
+}
+
+/// Disk-backed GRPO source pinned to one open file identity.
+///
+/// Path-based entry points construct this immediately after opening their
+/// input. Server callers can instead pass an already verified handle, so later
+/// preflight, resume, epoch, and receipt reads cannot be redirected by an
+/// atomic pathname replacement. Reader clones keep the corpus streamed from
+/// disk; the source never materializes the whole JSONL in memory.
+#[derive(Debug)]
+pub struct PinnedGrpoJsonlSource {
+    file: std::fs::File,
+    display_path: PathBuf,
+    // `File::try_clone` shares the cursor on Unix. The streamed implementation
+    // drops each phase reader before rewinding the next one; making this type
+    // !Sync prevents concurrent callers from violating that order.
+    _not_sync: std::marker::PhantomData<std::cell::Cell<()>>,
+}
+
+impl PinnedGrpoJsonlSource {
+    pub fn open(path: &Path) -> Result<Self> {
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)
+        };
+        #[cfg(not(unix))]
+        let file = std::fs::File::open(path);
+        let file = file.with_context(|| format!("open GRPO JSONL dataset {}", path.display()))?;
+        Self::from_file(file, path.to_path_buf())
+    }
+
+    pub fn from_file(file: std::fs::File, display_path: PathBuf) -> Result<Self> {
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("stat GRPO JSONL dataset {}", display_path.display()))?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "GRPO JSONL dataset {} is not a regular file",
+            display_path.display()
+        );
+        anyhow::ensure!(
+            metadata.len() <= crate::HF_TRL_GRPO_MAX_DATASET_BYTES,
+            "GRPO JSONL dataset {} has {} bytes; maximum is {}",
+            display_path.display(),
+            metadata.len(),
+            crate::HF_TRL_GRPO_MAX_DATASET_BYTES
+        );
+        Ok(Self {
+            file,
+            display_path,
+            _not_sync: std::marker::PhantomData,
+        })
+    }
+
+    pub fn display_path(&self) -> &Path {
+        &self.display_path
+    }
+
+    pub fn len(&self) -> Result<u64> {
+        self.file
+            .metadata()
+            .with_context(|| format!("stat GRPO JSONL dataset {}", self.display_path.display()))
+            .map(|metadata| metadata.len())
+    }
+
+    pub fn metadata(&self) -> Result<std::fs::Metadata> {
+        self.file
+            .metadata()
+            .with_context(|| format!("stat GRPO JSONL dataset {}", self.display_path.display()))
+    }
+
+    pub fn sha256(&self) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read as _;
+
+        let mut file = self.reader_from_start()?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).with_context(|| {
+                format!(
+                    "read GRPO JSONL dataset {} for sha256",
+                    self.display_path.display()
+                )
+            })?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(format!("sha256:{:x}", hasher.finalize()))
+    }
+
+    fn reader_from_start(&self) -> Result<std::fs::File> {
+        use std::io::{Seek as _, SeekFrom};
+
+        let mut file = self.file.try_clone().with_context(|| {
+            format!(
+                "clone pinned GRPO JSONL handle {}",
+                self.display_path.display()
+            )
+        })?;
+        file.seek(SeekFrom::Start(0)).with_context(|| {
+            format!(
+                "rewind pinned GRPO JSONL handle {}",
+                self.display_path.display()
+            )
+        })?;
+        Ok(file)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GrpoJsonlGradientCheckpointPlan {
     config: CheckpointConfig,
-    boundaries: Option<Vec<(usize, usize)>>,
+    boundaries_sha256: String,
+}
+
+struct Sha256Writer<'a>(&'a mut sha2::Sha256);
+
+impl std::io::Write for Sha256Writer<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest as _;
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct StreamingJsonArraySha256 {
+    hasher: sha2::Sha256,
+    has_items: bool,
+}
+
+impl StreamingJsonArraySha256 {
+    fn new() -> Self {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"[");
+        Self {
+            hasher,
+            has_items: false,
+        }
+    }
+
+    fn push<T: serde::Serialize>(&mut self, value: &T) -> Result<()> {
+        use sha2::Digest as _;
+        if self.has_items {
+            self.hasher.update(b",");
+        }
+        serde_json::to_writer(Sha256Writer(&mut self.hasher), value)
+            .context("serialize streamed GRPO preflight identity item")?;
+        self.has_items = true;
+        Ok(())
+    }
+
+    fn finish(mut self) -> String {
+        use sha2::Digest as _;
+        self.hasher.update(b"]");
+        format!("sha256:{:x}", self.hasher.finalize())
+    }
+}
+
+#[derive(serde::Serialize)]
+struct GrpoJsonlOrderIdentity<'a> {
+    source_index: usize,
+    source_line: usize,
+    byte_offset: u64,
+    next_byte_offset: u64,
+    line_sha256: &'a str,
+    completions: usize,
+    token_counts: &'a crate::train_receipt::TokenCountReceipt,
+    max_seq_len: usize,
+}
+
+#[derive(serde::Serialize)]
+struct GrpoJsonlGradientIdentity<'a> {
+    source_index: usize,
+    source_line: usize,
+    max_seq_len: usize,
+    enabled: bool,
+    num_segments: usize,
+    auto_configured: bool,
+    boundaries: &'a Option<Vec<(usize, usize)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -7846,7 +8649,7 @@ fn grpo_checkpoint_static_data_stats(
 
 #[allow(clippy::too_many_arguments)]
 fn build_grpo_jsonl_preflight_plan(
-    dataset_path: &Path,
+    dataset_source: &PinnedGrpoJsonlSource,
     config: &GrpoConfig,
     model_config: &ModelConfig,
     weights: &GpuWeights,
@@ -7855,70 +8658,124 @@ fn build_grpo_jsonl_preflight_plan(
     adapter_name: &str,
     device: &Device,
     activation_bytes_per_elem: usize,
+    runtime: &crate::TrainingRuntimeContext,
 ) -> Result<GrpoJsonlPreflightPlan> {
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read as _};
 
-    let file = File::open(dataset_path)
-        .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
-    let total_bytes = file
-        .metadata()
-        .with_context(|| format!("stat GRPO JSONL dataset {}", dataset_path.display()))?
-        .len();
+    let dataset_path = dataset_source.display_path();
+    let file = dataset_source.reader_from_start()?;
+    let total_bytes = dataset_source.len()?;
     let mut reader = BufReader::new(file);
     let mut line = String::new();
     let mut line_no = 0usize;
     let mut bytes_read = 0u64;
     let mut source_index = 0usize;
+    let mut max_row_bytes = 0u64;
     let mut data_stats = crate::train_receipt::DataStatsReceipt::default();
-    let mut reward_groups = Vec::new();
+    let filter_enabled = reward_filter_enabled(config);
+    let mut reward_stats_accumulator = StreamedRewardStatsAccumulator::default();
     let mut reward_filter_inputs = Vec::new();
 
     loop {
         line.clear();
-        let read = reader.read_line(&mut line).with_context(|| {
-            format!(
-                "read GRPO JSONL dataset {} line {} during preflight",
-                dataset_path.display(),
-                line_no + 1
-            )
-        })?;
+        let read = (&mut reader)
+            .take(MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES + 1)
+            .read_line(&mut line)
+            .with_context(|| {
+                format!(
+                    "read GRPO JSONL dataset {} line {} during preflight",
+                    dataset_path.display(),
+                    line_no + 1
+                )
+            })?;
         if read == 0 {
             break;
         }
-        line_no = line_no.saturating_add(1);
-        bytes_read = bytes_read.saturating_add(read as u64);
+        line_no = line_no
+            .checked_add(1)
+            .context("streamed GRPO preflight line count overflow")?;
+        anyhow::ensure!(
+            line.len() as u64 <= MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES,
+            "GRPO JSONL line {line_no} exceeds the {} byte streamed preflight row limit",
+            MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES
+        );
+        max_row_bytes = max_row_bytes.max(line.len() as u64);
+        bytes_read = bytes_read
+            .checked_add(read as u64)
+            .context("streamed GRPO preflight byte count overflow")?;
+        streamed_grpo_preflight_host_bytes(
+            data_stats.groups_read,
+            data_stats.completions_read,
+            max_row_bytes,
+            model_config.num_layers,
+            filter_enabled,
+        )
+        .with_context(|| format!("bound streamed GRPO preflight before parsing line {line_no}"))?;
         let Some(group) = parse_grpo_jsonl_group_line(&line, line_no)? else {
             continue;
         };
         validate_grpo_trajectory_roles(&group, line_no)?;
-        source_index = source_index.saturating_add(1);
-        data_stats.groups_read = data_stats.groups_read.saturating_add(1);
+        anyhow::ensure!(
+            !group.completions.is_empty()
+                && group.completions.len() <= crate::HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP,
+            "GRPO JSONL line {line_no} must contain 1..={} completions",
+            crate::HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP
+        );
+        source_index = source_index
+            .checked_add(1)
+            .context("streamed GRPO source index overflow")?;
+        data_stats.groups_read = data_stats
+            .groups_read
+            .checked_add(1)
+            .context("streamed GRPO group count overflow")?;
         data_stats.completions_read = data_stats
             .completions_read
-            .saturating_add(group.completions.len());
-        let rewards: Vec<f64> = group
-            .completions
-            .iter()
-            .map(|completion| completion.reward)
-            .collect();
-        reward_groups.push(rewards.clone());
-        reward_filter_inputs.push(RewardFilterInputGroup {
-            id: format!("line:{line_no}"),
-            source_index,
-            source_line: Some(line_no),
-            rewards,
-        });
+            .checked_add(group.completions.len())
+            .context("streamed GRPO completion count overflow")?;
+        streamed_grpo_preflight_host_bytes(
+            data_stats.groups_read,
+            data_stats.completions_read,
+            max_row_bytes,
+            model_config.num_layers,
+            filter_enabled,
+        )
+        .with_context(|| format!("bound streamed GRPO preflight metadata at line {line_no}"))?;
+        let reward_variance = reward_stats_accumulator.observe_group(
+            group
+                .completions
+                .iter()
+                .map(|completion| &completion.reward),
+            config.reward_saturation_threshold,
+        );
+        if filter_enabled {
+            reward_filter_inputs.push(RewardFilterInputGroup {
+                id: format!("line:{line_no}"),
+                source_index,
+                source_line: Some(line_no),
+                reward_variance,
+            });
+        }
     }
     anyhow::ensure!(
         bytes_read == total_bytes,
         "GRPO JSONL dataset length changed during preflight: expected {total_bytes}, read {bytes_read}"
     );
 
-    let reward_stats = crate::train_receipt::reward_stats_from_groups_with_threshold(
-        reward_groups.iter().map(Vec::as_slice),
-        config.reward_saturation_threshold,
+    let preflight_host_bytes = streamed_grpo_preflight_host_bytes(
+        data_stats.groups_read,
+        data_stats.completions_read,
+        max_row_bytes,
+        model_config.num_layers,
+        filter_enabled,
+    )?;
+    tracing::debug!(
+        preflight_host_bytes,
+        groups = data_stats.groups_read,
+        completions = data_stats.completions_read,
+        max_row_bytes,
+        "bounded streamed GRPO preflight host plan"
     );
+    let reward_stats = reward_stats_accumulator.finish();
     crate::train_receipt::warn_reward_diagnostics(
         "streamed_grpo_startup",
         adapter_name,
@@ -7949,7 +8806,6 @@ fn build_grpo_jsonl_preflight_plan(
         .as_ref()
         .is_some_and(|plan| plan.skip_training);
     if skip_training {
-        let empty_identity: Vec<serde_json::Value> = Vec::new();
         return Ok(GrpoJsonlPreflightPlan {
             total_bytes,
             total_lines: line_no,
@@ -7959,52 +8815,61 @@ fn build_grpo_jsonl_preflight_plan(
             data_stats,
             reward_stats,
             dynamic_groups_filtered: 0,
-            trainable_order_sha256: crate::train_receipt::sha256_json_serializable(&empty_identity)
-                .context("hash empty streamed GRPO trainable order")?,
-            gradient_checkpoint_plan_sha256: crate::train_receipt::sha256_json_serializable(
-                &empty_identity,
-            )
-            .context("hash empty streamed GRPO gradient-checkpoint plan")?,
+            trainable_order_sha256: StreamingJsonArraySha256::new().finish(),
+            gradient_checkpoint_plan_sha256: StreamingJsonArraySha256::new().finish(),
             skip_training,
         });
     }
 
-    let file = File::open(dataset_path).with_context(|| {
-        format!(
-            "reopen GRPO JSONL dataset {} for trainable preflight",
-            dataset_path.display()
-        )
-    })?;
+    drop(reader);
+    let file = dataset_source.reader_from_start()?;
     let mut reader = BufReader::new(file);
     let mut line_no = 0usize;
     let mut bytes_read = 0u64;
     let mut source_index = 0usize;
     let mut dynamic_groups_filtered = 0usize;
     let mut trainable = Vec::new();
+    trainable
+        .try_reserve_exact(data_stats.groups_read)
+        .context("reserve bounded streamed GRPO trainable plan")?;
     let mut planned_completions = 0usize;
     let mut planned_token_counts = crate::train_receipt::TokenCountReceipt::default();
-    let mut order_identity = Vec::new();
-    let mut gradient_identity = Vec::new();
+    let mut order_identity = StreamingJsonArraySha256::new();
+    let mut gradient_identity = StreamingJsonArraySha256::new();
 
     loop {
         line.clear();
         let byte_offset = bytes_read;
-        let read = reader.read_line(&mut line).with_context(|| {
-            format!(
-                "read GRPO JSONL dataset {} line {} during trainable preflight",
-                dataset_path.display(),
-                line_no + 1
-            )
-        })?;
+        let read = (&mut reader)
+            .take(MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES + 1)
+            .read_line(&mut line)
+            .with_context(|| {
+                format!(
+                    "read GRPO JSONL dataset {} line {} during trainable preflight",
+                    dataset_path.display(),
+                    line_no + 1
+                )
+            })?;
         if read == 0 {
             break;
         }
-        line_no = line_no.saturating_add(1);
-        bytes_read = bytes_read.saturating_add(read as u64);
+        line_no = line_no
+            .checked_add(1)
+            .context("streamed GRPO trainable-pass line count overflow")?;
+        anyhow::ensure!(
+            line.len() as u64 <= MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES,
+            "GRPO JSONL line {line_no} exceeds the {} byte streamed preflight row limit",
+            MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES
+        );
+        bytes_read = bytes_read
+            .checked_add(read as u64)
+            .context("streamed GRPO trainable-pass byte count overflow")?;
         let Some(group) = parse_grpo_jsonl_group_line(&line, line_no)? else {
             continue;
         };
-        source_index = source_index.saturating_add(1);
+        source_index = source_index
+            .checked_add(1)
+            .context("streamed GRPO source index overflow")?;
         if reward_filter_plan
             .as_ref()
             .is_some_and(|plan| !plan.keeps_source_line(line_no))
@@ -8047,30 +8912,35 @@ fn build_grpo_jsonl_preflight_plan(
             model_config.vocab_size,
             2,
             activation_bytes_per_elem,
+            runtime,
         );
         let boundaries =
             checkpoint_segments_for_config(weights, device, max_seq_len, checkpoint_config);
         let line_sha256 = crate::train_receipt::sha256_bytes(line.as_bytes());
-        order_identity.push(serde_json::json!({
-            "source_index": source_index,
-            "source_line": line_no,
-            "byte_offset": byte_offset,
-            "next_byte_offset": bytes_read,
-            "line_sha256": line_sha256,
-            "completions": completions,
-            "token_counts": token_counts,
-            "max_seq_len": max_seq_len,
-        }));
-        gradient_identity.push(serde_json::json!({
-            "source_index": source_index,
-            "source_line": line_no,
-            "max_seq_len": max_seq_len,
-            "enabled": checkpoint_config.enabled,
-            "num_segments": checkpoint_config.num_segments,
-            "auto_configured": checkpoint_config.auto_configured,
-            "boundaries": boundaries,
-        }));
-        planned_completions = planned_completions.saturating_add(completions);
+        order_identity.push(&GrpoJsonlOrderIdentity {
+            source_index,
+            source_line: line_no,
+            byte_offset,
+            next_byte_offset: bytes_read,
+            line_sha256: &line_sha256,
+            completions,
+            token_counts: &token_counts,
+            max_seq_len,
+        })?;
+        gradient_identity.push(&GrpoJsonlGradientIdentity {
+            source_index,
+            source_line: line_no,
+            max_seq_len,
+            enabled: checkpoint_config.enabled,
+            num_segments: checkpoint_config.num_segments,
+            auto_configured: checkpoint_config.auto_configured,
+            boundaries: &boundaries,
+        })?;
+        let boundaries_sha256 = crate::train_receipt::sha256_json_serializable(&boundaries)
+            .context("hash streamed GRPO checkpoint boundaries")?;
+        planned_completions = planned_completions
+            .checked_add(completions)
+            .context("streamed GRPO planned completion count overflow")?;
         planned_token_counts.add_from(&token_counts);
         trainable.push(GrpoJsonlTrainablePlanEntry {
             source_index,
@@ -8083,7 +8953,7 @@ fn build_grpo_jsonl_preflight_plan(
             max_seq_len,
             gradient_checkpoint: GrpoJsonlGradientCheckpointPlan {
                 config: checkpoint_config,
-                boundaries,
+                boundaries_sha256,
             },
         });
     }
@@ -8113,12 +8983,8 @@ fn build_grpo_jsonl_preflight_plan(
         data_stats,
         reward_stats,
         dynamic_groups_filtered,
-        trainable_order_sha256: crate::train_receipt::sha256_json_serializable(&order_identity)
-            .context("hash streamed GRPO trainable order")?,
-        gradient_checkpoint_plan_sha256: crate::train_receipt::sha256_json_serializable(
-            &gradient_identity,
-        )
-        .context("hash streamed GRPO gradient-checkpoint plan")?,
+        trainable_order_sha256: order_identity.finish(),
+        gradient_checkpoint_plan_sha256: gradient_identity.finish(),
         skip_training,
     })
 }
@@ -8212,7 +9078,11 @@ pub fn grpo_train_jsonl_to_with_coordination(
     )
 }
 
-/// Streaming staged-output GRPO with a separate durable checkpoint root.
+/// Standalone streamed GRPO with a separate durable checkpoint root.
+///
+/// Server callers should use
+/// [`grpo_train_jsonl_to_with_checkpoint_root_and_runtime`] to bind preflight
+/// and execution to the same process-lifetime memory configuration.
 #[allow(clippy::too_many_arguments)]
 pub fn grpo_train_jsonl_to_with_checkpoint_root(
     dataset_path: &Path,
@@ -8228,9 +9098,84 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
-    use std::fs::File;
+    let runtime =
+        crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
+    grpo_train_jsonl_to_with_checkpoint_root_and_runtime(
+        dataset_path,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        checkpoint_output_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+        gpu_step_coordination,
+        &runtime,
+    )
+}
+
+/// Server-owned streamed GRPO entry point with immutable runtime inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn grpo_train_jsonl_to_with_checkpoint_root_and_runtime(
+    dataset_path: &Path,
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+    gpu_step_coordination: Option<GpuStepCoordination>,
+    runtime: &crate::TrainingRuntimeContext,
+) -> Result<PathBuf> {
+    let dataset_source = PinnedGrpoJsonlSource::open(dataset_path)?;
+    grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
+        &dataset_source,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        output_adapter_dir,
+        checkpoint_output_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+        gpu_step_coordination,
+        runtime,
+    )
+}
+
+/// Streamed GRPO entry point for a caller-pinned file identity.
+#[allow(clippy::too_many_arguments)]
+pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
+    dataset_source: &PinnedGrpoJsonlSource,
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    checkpoint_output_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+    gpu_step_coordination: Option<GpuStepCoordination>,
+    runtime: &crate::TrainingRuntimeContext,
+) -> Result<PathBuf> {
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
+    let dataset_path = dataset_source.display_path();
+    let runtime_device = training_device_for_weights(weights, runtime)
+        .context("resolve streamed GRPO runtime device")?;
+    crate::ensure_memory_governor_for_runtime(runtime_device, runtime)
+        .context("initialize streamed GRPO memory governor")?;
     let run_started = Instant::now();
     anyhow::ensure!(
         config.checkpoint_interval != Some(0),
@@ -8249,7 +9194,8 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
         .validate_policy_config()
         .map_err(|e| anyhow::anyhow!("GRPO policy config: {e}"))?;
     let output_dir = output_adapter_dir.join(adapter_name);
-    let training_data_sha256 = crate::train_receipt::sha256_file(dataset_path)
+    let training_data_sha256 = dataset_source
+        .sha256()
         .with_context(|| format!("hash GRPO JSONL dataset {}", dataset_path.display()))?;
     let training_data_checkpoint_sha256 =
         checkpoint_sha256_hex(Some(&training_data_sha256), "GRPO JSONL training data")?;
@@ -8338,8 +9284,8 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
     // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward), so
     // keep `device` kt downstream. The only candle touch is safetensors adapter
     // I/O, which bridges kt->candle locally inside save/load.
-    let device = training_device_for_weights(weights);
-    let backend = backend::for_device_kt(&device);
+    let device = training_device_for_weights(weights, runtime)?;
+    let backend = training_backend_for_device(device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
     let activation_bytes_per_elem = training_activation_bytes_per_elem_for_policy(
         weights,
@@ -8454,7 +9400,7 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
     };
 
     let preflight = match build_grpo_jsonl_preflight_plan(
-        dataset_path,
+        dataset_source,
         config,
         model_config,
         weights,
@@ -8463,6 +9409,7 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
         adapter_name,
         &device,
         activation_bytes_per_elem,
+        runtime,
     ) {
         Ok(plan) => plan,
         Err(err) => {
@@ -8497,7 +9444,8 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
             return Err(crate::train_receipt::annotate_training_error(err));
         }
     };
-    let post_preflight_sha256 = crate::train_receipt::sha256_file(dataset_path)
+    let post_preflight_sha256 = dataset_source
+        .sha256()
         .with_context(|| format!("rehash GRPO JSONL dataset {}", dataset_path.display()))?;
     anyhow::ensure!(
         post_preflight_sha256 == training_data_sha256,
@@ -8748,8 +9696,7 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
             "streamed GRPO resume diagnostics do not match the committed trainable prefix"
         );
 
-        let mut file = File::open(dataset_path)
-            .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
+        let mut file = dataset_source.reader_from_start()?;
         file.seek(SeekFrom::Start(expected_byte_offset))
             .with_context(|| {
                 format!(
@@ -8845,7 +9792,9 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
                 break;
             }
             line_no = line_no.saturating_add(1);
-            bytes_read = bytes_read.saturating_add(read as u64);
+            bytes_read = bytes_read
+                .checked_add(read as u64)
+                .context("streamed GRPO training byte count overflow")?;
             let Some(entry) = preflight.trainable.get(global_step) else {
                 // Consume trailing blank/filtered lines so the final file
                 // cursor and hash still cover the complete source.
@@ -8937,12 +9886,15 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
                 model_config.vocab_size,
                 2, // BF16 base weights
                 activation_bytes_per_elem,
+                runtime,
             );
             let segments =
                 checkpoint_segments_for_config(weights, &device, group_max_seq_len, ckpt_config);
+            let segments_sha256 = crate::train_receipt::sha256_json_serializable(&segments)
+                .context("hash streamed GRPO runtime checkpoint boundaries")?;
             anyhow::ensure!(
                 ckpt_config == entry.gradient_checkpoint.config
-                    && segments == entry.gradient_checkpoint.boundaries,
+                    && segments_sha256 == entry.gradient_checkpoint.boundaries_sha256,
                 "streamed GRPO gradient-checkpoint plan drifted at line {}",
                 line_no
             );
@@ -9151,7 +10103,9 @@ pub fn grpo_train_jsonl_to_with_checkpoint_root(
                 && line_no == preflight.total_lines,
             "streamed GRPO completed with inconsistent progress, diagnostics, or source cursor"
         );
-        let final_training_data_sha256 = crate::train_receipt::sha256_file(dataset_path)
+        drop(reader);
+        let final_training_data_sha256 = dataset_source
+            .sha256()
             .with_context(|| format!("rehash GRPO JSONL dataset {}", dataset_path.display()))?;
         anyhow::ensure!(
             final_training_data_sha256 == training_data_sha256,
@@ -10689,12 +11643,43 @@ pub fn validate_grpo_group_policy_data(
     config: &GrpoConfig,
     tokenizer: &KilnTokenizer,
 ) -> Result<()> {
+    validate_grpo_group_policy_data_and_max_seq_len(group, config, tokenizer, 1).map(|_| ())
+}
+
+/// Validate one streamed GRPO row and return its exact longest tokenized
+/// completion length. Server admission uses this while scanning the complete
+/// JSONL source, so its memory plan is based on the same tokenizer and masks as
+/// the trainer rather than a character-count estimate.
+pub fn validate_grpo_group_policy_data_and_max_seq_len(
+    group: &GrpoGroup,
+    config: &GrpoConfig,
+    tokenizer: &KilnTokenizer,
+    source_line: usize,
+) -> Result<usize> {
     config
         .validate_policy_config()
         .map_err(|error| anyhow::anyhow!("GRPO policy config: {error}"))?;
+    validate_grpo_trajectory_roles(group, source_line)?;
+    let has_env_tokens = group.completions.iter().any(|completion| {
+        completion
+            .trajectory
+            .iter()
+            .any(|segment| segment.kind == TurnKind::Observation)
+    });
+    config
+        .loss
+        .validate_for_kt_tape(has_env_tokens)
+        .map_err(|error| anyhow::anyhow!("GRPO loss config: {error}"))?;
     let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
     let tokenized = tokenize_grpo_group_timed(group, tokenizer, &mask_cfg, None)?;
-    validate_tokenized_behavior_policy(&tokenized, config.behavior_policy)
+    validate_tokenized_behavior_policy(&tokenized, config.behavior_policy)?;
+    validate_grpo_dry_run_masks(&tokenized, source_line, source_line)?;
+    Ok(tokenized
+        .completions
+        .iter()
+        .map(|completion| completion.input_ids.len())
+        .max()
+        .unwrap_or(0))
 }
 
 fn tokenize_grpo_group_timed(
@@ -13509,39 +14494,63 @@ impl CheckpointConfig {
         }
     }
 
-    /// Create config from environment with VRAM-aware defaults.
-    ///
-    /// Priority for num_segments:
-    /// 1. `KILN_GRAD_CHECKPOINT_SEGMENTS` env var (user override)
-    /// 2. Auto-detect from GPU VRAM via `kiln_memory::vram`
-    /// 3. Fallback to 4 segments
+    /// Standalone constructor with VRAM-aware automatic defaults.
     ///
     /// This is the *VRAM-only* path. Callers that know the workload's
     /// `max_seq_len` should prefer [`CheckpointConfig::auto_for_workload`],
     /// which can additionally choose to *disable* checkpointing when the
     /// activation tape comfortably fits in available VRAM (typical on big
     /// GPUs with short prompts).
-    pub fn from_env(num_layers: usize) -> Self {
-        let enabled = std::env::var("KILN_NO_GRAD_CHECKPOINT")
-            .map(|v| v != "1" && v.to_lowercase() != "true")
-            .unwrap_or(true);
+    pub fn standalone(num_layers: usize) -> Self {
+        let runtime = crate::TrainingRuntimeContext::standalone();
+        Self::from_runtime(num_layers, &runtime)
+    }
 
-        // Check for explicit env override first
-        if let Some(explicit) = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-        {
-            return Self {
-                num_segments: explicit.min(num_layers).max(1),
-                enabled,
-                auto_configured: false,
-            };
+    /// Standalone compatibility with an already-resolved capacity.
+    pub fn standalone_with_vram(num_layers: usize, vram: &kiln_memory::vram::GpuVramInfo) -> Self {
+        let runtime = crate::TrainingRuntimeContext::standalone_with_effective_vram(*vram);
+        Self::from_runtime(num_layers, &runtime)
+    }
+
+    /// Deprecated compatibility name. This function does not read environment.
+    #[deprecated(note = "use CheckpointConfig::standalone or CheckpointConfig::from_runtime")]
+    pub fn from_env(num_layers: usize) -> Self {
+        Self::standalone(num_layers)
+    }
+
+    /// Deprecated compatibility name. This function does not read environment.
+    #[deprecated(note = "use CheckpointConfig::standalone_with_vram or from_runtime")]
+    pub fn from_env_with_vram(num_layers: usize, vram: &kiln_memory::vram::GpuVramInfo) -> Self {
+        Self::standalone_with_vram(num_layers, vram)
+    }
+
+    /// Resolve a VRAM-only checkpoint configuration from immutable inputs.
+    pub fn from_runtime(num_layers: usize, runtime: &crate::TrainingRuntimeContext) -> Self {
+        use crate::GradientCheckpointPolicy;
+
+        let vram = runtime.effective_vram();
+        match runtime.gradient_checkpoint_policy() {
+            GradientCheckpointPolicy::ExplicitSegments { segments } => {
+                let mut config = Self::from_resolved_segments(num_layers, segments.get());
+                config.auto_configured = false;
+                return config;
+            }
+            GradientCheckpointPolicy::Disabled {
+                segments: Some(segments),
+            } => {
+                return Self {
+                    num_segments: segments.get().min(num_layers).max(1),
+                    enabled: false,
+                    auto_configured: false,
+                };
+            }
+            GradientCheckpointPolicy::Auto
+            | GradientCheckpointPolicy::Disabled { segments: None } => {}
         }
 
         // VRAM-aware auto-configuration
-        let vram = kiln_memory::vram::detect_vram();
-        let num_segments = kiln_memory::vram::recommended_checkpoint_segments(&vram)
-            .unwrap_or(4) // fallback if env var was set (shouldn't happen here)
+        let num_segments = kiln_memory::vram::recommended_checkpoint_segments(vram)
+            .unwrap_or(4) // conservative fallback when capacity is unknown
             .min(num_layers)
             .max(1);
 
@@ -13558,19 +14567,20 @@ impl CheckpointConfig {
 
         Self {
             num_segments,
-            enabled,
+            enabled: !runtime.gradient_checkpoint_policy().is_disabled(),
             auto_configured,
         }
     }
 
     /// Create config with **VRAM + workload-shape** auto-tuning. Preferred over
-    /// [`CheckpointConfig::from_env`] for trainer call sites that have the
+    /// [`CheckpointConfig::standalone`] for trainer call sites that have the
     /// `max_seq_len` available after tokenization.
     ///
-    /// Behavior:
-    /// * `KILN_GRAD_CHECKPOINT_SEGMENTS` / `KILN_NO_GRAD_CHECKPOINT` env
-    ///   overrides are honored unchanged (falls through to `from_env`).
-    /// * Otherwise calls [`kiln_memory::vram::recommended_checkpoint_plan`]
+    /// Standalone wrappers detect physical capacity once into a
+    /// [`crate::TrainingRuntimeContext`]. Runtime-aware callers receive the
+    /// server's resolved typed configuration.
+    ///
+    /// In auto mode this calls [`kiln_memory::vram::recommended_checkpoint_plan`]
     ///   which can *disable* checkpointing entirely when the activation tape
     ///   comfortably fits in available VRAM. On A6000 + Qwen3.5-4B, this
     ///   skips checkpointing for sequences up to ~12K tokens and only
@@ -13587,7 +14597,8 @@ impl CheckpointConfig {
         vocab_size: usize,
         bytes_per_base_param: usize,
     ) -> Self {
-        Self::auto_for_workload_with_activation_bytes(
+        let runtime = crate::TrainingRuntimeContext::standalone();
+        Self::auto_for_workload_with_activation_bytes_and_runtime(
             num_layers,
             max_seq_len_tokens,
             hidden_size,
@@ -13595,6 +14606,30 @@ impl CheckpointConfig {
             vocab_size,
             bytes_per_base_param,
             4,
+            &runtime,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn auto_for_workload_with_vram(
+        num_layers: usize,
+        max_seq_len_tokens: usize,
+        hidden_size: usize,
+        intermediate_size: usize,
+        vocab_size: usize,
+        bytes_per_base_param: usize,
+        vram: &kiln_memory::vram::GpuVramInfo,
+    ) -> Self {
+        let runtime = crate::TrainingRuntimeContext::standalone_with_effective_vram(*vram);
+        Self::auto_for_workload_with_activation_bytes_and_runtime(
+            num_layers,
+            max_seq_len_tokens,
+            hidden_size,
+            intermediate_size,
+            vocab_size,
+            bytes_per_base_param,
+            4,
+            &runtime,
         )
     }
 
@@ -13608,20 +14643,72 @@ impl CheckpointConfig {
         bytes_per_base_param: usize,
         activation_bytes_per_elem: usize,
     ) -> Self {
-        // Env overrides always win and route to from_env's tested code path.
-        if std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .is_some()
-            || std::env::var("KILN_NO_GRAD_CHECKPOINT")
-                .as_deref()
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-        {
-            return Self::from_env(num_layers);
+        let runtime = crate::TrainingRuntimeContext::standalone();
+        Self::auto_for_workload_with_activation_bytes_and_runtime(
+            num_layers,
+            max_seq_len_tokens,
+            hidden_size,
+            intermediate_size,
+            vocab_size,
+            bytes_per_base_param,
+            activation_bytes_per_elem,
+            &runtime,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn auto_for_workload_with_activation_bytes_and_vram(
+        num_layers: usize,
+        max_seq_len_tokens: usize,
+        hidden_size: usize,
+        intermediate_size: usize,
+        vocab_size: usize,
+        bytes_per_base_param: usize,
+        activation_bytes_per_elem: usize,
+        vram: &kiln_memory::vram::GpuVramInfo,
+    ) -> Self {
+        let runtime = crate::TrainingRuntimeContext::standalone_with_effective_vram(*vram);
+        Self::auto_for_workload_with_activation_bytes_and_runtime(
+            num_layers,
+            max_seq_len_tokens,
+            hidden_size,
+            intermediate_size,
+            vocab_size,
+            bytes_per_base_param,
+            activation_bytes_per_elem,
+            &runtime,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn auto_for_workload_with_activation_bytes_and_runtime(
+        num_layers: usize,
+        max_seq_len_tokens: usize,
+        hidden_size: usize,
+        intermediate_size: usize,
+        vocab_size: usize,
+        bytes_per_base_param: usize,
+        activation_bytes_per_elem: usize,
+        runtime: &crate::TrainingRuntimeContext,
+    ) -> Self {
+        match runtime.gradient_checkpoint_policy() {
+            crate::GradientCheckpointPolicy::Auto => {}
+            crate::GradientCheckpointPolicy::ExplicitSegments { segments } => {
+                let mut config = Self::from_resolved_segments(num_layers, segments.get());
+                config.auto_configured = false;
+                return config;
+            }
+            crate::GradientCheckpointPolicy::Disabled { segments } => {
+                return Self {
+                    num_segments: segments.map_or(1, |value| value.get().min(num_layers).max(1)),
+                    enabled: false,
+                    auto_configured: false,
+                };
+            }
         }
 
-        let vram = kiln_memory::vram::detect_vram();
+        let vram = runtime.effective_vram();
+
         let base_bytes = kiln_memory::vram::estimate_base_model_bytes(
             num_layers,
             hidden_size,
@@ -13631,18 +14718,14 @@ impl CheckpointConfig {
         );
 
         match kiln_memory::vram::recommended_checkpoint_plan_with_activation_bytes(
-            &vram,
+            vram,
             num_layers,
             max_seq_len_tokens,
             hidden_size,
             base_bytes,
             activation_bytes_per_elem,
         ) {
-            None | Some(kiln_memory::vram::CheckpointPlan::UserOverride) => {
-                // VRAM detection failed or env override is set — fall back
-                // to the existing VRAM-only path.
-                Self::from_env(num_layers)
-            }
+            None => Self::from_runtime(num_layers, runtime),
             Some(kiln_memory::vram::CheckpointPlan::Disabled {
                 max_act_gib,
                 available_gib,
@@ -13689,22 +14772,11 @@ impl CheckpointConfig {
     }
 }
 
-fn checkpoint_env_override_present() -> bool {
-    std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .is_some()
-        || std::env::var("KILN_NO_GRAD_CHECKPOINT")
-            .as_deref()
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn checkpoint_config_for_training_step(
     weights: &GpuWeights,
     device: &Device,
-    preflight_max_segments: Option<usize>,
+    preflight_resolved_segments: Option<usize>,
     num_layers: usize,
     seq_len_tokens: usize,
     hidden_size: usize,
@@ -13712,14 +14784,40 @@ fn checkpoint_config_for_training_step(
     vocab_size: usize,
     bytes_per_base_param: usize,
     activation_bytes_per_elem: usize,
+    runtime: &crate::TrainingRuntimeContext,
 ) -> CheckpointConfig {
-    if checkpoint_env_override_present() {
-        return preflight_max_segments
-            .map(|segments| CheckpointConfig::from_resolved_segments(num_layers, segments))
-            .unwrap_or_else(|| CheckpointConfig::from_env(num_layers));
+    match runtime.gradient_checkpoint_policy() {
+        crate::GradientCheckpointPolicy::Auto => {}
+        crate::GradientCheckpointPolicy::ExplicitSegments { segments } => {
+            let mut config = CheckpointConfig::from_resolved_segments(
+                num_layers,
+                preflight_resolved_segments.unwrap_or(segments.get()),
+            );
+            config.auto_configured = false;
+            return config;
+        }
+        crate::GradientCheckpointPolicy::Disabled { segments } => {
+            return CheckpointConfig {
+                num_segments: segments
+                    .map(std::num::NonZeroUsize::get)
+                    .or(preflight_resolved_segments)
+                    .unwrap_or(1)
+                    .min(num_layers)
+                    .max(1),
+                enabled: false,
+                auto_configured: false,
+            };
+        }
     }
 
-    let mut cfg = CheckpointConfig::auto_for_workload_with_activation_bytes(
+    if let Some(resolved_segments) = preflight_resolved_segments {
+        // Server admission resolves against live memory after the model and KV
+        // cache are resident. That exact plan is stricter than replanning from
+        // the immutable startup capacity and must remain authoritative.
+        return CheckpointConfig::from_resolved_segments(num_layers, resolved_segments);
+    }
+
+    let mut cfg = CheckpointConfig::auto_for_workload_with_activation_bytes_and_runtime(
         num_layers,
         seq_len_tokens,
         hidden_size,
@@ -13727,6 +14825,7 @@ fn checkpoint_config_for_training_step(
         vocab_size,
         bytes_per_base_param,
         activation_bytes_per_elem,
+        runtime,
     );
 
     if let Some(num_segments) =
@@ -13741,14 +14840,6 @@ fn checkpoint_config_for_training_step(
         cfg.enabled = num_segments > 1;
         cfg.num_segments = num_segments;
         cfg.auto_configured = true;
-    }
-
-    if let Some(max_segments) = preflight_max_segments {
-        let max_segments = max_segments.min(num_layers).max(1);
-        if cfg.enabled && cfg.num_segments > max_segments {
-            cfg.num_segments = max_segments;
-            cfg.enabled = max_segments > 1;
-        }
     }
 
     cfg
@@ -15395,7 +16486,8 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     let lora_weights = params.as_lora_weights();
 
     let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
-    let mut boundaries: Vec<Tensor> = Vec::with_capacity(num_segments + 1);
+    let mut boundaries: Vec<Tensor> =
+        Vec::with_capacity(crate::retained_checkpoint_boundary_count(num_segments));
     let mut current = embed_hidden.detach();
     boundaries.push(current.clone());
     {
@@ -15912,6 +17004,185 @@ pub(crate) mod tests {
     #[cfg(feature = "cuda")]
     pub(crate) static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[cfg(unix)]
+    #[test]
+    fn pinned_grpo_source_survives_same_size_path_replacement() -> Result<()> {
+        use std::io::Read as _;
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("groups.jsonl");
+        let displaced = directory.path().join("admitted-inode.jsonl");
+        std::fs::write(&path, b"first\n")?;
+        let source = PinnedGrpoJsonlSource::from_file(std::fs::File::open(&path)?, path.clone())?;
+        let admitted_sha256 = source.sha256()?;
+
+        // Model the verify/use window: the caller moves the admitted inode
+        // away and installs different bytes at the same pathname and size.
+        std::fs::rename(&path, &displaced)?;
+        std::fs::write(&path, b"other\n")?;
+        assert_eq!(std::fs::metadata(&path)?.len(), source.len()?);
+
+        let mut pinned_bytes = String::new();
+        source
+            .reader_from_start()?
+            .read_to_string(&mut pinned_bytes)?;
+        assert_eq!(pinned_bytes, "first\n");
+        assert_eq!(source.sha256()?, admitted_sha256);
+        assert_ne!(crate::train_receipt::sha256_file(&path)?, admitted_sha256);
+        Ok(())
+    }
+
+    #[test]
+    fn streamed_grpo_preflight_budget_checks_every_retained_dimension() {
+        let baseline = streamed_grpo_preflight_host_bytes(1, 2, 128, 32, false).unwrap();
+        let filtered = streamed_grpo_preflight_host_bytes(1, 2, 128, 32, true).unwrap();
+        assert!(filtered > baseline);
+        assert!(
+            streamed_grpo_preflight_host_bytes(
+                MAX_STREAMED_GRPO_PREFLIGHT_GROUPS + 1,
+                2,
+                128,
+                32,
+                false,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("groups")
+        );
+        assert!(
+            streamed_grpo_preflight_host_bytes(
+                1,
+                MAX_STREAMED_GRPO_PREFLIGHT_COMPLETIONS + 1,
+                128,
+                32,
+                false,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("completions")
+        );
+        assert!(
+            streamed_grpo_preflight_host_bytes(
+                1,
+                2,
+                MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES + 1,
+                32,
+                false,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("row")
+        );
+        assert!(
+            streamed_grpo_preflight_host_bytes(200_000, 400_000, 128, 32, true)
+                .unwrap_err()
+                .to_string()
+                .contains("projects")
+        );
+    }
+
+    #[test]
+    fn streamed_grpo_per_group_charges_dominate_retained_layouts() {
+        let base = streamed_grpo_preflight_host_bytes(0, 0, 0, 1, false).unwrap();
+        let one_group = streamed_grpo_preflight_host_bytes(1, 0, 0, 1, false).unwrap();
+        let one_group_two_layers = streamed_grpo_preflight_host_bytes(1, 0, 0, 2, false).unwrap();
+        let one_filtered_group = streamed_grpo_preflight_host_bytes(1, 0, 0, 1, true).unwrap();
+        let plan_charge = one_group - base;
+        let checkpoint_layer_charge = one_group_two_layers - one_group;
+        let filter_charge = one_filtered_group - one_group;
+
+        // Each retained plan entry owns two `sha256:` strings. A 96-byte
+        // capacity per string covers the 71-byte payload plus allocator size
+        // class slack without double-counting the String headers in the
+        // struct layout itself.
+        const SHA256_HEAP_CAPACITY_WITH_SLACK: u64 = 96;
+        let minimum_plan_charge = std::mem::size_of::<GrpoJsonlTrainablePlanEntry>() as u64
+            + 2 * SHA256_HEAP_CAPACITY_WITH_SLACK;
+        assert!(
+            plan_charge >= minimum_plan_charge,
+            "streamed GRPO plan charge {plan_charge} is below retained entry layout {minimum_plan_charge}"
+        );
+        let minimum_checkpoint_layer_charge = std::mem::size_of::<(usize, usize)>() as u64 + 16;
+        assert!(
+            checkpoint_layer_charge >= minimum_checkpoint_layer_charge,
+            "streamed GRPO checkpoint layer charge {checkpoint_layer_charge} is below boundary layout {minimum_checkpoint_layer_charge}"
+        );
+
+        // At filter-plan peak, each group is represented by the compact input,
+        // a receipt decision, one kept/dropped ID String, and two index lists.
+        // Heap allowances cover all three ID payload copies, a reject reason,
+        // Vec allocator slack, and the overlapping serialized sidecar row.
+        const ID_HEAP_CAPACITY_WITH_SLACK: u64 = 64;
+        const REJECT_REASON_HEAP_CAPACITY_WITH_SLACK: u64 = 64;
+        const FILTER_VEC_ALLOCATOR_SLACK: u64 = 256;
+        const SERIALIZED_SIDECAR_ROW_WITH_SLACK: u64 = 512;
+        let minimum_filter_charge = std::mem::size_of::<RewardFilterInputGroup>() as u64
+            + std::mem::size_of::<crate::train_receipt::RewardFilterGroupDecisionReceipt>() as u64
+            + std::mem::size_of::<String>() as u64
+            + 2 * std::mem::size_of::<usize>() as u64
+            + 3 * ID_HEAP_CAPACITY_WITH_SLACK
+            + REJECT_REASON_HEAP_CAPACITY_WITH_SLACK
+            + FILTER_VEC_ALLOCATOR_SLACK
+            + SERIALIZED_SIDECAR_ROW_WITH_SLACK;
+        assert!(
+            filter_charge >= minimum_filter_charge,
+            "streamed GRPO filter charge {filter_charge} is below retained filter layout {minimum_filter_charge}"
+        );
+    }
+
+    #[test]
+    fn streamed_reward_stats_are_incremental_and_match_reference_receipt() {
+        let groups = [vec![0.0, 1.0], vec![0.25, 0.75, 1.0]];
+        let expected = crate::train_receipt::reward_stats_from_groups_with_threshold(
+            groups.iter().map(Vec::as_slice),
+            0.95,
+        );
+        let mut accumulator = StreamedRewardStatsAccumulator::default();
+        for group in &groups {
+            accumulator.observe_group(group.iter(), 0.95);
+        }
+        let actual = accumulator.finish();
+        assert_eq!(actual.count, expected.count);
+        assert_eq!(actual.group_count, expected.group_count);
+        assert_eq!(
+            actual.group_variance_histogram,
+            expected.group_variance_histogram
+        );
+        assert!((actual.mean.unwrap() - expected.mean.unwrap()).abs() < 1e-12);
+        assert!((actual.stdev.unwrap() - expected.stdev.unwrap()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn streamed_identity_hasher_is_multipass_constant_space() {
+        let mut hasher = StreamingJsonArraySha256::new();
+        hasher.push(&1u64).unwrap();
+        hasher.push(&2u64).unwrap();
+        assert_eq!(
+            hasher.finish(),
+            crate::train_receipt::sha256_json_serializable(&vec![1u64, 2u64]).unwrap()
+        );
+        assert_eq!(
+            StreamingJsonArraySha256::new().finish(),
+            crate::train_receipt::sha256_json_serializable(&Vec::<u64>::new()).unwrap()
+        );
+    }
+
+    #[test]
+    fn resident_training_weights_defensively_rejects_cpu_to_vulkan_upload() -> Result<()> {
+        let config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&config, &Device::Cpu)?;
+        let error = match resident_training_weights(&weights, &Device::Vulkan(0)) {
+            Ok(_) => anyhow::bail!("CPU-host weights must not start a resident Vulkan upload"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(
+                "full-model resident Vulkan training substrate is not production-qualified"
+            )
+        );
+        Ok(())
+    }
+
     #[test]
     fn native_sft_profile_binds_effective_config_and_scheduler_state() -> Result<()> {
         let config = crate::SftConfig::default();
@@ -16389,6 +17660,151 @@ pub(crate) mod tests {
             messages: vec![ChatMessage::new("user", "a")],
             completions,
         }
+    }
+
+    #[test]
+    fn grpo_dry_run_rejects_oversized_row_before_json_materialization() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dataset = tmp.path().join("oversized-row.jsonl");
+        let file = std::fs::File::create(&dataset).unwrap();
+        file.set_len(MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES + 1)
+            .unwrap();
+        let tokenizer = make_echo_smoke_tokenizer().unwrap();
+
+        let error = grpo_dry_run_jsonl(
+            &dataset,
+            &dry_run_config(false, false),
+            &ModelConfig::qwen3_5_4b(),
+            &tokenizer,
+            &tmp.path().join("out"),
+            "oversized-row",
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("streamed preflight row limit"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn grpo_dry_run_rejects_oversized_completion_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let completions = (0..=crate::HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP)
+            .map(|index| crate::ScoredRollout::legacy("b".to_string(), (index % 2) as f64))
+            .collect::<Vec<_>>();
+        let dataset = dry_run_dataset(
+            tmp.path(),
+            "oversized-completions.jsonl",
+            &[dry_run_group(completions)],
+        );
+        let tokenizer = make_echo_smoke_tokenizer().unwrap();
+
+        let error = grpo_dry_run_jsonl(
+            &dataset,
+            &dry_run_config(false, false),
+            &ModelConfig::qwen3_5_4b(),
+            &tokenizer,
+            &tmp.path().join("out"),
+            "oversized-completions",
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&format!(
+                "1..={} completions",
+                crate::HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP
+            )),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn grpo_dry_run_reward_stats_match_materialized_receipt_exactly() {
+        let groups = [
+            dry_run_group(vec![
+                crate::ScoredRollout::legacy("a".to_string(), 0.1),
+                crate::ScoredRollout::legacy("b".to_string(), 0.2),
+                crate::ScoredRollout::legacy("a".to_string(), 0.3),
+            ]),
+            dry_run_group(vec![
+                crate::ScoredRollout::legacy("b".to_string(), 0.0),
+                crate::ScoredRollout::legacy("a".to_string(), 1.0),
+            ]),
+        ];
+        let materialized = groups
+            .iter()
+            .map(|group| {
+                group
+                    .completions
+                    .iter()
+                    .map(|completion| completion.reward)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let expected = crate::train_receipt::reward_stats_from_groups_with_threshold(
+            materialized.iter().map(Vec::as_slice),
+            0.95,
+        );
+        let mut accumulator = DryRunRewardStatsAccumulator::default();
+        for group in &groups {
+            accumulator.observe_group(group, 0.95).unwrap();
+        }
+        let mean = accumulator.mean().unwrap();
+        let squared_deviation_sum = groups
+            .iter()
+            .flat_map(|group| &group.completions)
+            .map(|completion| {
+                let centered = completion.reward - mean;
+                centered * centered
+            })
+            .sum();
+        assert_eq!(accumulator.finish(squared_deviation_sum), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grpo_dry_run_multipass_stays_on_pinned_source_after_path_replacement() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let dataset = dry_run_dataset(
+            tmp.path(),
+            "pinned-dry-run.jsonl",
+            &[dry_run_group(vec![
+                crate::ScoredRollout::legacy("a".to_string(), 0.0),
+                crate::ScoredRollout::legacy("b".to_string(), 1.0),
+            ])],
+        );
+        let expected_sha256 = crate::train_receipt::sha256_file(&dataset)?;
+        let displaced = tmp.path().join("pinned-original.jsonl");
+        let mut replace_path = || -> Result<()> {
+            std::fs::rename(&dataset, &displaced)?;
+            std::fs::write(&dataset, b"replacement is not valid JSON\n")?;
+            Ok(())
+        };
+        let tokenizer = make_echo_smoke_tokenizer()?;
+        let output = tmp.path().join("out");
+
+        let report = grpo_dry_run_jsonl_with_pass_hook(
+            &dataset,
+            &dry_run_config(false, false),
+            &ModelConfig::qwen3_5_4b(),
+            &tokenizer,
+            &output,
+            "pinned-dry-run",
+            false,
+            Some(&mut replace_path),
+        )?;
+        assert_eq!(report.data.groups_read, 1);
+        assert_eq!(report.data.completions_trained, 2);
+        let receipt =
+            crate::train_receipt::TrainReceipt::read_from_adapter_dir(&report.adapter_dir)?
+                .context("dry-run receipt must exist")?;
+        assert_eq!(
+            receipt.training_data.sha256.as_deref(),
+            Some(expected_sha256.as_str())
+        );
+        assert_eq!(std::fs::read(&dataset)?, b"replacement is not valid JSON\n");
+        Ok(())
     }
 
     fn attach_test_rollout_provenance(
@@ -20506,6 +21922,7 @@ pub(crate) mod tests {
     fn grpo_cancel_resume_matches_uninterrupted_training(
         model_config: ModelConfig,
         weights: GpuWeights,
+        runtime: crate::TrainingRuntimeContext,
     ) -> Result<()> {
         let tokenizer = make_echo_smoke_tokenizer()?;
         let groups: Vec<GrpoGroup> = (0..3)
@@ -20545,7 +21962,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&uninterrupted_checkpoints)?;
         let uninterrupted_losses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let uninterrupted_capture = uninterrupted_losses.clone();
-        let uninterrupted_output = grpo_train_to_with_checkpoint_root(
+        let uninterrupted_output = grpo_train_to_with_checkpoint_root_and_runtime(
             &groups,
             &config,
             &model_config,
@@ -20561,6 +21978,7 @@ pub(crate) mod tests {
             })),
             None,
             None,
+            &runtime,
         )?;
 
         let resumed_root = tempfile::tempdir()?;
@@ -20570,7 +21988,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&resumed_checkpoints)?;
         let interrupted_losses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let interrupted_capture = interrupted_losses.clone();
-        let interrupted = grpo_train_to_with_checkpoint_root(
+        let interrupted = grpo_train_to_with_checkpoint_root_and_runtime(
             &groups,
             &config,
             &model_config,
@@ -20590,6 +22008,7 @@ pub(crate) mod tests {
             })),
             None,
             None,
+            &runtime,
         )
         .expect_err("injected GRPO cancellation must stop after group one");
         anyhow::ensure!(interrupted.to_string().contains("cancelled by user"));
@@ -20611,7 +22030,7 @@ pub(crate) mod tests {
             resume_checkpoint: Some(resume_path.display().to_string()),
             ..config.clone()
         };
-        let resumed_output = grpo_train_to_with_checkpoint_root(
+        let resumed_output = grpo_train_to_with_checkpoint_root_and_runtime(
             &groups,
             &resumed_config,
             &model_config,
@@ -20627,6 +22046,7 @@ pub(crate) mod tests {
             })),
             None,
             None,
+            &runtime,
         )?;
 
         let uninterrupted_losses = uninterrupted_losses.lock().unwrap().clone();
@@ -20648,6 +22068,7 @@ pub(crate) mod tests {
     fn grpo_jsonl_cancel_resume_matches_uninterrupted_training(
         model_config: ModelConfig,
         weights: GpuWeights,
+        runtime: crate::TrainingRuntimeContext,
     ) -> Result<()> {
         let tokenizer = make_echo_smoke_tokenizer()?;
         let groups: Vec<GrpoGroup> = (0..3)
@@ -20700,7 +22121,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&uninterrupted_checkpoints)?;
         let uninterrupted_losses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let uninterrupted_capture = uninterrupted_losses.clone();
-        let uninterrupted_output = grpo_train_jsonl_to_with_checkpoint_root(
+        let uninterrupted_output = grpo_train_jsonl_to_with_checkpoint_root_and_runtime(
             &dataset_path,
             &config,
             &model_config,
@@ -20716,6 +22137,7 @@ pub(crate) mod tests {
             })),
             None,
             None,
+            &runtime,
         )?;
 
         let resumed_root = tempfile::tempdir()?;
@@ -20725,7 +22147,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&resumed_checkpoints)?;
         let interrupted_losses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let interrupted_capture = interrupted_losses.clone();
-        let interrupted = grpo_train_jsonl_to_with_checkpoint_root(
+        let interrupted = grpo_train_jsonl_to_with_checkpoint_root_and_runtime(
             &dataset_path,
             &config,
             &model_config,
@@ -20746,6 +22168,7 @@ pub(crate) mod tests {
             })),
             None,
             None,
+            &runtime,
         )
         .expect_err("injected streamed GRPO cancellation must stop after group one");
         anyhow::ensure!(interrupted.to_string().contains("cancelled by user"));
@@ -20774,7 +22197,7 @@ pub(crate) mod tests {
             resume_checkpoint: Some(resume_path.display().to_string()),
             ..config.clone()
         };
-        let resumed_output = grpo_train_jsonl_to_with_checkpoint_root(
+        let resumed_output = grpo_train_jsonl_to_with_checkpoint_root_and_runtime(
             &dataset_path,
             &resumed_config,
             &model_config,
@@ -20790,6 +22213,7 @@ pub(crate) mod tests {
             })),
             None,
             None,
+            &runtime,
         )?;
 
         let (uninterrupted_loop, resumed_loop) = assert_grpo_resume_equivalent(
@@ -20828,9 +22252,10 @@ pub(crate) mod tests {
             "ROCm qualification requested but no ROCm device is available"
         );
         let device = Device::Rocm(0);
+        let runtime = crate::TrainingRuntimeContext::standalone_for_device(device);
         let model_config = tiny_config_full_attn_bf16();
         let weights = tiny_weights_bf16(&model_config, &device)?;
-        grpo_cancel_resume_matches_uninterrupted_training(model_config, weights)
+        grpo_cancel_resume_matches_uninterrupted_training(model_config, weights, runtime)
     }
 
     #[cfg(feature = "rocm")]
@@ -20847,9 +22272,10 @@ pub(crate) mod tests {
             "ROCm qualification requested but no ROCm device is available"
         );
         let device = Device::Rocm(0);
+        let runtime = crate::TrainingRuntimeContext::standalone_for_device(device);
         let model_config = tiny_config_full_attn_bf16();
         let weights = tiny_weights_bf16(&model_config, &device)?;
-        grpo_jsonl_cancel_resume_matches_uninterrupted_training(model_config, weights)
+        grpo_jsonl_cancel_resume_matches_uninterrupted_training(model_config, weights, runtime)
     }
 
     #[cfg(feature = "vulkan")]
@@ -20861,16 +22287,11 @@ pub(crate) mod tests {
             );
             return Ok(());
         }
-        let prior_resident = std::env::var("KILN_TRAIN_RESIDENT").ok();
-        unsafe {
-            std::env::set_var("KILN_TRAIN_RESIDENT", "1");
-        }
         let device = Device::Vulkan(0);
+        let runtime = crate::TrainingRuntimeContext::standalone_for_device(device);
         let model_config = tiny_config_full_attn();
         let weights = tiny_weights(&model_config, &device)?;
-        let result = grpo_cancel_resume_matches_uninterrupted_training(model_config, weights);
-        restore_env("KILN_TRAIN_RESIDENT", prior_resident);
-        result
+        grpo_cancel_resume_matches_uninterrupted_training(model_config, weights, runtime)
     }
 
     #[cfg(feature = "vulkan")]
@@ -20882,16 +22303,11 @@ pub(crate) mod tests {
             );
             return Ok(());
         }
-        let prior_resident = std::env::var("KILN_TRAIN_RESIDENT").ok();
-        unsafe {
-            std::env::set_var("KILN_TRAIN_RESIDENT", "1");
-        }
         let device = Device::Vulkan(0);
+        let runtime = crate::TrainingRuntimeContext::standalone_for_device(device);
         let model_config = tiny_config_full_attn();
         let weights = tiny_weights(&model_config, &device)?;
-        let result = grpo_jsonl_cancel_resume_matches_uninterrupted_training(model_config, weights);
-        restore_env("KILN_TRAIN_RESIDENT", prior_resident);
-        result
+        grpo_jsonl_cancel_resume_matches_uninterrupted_training(model_config, weights, runtime)
     }
 
     #[test]
@@ -21416,17 +22832,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_checkpoint_config_from_env() {
-        // Without KILN_GPU_MEMORY_GB or nvidia-smi, falls back to default (4 segments)
-        // or VRAM-aware value if GPU is detected
-        let cfg = CheckpointConfig::from_env(32);
+    fn checkpoint_config_uses_immutable_runtime() {
+        let runtime = crate::TrainingRuntimeContext::new(
+            checkpoint_test_vram(24),
+            crate::GradientCheckpointPolicy::Auto,
+        );
+        let cfg = CheckpointConfig::from_runtime(32, &runtime);
         assert!(cfg.enabled);
-        // num_segments depends on whether GPU is detected; just verify it's reasonable
         assert!(cfg.num_segments >= 1 && cfg.num_segments <= 32);
 
         // With very few layers, segments clamped to num_layers
-        let cfg = CheckpointConfig::from_env(2);
+        let cfg = CheckpointConfig::from_runtime(2, &runtime);
         assert!(cfg.num_segments <= 2);
+    }
+
+    fn checkpoint_test_vram(gib: u64) -> kiln_memory::vram::GpuVramInfo {
+        kiln_memory::vram::GpuVramInfo {
+            total_bytes: gib * 1024 * 1024 * 1024,
+            source: kiln_memory::vram::VramSource::ConfigOverride,
+            unified: false,
+        }
     }
 
     fn sft_tail_loss_value(
@@ -21806,10 +23231,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// #1077 Tier 1c: catch "the auto-tune wire got disconnected" — e.g.
-    /// someone refactors away the `tracing::info!("auto-configured gradient
-    /// checkpoint segments ...")` inside `CheckpointConfig::from_env`, or
-    /// removes the call to `from_env` from `sft_train`.
+    /// #1077 Tier 1c: catch the immutable auto-tune wire being disconnected.
     ///
     /// We use a structural check rather than a tracing-event capture.
     /// Capturing in-process tracing events from `sft_train` is unreliable
@@ -21819,62 +23241,38 @@ pub(crate) mod tests {
     /// test thread can miss the capture layer on the macOS runner (Linux
     /// runners capture fine). Instead:
     ///
-    ///   1. Force `KILN_GPU_MEMORY_GB` so `detect_vram` returns
-    ///      `Some(EnvOverride)`. `CheckpointConfig::from_env` then enters
+    ///   1. Inject a configured VRAM value. `CheckpointConfig::from_runtime`
+    ///      then enters
     ///      its `if auto_configured { tracing::info!(...) }` branch — the
     ///      single code path that fires the auto-tune log line. We assert
     ///      `cfg.auto_configured` to prove we reached that branch. Anyone
     ///      who deletes the `tracing::info!` will have to either delete
     ///      the `auto_configured` field or its assignment, and either of
     ///      those breaks adjacent tests.
-    ///   2. Run `sft_train` end-to-end so refactors that break the
-    ///      training-side `from_env` call at trainer.rs:3234 still get
-    ///      caught.
-    // (#1082) runs sft_train end-to-end → backend-gated post candle-drop (CPU-only
+    ///   2. Run the runtime-aware SFT entry end-to-end so the context must
+    ///      reach the per-step planner without any environment lookup.
+    // (#1082) runs SFT end-to-end → backend-gated post candle-drop (CPU-only
     // training dropped). This is the CUDA CPU-storage fixture; Vulkan training
     // uses separate resident-device tests and must not enter through CPU.
     #[cfg(feature = "cuda")]
     #[test]
-    fn perf_regression_sft_train_emits_auto_tune_log_line() -> Result<()> {
-        // RAII guard so the env override is scrubbed even if a later
-        // assertion in this test panics — otherwise subsequent tests under
-        // ENV_LOCK see a leaked `KILN_GPU_MEMORY_GB` override.
-        struct ScopedEnvVar(&'static str);
-        impl Drop for ScopedEnvVar {
-            fn drop(&mut self) {
-                unsafe { std::env::remove_var(self.0) };
-            }
-        }
-
-        // Serialize against other tests that mutate process env vars.
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Force `detect_vram` to return non-None so `from_env` takes the
-        // `auto_configured = true` branch (which is the branch that fires
-        // the `tracing::info!` auto-tune log line). Also scrub env vars
-        // that would short-circuit that branch.
-        unsafe {
-            std::env::set_var("KILN_GPU_MEMORY_GB", "16");
-            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
-            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
-        }
-        let _vram_guard = ScopedEnvVar("KILN_GPU_MEMORY_GB");
-
-        // (1) Wire check: with the env override in place, from_env MUST
-        // return auto_configured = true. That return value uniquely
+    fn perf_regression_sft_train_uses_injected_runtime_for_auto_tune() -> Result<()> {
+        // (1) Wire check: an injected configured capacity MUST return
+        // auto_configured = true. That return value uniquely
         // identifies the branch that owns the tracing::info! call.
-        let cfg = CheckpointConfig::from_env(32);
+        let vram = checkpoint_test_vram(16);
+        let runtime =
+            crate::TrainingRuntimeContext::new(vram, crate::GradientCheckpointPolicy::Auto);
+        let cfg = CheckpointConfig::from_runtime(32, &runtime);
         assert!(
             cfg.auto_configured,
-            "#1077 Tier 1c: with KILN_GPU_MEMORY_GB=16, \
-             CheckpointConfig::from_env must return auto_configured = true \
+            "#1077 Tier 1c: with an injected 16 GiB capacity, \
+             CheckpointConfig::from_runtime must return auto_configured = true \
              (the branch that fires `tracing::info!(\"auto-configured \
              gradient checkpoint segments ...\")`). Got cfg = {cfg:?}",
         );
 
-        // (2) Path coverage: run sft_train end-to-end so refactors that
-        // break the training-side `from_env` call site at trainer.rs:3234
-        // still get caught.
+        // (2) Path coverage: run the explicit runtime entry end-to-end.
         let (config, weights, tokenizer, examples) = build_perf_regression_cpu_fixture()?;
         let sft_config = crate::SftConfig {
             epochs: 1,
@@ -21886,50 +23284,56 @@ pub(crate) mod tests {
             ..crate::SftConfig::default()
         };
         let adapter_dir = tempfile::tempdir()?;
-        let _ = sft_train(
-            &examples,
+        let prepared = crate::sft_ingestion::prepare_sft_examples(
+            examples,
+            &tokenizer,
+            sft_config.invalid_row_policy,
+            "runtime_context_test",
+            None,
+        )?;
+        let _ = sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
+            &prepared.examples,
+            &prepared.ingestion,
             &sft_config,
             &config,
             &weights,
             &tokenizer,
             adapter_dir.path(),
+            adapter_dir.path(),
+            adapter_dir.path(),
             "perf-regression-tracing-smoke",
             None,
             None,
             None,
+            &runtime,
         )?;
         Ok(())
     }
 
-    /// #1077 Tier 1a (CheckpointConfig::auto_for_workload wrapper): force a
-    /// known VRAM number via env, then assert `auto_for_workload` returns
+    /// #1077 Tier 1a (CheckpointConfig workload wrapper): inject a
+    /// known VRAM number, then assert the wrapper returns
     /// the expected `enabled / num_segments` for a representative
     /// (vram, seq_len) cell. The pure `recommended_checkpoint_plan` matrix
     /// is already exhaustive (`kiln_memory::vram::tests::perf_regression_*_plan_matrix`);
     /// this just proves the wrapper is wired to it and propagates the
     /// decision through the `CheckpointConfig` shape correctly.
     #[test]
-    fn perf_regression_auto_for_workload_wrapper_dispatches_correctly() -> Result<()> {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Snapshot + scrub the env so the wrapper sees the synthetic VRAM
-        // and doesn't pick up a sibling test's mutation.
-        let prev_gb = std::env::var("KILN_GPU_MEMORY_GB").ok();
-        let prev_segs = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS").ok();
-        let prev_disable = std::env::var("KILN_NO_GRAD_CHECKPOINT").ok();
-        unsafe {
-            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
-            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
-        }
-
+    fn perf_regression_auto_for_workload_wrapper_dispatches_correctly() {
         // 48 GiB + 30-token prompts on Qwen3.5-4B shape → Disabled.
-        unsafe {
-            std::env::set_var("KILN_GPU_MEMORY_GB", "48");
-        }
-        let cfg = CheckpointConfig::auto_for_workload(32, 30, 2560, 10240, 151936, 2);
-        unsafe {
-            std::env::remove_var("KILN_GPU_MEMORY_GB");
-        }
+        let runtime_48 = crate::TrainingRuntimeContext::new(
+            checkpoint_test_vram(48),
+            crate::GradientCheckpointPolicy::Auto,
+        );
+        let cfg = CheckpointConfig::auto_for_workload_with_activation_bytes_and_runtime(
+            32,
+            30,
+            2560,
+            10240,
+            151936,
+            2,
+            4,
+            &runtime_48,
+        );
         assert!(
             !cfg.enabled,
             "expected auto_for_workload(48GB, 30tok) to disable; got {cfg:?}",
@@ -21941,13 +23345,20 @@ pub(crate) mod tests {
         );
 
         // 16 GiB + 4K prompts on Qwen3.5-4B shape → Enabled with N >= 2.
-        unsafe {
-            std::env::set_var("KILN_GPU_MEMORY_GB", "16");
-        }
-        let cfg = CheckpointConfig::auto_for_workload(32, 4096, 2560, 10240, 151936, 2);
-        unsafe {
-            std::env::remove_var("KILN_GPU_MEMORY_GB");
-        }
+        let runtime_16 = crate::TrainingRuntimeContext::new(
+            checkpoint_test_vram(16),
+            crate::GradientCheckpointPolicy::Auto,
+        );
+        let cfg = CheckpointConfig::auto_for_workload_with_activation_bytes_and_runtime(
+            32,
+            4096,
+            2560,
+            10240,
+            151936,
+            2,
+            4,
+            &runtime_16,
+        );
         assert!(
             cfg.enabled,
             "expected auto_for_workload(16GB, 4K tok) to engage; got {cfg:?}",
@@ -21957,36 +23368,22 @@ pub(crate) mod tests {
             "expected >=2 segments on tight VRAM + 4K, got {}",
             cfg.num_segments,
         );
-
-        // Restore the snapshotted env so neighbour tests see consistent
-        // state (uses the existing test-mod helper at line 11313).
-        restore_env("KILN_GPU_MEMORY_GB", prev_gb);
-        restore_env("KILN_GRAD_CHECKPOINT_SEGMENTS", prev_segs);
-        restore_env("KILN_NO_GRAD_CHECKPOINT", prev_disable);
-        Ok(())
     }
 
     #[test]
-    fn preflight_checkpoint_segments_are_dynamic_cap_not_fixed_plan() -> Result<()> {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let prev_gb = std::env::var("KILN_GPU_MEMORY_GB").ok();
-        let prev_segs = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS").ok();
-        let prev_disable = std::env::var("KILN_NO_GRAD_CHECKPOINT").ok();
-        unsafe {
-            std::env::set_var("KILN_GPU_MEMORY_GB", "48");
-            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
-            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
-        }
-
+    fn live_admitted_checkpoint_plan_overrides_roomy_static_capacity() -> Result<()> {
         let device = cpu_device();
         let tiny_config = tiny_config_bf16();
         let weights = tiny_weights_bf16(&tiny_config, &device)?;
 
+        let runtime = crate::TrainingRuntimeContext::new(
+            checkpoint_test_vram(48),
+            crate::GradientCheckpointPolicy::Auto,
+        );
         let cfg = checkpoint_config_for_training_step(
             &weights,
             &device,
-            Some(32),
+            Some(8),
             32,
             30,
             2560,
@@ -21994,56 +23391,99 @@ pub(crate) mod tests {
             151936,
             2,
             2,
-        );
-        assert!(
-            !cfg.enabled,
-            "server preflight max must not force checkpointing for a short row: {cfg:?}"
-        );
-        assert_eq!(cfg.num_segments, 1);
-
-        unsafe {
-            std::env::set_var("KILN_GRAD_CHECKPOINT_SEGMENTS", "32");
-        }
-        let cfg = checkpoint_config_for_training_step(
-            &weights,
-            &device,
-            Some(32),
-            32,
-            30,
-            2560,
-            10240,
-            151936,
-            2,
-            2,
+            &runtime,
         );
         assert!(
             cfg.enabled,
-            "explicit env override should remain authoritative: {cfg:?}"
+            "the live-admitted plan must override a roomy static-capacity plan: {cfg:?}"
+        );
+        assert_eq!(cfg.num_segments, 8);
+
+        let static_only = checkpoint_config_for_training_step(
+            &weights, &device, None, 32, 30, 2560, 10240, 151936, 2, 2, &runtime,
+        );
+        assert!(!static_only.enabled);
+        assert_eq!(static_only.num_segments, 1);
+
+        // The same process and weights produce a different per-step plan when
+        // the caller injects a tighter immutable capacity. No GPU-memory
+        // process environment lookup participates in this decision.
+        let tight_runtime = crate::TrainingRuntimeContext::new(
+            checkpoint_test_vram(16),
+            crate::GradientCheckpointPolicy::Auto,
+        );
+        let tight_cfg = checkpoint_config_for_training_step(
+            &weights,
+            &device,
+            None,
+            32,
+            4096,
+            2560,
+            10240,
+            151936,
+            2,
+            2,
+            &tight_runtime,
+        );
+        assert!(
+            tight_cfg.enabled && tight_cfg.num_segments >= 2,
+            "injected 16 GiB capacity should checkpoint a 4K-token step: {tight_cfg:?}"
+        );
+
+        let explicit_runtime = crate::TrainingRuntimeContext::new(
+            checkpoint_test_vram(48),
+            crate::GradientCheckpointPolicy::from_parts(Some(32), false)?,
+        );
+        let cfg = checkpoint_config_for_training_step(
+            &weights,
+            &device,
+            Some(32),
+            32,
+            30,
+            2560,
+            10240,
+            151936,
+            2,
+            2,
+            &explicit_runtime,
+        );
+        assert!(
+            cfg.enabled,
+            "explicit immutable policy should remain authoritative: {cfg:?}"
         );
         assert_eq!(cfg.num_segments, 32);
 
-        restore_env("KILN_GPU_MEMORY_GB", prev_gb);
-        restore_env("KILN_GRAD_CHECKPOINT_SEGMENTS", prev_segs);
-        restore_env("KILN_NO_GRAD_CHECKPOINT", prev_disable);
+        let disabled_runtime = crate::TrainingRuntimeContext::new(
+            checkpoint_test_vram(16),
+            crate::GradientCheckpointPolicy::from_parts(Some(32), true)?,
+        );
+        let disabled = checkpoint_config_for_training_step(
+            &weights,
+            &device,
+            Some(32),
+            32,
+            4096,
+            2560,
+            10240,
+            151936,
+            2,
+            2,
+            &disabled_runtime,
+        );
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.num_segments, 32);
         Ok(())
     }
 
     #[test]
     fn long_context_gpu_full_attention_forces_exact_checkpointing() -> Result<()> {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let prev_gb = std::env::var("KILN_GPU_MEMORY_GB").ok();
-        let prev_segs = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS").ok();
-        let prev_disable = std::env::var("KILN_NO_GRAD_CHECKPOINT").ok();
-        unsafe {
-            std::env::set_var("KILN_GPU_MEMORY_GB", "128");
-            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
-            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
-        }
-
         let host = cpu_device();
         let config = tiny_config_full_attn_bf16();
         let weights = tiny_weights_bf16(&config, &host)?;
+        let runtime = crate::TrainingRuntimeContext::new(
+            checkpoint_test_vram(128),
+            crate::GradientCheckpointPolicy::Auto,
+        );
         let cfg = checkpoint_config_for_training_step(
             &weights,
             &Device::Rocm(0),
@@ -22055,6 +23495,7 @@ pub(crate) mod tests {
             config.vocab_size,
             2,
             10,
+            &runtime,
         );
         assert!(
             cfg.enabled,
@@ -22065,51 +23506,46 @@ pub(crate) mod tests {
             "long full-attention GPU rows should split the tape: {cfg:?}"
         );
 
-        restore_env("KILN_GPU_MEMORY_GB", prev_gb);
-        restore_env("KILN_GRAD_CHECKPOINT_SEGMENTS", prev_segs);
-        restore_env("KILN_NO_GRAD_CHECKPOINT", prev_disable);
         Ok(())
     }
 
     #[test]
+    fn explicit_cpu_training_backend_does_not_autoselect_vulkan() {
+        let backend = training_backend_for_device(Device::Cpu);
+        assert_eq!(BackendIdentity::runtime_name(backend.as_ref()), "cpu");
+    }
+
+    #[test]
     fn training_activation_width_inflates_bf16_gdn_replay_planning() -> Result<()> {
-        let device = cpu_device();
+        let weight_device = cpu_device();
+        #[cfg(feature = "vulkan")]
+        let runtime_device = Device::Vulkan(0);
+        #[cfg(not(feature = "vulkan"))]
+        let runtime_device = Device::Cpu;
 
         let gdn_config = tiny_config_bf16();
-        let gdn_weights = tiny_weights_bf16(&gdn_config, &device)?;
-        // CPU-as-Vulkan-sentinel (#1517): on a Vulkan-capable host the
-        // per-device policy treats CPU-device tensors as the Vulkan
-        // substrate, whose F32-activation rule pins the planning width to
-        // 4 bytes; portable hosts (CI runners) keep the inflated GDN
-        // replay width.
+        let gdn_weights = tiny_weights_bf16(&gdn_config, &weight_device)?;
+        // CPU-host weights are masked from backend identity. The explicitly
+        // bound runtime device, not local Vulkan availability, selects the
+        // activation policy used by admission planning.
         #[cfg(feature = "vulkan")]
-        let expected_gdn_width = if kiln_model::backend::vulkan_training_substrate_active() {
-            4
-        } else {
-            10
-        };
+        let expected_gdn_width = 4;
         #[cfg(not(feature = "vulkan"))]
         let expected_gdn_width = 10;
         assert_eq!(
-            training_activation_bytes_per_elem(&gdn_weights, &device),
+            training_activation_bytes_per_elem(&gdn_weights, &runtime_device),
             expected_gdn_width,
             "BF16 GDN training should use substrate-correct activation planning"
         );
 
         let full_attn_config = tiny_config_full_attn_bf16();
-        let full_attn_weights = tiny_weights_bf16(&full_attn_config, &device)?;
-        // Same substrate rule: Vulkan hosts plan F32 activations (4 bytes)
-        // for CPU-device tensors; portable hosts keep BF16 (2 bytes).
+        let full_attn_weights = tiny_weights_bf16(&full_attn_config, &weight_device)?;
         #[cfg(feature = "vulkan")]
-        let expected_full_attn_width = if kiln_model::backend::vulkan_training_substrate_active() {
-            4
-        } else {
-            2
-        };
+        let expected_full_attn_width = 4;
         #[cfg(not(feature = "vulkan"))]
         let expected_full_attn_width = 2;
         assert_eq!(
-            training_activation_bytes_per_elem(&full_attn_weights, &device),
+            training_activation_bytes_per_elem(&full_attn_weights, &runtime_device),
             expected_full_attn_width,
             "BF16 full-attention-only training should keep substrate-correct planning"
         );

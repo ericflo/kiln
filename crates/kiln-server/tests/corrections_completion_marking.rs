@@ -140,6 +140,8 @@ fn enqueue_corrections_job(state: &AppState, job_id: &str, correction_ids: Vec<S
         job_id: job_id.to_string(),
         reserved_bytes: 0,
         teacher_bindings: Vec::new(),
+        prepared_data: Default::default(),
+        prepared_data_permit: Default::default(),
         job: QueuedJob::Sft(req),
     });
 }

@@ -1899,18 +1899,67 @@ pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
     }
 }
 
+/// Construct exactly the backend named by an explicit runtime binding.
+///
+/// Unlike [`for_device_kt`], CPU is never treated as Vulkan's historical host
+/// tensor sentinel. This is the selector for fallible, explicitly initialized
+/// inference runtimes; compatibility owners may continue using runtime
+/// autodetection through `for_device_kt`.
+pub fn for_explicit_device_kt(device: kiln_tensor::Device) -> Result<Arc<dyn BackendRuntime>> {
+    match device {
+        kiln_tensor::Device::Cpu => Ok(Arc::new(cpu::CpuBackend::new(device))),
+        kiln_tensor::Device::Cuda(_) => {
+            #[cfg(feature = "cuda")]
+            {
+                return Ok(Arc::new(cuda::CudaBackend::new(device)));
+            }
+            #[cfg(not(feature = "cuda"))]
+            anyhow::bail!("explicit CUDA runtime requested from a build without the cuda feature");
+        }
+        kiln_tensor::Device::Rocm(_) => {
+            #[cfg(feature = "rocm")]
+            {
+                return Ok(Arc::new(rocm::RocmBackend::new(device)));
+            }
+            #[cfg(not(feature = "rocm"))]
+            anyhow::bail!("explicit ROCm runtime requested from a build without the rocm feature");
+        }
+        kiln_tensor::Device::Metal(_) => {
+            #[cfg(feature = "metal")]
+            {
+                return Ok(Arc::new(metal::MetalBackend::new(device)));
+            }
+            #[cfg(not(feature = "metal"))]
+            anyhow::bail!(
+                "explicit Metal runtime requested from a build without the metal feature"
+            );
+        }
+        kiln_tensor::Device::Vulkan(_) => {
+            #[cfg(feature = "vulkan")]
+            {
+                anyhow::ensure!(
+                    vulkan::vulkan_is_available(),
+                    "explicit Vulkan runtime requested but no Vulkan device is available"
+                );
+                mark_vulkan_active();
+                return Ok(Arc::new(vulkan::VulkanBackend::new(
+                    kiln_tensor::Device::Cpu,
+                )));
+            }
+            #[cfg(not(feature = "vulkan"))]
+            anyhow::bail!(
+                "explicit Vulkan runtime requested from a build without the vulkan feature"
+            );
+        }
+    }
+}
+
 /// Training precision policy selected through the concrete backend facet.
 ///
-/// `for_device_kt` intentionally treats CPU as a Vulkan runtime-detect sentinel
-/// in Vulkan-enabled binaries — and so does THIS lookup when a Vulkan backend
-/// is ACTIVE in the process: on the Vulkan substrate the training tensors are
-/// kt CPU-storage tensors (hybrid residency), so a bare `Device::Cpu` match
-/// here returned the portable policy and the F32-activation × BF16-base-weight
-/// mixed exception never fired — production BF16 checkpoints failed in the
-/// first GDN projection ("MatmulOp: dtype mismatch a=f32 b=bf16") while the
-/// F32 unit fixtures passed. Processes that never constructed a Vulkan
-/// backend (pure-CPU tests in vulkan-feature builds) keep the portable policy
-/// needed for the policy query and then delegates to `TrainingLossBackend`.
+/// Vulkan's hybrid path may carry CPU-host tensors, but those tensors acquire
+/// Vulkan policy only after an owning runtime explicitly constructs and marks
+/// the Vulkan backend. Mere hardware availability must not reinterpret a CPU
+/// training job as Vulkan.
 pub fn training_precision_policy_for_device_kt(
     device: kiln_tensor::Device,
 ) -> TrainingPrecisionPolicy {
@@ -1933,12 +1982,10 @@ pub fn training_precision_policy_for_device_kt(
         #[cfg(feature = "vulkan")]
         kiln_tensor::Device::Vulkan(_) => TrainingPrecisionPolicy::vulkan(),
         _ => {
-            // CPU-as-Vulkan-sentinel: see the doc comment above. Keyed on
-            // the same runtime probe `for_device_kt` uses (NOT the
-            // mark_vulkan_active flag, whose state depends on incidental
-            // initialization order).
+            // CPU-host Vulkan tensors inherit policy only from an explicitly
+            // selected Vulkan runtime, never from an availability probe.
             #[cfg(feature = "vulkan")]
-            if matches!(device, kiln_tensor::Device::Cpu) && vulkan::vulkan_is_available() {
+            if matches!(device, kiln_tensor::Device::Cpu) && vulkan_active() {
                 return TrainingPrecisionPolicy::vulkan();
             }
             let backend = cpu::CpuBackend::new(device);
@@ -1975,12 +2022,10 @@ pub fn training_tape_route_for_device_kt(device: kiln_tensor::Device) -> Trainin
             vulkan::VulkanBackend::training_capabilities_static().tape_forward_backward_route
         }
         _ => {
-            // CPU-as-Vulkan-sentinel (matches `for_device_kt` and the
-            // precision-policy lookup above): an active-Vulkan process
-            // trains on kt CPU-storage tensors, and the tape recorders'
-            // device gates must see the Vulkan route for them.
+            // CPU-host tensors use the Vulkan tape route only after the
+            // owning runtime explicitly selected and marked Vulkan.
             #[cfg(feature = "vulkan")]
-            if matches!(device, kiln_tensor::Device::Cpu) && vulkan::vulkan_is_available() {
+            if matches!(device, kiln_tensor::Device::Cpu) && vulkan_active() {
                 return vulkan::VulkanBackend::training_capabilities_static()
                     .tape_forward_backward_route;
             }
@@ -1993,6 +2038,16 @@ pub fn training_tape_route_for_device_kt(device: kiln_tensor::Device) -> Trainin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_cpu_binding_never_auto_promotes_to_vulkan() {
+        let backend = for_explicit_device_kt(kiln_tensor::Device::Cpu).unwrap();
+        assert_eq!(BackendIdentity::runtime_name(backend.as_ref()), "cpu");
+        assert_eq!(
+            BackendIdentity::runtime_device(backend.as_ref()),
+            kiln_tensor::Device::Cpu
+        );
+    }
 
     #[derive(Debug)]
     struct ResidentActivationProbeBackend {

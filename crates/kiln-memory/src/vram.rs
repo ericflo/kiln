@@ -3,17 +3,251 @@
 //! Detects available GPU memory and provides recommended training parameters
 //! so that SFT and GRPO training "just works" on consumer GPUs without manual tuning.
 
-/// Detected GPU memory information.
-#[derive(Debug, Clone, Copy)]
+/// Effective GPU memory capacity plus physical-memory topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuVramInfo {
-    /// Total VRAM in bytes (0 if detection failed or no GPU).
+    /// Effective accelerator-memory capacity in bytes (0 if detection failed).
     pub total_bytes: u64,
-    /// Source of the detection.
+    /// Source of the effective capacity.
     pub source: VramSource,
+    /// Whether GPU allocations share physical memory with the CPU.
+    ///
+    /// This is deliberately independent from `source`: a configured capacity
+    /// cap must not make an APU look like a discrete GPU.
+    pub unified: bool,
+}
+
+/// How a configured memory cap resolved against the detected safe capacity.
+///
+/// `physical` is the one-time hardware/host probe. `effective` is never larger
+/// than `physical`; configuration can only reduce the usable capacity. Keeping
+/// both values makes a rejected optimistic cap observable without probing the
+/// machine a second time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VramCapacityResolution {
+    pub physical: GpuVramInfo,
+    pub requested_bytes: Option<u64>,
+    pub effective: GpuVramInfo,
+    pub clamped: bool,
+}
+
+/// Vendor constraint for a selected Linux DRM device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinuxDrmVendor {
+    Amd,
+    Intel,
+}
+
+/// Selects the accelerator whose memory counters are authoritative.
+///
+/// Linux DRM indices are zero-based after card/render aliases have been
+/// deduplicated by canonical device path and the optional vendor filter has
+/// been applied. This lets ROCm select AMD device 0 on a mixed NVIDIA/AMD host
+/// while Vulkan can select from all DRM devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VramProbeSelector {
+    Auto,
+    Nvidia(usize),
+    LinuxDrm {
+        index: usize,
+        vendor: Option<LinuxDrmVendor>,
+    },
+    AppleUnified,
+    None,
+}
+
+/// Startup failure when a backend logical ordinal cannot be proven to name the
+/// same physical accelerator as the OS/driver memory probe.
+///
+/// This is an intentionally conservative interim contract. Until accelerator
+/// selection and memory probes share a PCI address or UUID, ordinal-based
+/// startup is accepted only for logical ordinal zero on a provably singular
+/// physical candidate set with no visibility/remapping controls present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VramProbeIdentityError {
+    message: String,
+}
+
+impl VramProbeIdentityError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for VramProbeIdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for VramProbeIdentityError {}
+
+/// Prove that an ordinal-based backend and its memory probe address the same
+/// physical accelerator before model weights are uploaded.
+///
+/// `None` is safe because it performs no accelerator probe. Apple unified
+/// memory is safe because Metal and the probe observe the same single physical
+/// memory pool rather than independent device-local heaps. `Auto` is retained
+/// for diagnostics, but is rejected for startup because it cannot bind an
+/// already-selected backend to a physical device.
+pub fn validate_vram_probe_identity(
+    selector: VramProbeSelector,
+) -> Result<(), VramProbeIdentityError> {
+    match selector {
+        VramProbeSelector::None | VramProbeSelector::AppleUnified => Ok(()),
+        VramProbeSelector::Auto => Err(VramProbeIdentityError::new(
+            "automatic VRAM probe selection is diagnostic-only and cannot prove the identity of an already-selected accelerator; use a backend-derived explicit probe selector",
+        )),
+        VramProbeSelector::Nvidia(ordinal) => {
+            let remapping = present_environment_variables(NVIDIA_DEVICE_REMAP_ENV);
+            reject_device_remapping(selector, &remapping)?;
+            let candidates = query_nvidia_physical_indices().ok_or_else(|| {
+                unresolved_probe_identity_error(
+                    selector,
+                    "nvidia-smi GPU identity enumeration failed",
+                )
+            })?;
+            validate_nvidia_ordinal_identity(ordinal, &candidates, &remapping)
+        }
+        VramProbeSelector::LinuxDrm { index, vendor } => {
+            #[cfg(target_os = "linux")]
+            {
+                let remapping = present_environment_variables(match vendor {
+                    Some(LinuxDrmVendor::Amd) => ROCM_DEVICE_REMAP_ENV,
+                    Some(LinuxDrmVendor::Intel) => INTEL_DEVICE_REMAP_ENV,
+                    None => VULKAN_DEVICE_REMAP_ENV,
+                });
+                reject_device_remapping(selector, &remapping)?;
+                let candidate_count =
+                    linux_drm_candidate_count_at(std::path::Path::new("/sys/class/drm"), vendor)
+                        .ok_or_else(|| {
+                            unresolved_probe_identity_error(
+                                selector,
+                                "Linux DRM physical-device enumeration failed",
+                            )
+                        })?;
+                validate_ordinal_identity(selector, index, candidate_count, &remapping)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (index, vendor);
+                Err(unresolved_probe_identity_error(
+                    selector,
+                    "Linux DRM identity validation is unavailable on this operating system",
+                ))
+            }
+        }
+    }
+}
+
+const NVIDIA_DEVICE_REMAP_ENV: &[&str] = &[
+    "CUDA_VISIBLE_DEVICES",
+    "NVIDIA_VISIBLE_DEVICES",
+    "CUDA_DEVICE_ORDER",
+];
+const ROCM_DEVICE_REMAP_ENV: &[&str] = &[
+    "ROCR_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+    "CUDA_VISIBLE_DEVICES",
+    "GPU_DEVICE_ORDINAL",
+];
+const INTEL_DEVICE_REMAP_ENV: &[&str] = &[
+    "ZE_AFFINITY_MASK",
+    "ONEAPI_DEVICE_SELECTOR",
+    "SYCL_DEVICE_FILTER",
+];
+const VULKAN_DEVICE_REMAP_ENV: &[&str] = &[
+    "KILN_VULKAN_DEVICE",
+    "GGML_VK_VISIBLE_DEVICES",
+    "MESA_VK_DEVICE_SELECT",
+    "DRI_PRIME",
+    "VK_ICD_FILENAMES",
+    "VK_DRIVER_FILES",
+];
+
+fn present_environment_variables(names: &[&'static str]) -> Vec<&'static str> {
+    names
+        .iter()
+        .copied()
+        .filter(|name| std::env::var_os(name).is_some())
+        .collect()
+}
+
+fn validate_nvidia_ordinal_identity(
+    ordinal: usize,
+    physical_indices: &[usize],
+    remapping: &[&str],
+) -> Result<(), VramProbeIdentityError> {
+    let selector = VramProbeSelector::Nvidia(ordinal);
+    validate_ordinal_identity(selector, ordinal, physical_indices.len(), remapping)?;
+    if physical_indices != [0] {
+        return Err(unresolved_probe_identity_error(
+            selector,
+            &format!(
+                "nvidia-smi reported a singular but nonzero physical index set {physical_indices:?}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ordinal_identity(
+    selector: VramProbeSelector,
+    ordinal: usize,
+    candidate_count: usize,
+    remapping: &[&str],
+) -> Result<(), VramProbeIdentityError> {
+    reject_device_remapping(selector, remapping)?;
+    if candidate_count == 0 {
+        return Err(unresolved_probe_identity_error(
+            selector,
+            "the relevant physical candidate set is empty",
+        ));
+    }
+    if ordinal >= candidate_count {
+        return Err(VramProbeIdentityError::new(format!(
+            "memory probe {selector:?} requests logical ordinal {ordinal}, but only {candidate_count} relevant physical candidate(s) were found; refusing an out-of-range device/probe mapping before model upload",
+        )));
+    }
+    if ordinal != 0 {
+        return Err(VramProbeIdentityError::new(format!(
+            "cannot prove physical-device identity for memory probe {selector:?}: ordinal-based startup is temporarily restricted to logical ordinal zero until PCI-address/UUID-bound selectors are available",
+        )));
+    }
+    if candidate_count != 1 {
+        return Err(VramProbeIdentityError::new(format!(
+            "cannot prove physical-device identity for memory probe {selector:?}: found {candidate_count} relevant physical candidates; multi-device ordinal ordering may differ between the backend and memory probe, so startup is refused until PCI-address/UUID-bound selectors are available",
+        )));
+    }
+    Ok(())
+}
+
+fn reject_device_remapping(
+    selector: VramProbeSelector,
+    remapping: &[&str],
+) -> Result<(), VramProbeIdentityError> {
+    if remapping.is_empty() {
+        return Ok(());
+    }
+    Err(VramProbeIdentityError::new(format!(
+        "cannot prove physical-device identity for memory probe {selector:?}: device visibility or ordinal remapping is active via {}; remove these controls or wait for PCI-address/UUID-bound selectors",
+        remapping.join(", "),
+    )))
+}
+
+fn unresolved_probe_identity_error(
+    selector: VramProbeSelector,
+    reason: &str,
+) -> VramProbeIdentityError {
+    VramProbeIdentityError::new(format!(
+        "cannot prove physical-device identity for memory probe {selector:?}: {reason}; refusing accelerator startup before model upload until PCI-address/UUID-bound selectors are available",
+    ))
 }
 
 /// Snapshot of currently used GPU memory.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuMemoryUsedInfo {
     /// Used VRAM in bytes (0 if detection failed or no GPU).
     pub used_bytes: u64,
@@ -21,25 +255,26 @@ pub struct GpuMemoryUsedInfo {
     pub source: VramSource,
 }
 
-/// The corrected training memory budget plus provenance.
+/// The effective training memory budget plus provenance and topology.
 ///
 /// Use this when reporting "how much memory can training use" — the
 /// `source` makes the log line honest about *why* the budget is what
-/// it is. On a discrete NVIDIA GPU it'll just be `NvidiaSmi` and the
-/// budget equals the detected VRAM. On a unified-memory APU it'll be
-/// `LinuxDrmSysfsUnified` and the budget is the corrected value
-/// (the BIOS-reported VRAM carveout is replaced with `MemTotal − reserve`
-/// so training sized against this number cannot exhaust system RAM).
+/// it is. On a discrete NVIDIA GPU it will be `NvidiaSmi`; on an
+/// automatically detected unified-memory APU it will be
+/// `LinuxDrmSysfsUnified`; and an explicit configured capacity reports
+/// `ConfigOverride`. The independent `unified` field preserves the physical
+/// topology even when configuration replaces the capacity provenance.
 ///
 /// Field semantics match what consumers like the trainer preflight
 /// estimator and the inference KV-cache sizer already expect.
 #[derive(Debug, Clone, Copy)]
 pub struct EffectiveBudget {
-    /// Total memory addressable by training in bytes. Pre-corrected
-    /// for the unified-memory APU case.
+    /// Effective memory capacity available to training in bytes.
     pub total_bytes: u64,
     /// Provenance of the budget — what kind of probe produced it.
     pub source: VramSource,
+    /// Whether the GPU and CPU share the same physical memory pool.
+    pub unified: bool,
 }
 
 /// Convenience: detect VRAM and return an [`EffectiveBudget`] suitable
@@ -48,11 +283,12 @@ pub struct EffectiveBudget {
 ///
 /// This is the single source of truth — replaces ad-hoc reads of
 /// `total_vram_gb` scattered around `crates/kiln-server/src/state.rs`.
-pub fn detect_effective_training_budget() -> EffectiveBudget {
-    let info = detect_vram();
+pub fn detect_effective_training_budget(configured_total_gib: Option<f64>) -> EffectiveBudget {
+    let info = resolve_vram_capacity(detect_vram(), configured_total_gib).effective;
     EffectiveBudget {
         total_bytes: info.total_bytes,
         source: info.source,
+        unified: info.unified,
     }
 }
 
@@ -63,18 +299,16 @@ pub enum VramSource {
     NvidiaSmi,
     /// Detected via Linux DRM sysfs memory counters.
     LinuxDrmSysfs,
-    /// Detected via Linux DRM sysfs on a unified-memory APU. The reported
-    /// VRAM is a BIOS-configured carveout (often >> physical RAM thanks to
-    /// the GTT heap that pages against system RAM). The corrected budget
-    /// is `min(reported_vram, MemTotal − reserve)` so training sized
-    /// against this value cannot exhaust system RAM.
+    /// Detected via Linux DRM sysfs on a unified-memory APU. Capacity is bounded
+    /// by physical/cgroup-backed host memory after a conservative reserve; raw
+    /// VRAM+GTT address-space counters remain available in snapshot diagnostics.
     LinuxDrmSysfsUnified,
     /// Detected via `sysctl hw.memsize` on Apple Silicon (unified memory).
     /// GPU-addressable memory is effectively the full physical pool minus a
     /// headroom for the OS and other apps.
     AppleSilicon,
-    /// User-provided via `KILN_GPU_MEMORY_GB` env var.
-    EnvOverride,
+    /// Capacity reduced by the effective `memory.gpu_memory_gb` configuration.
+    ConfigOverride,
     /// No GPU detected or detection failed.
     None,
 }
@@ -86,7 +320,7 @@ impl std::fmt::Display for VramSource {
             VramSource::LinuxDrmSysfs => write!(f, "linux-drm-sysfs"),
             VramSource::LinuxDrmSysfsUnified => write!(f, "linux-drm-sysfs-unified"),
             VramSource::AppleSilicon => write!(f, "apple-silicon-unified"),
-            VramSource::EnvOverride => write!(f, "KILN_GPU_MEMORY_GB"),
+            VramSource::ConfigOverride => write!(f, "memory.gpu_memory_gb"),
             VramSource::None => write!(f, "none"),
         }
     }
@@ -94,87 +328,163 @@ impl std::fmt::Display for VramSource {
 
 /// Detect total GPU VRAM (or unified memory on Apple Silicon).
 ///
-/// Priority:
-/// 1. `KILN_GPU_MEMORY_GB` env var (user override, always respected).
-/// 2. `nvidia-smi` query (discrete NVIDIA).
-/// 3. Linux DRM sysfs counters (AMD/Intel Vulkan devices). On unified-memory
-///    APUs the BIOS carveout reported via DRM can far exceed physical RAM
-///    (GTT pages against system memory), so the reported value is corrected
-///    down to `min(reported_vram, MemTotal − reserve)` to avoid sizing
-///    training as if there were a discrete GPU's worth of memory.
-/// 4. `sysctl hw.memsize` on Apple Silicon (unified memory), with a
+/// This probe returns the safe physical capacity and topology. It performs no
+/// configuration lookup; call [`resolve_vram_capacity`] with the returned value
+/// to apply a typed capacity cap without probing twice.
+///
+/// Physical detection order:
+/// 1. `nvidia-smi` query (discrete NVIDIA).
+/// 2. Linux DRM sysfs counters (AMD/Intel Vulkan devices). Unified devices are
+///    bounded by host/cgroup capacity and retain conservative system headroom.
+/// 3. `sysctl hw.memsize` on Apple Silicon (unified memory), with a
 ///    `system_reserve_gb` headroom subtracted so training doesn't compete
 ///    with the OS for the last few GB.
-/// 5. Returns `GpuVramInfo { total_bytes: 0, source: None }` if no GPU.
+/// 4. Returns a zero-capacity, unknown-topology value if no GPU is detected.
 pub fn detect_vram() -> GpuVramInfo {
-    if let Ok(val) = std::env::var("KILN_GPU_MEMORY_GB") {
-        if let Ok(gb) = val.parse::<f64>() {
-            return GpuVramInfo {
-                total_bytes: (gb * 1024.0 * 1024.0 * 1024.0) as u64,
-                source: VramSource::EnvOverride,
-            };
+    detect_vram_for(VramProbeSelector::Auto)
+}
+
+/// Detect safe capacity for one explicitly selected accelerator.
+pub fn detect_vram_for(selector: VramProbeSelector) -> GpuVramInfo {
+    let detected = match selector {
+        VramProbeSelector::Auto => query_nvidia_smi_for(0)
+            .map(discrete_nvidia_info)
+            .or_else(|| {
+                #[cfg(target_os = "linux")]
+                {
+                    detect_linux_drm_vram_for(0, None)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    None
+                }
+            })
+            .or_else(detect_apple_unified_vram),
+        VramProbeSelector::Nvidia(index) => query_nvidia_smi_for(index).map(discrete_nvidia_info),
+        VramProbeSelector::LinuxDrm { index, vendor } => {
+            #[cfg(target_os = "linux")]
+            {
+                detect_linux_drm_vram_for(index, vendor)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (index, vendor);
+                None
+            }
         }
-    }
-
-    if let Some(bytes) = query_nvidia_smi() {
-        return GpuVramInfo {
-            total_bytes: bytes,
-            source: VramSource::NvidiaSmi,
-        };
-    }
-
-    #[cfg(target_os = "linux")]
-    if let Some(info) = detect_linux_drm_vram() {
-        return info;
-    }
-
-    #[cfg(target_os = "macos")]
-    if let Some(bytes) = query_apple_unified_memory() {
-        return GpuVramInfo {
-            total_bytes: bytes,
-            source: VramSource::AppleSilicon,
-        };
-    }
-
-    GpuVramInfo {
+        VramProbeSelector::AppleUnified => detect_apple_unified_vram(),
+        VramProbeSelector::None => None,
+    };
+    detected.unwrap_or(GpuVramInfo {
         total_bytes: 0,
         source: VramSource::None,
+        unified: false,
+    })
+}
+
+fn discrete_nvidia_info(total_bytes: u64) -> GpuVramInfo {
+    GpuVramInfo {
+        total_bytes,
+        source: VramSource::NvidiaSmi,
+        unified: false,
     }
 }
 
-/// Linux DRM detection that distinguishes discrete from unified-memory
-/// APUs and corrects the reported VRAM down to a survivable budget on
-/// the latter.
+fn detect_apple_unified_vram() -> Option<GpuVramInfo> {
+    #[cfg(target_os = "macos")]
+    {
+        query_apple_unified_memory().map(|total_bytes| GpuVramInfo {
+            total_bytes,
+            source: VramSource::AppleSilicon,
+            unified: true,
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+pub fn resolve_vram_capacity(
+    physical: GpuVramInfo,
+    configured_total_gib: Option<f64>,
+) -> VramCapacityResolution {
+    let requested_bytes = configured_total_gib
+        .filter(|gib| gib.is_finite() && *gib > 0.0)
+        .map(|gib| (gib * 1024.0 * 1024.0 * 1024.0) as u64);
+    let Some(requested) = requested_bytes else {
+        return VramCapacityResolution {
+            physical,
+            requested_bytes: None,
+            effective: physical,
+            clamped: false,
+        };
+    };
+    let effective_bytes = requested.min(physical.total_bytes);
+    let effective = GpuVramInfo {
+        total_bytes: effective_bytes,
+        source: if requested <= physical.total_bytes {
+            VramSource::ConfigOverride
+        } else {
+            physical.source
+        },
+        unified: physical.unified,
+    };
+    VramCapacityResolution {
+        physical,
+        requested_bytes: Some(requested),
+        effective,
+        clamped: requested > physical.total_bytes,
+    }
+}
+
+/// Linux DRM detection that distinguishes discrete from unified-memory APUs.
 #[cfg(target_os = "linux")]
-fn detect_linux_drm_vram() -> Option<GpuVramInfo> {
-    detect_linux_drm_vram_at(
+fn detect_linux_drm_vram_for(index: usize, vendor: Option<LinuxDrmVendor>) -> Option<GpuVramInfo> {
+    detect_linux_drm_vram_with_cgroup_at(
         std::path::Path::new("/sys/class/drm"),
         std::path::Path::new("/proc/meminfo"),
+        query_current_cgroup_memory(),
+        index,
+        vendor,
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn detect_linux_drm_vram_at(
     drm_base: &std::path::Path,
     meminfo_path: &std::path::Path,
 ) -> Option<GpuVramInfo> {
-    let device = collect_linux_drm_device_info_at(drm_base)?;
-    let mem_total = query_meminfo_total_bytes_at(meminfo_path);
-    let unified = mem_total
-        .map(|mt| is_unified_memory_drm(&device, mt))
-        .unwrap_or(false);
+    detect_linux_drm_vram_with_cgroup_at(drm_base, meminfo_path, None, 0, None)
+}
 
-    // The honest GPU-addressable total is the driver's VRAM + GTT — exactly what
-    // nvtop / rocm-smi report. On an integrated APU the GTT is the system-RAM-
-    // backed budget the GPU can actually use (often far larger than the BIOS
-    // VRAM carveout); on a discrete card the GTT is a small staging area, so
-    // vram+gtt ≈ vram. We deliberately DON'T cap this against /proc/meminfo
-    // anymore: inside a cgroup/sandbox `MemTotal` reads a fake-small limit (e.g.
-    // 32 GB on a 128 GB box), which wrongly slashed the budget. Safety headroom
-    // is the consumer's job (KV `inference_fraction`, the training reserve) and
-    // they should size against live FREE (`current_memory_snapshot`) so a
-    // coexisting GPU job is accounted for — total here is just the ceiling.
-    let total = device.vram_total.saturating_add(device.gtt_total);
+#[cfg(target_os = "linux")]
+fn detect_linux_drm_vram_with_cgroup_at(
+    drm_base: &std::path::Path,
+    meminfo_path: &std::path::Path,
+    cgroup: Option<CgroupMemoryObservation>,
+    index: usize,
+    vendor: Option<LinuxDrmVendor>,
+) -> Option<GpuVramInfo> {
+    let device = select_linux_drm_device_at(drm_base, index, vendor)?.info;
+    let mem_total = query_meminfo_total_bytes_at(meminfo_path);
+    let unified = is_host_shared_memory_drm(&device, mem_total);
+    let driver_addressable_total = device.vram_total.saturating_add(device.gtt_total);
+    let total = if unified {
+        unified_memory_bounds(
+            driver_addressable_total,
+            0,
+            mem_total,
+            query_meminfo_available_bytes_at(meminfo_path),
+            cgroup,
+        )
+        .total_bytes
+    } else {
+        // GTT is an addressable spill/staging tier, not device-local
+        // allocation capacity. HIP may abort rather than return an OOM when
+        // VRAM is exhausted, so discrete admission must use VRAM only.
+        device.vram_total
+    };
     Some(GpuVramInfo {
         total_bytes: total,
         source: if unified {
@@ -182,16 +492,17 @@ fn detect_linux_drm_vram_at(
         } else {
             VramSource::LinuxDrmSysfs
         },
+        unified,
     })
 }
 
-/// Aggregated DRM device info across the primary nodes for a single GPU.
-#[derive(Debug, Clone, Copy)]
+/// DRM counters for one physical device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct LinuxDrmDeviceInfo {
-    /// Largest `mem_info_vram_total` (or `vis_vram_total`) across nodes, bytes.
+    /// `mem_info_vram_total` (or `vis_vram_total`) for this device, bytes.
     pub vram_total: u64,
-    /// Largest `mem_info_gtt_total` across nodes, bytes (0 if absent).
+    /// `mem_info_gtt_total` for this device, bytes (0 if absent).
     pub gtt_total: u64,
     /// PCI vendor ID (e.g. `0x1002` for AMD), 0 if absent.
     pub vendor: u32,
@@ -200,98 +511,239 @@ pub(crate) struct LinuxDrmDeviceInfo {
     pub class: u32,
 }
 
+#[derive(Debug, Clone)]
 #[cfg(target_os = "linux")]
-fn collect_linux_drm_device_info_at(base: &std::path::Path) -> Option<LinuxDrmDeviceInfo> {
-    let mut vram_total = 0u64;
-    let mut gtt_total = 0u64;
-    let mut vendor = 0u32;
-    let mut class = 0u32;
-    let mut found_any = false;
+struct SelectedLinuxDrmDevice {
+    info: LinuxDrmDeviceInfo,
+    device_dir: std::path::PathBuf,
+}
 
+#[cfg(all(target_os = "linux", test))]
+fn collect_linux_drm_device_info_at(base: &std::path::Path) -> Option<LinuxDrmDeviceInfo> {
+    select_linux_drm_device_at(base, 0, None).map(|device| device.info)
+}
+
+#[cfg(target_os = "linux")]
+fn select_linux_drm_device_at(
+    base: &std::path::Path,
+    index: usize,
+    vendor_filter: Option<LinuxDrmVendor>,
+) -> Option<SelectedLinuxDrmDevice> {
+    let device_dir = collect_linux_drm_device_dirs_at(base, vendor_filter)?
+        .into_iter()
+        .nth(index)?;
+    let info = read_linux_drm_device_info_at(&device_dir)?;
+    Some(SelectedLinuxDrmDevice { info, device_dir })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_drm_candidate_count_at(
+    base: &std::path::Path,
+    vendor_filter: Option<LinuxDrmVendor>,
+) -> Option<usize> {
+    Some(collect_linux_drm_device_dirs_at(base, vendor_filter)?.len())
+}
+
+#[cfg(target_os = "linux")]
+fn collect_linux_drm_device_dirs_at(
+    base: &std::path::Path,
+    vendor_filter: Option<LinuxDrmVendor>,
+) -> Option<Vec<std::path::PathBuf>> {
+    let mut devices: Vec<(Option<usize>, std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     for entry in std::fs::read_dir(base).ok()? {
-        let Ok(entry) = entry else { continue };
+        let entry = entry.ok()?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if !is_primary_drm_node(&name) {
             continue;
         }
-
+        let card_index = name
+            .strip_prefix("card")
+            .and_then(|suffix| suffix.parse::<usize>().ok());
         let device_dir = entry.path().join("device");
-        for field in ["mem_info_vram_total", "mem_info_vis_vram_total"] {
-            if let Some(b) = read_u64_file(&device_dir.join(field)) {
-                vram_total = vram_total.max(b);
-                found_any = true;
+        let canonical = std::fs::canonicalize(&device_dir).unwrap_or_else(|_| device_dir.clone());
+        if let Some(existing) = devices
+            .iter_mut()
+            .find(|(_, existing_canonical, _)| *existing_canonical == canonical)
+        {
+            if card_index.is_some()
+                && (existing.0.is_none()
+                    || card_index.is_some_and(|index| existing.0.is_some_and(|old| index < old)))
+            {
+                existing.0 = card_index;
+                existing.2 = device_dir;
             }
-        }
-        if let Some(b) = read_u64_file(&device_dir.join("mem_info_gtt_total")) {
-            gtt_total = gtt_total.max(b);
-            found_any = true;
-        }
-        if vendor == 0 {
-            if let Some(v) = read_hex_u32_file(&device_dir.join("vendor")) {
-                vendor = v;
-            }
-        }
-        if class == 0 {
-            if let Some(c) = read_hex_u32_file(&device_dir.join("class")) {
-                class = c;
-            }
+        } else {
+            devices.push((card_index, canonical, device_dir));
         }
     }
+    devices.sort_by(|a, b| {
+        a.0.unwrap_or(usize::MAX)
+            .cmp(&b.0.unwrap_or(usize::MAX))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    let mut selected = Vec::new();
+    for (_, _, device_dir) in devices {
+        let matches_vendor = match vendor_filter {
+            Some(LinuxDrmVendor::Amd) => read_hex_u32_file(&device_dir.join("vendor"))? == 0x1002,
+            Some(LinuxDrmVendor::Intel) => read_hex_u32_file(&device_dir.join("vendor"))? == 0x8086,
+            None => true,
+        };
+        if matches_vendor {
+            selected.push(device_dir);
+        }
+    }
+    Some(selected)
+}
 
-    if !found_any {
+#[cfg(target_os = "linux")]
+fn read_linux_drm_device_info_at(device_dir: &std::path::Path) -> Option<LinuxDrmDeviceInfo> {
+    let vram_total = ["mem_info_vram_total", "mem_info_vis_vram_total"]
+        .into_iter()
+        .filter_map(|field| read_u64_file(&device_dir.join(field)))
+        .max()
+        .unwrap_or(0);
+    let gtt_total = read_u64_file(&device_dir.join("mem_info_gtt_total")).unwrap_or(0);
+    if vram_total == 0 && gtt_total == 0 {
         return None;
     }
     Some(LinuxDrmDeviceInfo {
         vram_total,
         gtt_total,
-        vendor,
-        class,
+        vendor: read_hex_u32_file(&device_dir.join("vendor")).unwrap_or(0),
+        class: read_hex_u32_file(&device_dir.join("class")).unwrap_or(0),
     })
 }
 
-/// True when the DRM-reported VRAM should be treated as a unified-memory
-/// budget (system RAM, not a discrete VRAM pool).
+/// True only when DRM reports no device-local heap and a host-addressable heap.
 ///
-/// Triggers when either:
-/// - The reported VRAM exceeds physical RAM by more than 25 % (a BIOS
-///   carveout larger than the box can possibly back is the strongest
-///   single signal of unified memory), OR
-/// - The PCI device is a display controller (`class >> 16 == 0x03`)
-///   from AMD (`0x1002`) or Intel (`0x8086`) and exposes a non-trivial
-///   GTT heap (`gtt_total >= 1 GB`). GTT is the unified-memory paging
-///   path; discrete dGPUs expose tiny GTTs (typically under 256 MB)
-///   used only for staging.
+/// `GTT >= VRAM`, PCI vendor, and display-controller class are not sufficient
+/// evidence of unified memory: common discrete AMD cards also have that shape.
+/// Auto-detection therefore fails closed whenever any local VRAM is reported.
+/// Large carveouts such as Strix Halo remain local accelerator capacity; small
+/// APU carveouts may be conservative until the driver exposes an unambiguous
+/// topology signal rather than being dangerously promoted to VRAM+GTT.
 #[cfg(target_os = "linux")]
-fn is_unified_memory_drm(device: &LinuxDrmDeviceInfo, mem_total_bytes: u64) -> bool {
-    if device.vram_total > mem_total_bytes.saturating_mul(5) / 4 {
-        return true;
-    }
-    let class_code = device.class >> 16;
-    let integrated_vendor = matches!(device.vendor, 0x1002 | 0x8086);
-    let display_controller = class_code == 0x03;
-    let trivial_gtt = device.gtt_total < 1024 * 1024 * 1024;
-    if display_controller && integrated_vendor && !trivial_gtt {
-        return true;
-    }
-    false
+fn is_host_shared_memory_drm(device: &LinuxDrmDeviceInfo, _mem_total_bytes: Option<u64>) -> bool {
+    device.vram_total == 0 && device.gtt_total > 0
 }
 
-/// Reserve to subtract from `MemTotal` before declaring the corrected
-/// unified-memory budget.
-///
-/// Matches the Apple Silicon path: `max(6 GB, MemTotal / 4)`. Override
-/// with `KILN_TRAINING_MEMORY_RESERVE_GB` (parsed as f64).
-#[cfg_attr(not(test), allow(dead_code))]
+/// Reserve retained for the OS and CPU workloads in a shared physical pool.
+/// Matches the Apple Silicon policy: `max(6 GiB, physical capacity / 4)`.
 fn unified_memory_reserve_bytes(mem_total_bytes: u64) -> u64 {
-    if let Ok(val) = std::env::var("KILN_TRAINING_MEMORY_RESERVE_GB") {
-        if let Ok(gb) = val.parse::<f64>() {
-            return (gb * 1024.0 * 1024.0 * 1024.0) as u64;
-        }
-    }
     const MIN_RESERVE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
     let proportional = mem_total_bytes / 4;
     proportional.max(MIN_RESERVE_BYTES)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg(target_os = "linux")]
+struct CgroupMemoryObservation {
+    /// Minimum finite `memory.max` (v2) / hard limit (v1) across ancestors.
+    limit_bytes: Option<u64>,
+    /// Minimum finite cgroup-v2 `memory.high` across ancestors.
+    high_bytes: Option<u64>,
+    /// Leaf usage, retained for diagnostics. Effective headroom is computed
+    /// from each ancestor's own usage rather than subtracting this from an
+    /// unrelated ancestor limit.
+    current_bytes: Option<u64>,
+    /// Minimum finite `(max|high) - current` headroom at any visible level.
+    effective_remaining_bytes: Option<u64>,
+}
+
+#[cfg(target_os = "linux")]
+impl CgroupMemoryObservation {
+    fn from_level(
+        limit_bytes: Option<u64>,
+        high_bytes: Option<u64>,
+        current_bytes: Option<u64>,
+    ) -> Self {
+        let effective_remaining_bytes = min_optional_u64(
+            limit_bytes
+                .map(|limit| current_bytes.map_or(0, |current| limit.saturating_sub(current))),
+            high_bytes.map(|high| current_bytes.map_or(0, |current| high.saturating_sub(current))),
+        );
+        Self {
+            limit_bytes,
+            high_bytes,
+            current_bytes,
+            effective_remaining_bytes,
+        }
+    }
+
+    fn merge_ancestor(self, ancestor: Self) -> Self {
+        Self {
+            limit_bytes: min_optional_u64(self.limit_bytes, ancestor.limit_bytes),
+            high_bytes: min_optional_u64(self.high_bytes, ancestor.high_bytes),
+            // Keep leaf usage as the stable diagnostic value.
+            current_bytes: self.current_bytes,
+            effective_remaining_bytes: min_optional_u64(
+                self.effective_remaining_bytes,
+                ancestor.effective_remaining_bytes,
+            ),
+        }
+    }
+
+    fn effective_capacity_bytes(self) -> Option<u64> {
+        min_optional_u64(self.limit_bytes, self.high_bytes)
+    }
+
+    fn remaining_bytes(self) -> Option<u64> {
+        self.effective_remaining_bytes
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn min_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg(target_os = "linux")]
+struct UnifiedMemoryBounds {
+    total_bytes: u64,
+    used_bytes: u64,
+    free_bytes: u64,
+    reserve_bytes: u64,
+}
+
+/// Convert driver address-space counters into a physically backed unified pool.
+/// Missing host totals/free values fail closed because the DRM address-space
+/// figures alone cannot prove that the corresponding RAM exists.
+#[cfg(target_os = "linux")]
+fn unified_memory_bounds(
+    driver_total: u64,
+    driver_used: u64,
+    host_total: Option<u64>,
+    host_available: Option<u64>,
+    cgroup: Option<CgroupMemoryObservation>,
+) -> UnifiedMemoryBounds {
+    let Some(host_total) = host_total.filter(|total| *total > 0) else {
+        return UnifiedMemoryBounds::default();
+    };
+    let backing_capacity = cgroup
+        .and_then(CgroupMemoryObservation::effective_capacity_bytes)
+        .map_or(host_total, |limit| host_total.min(limit));
+    let reserve = unified_memory_reserve_bytes(backing_capacity).min(backing_capacity);
+    let total = driver_total.min(backing_capacity.saturating_sub(reserve));
+
+    let driver_free = driver_total.saturating_sub(driver_used.min(driver_total));
+    let mut immediately_available =
+        driver_free.min(host_available.unwrap_or(0).saturating_sub(reserve));
+    if let Some(remaining) = cgroup.and_then(|observation| observation.remaining_bytes()) {
+        immediately_available = immediately_available.min(remaining.saturating_sub(reserve));
+    }
+    let free = immediately_available.min(total);
+    UnifiedMemoryBounds {
+        total_bytes: total,
+        used_bytes: total.saturating_sub(free),
+        free_bytes: free,
+        reserve_bytes: reserve,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -303,10 +755,213 @@ fn query_meminfo_total_bytes_at(path: &std::path::Path) -> Option<u64> {
                 .split_whitespace()
                 .next()
                 .and_then(|s| s.parse().ok())?;
-            return Some(kib * 1024);
+            return kib.checked_mul(1024);
         }
     }
     None
+}
+
+#[cfg(target_os = "linux")]
+fn query_current_cgroup_memory() -> Option<CgroupMemoryObservation> {
+    let membership = std::fs::read_to_string("/proc/self/cgroup").ok();
+    let mut v2_path = None;
+    let mut v1_memory_path = None;
+    if let Some(membership) = membership.as_deref() {
+        for line in membership.lines() {
+            let mut fields = line.splitn(3, ':');
+            let _hierarchy = fields.next();
+            let controllers = fields.next().unwrap_or_default();
+            let path = fields.next().unwrap_or_default();
+            if controllers.is_empty() {
+                v2_path = Some(path);
+            } else if controllers
+                .split(',')
+                .any(|controller| controller == "memory")
+            {
+                v1_memory_path = Some(path);
+            }
+        }
+    }
+
+    if let Some(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo").ok() {
+        for mount in cgroup_memory_mounts(&mountinfo) {
+            let membership_path = if mount.v2 { v2_path } else { v1_memory_path };
+            let Some(membership_path) = membership_path else {
+                continue;
+            };
+            let directory = resolve_cgroup_directory(&mount, membership_path);
+            let observation = if mount.v2 {
+                query_cgroup_v2_hierarchy_at(&directory, &mount.mount_point)
+            } else {
+                query_cgroup_v1_hierarchy_at(&directory, &mount.mount_point)
+            };
+            if observation.is_some() {
+                return observation;
+            }
+        }
+    }
+
+    // Conventional locations cover namespaced/container mounts whose
+    // mountinfo root is intentionally hidden or otherwise unavailable.
+    let root = std::path::Path::new("/sys/fs/cgroup");
+    if let Some(path) = v2_path {
+        let directory = root.join(path.trim_start_matches('/'));
+        if let Some(observation) = query_cgroup_v2_hierarchy_at(&directory, root) {
+            return Some(observation);
+        }
+    }
+    if let Some(observation) = query_cgroup_v2_at(root) {
+        return Some(observation);
+    }
+
+    if let Some(path) = v1_memory_path {
+        let relative = path.trim_start_matches('/');
+        for base in [root.join("memory").join(relative), root.join(relative)] {
+            let hierarchy_root = if base.starts_with(root.join("memory")) {
+                root.join("memory")
+            } else {
+                root.to_path_buf()
+            };
+            if let Some(observation) = query_cgroup_v1_hierarchy_at(&base, &hierarchy_root) {
+                return Some(observation);
+            }
+        }
+    }
+    query_cgroup_v1_at(&root.join("memory"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(target_os = "linux")]
+struct CgroupMount {
+    root: std::path::PathBuf,
+    mount_point: std::path::PathBuf,
+    v2: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_memory_mounts(mountinfo: &str) -> Vec<CgroupMount> {
+    mountinfo
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let separator = fields.iter().position(|field| *field == "-")?;
+            if separator < 5 || separator + 3 >= fields.len() {
+                return None;
+            }
+            let fs_type = fields[separator + 1];
+            let super_options = fields[separator + 3];
+            let v2 = fs_type == "cgroup2";
+            let v1_memory =
+                fs_type == "cgroup" && super_options.split(',').any(|option| option == "memory");
+            if !v2 && !v1_memory {
+                return None;
+            }
+            Some(CgroupMount {
+                root: std::path::PathBuf::from(unescape_mountinfo_path(fields[3])),
+                mount_point: std::path::PathBuf::from(unescape_mountinfo_path(fields[4])),
+                v2,
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_cgroup_directory(mount: &CgroupMount, membership: &str) -> std::path::PathBuf {
+    let membership = std::path::Path::new(membership);
+    let relative = membership
+        .strip_prefix(&mount.root)
+        .unwrap_or_else(|_| membership.strip_prefix("/").unwrap_or(membership));
+    mount.mount_point.join(relative)
+}
+
+#[cfg(target_os = "linux")]
+fn unescape_mountinfo_path(raw: &str) -> String {
+    raw.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+}
+
+#[cfg(target_os = "linux")]
+fn query_cgroup_v2_at(path: &std::path::Path) -> Option<CgroupMemoryObservation> {
+    let max_raw = std::fs::read_to_string(path.join("memory.max")).ok()?;
+    let limit_bytes = parse_cgroup_limit(max_raw.trim());
+    let high_bytes = std::fs::read_to_string(path.join("memory.high"))
+        .ok()
+        .and_then(|raw| parse_cgroup_limit(raw.trim()));
+    let current_bytes = read_u64_file(&path.join("memory.current"));
+    Some(CgroupMemoryObservation::from_level(
+        limit_bytes,
+        high_bytes,
+        current_bytes,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn query_cgroup_v1_at(path: &std::path::Path) -> Option<CgroupMemoryObservation> {
+    let raw_limit = std::fs::read_to_string(path.join("memory.limit_in_bytes")).ok()?;
+    let limit = raw_limit.trim().parse::<u64>().unwrap_or(0);
+    // v1 commonly represents "unlimited" as a page-aligned value near i64::MAX.
+    let limit_bytes = (limit < (1u64 << 60)).then_some(limit);
+    let current_bytes = read_u64_file(&path.join("memory.usage_in_bytes"));
+    Some(CgroupMemoryObservation::from_level(
+        limit_bytes,
+        None,
+        current_bytes,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn query_cgroup_v2_hierarchy_at(
+    leaf: &std::path::Path,
+    hierarchy_root: &std::path::Path,
+) -> Option<CgroupMemoryObservation> {
+    query_cgroup_hierarchy_at(leaf, hierarchy_root, query_cgroup_v2_at)
+}
+
+#[cfg(target_os = "linux")]
+fn query_cgroup_v1_hierarchy_at(
+    leaf: &std::path::Path,
+    hierarchy_root: &std::path::Path,
+) -> Option<CgroupMemoryObservation> {
+    query_cgroup_hierarchy_at(leaf, hierarchy_root, query_cgroup_v1_at)
+}
+
+#[cfg(target_os = "linux")]
+fn query_cgroup_hierarchy_at(
+    leaf: &std::path::Path,
+    hierarchy_root: &std::path::Path,
+    query_level: fn(&std::path::Path) -> Option<CgroupMemoryObservation>,
+) -> Option<CgroupMemoryObservation> {
+    if !leaf.starts_with(hierarchy_root) {
+        return None;
+    }
+    let mut current = leaf;
+    let mut aggregate: Option<CgroupMemoryObservation> = None;
+    loop {
+        if let Some(level) = query_level(current) {
+            aggregate = Some(match aggregate {
+                Some(existing) => existing.merge_ancestor(level),
+                None => level,
+            });
+        }
+        if current == hierarchy_root {
+            break;
+        }
+        current = current.parent()?;
+    }
+    aggregate
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cgroup_limit(raw: &str) -> Option<u64> {
+    if raw == "max" {
+        None
+    } else {
+        // The controller exists and claims to be finite. A malformed value
+        // cannot safely be interpreted as unlimited.
+        Some(raw.parse().unwrap_or(0))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -323,195 +978,399 @@ fn read_hex_u32_file(path: &std::path::Path) -> Option<u32> {
 /// while used VRAM is meaningful only after the model, quantized workspaces,
 /// allocator slabs, and warmup allocations have actually landed on the device.
 pub fn detect_used_vram() -> GpuMemoryUsedInfo {
-    if let Some(bytes) = query_nvidia_smi_field("memory.used") {
-        return GpuMemoryUsedInfo {
-            used_bytes: bytes,
-            source: VramSource::NvidiaSmi,
-        };
-    }
+    detect_used_vram_for(VramProbeSelector::Auto)
+}
 
-    #[cfg(target_os = "linux")]
-    if let Some(bytes) = query_linux_drm_used_vram() {
-        return GpuMemoryUsedInfo {
-            used_bytes: bytes,
-            source: VramSource::LinuxDrmSysfs,
-        };
-    }
-
+/// Query raw driver-accounted used memory for one selected accelerator.
+pub fn detect_used_vram_for(selector: VramProbeSelector) -> GpuMemoryUsedInfo {
+    let snapshot = current_memory_snapshot_for(selector);
     GpuMemoryUsedInfo {
-        used_bytes: 0,
-        source: VramSource::None,
+        used_bytes: snapshot
+            .observations
+            .driver_used_bytes
+            .unwrap_or(snapshot.used_bytes),
+        source: snapshot.source,
     }
 }
 
 /// Query currently used GPU VRAM in bytes.
 pub fn detect_used_vram_bytes() -> Option<u64> {
-    let info = detect_used_vram();
+    detect_used_vram_bytes_for(VramProbeSelector::Auto)
+}
+
+pub fn detect_used_vram_bytes_for(selector: VramProbeSelector) -> Option<u64> {
+    let info = detect_used_vram_for(selector);
     (info.used_bytes > 0).then_some(info.used_bytes)
 }
 
-/// A point-in-time snapshot of the memory pool the accelerator actually
-/// allocates from — the single backend-agnostic primitive kiln's memory
-/// awareness is built on. Every engine (CUDA / ROCm / Metal / Vulkan) consults
-/// the SAME probe, so the system is uniformly aware regardless of which backend
-/// is compiled in.
-///
-/// Figures come from the GPU DRIVER's authoritative, ALL-PROCESS counters
-/// (nvidia-smi on NVIDIA; AMD/Intel `mem_info_{vram,gtt}_{total,used}` DRM sysfs,
-/// the same source `nvtop`/`rocm-smi` show). Because they are all-process, a
-/// coexisting GPU job — llama.cpp, vLLM, another kiln — is reflected by
-/// construction: `free` already has its footprint subtracted. On a unified APU
-/// (AMD Strix Halo) these are the real combined VRAM+GTT pool the GPU can use,
-/// NOT a BIOS carveout and NOT a sandbox-/cgroup-limited `/proc/meminfo`.
-#[derive(Debug, Clone, Copy)]
-pub struct MemorySnapshot {
-    /// Total accelerator memory (driver-reported; VRAM+GTT on an AMD APU).
+/// One separately governed accelerator-memory allocation tier.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryTierSnapshot {
+    /// Safe effective capacity of this allocation tier.
     pub total_bytes: u64,
-    /// Currently-used bytes across ALL processes (`total - free`). Includes any
-    /// coexisting GPU workload — kiln never assumes it owns the device.
+    /// Effective pressure consumption; always `total_bytes - free_bytes`.
     pub used_bytes: u64,
-    /// Free bytes available to allocate RIGHT NOW (driver-reported).
+    /// Bytes allocators using this tier may consider free before governor floors.
+    pub free_bytes: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn memory_tier_snapshot(bounds: UnifiedMemoryBounds) -> MemoryTierSnapshot {
+    MemoryTierSnapshot {
+        total_bytes: bounds.total_bytes,
+        used_bytes: bounds.used_bytes,
+        free_bytes: bounds.free_bytes,
+    }
+}
+
+/// Raw observations retained alongside a safe, internally consistent snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemorySnapshotObservations {
+    /// The latest probe attempt failed. Effective free bytes are forced to zero
+    /// while the last known capacity/provenance remain visible.
+    pub probe_failed: bool,
+    /// Combined driver-visible VRAM+GTT address space. This is diagnostic on
+    /// discrete DRM devices and is not treated as allocation capacity.
+    pub driver_total_bytes: Option<u64>,
+    pub driver_used_bytes: Option<u64>,
+    pub driver_free_bytes: Option<u64>,
+    pub driver_vram_total_bytes: Option<u64>,
+    pub driver_vram_used_bytes: Option<u64>,
+    pub driver_gtt_total_bytes: Option<u64>,
+    pub driver_gtt_used_bytes: Option<u64>,
+    pub host_total_bytes: Option<u64>,
+    pub host_available_bytes: Option<u64>,
+    pub cgroup_limit_bytes: Option<u64>,
+    /// Minimum finite cgroup-v2 `memory.high` across the visible hierarchy.
+    pub cgroup_high_bytes: Option<u64>,
+    pub cgroup_current_bytes: Option<u64>,
+    pub cgroup_remaining_bytes: Option<u64>,
+    pub unified_reserve_bytes: Option<u64>,
+    /// Separately admissible host-backed accelerator tier. On Linux DRM this is
+    /// GTT bounded by host availability, the effective cgroup hierarchy, and
+    /// unified-memory reserve. It never inflates or caps the primary VRAM pool.
+    /// `None` means no safe host-backed tier could be established.
+    pub host_backed: Option<MemoryTierSnapshot>,
+}
+
+/// A point-in-time safe memory snapshot for one selected accelerator.
+///
+/// On discrete devices the effective figures are the driver's all-process
+/// counters. On a unified Linux device, DRM VRAM+GTT is only an address-space
+/// observation: effective total/free are additionally bounded by host RAM,
+/// `MemAvailable`, and any finite cgroup v1/v2 limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemorySnapshot {
+    /// Safe effective capacity after shared-memory headroom.
+    pub total_bytes: u64,
+    /// Effective pressure consumption; always `total_bytes - free_bytes`.
+    pub used_bytes: u64,
+    /// Bytes a shared allocator may consider free before governor floors.
     pub free_bytes: u64,
     /// Provenance of the figures.
     pub source: VramSource,
-    /// Whether the accelerator shares system RAM with the CPU (APU / Apple
-    /// Silicon). Informational — the figures are correct either way.
+    /// Whether the accelerator shares system RAM with the CPU.
     pub unified: bool,
+    /// Raw probe values used to derive the effective figures.
+    pub observations: MemorySnapshotObservations,
 }
 
-/// Take a live snapshot of accelerator memory: total, used, and free, from the
-/// GPU driver's all-process counters. This is the keystone of kiln's dynamic
-/// memory awareness — KV-cache sizing, graph-capture headroom checks, the
-/// training/inference budget arbiter, and allocator pressure response all read
-/// from here, so the whole system reacts to the SAME live figure (and the same
-/// view of any coexisting GPU workload) on every backend.
+/// Take an automatically selected live snapshot. Discrete figures come from
+/// all-process driver counters; unified figures additionally reflect host and
+/// cgroup pressure. Server code should prefer [`current_memory_snapshot_for`]
+/// so mixed-device hosts cannot select a different accelerator implicitly.
 pub fn current_memory_snapshot() -> MemorySnapshot {
-    // 1. NVIDIA: nvidia-smi reports authoritative, all-process total + used.
-    if let Some(total) = query_nvidia_smi() {
-        let used = query_nvidia_smi_field("memory.used")
-            .unwrap_or(0)
-            .min(total);
-        return MemorySnapshot {
-            total_bytes: total,
-            used_bytes: used,
-            free_bytes: total.saturating_sub(used),
-            source: VramSource::NvidiaSmi,
-            unified: false,
-        };
-    }
+    current_memory_snapshot_for(VramProbeSelector::Auto)
+}
 
-    // 2. AMD / Intel via DRM sysfs: combined VRAM+GTT total/used — the driver's
-    //    authoritative, ALL-PROCESS view (what nvtop / rocm-smi report). On an
-    //    integrated APU this is the real unified pool, correctly sized.
-    #[cfg(target_os = "linux")]
-    if let Some((total, used)) = query_linux_drm_total_used() {
-        return MemorySnapshot {
-            total_bytes: total,
-            used_bytes: used.min(total),
-            free_bytes: total.saturating_sub(used),
-            source: VramSource::LinuxDrmSysfs,
-            unified: drm_is_integrated_unified(),
-        };
-    }
+/// Take a live snapshot for one explicitly selected accelerator. Explicit
+/// selection never falls back to another device when the requested probe fails.
+pub fn current_memory_snapshot_for(selector: VramProbeSelector) -> MemorySnapshot {
+    try_current_memory_snapshot_for(selector).unwrap_or_else(empty_memory_snapshot)
+}
 
-    // 3. Apple Silicon / fallback: total from detect_vram (sysctl + the unified
-    //    correction + env override), free from host MemAvailable. No discrete
-    //    driver counter is available there.
-    let total = detect_vram();
-    let unified = matches!(
-        total.source,
-        VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon
-    );
-    #[cfg(target_os = "linux")]
-    if let Some(avail) = query_meminfo_available_bytes_at(std::path::Path::new("/proc/meminfo")) {
-        let free = avail.min(total.total_bytes);
-        return MemorySnapshot {
-            total_bytes: total.total_bytes,
-            used_bytes: total.total_bytes.saturating_sub(free),
-            free_bytes: free,
-            source: total.source,
-            unified,
-        };
-    }
-    let used = detect_used_vram();
-    let used_bytes = used.used_bytes.min(total.total_bytes);
+/// Fallible selected-device probe used by the governor to distinguish a probe
+/// failure from a legitimate zero-capacity source such as CPU-only mode.
+pub(crate) fn try_current_memory_snapshot_for(
+    selector: VramProbeSelector,
+) -> Option<MemorySnapshot> {
+    let snapshot = match selector {
+        VramProbeSelector::Auto => nvidia_memory_snapshot(0)
+            .or_else(|| {
+                #[cfg(target_os = "linux")]
+                {
+                    linux_drm_memory_snapshot_for(0, None)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    None
+                }
+            })
+            .or_else(apple_memory_snapshot),
+        VramProbeSelector::Nvidia(index) => nvidia_memory_snapshot(index),
+        VramProbeSelector::LinuxDrm { index, vendor } => {
+            #[cfg(target_os = "linux")]
+            {
+                linux_drm_memory_snapshot_for(index, vendor)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (index, vendor);
+                None
+            }
+        }
+        VramProbeSelector::AppleUnified => apple_memory_snapshot(),
+        VramProbeSelector::None => Some(empty_memory_snapshot()),
+    };
+    snapshot
+}
+
+fn empty_memory_snapshot() -> MemorySnapshot {
     MemorySnapshot {
-        total_bytes: total.total_bytes,
-        used_bytes,
-        free_bytes: total.total_bytes.saturating_sub(used_bytes),
-        source: if used.source != VramSource::None {
-            used.source
-        } else {
-            total.source
-        },
-        unified,
+        total_bytes: 0,
+        used_bytes: 0,
+        free_bytes: 0,
+        source: VramSource::None,
+        unified: false,
+        observations: MemorySnapshotObservations::default(),
     }
 }
 
-/// Combined VRAM+GTT `(total, used)` from AMD/Intel DRM sysfs — the all-process
-/// driver counters `nvtop` sums. `used` defaults to 0 when idle; a `total` of 0
-/// (no GPU node) returns `None`.
+fn nvidia_memory_snapshot(index: usize) -> Option<MemorySnapshot> {
+    let (total, used) = query_nvidia_smi_memory_for(index)?;
+    let used = used.min(total);
+    let free = total.saturating_sub(used);
+    Some(MemorySnapshot {
+        total_bytes: total,
+        used_bytes: used,
+        free_bytes: free,
+        source: VramSource::NvidiaSmi,
+        unified: false,
+        observations: MemorySnapshotObservations {
+            driver_total_bytes: Some(total),
+            driver_used_bytes: Some(used),
+            driver_free_bytes: Some(free),
+            ..MemorySnapshotObservations::default()
+        },
+    })
+}
+
+fn apple_memory_snapshot() -> Option<MemorySnapshot> {
+    #[cfg(target_os = "macos")]
+    let (physical_total, host_available) = query_apple_memory_state()?;
+    #[cfg(not(target_os = "macos"))]
+    return None;
+
+    #[cfg(target_os = "macos")]
+    let reserve = unified_memory_reserve_bytes(physical_total);
+    #[cfg(target_os = "macos")]
+    let total = physical_total.saturating_sub(reserve);
+    #[cfg(target_os = "macos")]
+    let free = host_available.saturating_sub(reserve).min(total);
+    #[cfg(target_os = "macos")]
+    Some(MemorySnapshot {
+        total_bytes: total,
+        used_bytes: total.saturating_sub(free),
+        free_bytes: free,
+        source: VramSource::AppleSilicon,
+        unified: true,
+        observations: MemorySnapshotObservations {
+            host_total_bytes: Some(physical_total),
+            host_available_bytes: Some(host_available),
+            unified_reserve_bytes: Some(reserve),
+            host_backed: Some(MemoryTierSnapshot {
+                total_bytes: total,
+                used_bytes: total.saturating_sub(free),
+                free_bytes: free,
+            }),
+            ..MemorySnapshotObservations::default()
+        },
+    })
+}
+
 #[cfg(target_os = "linux")]
-fn query_linux_drm_total_used() -> Option<(u64, u64)> {
-    // Max-within-field-list avoids double-counting vram vs vis_vram (vis is a
-    // subset); max-across-nodes ignores 0-valued connector entries.
-    let vram_total =
-        query_linux_drm_memory_fields(&["mem_info_vram_total", "mem_info_vis_vram_total"])
-            .unwrap_or(0);
-    let gtt_total = query_linux_drm_memory_fields(&["mem_info_gtt_total"]).unwrap_or(0);
-    let total = vram_total.saturating_add(gtt_total);
-    if total == 0 {
+fn linux_drm_memory_snapshot_for(
+    index: usize,
+    vendor: Option<LinuxDrmVendor>,
+) -> Option<MemorySnapshot> {
+    linux_drm_memory_snapshot_at(
+        std::path::Path::new("/sys/class/drm"),
+        std::path::Path::new("/proc/meminfo"),
+        query_current_cgroup_memory(),
+        index,
+        vendor,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_drm_memory_snapshot_at(
+    drm_base: &std::path::Path,
+    meminfo_path: &std::path::Path,
+    cgroup: Option<CgroupMemoryObservation>,
+    index: usize,
+    vendor: Option<LinuxDrmVendor>,
+) -> Option<MemorySnapshot> {
+    let device = select_linux_drm_device_at(drm_base, index, vendor)?;
+    let info = device.info;
+    let driver_total = info.vram_total.saturating_add(info.gtt_total);
+    let vram_used = if info.vram_total == 0 {
+        0
+    } else {
+        read_device_memory_field(
+            &device.device_dir,
+            &["mem_info_vram_used", "mem_info_vis_vram_used"],
+        )?
+    };
+    let host_total = query_meminfo_total_bytes_at(meminfo_path);
+    let host_available = query_meminfo_available_bytes_at(meminfo_path);
+    let unified = is_host_shared_memory_drm(&info, host_total);
+    let gtt_used_observation = if info.gtt_total == 0 {
+        Some(0)
+    } else {
+        read_device_memory_field(&device.device_dir, &["mem_info_gtt_used"])
+    };
+    if unified && gtt_used_observation.is_none() {
         return None;
     }
-    let vram_used =
-        query_linux_drm_memory_fields(&["mem_info_vram_used", "mem_info_vis_vram_used"])
-            .unwrap_or(0);
-    let gtt_used = query_linux_drm_memory_fields(&["mem_info_gtt_used"]).unwrap_or(0);
-    Some((total, vram_used.saturating_add(gtt_used)))
+    let driver_used =
+        gtt_used_observation.map(|gtt_used| vram_used.saturating_add(gtt_used).min(driver_total));
+    let driver_free = driver_used.map(|used| driver_total.saturating_sub(used));
+    let host_backed = if info.gtt_total == 0
+        || host_total.is_none_or(|total| total == 0)
+        || host_available.is_none()
+    {
+        None
+    } else {
+        gtt_used_observation.map(|gtt_used| {
+            memory_tier_snapshot(unified_memory_bounds(
+                info.gtt_total,
+                gtt_used.min(info.gtt_total),
+                host_total,
+                host_available,
+                cgroup,
+            ))
+        })
+    };
+    let vram_used = vram_used.min(info.vram_total);
+    let vram_free = info.vram_total.saturating_sub(vram_used);
+    let (total, used, free, reserve) = if unified {
+        let bounds = unified_memory_bounds(
+            driver_total,
+            driver_used?,
+            host_total,
+            host_available,
+            cgroup,
+        );
+        (
+            bounds.total_bytes,
+            bounds.used_bytes,
+            bounds.free_bytes,
+            Some(bounds.reserve_bytes),
+        )
+    } else {
+        (info.vram_total, vram_used, vram_free, None)
+    };
+    Some(MemorySnapshot {
+        total_bytes: total,
+        used_bytes: used,
+        free_bytes: free,
+        source: if unified {
+            VramSource::LinuxDrmSysfsUnified
+        } else {
+            VramSource::LinuxDrmSysfs
+        },
+        unified,
+        observations: MemorySnapshotObservations {
+            probe_failed: false,
+            driver_total_bytes: Some(driver_total),
+            driver_used_bytes: driver_used,
+            driver_free_bytes: driver_free,
+            driver_vram_total_bytes: Some(info.vram_total),
+            driver_vram_used_bytes: Some(vram_used),
+            driver_gtt_total_bytes: Some(info.gtt_total),
+            driver_gtt_used_bytes: gtt_used_observation.map(|used| used.min(info.gtt_total)),
+            host_total_bytes: host_total,
+            host_available_bytes: host_available,
+            cgroup_limit_bytes: cgroup.and_then(|observation| observation.limit_bytes),
+            cgroup_high_bytes: cgroup.and_then(|observation| observation.high_bytes),
+            cgroup_current_bytes: cgroup.and_then(|observation| observation.current_bytes),
+            cgroup_remaining_bytes: cgroup.and_then(|observation| observation.remaining_bytes()),
+            unified_reserve_bytes: reserve,
+            host_backed,
+        },
+    })
 }
 
-/// Whether the primary DRM GPU is an integrated/unified-memory part (AMD/Intel
-/// display controller with a non-trivial GTT). Informational for the snapshot's
-/// `unified` flag; does not affect the byte figures.
 #[cfg(target_os = "linux")]
-fn drm_is_integrated_unified() -> bool {
-    let Some(dev) = collect_linux_drm_device_info_at(std::path::Path::new("/sys/class/drm")) else {
-        return false;
-    };
-    let integrated_vendor = matches!(dev.vendor, 0x1002 | 0x8086);
-    let display_controller = (dev.class >> 16) == 0x03;
-    let non_trivial_gtt = dev.gtt_total >= 1024 * 1024 * 1024;
-    integrated_vendor && display_controller && non_trivial_gtt
+fn read_device_memory_field(device_dir: &std::path::Path, fields: &[&str]) -> Option<u64> {
+    fields
+        .iter()
+        .filter_map(|field| read_u64_file(&device_dir.join(field)))
+        .max()
 }
 
 /// Free accelerator memory in bytes right now (0 if undetectable). Thin
 /// convenience over [`current_memory_snapshot`].
 pub fn current_free_bytes() -> u64 {
-    current_memory_snapshot().free_bytes
+    current_free_bytes_for(VramProbeSelector::Auto)
+}
+
+pub fn current_free_bytes_for(selector: VramProbeSelector) -> u64 {
+    current_memory_snapshot_for(selector).free_bytes
 }
 
 /// Free *VRAM* (`mem_info_vram_total` − `mem_info_vram_used`) in bytes on a Linux
 /// AMD/DRM GPU, EXCLUDING GTT. `None` on non-DRM platforms (NVIDIA→nvidia-smi,
 /// macOS, Windows) and when the sysfs counters are absent.
 ///
-/// Why this exists, separate from [`current_free_bytes`] (which is vram+gtt):
+/// Why this exists, separate from [`current_free_bytes`]:
 /// ROCm's HIP allocator `abort()`s (rocclr `vmheap::MapPhysMemory` assertion) on
-/// a VRAM OOM instead of returning an error. A consumer that sizes against the
-/// governor's vram+gtt budget can therefore drive a hard, un-catchable crash
-/// when VRAM is full (e.g. a coexisting GPU job) even though "free" (incl. GTT)
-/// looks ample. Callers pre-check that a VRAM allocation fits in *free VRAM*
-/// before issuing it, turning the abort into a normal `Err` they shrink-retry on.
+/// a VRAM OOM instead of returning an error. The general DRM snapshot now uses
+/// VRAM-only capacity on discrete devices; this helper remains useful to callers
+/// that need an optional AMD-specific allocator guard. On unified devices even
+/// the VRAM counter can describe virtual address space, so this helper also caps
+/// it by the safe host-backed live free.
 pub fn current_free_vram_bytes() -> Option<u64> {
+    current_free_vram_bytes_for(VramProbeSelector::Auto)
+}
+
+pub fn current_free_vram_bytes_for(selector: VramProbeSelector) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
-        let total =
-            query_linux_drm_memory_fields(&["mem_info_vram_total", "mem_info_vis_vram_total"])?;
+        let (index, vendor, drm_selector) = match selector {
+            VramProbeSelector::Auto => (
+                0,
+                None,
+                VramProbeSelector::LinuxDrm {
+                    index: 0,
+                    vendor: None,
+                },
+            ),
+            VramProbeSelector::LinuxDrm { index, vendor } => (index, vendor, selector),
+            _ => return None,
+        };
+        let device =
+            select_linux_drm_device_at(std::path::Path::new("/sys/class/drm"), index, vendor)?;
+        let total = read_device_memory_field(
+            &device.device_dir,
+            &["mem_info_vram_total", "mem_info_vis_vram_total"],
+        )?;
         if total == 0 {
             return None;
         }
-        let used = query_linux_drm_memory_fields(&["mem_info_vram_used", "mem_info_vis_vram_used"])
-            .unwrap_or(0);
-        Some(total.saturating_sub(used))
+        let used = read_device_memory_field(
+            &device.device_dir,
+            &["mem_info_vram_used", "mem_info_vis_vram_used"],
+        )?;
+        let raw_free = total.saturating_sub(used);
+        let snapshot = current_memory_snapshot_for(drm_selector);
+        Some(if snapshot.source == VramSource::None {
+            0
+        } else if snapshot.unified {
+            raw_free.min(snapshot.free_bytes)
+        } else {
+            raw_free
+        })
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -532,7 +1391,7 @@ fn query_meminfo_available_bytes_at(path: &std::path::Path) -> Option<u64> {
                 .split_whitespace()
                 .next()
                 .and_then(|s| s.parse().ok())?;
-            return Some(kib * 1024);
+            return kib.checked_mul(1024);
         }
     }
     None
@@ -543,76 +1402,110 @@ fn query_meminfo_available_bytes_at(path: &std::path::Path) -> Option<u64> {
 /// Runs `nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits`
 /// which returns total memory in MiB. Returns None if nvidia-smi is not available
 /// or fails.
-fn query_nvidia_smi() -> Option<u64> {
-    query_nvidia_smi_field("memory.total")
+fn query_nvidia_smi_for(index: usize) -> Option<u64> {
+    query_nvidia_smi_memory_for(index).map(|(total, _used)| total)
 }
 
-/// Query a MiB-valued nvidia-smi GPU memory field.
-///
-/// Takes the first GPU because kiln is a single-GPU server today and the rest
-/// of the startup path also selects GPU 0 by default unless overridden.
-fn query_nvidia_smi_field(field: &str) -> Option<u64> {
-    let query = format!("--query-gpu={field}");
-    let output = std::process::Command::new("nvidia-smi")
-        .args([query.as_str(), "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
+/// Enumerate physical NVIDIA indices and stable UUIDs in one bounded process.
+/// The UUID column makes malformed/remapped-looking output fail closed instead
+/// of treating an arbitrary number of lines as an identity proof.
+fn query_nvidia_physical_indices() -> Option<Vec<usize>> {
+    let stdout = bounded_command_stdout(
+        "nvidia-smi",
+        &["--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
+        std::time::Duration::from_secs(2),
+    )?;
+    parse_nvidia_physical_indices(&stdout)
+}
 
-    if !output.status.success() {
+fn parse_nvidia_physical_indices(stdout: &[u8]) -> Option<Vec<usize>> {
+    let stdout = std::str::from_utf8(stdout).ok()?;
+    let mut indices = Vec::new();
+    let mut seen_indices = std::collections::BTreeSet::new();
+    let mut seen_uuids = std::collections::BTreeSet::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split(',');
+        let index = fields.next()?.trim().parse::<usize>().ok()?;
+        let uuid = fields.next()?.trim();
+        if fields.next().is_some()
+            || uuid.is_empty()
+            || uuid.eq_ignore_ascii_case("N/A")
+            || !uuid.starts_with("GPU-")
+            || uuid.len() <= "GPU-".len()
+            || !seen_indices.insert(index)
+            || !seen_uuids.insert(uuid)
+        {
+            return None;
+        }
+        indices.push(index);
+    }
+    (!indices.is_empty()).then_some(indices)
+}
+
+/// Query total and used memory in one bounded `nvidia-smi` process.
+fn query_nvidia_smi_memory_for(index: usize) -> Option<(u64, u64)> {
+    let id = format!("--id={index}");
+    let stdout = bounded_command_stdout(
+        "nvidia-smi",
+        &[
+            id.as_str(),
+            "--query-gpu=memory.total,memory.used",
+            "--format=csv,noheader,nounits",
+        ],
+        std::time::Duration::from_secs(2),
+    )?;
+    parse_nvidia_smi_memory(&stdout)
+}
+
+fn parse_nvidia_smi_memory(stdout: &[u8]) -> Option<(u64, u64)> {
+    let stdout = std::str::from_utf8(stdout).ok()?;
+    let mut fields = stdout.trim().lines().next()?.split(',');
+    let total_mib: u64 = fields.next()?.trim().parse().ok()?;
+    let used_mib: u64 = fields.next()?.trim().parse().ok()?;
+    if fields.next().is_some() {
         return None;
     }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let mib: u64 = stdout.trim().lines().next()?.trim().parse().ok()?;
-    Some(mib * 1024 * 1024)
+    Some((
+        total_mib.checked_mul(1024 * 1024)?,
+        used_mib.checked_mul(1024 * 1024)?,
+    ))
 }
 
-/// Query currently used GPU memory from Linux DRM sysfs.
-///
-/// AMDGPU exposes byte-valued `mem_info_vram_used` and
-/// `mem_info_vis_vram_used` files under `/sys/class/drm/{cardN,renderDN}/device`.
-/// We use the largest value across render/card nodes so duplicated connector
-/// entries do not add the same GPU multiple times.
-#[cfg(target_os = "linux")]
-fn query_linux_drm_used_vram() -> Option<u64> {
-    // VRAM + GTT: on an integrated/APU part a coexisting job's footprint spills
-    // into GTT (system-RAM-backed GPU memory) past the VRAM carveout, so
-    // counting VRAM alone undercounts it badly (e.g. a 40 GB llama.cpp model
-    // shows ~0 in `mem_info_vram_used` if it lives in GTT). Summing both matches
-    // what nvtop/rocm-smi report. `max` within each field-list avoids
-    // double-counting vram vs vis_vram.
-    let vram = query_linux_drm_memory_fields(&["mem_info_vram_used", "mem_info_vis_vram_used"])
-        .unwrap_or(0);
-    let gtt = query_linux_drm_memory_fields(&["mem_info_gtt_used"]).unwrap_or(0);
-    let total = vram.saturating_add(gtt);
-    (total > 0).then_some(total)
-}
+/// Run a small system probe with a hard child lifetime. Probe failures and
+/// timeouts are reported to the governor, which publishes a marked zero-free
+/// sample while retaining the last known capacity and provenance.
+fn bounded_command_stdout(
+    program: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::process::Stdio;
 
-#[cfg(target_os = "linux")]
-fn query_linux_drm_memory_fields(fields: &[&str]) -> Option<u64> {
-    query_linux_drm_memory_fields_at(std::path::Path::new("/sys/class/drm"), fields)
-}
-
-#[cfg(target_os = "linux")]
-fn query_linux_drm_memory_fields_at(base: &std::path::Path, fields: &[&str]) -> Option<u64> {
-    let mut best = 0u64;
-    for entry in std::fs::read_dir(base).ok()? {
-        let entry = entry.ok()?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !is_primary_drm_node(&name) {
-            continue;
-        }
-
-        let device_dir = entry.path().join("device");
-        for field in fields {
-            if let Some(bytes) = read_u64_file(&device_dir.join(field)) {
-                best = best.max(bytes);
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = Vec::new();
+                child.stdout.take()?.read_to_end(&mut stdout).ok()?;
+                return status.success().then_some(stdout);
+            }
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
             }
         }
     }
-
-    (best > 0).then_some(best)
 }
 
 #[cfg(target_os = "linux")]
@@ -635,41 +1528,84 @@ fn read_u64_file(path: &std::path::Path) -> Option<u64> {
 /// On Apple Silicon, CPU and GPU share the same memory pool. Metal can
 /// address most of it; we subtract a conservative OS/app headroom
 /// (6 GB, or 25 % on chips > 24 GB — whichever is larger) so inference
-/// and training don't squeeze out Finder, the browser, or a dev server.
-/// Users who know their system can work harder can override with
-/// `KILN_GPU_MEMORY_GB`.
+/// and training don't squeeze out Finder, the browser, or a dev server. The
+/// typed `memory.gpu_memory_gb` setting may reduce, but never expand, this cap.
 #[cfg(target_os = "macos")]
 fn query_apple_unified_memory() -> Option<u64> {
-    let output = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
+    let total = query_apple_physical_memory()?;
+    Some(total.saturating_sub(unified_memory_reserve_bytes(total)))
+}
+
+#[cfg(target_os = "macos")]
+fn query_apple_physical_memory() -> Option<u64> {
+    let stdout = bounded_command_stdout(
+        "sysctl",
+        &["-n", "hw.memsize"],
+        std::time::Duration::from_secs(1),
+    )?;
+    std::str::from_utf8(&stdout).ok()?.trim().parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn query_apple_memory_state() -> Option<(u64, u64)> {
+    let total = query_apple_physical_memory()?;
+    let available = bounded_command_stdout(
+        "memory_pressure",
+        &["-Q"],
+        std::time::Duration::from_secs(1),
+    )
+    .and_then(|stdout| parse_memory_pressure_available(&stdout, total))
+    .or_else(|| {
+        bounded_command_stdout("vm_stat", &[], std::time::Duration::from_secs(1))
+            .and_then(|stdout| parse_vm_stat_available(&stdout))
+    })?;
+    Some((total, available.min(total)))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_memory_pressure_available(stdout: &[u8], total: u64) -> Option<u64> {
+    let stdout = std::str::from_utf8(stdout).ok()?;
+    let percent = stdout.lines().find_map(|line| {
+        line.split_once("System-wide memory free percentage:")
+            .and_then(|(_, value)| value.trim().strip_suffix('%'))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+    })?;
+    (percent <= 100).then(|| total.saturating_mul(percent) / 100)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_vm_stat_available(stdout: &[u8]) -> Option<u64> {
+    let stdout = std::str::from_utf8(stdout).ok()?;
+    let page_size = stdout
+        .lines()
+        .next()?
+        .split_once("page size of ")?
+        .1
+        .split_once(" bytes")?
+        .0
+        .parse::<u64>()
         .ok()?;
-    if !output.status.success() {
-        return None;
+    let mut free_pages = None;
+    let mut inactive_pages = None;
+    for line in stdout.lines().skip(1) {
+        let Some((label, value)) = line.split_once(':') else {
+            continue;
+        };
+        let pages = value.trim().trim_end_matches('.').parse::<u64>().ok();
+        match label.trim() {
+            "Pages free" => free_pages = pages,
+            "Pages inactive" => inactive_pages = pages,
+            _ => {}
+        }
     }
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let total: u64 = stdout.trim().parse().ok()?;
-
-    const MIN_RESERVE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
-    let proportional_reserve = total / 4;
-    let reserve = proportional_reserve.max(MIN_RESERVE_BYTES);
-
-    Some(total.saturating_sub(reserve))
+    free_pages?
+        .saturating_add(inactive_pages.unwrap_or(0))
+        .checked_mul(page_size)
 }
 
 /// Recommended number of KV cache blocks based on total VRAM.
-///
-/// Returns `None` if the user set `KILN_NUM_BLOCKS` (should use that instead).
-/// Otherwise picks a conservative value that leaves room for training.
+/// Pure heuristic: typed operator policy is applied by the caller.
 pub fn recommended_num_blocks(vram: &GpuVramInfo) -> Option<usize> {
-    if std::env::var("KILN_NUM_BLOCKS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .is_some()
-    {
-        return None; // user override — don't second-guess
-    }
-
     // Use slightly lower thresholds since GPUs report slightly less than marketed
     // e.g. RTX A5000 "24GB" reports 24564 MiB ≈ 23.99 GiB
     let gb = vram.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -687,22 +1623,14 @@ pub fn recommended_num_blocks(vram: &GpuVramInfo) -> Option<usize> {
 
 /// Recommended gradient checkpoint segments based on total VRAM.
 ///
-/// Returns `None` if the user set `KILN_GRAD_CHECKPOINT_SEGMENTS` (should use that instead).
-/// More segments = less VRAM but more compute overhead.
+/// Pure heuristic: typed operator policy is applied by the caller. More
+/// segments means less VRAM but more compute overhead.
 ///
 /// This is the *VRAM-only* heuristic (no sequence-length awareness). The training
 /// trainer paths now prefer [`recommended_checkpoint_plan`] which also factors in
 /// `max_seq_len` and `hidden_size`, but this function is retained for callers that
 /// don't have the workload shape handy (preflight estimator, bench reporter).
 pub fn recommended_checkpoint_segments(vram: &GpuVramInfo) -> Option<usize> {
-    if std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .is_some()
-    {
-        return None; // user override
-    }
-
     // Use slightly lower thresholds since GPUs report slightly less than marketed
     // e.g. RTX A5000 "24GB" reports 24564 MiB ≈ 23.99 GiB
     let gb = vram.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -720,12 +1648,9 @@ pub fn recommended_checkpoint_segments(vram: &GpuVramInfo) -> Option<usize> {
 
 /// Decision returned by [`recommended_checkpoint_plan`].
 ///
-/// Three distinct outcomes — the auto-tuner returns one based on `(vram,
+/// Two outcomes — the auto-tuner returns one based on `(vram,
 /// num_layers, max_seq_len, hidden_size)`:
 ///
-/// * [`CheckpointPlan::UserOverride`] — the user set
-///   `KILN_GRAD_CHECKPOINT_SEGMENTS=<N>` or `KILN_NO_GRAD_CHECKPOINT=1`. The
-///   caller should honor the env value and skip auto-tuning entirely.
 /// * [`CheckpointPlan::Disabled`] — activations comfortably fit in available
 ///   VRAM after the base model and a safety reserve. Skipping checkpointing
 ///   wins ~10-30% step time without OOM risk.
@@ -734,10 +1659,6 @@ pub fn recommended_checkpoint_segments(vram: &GpuVramInfo) -> Option<usize> {
 ///   per-segment activation memory under the headroom budget.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CheckpointPlan {
-    /// User overrode via env (`KILN_GRAD_CHECKPOINT_SEGMENTS` or
-    /// `KILN_NO_GRAD_CHECKPOINT`). Caller should fall back to the env-driven
-    /// path (e.g. `CheckpointConfig::from_env`) so the override is respected.
-    UserOverride,
     /// Auto-decided to disable checkpointing entirely. `max_act_gib` is the
     /// estimated activation tape size for the workload; `available_gib` is
     /// the headroom we have for it. Included for logging.
@@ -814,24 +1735,20 @@ fn peak_activation_bytes(forward_tape_bytes: u64) -> u64 {
 /// `max_seq_len_tokens`, `hidden_size`, base-model footprint).
 ///
 /// Behavior:
-/// 1. If `KILN_GRAD_CHECKPOINT_SEGMENTS` or `KILN_NO_GRAD_CHECKPOINT=1` is
-///    set, return [`CheckpointPlan::UserOverride`] and let the caller honor
-///    the env value via `CheckpointConfig::from_env`.
-/// 2. Estimate F32 activation tape:
+/// 1. Estimate F32 activation tape:
 ///    `max_act_bytes = num_layers * max_seq_len * hidden_size * 4`.
-/// 3. Reserve `base_model_bytes + 2 GiB safety` for everything that isn't
+/// 2. Reserve `base_model_bytes + 2 GiB safety` for everything that isn't
 ///    activations (model weights, grads, AdamW state, working buffers).
-/// 4. Define `available_bytes = max(0, vram.total_bytes - reserved)`.
-/// 5. If `max_act_bytes <= available_bytes * 0.5`, return
+/// 3. Define `available_bytes = max(0, vram.total_bytes - reserved)`.
+/// 4. If `max_act_bytes <= available_bytes * 0.5`, return
 ///    [`CheckpointPlan::Disabled`] — checkpointing would only cost step time
 ///    without lowering peak VRAM enough to matter.
-/// 6. Otherwise pick `num_segments = ceil(max_act_bytes / (available_bytes *
+/// 5. Otherwise pick `num_segments = ceil(max_act_bytes / (available_bytes *
 ///    0.3))`, clamped to `[2, num_layers]`. The 30% target makes per-segment
 ///    intermediate memory comfortable inside headroom.
 ///
 /// `None` is returned if VRAM detection failed (`vram.total_bytes == 0`) —
-/// the caller should fall back to [`CheckpointConfig::from_env`]'s VRAM-only
-/// path (which itself handles "unknown VRAM" via a conservative default).
+/// the typed runtime policy must choose its conservative unknown-device path.
 pub fn recommended_checkpoint_plan(
     vram: &GpuVramInfo,
     num_layers: usize,
@@ -860,23 +1777,7 @@ pub fn recommended_checkpoint_plan_with_activation_bytes(
     base_model_bytes: u64,
     activation_bytes_per_elem: usize,
 ) -> Option<CheckpointPlan> {
-    // Env overrides take absolute precedence — caller should honor them.
-    if std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .is_some()
-    {
-        return Some(CheckpointPlan::UserOverride);
-    }
-    if std::env::var("KILN_NO_GRAD_CHECKPOINT")
-        .as_deref()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        return Some(CheckpointPlan::UserOverride);
-    }
-
-    // VRAM unknown — caller should fall back to the env-driven path.
+    // VRAM unknown — caller applies its typed conservative fallback.
     if vram.total_bytes == 0 {
         return None;
     }
@@ -906,12 +1807,19 @@ pub fn recommended_checkpoint_plan_with_activation_bytes(
     let max_act_gib = gib(max_act_bytes);
     let available_gib = gib(available_bytes);
 
-    // If we have less than 2 GiB of headroom after reserves, the auto-tune
-    // is in dangerous territory regardless of seq_len. Punt to the
-    // VRAM-only heuristic via UserOverride — let from_env's existing logic
-    // pick a conservative segment count.
+    // If we have less than 2 GiB of headroom after reserves, use the most
+    // aggressive valid checkpoint plan. Hidden runtime policy must not decide
+    // this branch through process environment.
     if available_bytes < 2 * 1024 * 1024 * 1024 {
-        return Some(CheckpointPlan::UserOverride);
+        if num_layers < 2 {
+            return None;
+        }
+        return Some(CheckpointPlan::Enabled {
+            num_segments: num_layers,
+            max_act_gib,
+            per_segment_gib: max_act_gib / num_layers as f64,
+            available_gib,
+        });
     }
 
     // Comfortable headroom: skip checkpointing. The 0.5 threshold compares
@@ -951,10 +1859,152 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_detect_vram_env_override() {
-        // This test relies on KILN_GPU_MEMORY_GB not being set in CI
-        // and nvidia-smi not being available, so it should return None source
-        // unless overridden. We test the logic paths via the recommendation functions.
+    fn parses_single_nvidia_memory_query() {
+        let mib = 1024 * 1024;
+        assert_eq!(
+            parse_nvidia_smi_memory(b"24564, 1024\n"),
+            Some((24_564 * mib, 1_024 * mib))
+        );
+        assert_eq!(parse_nvidia_smi_memory(b"24564\n"), None);
+        assert_eq!(parse_nvidia_smi_memory(b"24564, nope\n"), None);
+    }
+
+    #[test]
+    fn parses_nvidia_physical_identity_inventory_strictly() {
+        assert_eq!(
+            parse_nvidia_physical_indices(
+                b"0, GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                  1, GPU-11111111-2222-3333-4444-555555555555\n"
+            ),
+            Some(vec![0, 1])
+        );
+        assert_eq!(parse_nvidia_physical_indices(b""), None);
+        assert_eq!(parse_nvidia_physical_indices(b"0, N/A\n"), None);
+        assert_eq!(parse_nvidia_physical_indices(b"0, not-a-gpu-uuid\n"), None);
+        assert_eq!(
+            parse_nvidia_physical_indices(b"0, GPU-one\n0, GPU-two\n"),
+            None
+        );
+        assert_eq!(
+            parse_nvidia_physical_indices(b"0, GPU-one\n1, GPU-one\n"),
+            None
+        );
+        assert_eq!(
+            parse_nvidia_physical_indices(b"0, GPU-one, unexpected\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn ordinal_identity_contract_accepts_only_unmapped_singular_zero() {
+        let drm_zero = VramProbeSelector::LinuxDrm {
+            index: 0,
+            vendor: Some(LinuxDrmVendor::Amd),
+        };
+        assert!(validate_ordinal_identity(drm_zero, 0, 1, &[]).is_ok());
+
+        let multi = validate_ordinal_identity(drm_zero, 0, 2, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(multi.contains("2 relevant physical candidates"));
+        assert!(multi.contains("PCI-address/UUID-bound"));
+
+        let nonzero = validate_ordinal_identity(VramProbeSelector::Nvidia(1), 1, 2, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(nonzero.contains("restricted to logical ordinal zero"));
+
+        let out_of_range = validate_ordinal_identity(VramProbeSelector::Nvidia(3), 3, 1, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(out_of_range.contains("out-of-range"));
+
+        let remapped = validate_ordinal_identity(
+            drm_zero,
+            0,
+            1,
+            &["ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(remapped.contains("ROCR_VISIBLE_DEVICES, HIP_VISIBLE_DEVICES"));
+
+        assert!(validate_nvidia_ordinal_identity(0, &[0], &[]).is_ok());
+        let physical_nonzero = validate_nvidia_ordinal_identity(0, &[7], &[])
+            .unwrap_err()
+            .to_string();
+        assert!(physical_nonzero.contains("singular but nonzero physical index set [7]"));
+    }
+
+    #[test]
+    fn non_ordinal_identity_semantics_are_explicit() {
+        assert!(validate_vram_probe_identity(VramProbeSelector::None).is_ok());
+        assert!(validate_vram_probe_identity(VramProbeSelector::AppleUnified).is_ok());
+        let auto = validate_vram_probe_identity(VramProbeSelector::Auto)
+            .unwrap_err()
+            .to_string();
+        assert!(auto.contains("diagnostic-only"));
+    }
+
+    #[test]
+    fn parses_apple_host_availability_probes() {
+        let total = 16 * 1024u64.pow(3);
+        assert_eq!(
+            parse_memory_pressure_available(b"System-wide memory free percentage: 75%\n", total),
+            Some(12 * 1024u64.pow(3))
+        );
+        assert_eq!(
+            parse_vm_stat_available(
+                b"Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 100.\nPages active: 900.\nPages inactive: 200.\n"
+            ),
+            Some(300 * 16_384)
+        );
+    }
+
+    #[test]
+    fn configured_capacity_preserves_unified_physical_topology() {
+        let physical = GpuVramInfo {
+            total_bytes: 120 * 1024 * 1024 * 1024,
+            source: VramSource::LinuxDrmSysfsUnified,
+            unified: true,
+        };
+        let resolution = resolve_vram_capacity(physical, Some(96.0));
+        let configured = resolution.effective;
+
+        assert_eq!(resolution.physical, physical);
+        assert_eq!(resolution.requested_bytes, Some(96 * 1024 * 1024 * 1024));
+        assert!(!resolution.clamped);
+        assert_eq!(configured.total_bytes, 96 * 1024 * 1024 * 1024);
+        assert_eq!(configured.source, VramSource::ConfigOverride);
+        assert!(configured.unified);
+    }
+
+    #[test]
+    fn configured_capacity_preserves_discrete_physical_topology() {
+        let physical = GpuVramInfo {
+            total_bytes: 24 * 1024 * 1024 * 1024,
+            source: VramSource::NvidiaSmi,
+            unified: false,
+        };
+        let configured = resolve_vram_capacity(physical, Some(16.0)).effective;
+
+        assert_eq!(configured.total_bytes, 16 * 1024 * 1024 * 1024);
+        assert_eq!(configured.source, VramSource::ConfigOverride);
+        assert!(!configured.unified);
+    }
+
+    #[test]
+    fn configured_capacity_never_expands_physical_capacity() {
+        let physical = GpuVramInfo {
+            total_bytes: 24 * 1024 * 1024 * 1024,
+            source: VramSource::LinuxDrmSysfsUnified,
+            unified: true,
+        };
+        let resolution = resolve_vram_capacity(physical, Some(96.0));
+
+        assert_eq!(resolution.physical, physical);
+        assert_eq!(resolution.effective, physical);
+        assert!(resolution.clamped);
     }
 
     #[test]
@@ -964,9 +2014,10 @@ mod tests {
         // future refactor can't silently introduce divergence between
         // "what we log" and "what we size against".
         let detected = detect_vram();
-        let budget = detect_effective_training_budget();
+        let budget = detect_effective_training_budget(None);
         assert_eq!(budget.total_bytes, detected.total_bytes);
         assert_eq!(budget.source, detected.source);
+        assert_eq!(budget.unified, detected.unified);
     }
 
     #[test]
@@ -974,12 +2025,14 @@ mod tests {
         let vram_48gb = GpuVramInfo {
             total_bytes: 48 * 1024 * 1024 * 1024,
             source: VramSource::NvidiaSmi,
+            unified: false,
         };
         assert_eq!(recommended_num_blocks(&vram_48gb), Some(512));
 
         let vram_24gb = GpuVramInfo {
             total_bytes: 24 * 1024 * 1024 * 1024,
             source: VramSource::NvidiaSmi,
+            unified: false,
         };
         assert_eq!(recommended_num_blocks(&vram_24gb), Some(64));
 
@@ -987,34 +2040,38 @@ mod tests {
         let vram_a5000 = GpuVramInfo {
             total_bytes: 24564 * 1024 * 1024,
             source: VramSource::NvidiaSmi,
+            unified: false,
         };
         assert_eq!(recommended_num_blocks(&vram_a5000), Some(64));
 
         let vram_16gb = GpuVramInfo {
             total_bytes: 16 * 1024 * 1024 * 1024,
             source: VramSource::NvidiaSmi,
+            unified: false,
         };
         assert_eq!(recommended_num_blocks(&vram_16gb), Some(32));
 
         let vram_none = GpuVramInfo {
             total_bytes: 0,
             source: VramSource::None,
+            unified: false,
         };
         assert_eq!(recommended_num_blocks(&vram_none), Some(64));
     }
 
     #[test]
     fn test_recommended_checkpoint_segments() {
-        let _g = clear_checkpoint_override_env_for_test();
         let vram_48gb = GpuVramInfo {
             total_bytes: 48 * 1024 * 1024 * 1024,
             source: VramSource::NvidiaSmi,
+            unified: false,
         };
         assert_eq!(recommended_checkpoint_segments(&vram_48gb), Some(4));
 
         let vram_24gb = GpuVramInfo {
             total_bytes: 24 * 1024 * 1024 * 1024,
             source: VramSource::NvidiaSmi,
+            unified: false,
         };
         assert_eq!(recommended_checkpoint_segments(&vram_24gb), Some(8));
 
@@ -1022,12 +2079,14 @@ mod tests {
         let vram_a5000 = GpuVramInfo {
             total_bytes: 24564 * 1024 * 1024,
             source: VramSource::NvidiaSmi,
+            unified: false,
         };
         assert_eq!(recommended_checkpoint_segments(&vram_a5000), Some(8));
 
         let vram_16gb = GpuVramInfo {
             total_bytes: 16 * 1024 * 1024 * 1024,
             source: VramSource::NvidiaSmi,
+            unified: false,
         };
         assert_eq!(recommended_checkpoint_segments(&vram_16gb), Some(12));
     }
@@ -1036,18 +2095,8 @@ mod tests {
         GpuVramInfo {
             total_bytes: gb * 1024 * 1024 * 1024,
             source: VramSource::NvidiaSmi,
+            unified: false,
         }
-    }
-
-    fn clear_checkpoint_override_env_for_test() -> std::sync::MutexGuard<'static, ()> {
-        let guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
-            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
-        }
-        guard
     }
 
     fn act_gib(num_layers: usize, max_seq_len: usize, hidden_size: usize) -> f64 {
@@ -1071,7 +2120,6 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_disables_on_short_prompts_big_vram() {
-        let _g = clear_checkpoint_override_env_for_test();
         // A6000 (48 GiB) + Qwen3.5-4B + 30-token prompts: activation tape
         // is ~10 MiB. Auto-tune should disable checkpointing entirely.
         // This is the bench scenario where #1071's PR was leaving 10-30%
@@ -1088,7 +2136,6 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_enables_for_long_prompts_big_vram() {
-        let _g = clear_checkpoint_override_env_for_test();
         // A6000 (48 GiB) + Qwen3.5-4B + 32K prompts: activation tape is
         // ~10.7 GiB. Headroom is ~36 GiB. 30% of headroom is ~11 GiB so
         // a single segment fits — but we still want >=2 segments since
@@ -1114,7 +2161,6 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_aggressive_on_tight_vram_long_prompts() {
-        let _g = clear_checkpoint_override_env_for_test();
         // RTX 3090 (24 GiB) + Qwen3.5-4B + 16K prompts: activation tape
         // ~5.4 GiB, headroom ~12 GiB → must engage with >= 4 segments
         // (per-segment ~1.4 GiB inside the 30% target).
@@ -1140,7 +2186,6 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_respects_activation_width() {
-        let _g = clear_checkpoint_override_env_for_test();
         let base_bytes = estimate_base_model_bytes(32, 2560, 10240, 151936, 2);
         let f32_plan = recommended_checkpoint_plan_with_activation_bytes(
             &vram(16),
@@ -1175,87 +2220,28 @@ mod tests {
     }
 
     #[test]
-    fn recommended_checkpoint_plan_respects_user_override() {
-        let _g = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("KILN_GRAD_CHECKPOINT_SEGMENTS", "12");
-        }
-        let plan = recommended_checkpoint_plan(
-            &vram(48),
-            32,
-            30,
-            2560,
-            estimate_base_model_bytes(32, 2560, 10240, 151936, 2),
-        );
-        unsafe {
-            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
-        }
-        assert!(matches!(plan, Some(CheckpointPlan::UserOverride)));
-    }
-
-    #[test]
-    fn recommended_checkpoint_plan_respects_disable_env() {
-        let _g = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
-        }
-        let plan = recommended_checkpoint_plan(
-            &vram(48),
-            32,
-            32 * 1024,
-            2560,
-            estimate_base_model_bytes(32, 2560, 10240, 151936, 2),
-        );
-        unsafe {
-            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
-        }
-        assert!(matches!(plan, Some(CheckpointPlan::UserOverride)));
-    }
-
-    #[test]
     fn recommended_checkpoint_plan_returns_none_when_vram_unknown() {
-        // Take the env lock + scrub the two override env vars so a
-        // parallel test that's mid-`set_var` can't make us return
-        // UserOverride via env before we reach the VRAM check. macOS CI
-        // reproducibly hit this on the parallel test interleave.
-        let _g = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
-            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
-        }
         let unknown = GpuVramInfo {
             total_bytes: 0,
             source: VramSource::None,
+            unified: false,
         };
         let plan = recommended_checkpoint_plan(&unknown, 32, 1024, 2560, 10 * 1024 * 1024 * 1024);
         assert!(plan.is_none());
     }
 
     #[test]
-    fn recommended_checkpoint_plan_falls_back_when_headroom_too_small() {
-        // 12 GiB GPU + 10 GiB base estimate = 2 GiB before safety reserve;
-        // 2 GiB after safety. We're under the 2 GiB cliff so the plan
-        // should punt to UserOverride and let from_env's VRAM-only path
-        // pick a conservative segment count.
-        //
-        // Same env isolation as the test above — scrub the overrides so
-        // a parallel test can't make us return UserOverride via env
-        // before we reach the headroom check.
-        let _g = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
-            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
-        }
+    fn recommended_checkpoint_plan_maximizes_segments_when_headroom_too_small() {
+        // 12 GiB capacity minus a 10 GiB model and 2 GiB safety leaves no
+        // activation headroom, so the pure auto policy chooses every layer.
         let plan = recommended_checkpoint_plan(&vram(12), 32, 1024, 2560, 10 * 1024 * 1024 * 1024);
-        assert!(matches!(plan, Some(CheckpointPlan::UserOverride)));
+        assert!(matches!(
+            plan,
+            Some(CheckpointPlan::Enabled {
+                num_segments: 32,
+                ..
+            })
+        ));
     }
 
     /// Perf-regression matrix (#1077 Tier 1a): exhaustive
@@ -1270,16 +2256,6 @@ mod tests {
     /// flips a cell, the bench is doing its job.
     #[test]
     fn perf_regression_qwen35_4b_plan_matrix() {
-        // recommended_checkpoint_plan reads KILN_GRAD_CHECKPOINT_SEGMENTS
-        // and KILN_NO_GRAD_CHECKPOINT — take the env lock + scrub so a
-        // parallel env-mutating test can't flip our cells to UserOverride.
-        let _g = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
-            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
-        }
         #[derive(Debug)]
         enum Expect {
             /// Activation tape comfortably fits — disable.
@@ -1353,13 +2329,6 @@ mod tests {
     /// linearly with hidden, so the Disable→Enable boundary shifts.
     #[test]
     fn perf_regression_llama_8b_plan_matrix() {
-        let _g = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
-            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
-        }
         #[derive(Debug)]
         enum Expect {
             Disabled,
@@ -1414,13 +2383,6 @@ mod tests {
     /// constant-factor change in the reported `max_act_gib`.
     #[test]
     fn perf_regression_disabled_plan_reports_sane_act_tape() {
-        let _g = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
-            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
-        }
         let base_bytes = estimate_base_model_bytes(32, 2560, 10240, 151936, 2);
         let plan = recommended_checkpoint_plan(&vram(48), 32, 1024, 2560, base_bytes)
             .expect("plan must resolve for A6000+1K");
@@ -1459,22 +2421,19 @@ mod tests {
             VramSource::AppleSilicon.to_string(),
             "apple-silicon-unified"
         );
-        assert_eq!(VramSource::EnvOverride.to_string(), "KILN_GPU_MEMORY_GB");
+        assert_eq!(
+            VramSource::ConfigOverride.to_string(),
+            "memory.gpu_memory_gb"
+        );
         assert_eq!(VramSource::None.to_string(), "none");
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_unified_memory_apu_corrects_oversized_carveout() {
-        // Hold the shared env-mutation lock so concurrent
-        // `set_var(KILN_TRAINING_MEMORY_RESERVE_GB)` from
-        // `test_unified_memory_reserve_env_override` doesn't race
-        // with this test's reads of the same env var via
-        // `unified_memory_reserve_bytes`.
-        let _env_guard = crate::TEST_ENV_LOCK.lock().unwrap();
-        // Synthesize the user's hardware: AMD Strix Halo APU. DRM
-        // reports a 103 GB VRAM carveout on a 30 GB host. The corrected
-        // budget must be MemTotal − reserve, not the carveout.
+    fn test_strix_halo_carveout_keeps_device_vram_separate_from_host() {
+        // Approximate this Strix Halo host: 128 GiB physical LPDDR is split into
+        // a ~96 GiB GPU VRAM carveout and ~32 GiB CPU-online memory. GTT is an
+        // additional host-backed aperture; it must not inflate or cap VRAM.
         let root = std::env::temp_dir().join(format!(
             "kiln-drm-unified-test-{}-{}",
             std::process::id(),
@@ -1489,7 +2448,13 @@ mod tests {
         .unwrap();
         std::fs::write(
             root.join("card1/device/mem_info_gtt_total"),
-            "16629477376\n",
+            "16629473300\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("card1/device/mem_info_vram_used"), "4294967296\n").unwrap();
+        std::fs::write(
+            root.join("card1/device/mem_info_gtt_used"),
+            (3 * 1024u64.pow(3)).to_string(),
         )
         .unwrap();
         std::fs::write(root.join("card1/device/vendor"), "0x1002\n").unwrap();
@@ -1497,30 +2462,68 @@ mod tests {
 
         let device = collect_linux_drm_device_info_at(&root).unwrap();
         assert_eq!(device.vram_total, 103_079_215_104);
-        assert_eq!(device.gtt_total, 16_629_477_376);
+        assert_eq!(device.gtt_total, 16_629_473_300);
         assert_eq!(device.vendor, 0x1002);
         assert_eq!(device.class, 0x038000);
 
-        // 30 GB host: synthesize a meminfo file so the assertion does
-        // not depend on the actual host's MemTotal.
-        let mem_total = 30u64 * 1024 * 1024 * 1024;
+        let mem_total = 32 * 1024u64.pow(3);
+        let mem_available = 12u64 * 1024 * 1024 * 1024;
         let meminfo_path = root.join("meminfo");
         std::fs::write(
             &meminfo_path,
-            format!("MemTotal:       {} kB\n", mem_total / 1024),
+            format!(
+                "MemTotal:       {} kB\nMemAvailable:   {} kB\n",
+                mem_total / 1024,
+                mem_available / 1024
+            ),
         )
         .unwrap();
 
-        // The device is still RECOGNIZED as unified (so the source flag is set),
-        // but we no longer CAP the total against /proc/meminfo — that cap was the
-        // bug: on a big-RAM APU (and inside a memory-limited cgroup/sandbox) it
-        // slashed the real budget. The honest total is the driver's VRAM+GTT,
-        // which the GPU can genuinely address.
-        assert!(is_unified_memory_drm(&device, mem_total));
+        assert!(!is_host_shared_memory_drm(&device, Some(mem_total)));
         let info = detect_linux_drm_vram_at(&root, &meminfo_path).unwrap();
-        assert_eq!(info.source, VramSource::LinuxDrmSysfsUnified);
-        // total = vram_total + gtt_total (NOT capped to MemTotal − reserve).
-        assert_eq!(info.total_bytes, 103_079_215_104 + 16_629_477_376);
+        assert_eq!(info.source, VramSource::LinuxDrmSysfs);
+        assert!(!info.unified);
+        assert_eq!(info.total_bytes, 103_079_215_104);
+
+        let snapshot = linux_drm_memory_snapshot_at(&root, &meminfo_path, None, 0, None).unwrap();
+        assert_eq!(snapshot.total_bytes, 103_079_215_104);
+        assert_eq!(snapshot.used_bytes, 4 * 1024u64.pow(3));
+        assert_eq!(snapshot.free_bytes, 103_079_215_104 - 4 * 1024u64.pow(3));
+        assert_eq!(
+            snapshot.used_bytes.saturating_add(snapshot.free_bytes),
+            snapshot.total_bytes
+        );
+        assert_eq!(
+            snapshot.observations.driver_total_bytes,
+            Some(103_079_215_104 + 16_629_473_300)
+        );
+        assert_eq!(
+            snapshot.observations.driver_vram_total_bytes,
+            Some(103_079_215_104)
+        );
+        assert_eq!(
+            snapshot.observations.driver_gtt_total_bytes,
+            Some(16_629_473_300)
+        );
+        assert_eq!(snapshot.observations.host_total_bytes, Some(mem_total));
+        assert_eq!(
+            snapshot.observations.host_available_bytes,
+            Some(mem_available)
+        );
+        assert_eq!(snapshot.observations.unified_reserve_bytes, None);
+        let host_backed = snapshot
+            .observations
+            .host_backed
+            .expect("Strix Halo GTT should publish a separate host-backed tier");
+        assert_eq!(host_backed.total_bytes, 16_629_473_300);
+        assert_eq!(host_backed.free_bytes, 4 * 1024u64.pow(3));
+        assert_eq!(
+            host_backed
+                .used_bytes
+                .saturating_add(host_backed.free_bytes),
+            host_backed.total_bytes
+        );
+        assert!(host_backed.free_bytes < snapshot.free_bytes);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1528,8 +2531,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_discrete_amd_gpu_kept_as_linuxdrmsysfs() {
-        // Discrete AMD card on a small host: 16 GB VRAM, 256 MB GTT,
-        // 32 GB MemTotal. Heuristic must NOT flag this as unified.
+        // Discrete AMD card on a small host: 8 GiB VRAM, a larger 16 GiB GTT
+        // aperture, and 32 GiB MemTotal. This is also a common dGPU shape, so
+        // GTT dominance must neither flag it as unified nor inflate capacity.
         let root = std::env::temp_dir().join(format!(
             "kiln-drm-discrete-test-{}-{}",
             std::process::id(),
@@ -1539,14 +2543,16 @@ mod tests {
         std::fs::create_dir_all(root.join("card0/device")).unwrap();
         std::fs::write(
             root.join("card0/device/mem_info_vram_total"),
-            "17179869184\n", // 16 GB
+            "8589934592\n", // 8 GiB
         )
         .unwrap();
         std::fs::write(
             root.join("card0/device/mem_info_gtt_total"),
-            "268435456\n", // 256 MB — typical staging GTT on a discrete card
+            "17179869184\n",
         )
         .unwrap();
+        std::fs::write(root.join("card0/device/mem_info_vram_used"), "4294967296\n").unwrap();
+        std::fs::write(root.join("card0/device/mem_info_gtt_used"), "2147483648\n").unwrap();
         std::fs::write(root.join("card0/device/vendor"), "0x1002\n").unwrap();
         std::fs::write(root.join("card0/device/class"), "0x030000\n").unwrap();
 
@@ -1555,15 +2561,107 @@ mod tests {
         let meminfo_path = root.join("meminfo");
         std::fs::write(
             &meminfo_path,
-            format!("MemTotal:       {} kB\n", mem_total / 1024),
+            format!(
+                "MemTotal:       {} kB\nMemAvailable:   {} kB\n",
+                mem_total / 1024,
+                16 * 1024u64.pow(2)
+            ),
         )
         .unwrap();
-        assert!(!is_unified_memory_drm(&device, mem_total));
+        assert!(!is_host_shared_memory_drm(&device, Some(mem_total)));
 
         let info = detect_linux_drm_vram_at(&root, &meminfo_path).unwrap();
         assert_eq!(info.source, VramSource::LinuxDrmSysfs);
-        // total = vram (16 GiB) + gtt (256 MiB staging) on a discrete card.
-        assert_eq!(info.total_bytes, 17_179_869_184 + 268_435_456);
+        assert!(!info.unified);
+        assert_eq!(info.total_bytes, 8 * 1024u64.pow(3));
+
+        let snapshot = linux_drm_memory_snapshot_at(&root, &meminfo_path, None, 0, None)
+            .expect("discrete DRM snapshot");
+        assert_eq!(snapshot.total_bytes, 8 * 1024u64.pow(3));
+        assert_eq!(snapshot.used_bytes, 4 * 1024u64.pow(3));
+        assert_eq!(snapshot.free_bytes, 4 * 1024u64.pow(3));
+        assert_eq!(
+            snapshot.observations.driver_total_bytes,
+            Some(24 * 1024u64.pow(3))
+        );
+        assert_eq!(
+            snapshot.observations.driver_gtt_total_bytes,
+            Some(16 * 1024u64.pow(3))
+        );
+        assert_eq!(
+            snapshot.observations.host_backed,
+            Some(MemoryTierSnapshot {
+                total_bytes: 16 * 1024u64.pow(3),
+                used_bytes: 8 * 1024u64.pow(3),
+                free_bytes: 8 * 1024u64.pow(3),
+            })
+        );
+
+        // Losing the GTT usage counter must not poison the independent VRAM
+        // snapshot, but the host-backed tier itself becomes unavailable rather
+        // than publishing optimistic headroom.
+        std::fs::remove_file(root.join("card0/device/mem_info_gtt_used")).unwrap();
+        let missing_gtt_usage =
+            linux_drm_memory_snapshot_at(&root, &meminfo_path, None, 0, None).unwrap();
+        assert_eq!(missing_gtt_usage.free_bytes, 4 * 1024u64.pow(3));
+        assert_eq!(missing_gtt_usage.observations.host_backed, None);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_zero_local_vram_uses_host_bounded_gtt_pool() {
+        let root = std::env::temp_dir().join(format!(
+            "kiln-drm-host-shared-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("card0/device")).unwrap();
+        std::fs::write(root.join("card0/device/mem_info_vram_total"), "0\n").unwrap();
+        std::fs::write(
+            root.join("card0/device/mem_info_gtt_total"),
+            "17179869184\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("card0/device/mem_info_gtt_used"), "4294967296\n").unwrap();
+        std::fs::write(root.join("card0/device/vendor"), "0x1002\n").unwrap();
+        std::fs::write(root.join("card0/device/class"), "0x030000\n").unwrap();
+        let meminfo_path = root.join("meminfo");
+        std::fs::write(
+            &meminfo_path,
+            "MemTotal:       33554432 kB\nMemAvailable:   16777216 kB\n",
+        )
+        .unwrap();
+
+        let device = collect_linux_drm_device_info_at(&root).unwrap();
+        assert!(is_host_shared_memory_drm(
+            &device,
+            Some(32 * 1024u64.pow(3))
+        ));
+        let info = detect_linux_drm_vram_at(&root, &meminfo_path).unwrap();
+        assert_eq!(info.source, VramSource::LinuxDrmSysfsUnified);
+        assert!(info.unified);
+        assert_eq!(info.total_bytes, 16 * 1024u64.pow(3));
+
+        let snapshot = linux_drm_memory_snapshot_at(&root, &meminfo_path, None, 0, None)
+            .expect("host-shared DRM snapshot");
+        assert_eq!(snapshot.total_bytes, 16 * 1024u64.pow(3));
+        assert_eq!(snapshot.free_bytes, 8 * 1024u64.pow(3));
+        assert_eq!(snapshot.used_bytes, 8 * 1024u64.pow(3));
+        assert_eq!(
+            snapshot.observations.host_backed,
+            Some(MemoryTierSnapshot {
+                total_bytes: 16 * 1024u64.pow(3),
+                used_bytes: 8 * 1024u64.pow(3),
+                free_bytes: 8 * 1024u64.pow(3),
+            })
+        );
+        assert_eq!(
+            snapshot.observations.unified_reserve_bytes,
+            Some(8 * 1024u64.pow(3))
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1585,6 +2683,8 @@ mod tests {
             query_meminfo_total_bytes_at(&path),
             Some(32_479_448u64 * 1024)
         );
+        std::fs::write(&path, format!("MemTotal: {} kB\n", u64::MAX)).unwrap();
+        assert_eq!(query_meminfo_total_bytes_at(&path), None);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1608,7 +2708,149 @@ mod tests {
         // Missing MemAvailable -> None (older kernels; caller falls back).
         std::fs::write(&path, "MemTotal: 100 kB\n").unwrap();
         assert_eq!(query_meminfo_available_bytes_at(&path), None);
+        std::fs::write(&path, format!("MemAvailable: {} kB\n", u64::MAX)).unwrap();
+        assert_eq!(query_meminfo_available_bytes_at(&path), None);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_v1_and_v2_memory_headroom_parsers() {
+        let root = std::env::temp_dir().join(format!(
+            "kiln-cgroup-memory-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let v2 = root.join("v2");
+        let v1 = root.join("v1");
+        std::fs::create_dir_all(&v2).unwrap();
+        std::fs::create_dir_all(&v1).unwrap();
+
+        std::fs::write(v2.join("memory.max"), "25769803776\n").unwrap();
+        std::fs::write(v2.join("memory.high"), "max\n").unwrap();
+        std::fs::write(v2.join("memory.current"), "19327352832\n").unwrap();
+        let observed_v2 = query_cgroup_v2_at(&v2).unwrap();
+        assert_eq!(observed_v2.limit_bytes, Some(25_769_803_776));
+        assert_eq!(observed_v2.high_bytes, None);
+        assert_eq!(observed_v2.current_bytes, Some(19_327_352_832));
+        assert_eq!(observed_v2.remaining_bytes(), Some(6_442_450_944));
+        std::fs::write(v2.join("memory.high"), "21474836480\n").unwrap();
+        let high_bounded = query_cgroup_v2_at(&v2).unwrap();
+        assert_eq!(high_bounded.high_bytes, Some(21_474_836_480));
+        assert_eq!(high_bounded.remaining_bytes(), Some(2_147_483_648));
+        std::fs::write(v2.join("memory.high"), "max\n").unwrap();
+        std::fs::write(v2.join("memory.max"), "max\n").unwrap();
+        assert_eq!(query_cgroup_v2_at(&v2).unwrap().limit_bytes, None);
+        std::fs::write(v2.join("memory.max"), "invalid\n").unwrap();
+        assert_eq!(query_cgroup_v2_at(&v2).unwrap().limit_bytes, Some(0));
+
+        std::fs::write(v1.join("memory.limit_in_bytes"), "21474836480\n").unwrap();
+        std::fs::write(v1.join("memory.usage_in_bytes"), "12884901888\n").unwrap();
+        let observed_v1 = query_cgroup_v1_at(&v1).unwrap();
+        assert_eq!(observed_v1.limit_bytes, Some(21_474_836_480));
+        assert_eq!(observed_v1.current_bytes, Some(12_884_901_888));
+        assert_eq!(observed_v1.remaining_bytes(), Some(8_589_934_592));
+        std::fs::write(v1.join("memory.limit_in_bytes"), "invalid\n").unwrap();
+        assert_eq!(query_cgroup_v1_at(&v1).unwrap().limit_bytes, Some(0));
+
+        let mounts = cgroup_memory_mounts(
+            "29 22 0:26 /user.slice /run/cgroup\\040v2 rw - cgroup2 cgroup rw\n\
+             30 22 0:27 / /sys/fs/cgroup/memory rw - cgroup cgroup rw,memory\n",
+        );
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(
+            mounts[0].mount_point,
+            std::path::Path::new("/run/cgroup v2")
+        );
+        assert_eq!(
+            resolve_cgroup_directory(&mounts[0], "/user.slice/session.scope"),
+            std::path::Path::new("/run/cgroup v2/session.scope")
+        );
+        assert_eq!(
+            resolve_cgroup_directory(&mounts[1], "/docker/example"),
+            std::path::Path::new("/sys/fs/cgroup/memory/docker/example")
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_hierarchy_enforces_parent_max_and_high_when_leaf_is_unlimited() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let root = std::env::temp_dir().join(format!(
+            "kiln-cgroup-hierarchy-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let leaf = root.join("parent/leaf");
+        let parent = root.join("parent");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&leaf).unwrap();
+
+        // Leaf is unlimited, while its parent has 24 GiB hard capacity, a
+        // 20 GiB no-throttle ceiling, and only 2 GiB of high headroom.
+        std::fs::write(leaf.join("memory.max"), "max\n").unwrap();
+        std::fs::write(leaf.join("memory.high"), "max\n").unwrap();
+        std::fs::write(leaf.join("memory.current"), (4 * GIB).to_string()).unwrap();
+        std::fs::write(parent.join("memory.max"), (24 * GIB).to_string()).unwrap();
+        std::fs::write(parent.join("memory.high"), (20 * GIB).to_string()).unwrap();
+        std::fs::write(parent.join("memory.current"), (18 * GIB).to_string()).unwrap();
+        // The synthetic hierarchy root is unlimited.
+        std::fs::write(root.join("memory.max"), "max\n").unwrap();
+        std::fs::write(root.join("memory.high"), "max\n").unwrap();
+        std::fs::write(root.join("memory.current"), (19 * GIB).to_string()).unwrap();
+
+        let observed = query_cgroup_v2_hierarchy_at(&leaf, &root).unwrap();
+        assert_eq!(observed.limit_bytes, Some(24 * GIB));
+        assert_eq!(observed.high_bytes, Some(20 * GIB));
+        assert_eq!(observed.current_bytes, Some(4 * GIB));
+        assert_eq!(observed.effective_capacity_bytes(), Some(20 * GIB));
+        assert_eq!(observed.remaining_bytes(), Some(2 * GIB));
+
+        // A finite ancestor without a readable usage value fails headroom
+        // closed instead of treating the limit as unconsumed.
+        std::fs::remove_file(parent.join("memory.current")).unwrap();
+        assert_eq!(
+            query_cgroup_v2_hierarchy_at(&leaf, &root)
+                .unwrap()
+                .remaining_bytes(),
+            Some(0)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_v1_hierarchy_enforces_finite_parent_limit() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let root = std::env::temp_dir().join(format!(
+            "kiln-cgroup-v1-hierarchy-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let leaf = root.join("parent/leaf");
+        let parent = root.join("parent");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&leaf).unwrap();
+
+        let unlimited = (1u64 << 60).to_string();
+        std::fs::write(leaf.join("memory.limit_in_bytes"), &unlimited).unwrap();
+        std::fs::write(leaf.join("memory.usage_in_bytes"), (4 * GIB).to_string()).unwrap();
+        std::fs::write(parent.join("memory.limit_in_bytes"), (16 * GIB).to_string()).unwrap();
+        std::fs::write(parent.join("memory.usage_in_bytes"), (12 * GIB).to_string()).unwrap();
+        std::fs::write(root.join("memory.limit_in_bytes"), unlimited).unwrap();
+        std::fs::write(root.join("memory.usage_in_bytes"), (13 * GIB).to_string()).unwrap();
+
+        let observed = query_cgroup_v1_hierarchy_at(&leaf, &root).unwrap();
+        assert_eq!(observed.limit_bytes, Some(16 * GIB));
+        assert_eq!(observed.high_bytes, None);
+        assert_eq!(observed.current_bytes, Some(4 * GIB));
+        assert_eq!(observed.remaining_bytes(), Some(4 * GIB));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1623,66 +2865,115 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_unified_memory_reserve_env_override() {
-        // Hold the shared env-mutation lock — see
-        // test_unified_memory_apu_corrects_oversized_carveout.
-        let _env_guard = crate::TEST_ENV_LOCK.lock().unwrap();
-        // SAFETY: env mutation is safe under nextest's per-test process
-        // isolation; this test must run via `cargo nextest run`.
-        unsafe { std::env::set_var("KILN_TRAINING_MEMORY_RESERVE_GB", "10.0") };
+    fn unified_memory_reserve_is_conservative_and_deterministic() {
         let mem_total = 32u64 * 1024 * 1024 * 1024;
         assert_eq!(
             unified_memory_reserve_bytes(mem_total),
-            10u64 * 1024 * 1024 * 1024
+            8 * 1024 * 1024 * 1024
         );
-        unsafe { std::env::remove_var("KILN_TRAINING_MEMORY_RESERVE_GB") };
+        assert_eq!(
+            unified_memory_reserve_bytes(16 * 1024 * 1024 * 1024),
+            6 * 1024 * 1024 * 1024
+        );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_linux_drm_sysfs_memory_detection() {
+    fn cgroup_headroom_further_bounds_unified_free() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let bounds = unified_memory_bounds(
+            120 * GIB,
+            4 * GIB,
+            Some(32 * GIB),
+            Some(14 * GIB),
+            Some(CgroupMemoryObservation::from_level(
+                Some(24 * GIB),
+                None,
+                Some(18 * GIB),
+            )),
+        );
+        // A 24 GiB cgroup retains the 6 GiB minimum reserve. Its remaining
+        // 6 GiB is entirely reserved, so a new unified allocation gets zero.
+        assert_eq!(bounds.total_bytes, 18 * GIB);
+        assert_eq!(bounds.free_bytes, 0);
+        assert_eq!(bounds.used_bytes, bounds.total_bytes);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_drm_selector_deduplicates_aliases_and_never_mixes_devices() {
         let root = std::env::temp_dir().join(format!("kiln-drm-vram-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
+        let nvidia = root.join("devices/nvidia");
+        let amd = root.join("devices/amd");
+        std::fs::create_dir_all(&nvidia).unwrap();
+        std::fs::create_dir_all(&amd).unwrap();
+        for node in ["card0", "renderD128", "card1", "renderD129"] {
+            std::fs::create_dir_all(root.join(node)).unwrap();
+        }
+        std::os::unix::fs::symlink(&nvidia, root.join("card0/device")).unwrap();
+        std::os::unix::fs::symlink(&nvidia, root.join("renderD128/device")).unwrap();
+        std::os::unix::fs::symlink(&amd, root.join("card1/device")).unwrap();
+        std::os::unix::fs::symlink(&amd, root.join("renderD129/device")).unwrap();
 
-        std::fs::create_dir_all(root.join("card0/device")).unwrap();
-        std::fs::create_dir_all(root.join("card0-DP-1/device")).unwrap();
-        std::fs::create_dir_all(root.join("renderD128/device")).unwrap();
+        std::fs::write(nvidia.join("mem_info_vram_total"), "51539607552\n").unwrap();
+        std::fs::write(nvidia.join("vendor"), "0x10de\n").unwrap();
+        std::fs::write(nvidia.join("class"), "0x030200\n").unwrap();
+        std::fs::write(amd.join("mem_info_vram_total"), "103079215104\n").unwrap();
+        std::fs::write(amd.join("mem_info_gtt_total"), "16629473300\n").unwrap();
+        std::fs::write(amd.join("vendor"), "0x1002\n").unwrap();
+        std::fs::write(amd.join("class"), "0x038000\n").unwrap();
 
-        std::fs::write(
-            root.join("card0/device/mem_info_vram_total"),
-            "17179869184\n",
-        )
-        .unwrap();
-        std::fs::write(root.join("card0/device/mem_info_vram_used"), "536870912\n").unwrap();
-        std::fs::write(
-            root.join("card0-DP-1/device/mem_info_vram_total"),
-            "34359738368\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("renderD128/device/mem_info_vis_vram_total"),
-            "25769803776\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("renderD128/device/mem_info_vis_vram_used"),
-            "1073741824\n",
-        )
-        .unwrap();
+        let first = select_linux_drm_device_at(&root, 0, None).unwrap();
+        let second = select_linux_drm_device_at(&root, 1, None).unwrap();
+        assert_eq!(first.info.vram_total, 51_539_607_552);
+        assert_eq!(first.info.gtt_total, 0);
+        assert_eq!(first.info.vendor, 0x10de);
+        assert_eq!(second.info.vram_total, 103_079_215_104);
+        assert_eq!(second.info.gtt_total, 16_629_473_300);
+        assert_eq!(second.info.vendor, 0x1002);
+        assert!(!is_host_shared_memory_drm(
+            &first.info,
+            Some(32 * 1024 * 1024 * 1024)
+        ));
+        assert!(!is_host_shared_memory_drm(
+            &second.info,
+            Some(32 * 1024 * 1024 * 1024)
+        ));
+        assert!(select_linux_drm_device_at(&root, 2, None).is_none());
 
+        let amd_selected = select_linux_drm_device_at(&root, 0, Some(LinuxDrmVendor::Amd)).unwrap();
+        assert_eq!(amd_selected.info, second.info);
+        assert!(select_linux_drm_device_at(&root, 1, Some(LinuxDrmVendor::Amd)).is_none());
+        assert_eq!(linux_drm_candidate_count_at(&root, None), Some(2));
         assert_eq!(
-            query_linux_drm_memory_fields_at(
-                &root,
-                &["mem_info_vram_total", "mem_info_vis_vram_total"]
-            ),
-            Some(25769803776)
+            linux_drm_candidate_count_at(&root, Some(LinuxDrmVendor::Amd)),
+            Some(1)
         );
         assert_eq!(
-            query_linux_drm_memory_fields_at(
-                &root,
-                &["mem_info_vram_used", "mem_info_vis_vram_used"]
-            ),
-            Some(1073741824)
+            linux_drm_candidate_count_at(&root, Some(LinuxDrmVendor::Intel)),
+            Some(0)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_drm_vendor_inventory_fails_closed_when_evidence_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "kiln-drm-identity-incomplete-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("card0/device")).unwrap();
+
+        assert_eq!(linux_drm_candidate_count_at(&root, None), Some(1));
+        assert_eq!(
+            linux_drm_candidate_count_at(&root, Some(LinuxDrmVendor::Amd)),
+            None,
+            "a missing vendor ID cannot prove that an unknown device is irrelevant to ROCm",
         );
 
         std::fs::remove_dir_all(root).unwrap();
@@ -1690,14 +2981,10 @@ mod tests {
 
     /// Exercise `detect_vram` on macOS and confirm it returns a positive
     /// number from the unified-memory path (assuming nvidia-smi isn't
-    /// installed and no env override is set, which is the normal mac
-    /// developer setup).
+    /// installed, which is the normal mac developer setup).
     #[cfg(target_os = "macos")]
     #[test]
     fn test_detect_apple_unified_memory() {
-        if std::env::var("KILN_GPU_MEMORY_GB").is_ok() {
-            return;
-        }
         // If nvidia-smi happens to exist on this mac (unlikely), skip.
         if std::process::Command::new("nvidia-smi")
             .arg("--version")
@@ -1708,6 +2995,7 @@ mod tests {
         }
         let info = detect_vram();
         assert_eq!(info.source, VramSource::AppleSilicon);
+        assert!(info.unified);
         // Source is enough — `total_bytes > 0` doesn't survive on tiny CI
         // runners (GitHub macos-14 ships with ~7 GB, leaving ≤ 1 GB after
         // the 6 GB OS reserve, and `saturating_sub` can hit 0 on the smallest

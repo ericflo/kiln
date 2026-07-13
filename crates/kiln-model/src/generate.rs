@@ -327,6 +327,150 @@ pub struct ModelRunner {
     batched_state_cache: Mutex<Option<CachedBatchedState>>,
     backend: Arc<dyn BackendRuntime>,
     backend_health: BackendHealthHandle,
+    memory_runtime: Option<InferenceMemoryRuntime>,
+}
+
+/// Process-lifetime memory binding for direct inference consumers.
+///
+/// Construction is the explicit slow startup boundary: it validates that the
+/// selected backend and OS memory probe name the same physical accelerator,
+/// detects safe capacity, installs the exact governor policy, publishes one
+/// live sample, and starts the background sampler. Model constructors remain
+/// allocation-only and never probe hardware implicitly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InferenceMemoryRuntime {
+    device: kiln_tensor::Device,
+    selector: kiln_memory::VramProbeSelector,
+    effective_capacity_bytes: u64,
+    governor: kiln_memory::GovernorConfig,
+}
+
+impl InferenceMemoryRuntime {
+    /// Initialize direct inference memory governance for `device`.
+    ///
+    /// `governor.capacity_limit_bytes` is a cap, never a capacity override. A
+    /// value larger than detected physical capacity is clamped; zero or an
+    /// unresolved accelerator probe fails before model construction.
+    pub fn initialize(
+        device: kiln_tensor::Device,
+        mut governor: kiln_memory::GovernorConfig,
+    ) -> Result<Self> {
+        let selector = device.memory_probe_selector();
+        if device.is_cpu() {
+            return Ok(Self {
+                device,
+                selector,
+                effective_capacity_bytes: 0,
+                governor,
+            });
+        }
+
+        anyhow::ensure!(
+            governor.critical_frac.is_finite()
+                && governor.tight_frac.is_finite()
+                && governor.comfortable_frac.is_finite()
+                && (0.0..=1.0).contains(&governor.critical_frac)
+                && governor.critical_frac <= governor.tight_frac
+                && governor.tight_frac < governor.comfortable_frac
+                && governor.comfortable_frac <= 1.0,
+            "invalid inference governor pressure thresholds: require 0 <= critical <= tight < comfortable <= 1"
+        );
+
+        kiln_memory::validate_vram_probe_identity(selector).map_err(|error| {
+            anyhow::anyhow!(
+                "cannot initialize inference memory runtime for {}: {error}",
+                device.short_name()
+            )
+        })?;
+        let physical = kiln_memory::detect_vram_for(selector);
+        anyhow::ensure!(
+            physical.total_bytes > 0,
+            "cannot initialize inference memory runtime for {}: probe {:?} established no safe accelerator capacity",
+            device.short_name(),
+            selector,
+        );
+        let effective_capacity_bytes = governor
+            .capacity_limit_bytes
+            .unwrap_or(physical.total_bytes)
+            .min(physical.total_bytes);
+        anyhow::ensure!(
+            effective_capacity_bytes > 0,
+            "cannot initialize inference memory runtime for {} with a zero-byte capacity cap",
+            device.short_name(),
+        );
+        anyhow::ensure!(
+            governor.floor_bytes < effective_capacity_bytes,
+            "inference governor floor {} bytes must be smaller than effective capacity {} bytes",
+            governor.floor_bytes,
+            effective_capacity_bytes,
+        );
+        governor.capacity_limit_bytes = Some(effective_capacity_bytes);
+        kiln_memory::MemoryGovernor::configure_global(selector, governor)
+            .context("configure inference memory governor")?;
+        let memory_governor = kiln_memory::MemoryGovernor::global();
+        let published = memory_governor.refresh();
+        anyhow::ensure!(
+            published.total_bytes == effective_capacity_bytes
+                && !published.observations.probe_failed,
+            "inference memory probe for {} did not publish the bound {}-byte capacity",
+            device.short_name(),
+            effective_capacity_bytes,
+        );
+        anyhow::ensure!(
+            memory_governor.start_sampler(),
+            "failed to start inference memory sampler"
+        );
+        Ok(Self {
+            device,
+            selector,
+            effective_capacity_bytes,
+            governor,
+        })
+    }
+
+    pub const fn device(&self) -> kiln_tensor::Device {
+        self.device
+    }
+
+    pub const fn selector(&self) -> kiln_memory::VramProbeSelector {
+        self.selector
+    }
+
+    pub const fn effective_capacity_bytes(&self) -> u64 {
+        self.effective_capacity_bytes
+    }
+
+    pub const fn governor_config(&self) -> kiln_memory::GovernorConfig {
+        self.governor
+    }
+
+    fn is_weight_device_compatible(&self, weight_device: kiln_tensor::Device) -> bool {
+        self.device == weight_device
+            || matches!(self.device, kiln_tensor::Device::Vulkan(_))
+                && matches!(weight_device, kiln_tensor::Device::Cpu)
+    }
+
+    fn validate_weight_device(&self, weight_device: kiln_tensor::Device) -> Result<()> {
+        anyhow::ensure!(
+            self.is_weight_device_compatible(weight_device),
+            "inference memory runtime device {} does not match model weight device {}",
+            self.device.short_name(),
+            weight_device.short_name(),
+        );
+        if self.device.is_cpu() {
+            return Ok(());
+        }
+        let configured = kiln_memory::MemoryGovernor::global_configuration();
+        anyhow::ensure!(
+            configured.selector == self.selector && configured.governor == self.governor,
+            "inference memory runtime no longer matches the process-wide governor configuration"
+        );
+        anyhow::ensure!(
+            kiln_memory::MemoryGovernor::try_global_cached_snapshot().is_some(),
+            "inference memory runtime governor is not initialized"
+        );
+        Ok(())
+    }
 }
 
 /// Backend graph eligibility resolved before a [`ModelRunner`] is built.
@@ -2413,10 +2557,13 @@ impl ModelRunner {
             .cloned())
     }
 
-    /// Create a new ModelRunner from pre-loaded weights, tokenizer, and config.
+    /// Compatibility constructor for owners that initialize memory governance
+    /// separately, such as `kiln-server`.
     ///
-    /// Create a runner with the production default: CUDA graphs disabled.
-    /// Pass `cuda_graphs: true` to [`Self::new_with_options`] to opt in.
+    /// Direct accelerator consumers should prefer
+    /// [`Self::new_with_initialized_runtime`], which makes the startup contract
+    /// explicit and fails before inference when the selected device, probe, or
+    /// capacity policy is inconsistent. This constructor never probes.
     pub fn new(weights: GpuWeights, tokenizer: KilnTokenizer, config: ModelConfig) -> Self {
         Self::new_with_options(weights, tokenizer, config, false)
     }
@@ -2444,27 +2591,46 @@ impl ModelRunner {
     /// Create a runner with backend graph eligibility resolved by the owning
     /// product surface. Environment kill switches remain subordinate to these
     /// booleans; they can disable an eligible runner but cannot enable one the
-    /// server profile prohibited.
+    /// server profile prohibited. This compatibility constructor never probes
+    /// or initializes memory governance; direct accelerator consumers should
+    /// use [`Self::new_with_initialized_runtime`].
     pub fn new_with_runtime_options(
         weights: GpuWeights,
         tokenizer: KilnTokenizer,
         config: ModelConfig,
         options: ModelRunnerRuntimeOptions,
     ) -> Self {
+        let execution_device = weights.embed_tokens.device();
+        let selected_backend = backend::for_device_kt(&execution_device);
+        Self::new_with_selected_backend(
+            weights,
+            tokenizer,
+            config,
+            options,
+            execution_device,
+            selected_backend,
+        )
+    }
+
+    fn new_with_selected_backend(
+        weights: GpuWeights,
+        tokenizer: KilnTokenizer,
+        config: ModelConfig,
+        options: ModelRunnerRuntimeOptions,
+        execution_device: kiln_tensor::Device,
+        selected_backend: Arc<dyn BackendRuntime>,
+    ) -> Self {
         let eos_token_ids = tokenizer.eos_token_ids();
-        // (#1082) `embed_tokens.device()` is a kt `Device`. The backend
-        // dispatcher is kt-native (`for_device_kt`). (#1082) `CudaGraphRunner::new`
-        // is kt-native now — no candle device bridge.
-        let kt_device = weights.embed_tokens.device();
-        let backend = backend::for_device_kt(&kt_device);
-        let cuda_graph = CudaGraphRunner::new(&kt_device, options.cuda_graphs);
-        let rocm_graph = RocmGraphRunner::new(&kt_device, options.rocm_graphs);
-        let metal_graph = MetalGraphRunner::new(&kt_device, options.metal_graphs);
-        let training_caps = TrainingLossBackend::runtime_training_capabilities(backend.as_ref());
+        let cuda_graph = CudaGraphRunner::new(&execution_device, options.cuda_graphs);
+        let rocm_graph = RocmGraphRunner::new(&execution_device, options.rocm_graphs);
+        let metal_graph = MetalGraphRunner::new(&execution_device, options.metal_graphs);
+        let training_caps =
+            TrainingLossBackend::runtime_training_capabilities(selected_backend.as_ref());
         let decode_buffer_max_batch =
-            decode_buffer_max_batch(backend.as_ref(), options.max_decode_batch);
+            decode_buffer_max_batch(selected_backend.as_ref(), options.max_decode_batch);
         tracing::info!(
-            backend = BackendIdentity::runtime_name(backend.as_ref()),
+            backend = BackendIdentity::runtime_name(selected_backend.as_ref()),
+            execution_device = %execution_device.short_name(),
             projection_training = training_caps.projection_training,
             flce_loss = training_caps.flce_loss,
             rmsnorm_training = training_caps.rmsnorm_training,
@@ -2493,9 +2659,40 @@ impl ModelRunner {
             decode_buffer_max_batch,
             decode_buffer_config: OnceLock::new(),
             batched_state_cache: Mutex::new(None),
-            backend,
+            backend: selected_backend,
             backend_health: BackendHealthHandle::default(),
+            memory_runtime: None,
         }
+    }
+
+    /// Build a direct-inference runner from an explicitly initialized memory
+    /// runtime. This constructor performs no hardware probe; it verifies the
+    /// typed binding against the weights and already-published global policy.
+    pub fn new_with_initialized_runtime(
+        weights: GpuWeights,
+        tokenizer: KilnTokenizer,
+        config: ModelConfig,
+        options: ModelRunnerRuntimeOptions,
+        memory_runtime: &InferenceMemoryRuntime,
+    ) -> Result<Self> {
+        memory_runtime.validate_weight_device(weights.embed_tokens.device())?;
+        let selected_backend = backend::for_explicit_device_kt(memory_runtime.device())?;
+        let mut runner = Self::new_with_selected_backend(
+            weights,
+            tokenizer,
+            config,
+            options,
+            memory_runtime.device(),
+            selected_backend,
+        );
+        runner.memory_runtime = Some(*memory_runtime);
+        Ok(runner)
+    }
+
+    /// Direct-inference memory binding, or `None` for compatibility owners
+    /// that installed process memory governance outside `ModelRunner`.
+    pub const fn inference_memory_runtime(&self) -> Option<InferenceMemoryRuntime> {
+        self.memory_runtime
     }
 
     pub fn backend_health_handle(&self) -> BackendHealthHandle {
@@ -10232,6 +10429,23 @@ mod tests {
         "KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK",
         "KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK",
     ];
+
+    #[test]
+    fn inference_memory_binding_accepts_only_exact_or_vulkan_host_weights() {
+        let binding = InferenceMemoryRuntime {
+            device: kiln_tensor::Device::Vulkan(0),
+            selector: kiln_memory::VramProbeSelector::LinuxDrm {
+                index: 0,
+                vendor: None,
+            },
+            effective_capacity_bytes: 16 * 1024 * 1024 * 1024,
+            governor: kiln_memory::GovernorConfig::default(),
+        };
+        assert!(binding.is_weight_device_compatible(kiln_tensor::Device::Vulkan(0)));
+        assert!(binding.is_weight_device_compatible(kiln_tensor::Device::Cpu));
+        assert!(!binding.is_weight_device_compatible(kiln_tensor::Device::Cuda(0)));
+        assert!(!binding.is_weight_device_compatible(kiln_tensor::Device::Vulkan(1)));
+    }
 
     fn empty_prefix_stream_cleanup() -> PrefixCachedStreamingCleanup {
         PrefixCachedStreamingCleanup {

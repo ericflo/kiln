@@ -1843,8 +1843,9 @@ function renderServerStatus(h) {
 }
 
 /* =====================================================================
-   Runtime config expander — GET /v1/config (detected VRAM + detection
-   source, KV cache geometry, training checkpointing, memory budgets).
+   Runtime config expander — GET /v1/config (device-scoped capacity,
+   live usable memory, governor policy, KV geometry, training policy, and
+   exact memory-budget partitions).
    The <details> shell is static in index.html as a SIBLING of the keyed
    #server-status region: renderServerStatus innerHTML-swaps that element
    whenever its content key changes (and pollHealth's failure path
@@ -1887,34 +1888,90 @@ function runtimeConfigRow(label, valueHtml, title) {
   </div>`;
 }
 
-// Renders the genuinely useful subset of /v1/config (shape: api/config.rs
-// ConfigResponse — vram / kv_cache / training / memory_budget) plus a raw
-// pretty-printed JSON toggle so nothing the server reports is hidden.
+// Renders the operational subset of /v1/config (shape: api/config.rs
+// ConfigResponse) plus a raw pretty-printed JSON toggle so diagnostics that
+// do not belong in the compact summary remain available.
 function renderRuntimeConfigBody(cfg) {
   const vram = cfg.vram || {};
+  const live = vram.live || {};
+  const governor = vram.governor || {};
   const kv = cfg.kv_cache || {};
   const train = cfg.training || {};
   const b = cfg.memory_budget || {};
   const generation = cfg.generation || {};
   const srcChip = s => s == null ? '' : ` <span class="rc-source" title="Where this value came from">${escapeHtml(String(s))}</span>`;
+  const flagChip = (label, title) => ` <span class="rc-source"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(label)}</span>`;
   const onOff = v => v ? 'on' : 'off';
   const num = v => (typeof v === 'number' && isFinite(v)) ? v.toLocaleString() : '—';
-  const gb = v => (typeof v === 'number' && isFinite(v)) ? v.toFixed(1) + ' GB' : '—';
+  const gib = v => (typeof v === 'number' && isFinite(v)) ? v.toFixed(2) + ' GiB' : '—';
+  const memory = (gibValue, bytesValue) => {
+    const exact = typeof bytesValue === 'number' && Number.isSafeInteger(bytesValue) && bytesValue >= 0
+      ? `<span class="rc-memory-exact">${bytesValue.toLocaleString()} B</span>`
+      : '';
+    return `<strong>${gib(gibValue)}</strong>${exact}`;
+  };
+  const configuredCap = vram.configured_capacity_gib == null
+    ? '<strong>not set</strong>'
+    : `${memory(vram.configured_capacity_gib, vram.configured_capacity_bytes)}${vram.configured_capacity_clamped ? flagChip('clamped', 'The requested cap exceeded safely detected capacity and was reduced.') : ''}`;
+  const checkpointPolicy = train.checkpoint_policy || {};
+  const checkpointPolicyLabel = checkpointPolicy.mode === 'explicit_segments'
+    ? 'explicit segments'
+    : checkpointPolicy.mode === 'disabled'
+      ? 'disabled'
+      : checkpointPolicy.mode === 'auto'
+        ? 'auto'
+        : '—';
+  const retainedSegments = checkpointPolicy.mode === 'disabled' && checkpointPolicy.segments != null
+    ? flagChip(`${num(checkpointPolicy.segments)} retained`, 'The segment count remains part of checkpoint identity while execution is disabled.')
+    : '';
+  const reclaimRequested = governor.reclaim_mode_requested;
+  const reclaimEffective = governor.reclaim_mode_effective;
+  const reclaimDisabledByProfile = governor.reclaim_disabled_by_serving_profile === true;
+  const reclaimRequestedChip = reclaimRequested != null && reclaimEffective != null && reclaimRequested !== reclaimEffective
+    ? flagChip(
+        `requested ${String(reclaimRequested)}`,
+        reclaimDisabledByProfile
+          ? 'The serving profile disabled the requested reclaim behavior.'
+          : 'The effective reclaim behavior differs from the requested configuration.',
+      )
+    : '';
   return `
     <div class="rc-groups">
       <div class="rc-group">
-        <div class="rc-group-title">VRAM detection</div>
-        ${runtimeConfigRow('Detected', `<strong>${gb(vram.detected_gb)}</strong>${srcChip(vram.source)}`, 'GPU memory detected at startup, plus the detector that reported it (nvidia-smi, linux-drm-sysfs, KILN_GPU_MEMORY_GB, …).')}
+        <div class="rc-group-title">Capacity</div>
+        ${runtimeConfigRow('Device', `<strong>${escapeHtml(vram.probe_selector == null ? '—' : String(vram.probe_selector))}</strong>${vram.unified ? flagChip('unified', 'The accelerator and host share one physical memory pool.') : ''}`, 'The device-scoped probe selected for the running backend.')}
+        ${runtimeConfigRow('Physical', `${memory(vram.physical_capacity_gib, vram.physical_capacity_bytes)}${srcChip(vram.physical_capacity_source)}`, 'Safe capacity detected at startup for the selected device.')}
+        ${runtimeConfigRow('Configured cap', configuredCap, 'Optional typed capacity cap. It can reduce detected capacity but cannot expand it.')}
+        ${runtimeConfigRow('Effective cap', `${memory(vram.effective_capacity_gib, vram.effective_capacity_bytes)}${srcChip(vram.effective_capacity_source)}`, 'Immutable capacity used by planning and memory admission.')}
+      </div>
+      <div class="rc-group">
+        <div class="rc-group-title">Live memory</div>
+        ${runtimeConfigRow('Sample total', memory(live.total_gib, live.total_bytes), 'Current bounded total reported by the device-scoped live probe.')}
+        ${runtimeConfigRow('Used now', memory(live.used_gib, live.used_bytes), 'Memory currently in use at the time of this snapshot.')}
+        ${runtimeConfigRow('Probe available', `${memory(live.available_gib, live.available_bytes)}${srcChip(live.source)}`, 'Current availability after driver, host, cgroup, and unified-memory safety bounds.')}
+        ${runtimeConfigRow('Cap-aware', memory(live.effective_capacity_available_gib, live.effective_capacity_available_bytes), 'Current availability after the immutable effective capacity cap.')}
+        ${runtimeConfigRow('Usable', memory(live.usable_after_governor_floor_gib, live.usable_after_governor_floor_bytes), 'Live cap-aware memory remaining after the governor floor.')}
+      </div>
+      <div class="rc-group">
+        <div class="rc-group-title">Governor</div>
+        ${runtimeConfigRow('Capacity limit', memory(governor.capacity_limit_gib, governor.capacity_limit_bytes), 'Immutable capacity limit enforced by memory admission.')}
+        ${runtimeConfigRow('Free floor', memory(governor.floor_gib, governor.floor_bytes), 'Memory kept free rather than admitted to model work.')}
+        ${runtimeConfigRow('Probe cadence', `<strong>${typeof governor.probe_ms === 'number' && isFinite(governor.probe_ms) ? num(governor.probe_ms) + ' ms' : '—'}</strong>`, 'How often the memory governor refreshes live observations.')}
+        ${runtimeConfigRow('Reclaim', `<strong>${escapeHtml(reclaimEffective == null ? '—' : String(reclaimEffective))}</strong>${srcChip(governor.reclaim_mode_source)}${reclaimRequestedChip}`, 'Effective process-lifetime reclaim policy. A differing requested value is shown alongside it.')}
       </div>
       <div class="rc-group">
         <div class="rc-group-title">KV cache</div>
-        ${runtimeConfigRow('Blocks', `<strong>${num(kv.num_blocks)}</strong>${srcChip(kv.num_blocks_source)}`, 'Paged-attention blocks allocated by the running backend (auto-sized, or pinned via KILN_NUM_BLOCKS).')}
+        ${runtimeConfigRow('Blocks', `<strong>${num(kv.num_blocks)}</strong>${srcChip(kv.num_blocks_source)}`, 'Paged-attention blocks allocated by the running backend, either automatically sized or explicitly configured.')}
         ${runtimeConfigRow('FP8 cache', `<strong>${onOff(kv.fp8_enabled)}</strong>`, 'Whether the KV cache stores keys/values in FP8 (halves cache memory per token).')}
       </div>
       <div class="rc-group">
         <div class="rc-group-title">Training</div>
-        ${runtimeConfigRow('Grad checkpointing', `<strong>${onOff(train.checkpointing_enabled)}</strong>`, 'Gradient checkpointing trades recompute for activation memory during LoRA training.')}
-        ${runtimeConfigRow('Segments', `<strong>${num(train.checkpoint_segments)}</strong>${srcChip(train.checkpoint_segments_source)}`, 'Checkpoint segment count (auto-sized, or pinned via KILN_GRAD_CHECKPOINT_SEGMENTS).')}
+        ${runtimeConfigRow('Runtime device', `<strong>${escapeHtml(train.runtime_device == null ? '—' : String(train.runtime_device))}</strong>`, 'Immutable execution device bound to native training.')}
+        ${runtimeConfigRow('Weight device', `<strong>${escapeHtml(train.model_weight_device == null ? '—' : String(train.model_weight_device))}</strong>`, 'Device representation of the frozen model weights.')}
+        ${runtimeConfigRow('Native training', `<strong>${train.native_training_supported === true ? 'available' : 'unavailable'}</strong>`, train.native_training_supported === true ? 'The bound runtime and model-weight representation can execute native training.' : (train.native_training_unavailable_reason || 'Native training is unavailable on this backend.'))}
+        ${runtimeConfigRow('Checkpoint policy', `<strong>${checkpointPolicyLabel}</strong>${retainedSegments}`, 'Immutable typed checkpoint policy for native training runs.')}
+        ${runtimeConfigRow('Execution', `<strong>${onOff(train.checkpointing_enabled)}</strong>`, 'Gradient checkpointing trades recompute for activation memory during LoRA training.')}
+        ${runtimeConfigRow('Effective segments', `<strong>${num(train.checkpoint_segments)}</strong>${srcChip(train.checkpoint_segments_source)}`, 'Resolved segment count and whether it was measured, conservatively selected, explicitly configured, or disabled.')}
       </div>
       <div class="rc-group">
         <div class="rc-group-title">Generation</div>
@@ -1924,10 +1981,10 @@ function renderRuntimeConfigBody(cfg) {
       </div>
       <div class="rc-group">
         <div class="rc-group-title">Memory budget</div>
-        ${runtimeConfigRow('Total VRAM', `<strong>${gb(b.total_vram_gb)}</strong>`)}
-        ${runtimeConfigRow('Model weights', `<strong>${gb(b.model_gb)}</strong>`)}
-        ${runtimeConfigRow('KV cache', `<strong>${gb(b.kv_cache_gb)}</strong>`)}
-        ${runtimeConfigRow('Training reserve', `<strong>${gb(b.training_budget_gb)}</strong>`)}
+        ${runtimeConfigRow('Budget total', memory(b.total_vram_gib, b.total_vram_bytes), 'Effective capacity partitioned by the startup memory budget.')}
+        ${runtimeConfigRow('Model weights', memory(b.model_gib, b.model_bytes))}
+        ${runtimeConfigRow('KV cache', memory(b.kv_cache_gib, b.kv_cache_bytes))}
+        ${runtimeConfigRow('Training budget', memory(b.training_budget_gib, b.training_budget_bytes))}
         ${runtimeConfigRow('Inference fraction', `<strong>${(typeof b.inference_memory_fraction === 'number' && isFinite(b.inference_memory_fraction)) ? (b.inference_memory_fraction * 100).toFixed(0) + '%' : '—'}</strong>`, 'Fraction of usable VRAM reserved for inference (model + KV cache); the remainder is the training budget.')}
       </div>
     </div>

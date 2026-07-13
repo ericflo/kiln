@@ -19,7 +19,7 @@ use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
-use kiln_memory::vram::{detect_used_vram_bytes, detect_vram};
+use kiln_memory::vram::{VramProbeSelector, detect_used_vram_bytes_for, detect_vram_for};
 use kiln_model::PagedKvCacheKt;
 use kiln_model::backend::{self as runtime_backend, LinearBackend, ResidencyBackend};
 use kiln_model::forward::{
@@ -546,9 +546,13 @@ fn gpu_name() -> String {
     "unknown".to_string()
 }
 
-/// Get current VRAM usage in bytes.
-fn current_vram_used_bytes() -> u64 {
-    detect_used_vram_bytes().unwrap_or(0)
+fn vram_probe_selector_for_device(device: &kiln_tensor::Device) -> VramProbeSelector {
+    device.memory_probe_selector()
+}
+
+/// Get current VRAM usage for the benchmark's selected accelerator.
+fn current_vram_used_bytes(selector: VramProbeSelector) -> u64 {
+    detect_used_vram_bytes_for(selector).unwrap_or(0)
 }
 
 /// 30 distinct prompt bases spanning three domains, indexed by `seed % 30`.
@@ -682,6 +686,7 @@ fn bench_inference(
     max_output_tokens: usize,
     seed: u64,
     temperature: f32,
+    vram_probe_selector: VramProbeSelector,
 ) -> Result<InferenceBenchResult> {
     let prompt = build_prompt(tokenizer, prompt_tokens, seed);
     let actual_prompt_tokens = tokenizer
@@ -743,7 +748,7 @@ fn bench_inference(
     }
 
     let total_time = overall_start.elapsed();
-    let peak_vram = current_vram_used_bytes() / (1024 * 1024);
+    let peak_vram = current_vram_used_bytes(vram_probe_selector) / (1024 * 1024);
 
     Ok(InferenceBenchResult {
         batch_size: num_runs,
@@ -1462,6 +1467,36 @@ fn resolve_bench_spec_method_with_force(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vram_probe_selector_tracks_selected_benchmark_device() {
+        assert_eq!(
+            vram_probe_selector_for_device(&kiln_tensor::Device::Cuda(2)),
+            VramProbeSelector::Nvidia(2)
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(&kiln_tensor::Device::Rocm(1)),
+            VramProbeSelector::LinuxDrm {
+                index: 1,
+                vendor: Some(LinuxDrmVendor::Amd),
+            }
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(&kiln_tensor::Device::Vulkan(3)),
+            VramProbeSelector::LinuxDrm {
+                index: 3,
+                vendor: None,
+            }
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(&kiln_tensor::Device::Metal(4)),
+            VramProbeSelector::AppleUnified
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(&kiln_tensor::Device::Cpu),
+            VramProbeSelector::None
+        );
+    }
 
     fn default_speculative_policy_for_test() -> SpeculativeDecodePolicy {
         SpeculativeDecodePolicy::default()
@@ -2449,6 +2484,7 @@ fn bench_training(
     tokenizer: &KilnTokenizer,
     num_steps: usize,
     server_training_dispatch: ServerTrainingDispatchPolicy,
+    vram_probe_selector: VramProbeSelector,
 ) -> Result<TrainingResult> {
     use kiln_train::{ChatMessage, SftConfig, SftExample};
 
@@ -2572,7 +2608,7 @@ fn bench_training(
     };
     let elapsed = start.elapsed();
 
-    let peak_vram = current_vram_used_bytes() / (1024 * 1024);
+    let peak_vram = current_vram_used_bytes(vram_probe_selector) / (1024 * 1024);
 
     // Clean up temp adapter
     let _ = std::fs::remove_dir_all(adapter_dir.join("bench-adapter"));
@@ -2831,8 +2867,20 @@ fn main() -> Result<()> {
         );
     }
 
+    // Resolve the benchmark device before any memory probe so mixed-accelerator
+    // hosts never report or budget against whichever GPU an auto probe finds first.
+    let device_kt = kiln_server::device::select_device_kt()?;
+    let vram_probe_selector = vram_probe_selector_for_device(&device_kt);
+
     // GPU info
-    let vram = detect_vram();
+    let vram = detect_vram_for(vram_probe_selector);
+    let bench_runtime = kiln_train::TrainingRuntimeContext::new_for_device(
+        device_kt,
+        vram,
+        kiln_train::GradientCheckpointPolicy::Auto,
+    );
+    kiln_train::ensure_memory_governor_for_runtime(device_kt, &bench_runtime)
+        .context("failed to initialize benchmark memory governor")?;
     let gpu_info = GpuInfo {
         name: gpu_name(),
         total_vram_mb: vram.total_bytes / (1024 * 1024),
@@ -2848,7 +2896,7 @@ fn main() -> Result<()> {
     let model_config = ModelConfig::qwen3_5_4b();
     metric("Model path", model_path.display(), None);
 
-    let vram_before = current_vram_used_bytes();
+    let vram_before = current_vram_used_bytes(vram_probe_selector);
     let load_start = Instant::now();
 
     let spec_method = read_spec_method_from_env();
@@ -2859,12 +2907,8 @@ fn main() -> Result<()> {
     )
     .context("failed to load model weights")?;
 
-    // Route through the kt-typed `select_device_kt` so this site no
-    // longer names `candle_core::Device`. The kt-typed
-    // `from_model_weights_kt` constructor and `for_device_kt` runtime
-    // backend selector accept the kt device directly (issue #1082,
-    // candle removal).
-    let device_kt = kiln_server::device::select_device_kt()?;
+    // The kt-typed `from_model_weights_kt` constructor and `for_device_kt`
+    // runtime backend selector accept the selected device directly.
     let backend = runtime_backend::for_device_kt(&device_kt);
     let backend_name = BackendIdentity::runtime_name(backend.as_ref());
     if backend_name == "cpu" {
@@ -2881,10 +2925,14 @@ fn main() -> Result<()> {
 
     let gpu_weights = GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)
         .context("failed to transfer weights to GPU")?;
+    let post_load_memory = kiln_memory::MemoryGovernor::global().refresh();
+    if post_load_memory.total_bytes == 0 {
+        anyhow::bail!("selected-device memory probe failed after benchmark model load");
+    }
     drop(model_weights); // Free CPU memory
 
     let load_time = load_start.elapsed();
-    let vram_after = current_vram_used_bytes();
+    let vram_after = current_vram_used_bytes(vram_probe_selector);
     let model_vram = (vram_after.saturating_sub(vram_before)) / (1024 * 1024);
 
     metric(
@@ -2995,6 +3043,7 @@ fn main() -> Result<()> {
             &tokenizer,
             args.training_steps,
             backend_capabilities.training.server_dispatch,
+            vram_probe_selector,
         ) {
             Ok(result) => {
                 let mut stderr = std::io::stderr();
@@ -3057,6 +3106,7 @@ fn main() -> Result<()> {
             args.max_output_tokens,
             args.seed,
             args.temperature,
+            vram_probe_selector,
         ) {
             Ok(result) => {
                 let _ = writeln!(

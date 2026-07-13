@@ -817,6 +817,11 @@ pub struct OpdConfig {
     #[serde(default)]
     pub resume_checkpoint: Option<String>,
 
+    /// Internal server admission result for the maximum submitted row. `None`
+    /// lets standalone training plan from its immutable runtime capacity.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub grad_checkpoint_segments: Option<usize>,
+
     /// Deterministic seed. If `None`, the trainer picks one and records
     /// it in the replay log.
     #[serde(default)]
@@ -902,6 +907,10 @@ impl OpdConfig {
             self.clip_epsilon
         );
         anyhow::ensure!(
+            self.grad_checkpoint_segments != Some(0),
+            "OPD grad_checkpoint_segments must be greater than zero"
+        );
+        anyhow::ensure!(
             self.max_cost_usd.is_none(),
             "OPD max_cost_usd is unavailable: the only wired remote provider is self-hosted vLLM and no metered billing source exists"
         );
@@ -936,6 +945,7 @@ impl Default for OpdConfig {
             auto_load: default_auto_load(),
             checkpoint_interval: default_opd_checkpoint_interval(),
             resume_checkpoint: None,
+            grad_checkpoint_segments: None,
             seed: None,
             optimizer: Optimizer::default(),
             echo: None,
@@ -1641,51 +1651,32 @@ fn prepare_opd_kernel_inputs(
 }
 
 fn opd_checkpoint_segments_for_step(
-    vram: &kiln_memory::vram::GpuVramInfo,
-    base_model_bytes: u64,
+    runtime: &crate::TrainingRuntimeContext,
+    admitted_segments: Option<usize>,
     activation_bytes_per_elem: usize,
     model_config: &kiln_core::config::ModelConfig,
     seq_len: usize,
 ) -> Option<Vec<(usize, usize)>> {
-    let env_override = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .is_some()
-        || std::env::var("KILN_NO_GRAD_CHECKPOINT")
-            .as_deref()
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
-    let cfg = if env_override {
-        crate::trainer::CheckpointConfig::from_env(model_config.num_layers)
-    } else {
-        match kiln_memory::vram::recommended_checkpoint_plan_with_activation_bytes(
-            vram,
-            model_config.num_layers,
-            seq_len,
-            model_config.hidden_size,
-            base_model_bytes,
-            activation_bytes_per_elem,
-        ) {
-            None | Some(kiln_memory::vram::CheckpointPlan::UserOverride) => {
-                crate::trainer::CheckpointConfig::from_env(model_config.num_layers)
-            }
-            Some(kiln_memory::vram::CheckpointPlan::Disabled { .. }) => {
-                crate::trainer::CheckpointConfig {
-                    num_segments: 1,
-                    enabled: false,
-                    auto_configured: true,
-                }
-            }
-            Some(kiln_memory::vram::CheckpointPlan::Enabled { num_segments, .. }) => {
-                crate::trainer::CheckpointConfig {
-                    num_segments: num_segments.min(model_config.num_layers).max(1),
-                    enabled: true,
-                    auto_configured: true,
-                }
-            }
-        }
-    };
+    let cfg = admitted_segments.map_or_else(
+        || {
+            crate::trainer::CheckpointConfig::auto_for_workload_with_activation_bytes_and_runtime(
+                model_config.num_layers,
+                seq_len,
+                model_config.hidden_size,
+                model_config.intermediate_size,
+                model_config.vocab_size,
+                2,
+                activation_bytes_per_elem,
+                runtime,
+            )
+        },
+        |segments| {
+            crate::trainer::CheckpointConfig::from_resolved_segments(
+                model_config.num_layers,
+                segments,
+            )
+        },
+    );
 
     if cfg.enabled {
         Some(crate::trainer::compute_segment_boundaries(
@@ -3646,6 +3637,7 @@ fn opd_checkpoint_auxiliary_state(
     teacher_caps: &LogitSourceCaps,
     teacher_provenance: &OpdTeacherProvenance,
     use_chat_template_rollout_prefixes: bool,
+    runtime: &crate::TrainingRuntimeContext,
 ) -> Result<serde_json::Value> {
     let hashes =
         kiln_core::config_hashes::ConfigHashes::from_model_tokenizer(model_config, tokenizer, None);
@@ -3669,6 +3661,7 @@ fn opd_checkpoint_auxiliary_state(
         "teacher_content_revision": teacher_provenance.content_revision(),
         "training_precision_policy": training_precision_policy.name,
         "use_chat_template_rollout_prefixes": use_chat_template_rollout_prefixes,
+        "checkpoint_planning": runtime.checkpoint_planning_identity(),
     }))
 }
 
@@ -3732,8 +3725,11 @@ pub fn opd_train_to(
     )
 }
 
-/// Coordinated staged-output OPD entry point. Exact checkpoints publish under
-/// `checkpoint_output_dir`, independently of the final adapter staging tree.
+/// Standalone coordinated OPD entry point with a durable checkpoint root.
+///
+/// Server callers should use [`opd_train_to_with_checkpoint_root_and_runtime`]
+/// so rollout-dependent checkpoint plans share their process-lifetime memory
+/// configuration.
 #[allow(clippy::too_many_arguments)]
 pub fn opd_train_to_with_checkpoint_root(
     prompts: &[OpdPrompt],
@@ -3749,9 +3745,50 @@ pub fn opd_train_to_with_checkpoint_root(
     progress_cb: Option<crate::trainer::ProgressCallback>,
     gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
 ) -> Result<std::path::PathBuf> {
+    let runtime =
+        crate::standalone_training_runtime_for_weight_device(weights.embed_tokens.device())?;
+    opd_train_to_with_checkpoint_root_and_runtime(
+        prompts,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        teacher,
+        adapter_dir,
+        output_adapter_dir,
+        checkpoint_output_dir,
+        adapter_name,
+        progress_cb,
+        gpu_step_coordination,
+        &runtime,
+    )
+}
+
+/// Server-owned OPD entry point with immutable process-lifetime runtime inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn opd_train_to_with_checkpoint_root_and_runtime(
+    prompts: &[OpdPrompt],
+    config: &OpdConfig,
+    model_config: &kiln_core::config::ModelConfig,
+    weights: &kiln_model::forward::GpuWeights,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    teacher: Arc<dyn LogitSource>,
+    adapter_dir: &std::path::Path,
+    output_adapter_dir: &std::path::Path,
+    checkpoint_output_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: Option<crate::trainer::ProgressCallback>,
+    gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
+    runtime: &crate::TrainingRuntimeContext,
+) -> Result<std::path::PathBuf> {
     config
         .validate_runtime_contract()
         .context("opd_train: unsupported configuration")?;
+    let runtime_device = runtime
+        .resolve_device_for_weights(weights.embed_tokens.device())
+        .context("opd_train: resolve runtime device")?;
+    crate::ensure_memory_governor_for_runtime(runtime_device, runtime)
+        .context("opd_train: initialize memory governor")?;
     let teacher_caps = teacher.capabilities();
     let teacher_provenance = OpdTeacherProvenance::from_source(teacher.as_ref(), &teacher_caps);
     let effective_top_k = match config.loss {
@@ -3854,26 +3891,14 @@ pub fn opd_train_to_with_checkpoint_root(
     // (#1082) `embed_tokens.device()` is the kt Device — threaded straight
     // through. The per-step forward/backward (`opd_step_forward_backward_tape_authoritative`)
     // now takes the kt device directly; the candle round-trip bridge is gone.
-    let device_kt = weights.embed_tokens.device();
-    let backend_rt = backend::for_device_kt(&device_kt);
+    let device_kt = runtime_device;
+    let backend_rt = crate::trainer::training_backend_for_device(device_kt);
     let training_precision_policy =
         crate::trainer::training_precision_policy_for_backend(backend_rt.as_ref());
 
-    // Cache VRAM + base-model footprint estimate for the per-step
-    // gradient-checkpointing auto-tune below. OPD's input_ids length
-    // varies per step (rollouts are model-sampled), so we feed each
-    // step's actual seq_len into the decision rather than picking a
-    // single segment count up front like SFT/GRPO do. Detection is
-    // cheap (env var or one nvidia-smi spawn) but no reason to
-    // re-detect on every step.
-    let opd_vram_cache = kiln_memory::vram::detect_vram();
-    let opd_base_model_bytes = kiln_memory::vram::estimate_base_model_bytes(
-        model_config.num_layers,
-        model_config.hidden_size,
-        model_config.intermediate_size,
-        model_config.vocab_size,
-        2, // BF16 base weights
-    );
+    // Bind every per-step plan to the process-lifetime capacity supplied by
+    // the caller. OPD sequence lengths vary with sampled rollouts, but the
+    // effective hardware/configuration context must not drift within a run.
     let opd_activation_bytes_per_elem =
         crate::trainer::training_activation_bytes_per_elem_for_backend(
             weights,
@@ -4301,6 +4326,7 @@ pub fn opd_train_to_with_checkpoint_root(
             &teacher_caps,
             &teacher_provenance,
             use_chat_template_render,
+            runtime,
         )?,
     };
     if let (Some(checkpoint), Some(loop_state)) =
@@ -4589,8 +4615,8 @@ pub fn opd_train_to_with_checkpoint_root(
                     // `total_obs_len` stay computed above for the receipt token-count
                     // bookkeeping but no longer steer dispatch.
                     let opd_segments = opd_checkpoint_segments_for_step(
-                        &opd_vram_cache,
-                        opd_base_model_bytes,
+                        runtime,
+                        config.grad_checkpoint_segments,
                         opd_activation_bytes_per_elem,
                         model_config,
                         input_ids.len(),
@@ -4620,10 +4646,8 @@ pub fn opd_train_to_with_checkpoint_root(
                     // LoRA grads through the kt-internal forward ops (the kt↔candle
                     // copy bridge severs the lineage — see note
                     // `kiln-candle-autograd-drops-attn-conv-grads`), so the tape path
-                    // is the sole correct grad producer. `echo_active_this_step`,
-                    // `env_mask`, `env_count`, `total_obs_len`, `opd_vram_cache`,
-                    // `opd_base_model_bytes` (the candle-path-only inputs) are now
-                    // unused on the kt-only path.
+                    // is the sole correct grad producer. The former ECHO-only
+                    // dispatch inputs no longer steer this kt-only path.
                     //
                     // CUDA-gated: the kt tape adapters record kt CUDA ops, so the OPD
                     // tape path is CUDA-only. A non-cuda build of `opd_train` has no
@@ -5263,7 +5287,8 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
     let lora_weights = params.as_lora_weights();
 
     let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
-    let mut boundaries: Vec<kiln_tensor::Tensor> = Vec::with_capacity(num_segments + 1);
+    let mut boundaries: Vec<kiln_tensor::Tensor> =
+        Vec::with_capacity(crate::retained_checkpoint_boundary_count(num_segments));
     let mut current = embed_hidden.detach();
     boundaries.push(current.clone());
     {
@@ -5711,6 +5736,61 @@ mod tests {
     // surface migrating off candle `Tensor` in the public API — see the
     // module-level note above.
     use kiln_core::tokenizer::KilnTokenizer;
+
+    fn opd_test_runtime(
+        gib: u64,
+        policy: crate::GradientCheckpointPolicy,
+    ) -> crate::TrainingRuntimeContext {
+        crate::TrainingRuntimeContext::new(
+            kiln_memory::vram::GpuVramInfo {
+                total_bytes: gib * 1024 * 1024 * 1024,
+                source: kiln_memory::vram::VramSource::ConfigOverride,
+                unified: false,
+            },
+            policy,
+        )
+    }
+
+    #[test]
+    fn opd_checkpoint_planning_uses_immutable_capacity_and_policy() -> Result<()> {
+        let model = kiln_core::config::ModelConfig::qwen3_5_4b();
+        let roomy = opd_test_runtime(48, crate::GradientCheckpointPolicy::Auto);
+        let tight = opd_test_runtime(16, crate::GradientCheckpointPolicy::Auto);
+        assert!(opd_checkpoint_segments_for_step(&roomy, None, 4, &model, 30).is_none());
+        assert!(
+            opd_checkpoint_segments_for_step(&tight, None, 4, &model, 4096)
+                .is_some_and(|segments| segments.len() >= 2)
+        );
+
+        assert_eq!(
+            opd_checkpoint_segments_for_step(&roomy, Some(8), 4, &model, 30)
+                .expect("live-admitted OPD plan must override roomy static capacity")
+                .len(),
+            8
+        );
+
+        let explicit = opd_test_runtime(
+            48,
+            crate::GradientCheckpointPolicy::from_parts(Some(8), false)?,
+        );
+        assert_eq!(
+            opd_checkpoint_segments_for_step(&explicit, None, 4, &model, 30)
+                .expect("explicit policy enables checkpointing")
+                .len(),
+            8
+        );
+
+        let disabled = opd_test_runtime(
+            16,
+            crate::GradientCheckpointPolicy::from_parts(Some(8), true)?,
+        );
+        assert!(opd_checkpoint_segments_for_step(&disabled, None, 4, &model, 4096).is_none());
+        assert_ne!(
+            tight.checkpoint_planning_identity(),
+            disabled.checkpoint_planning_identity()
+        );
+        Ok(())
+    }
 
     #[derive(Debug)]
     struct RecordingLogitSource {

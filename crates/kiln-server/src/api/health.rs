@@ -15,6 +15,7 @@ use crate::config::{
     ConfigValueSource, DecodeRuntimeConfig, ModelDefaultsProfile, ServingProfileDiagnostics,
     ServingRuntimePolicy,
 };
+use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::recent_requests::RequestRecord;
 use crate::state::{AppState, ModelBackend};
 
@@ -175,6 +176,8 @@ struct GpuMemoryInfo {
 
 #[derive(Serialize)]
 struct LiveMemory {
+    /// True when the latest sampler attempt failed and free is forced to zero.
+    probe_failed: bool,
     total_gb: f64,
     /// Used by ALL processes right now (includes coexisting GPU jobs).
     used_gb: f64,
@@ -189,6 +192,22 @@ struct LiveMemory {
     source: String,
     /// True when GPU shares system RAM (APU / Apple Silicon).
     unified: bool,
+    /// Age and deadline of the sampler-published observation.
+    sample_age_ms: u64,
+    sample_max_age_ms: u64,
+    sample_stale: bool,
+    sampler_required: bool,
+    sampler_running: bool,
+    sampler_healthy: bool,
+    /// Independently constrained GTT/shared-host allocation tier, when known.
+    host_backed: Option<LiveMemoryTier>,
+}
+
+#[derive(Serialize)]
+struct LiveMemoryTier {
+    total_gb: f64,
+    used_gb: f64,
+    free_gb: f64,
 }
 
 #[derive(Serialize)]
@@ -279,9 +298,15 @@ struct DecodeRuntimeInfo {
 struct MemoryGovernorRuntimeInfo {
     /// Effective mode after applying the immutable serving profile.
     reclaim_mode: &'static str,
-    /// Mode selected by the governor's own environment/default configuration.
+    /// Mode selected by immutable typed startup configuration.
     requested_reclaim_mode: &'static str,
     automatic_monitor_enabled: bool,
+    sampler_required: bool,
+    sampler_running: bool,
+    sampler_healthy: bool,
+    sample_age_ms: u64,
+    sample_max_age_ms: u64,
+    sample_stale: bool,
     source: &'static str,
     disabled_by_serving_profile: bool,
     automatic_attempts: u64,
@@ -296,11 +321,13 @@ struct MemoryGovernorRuntimeInfo {
     automatic_zero_yield_streak: u64,
 }
 
-fn memory_governor_runtime_info(policy: ServingRuntimePolicy) -> MemoryGovernorRuntimeInfo {
-    let governor = kiln_memory::MemoryGovernor::global();
-    let enabled = governor.monitor_started();
-    let requested_reclaim_mode = governor.config().reclaim_mode.as_str();
-    let automatic = governor.automatic_reclaim_stats();
+fn memory_governor_runtime_info(
+    observation: &CachedMemoryGovernorObservation,
+    requested_reclaim_mode: &'static str,
+    policy: ServingRuntimePolicy,
+    source: crate::config::ConfigValueSource,
+) -> MemoryGovernorRuntimeInfo {
+    let automatic = observation.automatic_reclaim;
     MemoryGovernorRuntimeInfo {
         reclaim_mode: if policy.allocator_reclaim {
             requested_reclaim_mode
@@ -308,11 +335,25 @@ fn memory_governor_runtime_info(policy: ServingRuntimePolicy) -> MemoryGovernorR
             "off"
         },
         requested_reclaim_mode,
-        automatic_monitor_enabled: enabled,
-        source: if std::env::var_os(kiln_memory::MEMORY_RECLAIM_MODE_ENV).is_some() {
-            "environment"
-        } else {
-            "default"
+        automatic_monitor_enabled: observation.automatic_monitor_enabled,
+        sampler_required: observation.sample_status.sampler_required,
+        sampler_running: observation.sample_status.sampler_running,
+        sampler_healthy: observation.sample_status.healthy,
+        sample_age_ms: observation
+            .sample_status
+            .age
+            .as_millis()
+            .min(u64::MAX as u128) as u64,
+        sample_max_age_ms: observation
+            .sample_status
+            .max_age
+            .as_millis()
+            .min(u64::MAX as u128) as u64,
+        sample_stale: observation.sample_status.stale,
+        source: match source {
+            crate::config::ConfigValueSource::Default => "default",
+            crate::config::ConfigValueSource::ConfigFile => "config_file",
+            crate::config::ConfigValueSource::Environment => "environment",
         },
         disabled_by_serving_profile: !policy.allocator_reclaim,
         automatic_attempts: automatic.attempts,
@@ -634,13 +675,20 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let request_count = requests.total;
     let recent_requests = recent_request_metrics(&state);
     let prompt_caches = prompt_caches(&state);
+    let memory_observation =
+        CachedMemoryGovernorObservation::capture_global_for(state.vram_probe_selector);
     let decode_runtime = DecodeRuntimeInfo {
         configuration: state.decode_runtime_config,
         cuda_graphs,
         rocm_graphs,
         metal_graphs,
         kv_autoscaler: state.kv_autoscaler,
-        memory_governor: memory_governor_runtime_info(serving_policy),
+        memory_governor: memory_governor_runtime_info(
+            &memory_observation,
+            state.memory_config.reclaim_mode.mode().as_str(),
+            serving_policy,
+            state.memory_config.reclaim_mode.source(),
+        ),
         decode_batcher,
         batching_engine,
     };
@@ -651,20 +699,45 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         let peak_prefill_used_bytes = b.peak_prefill_used_vram_bytes();
         let allocated_bytes = b.model_memory_bytes.saturating_add(b.kv_cache_bytes);
         let reserved_bytes = allocated_bytes.saturating_add(b.training_budget_bytes);
-        // The governor's LIVE view right now — what kiln actually sees, including
-        // a coexisting llama.cpp / vLLM / training job (the probe is all-process).
+        // The latest sampler-published all-process view. Health rendering never
+        // performs driver or OS I/O on the async request thread.
         let live = {
-            let g = kiln_memory::MemoryGovernor::global();
-            let s = g.snapshot();
-            (s.total_bytes > 0).then(|| LiveMemory {
+            let s = memory_observation.snapshot;
+            let effective_capacity_available = s
+                .free_bytes
+                .min(state.vram_info.total_bytes.saturating_sub(s.used_bytes));
+            (s.total_bytes > 0 || s.observations.probe_failed).then(|| LiveMemory {
+                probe_failed: s.observations.probe_failed,
                 total_gb: s.total_bytes as f64 / 1e9,
                 used_gb: s.used_bytes as f64 / 1e9,
                 free_gb: s.free_bytes as f64 / 1e9,
-                available_gb: g.available_bytes() as f64 / 1e9,
-                soft_reserved_gb: g.soft_reserved_bytes() as f64 / 1e9,
-                pressure: format!("{:?}", g.pressure()),
+                available_gb: memory_observation
+                    .available_bytes
+                    .min(effective_capacity_available) as f64
+                    / 1e9,
+                soft_reserved_gb: memory_observation.soft_reserved_bytes as f64 / 1e9,
+                pressure: format!("{:?}", memory_observation.pressure),
                 source: s.source.to_string(),
                 unified: s.unified,
+                sample_age_ms: memory_observation
+                    .sample_status
+                    .age
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64,
+                sample_max_age_ms: memory_observation
+                    .sample_status
+                    .max_age
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64,
+                sample_stale: memory_observation.sample_status.stale,
+                sampler_required: memory_observation.sample_status.sampler_required,
+                sampler_running: memory_observation.sample_status.sampler_running,
+                sampler_healthy: memory_observation.sample_status.healthy,
+                host_backed: s.observations.host_backed.map(|tier| LiveMemoryTier {
+                    total_gb: tier.total_bytes as f64 / 1e9,
+                    used_gb: tier.used_bytes as f64 / 1e9,
+                    free_gb: tier.free_bytes as f64 / 1e9,
+                }),
             })
         };
         Some(GpuMemoryInfo {

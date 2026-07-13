@@ -3466,14 +3466,18 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .runtime-config-body { padding: 0 var(--space-5) var(--space-4); }
-.rc-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-4); }
+.rc-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: var(--space-4); }
 .rc-group-title {
   font-size: 10px; font-weight: 600; color: var(--text-muted);
   text-transform: uppercase; letter-spacing: var(--tracking-caps); margin-bottom: var(--space-2);
 }
 .rc-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); padding: 2px 0; font-size: var(--text-xs); }
 .rc-label { color: var(--text-muted); }
-.rc-value { text-align: right; font-variant-numeric: tabular-nums; }
+.rc-value { min-width: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.rc-memory-exact {
+  display: block; color: var(--text-muted); font-family: var(--font-mono);
+  font-size: 10px; line-height: 1.25;
+}
 .rc-source {
   display: inline-block; padding: 0 5px; border-radius: var(--radius-pill);
   background: var(--surface-2); border: 1px solid var(--border);

@@ -11,7 +11,7 @@
 use kiln_core::config::{DType, ModelConfig};
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_memory::vram::{GpuVramInfo, VramSource};
-use kiln_train::{GrpoGroup, SftExample};
+use kiln_train::{GrpoGroup, Optimizer, SftExample};
 
 /// What the trainer can rely on being deduplicated across CPU and GPU.
 ///
@@ -32,6 +32,48 @@ pub enum WeightResidency {
     DualResidentCpuAndVulkan,
 }
 
+/// Backend ownership policy for trainable LoRA tensors.
+///
+/// CUDA, ROCm, and Metal residency aliases tensor storage. Vulkan's resident
+/// registry currently allocates and uploads a distinct device-local buffer, so
+/// every registered parameter and optimizer state has two physical copies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LoraResidency {
+    #[default]
+    StorageOwned,
+    RegistryMirrored,
+}
+
+impl LoraResidency {
+    /// Resolve from the selected runtime backend, independent of memory
+    /// topology. Unknown accelerator backends fail closed as registry-mirrored.
+    pub fn for_backend_name(backend_name: &str) -> Self {
+        match kiln_model::backend::residency::resident_ownership_for_backend(backend_name) {
+            kiln_model::backend::residency::ResidentOwnership::StorageOwned => Self::StorageOwned,
+            kiln_model::backend::residency::ResidentOwnership::RegistryOwned => {
+                Self::RegistryMirrored
+            }
+        }
+    }
+
+    fn param_and_grad_f32_copies(self) -> u64 {
+        match self {
+            // Parameter storage + gradient storage.
+            Self::StorageOwned => 2,
+            // Parameter storage + registry mirror + gradient storage.
+            Self::RegistryMirrored => 3,
+        }
+    }
+
+    fn optimizer_state_f32_copies(self) -> u64 {
+        match self {
+            Self::StorageOwned => 1,
+            // State storage + registry mirror.
+            Self::RegistryMirrored => 2,
+        }
+    }
+}
+
 impl WeightResidency {
     /// What multiplier to apply to base weight bytes when computing the
     /// working-set estimate.
@@ -45,19 +87,17 @@ impl WeightResidency {
         }
     }
 
-    /// Inferred from the corrected VRAM source: if detection labelled
-    /// the device as a unified-memory APU, weights are dual-resident
-    /// today.
-    pub fn for_vram_source(source: VramSource) -> Self {
-        match source {
-            VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon => {
-                Self::DualResidentCpuAndVulkan
-            }
+    /// Unified-memory systems keep CPU and accelerator copies in the same
+    /// physical pool regardless of how the effective capacity was configured.
+    pub fn for_vram(vram: &GpuVramInfo) -> Self {
+        if vram.unified {
+            Self::DualResidentCpuAndVulkan
+        } else {
             // Discrete: candle keeps weights in CPU RAM but the GPU's
             // separate VRAM pool is its own memory; only the CPU copy
             // counts against the same budget the trainer estimates
             // against on the host. SingleCopy is honest there.
-            _ => Self::SingleCopy,
+            Self::SingleCopy
         }
     }
 }
@@ -72,17 +112,30 @@ pub struct Breakdown {
     pub boundary_states: u64,
     pub flce_intermediates: u64,
     pub lora_param_grad: u64,
+    pub lora_optimizer_state: u64,
+    pub lora_registry_scratch: u64,
     pub safety_margin: u64,
 }
 
 impl Breakdown {
     pub fn total(&self) -> u64 {
         self.base_weights
-            + self.per_segment_activations
-            + self.boundary_states
-            + self.flce_intermediates
-            + self.lora_param_grad
-            + self.safety_margin
+            .saturating_add(self.per_segment_activations)
+            .saturating_add(self.boundary_states)
+            .saturating_add(self.flce_intermediates)
+            .saturating_add(self.lora_param_grad)
+            .saturating_add(self.lora_optimizer_state)
+            .saturating_add(self.lora_registry_scratch)
+            .saturating_add(self.safety_margin)
+    }
+
+    /// The part of the estimate that does not scale with LoRA rank.
+    pub fn fixed_bytes(&self) -> u64 {
+        self.base_weights
+            .saturating_add(self.per_segment_activations)
+            .saturating_add(self.boundary_states)
+            .saturating_add(self.flce_intermediates)
+            .saturating_add(self.safety_margin)
     }
 }
 
@@ -100,6 +153,23 @@ pub struct EstimateOptions {
     pub recompute_boundaries: bool,
     pub activation_bytes_per_elem: Option<usize>,
     pub streaming_gdn_tile_tokens: Option<usize>,
+    /// Persistent optimizer state that must coexist with params and grads.
+    pub optimizer: Optimizer,
+    /// Whether backend residency aliases tensor storage or mirrors it.
+    pub lora_residency: LoraResidency,
+}
+
+/// Model- and resource-derived upper bounds for a uniformly applied LoRA rank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoraRankCeiling {
+    /// Largest rank that remains low-rank for every trained projection.
+    pub model: usize,
+    /// Largest rank whose params, grads, and optimizer state fit the budget.
+    pub resource: usize,
+    /// The enforceable ceiling (`min(model, resource)`).
+    pub effective: usize,
+    /// Rank-linear LoRA working-set bytes charged for each rank unit.
+    pub bytes_per_rank: u64,
 }
 
 const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
@@ -110,6 +180,21 @@ const CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES: u64 = 6 * BYTES_PER_GB;
 const SAFETY_MARGIN_BYTES: u64 = BYTES_PER_GB;
 const FLCE_MAX_AUTO_CHUNK: usize = 4096;
 const FLCE_FALLBACK_SCRATCH_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
+
+fn usize_to_u64_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn gib_to_bytes_saturating(gib: f64) -> u64 {
+    let bytes = gib * BYTES_PER_GB as f64;
+    if !bytes.is_finite() || bytes >= u64::MAX as f64 {
+        u64::MAX
+    } else if bytes <= 0.0 {
+        0
+    } else {
+        bytes as u64
+    }
+}
 
 fn dtype_bytes(dtype: DType) -> u64 {
     match dtype {
@@ -124,22 +209,30 @@ fn dtype_bytes(dtype: DType) -> u64 {
 /// intended as a stable upper bound for preflight rejection.
 fn approximate_base_weight_bytes(cfg: &ModelConfig) -> u64 {
     let elem = dtype_bytes(cfg.dtype);
-    let h = cfg.hidden_size as u64;
-    let i = cfg.intermediate_size as u64;
-    let v = cfg.vocab_size as u64;
-    let layers = cfg.num_layers as u64;
+    let h = usize_to_u64_saturating(cfg.hidden_size);
+    let i = usize_to_u64_saturating(cfg.intermediate_size);
+    let v = usize_to_u64_saturating(cfg.vocab_size);
+    let layers = usize_to_u64_saturating(cfg.num_layers);
 
     // Embedding + LM head (often tied, but we count both to stay conservative).
-    let embed_bytes = v * h * elem * 2;
+    let embed_bytes = v.saturating_mul(h).saturating_mul(elem).saturating_mul(2);
     // Per-layer projections (Q, K, V, O on full attention; gate/up/down for MLP).
     // Rough composition: q_proj ~ h * gate_h, k/v ~ h * kv_h, o_proj ~ h * h.
     // We collapse to (4 * h * h) for attention as a conservative upper bound,
     // and (3 * h * i) for the MLP, plus 4 * h for RMSNorm pairs per layer.
-    let per_layer_attn = 4 * h * h * elem;
-    let per_layer_mlp = 3 * h * i * elem;
-    let per_layer_norms = 4 * h * elem;
-    let per_layer_total = per_layer_attn + per_layer_mlp + per_layer_norms;
-    embed_bytes + per_layer_total * layers
+    let per_layer_attn = 4u64
+        .saturating_mul(h)
+        .saturating_mul(h)
+        .saturating_mul(elem);
+    let per_layer_mlp = 3u64
+        .saturating_mul(h)
+        .saturating_mul(i)
+        .saturating_mul(elem);
+    let per_layer_norms = 4u64.saturating_mul(h).saturating_mul(elem);
+    let per_layer_total = per_layer_attn
+        .saturating_add(per_layer_mlp)
+        .saturating_add(per_layer_norms);
+    embed_bytes.saturating_add(per_layer_total.saturating_mul(layers))
 }
 
 /// Activations live for the segment currently being recomputed.
@@ -150,7 +243,7 @@ fn approximate_base_weight_bytes(cfg: &ModelConfig) -> u64 {
 fn estimate_activation_bytes_per_elem(cfg: &ModelConfig, options: EstimateOptions) -> u64 {
     options
         .activation_bytes_per_elem
-        .map(|bytes| bytes.max(1) as u64)
+        .map(|bytes| usize_to_u64_saturating(bytes.max(1)))
         .unwrap_or_else(|| dtype_bytes(cfg.dtype))
 }
 
@@ -161,13 +254,19 @@ fn per_segment_activation_bytes(
     activation_bytes_per_elem: u64,
 ) -> u64 {
     let elem = activation_bytes_per_elem.max(1);
-    let h = cfg.hidden_size as u64;
-    let i = cfg.intermediate_size as u64;
-    let t = max_seq_len as u64;
-    let layers_per_seg = cfg.num_layers.div_ceil(num_segments.max(1)).max(1) as u64;
+    let h = usize_to_u64_saturating(cfg.hidden_size);
+    let i = usize_to_u64_saturating(cfg.intermediate_size);
+    let t = usize_to_u64_saturating(max_seq_len);
+    let layers_per_seg =
+        usize_to_u64_saturating(cfg.num_layers.div_ceil(num_segments.max(1)).max(1));
     // Per layer: 6 hidden-sized tensors + 2 intermediate-sized tensors.
-    let per_layer = (6 * h + 2 * i) * t * elem;
-    per_layer * layers_per_seg
+    let per_layer_width = 6u64
+        .saturating_mul(h)
+        .saturating_add(2u64.saturating_mul(i));
+    per_layer_width
+        .saturating_mul(t)
+        .saturating_mul(elem)
+        .saturating_mul(layers_per_seg)
 }
 
 /// Boundary states between segments — always live.
@@ -180,25 +279,36 @@ fn boundary_state_bytes(
 ) -> u64 {
     let elem = activation_bytes_per_elem.max(1);
     if recompute_boundaries {
-        let h = cfg.hidden_size as u64;
-        let t = max_seq_len as u64;
+        let h = usize_to_u64_saturating(cfg.hidden_size);
+        let t = usize_to_u64_saturating(max_seq_len);
         let anchor_stride = checkpoint_boundary_anchor_stride_for_shape(
             max_seq_len,
             num_segments,
             cfg.hidden_size,
             activation_bytes_per_elem as usize,
         );
-        let anchor_count = checkpoint_boundary_anchor_count(num_segments, anchor_stride) as u64;
-        let anchor_bytes = anchor_count * h * t * elem;
+        let anchor_count = usize_to_u64_saturating(checkpoint_boundary_anchor_count(
+            num_segments,
+            anchor_stride,
+        ));
+        let hidden_tokens = h.saturating_mul(t);
+        let anchor_bytes = anchor_count
+            .saturating_mul(hidden_tokens)
+            .saturating_mul(elem);
         // Long-context SFT recomputes segment inputs on demand. At peak it
         // keeps sparse boundary anchors, the upstream hidden gradient (F32),
         // one detached segment input (model dtype), and one F32-sized cushion
         // for allocator overlap during replay/backprop.
-        return anchor_bytes + 2 * h * t * 4 + h * t * elem;
+        return anchor_bytes
+            .saturating_add(hidden_tokens.saturating_mul(2).saturating_mul(4))
+            .saturating_add(hidden_tokens.saturating_mul(elem));
     }
-    let h = cfg.hidden_size as u64;
-    let t = max_seq_len as u64;
-    (num_segments as u64 + 1) * h * t * elem
+    let h = usize_to_u64_saturating(cfg.hidden_size);
+    let t = usize_to_u64_saturating(max_seq_len);
+    usize_to_u64_saturating(kiln_train::retained_checkpoint_boundary_count(num_segments))
+        .saturating_mul(h)
+        .saturating_mul(t)
+        .saturating_mul(elem)
 }
 
 pub fn checkpoint_boundary_anchor_stride_for_shape(
@@ -223,23 +333,22 @@ pub fn checkpoint_boundary_anchor_stride_for_shape(
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value > 0.0)
-        .map(|gb| (gb * BYTES_PER_GB as f64) as u64)
+        .map(gib_to_bytes_saturating)
         .unwrap_or(CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES)
         .max(1);
-    let boundary_bytes = (max_seq_len as u64)
-        .saturating_mul(hidden_size as u64)
-        .saturating_mul(activation_bytes_per_elem.max(1) as u64)
+    let boundary_bytes = usize_to_u64_saturating(max_seq_len)
+        .saturating_mul(usize_to_u64_saturating(hidden_size))
+        .saturating_mul(usize_to_u64_saturating(activation_bytes_per_elem.max(1)))
         .max(1);
-    let max_anchors = (cache_target_bytes / boundary_bytes).max(2) as usize;
+    let max_anchors =
+        usize::try_from((cache_target_bytes / boundary_bytes).max(2)).unwrap_or(usize::MAX);
     let replay_anchor_slots = max_anchors.saturating_sub(1).max(1);
     num_segments.div_ceil(replay_anchor_slots).max(1)
 }
 
 pub fn checkpoint_boundary_anchor_count(num_segments: usize, anchor_stride: usize) -> usize {
     let anchor_stride = anchor_stride.max(1);
-    (0..=num_segments)
-        .filter(|&boundary_idx| boundary_idx == 0 || boundary_idx % anchor_stride == 0)
-        .count()
+    (num_segments / anchor_stride).saturating_add(1)
 }
 
 /// Peak working-set bytes for the FLCE chunked-head pass.
@@ -257,15 +366,20 @@ pub fn checkpoint_boundary_anchor_count(num_segments: usize, anchor_stride: usiz
 /// Uses the same shape-aware default as the runtime path so long-context
 /// GRPO does not require the operator to tune `KILN_VK_FLCE_CHUNK_LEN`.
 fn flce_chunk_intermediate_bytes(cfg: &ModelConfig, max_seq_len: usize) -> u64 {
-    let h = cfg.hidden_size as u64;
-    let t = max_seq_len as u64;
-    let chunk_len = active_flce_chunk_len(cfg, max_seq_len) as u64;
-    let per_chunk_logits = t * chunk_len * 4; // F32 logits / grad-logits
+    let h = usize_to_u64_saturating(cfg.hidden_size);
+    let t = usize_to_u64_saturating(max_seq_len);
+    let chunk_len = usize_to_u64_saturating(active_flce_chunk_len(cfg, max_seq_len));
+    let per_chunk_logits = t.saturating_mul(chunk_len).saturating_mul(4); // F32 logits / grad-logits
     // FLCE now slices `[chunk_len, hidden]` and transposes only that
     // chunk to `[hidden, chunk_len]`; both buffers can be live at once.
-    let per_chunk_weight = 2 * chunk_len * h * 4;
-    let grad_hidden = t * h * 4; // accumulator across vocab loop
-    per_chunk_logits + per_chunk_weight + grad_hidden
+    let per_chunk_weight = 2u64
+        .saturating_mul(chunk_len)
+        .saturating_mul(h)
+        .saturating_mul(4);
+    let grad_hidden = t.saturating_mul(h).saturating_mul(4); // accumulator across vocab loop
+    per_chunk_logits
+        .saturating_add(per_chunk_weight)
+        .saturating_add(grad_hidden)
 }
 
 fn active_flce_chunk_len(cfg: &ModelConfig, max_active_tokens: usize) -> usize {
@@ -274,9 +388,9 @@ fn active_flce_chunk_len(cfg: &ModelConfig, max_active_tokens: usize) -> usize {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&v| v > 0);
 
-    let active = max_active_tokens.max(1) as u64;
-    let hidden = cfg.hidden_size.max(1) as u64;
-    let bytes_per_vocab_col = 4u64.saturating_mul(active.saturating_add(2 * hidden));
+    let active = usize_to_u64_saturating(max_active_tokens.max(1));
+    let hidden = usize_to_u64_saturating(cfg.hidden_size.max(1));
+    let bytes_per_vocab_col = 4u64.saturating_mul(active.saturating_add(hidden.saturating_mul(2)));
     let by_memory = (FLCE_FALLBACK_SCRATCH_BUDGET_BYTES / bytes_per_vocab_col).max(1) as usize;
     let raw = cfg
         .vocab_size
@@ -293,17 +407,204 @@ fn active_flce_chunk_len(cfg: &ModelConfig, max_active_tokens: usize) -> usize {
     forced.map(|v| v.clamp(1, safe)).unwrap_or(safe)
 }
 
-/// LoRA params + their gradients, F32 for both.
-fn lora_param_and_grad_bytes(cfg: &ModelConfig, lora_rank: usize) -> u64 {
-    let h = cfg.hidden_size as u64;
-    let i = cfg.intermediate_size as u64;
-    let r = lora_rank as u64;
-    let layers = cfg.num_layers as u64;
-    // Per layer: U + V for {q, k, v, o, gate, up, down}. Conservative:
-    // each has shapes ~ (h, r) + (r, max(h,i)). Use intermediate as upper bound.
-    let per_layer_params = 7 * (h * r + r * i);
-    // Param + grad, both F32.
-    2 * per_layer_params * 4 * layers
+/// Shape-derived rank-linear upper bound for trainable LoRA elements.
+///
+/// Each projection pair contains `(in_features + out_features) * rank`
+/// elements. One additional full-attention layer is charged for SFT's optional
+/// MTP alignment phase: the main adapter and its optimizer state remain live
+/// while the draft-block LoRA is trained.
+fn lora_parameter_elements_upper_bound(cfg: &ModelConfig, lora_rank: usize) -> u64 {
+    if cfg.full_attention_interval == 0 {
+        return u64::MAX;
+    }
+    let h = usize_to_u64_saturating(cfg.hidden_size);
+    let i = usize_to_u64_saturating(cfg.intermediate_size);
+    let r = usize_to_u64_saturating(lora_rank);
+    let layers = usize_to_u64_saturating(cfg.num_layers);
+    let full_layers = usize_to_u64_saturating(cfg.num_layers / cfg.full_attention_interval);
+    let linear_layers = layers.saturating_sub(full_layers);
+    let q_out = usize_to_u64_saturating(cfg.num_attention_heads.saturating_mul(cfg.head_dim));
+    let full_q = q_out.saturating_mul(if cfg.attn_output_gate { 2 } else { 1 });
+    let kv = usize_to_u64_saturating(cfg.num_kv_heads.saturating_mul(cfg.head_dim));
+    let linear_qk = usize_to_u64_saturating(
+        cfg.linear_num_key_heads
+            .saturating_mul(cfg.linear_key_head_dim),
+    );
+    let linear_v = usize_to_u64_saturating(
+        cfg.linear_num_value_heads
+            .saturating_mul(cfg.linear_value_head_dim),
+    );
+    let linear_qkv = linear_qk.saturating_mul(2).saturating_add(linear_v);
+
+    let mlp_per_layer = h.saturating_add(i).saturating_mul(3);
+    let full_attention_per_layer = h
+        .saturating_add(full_q)
+        .saturating_add(h.saturating_add(kv).saturating_mul(2))
+        .saturating_add(q_out.saturating_add(h));
+    let linear_attention_per_layer = h
+        .saturating_add(linear_qkv)
+        .saturating_add(h.saturating_add(linear_v))
+        .saturating_add(linear_v.saturating_add(h));
+    let main_adapter = mlp_per_layer
+        .saturating_mul(layers)
+        .saturating_add(full_attention_per_layer.saturating_mul(full_layers))
+        .saturating_add(linear_attention_per_layer.saturating_mul(linear_layers));
+    let optional_mtp = mlp_per_layer.saturating_add(full_attention_per_layer);
+    main_adapter.saturating_add(optional_mtp).saturating_mul(r)
+}
+
+/// LoRA params + their gradients, conservatively F32 for every physical copy.
+fn lora_param_and_grad_bytes(cfg: &ModelConfig, lora_rank: usize, residency: LoraResidency) -> u64 {
+    lora_parameter_elements_upper_bound(cfg, lora_rank)
+        .saturating_mul(residency.param_and_grad_f32_copies())
+        .saturating_mul(4)
+}
+
+fn optimizer_state_tensor_count(optimizer: Optimizer) -> u64 {
+    match optimizer {
+        Optimizer::Sgd => 0,
+        Optimizer::Muon { .. } => 1,
+        Optimizer::AdamW { .. } => 2,
+    }
+}
+
+/// Persistent optimizer state is always a full F32 tensor per LoRA parameter:
+/// one momentum tensor for Muon and first/second moments for AdamW.
+fn lora_optimizer_state_bytes_for_residency(
+    cfg: &ModelConfig,
+    lora_rank: usize,
+    optimizer: Optimizer,
+    residency: LoraResidency,
+) -> u64 {
+    lora_parameter_elements_upper_bound(cfg, lora_rank)
+        .saturating_mul(optimizer_state_tensor_count(optimizer))
+        .saturating_mul(residency.optimizer_state_f32_copies())
+        .saturating_mul(4)
+}
+
+/// Vulkan's initial registry upload and each optimizer dispatch temporarily
+/// mirror one tensor at a time. Charge the largest possible LoRA matrix as the
+/// one-at-a-time registry scratch peak.
+fn lora_registry_scratch_bytes(
+    cfg: &ModelConfig,
+    lora_rank: usize,
+    residency: LoraResidency,
+) -> u64 {
+    if residency != LoraResidency::RegistryMirrored {
+        return 0;
+    }
+    let largest_feature_dim = [
+        cfg.hidden_size,
+        cfg.intermediate_size,
+        cfg.num_attention_heads.saturating_mul(cfg.head_dim),
+        cfg.num_attention_heads
+            .saturating_mul(cfg.head_dim)
+            .saturating_mul(if cfg.attn_output_gate { 2 } else { 1 }),
+        cfg.num_kv_heads.saturating_mul(cfg.head_dim),
+        cfg.linear_num_key_heads
+            .saturating_mul(cfg.linear_key_head_dim)
+            .saturating_mul(2)
+            .saturating_add(
+                cfg.linear_num_value_heads
+                    .saturating_mul(cfg.linear_value_head_dim),
+            ),
+        cfg.linear_num_value_heads
+            .saturating_mul(cfg.linear_value_head_dim),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    usize_to_u64_saturating(largest_feature_dim)
+        .saturating_mul(usize_to_u64_saturating(lora_rank))
+        .saturating_mul(4)
+}
+
+fn lora_working_set_bytes_per_rank(
+    cfg: &ModelConfig,
+    optimizer: Optimizer,
+    residency: LoraResidency,
+) -> u64 {
+    lora_param_and_grad_bytes(cfg, 1, residency)
+        .saturating_add(lora_optimizer_state_bytes_for_residency(
+            cfg, 1, optimizer, residency,
+        ))
+        .saturating_add(lora_registry_scratch_bytes(cfg, 1, residency))
+}
+
+/// Largest useful uniform rank for the projection set trained by Kiln.
+///
+/// A rank above either matrix dimension is no longer a low-rank update. Since
+/// one rank is applied to every target, the smallest trained projection is the
+/// architecture-derived ceiling. Invalid or degenerate model shapes fail
+/// closed with a zero ceiling.
+pub fn model_lora_rank_ceiling(cfg: &ModelConfig) -> usize {
+    if cfg.num_layers == 0 || cfg.full_attention_interval == 0 {
+        return 0;
+    }
+
+    let mut ceiling = cfg.hidden_size.min(cfg.intermediate_size);
+    if ceiling == 0 {
+        return 0;
+    }
+
+    let mut include_projection = |in_features: usize, out_features: usize| {
+        ceiling = ceiling.min(in_features).min(out_features);
+    };
+    let kv_dim = cfg.num_kv_heads.saturating_mul(cfg.head_dim);
+    let q_out_dim = cfg.num_attention_heads.saturating_mul(cfg.head_dim);
+    let full_q_dim = q_out_dim.saturating_mul(if cfg.attn_output_gate { 2 } else { 1 });
+    let linear_qk_dim = cfg
+        .linear_num_key_heads
+        .saturating_mul(cfg.linear_key_head_dim);
+    let linear_v_dim = cfg
+        .linear_num_value_heads
+        .saturating_mul(cfg.linear_value_head_dim);
+    let linear_qkv_dim = linear_qk_dim.saturating_mul(2).saturating_add(linear_v_dim);
+
+    let full_layer_count = cfg.num_layers / cfg.full_attention_interval;
+    // SFT may train one MTP full-attention layer while the main adapter and
+    // optimizer remain live, so its projection dimensions always participate.
+    include_projection(cfg.hidden_size, full_q_dim);
+    include_projection(cfg.hidden_size, kv_dim);
+    include_projection(cfg.hidden_size, kv_dim);
+    include_projection(q_out_dim, cfg.hidden_size);
+    if full_layer_count < cfg.num_layers {
+        include_projection(cfg.hidden_size, linear_qkv_dim);
+        include_projection(cfg.hidden_size, linear_v_dim);
+        include_projection(linear_v_dim, cfg.hidden_size);
+    }
+    ceiling
+}
+
+/// Derive the rank ceiling for an already-shaped working-set plan.
+///
+/// `estimate.breakdown.fixed_bytes()` contains activations and other costs
+/// for the selected checkpoint plan. The remainder is divided by the exact
+/// rank-linear upper bound for params, grads, registry scratch, and this
+/// optimizer's persistent state. A zero/overflowed shape produces a zero
+/// resource ceiling.
+pub fn lora_rank_ceiling_for_budget(
+    cfg: &ModelConfig,
+    optimizer: Optimizer,
+    residency: LoraResidency,
+    available_bytes: u64,
+    estimate: &WorkingSet,
+) -> LoraRankCeiling {
+    let model = model_lora_rank_ceiling(cfg);
+    let bytes_per_rank = lora_working_set_bytes_per_rank(cfg, optimizer, residency);
+    let rank_budget = available_bytes.saturating_sub(estimate.breakdown.fixed_bytes());
+    let resource_u64 = if bytes_per_rank == 0 {
+        0
+    } else {
+        rank_budget / bytes_per_rank
+    };
+    let resource = usize::try_from(resource_u64).unwrap_or(usize::MAX);
+    LoraRankCeiling {
+        model,
+        resource,
+        effective: model.min(resource),
+        bytes_per_rank,
+    }
 }
 
 /// Closed-form working-set estimate for one training step.
@@ -378,7 +679,14 @@ pub fn estimate_step_working_set_with_options(
             activation_bytes_per_elem,
         ),
         flce_intermediates: flce_chunk_intermediate_bytes(cfg, flce_tokens),
-        lora_param_grad: lora_param_and_grad_bytes(cfg, lora_rank),
+        lora_param_grad: lora_param_and_grad_bytes(cfg, lora_rank, options.lora_residency),
+        lora_optimizer_state: lora_optimizer_state_bytes_for_residency(
+            cfg,
+            lora_rank,
+            options.optimizer,
+            options.lora_residency,
+        ),
+        lora_registry_scratch: lora_registry_scratch_bytes(cfg, lora_rank, options.lora_residency),
         safety_margin: SAFETY_MARGIN_BYTES,
     };
     WorkingSet {
@@ -430,11 +738,17 @@ pub fn auto_fit_checkpoint_segments(
 }
 
 fn f32_matrix_bytes(rows: usize, cols: usize) -> u64 {
-    rows as u64 * cols as u64 * 4
+    usize_to_u64_saturating(rows)
+        .saturating_mul(usize_to_u64_saturating(cols))
+        .saturating_mul(4)
 }
 
 fn ceil_div_u64(n: u64, d: u64) -> u64 {
-    if d == 0 { 0 } else { (n + d - 1) / d }
+    if d == 0 {
+        0
+    } else {
+        (n / d).saturating_add(u64::from(n % d != 0))
+    }
 }
 
 /// Peak activation estimate for one replayed layer/subblock.
@@ -455,9 +769,9 @@ fn layerwise_recompute_activation_bytes(
     let t = max_seq_len;
     let h = cfg.hidden_size;
     let i = cfg.intermediate_size;
-    let q_dim = cfg.num_attention_heads * cfg.head_dim;
-    let kv_dim = cfg.num_kv_heads * cfg.head_dim;
-    let q_raw_dim = cfg.full_attn_q_proj_dim();
+    let q_dim = cfg.num_attention_heads.saturating_mul(cfg.head_dim);
+    let kv_dim = cfg.num_kv_heads.saturating_mul(cfg.head_dim);
+    let q_raw_dim = q_dim.saturating_mul(if cfg.attn_output_gate { 2 } else { 1 });
 
     let hidden = f32_matrix_bytes(t, h);
     let intermediate = f32_matrix_bytes(t, i);
@@ -471,36 +785,63 @@ fn layerwise_recompute_activation_bytes(
     // residency is the Q/gate/Q-norm/RoPE path, K/V, attention output,
     // and upstream/boundary tensors rather than all intermediates at
     // once.
-    let full_attention_peak = 5 * hidden + q_raw + 5 * q + 4 * kv;
+    let full_attention_peak = hidden
+        .saturating_mul(5)
+        .saturating_add(q_raw)
+        .saturating_add(q.saturating_mul(5))
+        .saturating_add(kv.saturating_mul(4));
     // Split SwiGLU: gate/up/silu/gated dominate. Down-proj replay is
     // lower but still included for non-Qwen shapes.
-    let mlp_gate_up_peak = 4 * hidden + 4 * intermediate;
-    let mlp_down_peak = 4 * hidden + 3 * intermediate;
+    let mlp_gate_up_peak = hidden
+        .saturating_mul(4)
+        .saturating_add(intermediate.saturating_mul(4));
+    let mlp_down_peak = hidden
+        .saturating_mul(4)
+        .saturating_add(intermediate.saturating_mul(3));
 
     let gdn_t = streaming_gdn_tile_tokens
         .filter(|&tile| tile > 0 && tile < t)
         .unwrap_or(t);
     let hidden_tile = f32_matrix_bytes(gdn_t, h);
-    let linear_qkv = f32_matrix_bytes(gdn_t, cfg.linear_qkv_dim());
-    let linear_qk = f32_matrix_bytes(gdn_t, cfg.linear_qk_dim());
-    let linear_v = f32_matrix_bytes(gdn_t, cfg.linear_v_dim());
-    let gdn_chunks = ceil_div_u64(gdn_t as u64, 64);
+    let linear_qk_dim = cfg
+        .linear_num_key_heads
+        .saturating_mul(cfg.linear_key_head_dim);
+    let linear_v_dim = cfg
+        .linear_num_value_heads
+        .saturating_mul(cfg.linear_value_head_dim);
+    let linear_qkv_dim = linear_qk_dim.saturating_mul(2).saturating_add(linear_v_dim);
+    let linear_qkv = f32_matrix_bytes(gdn_t, linear_qkv_dim);
+    let linear_qk = f32_matrix_bytes(gdn_t, linear_qk_dim);
+    let linear_v = f32_matrix_bytes(gdn_t, linear_v_dim);
+    let gdn_chunks = ceil_div_u64(usize_to_u64_saturating(gdn_t), 64);
     let gdn_state_snapshots = gdn_chunks
-        * cfg.linear_num_value_heads as u64
-        * cfg.linear_key_head_dim as u64
-        * cfg.linear_value_head_dim as u64
-        * 4;
+        .saturating_mul(usize_to_u64_saturating(cfg.linear_num_value_heads))
+        .saturating_mul(usize_to_u64_saturating(cfg.linear_key_head_dim))
+        .saturating_mul(usize_to_u64_saturating(cfg.linear_value_head_dim))
+        .saturating_mul(4);
     // The vk-native GDN backward is split into exact subgraphs instead
     // of replaying the whole GDN layer at once. The largest pieces are:
     // no-grad normed recompute for frozen out-proj, chunkwise backward
     // with recurrent snapshots, and conv/split/repeat backward from
     // q/k/v to mixed_qkv.
-    let gdn_normed_recompute_peak =
-        4 * hidden + hidden_tile + 2 * linear_qkv + 3 * linear_v + 2 * linear_qk;
-    let gdn_chunkwise_split_peak =
-        gdn_state_snapshots + 2 * hidden + hidden_tile + linear_qkv + 3 * linear_v + 2 * linear_qk;
-    let gdn_conv_split_peak =
-        2 * hidden + hidden_tile + 2 * linear_qkv + 3 * linear_v + 2 * linear_qk;
+    let gdn_normed_recompute_peak = hidden
+        .saturating_mul(4)
+        .saturating_add(hidden_tile)
+        .saturating_add(linear_qkv.saturating_mul(2))
+        .saturating_add(linear_v.saturating_mul(3))
+        .saturating_add(linear_qk.saturating_mul(2));
+    let gdn_chunkwise_split_peak = gdn_state_snapshots
+        .saturating_add(hidden.saturating_mul(2))
+        .saturating_add(hidden_tile)
+        .saturating_add(linear_qkv)
+        .saturating_add(linear_v.saturating_mul(3))
+        .saturating_add(linear_qk.saturating_mul(2));
+    let gdn_conv_split_peak = hidden
+        .saturating_mul(2)
+        .saturating_add(hidden_tile)
+        .saturating_add(linear_qkv.saturating_mul(2))
+        .saturating_add(linear_v.saturating_mul(3))
+        .saturating_add(linear_qk.saturating_mul(2));
     let gdn_peak = gdn_normed_recompute_peak
         .max(gdn_chunkwise_split_peak)
         .max(gdn_conv_split_peak);
@@ -525,7 +866,8 @@ fn checkpointed_layerwise_streaming_activation_bytes(
     num_segments: usize,
     streaming_gdn_tile_tokens: usize,
 ) -> u64 {
-    let layers_per_seg = cfg.num_layers.div_ceil(num_segments.max(1)).max(1) as u64;
+    let layers_per_seg =
+        usize_to_u64_saturating(cfg.num_layers.div_ceil(num_segments.max(1)).max(1));
     layerwise_recompute_activation_bytes(cfg, max_seq_len, Some(streaming_gdn_tile_tokens))
         .saturating_mul(layers_per_seg)
 }
@@ -545,6 +887,44 @@ pub fn estimate_vk_native_recompute_working_set(
     residency: WeightResidency,
     weights_already_resident: bool,
 ) -> WorkingSet {
+    estimate_vk_native_recompute_working_set_with_optimizer(
+        cfg,
+        max_seq_len,
+        lora_rank,
+        residency,
+        weights_already_resident,
+        Optimizer::default(),
+    )
+}
+
+pub fn estimate_vk_native_recompute_working_set_with_optimizer(
+    cfg: &ModelConfig,
+    max_seq_len: usize,
+    lora_rank: usize,
+    residency: WeightResidency,
+    weights_already_resident: bool,
+    optimizer: Optimizer,
+) -> WorkingSet {
+    estimate_vk_native_recompute_working_set_with_residency(
+        cfg,
+        max_seq_len,
+        lora_rank,
+        residency,
+        weights_already_resident,
+        optimizer,
+        LoraResidency::RegistryMirrored,
+    )
+}
+
+pub fn estimate_vk_native_recompute_working_set_with_residency(
+    cfg: &ModelConfig,
+    max_seq_len: usize,
+    lora_rank: usize,
+    residency: WeightResidency,
+    weights_already_resident: bool,
+    optimizer: Optimizer,
+    lora_residency: LoraResidency,
+) -> WorkingSet {
     let base_weights = if weights_already_resident {
         0
     } else {
@@ -555,7 +935,14 @@ pub fn estimate_vk_native_recompute_working_set(
         per_segment_activations: vk_native_recompute_activation_bytes(cfg, max_seq_len),
         boundary_states: 0,
         flce_intermediates: flce_chunk_intermediate_bytes(cfg, max_seq_len),
-        lora_param_grad: lora_param_and_grad_bytes(cfg, lora_rank),
+        lora_param_grad: lora_param_and_grad_bytes(cfg, lora_rank, lora_residency),
+        lora_optimizer_state: lora_optimizer_state_bytes_for_residency(
+            cfg,
+            lora_rank,
+            optimizer,
+            lora_residency,
+        ),
+        lora_registry_scratch: lora_registry_scratch_bytes(cfg, lora_rank, lora_residency),
         safety_margin: if weights_already_resident {
             0
         } else {
@@ -579,8 +966,8 @@ pub fn estimate_vk_native_recompute_working_set(
 /// candle CPU storage from that pool by the time training is
 /// submitted.
 ///
-/// Discrete GPUs and the no-detection path keep the static behavior:
-/// reserve a fraction of the budget for inference, return the rest.
+/// Discrete GPUs keep the static behavior: reserve a fraction of the budget
+/// for inference, return the rest. Missing detection fails closed with zero.
 pub fn available_for_training_bytes(vram: &GpuVramInfo) -> u64 {
     available_for_training_bytes_with_meminfo_details(
         vram,
@@ -601,49 +988,23 @@ pub fn available_for_training_bytes_with_meminfo(
 pub fn available_for_training_bytes_with_meminfo_details(
     vram: &GpuVramInfo,
     mem_available_bytes: Option<u64>,
-    mem_total_bytes: Option<u64>,
+    _mem_total_bytes: Option<u64>,
 ) -> u64 {
     if vram.total_bytes == 0 {
-        // No detection — refuse to claim any budget. Caller should treat
-        // this as "skip the check" rather than "reject everything",
-        // since the preflight is not the right place to refuse jobs
-        // when we have no budget signal at all.
-        return u64::MAX;
+        return 0;
     }
 
     // Unified memory: training and inference share the same physical
-    // pool, so MemAvailable_now is the truth. Cap by the corrected
-    // VRAM budget so a misconfigured host can't somehow report more
-    // available than the GPU can address.
-    if matches!(
-        vram.source,
-        VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon
-    ) {
-        if let Some(mem_total) = mem_total_bytes {
-            // Some ROCm systems expose a large dedicated GPU memory heap through
-            // DRM while still labelling the heap as unified. If the reported GPU
-            // budget is larger than host MemTotal, /proc/meminfo is not the
-            // limiting pool for training allocations and using MemAvailable
-            // under-admits long-context jobs.
-            if vram.total_bytes <= mem_total.saturating_add(SAFETY_MARGIN_BYTES) {
-                if let Some(mem_avail) = mem_available_bytes {
-                    let live = mem_avail.saturating_sub(SAFETY_MARGIN_BYTES);
-                    return live.min(vram.total_bytes.saturating_sub(SAFETY_MARGIN_BYTES));
-                }
-            }
-        } else if let Some(mem_avail) = mem_available_bytes {
+    // pool, so MemAvailable_now is the truth. Cap by the effective capacity so
+    // a host cannot report more available memory than the GPU can address.
+    if vram.unified {
+        if let Some(mem_avail) = mem_available_bytes {
             let live = mem_avail.saturating_sub(SAFETY_MARGIN_BYTES);
             return live.min(vram.total_bytes.saturating_sub(SAFETY_MARGIN_BYTES));
         }
-        // No /proc/meminfo (non-Linux Apple Silicon, or read failed):
-        // honor the explicit unified-memory reserve knob when present,
-        // otherwise fall through to the conservative static path.
-        if let Some(reserve) = training_memory_reserve_override_bytes() {
-            return vram
-                .total_bytes
-                .saturating_sub(reserve)
-                .saturating_sub(SAFETY_MARGIN_BYTES);
-        }
+        // No live host signal (for example non-Linux Apple Silicon): fall
+        // through to the conservative static path. Capacity detection already
+        // retained unified-memory system headroom.
     }
 
     // Discrete-GPU / unknown path: reserve a fraction of the budget
@@ -655,22 +1016,14 @@ pub fn available_for_training_bytes_with_meminfo_details(
     after_inference.saturating_sub(SAFETY_MARGIN_BYTES)
 }
 
-fn training_memory_reserve_override_bytes() -> Option<u64> {
-    let gb = std::env::var("KILN_TRAINING_MEMORY_RESERVE_GB")
-        .ok()?
-        .parse::<f64>()
-        .ok()?;
-    (gb.is_finite() && gb >= 0.0).then_some((gb * BYTES_PER_GB as f64) as u64)
-}
-
 #[cfg(target_os = "linux")]
 fn query_linux_mem_available_bytes() -> Option<u64> {
-    query_linux_meminfo_kib("MemAvailable:").map(|kib| kib * 1024)
+    query_linux_meminfo_kib("MemAvailable:").map(|kib| kib.saturating_mul(1024))
 }
 
 #[cfg(target_os = "linux")]
 fn query_linux_mem_total_bytes() -> Option<u64> {
-    query_linux_meminfo_kib("MemTotal:").map(|kib| kib * 1024)
+    query_linux_meminfo_kib("MemTotal:").map(|kib| kib.saturating_mul(1024))
 }
 
 #[cfg(target_os = "linux")]
@@ -790,7 +1143,7 @@ pub fn approximate_max_seq_len_opd(
         .map(|p| approximate_tokens_for_messages(&p.messages, tokenizer))
         .max()
         .unwrap_or(0);
-    longest_prompt + max_tokens
+    longest_prompt.saturating_add(max_tokens)
 }
 
 pub fn approximate_max_seq_len_grpo_group(
@@ -804,7 +1157,7 @@ pub fn approximate_max_seq_len_grpo_group(
         .map(|c| approximate_tokens_for_text(&c.text, tokenizer))
         .max()
         .unwrap_or(0);
-    prompt + max_completion
+    prompt.saturating_add(max_completion)
 }
 
 fn approximate_tokens_for_messages(
@@ -813,19 +1166,16 @@ fn approximate_tokens_for_messages(
 ) -> usize {
     // Sum every message's content in chars, plus a 16-token-per-message
     // tag for chat-template envelope overhead.
-    let chars: usize = messages
-        .iter()
-        .map(|message| {
-            message.content.chars().count()
-                + message
-                    .tool_calls
-                    .as_ref()
-                    .and_then(|tool_calls| serde_json::to_string(tool_calls).ok())
-                    .map_or(0, |value| value.chars().count())
-        })
-        .sum();
-    let envelope = messages.len() * 16;
-    let char_estimate = (chars / 4) + envelope;
+    let chars = messages.iter().fold(0usize, |total, message| {
+        let tool_chars = message
+            .tool_calls
+            .as_ref()
+            .and_then(|tool_calls| serde_json::to_string(tool_calls).ok())
+            .map_or(0, |value| value.chars().count());
+        total.saturating_add(message.content.chars().count().saturating_add(tool_chars))
+    });
+    let envelope = messages.len().saturating_mul(16);
+    let char_estimate = (chars / 4).saturating_add(envelope);
 
     if let Some(tok) = tokenizer {
         let core: Vec<kiln_core::tokenizer::ChatMessage> = messages.to_vec();
@@ -839,7 +1189,7 @@ fn approximate_tokens_for_messages(
 }
 
 fn approximate_tokens_for_text(text: &str, tokenizer: Option<&KilnTokenizer>) -> usize {
-    let char_estimate = text.chars().count() / 4 + 4;
+    let char_estimate = (text.chars().count() / 4).saturating_add(4);
     if let Some(tok) = tokenizer {
         if let Ok(ids) = tok.encode(text) {
             return ids.len().max(char_estimate);
@@ -875,9 +1225,14 @@ pub fn format_oom_message_with_source(
     let avail_gb = available_bytes as f64 / BYTES_PER_GB as f64;
     let bd = &estimate.breakdown;
     let bw_gb = bd.base_weights as f64 / BYTES_PER_GB as f64;
-    let act_gb = (bd.per_segment_activations + bd.boundary_states) as f64 / BYTES_PER_GB as f64;
+    let act_gb = bd
+        .per_segment_activations
+        .saturating_add(bd.boundary_states) as f64
+        / BYTES_PER_GB as f64;
     let flce_gb = bd.flce_intermediates as f64 / BYTES_PER_GB as f64;
     let lora_gb = bd.lora_param_grad as f64 / BYTES_PER_GB as f64;
+    let optimizer_gb = bd.lora_optimizer_state as f64 / BYTES_PER_GB as f64;
+    let registry_scratch_gb = bd.lora_registry_scratch as f64 / BYTES_PER_GB as f64;
     let source_clause = match vram_source {
         Some(src) => format!(" (vram_source={src})"),
         None => String::new(),
@@ -886,7 +1241,8 @@ pub fn format_oom_message_with_source(
         "Estimated training step working set is {est_gb:.2} GB but only \
          {avail_gb:.2} GB is available{source_clause}. Breakdown: weights {bw_gb:.2} GB, \
          activations {act_gb:.2} GB (max_seq_len={msl}, num_segments={num_segments}), \
-         FLCE chunk {flce_gb:.2} GB, LoRA params+grads {lora_gb:.2} GB \
+         FLCE chunk {flce_gb:.2} GB, LoRA params+grads {lora_gb:.2} GB, \
+         optimizer state {optimizer_gb:.2} GB, residency scratch {registry_scratch_gb:.2} GB \
          (lora_rank={lora_rank}). Dynamic checkpointing already tried up to \
          this segment count. To fit, shrink lora_rank, send fewer/shorter \
          examples per submission, or free memory from other processes.",
@@ -903,6 +1259,10 @@ mod tests {
 
     fn qwen_4b() -> ModelConfig {
         ModelConfig::qwen3_5_4b()
+    }
+
+    fn adamw() -> Optimizer {
+        serde_json::from_str(r#"{"kind":"adam_w"}"#).unwrap()
     }
 
     #[test]
@@ -953,6 +1313,246 @@ mod tests {
             small.total_bytes,
             large.total_bytes
         );
+    }
+
+    #[test]
+    fn optimizer_state_is_charged_as_full_f32_lora_tensors() {
+        let cfg = qwen_4b();
+        let estimate = |optimizer| {
+            estimate_step_working_set_with_options(
+                &cfg,
+                256,
+                16,
+                4,
+                WeightResidency::SingleCopy,
+                true,
+                EstimateOptions {
+                    optimizer,
+                    ..Default::default()
+                },
+            )
+        };
+
+        let sgd = estimate(Optimizer::Sgd);
+        let muon = estimate(Optimizer::default());
+        let adamw = estimate(adamw());
+        assert_eq!(sgd.breakdown.lora_optimizer_state, 0);
+        assert_eq!(
+            muon.breakdown.lora_param_grad,
+            sgd.breakdown.lora_param_grad
+        );
+        assert_eq!(
+            adamw.breakdown.lora_param_grad,
+            sgd.breakdown.lora_param_grad
+        );
+        assert_eq!(
+            muon.breakdown.lora_optimizer_state,
+            sgd.breakdown.lora_param_grad / 2,
+            "Muon owns one F32 state tensor while params+grads charge two"
+        );
+        assert_eq!(
+            adamw.breakdown.lora_optimizer_state, sgd.breakdown.lora_param_grad,
+            "AdamW owns two F32 state tensors"
+        );
+        assert!(sgd.total_bytes < muon.total_bytes);
+        assert!(muon.total_bytes < adamw.total_bytes);
+
+        let vk_adamw = estimate_vk_native_recompute_working_set_with_optimizer(
+            &cfg,
+            256,
+            16,
+            WeightResidency::SingleCopy,
+            true,
+            adamw(),
+        );
+        assert_eq!(
+            vk_adamw.breakdown.lora_optimizer_state,
+            adamw.breakdown.lora_optimizer_state.saturating_mul(2),
+            "vk-native admission must charge storage plus the registry mirror"
+        );
+        assert!(vk_adamw.breakdown.lora_registry_scratch > 0);
+    }
+
+    #[test]
+    fn lora_residency_is_selected_by_backend_not_memory_topology() {
+        for backend in ["cuda", "cuda-portable", "rocm", "metal", "metal-portable"] {
+            assert_eq!(
+                LoraResidency::for_backend_name(backend),
+                LoraResidency::StorageOwned,
+                "{backend} residency must alias tensor storage"
+            );
+        }
+        for backend in [
+            "vulkan",
+            "vulkan-portable",
+            "cpu",
+            "portable",
+            "future-unknown",
+        ] {
+            assert_eq!(
+                LoraResidency::for_backend_name(backend),
+                LoraResidency::RegistryMirrored,
+                "{backend} must charge a registry-owned mirror"
+            );
+        }
+    }
+
+    #[test]
+    fn vulkan_charges_three_five_seven_persistent_lora_copies() {
+        let cfg = qwen_4b();
+        let rank = 16;
+        let p = lora_parameter_elements_upper_bound(&cfg, rank).saturating_mul(4);
+        let estimate = |optimizer, lora_residency| {
+            estimate_step_working_set_with_options(
+                &cfg,
+                256,
+                rank,
+                4,
+                WeightResidency::SingleCopy,
+                true,
+                EstimateOptions {
+                    optimizer,
+                    lora_residency,
+                    ..Default::default()
+                },
+            )
+        };
+
+        let rocm = LoraResidency::for_backend_name("rocm");
+        let cuda = LoraResidency::for_backend_name("cuda");
+        let vulkan = LoraResidency::for_backend_name("vulkan");
+        let rocm_sgd = estimate(Optimizer::Sgd, rocm);
+        let rocm_muon = estimate(Optimizer::default(), rocm);
+        let rocm_adamw = estimate(adamw(), rocm);
+        let cuda_adamw = estimate(adamw(), cuda);
+        let vulkan_sgd = estimate(Optimizer::Sgd, vulkan);
+        let vulkan_muon = estimate(Optimizer::default(), vulkan);
+        let vulkan_adamw = estimate(adamw(), vulkan);
+        let persistent = |working_set: &WorkingSet| {
+            working_set
+                .breakdown
+                .lora_param_grad
+                .saturating_add(working_set.breakdown.lora_optimizer_state)
+        };
+
+        assert_eq!(persistent(&rocm_sgd), p.saturating_mul(2));
+        assert_eq!(persistent(&rocm_muon), p.saturating_mul(3));
+        assert_eq!(persistent(&rocm_adamw), p.saturating_mul(4));
+        assert_eq!(persistent(&cuda_adamw), p.saturating_mul(4));
+        assert_eq!(persistent(&vulkan_sgd), p.saturating_mul(3));
+        assert_eq!(persistent(&vulkan_muon), p.saturating_mul(5));
+        assert_eq!(persistent(&vulkan_adamw), p.saturating_mul(7));
+        assert_eq!(rocm_adamw.breakdown.lora_registry_scratch, 0);
+        assert!(vulkan_adamw.breakdown.lora_registry_scratch > 0);
+    }
+
+    #[test]
+    fn lora_rank_ceiling_is_derived_from_model_and_optimizer_budget() {
+        let cfg = qwen_4b();
+        let estimate = estimate_step_working_set_with_options(
+            &cfg,
+            256,
+            1,
+            4,
+            WeightResidency::SingleCopy,
+            true,
+            EstimateOptions {
+                optimizer: Optimizer::Sgd,
+                ..Default::default()
+            },
+        );
+        assert_eq!(model_lora_rank_ceiling(&cfg), 1024);
+
+        let sgd_per_rank =
+            lora_working_set_bytes_per_rank(&cfg, Optimizer::Sgd, LoraResidency::StorageOwned);
+        let budget = estimate
+            .breakdown
+            .fixed_bytes()
+            .saturating_add(sgd_per_rank.saturating_mul(120));
+        let sgd = lora_rank_ceiling_for_budget(
+            &cfg,
+            Optimizer::Sgd,
+            LoraResidency::StorageOwned,
+            budget,
+            &estimate,
+        );
+        let muon = lora_rank_ceiling_for_budget(
+            &cfg,
+            Optimizer::default(),
+            LoraResidency::StorageOwned,
+            budget,
+            &estimate,
+        );
+        let adamw = lora_rank_ceiling_for_budget(
+            &cfg,
+            adamw(),
+            LoraResidency::StorageOwned,
+            budget,
+            &estimate,
+        );
+        let vulkan_sgd = lora_rank_ceiling_for_budget(
+            &cfg,
+            Optimizer::Sgd,
+            LoraResidency::RegistryMirrored,
+            budget,
+            &estimate,
+        );
+
+        assert_eq!(sgd.resource, 120);
+        assert_eq!(muon.resource, 80);
+        assert_eq!(adamw.resource, 60);
+        assert_eq!(sgd.effective, 120);
+        assert_eq!(muon.effective, 80);
+        assert_eq!(adamw.effective, 60);
+        assert!(
+            vulkan_sgd.resource < sgd.resource,
+            "registry mirrors and scratch must lower Vulkan's resource-derived rank ceiling"
+        );
+    }
+
+    #[test]
+    fn lora_rank_ceiling_fails_closed_for_degenerate_or_exhausted_shapes() {
+        let mut invalid = qwen_4b();
+        invalid.num_kv_heads = 0;
+        assert_eq!(model_lora_rank_ceiling(&invalid), 0);
+
+        let cfg = qwen_4b();
+        let estimate =
+            estimate_step_working_set(&cfg, 256, 1, 4, WeightResidency::SingleCopy, true);
+        let ceiling = lora_rank_ceiling_for_budget(
+            &cfg,
+            Optimizer::default(),
+            LoraResidency::StorageOwned,
+            estimate.breakdown.fixed_bytes().saturating_sub(1),
+            &estimate,
+        );
+        assert_eq!(ceiling.resource, 0);
+        assert_eq!(ceiling.effective, 0);
+    }
+
+    #[test]
+    fn estimator_overflow_saturates_toward_rejection() {
+        let mut cfg = qwen_4b();
+        cfg.hidden_size = usize::MAX;
+        cfg.intermediate_size = usize::MAX;
+        cfg.num_layers = usize::MAX;
+        cfg.vocab_size = usize::MAX;
+
+        let estimate = estimate_step_working_set_with_options(
+            &cfg,
+            usize::MAX,
+            usize::MAX,
+            1,
+            WeightResidency::DualResidentCpuAndVulkan,
+            false,
+            EstimateOptions {
+                optimizer: adamw(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(estimate.total_bytes, u64::MAX);
+        assert_eq!(estimate.breakdown.lora_param_grad, u64::MAX);
+        assert_eq!(estimate.breakdown.lora_optimizer_state, u64::MAX);
     }
 
     #[test]
@@ -1082,6 +1682,7 @@ mod tests {
             recompute_boundaries: true,
             activation_bytes_per_elem: Some(10),
             streaming_gdn_tile_tokens: Some(1024),
+            ..Default::default()
         };
         let (segments, fit) = auto_fit_checkpoint_segments(
             &cfg,
@@ -1198,6 +1799,46 @@ mod tests {
     }
 
     #[test]
+    fn retained_boundary_estimate_matches_grpo_and_opd_runtime_contract() {
+        let cfg = qwen_4b();
+        let seq_len = 104_412usize;
+        let num_segments = 32usize;
+        let estimate = estimate_step_working_set_with_options(
+            &cfg,
+            seq_len,
+            16,
+            num_segments,
+            WeightResidency::SingleCopy,
+            true,
+            EstimateOptions::default(),
+        );
+        let runtime_boundary_count =
+            kiln_train::retained_checkpoint_boundary_count(num_segments) as u64;
+        let expected = runtime_boundary_count
+            * cfg.hidden_size as u64
+            * seq_len as u64
+            * dtype_bytes(cfg.dtype);
+        assert_eq!(estimate.breakdown.boundary_states, expected);
+
+        let sparse = estimate_step_working_set_with_options(
+            &cfg,
+            seq_len,
+            16,
+            num_segments,
+            WeightResidency::SingleCopy,
+            true,
+            EstimateOptions {
+                recompute_boundaries: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            estimate.breakdown.boundary_states > sparse.breakdown.boundary_states,
+            "the GRPO/OPD retained-boundary contract must not use SFT's sparse estimate"
+        );
+    }
+
+    #[test]
     fn recompute_boundary_estimate_charges_sparse_anchors_and_segment_input() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -1288,21 +1929,24 @@ mod tests {
     }
 
     #[test]
-    fn weight_residency_is_dual_for_unified_memory() {
+    fn configured_capacity_does_not_hide_weight_memory_topology() {
+        let unified = GpuVramInfo {
+            total_bytes: 96 * BYTES_PER_GB,
+            source: VramSource::ConfigOverride,
+            unified: true,
+        };
+        let discrete = GpuVramInfo {
+            total_bytes: 16 * BYTES_PER_GB,
+            source: VramSource::ConfigOverride,
+            unified: false,
+        };
+
         assert_eq!(
-            WeightResidency::for_vram_source(VramSource::LinuxDrmSysfsUnified),
+            WeightResidency::for_vram(&unified),
             WeightResidency::DualResidentCpuAndVulkan
         );
         assert_eq!(
-            WeightResidency::for_vram_source(VramSource::AppleSilicon),
-            WeightResidency::DualResidentCpuAndVulkan
-        );
-        assert_eq!(
-            WeightResidency::for_vram_source(VramSource::NvidiaSmi),
-            WeightResidency::SingleCopy
-        );
-        assert_eq!(
-            WeightResidency::for_vram_source(VramSource::LinuxDrmSysfs),
+            WeightResidency::for_vram(&discrete),
             WeightResidency::SingleCopy
         );
     }
@@ -1321,6 +1965,7 @@ mod tests {
         let vram = GpuVramInfo {
             total_bytes: 24_944_216_064,
             source: VramSource::LinuxDrmSysfsUnified,
+            unified: true,
         };
         // Pre-Phase-1.2-1 codebase had ~5 GB MemAvailable at
         // submission time (model loaded twice in CPU+Vulkan, KV
@@ -1351,21 +1996,38 @@ mod tests {
     }
 
     #[test]
-    fn preflight_ignores_host_memavailable_when_rocm_heap_exceeds_host_ram() {
+    fn unified_preflight_never_ignores_live_host_memory() {
         let vram = GpuVramInfo {
             total_bytes: 120 * BYTES_PER_GB,
             source: VramSource::LinuxDrmSysfsUnified,
+            unified: true,
         };
         let avail = available_for_training_bytes_with_meminfo_details(
             &vram,
             Some(16 * BYTES_PER_GB),
             Some(32 * BYTES_PER_GB),
         );
-        let static_gpu_budget = 120 * BYTES_PER_GB - 6 * BYTES_PER_GB - SAFETY_MARGIN_BYTES;
         assert_eq!(
-            avail, static_gpu_budget,
-            "large ROCm heaps mislabelled as unified should not be capped by host MemAvailable"
+            avail,
+            16 * BYTES_PER_GB - SAFETY_MARGIN_BYTES,
+            "unified address-space counters must not override live host availability"
         );
+    }
+
+    #[test]
+    fn configured_unified_capacity_remains_bounded_by_live_host_memory() {
+        let vram = GpuVramInfo {
+            total_bytes: 120 * BYTES_PER_GB,
+            source: VramSource::ConfigOverride,
+            unified: true,
+        };
+        let avail = available_for_training_bytes_with_meminfo_details(
+            &vram,
+            Some(16 * BYTES_PER_GB),
+            Some(32 * BYTES_PER_GB),
+        );
+
+        assert_eq!(avail, 16 * BYTES_PER_GB - SAFETY_MARGIN_BYTES);
     }
 
     #[test]
@@ -1373,6 +2035,7 @@ mod tests {
         let vram = GpuVramInfo {
             total_bytes: 24 * BYTES_PER_GB,
             source: VramSource::LinuxDrmSysfsUnified,
+            unified: true,
         };
         let avail = available_for_training_bytes_with_meminfo_details(
             &vram,
@@ -1390,6 +2053,7 @@ mod tests {
         let vram = GpuVramInfo {
             total_bytes: 22 * BYTES_PER_GB,
             source: VramSource::LinuxDrmSysfsUnified,
+            unified: true,
         };
         let avail = available_for_training_bytes_with_meminfo(&vram, Some(8 * BYTES_PER_GB));
         let est = estimate_step_working_set(
@@ -1420,6 +2084,7 @@ mod tests {
         let vram = GpuVramInfo {
             total_bytes: 24_944_216_064,
             source: VramSource::LinuxDrmSysfsUnified,
+            unified: true,
         };
         // Post-load MemAvailable on the actual hardware was ~17 GB
         // (the model + Vulkan caches were already loaded).
@@ -1452,6 +2117,7 @@ mod tests {
         let big_vram = GpuVramInfo {
             total_bytes: 48 * BYTES_PER_GB,
             source: VramSource::NvidiaSmi,
+            unified: false,
         };
         let big_avail = available_for_training_bytes_with_meminfo(&big_vram, None);
         let est = estimate_step_working_set(&cfg, 256, 8, 8, WeightResidency::SingleCopy, false);
@@ -1472,6 +2138,7 @@ mod tests {
         let a6000_vram = GpuVramInfo {
             total_bytes: 48 * BYTES_PER_GB,
             source: VramSource::NvidiaSmi,
+            unified: false,
         };
         let available = available_for_training_bytes_with_meminfo(&a6000_vram, None);
         let est =
@@ -1488,12 +2155,13 @@ mod tests {
     }
 
     #[test]
-    fn available_for_training_handles_unknown_vram() {
+    fn available_for_training_fails_closed_for_unknown_vram() {
         let none = GpuVramInfo {
             total_bytes: 0,
             source: VramSource::None,
+            unified: false,
         };
-        assert_eq!(available_for_training_bytes(&none), u64::MAX);
+        assert_eq!(available_for_training_bytes(&none), 0);
     }
 
     #[test]
@@ -1501,6 +2169,7 @@ mod tests {
         let vram = GpuVramInfo {
             total_bytes: 25 * BYTES_PER_GB,
             source: VramSource::LinuxDrmSysfsUnified,
+            unified: true,
         };
         // 8 GB free at submission time, capped by VRAM ceiling.
         let avail = available_for_training_bytes_with_meminfo(&vram, Some(8 * BYTES_PER_GB));
@@ -1513,6 +2182,7 @@ mod tests {
         let vram = GpuVramInfo {
             total_bytes: 10 * BYTES_PER_GB,
             source: VramSource::LinuxDrmSysfsUnified,
+            unified: true,
         };
         // 50 GB MemAvailable on a 10 GB ceiling — cap to ceiling.
         let avail = available_for_training_bytes_with_meminfo(&vram, Some(50 * BYTES_PER_GB));
@@ -1520,20 +2190,18 @@ mod tests {
     }
 
     #[test]
-    fn unified_memory_without_meminfo_honors_reserve_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("KILN_TRAINING_MEMORY_RESERVE_GB", "1.5") };
+    fn unified_memory_without_meminfo_uses_conservative_static_budget() {
         let vram = GpuVramInfo {
             total_bytes: 10 * BYTES_PER_GB,
             source: VramSource::AppleSilicon,
+            unified: true,
         };
 
         let avail = available_for_training_bytes_with_meminfo(&vram, None);
 
-        unsafe { std::env::remove_var("KILN_TRAINING_MEMORY_RESERVE_GB") };
         assert_eq!(
             avail,
-            10 * BYTES_PER_GB - BYTES_PER_GB - BYTES_PER_GB / 2 - SAFETY_MARGIN_BYTES
+            10 * BYTES_PER_GB - (10 * BYTES_PER_GB) / 3 - SAFETY_MARGIN_BYTES
         );
     }
 
@@ -1544,6 +2212,8 @@ mod tests {
         let msg = format_oom_message(&est, 8 * BYTES_PER_GB, 16, 4);
         assert!(msg.contains("Dynamic checkpointing already tried"));
         assert!(msg.contains("lora_rank"));
+        assert!(msg.contains("optimizer state"));
+        assert!(msg.contains("residency scratch"));
         assert!(!msg.contains("KILN_TRAINING_MEMORY_RESERVE_GB"));
     }
 

@@ -21,7 +21,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kiln_memory::{MemoryGovernor, MemoryPressure};
+use kiln_memory::{MemoryGovernor, MemoryPressure, Reservation};
 use kiln_model::{GpuAllocatorMemoryProbePolicy, PagedKvCacheKt};
 
 use crate::batching_engine::{BatchingEngineHandle, KvResizeReason};
@@ -132,6 +132,84 @@ pub(crate) fn plan_resize_with_staging_headroom(
     })
 }
 
+struct ReservedKvResize<'a> {
+    plan: KvResizeStagingPlan,
+    _reservation: Reservation<'a>,
+    replanned_after_contention: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KvResizeReservationFailure {
+    InsufficientHeadroom {
+        staging_available_bytes: u64,
+    },
+    Contended {
+        initial_plan: KvResizeStagingPlan,
+        replanned_plan: Option<KvResizeStagingPlan>,
+        refreshed_staging_available_bytes: u64,
+    },
+}
+
+/// Plan and atomically claim the complete replacement pool. If another
+/// in-process consumer wins memory after the initial observation, replan once
+/// from a fresh, governor-capped budget. A second loss is returned to the
+/// control loop so its bounded retry backoff applies; physical allocation must
+/// never proceed under an unchecked reservation.
+fn plan_and_reserve_resize_with_replan<'a>(
+    governor: &'a MemoryGovernor,
+    current_blocks: usize,
+    requested_blocks: usize,
+    minimum_target_blocks: usize,
+    initial_staging_available_bytes: u64,
+    bytes_per_block: u64,
+    refresh_staging_available_bytes: impl FnOnce() -> u64,
+) -> Result<ReservedKvResize<'a>, KvResizeReservationFailure> {
+    let Some(initial_plan) = plan_resize_with_staging_headroom(
+        current_blocks,
+        requested_blocks,
+        minimum_target_blocks,
+        initial_staging_available_bytes,
+        bytes_per_block,
+    ) else {
+        return Err(KvResizeReservationFailure::InsufficientHeadroom {
+            staging_available_bytes: initial_staging_available_bytes,
+        });
+    };
+
+    if let Some(reservation) = governor.try_reserve_cached(initial_plan.replacement_bytes) {
+        return Ok(ReservedKvResize {
+            plan: initial_plan,
+            _reservation: reservation,
+            replanned_after_contention: false,
+        });
+    }
+
+    let refreshed_staging_available_bytes =
+        refresh_staging_available_bytes().min(governor.cached_observation().available_bytes);
+    let replanned_plan = plan_resize_with_staging_headroom(
+        current_blocks,
+        requested_blocks,
+        minimum_target_blocks,
+        refreshed_staging_available_bytes,
+        bytes_per_block,
+    );
+    if let Some(plan) = replanned_plan {
+        if let Some(reservation) = governor.try_reserve_cached(plan.replacement_bytes) {
+            return Ok(ReservedKvResize {
+                plan,
+                _reservation: reservation,
+                replanned_after_contention: true,
+            });
+        }
+    }
+
+    Err(KvResizeReservationFailure::Contended {
+        initial_plan,
+        replanned_plan,
+        refreshed_staging_available_bytes,
+    })
+}
+
 fn next_retry_backoff(current: Duration) -> Duration {
     current.saturating_mul(2).min(MAX_RETRY_BACKOFF)
 }
@@ -144,6 +222,7 @@ struct ResizeMemorySnapshot {
     /// Actual replacement-allocation input. ROCm includes reusable HIP-pool
     /// spare here, which the OS-wide snapshot reports as unavailable.
     staging_available_bytes: u64,
+    pressure: MemoryPressure,
 }
 
 fn is_disabled() -> bool {
@@ -236,58 +315,102 @@ fn run(
         } else {
             cur.saturating_add(1)
         };
-        if let Some(plan) = plan_resize_with_staging_headroom(
-            cur,
-            requested,
-            minimum_target,
-            memory.staging_available_bytes,
-            bytes_per_block,
-        ) {
-            if plan.target_blocks < requested {
-                tracing::warn!(
-                    requested,
-                    capped = plan.target_blocks,
-                    cur,
-                    staging_available_mb = memory.staging_available_bytes / (1024 * 1024),
-                    replacement_mb = plan.replacement_bytes / (1024 * 1024),
-                    "KV autoscaler forced grow capped by replacement-pool staging headroom"
-                );
-            }
-            let _staging_reservation = gov.reserve(plan.replacement_bytes);
-            match engine.resize_kv_blocking(plan.target_blocks, KvResizeReason::ForcedConfiguration)
-            {
-                Ok(achieved) => {
-                    next_attempt = Instant::now() + COOLDOWN;
-                    retry_backoff = COOLDOWN;
-                    tracing::info!(
-                        requested,
-                        planned = plan.target_blocks,
-                        achieved,
-                        replacement_mb = plan.replacement_bytes / (1024 * 1024),
-                        "KV autoscaler FORCED resize (KILN_KV_FORCE_BLOCKS)"
-                    );
-                }
-                Err(err) => {
-                    next_attempt = Instant::now() + retry_backoff;
-                    retry_backoff = next_retry_backoff(retry_backoff);
-                    tracing::warn!(
-                        error = %err,
-                        requested,
-                        planned = plan.target_blocks,
-                        "KV autoscaler forced resize failed"
-                    );
-                }
-            }
-        } else if requested != cur {
-            next_attempt = Instant::now() + retry_backoff;
-            retry_backoff = next_retry_backoff(retry_backoff);
-            tracing::warn!(
+        if requested == cur {
+            tracing::debug!(
                 requested,
-                cur,
-                staging_available_mb = memory.staging_available_bytes / (1024 * 1024),
-                bytes_per_block,
-                "KV autoscaler forced resize skipped: full replacement pool lacks staging headroom"
+                "KV autoscaler forced resize is already satisfied"
             );
+        } else {
+            let reservation_attempt = plan_and_reserve_resize_with_replan(
+                gov,
+                cur,
+                requested,
+                minimum_target,
+                memory.staging_available_bytes,
+                bytes_per_block,
+                || {
+                    live_resize_memory_snapshot(
+                        gpu_allocator_memory_probe_policy,
+                        gov,
+                        &paged_cache,
+                    )
+                    .staging_available_bytes
+                },
+            );
+            match reservation_attempt {
+                Ok(claim) => {
+                    let plan = claim.plan;
+                    if plan.target_blocks < requested {
+                        tracing::warn!(
+                            requested,
+                            capped = plan.target_blocks,
+                            cur,
+                            replanned_after_contention = claim.replanned_after_contention,
+                            staging_available_mb = memory.staging_available_bytes / (1024 * 1024),
+                            replacement_mb = plan.replacement_bytes / (1024 * 1024),
+                            "KV autoscaler forced grow capped by replacement-pool staging headroom"
+                        );
+                    }
+                    match engine
+                        .resize_kv_blocking(plan.target_blocks, KvResizeReason::ForcedConfiguration)
+                    {
+                        Ok(achieved) => {
+                            next_attempt = Instant::now() + COOLDOWN;
+                            retry_backoff = COOLDOWN;
+                            tracing::info!(
+                                requested,
+                                planned = plan.target_blocks,
+                                achieved,
+                                replacement_mb = plan.replacement_bytes / (1024 * 1024),
+                                "KV autoscaler FORCED resize (KILN_KV_FORCE_BLOCKS)"
+                            );
+                        }
+                        Err(err) => {
+                            let applied_backoff = retry_backoff;
+                            next_attempt = Instant::now() + applied_backoff;
+                            retry_backoff = next_retry_backoff(retry_backoff);
+                            tracing::warn!(
+                                error = %err,
+                                requested,
+                                planned = plan.target_blocks,
+                                retry_after_ms = applied_backoff.as_millis() as u64,
+                                "KV autoscaler forced resize failed"
+                            );
+                        }
+                    }
+                }
+                Err(failure) => {
+                    let applied_backoff = retry_backoff;
+                    next_attempt = Instant::now() + applied_backoff;
+                    retry_backoff = next_retry_backoff(retry_backoff);
+                    match failure {
+                        KvResizeReservationFailure::InsufficientHeadroom {
+                            staging_available_bytes,
+                        } => tracing::warn!(
+                            requested,
+                            cur,
+                            staging_available_mb = staging_available_bytes / (1024 * 1024),
+                            bytes_per_block,
+                            retry_after_ms = applied_backoff.as_millis() as u64,
+                            "KV autoscaler forced resize skipped: full replacement pool lacks staging headroom"
+                        ),
+                        KvResizeReservationFailure::Contended {
+                            initial_plan,
+                            replanned_plan,
+                            refreshed_staging_available_bytes,
+                        } => tracing::warn!(
+                            requested,
+                            cur,
+                            initial_planned = initial_plan.target_blocks,
+                            replanned = replanned_plan.map(|plan| plan.target_blocks),
+                            refreshed_staging_available_mb =
+                                refreshed_staging_available_bytes / (1024 * 1024),
+                            retry_after_ms = applied_backoff.as_millis() as u64,
+                            "KV autoscaler forced resize lost its staging reservation; backing off"
+                        ),
+                    }
+                }
+            }
         }
     }
 
@@ -304,13 +427,11 @@ fn run(
         let cur = paged_cache.num_blocks();
         let memory =
             live_resize_memory_snapshot(gpu_allocator_memory_probe_policy, gov, &paged_cache);
-        let pressure = gov.pressure();
-
         let requested = decide_target(
             cur,
             memory.policy_available_bytes,
             bytes_per_block,
-            pressure,
+            memory.pressure,
             bounds,
         );
         let Some(requested) = requested else {
@@ -323,41 +444,70 @@ fn run(
         } else {
             cur.saturating_add(1)
         };
-        let Some(plan) = plan_resize_with_staging_headroom(
+        let claim = match plan_and_reserve_resize_with_replan(
+            gov,
             cur,
             requested,
             minimum_target,
             memory.staging_available_bytes,
             bytes_per_block,
-        ) else {
-            let applied_backoff = retry_backoff;
-            next_attempt = Instant::now() + applied_backoff;
-            retry_backoff = next_retry_backoff(retry_backoff);
-            tracing::warn!(
-                from = cur,
-                requested,
-                minimum_target,
-                pressure = ?pressure,
-                policy_available_mb = memory.policy_available_bytes / (1024 * 1024),
-                staging_available_mb = memory.staging_available_bytes / (1024 * 1024),
-                retry_after_ms = applied_backoff.as_millis() as u64,
-                "KV autoscaler resize skipped: full replacement pool lacks staging headroom"
-            );
-            continue;
+            || {
+                live_resize_memory_snapshot(gpu_allocator_memory_probe_policy, gov, &paged_cache)
+                    .staging_available_bytes
+            },
+        ) {
+            Ok(claim) => claim,
+            Err(failure) => {
+                let applied_backoff = retry_backoff;
+                next_attempt = Instant::now() + applied_backoff;
+                retry_backoff = next_retry_backoff(retry_backoff);
+                match failure {
+                    KvResizeReservationFailure::InsufficientHeadroom {
+                        staging_available_bytes,
+                    } => tracing::warn!(
+                        from = cur,
+                        requested,
+                        minimum_target,
+                        pressure = ?memory.pressure,
+                        policy_available_mb = memory.policy_available_bytes / (1024 * 1024),
+                        staging_available_mb = staging_available_bytes / (1024 * 1024),
+                        retry_after_ms = applied_backoff.as_millis() as u64,
+                        "KV autoscaler resize skipped: full replacement pool lacks staging headroom"
+                    ),
+                    KvResizeReservationFailure::Contended {
+                        initial_plan,
+                        replanned_plan,
+                        refreshed_staging_available_bytes,
+                    } => tracing::warn!(
+                        from = cur,
+                        requested,
+                        minimum_target,
+                        initial_planned = initial_plan.target_blocks,
+                        replanned = replanned_plan.map(|plan| plan.target_blocks),
+                        pressure = ?memory.pressure,
+                        refreshed_staging_available_mb =
+                            refreshed_staging_available_bytes / (1024 * 1024),
+                        retry_after_ms = applied_backoff.as_millis() as u64,
+                        "KV autoscaler resize lost its staging reservation; backing off"
+                    ),
+                }
+                continue;
+            }
         };
+        let plan = claim.plan;
         if plan.target_blocks != requested {
             tracing::info!(
                 from = cur,
                 requested,
                 planned = plan.target_blocks,
                 minimum_target,
+                replanned_after_contention = claim.replanned_after_contention,
                 staging_available_mb = memory.staging_available_bytes / (1024 * 1024),
                 replacement_mb = plan.replacement_bytes / (1024 * 1024),
                 "KV autoscaler adjusted target to fit transactional staging headroom"
             );
         }
 
-        let _staging_reservation = gov.reserve(plan.replacement_bytes);
         match engine.resize_kv_blocking(plan.target_blocks, KvResizeReason::AutomaticMemoryPolicy) {
             Ok(achieved) => {
                 next_attempt = Instant::now() + COOLDOWN;
@@ -368,7 +518,7 @@ fn run(
                         to = achieved,
                         requested,
                         planned = plan.target_blocks,
-                        pressure = ?pressure,
+                        pressure = ?memory.pressure,
                         policy_available_mb = memory.policy_available_bytes / (1024 * 1024),
                         staging_available_mb = memory.staging_available_bytes / (1024 * 1024),
                         replacement_mb = plan.replacement_bytes / (1024 * 1024),
@@ -414,12 +564,14 @@ fn live_resize_memory_snapshot(
     // soft reservations. CUDA/ROCm also expose the allocator heap the KV tensors
     // actually grow from; use the stricter signal when present so an optimistic
     // OS snapshot cannot drive a backend allocation failure.
-    let governor_avail = gov.available_bytes();
+    let published = gov.cached_observation();
+    let governor_avail = published.available_bytes;
     let allocator_avail = paged_cache.device().and_then(|device| {
-        crate::device_memory::allocator_safe_available_bytes(
+        crate::device_memory::allocator_safe_available_bytes_with_soft_reserved(
             gpu_allocator_memory_probe_policy,
-            gov,
             &device,
+            gov.config().floor_bytes,
+            published.soft_reserved_bytes,
         )
     });
     ResizeMemorySnapshot {
@@ -427,6 +579,7 @@ fn live_resize_memory_snapshot(
             .map(|allocator| governor_avail.min(allocator))
             .unwrap_or(governor_avail),
         staging_available_bytes: allocator_avail.unwrap_or(governor_avail),
+        pressure: published.pressure,
     }
 }
 
@@ -475,6 +628,10 @@ fn decide_target(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use kiln_memory::{GovernorConfig, MemorySnapshot, MemorySource};
+
     use super::*;
 
     const BPB: u64 = 10 * 1024 * 1024; // 10 MB/block
@@ -483,6 +640,31 @@ mod tests {
             max_blocks: 1000,
             min_blocks: 250,
         }
+    }
+
+    struct FixedMemorySource(Mutex<MemorySnapshot>);
+
+    impl MemorySource for FixedMemorySource {
+        fn probe(&self) -> MemorySnapshot {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    fn reservation_governor(available_blocks: u64) -> MemoryGovernor {
+        MemoryGovernor::with_source(
+            Box::new(FixedMemorySource(Mutex::new(MemorySnapshot {
+                total_bytes: available_blocks * BPB,
+                used_bytes: 0,
+                free_bytes: available_blocks * BPB,
+                source: kiln_memory::vram::VramSource::None,
+                unified: false,
+                observations: Default::default(),
+            }))),
+            GovernorConfig {
+                floor_bytes: 0,
+                ..GovernorConfig::default()
+            },
+        )
     }
 
     #[test]
@@ -566,6 +748,72 @@ mod tests {
             plan_resize_with_staging_headroom(1000, 900, 900, 800 * BPB, BPB),
             None
         );
+    }
+
+    #[test]
+    fn shrink_replans_and_atomically_reserves_the_full_replacement() {
+        let governor = reservation_governor(1_000);
+        let competing = governor.reserve(200 * BPB);
+
+        let claim =
+            plan_and_reserve_resize_with_replan(&governor, 1_000, 900, 650, 900 * BPB, BPB, || {
+                900 * BPB
+            })
+            .expect("the stale 900-block plan should replan to the live 800-block budget");
+
+        assert_eq!(claim.plan.target_blocks, 800);
+        assert_eq!(claim._reservation.bytes(), 800 * BPB);
+        assert!(claim.replanned_after_contention);
+        assert_eq!(governor.soft_reserved_bytes(), 1_000 * BPB);
+        drop(claim);
+        assert_eq!(governor.soft_reserved_bytes(), 200 * BPB);
+        drop(competing);
+    }
+
+    #[test]
+    fn grow_replans_and_atomically_reserves_the_full_replacement() {
+        let governor = reservation_governor(1_000);
+        let competing = governor.reserve(300 * BPB);
+
+        let claim =
+            plan_and_reserve_resize_with_replan(&governor, 500, 900, 501, 900 * BPB, BPB, || {
+                900 * BPB
+            })
+            .expect("the stale 900-block plan should replan to the live 700-block budget");
+
+        assert_eq!(claim.plan.target_blocks, 700);
+        assert_eq!(claim._reservation.bytes(), 700 * BPB);
+        assert!(claim.replanned_after_contention);
+        assert_eq!(governor.soft_reserved_bytes(), 1_000 * BPB);
+        drop(claim);
+        drop(competing);
+    }
+
+    #[test]
+    fn second_reservation_loss_returns_a_backoff_outcome_without_allocating() {
+        let governor = reservation_governor(1_000);
+        let competing = governor.reserve(500 * BPB);
+
+        let failure =
+            plan_and_reserve_resize_with_replan(&governor, 500, 900, 501, 900 * BPB, BPB, || {
+                900 * BPB
+            })
+            .err()
+            .expect("no useful grow fits after the stale reservation is rejected");
+
+        assert_eq!(
+            failure,
+            KvResizeReservationFailure::Contended {
+                initial_plan: KvResizeStagingPlan {
+                    target_blocks: 900,
+                    replacement_bytes: 900 * BPB,
+                },
+                replanned_plan: None,
+                refreshed_staging_available_bytes: 500 * BPB,
+            }
+        );
+        assert_eq!(governor.soft_reserved_bytes(), 500 * BPB);
+        drop(competing);
     }
 
     #[test]

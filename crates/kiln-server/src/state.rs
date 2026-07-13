@@ -16,7 +16,7 @@ use kiln_model::engine::Engine;
 use kiln_model::lora_loader::LoraSourceIdentity;
 use kiln_model::{
     BackendHealthHandle, DecodeBatcher, DecodeBatcherConfig, GpuAllocatorMemoryProbePolicy,
-    GpuMemoryBudgetPolicy, GpuMemoryDetectionPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
+    GpuMemoryBudgetPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
     InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy, LinearAttentionState, ModelRunner,
     PagedKvCacheKt, PagedPrefixNextToken, PagedPrefixRegistration,
     TrainingAccelerationEnvFlagPolicy, TrainingAccelerationProfileLogMessage,
@@ -114,7 +114,7 @@ impl GpuMemoryBudget {
     /// `model_memory_bytes`: post-load residency or static model estimate.
     /// `kv_cache_bytes`: Actual KV cache allocation size.
     /// `inference_fraction`: Fraction of VRAM for inference.
-    /// `training_memory_gb`: Optional explicit training memory budget in GB.
+    /// `training_memory_gb`: Optional cap on the remaining training budget in GiB.
     pub fn compute(
         total_vram_bytes: u64,
         model_memory_bytes: u64,
@@ -128,23 +128,13 @@ impl GpuMemoryBudget {
             // CPU mode — no GPU memory budget applies
             0
         } else {
-            // Explicit override takes precedence
-            if let Some(gb) = training_memory_gb {
-                return Self {
-                    total_vram_bytes,
-                    model_memory_bytes,
-                    estimated_model_memory_bytes,
-                    post_load_used_vram_bytes,
-                    peak_prefill_used_vram_bytes: std::sync::atomic::AtomicU64::new(0),
-                    kv_cache_bytes,
-                    training_budget_bytes: (gb * 1024.0 * 1024.0 * 1024.0) as u64,
-                    inference_memory_fraction: inference_fraction,
-                };
-            }
-            // Auto-detect: total - model - kv_cache
-            total_vram_bytes
+            let remaining = total_vram_bytes
                 .saturating_sub(model_memory_bytes)
-                .saturating_sub(kv_cache_bytes)
+                .saturating_sub(kv_cache_bytes);
+            training_memory_gb.map_or(remaining, |gib| {
+                let requested = (gib * 1024.0 * 1024.0 * 1024.0) as u64;
+                requested.min(remaining)
+            })
         };
 
         Self {
@@ -2404,6 +2394,21 @@ pub struct AppState {
     pub teacher_credentials: Arc<crate::config::TeachersConfig>,
     /// Detected VRAM info for config/debug reporting.
     pub vram_info: kiln_memory::vram::GpuVramInfo,
+    /// Physical, requested, and cap-only effective memory capacity resolved at
+    /// startup. This remains immutable for process-lifetime diagnostics.
+    pub vram_capacity_resolution: kiln_memory::vram::VramCapacityResolution,
+    /// Active accelerator selected for every live memory probe.
+    pub vram_probe_selector: kiln_memory::vram::VramProbeSelector,
+    /// Typed memory policy retained for diagnostics without re-reading process
+    /// environment after startup.
+    pub memory_config: crate::config::MemoryConfig,
+    /// Immutable native-training planning inputs shared by every queued job.
+    pub training_runtime: kiln_train::TrainingRuntimeContext,
+    /// Immutable device identity of the frozen model-weight representation.
+    /// This differs from the execution device on Vulkan's hybrid serving path
+    /// and lets admission/reporting reject unqualified residency without
+    /// locking the model runner.
+    pub model_weight_device: kiln_tensor::Device,
     /// Shutdown flag — set to true when the server is shutting down.
     pub shutdown: ShutdownFlag,
     /// Per-request timeout duration. Configurable via KILN_REQUEST_TIMEOUT_SECS (default 600).
@@ -2541,6 +2546,81 @@ pub struct AppState {
     /// Fire-and-forget webhook for terminal eval jobs (`eval.webhook_url`
     /// in the TOML). Mirrors `training_webhook_url`.
     pub eval_webhook_url: Option<String>,
+}
+
+/// Map the active tensor backend to the one accelerator whose memory counters
+/// are authoritative for this server process.
+pub fn vram_probe_selector_for_device(
+    device: kiln_tensor::Device,
+) -> kiln_memory::vram::VramProbeSelector {
+    device.memory_probe_selector()
+}
+
+/// Establish the conservative physical-device identity contract shared by the
+/// selected tensor backend and its OS/driver memory probe.
+///
+/// The production startup path must call this immediately after backend device
+/// selection and before loading/uploading model weights. Real-state
+/// construction repeats the validation as defense in depth before any memory
+/// detection or KV-cache allocation owned by `AppState`.
+pub fn ensure_accelerator_memory_probe_identity(
+    device: kiln_tensor::Device,
+) -> anyhow::Result<kiln_memory::vram::VramProbeSelector> {
+    let selector = vram_probe_selector_for_device(device);
+    kiln_memory::vram::validate_vram_probe_identity(selector).map_err(|error| {
+        anyhow::anyhow!(
+            "cannot start selected backend device {}: {error}",
+            device.short_name()
+        )
+    })?;
+    Ok(selector)
+}
+
+/// Refuse accelerator startup unless the selected, device-scoped probe
+/// established a non-zero safe capacity. A configured memory value is a cap,
+/// not permission to invent capacity when hardware detection failed.
+pub fn ensure_accelerator_memory_capacity(
+    device: kiln_tensor::Device,
+    selector: kiln_memory::vram::VramProbeSelector,
+    capacity: kiln_memory::vram::GpuVramInfo,
+) -> anyhow::Result<()> {
+    if device.is_cpu() || capacity.total_bytes > 0 {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "cannot start on selected accelerator {}: device-scoped memory probe {:?} established 0 bytes of safe effective capacity (source: {}). Refusing to load model weights or allocate the paged KV cache because that could trigger a process- or host-fatal allocator failure. Verify that the selected device and its driver memory counters are visible, or select CPU/a different accelerator. memory.gpu_memory_gb is cap-only and cannot replace a failed hardware probe.",
+        device.short_name(),
+        selector,
+        capacity.source,
+    )
+}
+
+/// Refuse a governor floor that consumes the selected accelerator's entire
+/// effective capacity. This runs before model upload so an impossible policy
+/// cannot reach allocator setup and fail later under load.
+pub fn ensure_accelerator_memory_floor(
+    device: kiln_tensor::Device,
+    capacity: kiln_memory::vram::GpuVramInfo,
+    memory: &crate::config::MemoryConfig,
+) -> anyhow::Result<()> {
+    if device.is_cpu() {
+        return Ok(());
+    }
+    let floor_bytes = memory.floor_bytes();
+    if floor_bytes < capacity.total_bytes {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "cannot start on selected accelerator {}: memory.floor_gb={} GiB resolves to {} bytes, but effective accelerator capacity is {} bytes ({:.6} GiB, source: {}). memory.floor_gb must be strictly smaller than effective accelerator capacity before model upload",
+        device.short_name(),
+        memory.floor_gb,
+        floor_bytes,
+        capacity.total_bytes,
+        capacity.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        capacity.source,
+    )
 }
 
 impl AppState {
@@ -2901,7 +2981,34 @@ impl AppState {
             vram_info: kiln_memory::vram::GpuVramInfo {
                 total_bytes: 0,
                 source: kiln_memory::vram::VramSource::None,
+                unified: false,
             },
+            vram_capacity_resolution: kiln_memory::vram::VramCapacityResolution {
+                physical: kiln_memory::vram::GpuVramInfo {
+                    total_bytes: 0,
+                    source: kiln_memory::vram::VramSource::None,
+                    unified: false,
+                },
+                requested_bytes: None,
+                effective: kiln_memory::vram::GpuVramInfo {
+                    total_bytes: 0,
+                    source: kiln_memory::vram::VramSource::None,
+                    unified: false,
+                },
+                clamped: false,
+            },
+            vram_probe_selector: kiln_memory::vram::VramProbeSelector::None,
+            memory_config: crate::config::MemoryConfig::default(),
+            training_runtime: kiln_train::TrainingRuntimeContext::new_for_device(
+                kiln_tensor::Device::Cpu,
+                kiln_memory::vram::GpuVramInfo {
+                    total_bytes: 0,
+                    source: kiln_memory::vram::VramSource::None,
+                    unified: false,
+                },
+                kiln_train::GradientCheckpointPolicy::Auto,
+            ),
+            model_weight_device: kiln_tensor::Device::Cpu,
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             http_send_buffer_bytes: None,
@@ -2990,7 +3097,7 @@ impl AppState {
         served_model_id: String,
         prefix_cache_cfg: &crate::config::PrefixCacheConfig,
         base_teacher_identity: Option<Arc<kiln_train::TeacherIdentityV1>>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let decode_runtime_config = crate::batching_engine::resolve_decode_runtime_config(
             crate::config::DeterministicInference::default(),
             crate::config::MaxDecodeBatch::default(),
@@ -3014,6 +3121,7 @@ impl AppState {
             prefix_cache_cfg,
             base_teacher_identity,
             crate::config::ServingProfileSetting::default(),
+            kiln_train::GradientCheckpointPolicy::Auto,
         )
     }
 
@@ -3037,7 +3145,22 @@ impl AppState {
         prefix_cache_cfg: &crate::config::PrefixCacheConfig,
         base_teacher_identity: Option<Arc<kiln_train::TeacherIdentityV1>>,
         serving_profile: crate::config::ServingProfileSetting,
-    ) -> Self {
+        gradient_checkpoint_policy: kiln_train::GradientCheckpointPolicy,
+    ) -> anyhow::Result<Self> {
+        let vram_probe_selector = ensure_accelerator_memory_probe_identity(device_kt)?;
+        let physical_vram = kiln_memory::vram::detect_vram_for(vram_probe_selector);
+        let vram_capacity_resolution =
+            kiln_memory::vram::resolve_vram_capacity(physical_vram, memory_cfg.gpu_memory_gb);
+        ensure_accelerator_memory_capacity(
+            device_kt,
+            vram_probe_selector,
+            vram_capacity_resolution.effective,
+        )?;
+        ensure_accelerator_memory_floor(device_kt, vram_capacity_resolution.effective, memory_cfg)?;
+        kiln_memory::MemoryGovernor::configure_global(
+            vram_probe_selector,
+            memory_cfg.governor_config_for_capacity(vram_capacity_resolution.effective.total_bytes),
+        )?;
         let serving_policy = serving_profile.runtime_policy();
         let base_weight_shard_manifest = runner
             .weights
@@ -3094,33 +3217,66 @@ impl AppState {
             * block_size
             * kv_dtype_bytes) as u64;
 
-        // Detect VRAM once and reuse it for both auto-sizing and reporting so
-        // startup doesn't repeat the same probe/logging path.
-        let vram_info = kiln_memory::vram::detect_vram();
+        // Detect the selected device once, then apply the typed configured cap.
+        // A failed physical probe stays at zero; startup never manufactures an
+        // optimistic fallback capacity that could turn into a fatal allocation.
+        let vram_info = vram_capacity_resolution.effective;
         let storage_capabilities = runner.backend_capabilities().storage;
+        let inference_recurrent_state_policy =
+            runner.backend_capabilities().gdn.inference_recurrent_state;
+        let prefix_cache_state_bytes_per_entry =
+            linear_attention_state_bytes(&model_config, inference_recurrent_state_policy);
         let kv_auto_block_policy = storage_capabilities.kv_auto_block_policy;
-        let gpu_memory_detection_policy = storage_capabilities.gpu_memory_detection_policy;
         let gpu_memory_budget_policy = storage_capabilities.gpu_memory_budget_policy;
         let gpu_allocator_memory_probe_policy =
             storage_capabilities.gpu_allocator_memory_probe_policy;
         let gpu_memory_reclaim_policy = storage_capabilities.gpu_memory_reclaim_policy;
 
-        // Total AND used come from the SAME live, all-process driver snapshot
-        // (VRAM+GTT on AMD, nvidia-smi on NVIDIA) so they're mutually consistent
-        // and both account for any coexisting GPU workload (e.g. a llama.cpp
-        // server). Falling back to the static `detected_gpu_total_memory` only
-        // when the driver snapshot is unavailable (e.g. Apple Metal). Without
-        // this, total came from the carveout heuristic while used came from the
-        // snapshot — and `used` could exceed `total`.
+        // Physical total and used normally come from the same all-process driver
+        // snapshot. A configured total is different by design: it is the static
+        // sizing ceiling, while used/free telemetry remains physical so the
+        // governor and allocator caps still see coexisting GPU workloads.
         let snap = if gpu_memory_budget_policy.use_live_memory_snapshot {
-            let s = kiln_memory::vram::current_memory_snapshot();
+            let s = kiln_memory::vram::current_memory_snapshot_for(vram_probe_selector);
             (s.total_bytes > 0).then_some(s)
         } else {
             None
         };
-        let total_vram = snap
-            .map(|s| s.total_bytes)
-            .unwrap_or_else(|| detected_gpu_total_memory(gpu_memory_detection_policy, &vram_info));
+        if vram_probe_selector != kiln_memory::vram::VramProbeSelector::None {
+            // Supervise the cached admission source before any large KV
+            // allocation or retry. A slow zero-fill must not leave a later
+            // retry depending on an initial sample that aged out while the
+            // sampler had not yet been started. This publisher never reclaims
+            // or mutates accelerator state; reclaim hooks remain wired only
+            // after actor/GPU coordination exists below.
+            let governor = kiln_memory::MemoryGovernor::global();
+            let published = governor.refresh();
+            anyhow::ensure!(
+                published.total_bytes > 0 && !published.observations.probe_failed,
+                "selected-device memory probe lost its safe capacity before KV allocation; refusing to allocate"
+            );
+            anyhow::ensure!(
+                governor.start_sampler(),
+                "failed to start the selected-device memory sampler before KV allocation"
+            );
+        }
+        let total_vram = vram_info.total_bytes;
+        let host_prefix_cache_reserve_bytes = prefix_cache_host_reserve_bytes(
+            host_backed_free_bytes_for_device(device_kt, snap),
+            prefix_cache_state_bytes_per_entry,
+            prefix_cache_cfg.enabled,
+            prefix_cache_cfg.max_entries,
+        )?;
+        if matches!(device_kt, kiln_tensor::Device::Vulkan(_)) {
+            let host_backed = snap.and_then(|snapshot| snapshot.observations.host_backed);
+            tracing::info!(
+                host_backed_total_gb = host_backed.map(|tier| tier.total_bytes as f64 / 1e9),
+                host_backed_used_gb = host_backed.map(|tier| tier.used_bytes as f64 / 1e9),
+                host_backed_free_gb = host_backed.map(|tier| tier.free_bytes as f64 / 1e9),
+                prefix_cache_host_reserve_gb = host_prefix_cache_reserve_bytes as f64 / 1e9,
+                "Vulkan host-backed serving budget"
+            );
+        }
         let allocator_memory_snapshot = crate::device_memory::allocator_memory_snapshot(
             gpu_allocator_memory_probe_policy,
             &device_kt,
@@ -3142,7 +3298,8 @@ impl AppState {
             );
         }
 
-        let post_load_used_vram_info = runtime_used_vram_for_policy(gpu_memory_budget_policy);
+        let post_load_used_vram_info =
+            runtime_used_vram_for_policy(gpu_memory_budget_policy, vram_probe_selector);
         let post_load_used_vram = snap
             .map(|s| s.used_bytes)
             .or_else(|| post_load_used_vram_info.map(|info| info.used_bytes))
@@ -3193,44 +3350,47 @@ impl AppState {
             // Additionally clamp so the KV pool fits within the live budget.
             // The governor provides the OS/driver-wide pressure view; CUDA/ROCm
             // also expose the allocator heap that the actual KV tensors will
-            // allocate from. Use the stricter cap when both are available so an
-            // optimistic DRM/nvidia-smi snapshot cannot drive a fatal backend
+            // allocate from, while Vulkan's current KV implementation requires
+            // a separately bounded host-backed tier. Use the strictest known
+            // ceiling so a large DRM aperture cannot authorize a fatal host
             // allocation.
             if gpu_memory_budget_policy.cap_kv_blocks_by_live_budget && bytes_per_block > 0 {
                 let governor = kiln_memory::MemoryGovernor::global();
-                let governor_avail = governor.available_bytes();
-                let allocator_budget =
-                    crate::device_memory::allocator_kv_budget_bytes_for_fraction(
-                        gpu_allocator_memory_probe_policy,
-                        governor,
-                        &device_kt,
-                        fraction,
-                    )
-                    .unwrap_or(u64::MAX);
-                let budget = governor_avail.min(allocator_budget);
-                let max_blocks = (budget / bytes_per_block) as usize;
-                let capped = if max_blocks >= MIN_AUTO_KV_BLOCKS {
-                    n.min(max_blocks)
-                } else if kv_auto_block_policy.allow_min_blocks_below_live_budget
-                    && allocator_budget != u64::MAX
-                {
-                    MIN_AUTO_KV_BLOCKS.min(n)
-                } else {
-                    n
-                };
+                let governor_observation = governor.cached_observation();
+                let governor_avail = governor_observation.available_bytes;
+                let allocator_budget = crate::device_memory::allocator_kv_budget_bytes_for_fraction(
+                    gpu_allocator_memory_probe_policy,
+                    governor,
+                    &device_kt,
+                    fraction,
+                );
+                let host_backed_budget = host_backed_kv_budget_for_fraction(
+                    device_kt,
+                    Some(governor_observation.snapshot),
+                    host_prefix_cache_reserve_bytes,
+                    fraction,
+                );
+                let residency_budget =
+                    minimum_optional_budget(allocator_budget, host_backed_budget);
+                let (capped, max_blocks) = cap_kv_blocks_to_live_budget(
+                    n,
+                    bytes_per_block,
+                    governor_avail,
+                    residency_budget,
+                );
                 if max_blocks < MIN_AUTO_KV_BLOCKS {
                     tracing::warn!(
                         fraction,
                         proposed_blocks = n,
                         max_live_budget_blocks = max_blocks,
                         min_auto_blocks = MIN_AUTO_KV_BLOCKS,
+                        backend_policy_requested_minimum =
+                            kv_auto_block_policy.allow_min_blocks_below_live_budget,
                         governor_available_gb = governor_avail as f64 / 1e9,
-                        allocator_budget_gb = if allocator_budget == u64::MAX {
-                            None
-                        } else {
-                            Some(allocator_budget as f64 / 1e9)
-                        },
-                        "KV cache auto-sizer live budget is below the minimum cache size; using conservative backend policy floor when applicable"
+                        allocator_budget_gb = allocator_budget.map(|bytes| bytes as f64 / 1e9),
+                        host_backed_budget_gb = host_backed_budget.map(|bytes| bytes as f64 / 1e9),
+                        capped_blocks = capped,
+                        "KV cache auto-sizer live budget is below the preferred minimum; refusing to allocate above the live budget"
                     );
                 } else if capped < n {
                     tracing::warn!(
@@ -3239,12 +3399,9 @@ impl AppState {
                         capped_blocks = capped,
                         max_live_budget_blocks = max_blocks,
                         governor_available_gb = governor_avail as f64 / 1e9,
-                        allocator_budget_gb = if allocator_budget == u64::MAX {
-                            None
-                        } else {
-                            Some(allocator_budget as f64 / 1e9)
-                        },
-                        "KV cache auto-sizer capped by live allocator memory"
+                        allocator_budget_gb = allocator_budget.map(|bytes| bytes as f64 / 1e9),
+                        host_backed_budget_gb = host_backed_budget.map(|bytes| bytes as f64 / 1e9),
+                        "KV cache auto-sizer capped by live residency memory"
                     );
                 }
                 capped
@@ -3292,6 +3449,7 @@ impl AppState {
                 gpu_allocator_memory_probe_policy,
                 kv_auto_block_policy,
                 kiln_memory::MemoryGovernor::global(),
+                host_prefix_cache_reserve_bytes,
             )?;
             let attempt = || {
                 let attempt_number = allocation_attempt.get().saturating_add(1);
@@ -3383,9 +3541,8 @@ impl AppState {
         };
 
         // Determine num_blocks + paged cache:
-        //   - If `memory_cfg.num_blocks` is set, honor it exactly (no retry — the
-        //     user has chosen a specific value and we should not silently shrink
-        //     past their request).
+        //   - If `memory_cfg.num_blocks` is set, honor it exactly when it fits
+        //     the live safety budget (no retry or silent shrink).
         //   - Otherwise, run the auto-sizer retry loop, starting at the
         //     configured `inference_memory_fraction` and shrinking on OOM.
         let (paged_cache, num_blocks, inference_fraction) = if let Some(explicit) =
@@ -3398,10 +3555,18 @@ impl AppState {
                 fp8_enabled,
                 "allocating paged KV cache (explicit num_blocks)"
             );
-            let cache = allocate_cache(explicit)
-                .expect("failed to create PagedKvCacheKt with explicit num_blocks");
+            let cache = allocate_cache(explicit).map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to allocate explicitly configured paged KV cache with memory.num_blocks={explicit}: {error:#}"
+                )
+            })?;
             (cache, explicit, configured_inference_fraction)
         } else {
+            let initial_auto_blocks = compute_blocks_for_fraction(configured_inference_fraction);
+            anyhow::ensure!(
+                initial_auto_blocks > 0,
+                "paged KV cache auto-sizing cannot fit even one block within the current live accelerator/host residency budget after model residency, prefix-cache state, memory.floor_gb, and allocator reservations. Refusing to attempt an allocation. Free accelerator or host memory, reduce memory.floor_gb, lower model residency, or choose a device with more available memory"
+            );
             tracing::info!(
                 total_vram_gb = total_vram as f64 / 1e9,
                 model_gb = estimated_model_bytes as f64 / 1e9,
@@ -3463,11 +3628,8 @@ impl AppState {
                         configured_inference_fraction,
                         vram_info.source,
                     );
-                    // Print to stderr too so users see the actionable message
-                    // even when tracing is configured to discard error events.
-                    eprintln!("{msg}");
                     tracing::error!("{msg}");
-                    panic!("{msg}");
+                    return Err(anyhow::anyhow!(msg));
                 }
             }
         };
@@ -3501,7 +3663,6 @@ impl AppState {
         log_backend_training_acceleration_profile(
             backend_capabilities.training.acceleration_profile,
         );
-        let inference_recurrent_state_policy = backend_capabilities.gdn.inference_recurrent_state;
         let prefix_cache_max_blocks = if prefix_cache_cfg.enabled {
             prefix_cache_cfg
                 .max_blocks
@@ -3509,11 +3670,16 @@ impl AppState {
         } else {
             0
         };
-        let prefix_cache_state_bytes_per_entry =
-            linear_attention_state_bytes(&model_config, inference_recurrent_state_policy);
         let prefix_cache_max_entries = if prefix_cache_cfg.enabled {
             prefix_cache_cfg.max_entries.unwrap_or_else(|| {
-                default_prefix_cache_max_entries(total_vram, prefix_cache_state_bytes_per_entry)
+                if matches!(device_kt, kiln_tensor::Device::Vulkan(_)) {
+                    prefix_cache_entries_for_state_budget(
+                        host_prefix_cache_reserve_bytes,
+                        prefix_cache_state_bytes_per_entry,
+                    )
+                } else {
+                    default_prefix_cache_max_entries(total_vram, prefix_cache_state_bytes_per_entry)
+                }
             })
         } else {
             MIN_PREFIX_CACHE_MAX_ENTRIES
@@ -3536,6 +3702,7 @@ impl AppState {
             REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS,
         );
 
+        let model_weight_device = runner.weights.embed_tokens.device();
         let runner = Arc::new(std::sync::RwLock::new(runner));
         let backend_health = runner.read().unwrap().backend_health_handle();
         let block_manager = Arc::new(std::sync::Mutex::new(block_manager));
@@ -3636,6 +3803,13 @@ impl AppState {
                 response_delivery_policy,
             )
         });
+        if vram_probe_selector != kiln_memory::vram::VramProbeSelector::None {
+            let published = kiln_memory::MemoryGovernor::global().refresh();
+            anyhow::ensure!(
+                published.total_bytes > 0 && !published.observations.probe_failed,
+                "selected-device memory probe lost its safe capacity after startup allocations; refusing to become ready"
+            );
+        }
         // Wire allocator reclaim only after the actor and GPU coordination lock
         // exist. A periodic monitor must never synchronize or trim underneath a
         // live request; the reclaimer below checks actor activity and takes the
@@ -3706,7 +3880,7 @@ impl AppState {
         };
 
         let config_hashes = ConfigHashes::from_model_tokenizer(&model_config, &tokenizer, None);
-        Self {
+        Ok(Self {
             serving_profile,
             decode_runtime_config,
             model_config,
@@ -3743,6 +3917,15 @@ impl AppState {
             teacher_registry: teacher_registry_for_real.clone(),
             teacher_credentials: Arc::new(crate::config::TeachersConfig::default()),
             vram_info,
+            vram_capacity_resolution,
+            vram_probe_selector,
+            memory_config: memory_cfg.clone(),
+            training_runtime: kiln_train::TrainingRuntimeContext::new_for_device(
+                device_kt,
+                vram_info,
+                gradient_checkpoint_policy,
+            ),
+            model_weight_device,
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             http_send_buffer_bytes: None,
@@ -3810,7 +3993,7 @@ impl AppState {
             max_queued_eval_jobs: 32,
             max_tracked_eval_jobs: 1024,
             eval_webhook_url: None,
-        }
+        })
     }
 }
 
@@ -3888,13 +4071,110 @@ fn default_prefix_cache_max_entries(total_vram_bytes: u64, state_bytes_per_entry
     if state_bytes_per_entry == 0 {
         return MIN_PREFIX_CACHE_MAX_ENTRIES;
     }
-    let state_budget = if total_vram_bytes == 0 {
+    prefix_cache_entries_for_state_budget(
+        default_prefix_cache_state_budget(total_vram_bytes),
+        state_bytes_per_entry,
+    )
+}
+
+fn default_prefix_cache_state_budget(total_bytes: u64) -> u64 {
+    if total_bytes == 0 {
         MIN_PREFIX_CACHE_STATE_BYTES
     } else {
-        (total_vram_bytes / PREFIX_CACHE_STATE_FRACTION_DIVISOR)
+        (total_bytes / PREFIX_CACHE_STATE_FRACTION_DIVISOR)
             .clamp(MIN_PREFIX_CACHE_STATE_BYTES, MAX_PREFIX_CACHE_STATE_BYTES)
+    }
+}
+
+fn prefix_cache_entries_for_state_budget(
+    state_budget_bytes: u64,
+    state_bytes_per_entry: u64,
+) -> usize {
+    if state_bytes_per_entry == 0 {
+        return MIN_PREFIX_CACHE_MAX_ENTRIES;
+    }
+    usize::try_from(state_budget_bytes / state_bytes_per_entry)
+        .unwrap_or(usize::MAX)
+        .max(MIN_PREFIX_CACHE_MAX_ENTRIES)
+}
+
+/// Return the independently governed host-backed allocation tier used by
+/// Vulkan's current CPU-resident paged KV and recurrent-state storage.
+///
+/// A missing Vulkan tier is a failed safety proof, not permission to size from
+/// the primary DRM VRAM aperture. Other backends do not use this second ceiling.
+fn host_backed_free_bytes_for_device(
+    device: kiln_tensor::Device,
+    snapshot: Option<kiln_memory::MemorySnapshot>,
+) -> Option<u64> {
+    match device {
+        kiln_tensor::Device::Vulkan(_) => Some(
+            snapshot
+                .and_then(|snapshot| snapshot.observations.host_backed)
+                .map_or(0, |tier| tier.free_bytes),
+        ),
+        _ => None,
+    }
+}
+
+fn prefix_cache_host_reserve_bytes(
+    host_backed_free_bytes: Option<u64>,
+    state_bytes_per_entry: u64,
+    enabled: bool,
+    configured_max_entries: Option<usize>,
+) -> anyhow::Result<u64> {
+    let Some(host_backed_free_bytes) = host_backed_free_bytes else {
+        return Ok(0);
     };
-    ((state_budget / state_bytes_per_entry) as usize).max(MIN_PREFIX_CACHE_MAX_ENTRIES)
+    if !enabled || state_bytes_per_entry == 0 {
+        return Ok(0);
+    }
+
+    let state_budget = if let Some(max_entries) = configured_max_entries {
+        let max_entries = max_entries.max(MIN_PREFIX_CACHE_MAX_ENTRIES);
+        let max_entries = u64::try_from(max_entries).map_err(|_| {
+            anyhow::anyhow!(
+                "prefix_cache.max_entries={max_entries} cannot be represented as a 64-bit memory budget"
+            )
+        })?;
+        state_bytes_per_entry
+            .checked_mul(max_entries)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "prefix cache state budget overflow: state_bytes_per_entry={state_bytes_per_entry}, prefix_cache.max_entries={max_entries}"
+                )
+            })?
+    } else {
+        default_prefix_cache_state_budget(host_backed_free_bytes)
+            .min(host_backed_free_bytes)
+            .max(state_bytes_per_entry)
+    };
+
+    anyhow::ensure!(
+        state_budget <= host_backed_free_bytes,
+        "Vulkan prefix cache state requires {state_budget} host-backed bytes, but the safe GTT/host tier has only {host_backed_free_bytes} bytes free. Lower prefix_cache.max_entries, disable prefix_cache.enabled, free host memory, or increase the host/cgroup memory limit"
+    );
+    Ok(state_budget)
+}
+
+fn host_backed_kv_budget_for_fraction(
+    device: kiln_tensor::Device,
+    snapshot: Option<kiln_memory::MemorySnapshot>,
+    prefix_cache_reserve_bytes: u64,
+    fraction: f64,
+) -> Option<u64> {
+    host_backed_free_bytes_for_device(device, snapshot).map(|free_bytes| {
+        let after_prefix_cache = free_bytes.saturating_sub(prefix_cache_reserve_bytes);
+        ((after_prefix_cache as f64) * fraction.clamp(0.0, 1.0)) as u64
+    })
+}
+
+fn minimum_optional_budget(lhs: Option<u64>, rhs: Option<u64>) -> Option<u64> {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
 }
 
 /// Estimate model weight memory in bytes from config.
@@ -3966,9 +4246,8 @@ fn cap_auto_num_blocks(
     // ROCm's HIP allocator can abort the process on later long-prefill scratch
     // OOMs instead of returning a catchable allocation error. Its capability
     // policy keeps the default KV pool to one Qwen3.5-class full-context pool
-    // so long prefill has workspace headroom; explicit `memory.num_blocks` /
-    // `KILN_NUM_BLOCKS` still opts into larger pools for operators who want
-    // them.
+    // so long prefill has workspace headroom; explicit `memory.num_blocks` can
+    // request a larger pool, but the live-budget validator remains authoritative.
     //
     // On CUDA / CPU, memory-aware sizing already drove `raw_blocks` from the
     // available VRAM × `inference_memory_fraction` budget. Capping again at
@@ -3985,7 +4264,34 @@ fn cap_auto_num_blocks(
         total_vram_bytes,
     );
 
-    raw_blocks.max(MIN_AUTO_KV_BLOCKS).min(runtime_cap_blocks)
+    // `raw_blocks` is a capacity result, not a hint. Raising it to the
+    // historical preferred minimum can turn a measured sub-minimum budget into
+    // an over-budget allocation, which is especially dangerous on ROCm/UMA.
+    raw_blocks.min(runtime_cap_blocks)
+}
+
+fn effective_live_kv_budget_bytes(
+    governor_available_bytes: u64,
+    allocator_available_bytes: Option<u64>,
+) -> u64 {
+    allocator_available_bytes.map_or(governor_available_bytes, |allocator| {
+        governor_available_bytes.min(allocator)
+    })
+}
+
+fn cap_kv_blocks_to_live_budget(
+    proposed_blocks: usize,
+    bytes_per_block: u64,
+    governor_available_bytes: u64,
+    allocator_available_bytes: Option<u64>,
+) -> (usize, usize) {
+    if bytes_per_block == 0 {
+        return (proposed_blocks, usize::MAX);
+    }
+    let live_budget =
+        effective_live_kv_budget_bytes(governor_available_bytes, allocator_available_bytes);
+    let max_blocks = (live_budget / bytes_per_block) as usize;
+    (proposed_blocks.min(max_blocks), max_blocks)
 }
 
 fn validate_kv_allocation_against_live_allocator(
@@ -3996,51 +4302,80 @@ fn validate_kv_allocation_against_live_allocator(
     gpu_allocator_memory_probe_policy: GpuAllocatorMemoryProbePolicy,
     kv_auto_block_policy: KvCacheAutoBlockPolicy,
     governor: &kiln_memory::MemoryGovernor,
+    host_prefix_cache_reserve_bytes: u64,
 ) -> anyhow::Result<()> {
     if !gpu_memory_budget_policy.cap_kv_blocks_by_live_budget || bytes_per_block == 0 {
         return Ok(());
     }
-    let Some(allocator_budget) = crate::device_memory::allocator_safe_available_bytes(
+    let governor_observation = governor.cached_observation();
+    let governor_budget = governor_observation.available_bytes;
+    let allocator_budget = crate::device_memory::allocator_safe_available_bytes(
         gpu_allocator_memory_probe_policy,
         governor,
         device,
-    ) else {
-        return Ok(());
-    };
-    let requested = (num_blocks as u64).saturating_mul(bytes_per_block);
-    if requested <= allocator_budget {
-        return Ok(());
-    }
-    let max_blocks = (allocator_budget / bytes_per_block) as usize;
-    if kv_auto_block_policy.allow_min_blocks_below_live_budget
-        && max_blocks < MIN_AUTO_KV_BLOCKS
-        && num_blocks <= MIN_AUTO_KV_BLOCKS
-    {
-        tracing::warn!(
-            num_blocks,
-            max_live_budget_blocks = max_blocks,
-            min_auto_blocks = MIN_AUTO_KV_BLOCKS,
-            "backend allocator probe reports less than the minimum KV cache budget; allowing conservative policy floor allocation attempt"
-        );
-        return Ok(());
-    }
-    anyhow::bail!(
-        "paged KV cache allocation request exceeds live backend allocator memory: \
-         requested num_blocks={num_blocks} (~{requested_gb:.2} GiB) but allocator \
-         budget fits at most num_blocks={max_blocks} (~{budget_gb:.2} GiB). \
-         Lower KILN_NUM_BLOCKS or KILN_INFERENCE_MEMORY_FRACTION.",
-        requested_gb = requested as f64 / (1024.0 * 1024.0 * 1024.0),
-        budget_gb = allocator_budget as f64 / (1024.0 * 1024.0 * 1024.0),
+    );
+    let host_backed_budget = host_backed_kv_budget_for_fraction(
+        *device,
+        Some(governor_observation.snapshot),
+        host_prefix_cache_reserve_bytes,
+        1.0,
+    );
+    let residency_budget = minimum_optional_budget(allocator_budget, host_backed_budget);
+    let live_budget = effective_live_kv_budget_bytes(governor_budget, residency_budget);
+    validate_kv_allocation_against_live_budget(
+        num_blocks,
+        bytes_per_block,
+        live_budget,
+        allocator_budget.is_some(),
+        host_backed_budget.is_some(),
+        kv_auto_block_policy,
     )
 }
 
-/// Query total GPU memory in bytes. Returns 0 for CPU devices.
-///
-/// Uses the shared VRAM detection from kiln-core (nvidia-smi + sysctl
-/// hw.memsize on Apple Silicon + env override).
+fn validate_kv_allocation_against_live_budget(
+    num_blocks: usize,
+    bytes_per_block: u64,
+    live_budget: u64,
+    allocator_probe_available: bool,
+    host_backed_budget_available: bool,
+    kv_auto_block_policy: KvCacheAutoBlockPolicy,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        num_blocks > 0,
+        "paged KV cache live memory budget cannot fit even one block; reduce model residency or memory.floor_gb, free accelerator and host memory, or choose a device with more available memory"
+    );
+    let requested = (num_blocks as u64).saturating_mul(bytes_per_block);
+    if requested <= live_budget {
+        return Ok(());
+    }
+    let max_blocks = (live_budget / bytes_per_block) as usize;
+    let budget_source = match (allocator_probe_available, host_backed_budget_available) {
+        (true, true) => "the stricter governor/allocator/host-backed budget",
+        (true, false) => "the stricter governor/allocator budget",
+        (false, true) => "the stricter governor/host-backed budget",
+        (false, false) => "the memory governor budget",
+    };
+    let policy_floor_note = if kv_auto_block_policy.allow_min_blocks_below_live_budget
+        && max_blocks < MIN_AUTO_KV_BLOCKS
+    {
+        " The backend's preferred minimum block policy is intentionally not applied above live memory."
+    } else {
+        ""
+    };
+    anyhow::bail!(
+        "paged KV cache allocation request exceeds live accelerator/host residency memory: \
+         requested num_blocks={num_blocks} (~{requested_gb:.2} GiB), but {budget_source} \
+         fits at most num_blocks={max_blocks} (~{budget_gb:.2} GiB).{policy_floor_note} \
+         Lower memory.num_blocks or memory.inference_memory_fraction, reduce \
+         memory.floor_gb, or free accelerator and host memory.",
+        requested_gb = requested as f64 / (1024.0 * 1024.0 * 1024.0),
+        budget_gb = live_budget as f64 / (1024.0 * 1024.0 * 1024.0),
+    )
+}
 
 fn runtime_used_vram_for_policy(
     policy: GpuMemoryBudgetPolicy,
+    selector: kiln_memory::vram::VramProbeSelector,
 ) -> Option<kiln_memory::vram::GpuMemoryUsedInfo> {
     // The live used-memory probe is OS-level (nvidia-smi / AMD+Intel DRM sysfs /
     // unified-APU MemAvailable, see `kiln_memory::vram::current_memory_snapshot`),
@@ -4053,38 +4388,11 @@ fn runtime_used_vram_for_policy(
     if !policy.use_live_memory_snapshot {
         return None;
     }
-    let snap = kiln_memory::vram::current_memory_snapshot();
+    let snap = kiln_memory::vram::current_memory_snapshot_for(selector);
     (snap.used_bytes > 0).then_some(kiln_memory::vram::GpuMemoryUsedInfo {
         used_bytes: snap.used_bytes,
         source: snap.source,
     })
-}
-
-fn detected_gpu_total_memory(
-    policy: GpuMemoryDetectionPolicy,
-    vram: &kiln_memory::vram::GpuVramInfo,
-) -> u64 {
-    if vram.total_bytes > 0 {
-        if let Some(message) = policy.detected_total_log_message {
-            tracing::info!(
-                total_gb = vram.total_bytes as f64 / 1e9,
-                source = %vram.source,
-                memory_detection_policy = message,
-                "backend total memory detected"
-            );
-        }
-        return policy.total_memory_bytes(vram.total_bytes);
-    }
-    if let Some(warning) = policy.missing_total_warning {
-        tracing::warn!(
-            memory_detection_policy = warning,
-            fallback_total_gb = policy
-                .missing_total_fallback_bytes
-                .map(|bytes| bytes as f64 / 1e9),
-            "backend total memory detection failed; using policy fallback"
-        );
-    }
-    policy.total_memory_bytes(vram.total_bytes)
 }
 
 /// Successful auto-sizer outcome. Carries the live cache plus the metadata
@@ -4462,7 +4770,7 @@ fn suggested_emergency_num_blocks(
 ///   - a concrete `KILN_NUM_BLOCKS=N` value
 ///   - a concrete `inference_memory_fraction=X` value (the lowest we tried,
 ///     halved further to stay safely below the OOM floor)
-///   - the GPU VRAM total + detection source so users can sanity-check
+///   - the effective GPU memory total + source so users can sanity-check
 fn format_oom_remediation_message(
     failure: &AutoSizeFailure,
     total_vram: u64,
@@ -4491,7 +4799,7 @@ fn format_oom_remediation_message(
     let model_gb = estimated_model_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let kv_gb = (suggested_blocks as u64 * bytes_per_block) as f64 / (1024.0 * 1024.0 * 1024.0);
     buf.push_str(&format!(
-        "\nGPU detected: {:.1} GiB total VRAM (source: {}), \
+        "\nGPU memory budget: {:.1} GiB effective total (source: {}), \
          estimated model weights: {:.1} GiB.\n",
         vram_gb, vram_source, model_gb
     ));
@@ -5749,6 +6057,82 @@ mod tests {
     }
 
     #[test]
+    fn vulkan_prefix_cache_reserves_only_proven_host_backed_memory() {
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB;
+
+        assert_eq!(
+            prefix_cache_host_reserve_bytes(Some(4 * GIB), 49 * MIB, true, None).unwrap(),
+            256 * MIB
+        );
+        assert_eq!(
+            prefix_cache_host_reserve_bytes(Some(4 * GIB), 49 * MIB, true, Some(3)).unwrap(),
+            147 * MIB
+        );
+        assert_eq!(
+            prefix_cache_host_reserve_bytes(Some(4 * GIB), 49 * MIB, false, Some(3)).unwrap(),
+            0
+        );
+
+        let error = prefix_cache_host_reserve_bytes(Some(128 * MIB), 49 * MIB, true, Some(3))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("safe GTT/host tier"));
+        assert!(
+            prefix_cache_host_reserve_bytes(Some(u64::MAX), u64::MAX, true, Some(2))
+                .unwrap_err()
+                .to_string()
+                .contains("overflow")
+        );
+    }
+
+    #[test]
+    fn vulkan_host_backed_budget_is_independent_from_large_primary_vram() {
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB;
+        let snapshot = kiln_memory::MemorySnapshot {
+            total_bytes: 96 * GIB,
+            used_bytes: 6 * GIB,
+            free_bytes: 90 * GIB,
+            source: kiln_memory::vram::VramSource::LinuxDrmSysfs,
+            unified: false,
+            observations: kiln_memory::MemorySnapshotObservations {
+                host_backed: Some(kiln_memory::MemoryTierSnapshot {
+                    total_bytes: 16 * GIB,
+                    used_bytes: 12 * GIB,
+                    free_bytes: 4 * GIB,
+                }),
+                ..Default::default()
+            },
+        };
+
+        assert_eq!(
+            host_backed_free_bytes_for_device(kiln_tensor::Device::Vulkan(0), None),
+            Some(0),
+            "a missing host tier must fail closed"
+        );
+        assert_eq!(
+            host_backed_free_bytes_for_device(kiln_tensor::Device::Rocm(0), Some(snapshot)),
+            None,
+            "device-resident ROCm KV has no host-backed ceiling"
+        );
+
+        let host_budget = host_backed_kv_budget_for_fraction(
+            kiln_tensor::Device::Vulkan(0),
+            Some(snapshot),
+            256 * MIB,
+            0.7,
+        )
+        .unwrap();
+        assert_eq!(host_budget, (((4 * GIB - 256 * MIB) as f64) * 0.7) as u64);
+        let (capped, max_blocks) =
+            cap_kv_blocks_to_live_budget(96 * 1024, MIB, 90 * GIB, Some(host_budget));
+        assert_eq!(capped, max_blocks);
+        assert_eq!(max_blocks, (host_budget / MIB) as usize);
+        assert!(max_blocks < 4 * 1024);
+    }
+
+    #[test]
     fn real_prefix_cache_keys_by_adapter() -> anyhow::Result<()> {
         let config = tiny_linear_config();
         let device = cpu_device!();
@@ -6516,6 +6900,18 @@ mod tests {
     }
 
     #[test]
+    fn configured_training_budget_is_cap_only() {
+        let gib = 1024 * 1024 * 1024;
+        let capped =
+            GpuMemoryBudget::compute(24 * gib, 8 * gib, 8 * gib, 0, 4 * gib, 0.7, Some(6.0));
+        assert_eq!(capped.training_budget_bytes, 6 * gib);
+
+        let optimistic =
+            GpuMemoryBudget::compute(24 * gib, 8 * gib, 8 * gib, 0, 4 * gib, 0.7, Some(40.0));
+        assert_eq!(optimistic.training_budget_bytes, 12 * gib);
+    }
+
+    #[test]
     fn test_estimate_model_memory() {
         let config = ModelConfig::qwen3_5_4b();
         let bytes = estimate_model_memory_bytes(&config);
@@ -6561,53 +6957,200 @@ mod tests {
     }
 
     #[test]
-    fn test_detected_gpu_total_memory_uses_backend_policy_fallbacks() {
-        let missing = kiln_memory::vram::GpuVramInfo {
-            total_bytes: 0,
-            source: kiln_memory::vram::VramSource::None,
-        };
+    fn active_backend_maps_to_one_device_scoped_memory_probe() {
+        use kiln_memory::vram::{LinuxDrmVendor, VramProbeSelector};
 
         assert_eq!(
-            detected_gpu_total_memory(
-                GpuMemoryDetectionPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0)),
-                &missing,
-            ),
-            GpuMemoryDetectionPolicy::CUDA_MISSING_TOTAL_FALLBACK_BYTES
+            vram_probe_selector_for_device(kiln_tensor::Device::Cuda(2)),
+            VramProbeSelector::Nvidia(2)
         );
         assert_eq!(
-            detected_gpu_total_memory(
-                GpuMemoryDetectionPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
-                &missing,
-            ),
-            GpuMemoryDetectionPolicy::METAL_MISSING_TOTAL_FALLBACK_BYTES
+            vram_probe_selector_for_device(kiln_tensor::Device::Rocm(1)),
+            VramProbeSelector::LinuxDrm {
+                index: 1,
+                vendor: Some(LinuxDrmVendor::Amd),
+            }
         );
         assert_eq!(
-            detected_gpu_total_memory(
-                GpuMemoryDetectionPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0)),
-                &missing,
-            ),
-            0
+            vram_probe_selector_for_device(kiln_tensor::Device::Vulkan(3)),
+            VramProbeSelector::LinuxDrm {
+                index: 3,
+                vendor: None,
+            }
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(kiln_tensor::Device::Metal(0)),
+            VramProbeSelector::AppleUnified
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(kiln_tensor::Device::Cpu),
+            VramProbeSelector::None
+        );
+        assert_eq!(
+            ensure_accelerator_memory_probe_identity(kiln_tensor::Device::Cpu).unwrap(),
+            VramProbeSelector::None
         );
     }
 
     #[test]
-    fn test_detected_gpu_total_memory_preserves_detected_total() {
-        let detected = kiln_memory::vram::GpuVramInfo {
-            total_bytes: 40 * 1024 * 1024 * 1024,
-            source: kiln_memory::vram::VramSource::EnvOverride,
+    fn accelerator_capacity_guard_fails_closed_without_a_safe_probe() {
+        use kiln_memory::vram::{GpuVramInfo, VramProbeSelector, VramSource};
+
+        let missing = GpuVramInfo {
+            total_bytes: 0,
+            source: VramSource::None,
+            unified: false,
         };
+        let error = ensure_accelerator_memory_capacity(
+            kiln_tensor::Device::Rocm(0),
+            VramProbeSelector::LinuxDrm {
+                index: 0,
+                vendor: Some(kiln_memory::vram::LinuxDrmVendor::Amd),
+            },
+            missing,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("0 bytes of safe effective capacity"));
+        assert!(error.contains("cap-only"));
+
+        assert!(
+            ensure_accelerator_memory_capacity(
+                kiln_tensor::Device::Cpu,
+                VramProbeSelector::None,
+                missing,
+            )
+            .is_ok()
+        );
+        assert!(
+            ensure_accelerator_memory_capacity(
+                kiln_tensor::Device::Vulkan(0),
+                VramProbeSelector::LinuxDrm {
+                    index: 0,
+                    vendor: None,
+                },
+                GpuVramInfo {
+                    total_bytes: 8 * 1024 * 1024 * 1024,
+                    source: VramSource::LinuxDrmSysfs,
+                    unified: false,
+                },
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accelerator_floor_guard_rejects_equal_or_larger_effective_capacity() {
+        use kiln_memory::vram::{GpuVramInfo, VramSource};
+
+        let capacity = GpuVramInfo {
+            total_bytes: 8 * 1024 * 1024 * 1024,
+            source: VramSource::LinuxDrmSysfs,
+            unified: false,
+        };
+        let mut memory = crate::config::MemoryConfig::default();
+        memory.floor_gb = 8.0;
+        let error =
+            ensure_accelerator_memory_floor(kiln_tensor::Device::Vulkan(0), capacity, &memory)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("memory.floor_gb=8"));
+        assert!(error.contains("8589934592 bytes"));
+        assert!(error.contains("strictly smaller"));
+        assert!(error.contains("before model upload"));
+
+        memory.floor_gb = 8.5;
+        assert!(
+            ensure_accelerator_memory_floor(kiln_tensor::Device::Rocm(0), capacity, &memory,)
+                .is_err()
+        );
+        memory.floor_gb = 7.5;
+        assert!(
+            ensure_accelerator_memory_floor(kiln_tensor::Device::Rocm(0), capacity, &memory,)
+                .is_ok()
+        );
+        assert!(
+            ensure_accelerator_memory_floor(
+                kiln_tensor::Device::Cpu,
+                GpuVramInfo {
+                    total_bytes: 0,
+                    source: VramSource::None,
+                    unified: false,
+                },
+                &memory,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn live_budget_caps_auto_blocks_below_the_preferred_minimum() {
+        const MIB: u64 = 1024 * 1024;
+
+        let (capped, max_blocks) =
+            cap_kv_blocks_to_live_budget(MIN_AUTO_KV_BLOCKS, MIB, 63 * MIB, None);
+        assert_eq!(max_blocks, 63);
+        assert_eq!(capped, 63);
+
+        let (capped, max_blocks) = cap_kv_blocks_to_live_budget(128, MIB, 96 * MIB, Some(32 * MIB));
+        assert_eq!(max_blocks, 32);
+        assert_eq!(capped, 32);
+    }
+
+    #[test]
+    fn explicit_portable_kv_allocation_obeys_governor_without_allocator_probe() {
+        const MIB: u64 = 1024 * 1024;
 
         for policy in [
-            GpuMemoryDetectionPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0)),
-            GpuMemoryDetectionPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
-            GpuMemoryDetectionPolicy::for_backend("rocm", kiln_tensor::Device::Rocm(0)),
-            GpuMemoryDetectionPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0)),
+            KvCacheAutoBlockPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0)),
+            KvCacheAutoBlockPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
         ] {
-            assert_eq!(
-                detected_gpu_total_memory(policy, &detected),
-                detected.total_bytes
-            );
+            let error = validate_kv_allocation_against_live_budget(
+                MIN_AUTO_KV_BLOCKS,
+                MIB,
+                63 * MIB,
+                false,
+                false,
+                policy,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("memory governor budget"));
+            assert!(error.contains("at most num_blocks=63"));
         }
+    }
+
+    #[test]
+    fn rocm_minimum_policy_never_overrides_live_allocator_budget() {
+        const MIB: u64 = 1024 * 1024;
+        let policy = KvCacheAutoBlockPolicy::for_backend("rocm", kiln_tensor::Device::Rocm(0));
+        assert!(policy.allow_min_blocks_below_live_budget);
+
+        let error = validate_kv_allocation_against_live_budget(
+            MIN_AUTO_KV_BLOCKS,
+            MIB,
+            63 * MIB,
+            true,
+            false,
+            policy,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("stricter governor/allocator budget"));
+        assert!(error.contains("preferred minimum block policy"));
+    }
+
+    #[test]
+    fn explicit_vulkan_kv_allocation_reports_host_backed_ceiling() {
+        const MIB: u64 = 1024 * 1024;
+        let policy = KvCacheAutoBlockPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0));
+        let error =
+            validate_kv_allocation_against_live_budget(128, MIB, 32 * MIB, false, true, policy)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("governor/host-backed budget"));
+        assert!(error.contains("at most num_blocks=32"));
+        assert!(error.contains("free accelerator and host memory"));
     }
 
     #[test]
@@ -6709,7 +7252,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_num_blocks_preserves_small_auto_and_minimum() {
+    fn test_auto_num_blocks_preserves_measured_sub_minimum_budget() {
         assert_eq!(
             cap_auto_num_blocks(
                 512,
@@ -6728,7 +7271,7 @@ mod tests {
                 KvCacheAutoBlockPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
                 10 * 1024 * 1024 * 1024,
             ),
-            MIN_AUTO_KV_BLOCKS
+            1
         );
     }
 

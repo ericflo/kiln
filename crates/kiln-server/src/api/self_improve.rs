@@ -521,6 +521,8 @@ fn prepare_agent_job(
             job_id: job_id.to_string(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            prepared_data: Default::default(),
+            prepared_data_permit: Default::default(),
             job,
         },
     )

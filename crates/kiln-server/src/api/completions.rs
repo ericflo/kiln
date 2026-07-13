@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use crate::batching_engine::{EngineActionTokenSource, EngineEvent, EngineRequest};
 use crate::config::{SpecMethod, SpeculativeDecodingConfig};
 use crate::error::ApiError;
+use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::metrics::RequestStatus;
 use crate::recent_requests::{
     FULL_BODY_MAX_CHARS, RequestRecord, RequestThinkingBudget, now_unix_ms, truncate_chars,
@@ -80,9 +81,16 @@ const QWEN_TOOL_CALL_OPEN_TAG: &str = "<tool_call>";
 const QWEN_TOOL_CALL_CLOSE_TAG: &str = "</tool_call>";
 const MOCK_COMPLETION_TOKEN_LIMIT: usize = 20;
 
-fn observe_post_prefill_vram(memory_budget: &std::sync::Arc<crate::state::GpuMemoryBudget>) {
-    if let Some(bytes) = kiln_memory::vram::detect_used_vram_bytes() {
-        memory_budget.observe_prefill_used_vram_bytes(bytes);
+fn observe_post_prefill_vram(
+    memory_budget: &std::sync::Arc<crate::state::GpuMemoryBudget>,
+    selector: kiln_memory::VramProbeSelector,
+) {
+    let observation = CachedMemoryGovernorObservation::capture_global_for(selector);
+    if observation.sample_status.healthy
+        && observation.snapshot.total_bytes > 0
+        && !observation.snapshot.observations.probe_failed
+    {
+        memory_budget.observe_prefill_used_vram_bytes(observation.snapshot.used_bytes);
     }
 }
 
@@ -7173,7 +7181,7 @@ async fn generate_real_batched(
     state
         .metrics
         .observe_decode_duration(output.decode_duration.as_secs_f64());
-    observe_post_prefill_vram(&state.memory_budget);
+    observe_post_prefill_vram(&state.memory_budget, state.vram_probe_selector);
 
     let actor_queue_duration = output.actor_queue_duration;
     let actor_admission_duration = output.actor_admission_duration;
@@ -7997,6 +8005,7 @@ async fn generate_real(
     let gpu_lock = state.gpu_lock.clone();
     let loaded_adapter = state.loaded_adapter.clone();
     let memory_budget = state.memory_budget.clone();
+    let vram_probe_selector = state.vram_probe_selector;
     let metrics = state.metrics.clone();
     let timeout = state.request_timeout;
     let mtp_acceptance = state.mtp_acceptance.clone();
@@ -8194,18 +8203,18 @@ async fn generate_real(
     let output = match tokio::time::timeout(timeout, &mut generation).await {
         Ok(join_result) => match join_result {
             Ok(Ok(output)) => {
-                observe_post_prefill_vram(&memory_budget);
+                observe_post_prefill_vram(&memory_budget, vram_probe_selector);
                 cancel.clear_prefill_progress();
                 output
             }
             Ok(Err(err)) => {
-                observe_post_prefill_vram(&memory_budget);
+                observe_post_prefill_vram(&memory_budget, vram_probe_selector);
                 cancel.clear_prefill_progress();
                 tracing::error!(error = %format!("{err:#}"), "real generation failed");
                 return Err(ApiError::generation_failed(err));
             }
             Err(err) => {
-                observe_post_prefill_vram(&memory_budget);
+                observe_post_prefill_vram(&memory_budget, vram_probe_selector);
                 cancel.clear_prefill_progress();
                 return Err(ApiError::internal(format!("join error: {err}")));
             }
@@ -8730,6 +8739,7 @@ async fn generate_real_streaming(
     let created = now_epoch();
     let gpu_lock = state.gpu_lock.clone();
     let memory_budget = state.memory_budget.clone();
+    let vram_probe_selector = state.vram_probe_selector;
     let timeout = state.request_timeout;
     let decode_stats = state.decode_stats.clone();
     let metrics = state.metrics.clone();
@@ -9042,7 +9052,7 @@ async fn generate_real_streaming(
                     } else {
                         cancel_and_settle_direct_prefill(&cancel, prefill).await;
                     }
-                    observe_post_prefill_vram(&memory_budget);
+                    observe_post_prefill_vram(&memory_budget, vram_probe_selector);
                     return;
                 }
                 DirectStreamSelection::ClientDisconnected => {
@@ -9053,11 +9063,11 @@ async fn generate_real_streaming(
                         completion_token_count,
                     );
                     cancel_and_settle_direct_prefill(&cancel, prefill).await;
-                    observe_post_prefill_vram(&memory_budget);
+                    observe_post_prefill_vram(&memory_budget, vram_probe_selector);
                     return;
                 }
                 DirectStreamSelection::Ready(result) => {
-                    observe_post_prefill_vram(&memory_budget);
+                    observe_post_prefill_vram(&memory_budget, vram_probe_selector);
                     match result {
                         Ok(Ok(stream)) => stream,
                         Ok(Err(error)) => {

@@ -511,6 +511,67 @@ impl<'de> Deserialize<'de> for ServingProfileSetting {
     }
 }
 
+/// Validated memory-governor reclaim mode plus startup provenance.
+///
+/// The memory crate deliberately has no serialization dependency, so the
+/// server-owned startup boundary wraps its runtime enum and performs all TOML
+/// and environment parsing here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryReclaimModeSetting {
+    mode: kiln_memory::MemoryReclaimMode,
+    source: ConfigValueSource,
+}
+
+impl MemoryReclaimModeSetting {
+    pub const fn new(mode: kiln_memory::MemoryReclaimMode, source: ConfigValueSource) -> Self {
+        Self { mode, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let mode = kiln_memory::MemoryReclaimMode::parse(raw).map_err(|_| {
+            anyhow::anyhow!("{name} must be one of off, on-demand, automatic; got {raw:?}")
+        })?;
+        Ok(Self::new(mode, ConfigValueSource::Environment))
+    }
+
+    pub const fn mode(self) -> kiln_memory::MemoryReclaimMode {
+        self.mode
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for MemoryReclaimModeSetting {
+    fn default() -> Self {
+        Self::new(
+            kiln_memory::MemoryReclaimMode::Off,
+            ConfigValueSource::Default,
+        )
+    }
+}
+
+impl Serialize for MemoryReclaimModeSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.mode.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for MemoryReclaimModeSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let mode = kiln_memory::MemoryReclaimMode::parse(&raw).map_err(serde::de::Error::custom)?;
+        Ok(Self::new(mode, ConfigValueSource::ConfigFile))
+    }
+}
+
 /// Validated stream-stall grace plus the startup source that selected it.
 ///
 /// The custom serde implementation keeps `server.stream_stall_grace_ms` an
@@ -1219,13 +1280,19 @@ impl ModelConfig {
 /// GPU memory allocation settings. Canonical startup overrides use
 /// `KILN_MEMORY_<FIELD>`; historical unsectioned spellings are
 /// compatibility-only.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MemoryConfig {
     pub num_blocks: Option<usize>,
     pub gpu_memory_gb: Option<f64>,
     pub inference_memory_fraction: f64,
     pub training_memory_gb: Option<f64>,
+    /// GiB withheld by the process-wide memory governor after live probing.
+    pub floor_gb: f64,
+    /// Minimum interval between live OS/driver memory probes.
+    pub probe_ms: u64,
+    /// Whether allocator reclaim is disabled, explicit only, or automatic.
+    pub reclaim_mode: MemoryReclaimModeSetting,
     /// Enable FP8 (E4M3FN) quantization for KV cache, halving memory usage.
     /// When enabled, K/V values are stored as 8-bit floats with per-tensor scaling.
     /// Default: false
@@ -1584,6 +1651,12 @@ impl NormalizedEnvValue for ServingProfileSetting {
     }
 }
 
+impl NormalizedEnvValue for MemoryReclaimModeSetting {
+    fn normalized_env_value(&self) -> String {
+        self.mode().as_str().to_owned()
+    }
+}
+
 impl NormalizedEnvValue for StreamStallGrace {
     fn normalized_env_value(&self) -> String {
         self.millis().normalized_env_value()
@@ -1821,6 +1894,9 @@ macro_rules! public_env_parser {
     (serving_profile) => {
         ServingProfileSetting::from_named_environment_value
     };
+    (memory_reclaim_mode) => {
+        MemoryReclaimModeSetting::from_named_environment_value
+    };
     (deterministic) => {
         DeterministicInference::from_named_environment_value
     };
@@ -1980,6 +2056,13 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         some_f64,
         memory.training_memory_gb,
         "KILN_TRAINING_MEMORY_GB"
+    ),
+    public_env_field!(f64, memory.floor_gb, "KILN_MEMORY_FLOOR_GB"),
+    public_env_field!(u64, memory.probe_ms, "KILN_MEMORY_PROBE_MS"),
+    public_env_field!(
+        memory_reclaim_mode,
+        memory.reclaim_mode,
+        "KILN_MEMORY_RECLAIM_MODE"
     ),
     public_env_field!(bool, memory.kv_cache_fp8, "KILN_KV_CACHE_FP8"),
     public_env_field!(bool, memory.cuda_graphs, "KILN_CUDA_GRAPHS"),
@@ -2154,6 +2237,9 @@ impl Default for MemoryConfig {
             gpu_memory_gb: None,
             inference_memory_fraction: 0.7,
             training_memory_gb: None,
+            floor_gb: 1.0,
+            probe_ms: 500,
+            reclaim_mode: MemoryReclaimModeSetting::default(),
             kv_cache_fp8: false,
             // Default-ON (#34): CUDA graph capture/replay is now bit-identical to
             // eager decode. BUG2 (the replay divergence) was the captured graph
@@ -2162,6 +2248,35 @@ impl Default for MemoryConfig {
             // bit-identical over 512-token decodes (BF16 + W4A16, multiple prompts).
             cuda_graphs: true,
         }
+    }
+}
+
+impl MemoryConfig {
+    /// Configured governor floor in bytes, using the same GiB conversion and
+    /// rounding as the installed runtime policy.
+    pub fn floor_bytes(&self) -> u64 {
+        (self.floor_gb * 1024.0 * 1024.0 * 1024.0).round() as u64
+    }
+
+    /// Translate the validated typed startup configuration into the
+    /// dependency-light governor's immutable runtime policy.
+    pub fn governor_config(&self) -> kiln_memory::GovernorConfig {
+        let mut governor = kiln_memory::GovernorConfig::default();
+        governor.floor_bytes = self.floor_bytes();
+        governor.ttl = std::time::Duration::from_millis(self.probe_ms);
+        governor.reclaim_mode = self.reclaim_mode.mode();
+        governor
+    }
+
+    /// Bind the governor to the already-resolved cap-only effective capacity.
+    /// A zero capacity remains an explicit fail-closed ceiling.
+    pub fn governor_config_for_capacity(
+        &self,
+        effective_capacity_bytes: u64,
+    ) -> kiln_memory::GovernorConfig {
+        let mut governor = self.governor_config();
+        governor.capacity_limit_bytes = Some(effective_capacity_bytes);
+        governor
     }
 }
 
@@ -2505,15 +2620,29 @@ impl KilnConfig {
             ("memory.training_memory_gb", self.memory.training_memory_gb),
         ] {
             if let Some(value) = value
-                && (!value.is_finite() || value <= 0.0)
+                && (!value.is_finite()
+                    || value <= 0.0
+                    || value > u64::MAX as f64 / (1024.0 * 1024.0 * 1024.0))
             {
-                anyhow::bail!("{field} must be finite and > 0 when set, got {value}");
+                anyhow::bail!(
+                    "{field} must be finite, > 0, and representable as bytes when set, got {value}"
+                );
             }
         }
 
         let f = self.memory.inference_memory_fraction;
         if !f.is_finite() || !(0.0..=1.0).contains(&f) {
             anyhow::bail!("memory.inference_memory_fraction must be between 0.0 and 1.0, got {f}");
+        }
+        let floor_gb = self.memory.floor_gb;
+        let max_floor_gb = u64::MAX as f64 / (1024.0 * 1024.0 * 1024.0);
+        if !floor_gb.is_finite() || floor_gb < 0.0 || floor_gb > max_floor_gb {
+            anyhow::bail!(
+                "memory.floor_gb must be finite, non-negative, and representable as bytes, got {floor_gb}"
+            );
+        }
+        if self.memory.probe_ms == 0 {
+            anyhow::bail!("memory.probe_ms must be > 0, got 0");
         }
 
         if self.training.grad_checkpoint_segments == Some(0) {
@@ -2817,10 +2946,13 @@ mod tests {
         "KILN_LOGGING_FORMAT",
         "KILN_LOGGING_LEVEL",
         "KILN_MEMORY_CUDA_GRAPHS",
+        "KILN_MEMORY_FLOOR_GB",
         "KILN_MEMORY_GPU_MEMORY_GB",
         "KILN_MEMORY_INFERENCE_MEMORY_FRACTION",
         "KILN_MEMORY_KV_CACHE_FP8",
         "KILN_MEMORY_NUM_BLOCKS",
+        "KILN_MEMORY_PROBE_MS",
+        "KILN_MEMORY_RECLAIM_MODE",
         "KILN_MEMORY_TRAINING_MEMORY_GB",
         "KILN_MODEL_ADAPTER_DIR",
         "KILN_MODEL_MODEL_ID",
@@ -3061,6 +3193,16 @@ mod tests {
         assert!(config.model.adapter_dir.is_none());
         assert!(config.memory.num_blocks.is_none());
         assert_eq!(config.memory.inference_memory_fraction, 0.7);
+        assert_eq!(config.memory.floor_gb, 1.0);
+        assert_eq!(config.memory.probe_ms, 500);
+        assert_eq!(
+            config.memory.reclaim_mode.mode(),
+            kiln_memory::MemoryReclaimMode::Off
+        );
+        assert_eq!(
+            config.memory.reclaim_mode.source(),
+            ConfigValueSource::Default
+        );
         assert!(!config.memory.kv_cache_fp8);
         assert!(config.memory.cuda_graphs); // #34: default-ON
         assert!(!config.training.no_grad_checkpoint);
@@ -3112,7 +3254,7 @@ mod tests {
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 60);
+        assert_eq!(original_len, 63);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -3136,7 +3278,7 @@ mod tests {
                     .filter(move |alias| alias.name != canonical)
             })
             .count();
-        assert_eq!(canonical_only_aliases, 18);
+        assert_eq!(canonical_only_aliases, 21);
         assert_eq!(compatibility_aliases, 43);
 
         for field in PUBLIC_ENV_FIELDS {
@@ -3205,7 +3347,7 @@ mod tests {
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_sixty_public_fields() {
+    fn public_env_canonical_only_loads_all_sixty_three_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
@@ -3239,6 +3381,9 @@ mod tests {
             ("KILN_MEMORY_GPU_MEMORY_GB", "64"),
             ("KILN_MEMORY_INFERENCE_MEMORY_FRACTION", "0.6"),
             ("KILN_MEMORY_TRAINING_MEMORY_GB", "8"),
+            ("KILN_MEMORY_FLOOR_GB", "2.5"),
+            ("KILN_MEMORY_PROBE_MS", "750"),
+            ("KILN_MEMORY_RECLAIM_MODE", "on-demand"),
             ("KILN_MEMORY_KV_CACHE_FP8", "true"),
             ("KILN_MEMORY_CUDA_GRAPHS", "false"),
             ("KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS", "4"),
@@ -3323,6 +3468,16 @@ mod tests {
         assert_eq!(config.memory.gpu_memory_gb, Some(64.0));
         assert_eq!(config.memory.inference_memory_fraction, 0.6);
         assert_eq!(config.memory.training_memory_gb, Some(8.0));
+        assert_eq!(config.memory.floor_gb, 2.5);
+        assert_eq!(config.memory.probe_ms, 750);
+        assert_eq!(
+            config.memory.reclaim_mode.mode(),
+            kiln_memory::MemoryReclaimMode::OnDemand
+        );
+        assert_eq!(
+            config.memory.reclaim_mode.source(),
+            ConfigValueSource::Environment
+        );
         assert!(config.memory.kv_cache_fp8);
         assert!(!config.memory.cuda_graphs);
         assert_eq!(config.training.grad_checkpoint_segments, Some(4));
@@ -3445,6 +3600,7 @@ mod tests {
             ("KILN_SERVER_PORT", "nine-thousand"),
             ("KILN_SERVER_DETERMINISTIC", "maybe"),
             ("KILN_SERVER_DEFAULT_THINKING_BUDGET_MS", "2.5"),
+            ("KILN_MEMORY_RECLAIM_MODE", "whenever"),
             ("KILN_SPECULATIVE_METHOD", "guessing"),
             ("KILN_REQUEST_LOG_COMPRESS", "occasionally"),
         ] {
@@ -3453,6 +3609,28 @@ mod tests {
             environment.remove(name);
             let detail = format!("{error:#}");
             assert!(detail.contains(name), "{name}: {detail}");
+            assert!(detail.contains(invalid), "{name}: {detail}");
+        }
+    }
+
+    #[test]
+    fn memory_governor_environment_values_are_validated_at_startup() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("kiln.toml");
+        std::fs::write(&path, "").unwrap();
+
+        for (name, invalid, field) in [
+            ("KILN_MEMORY_FLOOR_GB", "-0.5", "memory.floor_gb"),
+            ("KILN_MEMORY_FLOOR_GB", "inf", "memory.floor_gb"),
+            ("KILN_MEMORY_PROBE_MS", "0", "memory.probe_ms"),
+        ] {
+            environment.set(name, invalid);
+            let error = KilnConfig::load(Some(path.to_str().unwrap())).unwrap_err();
+            environment.remove(name);
+            let detail = format!("{error:#}");
+            assert!(detail.contains(field), "{name}: {detail}");
             assert!(detail.contains(invalid), "{name}: {detail}");
         }
     }
@@ -3845,6 +4023,9 @@ num_blocks = 128
 gpu_memory_gb = 24.0
 inference_memory_fraction = 0.5
 training_memory_gb = 6.0
+floor_gb = 2.0
+probe_ms = 250
+reclaim_mode = "automatic"
 kv_cache_fp8 = true
 cuda_graphs = false
 
@@ -3930,6 +4111,16 @@ composed_cache_max_entries = 8
         assert_eq!(config.memory.gpu_memory_gb, Some(24.0));
         assert_eq!(config.memory.inference_memory_fraction, 0.5);
         assert_eq!(config.memory.training_memory_gb, Some(6.0));
+        assert_eq!(config.memory.floor_gb, 2.0);
+        assert_eq!(config.memory.probe_ms, 250);
+        assert_eq!(
+            config.memory.reclaim_mode.mode(),
+            kiln_memory::MemoryReclaimMode::Automatic
+        );
+        assert_eq!(
+            config.memory.reclaim_mode.source(),
+            ConfigValueSource::ConfigFile
+        );
         assert!(config.memory.kv_cache_fp8);
         assert!(!config.memory.cuda_graphs);
         assert_eq!(config.training.grad_checkpoint_segments, Some(8));
@@ -4012,6 +4203,37 @@ port = 3000
         let mut config = KilnConfig::default();
         config.memory.inference_memory_fraction = -0.1;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_invalid_memory_governor_tuning() {
+        let mut negative_floor = KilnConfig::default();
+        negative_floor.memory.floor_gb = -0.1;
+        assert!(negative_floor.validate().is_err());
+
+        let mut non_finite_floor = KilnConfig::default();
+        non_finite_floor.memory.floor_gb = f64::INFINITY;
+        assert!(non_finite_floor.validate().is_err());
+
+        let mut zero_probe = KilnConfig::default();
+        zero_probe.memory.probe_ms = 0;
+        assert!(zero_probe.validate().is_err());
+
+        let mut unrepresentable_capacity = KilnConfig::default();
+        unrepresentable_capacity.memory.gpu_memory_gb = Some(f64::MAX);
+        assert!(unrepresentable_capacity.validate().is_err());
+    }
+
+    #[test]
+    fn test_memory_reclaim_mode_rejects_invalid_toml_value() {
+        let error = toml::from_str::<KilnConfig>(
+            r#"
+[memory]
+reclaim_mode = "whenever"
+"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("memory.reclaim_mode"));
     }
 
     #[test]

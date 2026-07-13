@@ -1714,6 +1714,7 @@ dependencies = [
  "kiln-tensor",
  "kiln-tensor-id",
  "kiln-vulkan-kernel",
+ "libc",
  "rand 0.10.1",
  "reqwest",
  "safetensors",

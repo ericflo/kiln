@@ -70,6 +70,327 @@ pub mod trajectory;
 pub mod trajectory_inspect;
 pub mod trajectory_mask;
 
+/// Number of full hidden-state boundaries retained by GRPO and OPD when a
+/// checkpoint plan has `num_segments` segments. The forward pass stores the
+/// embedded input plus every segment output until reverse replay completes.
+pub const fn retained_checkpoint_boundary_count(num_segments: usize) -> usize {
+    num_segments.saturating_add(1)
+}
+
+/// Immutable gradient-checkpoint behavior for one native training run.
+///
+/// `Disabled` retains an optional explicit segment count so resolving both
+/// legacy controls does not silently discard either value. The count remains
+/// part of checkpoint identity even though execution is disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum GradientCheckpointPolicy {
+    Auto,
+    ExplicitSegments {
+        segments: std::num::NonZeroUsize,
+    },
+    Disabled {
+        segments: Option<std::num::NonZeroUsize>,
+    },
+}
+
+impl GradientCheckpointPolicy {
+    /// Construct a validated policy from typed configuration fields.
+    pub fn from_parts(
+        segments: Option<usize>,
+        disabled: bool,
+    ) -> Result<Self, InvalidGradientCheckpointSegments> {
+        let segments = segments
+            .map(|value| {
+                std::num::NonZeroUsize::new(value).ok_or(InvalidGradientCheckpointSegments)
+            })
+            .transpose()?;
+        Ok(Self::from_nonzero_parts(segments, disabled))
+    }
+
+    pub const fn from_nonzero_parts(
+        segments: Option<std::num::NonZeroUsize>,
+        disabled: bool,
+    ) -> Self {
+        if disabled {
+            Self::Disabled { segments }
+        } else if let Some(segments) = segments {
+            Self::ExplicitSegments { segments }
+        } else {
+            Self::Auto
+        }
+    }
+
+    pub const fn explicit_segments(self) -> Option<std::num::NonZeroUsize> {
+        match self {
+            Self::Auto => None,
+            Self::ExplicitSegments { segments } => Some(segments),
+            Self::Disabled { segments } => segments,
+        }
+    }
+
+    pub const fn is_auto(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+
+    pub const fn is_disabled(self) -> bool {
+        matches!(self, Self::Disabled { .. })
+    }
+}
+
+impl Default for GradientCheckpointPolicy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidGradientCheckpointSegments;
+
+impl std::fmt::Display for InvalidGradientCheckpointSegments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "gradient checkpoint segments must be greater than zero")
+    }
+}
+
+impl std::error::Error for InvalidGradientCheckpointSegments {}
+
+/// Immutable process-lifetime inputs used to plan a native training run.
+///
+/// Server and accelerator callers construct this with
+/// [`TrainingRuntimeContext::new_for_device`] and pass it through the explicit
+/// `*_with_runtime` entry points. Standalone checkpoint planners can use
+/// [`TrainingRuntimeContext::standalone`] (or [`Default`]) for physical
+/// memory autodetection without claiming a backend identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrainingRuntimeContext {
+    effective_vram: kiln_memory::vram::GpuVramInfo,
+    gradient_checkpoint_policy: GradientCheckpointPolicy,
+    runtime_device: Option<kiln_tensor::Device>,
+}
+
+impl TrainingRuntimeContext {
+    /// Build an unbound checkpoint-planning context.
+    ///
+    /// Accelerator execution rejects this form; use [`Self::new_for_device`]
+    /// when the context will authorize a training run.
+    pub const fn new(
+        effective_vram: kiln_memory::vram::GpuVramInfo,
+        gradient_checkpoint_policy: GradientCheckpointPolicy,
+    ) -> Self {
+        Self {
+            effective_vram,
+            gradient_checkpoint_policy,
+            runtime_device: None,
+        }
+    }
+
+    /// Bind training to the backend device selected by the owning runtime.
+    ///
+    /// This binding is required when accelerator identity cannot be recovered
+    /// from tensor storage, notably Vulkan's CPU-host weight representation.
+    pub const fn new_for_device(
+        runtime_device: kiln_tensor::Device,
+        effective_vram: kiln_memory::vram::GpuVramInfo,
+        gradient_checkpoint_policy: GradientCheckpointPolicy,
+    ) -> Self {
+        Self {
+            effective_vram,
+            gradient_checkpoint_policy,
+            runtime_device: Some(runtime_device),
+        }
+    }
+
+    /// Build a standalone context using automatic device and checkpoint-policy
+    /// selection. Explicit policy belongs in [`TrainingRuntimeContext::new`].
+    pub fn standalone() -> Self {
+        Self::standalone_for_selector(kiln_memory::vram::VramProbeSelector::Auto)
+    }
+
+    /// Build a standalone context explicitly bound to `device`.
+    pub fn standalone_for_device(device: kiln_tensor::Device) -> Self {
+        let mut runtime = Self::standalone_for_selector(device.memory_probe_selector());
+        runtime.runtime_device = Some(device);
+        runtime
+    }
+
+    fn standalone_for_selector(selector: kiln_memory::vram::VramProbeSelector) -> Self {
+        Self::new(
+            kiln_memory::vram::detect_vram_for(selector),
+            GradientCheckpointPolicy::Auto,
+        )
+    }
+
+    pub(crate) fn standalone_with_effective_vram(
+        effective_vram: kiln_memory::vram::GpuVramInfo,
+    ) -> Self {
+        Self::new(effective_vram, GradientCheckpointPolicy::Auto)
+    }
+
+    /// Effective accelerator capacity and physical-memory topology for this run.
+    pub const fn effective_vram(&self) -> &kiln_memory::vram::GpuVramInfo {
+        &self.effective_vram
+    }
+
+    pub const fn gradient_checkpoint_policy(&self) -> GradientCheckpointPolicy {
+        self.gradient_checkpoint_policy
+    }
+
+    /// Backend device selected by the owning runtime, when one was bound.
+    pub const fn runtime_device(&self) -> Option<kiln_tensor::Device> {
+        self.runtime_device
+    }
+
+    /// Resolve the training device without inferring backend identity from
+    /// process features, environment variables, or hardware availability.
+    ///
+    /// Weight storage and execution must currently name the same device. In
+    /// particular, Vulkan serving may use CPU-host weight handles, but the
+    /// full-model resident training upload has not passed the production-model
+    /// correctness and memory-safety gates. Treating that representation as a
+    /// Vulkan training device would turn a known-incomplete multi-GiB upload
+    /// into the default server path, so it fails closed here.
+    pub fn resolve_device_for_weights(
+        &self,
+        weight_device: kiln_tensor::Device,
+    ) -> anyhow::Result<kiln_tensor::Device> {
+        match self.runtime_device {
+            Some(runtime_device) if runtime_device == weight_device => Ok(runtime_device),
+            Some(kiln_tensor::Device::Vulkan(_)) if weight_device == kiln_tensor::Device::Cpu => {
+                anyhow::bail!(
+                    "native Vulkan training is unavailable for CPU-host serving weights: the full-model resident Vulkan training substrate is not production-qualified"
+                )
+            }
+            Some(runtime_device) => anyhow::bail!(
+                "training runtime device {} does not match model weight device {}",
+                runtime_device.short_name(),
+                weight_device.short_name(),
+            ),
+            None if weight_device == kiln_tensor::Device::Cpu => Ok(kiln_tensor::Device::Cpu),
+            None => anyhow::bail!(
+                "training runtime has no explicit device binding for accelerator-backed weights on {}; construct TrainingRuntimeContext::new_for_device",
+                weight_device.short_name(),
+            ),
+        }
+    }
+
+    /// Stable exact-resume identity for every input that can change planning.
+    pub fn checkpoint_planning_identity(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "kiln.training-checkpoint-planning.v1",
+            "effective_vram": {
+                "total_bytes": self.effective_vram.total_bytes,
+                "source": self.effective_vram.source.to_string(),
+                "unified": self.effective_vram.unified,
+            },
+            "gradient_checkpoint_policy": self.gradient_checkpoint_policy,
+            "runtime_device": self.runtime_device.map(kiln_tensor::Device::short_name),
+        })
+    }
+}
+
+impl Default for TrainingRuntimeContext {
+    fn default() -> Self {
+        Self::standalone()
+    }
+}
+
+/// Resolve the compatibility-wrapper context from tensor storage only.
+///
+/// CPU-host weights select CPU in this compatibility path and never acquire a
+/// Vulkan identity from hardware presence. Vulkan callers must use a
+/// `*_with_runtime` entry point with [`TrainingRuntimeContext::new_for_device`].
+pub fn standalone_training_runtime_for_weight_device(
+    weight_device: kiln_tensor::Device,
+) -> anyhow::Result<TrainingRuntimeContext> {
+    Ok(TrainingRuntimeContext::standalone_for_device(weight_device))
+}
+
+/// Initialize the process governor before a standalone training run.
+/// Server callers have already installed the same immutable policy; standalone
+/// examples and library entry points use this explicit startup boundary rather
+/// than discovering memory from an attention hot path.
+pub fn ensure_memory_governor_for_runtime(
+    device: kiln_tensor::Device,
+    runtime: &TrainingRuntimeContext,
+) -> anyhow::Result<()> {
+    if let Some(runtime_device) = runtime.runtime_device() {
+        if runtime_device != device {
+            anyhow::bail!(
+                "training device {} does not match runtime-bound device {}",
+                device.short_name(),
+                runtime_device.short_name(),
+            );
+        }
+    } else if device.is_gpu() {
+        anyhow::bail!(
+            "training runtime has no explicit device binding for {}; construct TrainingRuntimeContext::new_for_device",
+            device.short_name(),
+        );
+    }
+    let selector = device.memory_probe_selector();
+    if selector == kiln_memory::VramProbeSelector::None {
+        return Ok(());
+    }
+
+    kiln_memory::validate_vram_probe_identity(selector).map_err(|error| {
+        anyhow::anyhow!(
+            "cannot initialize training runtime for {}: {error}",
+            device.short_name()
+        )
+    })?;
+
+    let runtime_capacity = runtime.effective_vram().total_bytes;
+    if runtime_capacity == 0 {
+        anyhow::bail!(
+            "training runtime for {} has no safe accelerator capacity",
+            device.short_name()
+        );
+    }
+
+    if kiln_memory::MemoryGovernor::try_global_cached_snapshot().is_none() {
+        kiln_memory::MemoryGovernor::configure_global(
+            selector,
+            kiln_memory::GovernorConfig {
+                capacity_limit_bytes: Some(runtime_capacity),
+                ..kiln_memory::GovernorConfig::default()
+            },
+        )?;
+    } else {
+        let configuration = kiln_memory::MemoryGovernor::global_configuration();
+        if configuration.selector != selector {
+            anyhow::bail!(
+                "training device {} does not match the initialized memory governor selector {:?}",
+                device.short_name(),
+                configuration.selector,
+            );
+        }
+        if configuration.governor.capacity_limit_bytes != Some(runtime_capacity) {
+            anyhow::bail!(
+                "training runtime capacity {} bytes does not match the initialized memory governor capacity {:?}",
+                runtime_capacity,
+                configuration.governor.capacity_limit_bytes,
+            );
+        }
+    }
+
+    let governor = kiln_memory::MemoryGovernor::global();
+    let published = governor.refresh();
+    if published.total_bytes != runtime_capacity || published.observations.probe_failed {
+        anyhow::bail!(
+            "training memory probe for {} did not publish the runtime-bound {}-byte capacity (published {} bytes, probe_failed={})",
+            device.short_name(),
+            runtime_capacity,
+            published.total_bytes,
+            published.observations.probe_failed,
+        );
+    }
+    if !governor.start_sampler() {
+        anyhow::bail!("failed to start the training memory sampler");
+    }
+    Ok(())
+}
+
 pub use hf_grpo_interop::{
     HF_TRL_GRPO_CORPUS_IDENTITY_V1, HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP,
     HF_TRL_GRPO_MAX_DATASET_BYTES, HF_TRL_GRPO_MAX_GROUPS, HF_TRL_GRPO_MAX_ROW_BYTES,
@@ -1479,6 +1800,86 @@ pub struct TrainingResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gradient_checkpoint_policy_preserves_disabled_segments() {
+        let policy = GradientCheckpointPolicy::from_parts(Some(8), true).unwrap();
+        assert!(policy.is_disabled());
+        assert_eq!(policy.explicit_segments().map(|value| value.get()), Some(8));
+        assert_eq!(
+            serde_json::to_value(policy).unwrap(),
+            serde_json::json!({"mode": "disabled", "segments": 8})
+        );
+        assert!(GradientCheckpointPolicy::from_parts(Some(0), false).is_err());
+    }
+
+    #[test]
+    fn training_runtime_device_selectors_are_backend_specific() {
+        use kiln_memory::vram::{LinuxDrmVendor, VramProbeSelector};
+
+        assert_eq!(
+            kiln_tensor::Device::Cuda(2).memory_probe_selector(),
+            VramProbeSelector::Nvidia(2)
+        );
+        assert_eq!(
+            kiln_tensor::Device::Rocm(1).memory_probe_selector(),
+            VramProbeSelector::LinuxDrm {
+                index: 1,
+                vendor: Some(LinuxDrmVendor::Amd),
+            }
+        );
+        assert_eq!(
+            kiln_tensor::Device::Vulkan(3).memory_probe_selector(),
+            VramProbeSelector::LinuxDrm {
+                index: 3,
+                vendor: None,
+            }
+        );
+        assert_eq!(
+            kiln_tensor::Device::Metal(4).memory_probe_selector(),
+            VramProbeSelector::AppleUnified
+        );
+        assert_eq!(
+            kiln_tensor::Device::Cpu.memory_probe_selector(),
+            VramProbeSelector::None
+        );
+    }
+
+    #[test]
+    fn explicit_vulkan_runtime_rejects_unqualified_cpu_host_weight_residency() {
+        let vram = kiln_memory::vram::GpuVramInfo {
+            total_bytes: 16 * 1024 * 1024 * 1024,
+            source: kiln_memory::vram::VramSource::ConfigOverride,
+            unified: true,
+        };
+        let vulkan = TrainingRuntimeContext::new_for_device(
+            kiln_tensor::Device::Vulkan(0),
+            vram,
+            GradientCheckpointPolicy::Auto,
+        );
+        let error = vulkan
+            .resolve_device_for_weights(kiln_tensor::Device::Cpu)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("native Vulkan training is unavailable"));
+        assert!(error.contains("not production-qualified"));
+
+        let unbound = TrainingRuntimeContext::new(vram, GradientCheckpointPolicy::Auto);
+        assert!(
+            unbound
+                .resolve_device_for_weights(kiln_tensor::Device::Rocm(0))
+                .unwrap_err()
+                .to_string()
+                .contains("no explicit device binding")
+        );
+        assert!(
+            vulkan
+                .resolve_device_for_weights(kiln_tensor::Device::Cuda(0))
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
+        );
+    }
 
     /// Legacy `TrainingStatus` payloads (pre-`error` archives, older
     /// servers) must keep deserializing, and the field must stay off the

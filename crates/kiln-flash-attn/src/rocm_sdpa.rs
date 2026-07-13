@@ -2,9 +2,9 @@
 //!
 //! The hot bf16/head_dim=128/256 forward paths use native exact HIP kernels that
 //! stream attention through saved log-sum-exp without materializing `[sq, sk]`
-//! scores. Backward uses an exact BLASLt materialized composite when the live
-//! score budget permits, and falls back to native bounded HIP kernels for tiles
-//! that would be too large. Other shapes use the same correct, **fully
+//! scores. Backward uses an exact BLASLt materialized composite when the
+//! governor-published operation peak permits, and falls back to bounded paths
+//! for tiles that would be too large. Other shapes use the same correct, **fully
 //! on-device** scaled-dot-product-attention composite built out of the
 //! parity-tested `kiln_tensor` ROCm primitives:
 //!
@@ -39,12 +39,12 @@ const SCALAR_MUL: i32 = 2;
 /// finite negative number rather than `f32::NEG_INFINITY` so that BF16 / F16
 /// downcasts in the softmax stay well-defined (`exp` underflows to 0).
 const NEG_FILL: f32 = -1.0e30;
-const DEFAULT_MATERIALIZED_SCORE_BUDGET_MB: usize = 4096;
 const DYNAMIC_MATERIALIZED_SCORE_BUDGET_MAX_MB: usize = 32 * 1024;
 const DYNAMIC_MATERIALIZED_SCORE_BUDGET_FREE_DIVISOR: usize = 3;
 const MATERIALIZED_SCORE_SCRATCH_BUFFERS: usize = 3;
 const MATERIALIZED_BWD_SCORE_SCRATCH_BUFFERS: usize = 8;
 const MATERIALIZED_SCORE_TILE_GRANULARITY: usize = 128;
+const MAX_MATERIALIZED_QUERY_TILES: usize = 1024;
 const DEFAULT_MATERIALIZED_SCORE_TILE_MAX_ELEMENTS: usize = 1 << 29;
 const DEFAULT_NATIVE_FWD_MAX_SEQ: usize = 4096;
 const DEFAULT_NATIVE_SINGLE_FWD_MAX_SEQ: usize = 32768;
@@ -57,11 +57,10 @@ const DEFAULT_NATIVE_BWD_LONG_MIN_SEQ: usize = 4096;
 const DEFAULT_ONLINE_QUERY_TILE: usize = 2048;
 const DEFAULT_ONLINE_KEY_TILE: usize = 4096;
 const DEFAULT_ONLINE_MATMUL_BATCH_GROUP: usize = 4;
-const MIN_ONLINE_SCORE_TILE_BUDGET_MB: usize = 256;
-const DEFAULT_ONLINE_SCORE_TILE_BUDGET_MB: usize = 1024;
 const DYNAMIC_ONLINE_SCORE_TILE_BUDGET_MAX_MB: usize = 1024;
 const DYNAMIC_ONLINE_SCORE_TILE_BUDGET_FREE_DIVISOR: usize = 32;
 const ONLINE_TILE_GRANULARITY: usize = 128;
+const MAX_ONLINE_TILE_PAIRS: usize = 16 * 1024;
 const DEFAULT_F32_MATMUL_INNER_TILE: usize = 4096;
 
 thread_local! {
@@ -485,28 +484,70 @@ fn rocm_matmul_rhs_transposed_to_dtype_batch_grouped(
     Ok(out)
 }
 
-fn materialized_score_budget_mb() -> usize {
-    if let Some(override_mb) = env_usize("KILN_ROCM_FLASH_SCORE_BUDGET_MB")
-        .or_else(|| env_usize("KILN_FULL_ATTN_SCORE_BUDGET_MB"))
-    {
-        return override_mb;
+fn published_rocm_available_bytes(device: KtDevice) -> Option<usize> {
+    let selector = device.memory_probe_selector();
+    if !matches!(device, KtDevice::Rocm(_)) {
+        return None;
     }
+    let configured = kiln_memory::MemoryGovernor::global_configuration();
+    if configured.selector != selector {
+        return None;
+    }
+    kiln_memory::MemoryGovernor::try_global_cached_available_bytes()
+        .map(|available| available.min(usize::MAX as u64) as usize)
+}
 
-    let snapshot = kiln_memory::current_memory_snapshot();
-    if snapshot.free_bytes == 0 {
-        return DEFAULT_MATERIALIZED_SCORE_BUDGET_MB;
-    }
-    let dynamic_mb = (snapshot.free_bytes as usize)
-        / DYNAMIC_MATERIALIZED_SCORE_BUDGET_FREE_DIVISOR
-        / (1024 * 1024);
-    dynamic_mb.clamp(
-        DEFAULT_MATERIALIZED_SCORE_BUDGET_MB,
-        DYNAMIC_MATERIALIZED_SCORE_BUDGET_MAX_MB,
+fn require_published_rocm_available_bytes(
+    device: KtDevice,
+    operation: &str,
+) -> Result<usize, FlashAttnError> {
+    published_rocm_available_bytes(device).ok_or_else(|| {
+        FlashAttnError::Msg(format!(
+            "ROCm {operation} rejected: no initialized memory governor snapshot matches the active ROCm device"
+        ))
+    })
+}
+
+fn reserve_published_rocm_bytes(
+    bytes: usize,
+    operation: &str,
+) -> Result<kiln_memory::governor::Reservation<'static>, FlashAttnError> {
+    let bytes_u64 = u64::try_from(bytes).map_err(|_| {
+        FlashAttnError::Msg(format!(
+            "ROCm {operation} rejected: planned reservation does not fit u64 (bytes={bytes})"
+        ))
+    })?;
+    kiln_memory::MemoryGovernor::try_global_cached_reserve(bytes_u64).ok_or_else(|| {
+        FlashAttnError::Msg(format!(
+            "ROCm {operation} rejected: the published memory budget changed or is already reserved by another operation (requested_bytes={bytes})"
+        ))
+    })
+}
+
+fn materialized_score_budget_mb_for_available_bytes(
+    override_mb: Option<usize>,
+    available_bytes: Option<usize>,
+) -> usize {
+    let Some(available_bytes) = available_bytes else {
+        return 0;
+    };
+    let safe_mb =
+        (available_bytes / DYNAMIC_MATERIALIZED_SCORE_BUDGET_FREE_DIVISOR / (1024 * 1024))
+            .min(DYNAMIC_MATERIALIZED_SCORE_BUDGET_MAX_MB);
+    override_mb.map_or(safe_mb, |requested| requested.min(safe_mb))
+}
+
+fn materialized_score_budget_mb(device: KtDevice) -> usize {
+    let override_mb = env_usize("KILN_ROCM_FLASH_SCORE_BUDGET_MB")
+        .or_else(|| env_usize("KILN_FULL_ATTN_SCORE_BUDGET_MB"));
+    materialized_score_budget_mb_for_available_bytes(
+        override_mb,
+        published_rocm_available_bytes(device),
     )
 }
 
-fn materialized_score_budget_bytes() -> usize {
-    materialized_score_budget_mb().saturating_mul(1024 * 1024)
+fn materialized_score_budget_bytes(device: KtDevice) -> usize {
+    materialized_score_budget_mb(device).saturating_mul(1024 * 1024)
 }
 
 fn materialized_score_tile_max_elements() -> usize {
@@ -523,12 +564,115 @@ fn materialized_score_working_set_bytes(b: usize, h: usize, sq: usize, sk: usize
         .checked_mul(MATERIALIZED_SCORE_SCRATCH_BUFFERS)
 }
 
-fn materialized_bwd_working_set_bytes(b: usize, h: usize, sq: usize, sk: usize) -> Option<usize> {
+fn reserve_materialized_score_scratch(
+    device: KtDevice,
+    b: usize,
+    h: usize,
+    sq: usize,
+    sk: usize,
+    operation: &str,
+) -> Result<kiln_memory::governor::Reservation<'static>, FlashAttnError> {
+    require_published_rocm_available_bytes(device, operation)?;
+    let scratch_bytes = materialized_score_working_set_bytes(b, h, sq, sk).ok_or_else(|| {
+        FlashAttnError::Msg(format!(
+            "ROCm {operation} rejected: materialized score scratch estimate overflow (batch={b}, heads={h}, sq={sq}, sk={sk})"
+        ))
+    })?;
+    reserve_published_rocm_bytes(scratch_bytes, operation)
+}
+
+fn materialized_bwd_score_scratch_bytes(b: usize, h: usize, sq: usize, sk: usize) -> Option<usize> {
     b.checked_mul(h)?
         .checked_mul(sq)?
         .checked_mul(sk)?
         .checked_mul(std::mem::size_of::<f32>())?
         .checked_mul(MATERIALIZED_BWD_SCORE_SCRATCH_BUFFERS)
+}
+
+fn checked_tensor_elements(dimensions: &[usize]) -> Option<usize> {
+    dimensions.iter().try_fold(1usize, |elements, dimension| {
+        elements.checked_mul(*dimension)
+    })
+}
+
+fn checked_weighted_bytes(terms: &[(usize, usize)]) -> Option<usize> {
+    terms.iter().try_fold(0usize, |total, (elements, bytes)| {
+        total.checked_add(elements.checked_mul(*bytes)?)
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BackwardMemoryPlan {
+    fixed_peak_bytes: usize,
+    scratch_peak_bytes: usize,
+    peak_bytes: usize,
+}
+
+fn full_materialized_bwd_memory_plan(
+    b: usize,
+    h: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+) -> Option<BackwardMemoryPlan> {
+    let bh = b.checked_mul(h)?;
+    let q_elements = checked_tensor_elements(&[bh, sq, d])?;
+    let k_elements = checked_tensor_elements(&[bh, sk, d])?;
+    let row_elements = checked_tensor_elements(&[bh, sq])?;
+
+    // This is deliberately an upper bound over operation-owned allocations,
+    // rather than an allocator-dependent lifetime guess. Per Q element it
+    // charges transformed Q/dO BF16 (4), their F32 copies (8), and the dQ
+    // split-matmul accumulator/conversion/output ceiling (12). Per expanded K/V element it
+    // charges GQA + transposed BF16 copies (10), F32 K/V + V-transpose copies
+    // (12), and simultaneous dK/dV conversion/output storage (16). Row
+    // reductions are separate because head_dim is not assumed to be non-zero.
+    let fixed_peak_bytes = checked_weighted_bytes(&[
+        (q_elements, 24),
+        (k_elements, 38),
+        (row_elements, std::mem::size_of::<f32>()),
+    ])?;
+    let scratch_peak_bytes = checked_tensor_elements(&[bh, sq, sk])?
+        .checked_mul(std::mem::size_of::<f32>())?
+        .checked_mul(MATERIALIZED_BWD_SCORE_SCRATCH_BUFFERS)?;
+    let peak_bytes = fixed_peak_bytes.checked_add(scratch_peak_bytes)?;
+    Some(BackwardMemoryPlan {
+        fixed_peak_bytes,
+        scratch_peak_bytes,
+        peak_bytes,
+    })
+}
+
+fn validate_full_materialized_bwd_admission(
+    available_bytes: usize,
+    b: usize,
+    h: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+) -> Result<BackwardMemoryPlan, FlashAttnError> {
+    let plan = full_materialized_bwd_memory_plan(b, h, sq, sk, d).ok_or_else(|| {
+        FlashAttnError::Msg("ROCm full materialized backward memory estimate overflow".into())
+    })?;
+    if plan.peak_bytes > available_bytes {
+        return Err(FlashAttnError::Msg(format!(
+            "ROCm full materialized backward rejected: operation peak exceeds the published memory budget (available_bytes={available_bytes}, fixed_peak_bytes={}, simultaneous_score_scratch_bytes={}, peak_bytes={}, batch={b}, heads={h}, sq={sq}, sk={sk}, d={d})",
+            plan.fixed_peak_bytes, plan.scratch_peak_bytes, plan.peak_bytes,
+        )));
+    }
+    Ok(plan)
+}
+
+fn materialized_bwd_route_enabled(
+    force: Option<bool>,
+    heuristic_score_fit: bool,
+    full_operation_admitted: bool,
+) -> bool {
+    match force {
+        Some(false) => false,
+        Some(true) => full_operation_admitted,
+        None => heuristic_score_fit && full_operation_admitted,
+    }
 }
 
 fn native_scalar_fwd_enabled(sq: usize, sk: usize) -> bool {
@@ -605,13 +749,28 @@ fn rocm_trace_fwd_enabled() -> bool {
     env_bool("KILN_TRACE_ROCM_FLASH_FWD").unwrap_or(false)
 }
 
-fn rocm_materialized_bwd_enabled(b: usize, h: usize, sq: usize, sk: usize) -> bool {
-    if let Some(force) = env_bool("KILN_ROCM_FLASH_MATMUL_BWD") {
-        return force;
-    }
-    materialized_bwd_working_set_bytes(b, h, sq, sk)
-        .map(|bytes| bytes <= materialized_score_budget_bytes())
-        .unwrap_or(false)
+fn rocm_materialized_bwd_enabled(
+    device: KtDevice,
+    b: usize,
+    h: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+) -> bool {
+    let heuristic_score_fit = materialized_bwd_score_scratch_bytes(b, h, sq, sk)
+        .map(|bytes| bytes <= materialized_score_budget_bytes(device))
+        .unwrap_or(false);
+    let full_operation_admitted = published_rocm_available_bytes(device)
+        .and_then(|available_bytes| {
+            full_materialized_bwd_memory_plan(b, h, sq, sk, d)
+                .map(|plan| plan.peak_bytes <= available_bytes)
+        })
+        .unwrap_or(false);
+    materialized_bwd_route_enabled(
+        env_bool("KILN_ROCM_FLASH_MATMUL_BWD"),
+        heuristic_score_fit,
+        full_operation_admitted,
+    )
 }
 
 fn rocm_native_bwd_preferred(_b: usize, _h: usize, sq: usize, sk: usize, d: usize) -> bool {
@@ -701,35 +860,581 @@ fn query_tile_len_for_budget_with_scratch(
     remaining.min(tile.max(1)).max(1)
 }
 
-fn rocm_device_free_bytes(device: KtDevice) -> Option<usize> {
-    let idx = dev_index(device).ok()?;
-    kiln_tensor::rocm_mem_get_info(idx)
-        .ok()
-        .map(|(free, _)| free)
+fn validate_materialized_query_tile_plan(
+    b: usize,
+    h: usize,
+    sq: usize,
+    sk: usize,
+    budget_bytes: usize,
+) -> Result<usize, FlashAttnError> {
+    validate_materialized_query_tile_plan_with_scratch(
+        b,
+        h,
+        sq,
+        sk,
+        budget_bytes,
+        MATERIALIZED_SCORE_SCRATCH_BUFFERS,
+    )
 }
 
-fn online_score_tile_budget_bytes(device: KtDevice) -> usize {
-    let budget_mb = if let Some(override_mb) = env_usize("KILN_ROCM_FLASH_ONLINE_SCORE_BUDGET_MB") {
-        override_mb
+fn validate_materialized_query_tile_plan_with_scratch(
+    b: usize,
+    h: usize,
+    sq: usize,
+    sk: usize,
+    budget_bytes: usize,
+    scratch_buffers: usize,
+) -> Result<usize, FlashAttnError> {
+    if sq == 0 || sk == 0 {
+        return Ok(1);
+    }
+    let minimum_query_tile = sq.min(MATERIALIZED_SCORE_TILE_GRANULARITY);
+    let minimum_scratch_bytes = b
+        .checked_mul(h)
+        .and_then(|value| value.checked_mul(minimum_query_tile))
+        .and_then(|value| value.checked_mul(sk))
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .and_then(|value| value.checked_mul(scratch_buffers))
+        .unwrap_or(usize::MAX);
+    let planned_tile =
+        query_tile_len_for_budget_with_scratch(b, h, sk, sq, budget_bytes, scratch_buffers);
+    let tile_count = sq.div_ceil(planned_tile);
+    if budget_bytes < minimum_scratch_bytes
+        || planned_tile < minimum_query_tile
+        || tile_count > MAX_MATERIALIZED_QUERY_TILES
+    {
+        return Err(FlashAttnError::Msg(format!(
+            "ROCm materialized query-tiled attention rejected: the published memory budget cannot sustain a bounded plan (budget_bytes={budget_bytes}, minimum_scratch_bytes={minimum_scratch_bytes}, scratch_buffers={scratch_buffers}, planned_query_tile={planned_tile}, minimum_query_tile={minimum_query_tile}, tile_count={tile_count}, max_tile_count={MAX_MATERIALIZED_QUERY_TILES}, batch={b}, heads={h}, sq={sq}, sk={sk})"
+        )));
+    }
+    Ok(planned_tile)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MaterializedBwdQueryTilePlan {
+    query_tile: usize,
+    fixed_peak_bytes: usize,
+    tile_scratch_bytes: usize,
+}
+
+impl MaterializedBwdQueryTilePlan {
+    fn peak_bytes(self) -> Option<usize> {
+        self.fixed_peak_bytes.checked_add(self.tile_scratch_bytes)
+    }
+}
+
+fn materialized_bwd_query_tiled_fixed_peak_bytes(
+    b: usize,
+    h: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+) -> Option<usize> {
+    let bh = b.checked_mul(h)?;
+    let q_elements = checked_tensor_elements(&[bh, sq, d])?;
+    let k_elements = checked_tensor_elements(&[bh, sk, d])?;
+    let row_elements = checked_tensor_elements(&[bh, sq])?;
+
+    // Q includes retained transformed q/dO and the worst accumulated dQ/cat
+    // output phase. K includes expanded/transposed K/V, F32 K/V views, both
+    // full F32 gradient accumulators, and the worst accumulator or final-output
+    // conversion phase. Tile-local Q/K and score tensors are charged separately.
+    checked_weighted_bytes(&[
+        (q_elements, 8),
+        (k_elements, 38),
+        (row_elements, std::mem::size_of::<f32>()),
+    ])
+}
+
+fn materialized_bwd_query_tile_scratch_bytes(
+    bh: usize,
+    query_tile: usize,
+    sk: usize,
+    d: usize,
+) -> Option<usize> {
+    let q_elements = checked_tensor_elements(&[bh, query_tile, d])?;
+    let row_elements = checked_tensor_elements(&[bh, query_tile])?;
+    let score_elements = checked_tensor_elements(&[bh, query_tile, sk])?;
+    checked_weighted_bytes(&[
+        // q/dO tile conversion, dQ matmul/scaling, and BF16 output conversion.
+        (q_elements, 24),
+        (row_elements, 8),
+        (
+            score_elements,
+            std::mem::size_of::<f32>() * MATERIALIZED_BWD_SCORE_SCRATCH_BUFFERS,
+        ),
+    ])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_materialized_bwd_query_tiles_with_limit(
+    available_bytes: usize,
+    b: usize,
+    h: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+    score_element_limit: usize,
+) -> Result<MaterializedBwdQueryTilePlan, FlashAttnError> {
+    let bh = b
+        .checked_mul(h)
+        .ok_or_else(|| FlashAttnError::Msg("ROCm tiled backward batch/head overflow".into()))?;
+    let fixed_peak_bytes = materialized_bwd_query_tiled_fixed_peak_bytes(b, h, sq, sk, d)
+        .ok_or_else(|| {
+            FlashAttnError::Msg("ROCm tiled backward fixed memory estimate overflow".into())
+        })?;
+    let residual_bytes = available_bytes.checked_sub(fixed_peak_bytes).ok_or_else(|| {
+        FlashAttnError::Msg(format!(
+            "ROCm materialized query-tiled backward rejected: fixed and accumulator/output peaks exceed the published memory budget (available_bytes={available_bytes}, fixed_peak_bytes={fixed_peak_bytes}, batch={b}, heads={h}, sq={sq}, sk={sk}, d={d})"
+        ))
+    })?;
+
+    if sq == 0 || sk == 0 {
+        return Ok(MaterializedBwdQueryTilePlan {
+            query_tile: 1,
+            fixed_peak_bytes,
+            tile_scratch_bytes: 0,
+        });
+    }
+
+    let bytes_per_query = materialized_bwd_query_tile_scratch_bytes(bh, 1, sk, d)
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| {
+            FlashAttnError::Msg("ROCm tiled backward tile memory estimate overflow".into())
+        })?;
+    let budget_limited = residual_bytes / bytes_per_query;
+    let score_elements_per_query = bh.checked_mul(sk).ok_or_else(|| {
+        FlashAttnError::Msg("ROCm tiled backward score element estimate overflow".into())
+    })?;
+    let element_limited = score_element_limit / score_elements_per_query;
+    let raw_tile = sq.min(budget_limited).min(element_limited);
+    let planned_tile = if raw_tile >= MATERIALIZED_SCORE_TILE_GRANULARITY {
+        (raw_tile / MATERIALIZED_SCORE_TILE_GRANULARITY) * MATERIALIZED_SCORE_TILE_GRANULARITY
     } else {
-        let free_bytes = rocm_device_free_bytes(device)
-            .or_else(|| {
-                let snapshot = kiln_memory::current_memory_snapshot();
-                (snapshot.free_bytes > 0).then_some(snapshot.free_bytes as usize)
-            })
-            .unwrap_or(0);
-        if free_bytes == 0 {
-            DEFAULT_ONLINE_SCORE_TILE_BUDGET_MB
-        } else {
-            let dynamic_mb =
-                free_bytes / DYNAMIC_ONLINE_SCORE_TILE_BUDGET_FREE_DIVISOR / (1024 * 1024);
-            dynamic_mb.clamp(
-                MIN_ONLINE_SCORE_TILE_BUDGET_MB,
-                DYNAMIC_ONLINE_SCORE_TILE_BUDGET_MAX_MB,
-            )
+        raw_tile
+    };
+    let minimum_query_tile = sq.min(MATERIALIZED_SCORE_TILE_GRANULARITY);
+    let tile_count = if planned_tile == 0 {
+        usize::MAX
+    } else {
+        sq.div_ceil(planned_tile)
+    };
+    if planned_tile < minimum_query_tile || tile_count > MAX_MATERIALIZED_QUERY_TILES {
+        let minimum_scratch_bytes =
+            materialized_bwd_query_tile_scratch_bytes(bh, minimum_query_tile, sk, d)
+                .unwrap_or(usize::MAX);
+        return Err(FlashAttnError::Msg(format!(
+            "ROCm materialized query-tiled backward rejected: the residual published memory budget cannot sustain a bounded plan (available_bytes={available_bytes}, fixed_peak_bytes={fixed_peak_bytes}, residual_bytes={residual_bytes}, minimum_tile_scratch_bytes={minimum_scratch_bytes}, planned_query_tile={planned_tile}, minimum_query_tile={minimum_query_tile}, tile_count={tile_count}, max_tile_count={MAX_MATERIALIZED_QUERY_TILES}, batch={b}, heads={h}, sq={sq}, sk={sk}, d={d})"
+        )));
+    }
+
+    let tile_scratch_bytes = materialized_bwd_query_tile_scratch_bytes(bh, planned_tile, sk, d)
+        .ok_or_else(|| {
+            FlashAttnError::Msg("ROCm tiled backward tile memory estimate overflow".into())
+        })?;
+    let peak_bytes = fixed_peak_bytes
+        .checked_add(tile_scratch_bytes)
+        .ok_or_else(|| FlashAttnError::Msg("ROCm tiled backward peak estimate overflow".into()))?;
+    if peak_bytes > available_bytes {
+        return Err(FlashAttnError::Msg(format!(
+            "ROCm materialized query-tiled backward rejected: planned operation peak exceeds the published memory budget (available_bytes={available_bytes}, fixed_peak_bytes={fixed_peak_bytes}, tile_scratch_bytes={tile_scratch_bytes}, peak_bytes={peak_bytes})"
+        )));
+    }
+    Ok(MaterializedBwdQueryTilePlan {
+        query_tile: planned_tile,
+        fixed_peak_bytes,
+        tile_scratch_bytes,
+    })
+}
+
+fn plan_materialized_bwd_query_tiles(
+    available_bytes: usize,
+    b: usize,
+    h: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+) -> Result<MaterializedBwdQueryTilePlan, FlashAttnError> {
+    plan_materialized_bwd_query_tiles_with_limit(
+        available_bytes,
+        b,
+        h,
+        sq,
+        sk,
+        d,
+        materialized_score_tile_max_elements(),
+    )
+}
+
+fn online_score_tile_budget_bytes_for_available_bytes(
+    override_mb: Option<usize>,
+    available_bytes: Option<usize>,
+) -> usize {
+    let budget_mb = match available_bytes {
+        None => 0,
+        Some(available_bytes) => {
+            let safe_mb =
+                (available_bytes / DYNAMIC_ONLINE_SCORE_TILE_BUDGET_FREE_DIVISOR / (1024 * 1024))
+                    .min(DYNAMIC_ONLINE_SCORE_TILE_BUDGET_MAX_MB);
+            override_mb.map_or(safe_mb, |requested| requested.min(safe_mb))
         }
     };
     budget_mb.saturating_mul(1024 * 1024)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OnlineTileSizing {
+    query_tile: usize,
+    key_tile: usize,
+    score_budget_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OnlineForwardPlan {
+    sizing: OnlineTileSizing,
+    fixed_working_set_bytes: usize,
+}
+
+impl OnlineForwardPlan {
+    fn for_operation(
+        device: KtDevice,
+        bh: usize,
+        sq: usize,
+        sk: usize,
+        d: usize,
+        fixed_working_set_bytes: usize,
+    ) -> Result<Self, FlashAttnError> {
+        Ok(Self {
+            sizing: OnlineTileSizing::for_operation(
+                device,
+                bh,
+                sq,
+                sk,
+                d,
+                fixed_working_set_bytes,
+                OnlinePass::Forward,
+            )?,
+            fixed_working_set_bytes,
+        })
+    }
+
+    fn operation_peak_bytes(self, bh: usize, sq: usize, sk: usize, d: usize) -> Option<usize> {
+        online_forward_operation_peak_bytes(
+            self.sizing,
+            bh,
+            sq,
+            sk,
+            d,
+            self.fixed_working_set_bytes,
+        )
+    }
+}
+
+struct PreReservedOnlineForwardPlan<'a> {
+    plan: OnlineForwardPlan,
+    _reservation: &'a kiln_memory::governor::Reservation<'static>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OnlinePass {
+    Forward,
+    Backward,
+}
+
+impl OnlineTileSizing {
+    fn for_operation(
+        device: KtDevice,
+        bh: usize,
+        sq: usize,
+        sk: usize,
+        d: usize,
+        fixed_working_set_bytes: usize,
+        pass: OnlinePass,
+    ) -> Result<Self, FlashAttnError> {
+        let available_bytes = published_rocm_available_bytes(device).ok_or_else(|| {
+            FlashAttnError::Msg(
+                "ROCm online attention rejected: no initialized memory governor snapshot matches the active ROCm device"
+                    .to_owned(),
+            )
+        })?;
+        let score_available_bytes = available_bytes.checked_sub(fixed_working_set_bytes).ok_or_else(
+            || {
+                FlashAttnError::Msg(format!(
+                    "ROCm online attention rejected: fixed working set exceeds the published memory budget (available_bytes={available_bytes}, fixed_working_set_bytes={fixed_working_set_bytes}, bh={bh}, sq={sq}, sk={sk})"
+                ))
+            },
+        )?;
+        let sizing = Self {
+            query_tile: env_usize("KILN_ROCM_FLASH_ONLINE_QUERY_TILE")
+                .unwrap_or(DEFAULT_ONLINE_QUERY_TILE),
+            key_tile: env_usize("KILN_ROCM_FLASH_ONLINE_KEY_TILE")
+                .unwrap_or(DEFAULT_ONLINE_KEY_TILE),
+            score_budget_bytes: online_score_tile_budget_bytes_for_available_bytes(
+                env_usize("KILN_ROCM_FLASH_ONLINE_SCORE_BUDGET_MB"),
+                Some(score_available_bytes),
+            ),
+        };
+        validate_online_operation_plan(sizing, bh, sq, sk, d, score_available_bytes, pass)?;
+        Ok(sizing)
+    }
+}
+
+fn checked_sequence_working_set_bytes(
+    bh: usize,
+    seq: usize,
+    d: usize,
+    bytes_per_element: usize,
+) -> Option<usize> {
+    bh.checked_mul(seq)?
+        .checked_mul(d)?
+        .checked_mul(bytes_per_element)
+}
+
+fn online_forward_fixed_working_set_bytes(
+    bh: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+) -> Option<usize> {
+    // Q contiguity + retained output/LSE, plus expanded/contiguous K/V and the
+    // F32 V copy. Inputs themselves are already resident and are not charged.
+    checked_sequence_working_set_bytes(bh, sq, d, 8)?
+        .checked_add(checked_sequence_working_set_bytes(bh, sk, d, 12)?)
+}
+
+fn online_backward_fixed_working_set_bytes(
+    bh: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+) -> Option<usize> {
+    let q_elements = checked_tensor_elements(&[bh, sq, d])?;
+    let k_elements = checked_tensor_elements(&[bh, sk, d])?;
+    let row_elements = checked_tensor_elements(&[bh, sq])?;
+
+    // Preparation/loop peak: transformed q/dO/out BF16 (6Q), retained dQ BF16
+    // tiles (2Q), expanded + transformed K/V BF16 (8K), full dK/dV F32
+    // accumulators (8K), and the saved contiguous LSE (4R). The final dK/dV
+    // conversion phase also tops out at 16K, so this bound covers both phases.
+    checked_weighted_bytes(&[
+        (q_elements, 8),
+        (k_elements, 16),
+        (row_elements, std::mem::size_of::<f32>()),
+    ])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OnlineBackwardTilePhasePeaks {
+    q_preparation_bytes: usize,
+    score_bytes: usize,
+    dv_bytes: usize,
+    dq_bytes: usize,
+    dk_bytes: usize,
+}
+
+impl OnlineBackwardTilePhasePeaks {
+    fn peak_bytes(self) -> usize {
+        [
+            self.q_preparation_bytes,
+            self.score_bytes,
+            self.dv_bytes,
+            self.dq_bytes,
+            self.dk_bytes,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+    }
+}
+
+fn online_backward_tile_phase_peaks(
+    bh: usize,
+    q_tile: usize,
+    k_tile: usize,
+    d: usize,
+) -> Option<OnlineBackwardTilePhasePeaks> {
+    let q_elements = checked_tensor_elements(&[bh, q_tile, d])?;
+    let k_elements = checked_tensor_elements(&[bh, k_tile, d])?;
+    let row_elements = checked_tensor_elements(&[bh, q_tile])?;
+    let score_elements = checked_tensor_elements(&[bh, q_tile, k_tile])?;
+
+    // Each phase is incremental to `online_backward_fixed_working_set_bytes`.
+    // Score-family accounting includes simultaneous F32 probabilities + dP/dS
+    // and the BF16 probability/gradient copy (10 bytes per score element at the
+    // widest phase). K accounting includes both BF16 blocks and the transient
+    // F32 dK/dV matmul output at the phase where it is live.
+    let q_preparation_bytes = checked_weighted_bytes(&[(q_elements, 20), (row_elements, 4)])?;
+    let score_bytes = checked_weighted_bytes(&[
+        (q_elements, 8),
+        (row_elements, 4),
+        (k_elements, 4),
+        (score_elements, 10),
+    ])?;
+    let dv_bytes = checked_weighted_bytes(&[
+        (q_elements, 8),
+        (row_elements, 4),
+        (k_elements, 8),
+        (score_elements, 6),
+    ])?;
+    let dq_bytes = checked_weighted_bytes(&[
+        (q_elements, 12),
+        (row_elements, 4),
+        (k_elements, 4),
+        (score_elements, 6),
+    ])?;
+    let dk_bytes = checked_weighted_bytes(&[
+        (q_elements, 8),
+        (row_elements, 4),
+        (k_elements, 6),
+        (score_elements, 6),
+    ])?;
+    Some(OnlineBackwardTilePhasePeaks {
+        q_preparation_bytes,
+        score_bytes,
+        dv_bytes,
+        dq_bytes,
+        dk_bytes,
+    })
+}
+
+fn head_major_conversion_working_set_bytes(
+    b: usize,
+    h: usize,
+    hk: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+) -> Option<usize> {
+    let q_heads = b.checked_mul(h)?;
+    let kv_heads = b.checked_mul(hk)?;
+    checked_sequence_working_set_bytes(q_heads, sq, d, 2)?
+        .checked_add(checked_sequence_working_set_bytes(kv_heads, sk, d, 4)?)
+}
+
+fn head_major_online_forward_fixed_working_set_bytes(
+    b: usize,
+    h: usize,
+    hk: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+) -> Option<usize> {
+    let bh = b.checked_mul(h)?;
+    online_forward_fixed_working_set_bytes(bh, sq, sk, d)?.checked_add(
+        head_major_conversion_working_set_bytes(b, h, hk, sq, sk, d)?,
+    )
+}
+
+fn validate_online_tile_plan(
+    sizing: OnlineTileSizing,
+    bh: usize,
+    sq: usize,
+    sk: usize,
+) -> Result<(), FlashAttnError> {
+    if bh == 0 || sq == 0 || sk == 0 {
+        return Ok(());
+    }
+    let (q_tile, k_tile) = online_tile_lens(sizing, bh, sq, sk);
+    let required_bytes = online_tile_bytes(bh, q_tile, k_tile).unwrap_or(usize::MAX);
+    let tile_pairs = sq.div_ceil(q_tile).saturating_mul(sk.div_ceil(k_tile));
+    if required_bytes > sizing.score_budget_bytes || tile_pairs > MAX_ONLINE_TILE_PAIRS {
+        return Err(FlashAttnError::Msg(format!(
+            "ROCm online attention rejected: the published memory budget cannot sustain a bounded tile plan (budget_bytes={}, required_tile_bytes={}, tile_pairs={}, max_tile_pairs={}, bh={}, sq={}, sk={}). Wait for memory pressure to ease or reduce the sequence/batch size.",
+            sizing.score_budget_bytes,
+            required_bytes,
+            tile_pairs,
+            MAX_ONLINE_TILE_PAIRS,
+            bh,
+            sq,
+            sk,
+        )));
+    }
+    Ok(())
+}
+
+fn online_forward_tile_peak_bytes(
+    bh: usize,
+    q_tile: usize,
+    k_tile: usize,
+    d: usize,
+) -> Option<(usize, usize, usize)> {
+    let q_elements = checked_tensor_elements(&[bh, q_tile, d])?;
+    let k_elements = checked_tensor_elements(&[bh, k_tile, d])?;
+    let row_elements = checked_tensor_elements(&[bh, q_tile])?;
+    let score_bytes = online_tile_bytes(bh, q_tile, k_tile)?;
+    let non_score_bytes =
+        checked_weighted_bytes(&[(q_elements, 12), (k_elements, 6), (row_elements, 24)])?;
+    Some((
+        score_bytes,
+        non_score_bytes,
+        score_bytes.checked_add(non_score_bytes)?,
+    ))
+}
+
+fn online_forward_operation_peak_bytes(
+    sizing: OnlineTileSizing,
+    bh: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+    fixed_working_set_bytes: usize,
+) -> Option<usize> {
+    let (q_tile, k_tile) = online_tile_lens(sizing, bh, sq, sk);
+    let (_, _, tile_peak_bytes) = online_forward_tile_peak_bytes(bh, q_tile, k_tile, d)?;
+    fixed_working_set_bytes.checked_add(tile_peak_bytes)
+}
+
+fn validate_online_operation_plan(
+    sizing: OnlineTileSizing,
+    bh: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+    scratch_available_bytes: usize,
+    pass: OnlinePass,
+) -> Result<(), FlashAttnError> {
+    validate_online_tile_plan(sizing, bh, sq, sk)?;
+    let (q_tile, k_tile) = online_tile_lens(sizing, bh, sq, sk);
+    let score_bytes = online_tile_bytes(bh, q_tile, k_tile).unwrap_or(usize::MAX);
+    let (non_score_bytes, score_family_bytes, peak_tile_bytes) = match pass {
+        OnlinePass::Forward => {
+            let (score_bytes, non_score_bytes, peak_tile_bytes) =
+                online_forward_tile_peak_bytes(bh, q_tile, k_tile, d).ok_or_else(|| {
+                    FlashAttnError::Msg("ROCm online forward tile size overflow".into())
+                })?;
+            (non_score_bytes, score_bytes, peak_tile_bytes)
+        }
+        OnlinePass::Backward => {
+            let phases =
+                online_backward_tile_phase_peaks(bh, q_tile, k_tile, d).ok_or_else(|| {
+                    FlashAttnError::Msg("ROCm online backward tile phase estimate overflow".into())
+                })?;
+            let score_family_bytes = checked_tensor_elements(&[bh, q_tile, k_tile])
+                .and_then(|elements| elements.checked_mul(10))
+                .ok_or_else(|| {
+                    FlashAttnError::Msg(
+                        "ROCm online backward score-family estimate overflow".into(),
+                    )
+                })?;
+            (
+                phases.peak_bytes().saturating_sub(score_family_bytes),
+                score_family_bytes,
+                phases.peak_bytes(),
+            )
+        }
+    };
+    if peak_tile_bytes > scratch_available_bytes {
+        let message = match pass {
+            OnlinePass::Forward => format!(
+                "ROCm online attention rejected: score and non-score tile scratch exceed the published residual budget (scratch_available_bytes={scratch_available_bytes}, score_bytes={score_bytes}, non_score_bytes={non_score_bytes}, peak_tile_bytes={peak_tile_bytes}, pass={pass:?}, bh={bh}, sq={sq}, sk={sk}, d={d})"
+            ),
+            OnlinePass::Backward => format!(
+                "ROCm online attention rejected: score-family and non-score tile scratch exceed the published residual budget (scratch_available_bytes={scratch_available_bytes}, score_tile_bytes={score_bytes}, score_family_bytes={score_family_bytes}, non_score_peak_bytes={non_score_bytes}, peak_tile_bytes={peak_tile_bytes}, pass={pass:?}, bh={bh}, sq={sq}, sk={sk}, d={d})"
+            ),
+        };
+        return Err(FlashAttnError::Msg(message));
+    }
+    Ok(())
 }
 
 fn online_tile_bytes(bh: usize, q_tile: usize, k_tile: usize) -> Option<usize> {
@@ -739,20 +1444,14 @@ fn online_tile_bytes(bh: usize, q_tile: usize, k_tile: usize) -> Option<usize> {
 }
 
 fn online_tile_lens(
-    device: KtDevice,
+    sizing: OnlineTileSizing,
     bh: usize,
     remaining_q: usize,
     remaining_k: usize,
 ) -> (usize, usize) {
-    let mut q_tile = env_usize("KILN_ROCM_FLASH_ONLINE_QUERY_TILE")
-        .unwrap_or(DEFAULT_ONLINE_QUERY_TILE)
-        .min(remaining_q)
-        .max(1);
-    let mut k_tile = env_usize("KILN_ROCM_FLASH_ONLINE_KEY_TILE")
-        .unwrap_or(DEFAULT_ONLINE_KEY_TILE)
-        .min(remaining_k)
-        .max(1);
-    let budget = online_score_tile_budget_bytes(device).max(1);
+    let mut q_tile = sizing.query_tile.min(remaining_q).max(1);
+    let mut k_tile = sizing.key_tile.min(remaining_k).max(1);
+    let budget = sizing.score_budget_bytes.max(1);
 
     while online_tile_bytes(bh, q_tile, k_tile)
         .map(|bytes| bytes > budget)
@@ -801,6 +1500,7 @@ fn sdpa_forward_online_tiled(
     d: usize,
     scale: f32,
     causal: bool,
+    pre_reserved_plan: Option<PreReservedOnlineForwardPlan<'_>>,
 ) -> Result<(KtTensor, KtTensor), FlashAttnError> {
     if sq == 0 || sk == 0 {
         return sdpa_forward(q, k, v, b, sq, sk, h, hk, d, scale, causal);
@@ -808,8 +1508,32 @@ fn sdpa_forward_online_tiled(
 
     let debug_finite = debug_rocm_flash_finite_checks();
     let device = q.device();
-    let bh = b * h;
+    let bh = b
+        .checked_mul(h)
+        .ok_or_else(|| FlashAttnError::Msg("ROCm online attention batch/head overflow".into()))?;
     let causal_offset = sk as isize - sq as isize;
+    let online_plan = match pre_reserved_plan.as_ref() {
+        Some(pre_reserved) => pre_reserved.plan,
+        None => {
+            let fixed_working_set_bytes = online_forward_fixed_working_set_bytes(bh, sq, sk, d)
+                .ok_or_else(|| {
+                    FlashAttnError::Msg("ROCm online attention working-set overflow".into())
+                })?;
+            OnlineForwardPlan::for_operation(device, bh, sq, sk, d, fixed_working_set_bytes)?
+        }
+    };
+    let online_tile_sizing = online_plan.sizing;
+    let operation_peak_bytes = online_plan
+        .operation_peak_bytes(bh, sq, sk, d)
+        .ok_or_else(|| FlashAttnError::Msg("ROCm online forward peak estimate overflow".into()))?;
+    let _owned_memory_reservation = if pre_reserved_plan.is_none() {
+        Some(reserve_published_rocm_bytes(
+            operation_peak_bytes,
+            "online forward",
+        )?)
+    } else {
+        None
+    };
     let k_exp = gqa_expand_heads(k, h, hk, device)?;
     let v_exp = gqa_expand_heads(v, h, hk, device)?;
 
@@ -840,7 +1564,8 @@ fn sdpa_forward_online_tiled(
         } else {
             sk
         };
-        let (q_tile_cap, key_tile_cap) = online_tile_lens(device, bh, remaining_q, max_k);
+        let (q_tile_cap, key_tile_cap) =
+            online_tile_lens(online_tile_sizing, bh, remaining_q, max_k);
         let q_len = remaining_q.min(q_tile_cap).max(1);
         let rows = bh * q_len;
 
@@ -1092,6 +1817,7 @@ fn sdpa_forward_query_tiled(
     if causal && sk < sq {
         return sdpa_forward(q, k, v, b, sq, sk, h, hk, d, scale, causal);
     }
+    let planned_tile = validate_materialized_query_tile_plan(b, h, sq, sk, budget_bytes)?;
 
     let causal_offset = sk.saturating_sub(sq);
     let mut out_tiles = Vec::new();
@@ -1099,12 +1825,7 @@ fn sdpa_forward_query_tiled(
     let mut tile_start = 0usize;
     while tile_start < sq {
         let remaining = sq - tile_start;
-        let max_key_len = if causal {
-            causal_offset + tile_start + remaining
-        } else {
-            sk
-        };
-        let tile_len = query_tile_len_for_budget(b, h, max_key_len, remaining, budget_bytes);
+        let tile_len = remaining.min(planned_tile).max(1);
         let tile_end = tile_start + tile_len;
         let key_len = if causal { causal_offset + tile_end } else { sk };
 
@@ -1231,7 +1952,14 @@ pub fn sdpa_forward(
 ) -> Result<(KtTensor, KtTensor), FlashAttnError> {
     let debug_finite = debug_rocm_flash_finite_checks();
     let device = q.device();
-    let bh = b * h;
+    // Reservation ownership lives at the score allocator, not at a route or
+    // tile planner. Query tiling therefore acquires exactly once per live tile,
+    // and callers that merely selected this route never double-charge it.
+    let _score_scratch_reservation =
+        reserve_materialized_score_scratch(device, b, h, sq, sk, "materialized forward")?;
+    let bh = b.checked_mul(h).ok_or_else(|| {
+        FlashAttnError::Msg("ROCm materialized attention batch/head overflow".into())
+    })?;
 
     // 1. GQA expand k, v from hk -> h heads: [b, sk, hk, d] -> [b, sk, h, d].
     let k_exp = gqa_expand_heads(k, h, hk, device)?; // [b, sk, h, d]
@@ -1322,7 +2050,17 @@ pub fn sdpa_forward_head_major(
 ) -> Result<(KtTensor, KtTensor), FlashAttnError> {
     let debug_finite = debug_rocm_flash_finite_checks();
     let device = q.device();
-    let bh = b * h;
+    let _score_scratch_reservation = reserve_materialized_score_scratch(
+        device,
+        b,
+        h,
+        sq,
+        sk,
+        "head-major materialized forward",
+    )?;
+    let bh = b.checked_mul(h).ok_or_else(|| {
+        FlashAttnError::Msg("ROCm head-major attention batch/head overflow".into())
+    })?;
 
     let q_bhsd = rocm_contig(q)?;
     let k_exp = gqa_expand_heads_head_major(k, h, hk, device)?;
@@ -1417,14 +2155,27 @@ pub fn flash_attn_fwd_rocm(
         }
     }
 
-    let budget_bytes = materialized_score_budget_bytes();
+    let budget_bytes = materialized_score_budget_bytes(dev);
     let rectangular_causal_prefix = causal && sq != sk;
     if materialized_score_working_set_bytes(b, h, sq, sk)
         .map(|bytes| bytes > budget_bytes)
         .unwrap_or(true)
     {
         if rocm_online_fwd_enabled() && !rectangular_causal_prefix {
-            return sdpa_forward_online_tiled(q, k, v, b, sq, sk, h, hk, d, softmax_scale, causal);
+            return sdpa_forward_online_tiled(
+                q,
+                k,
+                v,
+                b,
+                sq,
+                sk,
+                h,
+                hk,
+                d,
+                softmax_scale,
+                causal,
+                None,
+            );
         }
         if rectangular_causal_prefix && rocm_trace_fwd_enabled() {
             eprintln!(
@@ -1486,16 +2237,54 @@ pub fn flash_attn_fwd_head_major_rocm(
 
     let (b, h, sq, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[2], k.shape()[1]);
-    let budget_bytes = materialized_score_budget_bytes();
+    let budget_bytes = materialized_score_budget_bytes(dev);
     let rectangular_causal_prefix = causal && sq != sk;
     let exceeds_materialized_budget = materialized_score_working_set_bytes(b, h, sq, sk)
         .map(|bytes| bytes > budget_bytes)
         .unwrap_or(true);
     if exceeds_materialized_budget {
+        let use_online = rocm_online_fwd_enabled() && !rectangular_causal_prefix;
+        let online_plan = if use_online {
+            let bh = b.checked_mul(h).ok_or_else(|| {
+                FlashAttnError::Msg("ROCm head-major online batch/head overflow".into())
+            })?;
+            let fixed_working_set_bytes =
+                head_major_online_forward_fixed_working_set_bytes(b, h, hk, sq, sk, d).ok_or_else(
+                    || FlashAttnError::Msg("ROCm head-major online working-set overflow".into()),
+                )?;
+            Some(OnlineForwardPlan::for_operation(
+                dev,
+                bh,
+                sq,
+                sk,
+                d,
+                fixed_working_set_bytes,
+            )?)
+        } else {
+            validate_materialized_query_tile_plan(b, h, sq, sk, budget_bytes)?;
+            None
+        };
+        let online_reservation = online_plan
+            .map(|plan| {
+                let bh = b.checked_mul(h).ok_or_else(|| {
+                    FlashAttnError::Msg("ROCm head-major online batch/head overflow".into())
+                })?;
+                let operation_peak_bytes =
+                    plan.operation_peak_bytes(bh, sq, sk, d).ok_or_else(|| {
+                        FlashAttnError::Msg("ROCm head-major online peak estimate overflow".into())
+                    })?;
+                reserve_published_rocm_bytes(operation_peak_bytes, "head-major online forward")
+            })
+            .transpose()?;
         let q_bshd = rocm_contig(&map_kt(q.transpose(1, 2))?)?;
         let k_bskhd = rocm_contig(&map_kt(k.transpose(1, 2))?)?;
         let v_bskhd = rocm_contig(&map_kt(v.transpose(1, 2))?)?;
-        let (out_bshd, lse) = if rocm_online_fwd_enabled() && !rectangular_causal_prefix {
+        let (out_bshd, lse) = if let Some(plan) = online_plan {
+            let reservation = online_reservation.as_ref().ok_or_else(|| {
+                FlashAttnError::Msg(
+                    "ROCm head-major online forward lost its accepted memory reservation".into(),
+                )
+            })?;
             sdpa_forward_online_tiled(
                 &q_bshd,
                 &k_bskhd,
@@ -1508,6 +2297,10 @@ pub fn flash_attn_fwd_head_major_rocm(
                 d,
                 softmax_scale,
                 causal,
+                Some(PreReservedOnlineForwardPlan {
+                    plan,
+                    _reservation: reservation,
+                }),
             )?
         } else {
             if rectangular_causal_prefix && rocm_trace_fwd_enabled() {
@@ -2955,10 +3748,10 @@ pub fn paged_kv_write_token_major_bf16_batch_slot_rocm(
 // ============================================================================
 
 /// ROCm backward for `flash_attn_bwd_kt`. The bf16/head_dim=128/256 path uses
-/// an exact materialized BLASLt composite when the live score budget and BLASLt
-/// heuristics allow it, otherwise a native exact HIP kernel consumes the saved
-/// forward output and `softmax_lse`. Other shapes fall back to the composite
-/// that recomputes scores and produces `(dq, dk, dv)` via matmuls:
+/// an exact materialized BLASLt composite when the governor-published operation
+/// peak and BLASLt heuristics allow it, otherwise a native exact HIP kernel consumes
+/// the saved forward output and `softmax_lse`. Other shapes fall back to the
+/// composite that recomputes scores and produces `(dq, dk, dv)` via matmuls:
 ///   dv = p^T @ dout
 ///   dp = dout @ v^T
 ///   ds = p * (dp - rowsum(dp * p))
@@ -2977,6 +3770,7 @@ pub fn flash_attn_bwd_rocm(
     softmax_scale: f32,
     causal: bool,
 ) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
+    let device = q.device();
     let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
 
@@ -3005,7 +3799,7 @@ pub fn flash_attn_bwd_rocm(
     // tiles that fit the materialized score budget, the BLASLt composite is
     // much faster on long-context training. If hipBLASLt has no algorithm for a
     // specific shape, fall back to the exact native kernel instead of failing.
-    if rocm_materialized_bwd_enabled(b, h, sq, sk) {
+    if rocm_materialized_bwd_enabled(device, b, h, sq, sk, d) {
         match materialized_bwd_composite_rocm(
             dout,
             q,
@@ -3081,7 +3875,6 @@ pub fn flash_attn_bwd_rocm(
         h,
         hk,
         d,
-        materialized_score_budget_bytes(),
     ) {
         Ok(result) => return Ok(result),
         Err(tiled_err) => {
@@ -3129,6 +3922,7 @@ pub fn flash_attn_bwd_rocm_collapsed_gqa(
     softmax_scale: f32,
     causal: bool,
 ) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
+    let device = q.device();
     let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
     if hk == h {
@@ -3164,7 +3958,9 @@ pub fn flash_attn_bwd_rocm_collapsed_gqa(
         }
     }
 
-    if !rocm_native_bwd_preferred(b, h, sq, sk, d) && rocm_materialized_bwd_enabled(b, h, sq, sk) {
+    if !rocm_native_bwd_preferred(b, h, sq, sk, d)
+        && rocm_materialized_bwd_enabled(device, b, h, sq, sk, d)
+    {
         match materialized_bwd_composite_rocm_impl(
             dout,
             q,
@@ -3244,8 +4040,15 @@ fn materialized_bwd_composite_rocm_impl(
     collapse_gqa: bool,
 ) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
     let device = q.device();
+    let available_bytes =
+        require_published_rocm_available_bytes(device, "full materialized backward")?;
+    let memory_plan = validate_full_materialized_bwd_admission(available_bytes, b, h, sq, sk, d)?;
+    let _memory_reservation =
+        reserve_published_rocm_bytes(memory_plan.peak_bytes, "full materialized backward")?;
     let debug_finite = debug_rocm_flash_finite_checks();
-    let bh = b * h;
+    let bh = b.checked_mul(h).ok_or_else(|| {
+        FlashAttnError::Msg("ROCm full materialized backward batch/head overflow".into())
+    })?;
     let trace = env_bool("KILN_TRACE_ROCM_FLASH_BWD").unwrap_or(false);
     let total_started = std::time::Instant::now();
     let mut prep_ms = 0.0;
@@ -3403,7 +4206,6 @@ fn materialized_bwd_query_tiled_rocm(
     h: usize,
     hk: usize,
     d: usize,
-    budget_bytes: usize,
 ) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
     if sq == 0 || sk == 0 {
         return materialized_bwd_composite_rocm(
@@ -3423,8 +4225,19 @@ fn materialized_bwd_query_tiled_rocm(
     }
 
     let device = q.device();
+    let available_bytes =
+        require_published_rocm_available_bytes(device, "materialized query-tiled backward")?;
+    let memory_plan = plan_materialized_bwd_query_tiles(available_bytes, b, h, sq, sk, d)?;
+    let operation_peak_bytes = memory_plan
+        .peak_bytes()
+        .ok_or_else(|| FlashAttnError::Msg("ROCm tiled backward peak estimate overflow".into()))?;
+    let _memory_reservation =
+        reserve_published_rocm_bytes(operation_peak_bytes, "materialized query-tiled backward")?;
+    let planned_tile = memory_plan.query_tile;
     let debug_finite = debug_rocm_flash_finite_checks();
-    let bh = b * h;
+    let bh = b.checked_mul(h).ok_or_else(|| {
+        FlashAttnError::Msg("ROCm materialized backward batch/head overflow".into())
+    })?;
     let causal_offset = sk as isize - sq as isize;
     let k_exp = gqa_expand_heads(k, h, hk, device)?;
     let v_exp = gqa_expand_heads(v, h, hk, device)?;
@@ -3453,14 +4266,7 @@ fn materialized_bwd_query_tiled_rocm(
 
     while tile_start < sq {
         let remaining = sq - tile_start;
-        let tile_len = query_tile_len_for_budget_with_scratch(
-            b,
-            h,
-            sk,
-            remaining,
-            budget_bytes,
-            MATERIALIZED_BWD_SCORE_SCRATCH_BUFFERS,
-        );
+        let tile_len = remaining.min(planned_tile).max(1);
         let tile_end = tile_start + tile_len;
 
         let q_tile_bf = map_kt(q3_bf.narrow(1, tile_start, tile_len))?;
@@ -3591,7 +4397,9 @@ fn online_bwd_tiled_rocm(
     }
 
     let device = q.device();
-    let bh = b * h;
+    let bh = b
+        .checked_mul(h)
+        .ok_or_else(|| FlashAttnError::Msg("ROCm online backward batch/head overflow".into()))?;
     let causal_offset = sk as isize - sq as isize;
     let trace = env_bool("KILN_TRACE_ROCM_FLASH_ONLINE_BWD").unwrap_or(false);
     let total_started = std::time::Instant::now();
@@ -3607,6 +4415,30 @@ fn online_bwd_tiled_rocm(
     let mut out_ms = 0.0;
     let mut blocks = 0usize;
     let mut q_tiles = 0usize;
+
+    let fixed_working_set_bytes = online_backward_fixed_working_set_bytes(bh, sq, sk, d)
+        .ok_or_else(|| FlashAttnError::Msg("ROCm online backward working-set overflow".into()))?;
+    let online_tile_sizing = OnlineTileSizing::for_operation(
+        device,
+        bh,
+        sq,
+        sk,
+        d,
+        fixed_working_set_bytes,
+        OnlinePass::Backward,
+    )?;
+    let (planned_q_tile, planned_k_tile) = online_tile_lens(online_tile_sizing, bh, sq, sk);
+    let tile_phase_peaks = online_backward_tile_phase_peaks(bh, planned_q_tile, planned_k_tile, d)
+        .ok_or_else(|| {
+            FlashAttnError::Msg("ROCm online backward tile phase estimate overflow".into())
+        })?;
+    let operation_peak_bytes = fixed_working_set_bytes
+        .checked_add(tile_phase_peaks.peak_bytes())
+        .ok_or_else(|| {
+            FlashAttnError::Msg("ROCm online backward operation peak estimate overflow".into())
+        })?;
+    let _memory_reservation =
+        reserve_published_rocm_bytes(operation_peak_bytes, "online backward")?;
 
     let started = std::time::Instant::now();
     let k_exp = gqa_expand_heads(k, h, hk, device)?;
@@ -3639,7 +4471,8 @@ fn online_bwd_tiled_rocm(
         } else {
             sk
         };
-        let (q_tile_cap, key_tile_cap) = online_tile_lens(device, bh, remaining_q, max_k);
+        let (q_tile_cap, key_tile_cap) =
+            online_tile_lens(online_tile_sizing, bh, remaining_q, max_k);
         let q_len = remaining_q.min(q_tile_cap).max(1);
 
         let started = std::time::Instant::now();
@@ -4702,6 +5535,287 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn materialized_force_is_only_a_route_preference() {
+        assert!(!materialized_bwd_route_enabled(Some(false), true, true));
+        assert!(materialized_bwd_route_enabled(Some(true), false, true));
+        assert!(!materialized_bwd_route_enabled(Some(true), true, false));
+        assert!(materialized_bwd_route_enabled(None, true, true));
+        assert!(!materialized_bwd_route_enabled(None, false, true));
+        assert!(!materialized_bwd_route_enabled(None, true, false));
+    }
+
+    #[test]
+    fn full_materialized_backward_accounts_fixed_peak_and_overflow() {
+        let plan = full_materialized_bwd_memory_plan(1, 2, 256, 128, 64).unwrap();
+        assert!(plan.fixed_peak_bytes > 0);
+        assert!(plan.scratch_peak_bytes > 0);
+        let error =
+            validate_full_materialized_bwd_admission(plan.scratch_peak_bytes, 1, 2, 256, 128, 64)
+                .expect_err("a score-only budget must not omit fixed tensors and outputs");
+        assert!(error.to_string().contains("fixed_peak_bytes"));
+        validate_full_materialized_bwd_admission(plan.peak_bytes, 1, 2, 256, 128, 64)
+            .expect("the exact conservative peak must be admissible");
+
+        let overflow = validate_full_materialized_bwd_admission(usize::MAX, usize::MAX, 2, 2, 2, 2)
+            .expect_err("dimension overflow must fail closed");
+        assert!(overflow.to_string().contains("estimate overflow"));
+    }
+
+    #[test]
+    fn tiled_materialized_backward_subtracts_fixed_and_accumulator_peaks() {
+        let (b, h, sq, sk, d) = (1, 2, 256, 128, 64);
+        let bh = b * h;
+        let fixed = materialized_bwd_query_tiled_fixed_peak_bytes(b, h, sq, sk, d).unwrap();
+        let minimum_scratch = materialized_bwd_query_tile_scratch_bytes(
+            bh,
+            MATERIALIZED_SCORE_TILE_GRANULARITY,
+            sk,
+            d,
+        )
+        .unwrap();
+
+        let error = plan_materialized_bwd_query_tiles_with_limit(
+            minimum_scratch,
+            b,
+            h,
+            sq,
+            sk,
+            d,
+            usize::MAX,
+        )
+        .expect_err("score scratch alone must not omit fixed and accumulator/output peaks");
+        assert!(error.to_string().contains("fixed_peak_bytes"));
+
+        let plan = plan_materialized_bwd_query_tiles_with_limit(
+            fixed + minimum_scratch,
+            b,
+            h,
+            sq,
+            sk,
+            d,
+            usize::MAX,
+        )
+        .expect("full available memory after fixed peaks sustains the minimum tile");
+        assert_eq!(plan.query_tile, MATERIALIZED_SCORE_TILE_GRANULARITY);
+        assert_eq!(plan.fixed_peak_bytes, fixed);
+        assert_eq!(plan.tile_scratch_bytes, minimum_scratch);
+        assert_eq!(plan.peak_bytes(), Some(fixed + minimum_scratch));
+    }
+
+    #[test]
+    fn online_backward_phase_estimates_include_k_and_score_families() {
+        let phases = online_backward_tile_phase_peaks(1, 2, 3, 4).unwrap();
+        assert_eq!(phases.q_preparation_bytes, 168);
+        assert_eq!(phases.score_bytes, 180);
+        assert_eq!(phases.dv_bytes, 204);
+        assert_eq!(phases.dq_bytes, 188);
+        assert_eq!(phases.dk_bytes, 180);
+        assert_eq!(phases.peak_bytes(), phases.dv_bytes);
+
+        // Q=8 elements, K=12 elements, rows=2: 8Q + 16K + 4R.
+        assert_eq!(
+            online_backward_fixed_working_set_bytes(1, 2, 3, 4),
+            Some(264)
+        );
+        let sizing = OnlineTileSizing {
+            query_tile: 2,
+            key_tile: 3,
+            score_budget_bytes: online_tile_bytes(1, 2, 3).unwrap(),
+        };
+        validate_online_operation_plan(
+            sizing,
+            1,
+            2,
+            3,
+            4,
+            phases.peak_bytes(),
+            OnlinePass::Backward,
+        )
+        .expect("the exact phase peak must be admissible");
+        validate_online_operation_plan(
+            sizing,
+            1,
+            2,
+            3,
+            4,
+            phases.peak_bytes() - 1,
+            OnlinePass::Backward,
+        )
+        .expect_err("omitting any phase bytes must fail closed");
+        assert!(online_backward_tile_phase_peaks(usize::MAX, 2, 2, 2).is_none());
+    }
+
+    #[test]
+    fn forward_score_plans_scale_with_batch_and_fail_closed_on_overflow() {
+        let single = materialized_score_working_set_bytes(1, 8, 128, 512).unwrap();
+        assert_eq!(
+            materialized_score_working_set_bytes(4, 8, 128, 512),
+            single.checked_mul(4),
+            "materialized scores are [batch, heads, query, key]"
+        );
+        assert!(materialized_score_working_set_bytes(usize::MAX, 2, 2, 2).is_none());
+
+        let sizing = OnlineTileSizing {
+            query_tile: 2,
+            key_tile: 3,
+            score_budget_bytes: usize::MAX,
+        };
+        assert_eq!(
+            online_forward_operation_peak_bytes(sizing, 1, 2, 3, 4, 100),
+            Some(340),
+            "the reservation owns fixed bytes plus score and non-score tile scratch"
+        );
+        assert!(online_forward_operation_peak_bytes(sizing, usize::MAX, 2, 3, 4, 100,).is_none());
+    }
+
+    #[test]
+    fn head_major_online_peak_includes_live_conversions_and_overflow_fails_closed() {
+        let (b, h, hk, sq, sk, d) = (2, 8, 2, 32, 64, 16);
+        let bh = b * h;
+        let inner_fixed = online_forward_fixed_working_set_bytes(bh, sq, sk, d).unwrap();
+        let conversion_fixed =
+            head_major_conversion_working_set_bytes(b, h, hk, sq, sk, d).unwrap();
+        let head_major_fixed =
+            head_major_online_forward_fixed_working_set_bytes(b, h, hk, sq, sk, d).unwrap();
+        assert_eq!(
+            head_major_fixed,
+            inner_fixed.checked_add(conversion_fixed).unwrap(),
+            "the pre-reserved fixed set must retain converted Q/K/V alongside inner buffers"
+        );
+
+        let sizing = OnlineTileSizing {
+            query_tile: 2,
+            key_tile: 3,
+            score_budget_bytes: usize::MAX,
+        };
+        let inner_peak = OnlineForwardPlan {
+            sizing,
+            fixed_working_set_bytes: inner_fixed,
+        }
+        .operation_peak_bytes(bh, sq, sk, d)
+        .unwrap();
+        let reserved_head_major_peak = OnlineForwardPlan {
+            sizing,
+            fixed_working_set_bytes: head_major_fixed,
+        }
+        .operation_peak_bytes(bh, sq, sk, d)
+        .unwrap();
+        assert_eq!(
+            reserved_head_major_peak,
+            inner_peak.checked_add(conversion_fixed).unwrap(),
+            "the outer reservation peak must include every live head-major conversion byte"
+        );
+
+        assert!(
+            head_major_online_forward_fixed_working_set_bytes(usize::MAX, 2, hk, sq, sk, d,)
+                .is_none(),
+            "head-major dimension overflow must fail closed before conversion allocation"
+        );
+        assert!(
+            OnlineForwardPlan {
+                sizing,
+                fixed_working_set_bytes: usize::MAX,
+            }
+            .operation_peak_bytes(bh, sq, sk, d)
+            .is_none(),
+            "reservation peak overflow must fail closed"
+        );
+    }
+
+    #[test]
+    fn tighter_published_budget_reduces_later_attention_sizing() {
+        let roomy = Some(24 * 1024 * 1024 * 1024usize);
+        let tight = Some(2 * 1024 * 1024 * 1024usize);
+        assert!(
+            materialized_score_budget_mb_for_available_bytes(None, tight)
+                < materialized_score_budget_mb_for_available_bytes(None, roomy)
+        );
+        assert!(
+            online_score_tile_budget_bytes_for_available_bytes(None, tight)
+                < online_score_tile_budget_bytes_for_available_bytes(None, roomy)
+        );
+        assert_eq!(
+            materialized_score_budget_mb_for_available_bytes(None, Some(0)),
+            0
+        );
+        assert_eq!(
+            online_score_tile_budget_bytes_for_available_bytes(None, Some(0)),
+            0
+        );
+        assert_eq!(
+            materialized_score_budget_mb_for_available_bytes(Some(4096), None),
+            0
+        );
+        assert_eq!(
+            online_score_tile_budget_bytes_for_available_bytes(Some(1024), None),
+            0
+        );
+
+        let (q_tile, key_tile) = online_tile_lens(
+            OnlineTileSizing {
+                query_tile: 4096,
+                key_tile: 8192,
+                score_budget_bytes: online_score_tile_budget_bytes_for_available_bytes(None, tight),
+            },
+            16,
+            4096,
+            8192,
+        );
+        assert!(q_tile > 0 && key_tile > 0);
+    }
+
+    #[test]
+    fn online_attention_rejects_unbounded_low_budget_plan() {
+        let low_budget = OnlineTileSizing {
+            query_tile: DEFAULT_ONLINE_QUERY_TILE,
+            key_tile: DEFAULT_ONLINE_KEY_TILE,
+            score_budget_bytes: 1024 * 1024,
+        };
+        let error = validate_online_tile_plan(low_budget, 16, 128 * 1024, 128 * 1024)
+            .expect_err("one-megabyte budget must not degrade into a near-hang");
+        assert!(error.to_string().contains("bounded tile plan"));
+
+        let bounded = OnlineTileSizing {
+            score_budget_bytes: 1024 * 1024 * 1024,
+            ..low_budget
+        };
+        validate_online_tile_plan(bounded, 16, 128 * 1024, 128 * 1024)
+            .expect("one-gibibyte score budget has a bounded default tile plan");
+        let (q_tile, k_tile) = online_tile_lens(bounded, 16, 128 * 1024, 128 * 1024);
+        let score_only = online_tile_bytes(16, q_tile, k_tile).unwrap();
+        let error = validate_online_operation_plan(
+            bounded,
+            16,
+            128 * 1024,
+            128 * 1024,
+            128,
+            score_only,
+            OnlinePass::Forward,
+        )
+        .expect_err("score-only accounting must reject omitted non-score scratch");
+        assert!(error.to_string().contains("non-score tile scratch"));
+    }
+
+    #[test]
+    fn materialized_query_tiling_rejects_per_token_fallback() {
+        let error = validate_materialized_query_tile_plan(1, 16, 128 * 1024, 128 * 1024, 0)
+            .expect_err("zero budget must not produce one query tile per token");
+        assert!(error.to_string().contains("bounded plan"));
+
+        let minimum = materialized_score_working_set_bytes(
+            1,
+            16,
+            MATERIALIZED_SCORE_TILE_GRANULARITY,
+            128 * 1024,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_materialized_query_tile_plan(1, 16, 128 * 1024, 128 * 1024, minimum).unwrap(),
+            MATERIALIZED_SCORE_TILE_GRANULARITY
+        );
+    }
 
     #[test]
     fn materialized_query_tile_respects_score_element_cap() {

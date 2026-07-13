@@ -451,54 +451,18 @@ fn step_to_queued_job(
                     "SFT recipe step {name:?} has an invalid native profile: {error:#}"
                 ))
             })?;
-            let prepared = match examples_from {
-                ExamplesSource::Inline { examples } => kiln_train::prepare_sft_examples(
-                    examples.clone(),
-                    state.tokenizer.as_ref(),
-                    sft_config.invalid_row_policy,
-                    "recipe",
-                    Some(name.clone()),
-                )
-                .map_err(|error| {
-                    ApiError::training_invalid_request(format!(
-                        "SFT recipe step {name:?} has invalid rows: {error:#}"
-                    ))
-                })?,
-                ExamplesSource::Dataset { dataset } => {
-                    let registry = state
-                        .dataset_registry
-                        .as_ref()
-                        .ok_or_else(ApiError::dataset_registry_unavailable)?;
-                    let data_path = registry
-                        .dataset_dir(dataset)
-                        .map_err(|error| {
-                            ApiError::training_invalid_request(format!(
-                                "SFT step `dataset: {dataset}`: {error}"
-                            ))
-                        })?
-                        .join("data.jsonl");
-                    crate::sft_dataset::prepare_sft_jsonl(
-                        &data_path,
-                        state.tokenizer.as_ref(),
-                        sft_config.invalid_row_policy,
-                        "named_dataset",
-                        Some(dataset.clone()),
-                    )
-                    .map_err(|error| {
-                        ApiError::training_invalid_request(format!(
-                            "SFT step `dataset: {dataset}`: {error:#}"
-                        ))
-                    })?
-                }
+            let (examples, dataset) = match examples_from {
+                ExamplesSource::Inline { examples } => (examples.clone(), None),
+                ExamplesSource::Dataset { dataset } => (Vec::new(), Some(dataset.clone())),
             };
             Ok((
                 name.clone(),
                 QueuedJob::Sft(SftRequest {
                     dataset_path: None,
-                    dataset: None,
-                    examples: prepared.examples,
+                    dataset,
+                    examples,
                     config: sft_config,
-                    ingestion: Some(prepared.ingestion),
+                    ingestion: None,
                     post_eval: post_eval.clone(),
                 }),
             ))
@@ -690,6 +654,8 @@ fn prepare_step_job(
             job_id: job_id.to_string(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            prepared_data: Default::default(),
+            prepared_data_permit: Default::default(),
             job: queued,
         },
     )

@@ -37,8 +37,8 @@
 //!     --example flce_phase_a_validation_bench -- --model-path /path/to/Qwen3.5-4B
 //!
 //! Env toggles honored by the inner training loop:
-//!   KILN_GRAD_CHECKPOINT_SEGMENTS  (default 4; matches the preflight)
-//!   KILN_NO_GRAD_CHECKPOINT=1      (disables checkpointing — not recommended)
+//! Server checkpoint behavior comes from typed `[training]` configuration;
+//! standalone benchmark code uses automatic checkpoint planning.
 //!
 //! The bench sets/unsets `KILN_USE_FLCE`, `KILN_STREAMING_PREFILL`, and
 //! `KILN_STREAMING_TILE_TOKENS` itself, so do NOT export them before invoking

@@ -108,17 +108,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 13 top-level sections and 68 fixed leaf
+The accepted TOML surface contains 13 top-level sections and 71 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 68 fixed fields:
+credential. Of the 71 fixed fields:
 
-- 60 implement the canonical mechanical environment name;
-- 41 also retain a primary deprecated compatibility spelling;
+- 63 implement the canonical mechanical environment name;
+- 42 also retain one or more deprecated compatibility spellings (43 aliases
+  total);
 - 8 have no environment override;
-- `KILN_DEFAULT_NO_THINK` is one additional deprecated compatibility alias for
-  `server.default_thinking_enabled`.
+- the 43 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
+  compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 68 fixed fields and both dynamic credential fields.
+The tables below cover all 71 fixed fields and both dynamic credential fields.
 
 ## `[server]`
 
@@ -176,18 +177,59 @@ disabled.
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
 |---|---|---|---|---|
 | `memory.num_blocks` | optional unsigned integer; omitted (`None`) | `KILN_MEMORY_NUM_BLOCKS` (implemented) | `KILN_NUM_BLOCKS` (deprecated compatibility) | Must be greater than zero when set. Omission invokes backend-aware automatic KV-block sizing. |
-| `memory.gpu_memory_gb` | optional finite number; omitted (`None`) | `KILN_MEMORY_GPU_MEMORY_GB` (implemented) | `KILN_GPU_MEMORY_GB` (deprecated compatibility) | Must be finite and greater than zero. Units are GiB. **Migration limitation:** the typed value is not yet forwarded to the lower-level VRAM detector; only the deprecated compatibility spelling reaches that direct reader today. |
+| `memory.gpu_memory_gb` | optional finite number; omitted (`None`) | `KILN_MEMORY_GPU_MEMORY_GB` (implemented) | `KILN_GPU_MEMORY_GB` (deprecated compatibility) | Must be finite, greater than zero, and representable as bytes. Units are GiB. This is a capacity cap, not a hardware override: it may reduce the detected safe capacity but never expands physical VRAM, host-backed unified memory, or a cgroup-bounded capacity. A request above the safe detected capacity is clamped down. |
 | `memory.inference_memory_fraction` | finite number; `0.7` | `KILN_MEMORY_INFERENCE_MEMORY_FRACTION` (implemented) | `KILN_INFERENCE_MEMORY_FRACTION` (deprecated compatibility) | Loader validation accepts `0.0..=1.0`; real-state construction clamps the configured value to `0.1..=1.0` before KV sizing. The remainder is available to the training budget. |
-| `memory.training_memory_gb` | optional finite number; omitted (`None`) | `KILN_MEMORY_TRAINING_MEMORY_GB` (implemented) | `KILN_TRAINING_MEMORY_GB` (deprecated compatibility) | Must be finite and greater than zero when set. Explicit training-memory budget in GiB. |
+| `memory.training_memory_gb` | optional finite number; omitted (`None`) | `KILN_MEMORY_TRAINING_MEMORY_GB` (implemented) | `KILN_TRAINING_MEMORY_GB` (deprecated compatibility) | Must be finite, greater than zero, and representable as bytes when set. Optional training-budget cap in GiB; it can reduce but never expand the capacity remaining after resident model and KV allocations. |
+| `memory.floor_gb` | finite number; `1.0` | `KILN_MEMORY_FLOOR_GB` (implemented) | `KILN_MEMORY_FLOOR_GB` | Must be finite, non-negative, representable as bytes, and strictly smaller than the selected accelerator's effective capacity after `memory.gpu_memory_gb` is applied. Units are GiB. Accelerator startup rejects an equal or larger floor before model upload and reports both configured and effective byte values. The process-wide governor subtracts this additional floor, then outstanding soft reservations, from live free memory when computing allocation headroom. On unified-memory devices it is separate from the physical-memory reserve applied during safe-capacity detection. |
+| `memory.probe_ms` | unsigned integer; `500` | `KILN_MEMORY_PROBE_MS` (implemented) | `KILN_MEMORY_PROBE_MS` | Must be greater than zero. Sets the background memory-sampler cadence. Request, inference, health, and metrics paths read only the published sample and never run a driver/OS probe synchronously. Cached admission fails closed when the sample is older than `max(5000 ms, 4 * probe_ms)`, the latest probe failed, or a required sampler is not running. An explicit refresh after a material allocation or release bypasses the cadence. |
+| `memory.reclaim_mode` | string enum; `"off"` | `KILN_MEMORY_RECLAIM_MODE` (implemented) | `KILN_MEMORY_RECLAIM_MODE` | Exactly `off`, `on-demand`, or `automatic`, case-insensitive with surrounding whitespace ignored. `off` prevents execution of registered allocator reclaim hooks; `on-demand` permits explicit pressure and allocation-retry reclaim calls; `automatic` also permits the background pressure monitor. The immutable serving profile remains authoritative: a profile with allocator reclaim disabled keeps the effective mode off and does not start the monitor. |
 | `memory.kv_cache_fp8` | boolean; `false` | `KILN_MEMORY_KV_CACHE_FP8` (implemented) | `KILN_KV_CACHE_FP8` (deprecated compatibility) | Requests E4M3FN KV storage. Backend storage policy may reject or disable the request when unsupported. |
 | `memory.cuda_graphs` | boolean; `true` | `KILN_MEMORY_CUDA_GRAPHS` (implemented) | `KILN_CUDA_GRAPHS` (deprecated compatibility) | CUDA-only request. Non-CUDA backends ignore it, and a serving profile with live graph capture disabled selects eager-only execution regardless of this value. |
+
+Capacity detection is device-scoped. Discrete accelerators use the selected
+device's driver-reported VRAM and never count GTT as device-local capacity.
+Linux DRM topology keeps the primary VRAM heap and a separately admissible
+host-backed GTT tier distinct. Any nonzero VRAM heap remains the primary pool,
+even when GTT is larger, because that is also a common discrete-AMD shape. This
+preserves large carved pools such as Strix Halo's 96 GiB VRAM rather than
+incorrectly capping it to Linux's smaller CPU-online pool.
+
+The host-backed tier is independently bounded by GTT free bytes,
+`MemAvailable`, the most restrictive finite `memory.max` and `memory.high`
+headroom across the visible cgroup hierarchy, and the unified-memory reserve.
+Kiln's current Vulkan paged KV cache and recurrent prefix state are
+host-resident, so startup requires them to fit both the primary accelerator
+budget and this host-backed budget. Prefix state is reserved first; automatic
+KV sizing uses the configured inference fraction of the remaining host-backed
+headroom. Missing or exhausted host-tier evidence yields a startup error before
+the zero-filled Rust allocation is attempted. CUDA and ROCm KV pools remain
+device-resident and are not capped by this separate tier.
+
+Only a driver reporting no local VRAM and a nonzero GTT heap is automatically
+treated as fully host-shared. A host-shared primary pool retains
+`max(6 GiB, 25% of backing capacity)` for the OS and CPU workloads. Apple
+Silicon applies the same reserve to its unified pool and samples live host
+pressure. The optional `memory.gpu_memory_gb` cap is applied only after safe
+physical capacity is established.
+
+Physical-device identity is currently fail-closed while backend selection and
+memory probes still expose unrelated logical ordinals. CUDA, ROCm, and Vulkan
+startup therefore accepts only logical device `0` when the relevant NVIDIA or
+DRM candidate set is provably singular. Multi-device hosts, nonzero ordinals,
+failed candidate enumeration, and visibility/remapping controls such as
+`CUDA_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`,
+`KILN_VULKAN_DEVICE`, or `GGML_VK_VISIBLE_DEVICES` are rejected before model
+upload. `Auto` probing remains diagnostic-only; CPU performs no accelerator
+probe, and Apple Silicon uses its single unified physical memory pool. This is
+an interim safety restriction until backend selection and probing share a
+typed PCI-address or UUID identity.
 
 ## `[training]`
 
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
 |---|---|---|---|---|
-| `training.grad_checkpoint_segments` | optional unsigned integer; omitted (`None`) | `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS` (implemented) | `KILN_GRAD_CHECKPOINT_SEGMENTS` (deprecated compatibility) | Must be greater than zero when set. **Migration limitation:** training admission and lower training crates still consult the deprecated compatibility spelling directly; the typed value is not yet the runtime authority. |
-| `training.no_grad_checkpoint` | boolean; `false` | `KILN_TRAINING_NO_GRAD_CHECKPOINT` (implemented) | `KILN_NO_GRAD_CHECKPOINT` (deprecated compatibility) | **Migration limitation:** lower training code still reads the deprecated compatibility spelling directly. Disabling checkpointing can materially increase training memory. |
+| `training.grad_checkpoint_segments` | optional unsigned integer; omitted (`None`) | `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS` (implemented) | `KILN_GRAD_CHECKPOINT_SEGMENTS` (deprecated compatibility) | Must be greater than zero when set. When present, selects an explicit process-lifetime gradient-checkpoint segment count for native training; omission leaves workload- and capacity-aware automatic planning enabled. |
+| `training.no_grad_checkpoint` | boolean; `false` | `KILN_TRAINING_NO_GRAD_CHECKPOINT` (implemented) | `KILN_NO_GRAD_CHECKPOINT` (deprecated compatibility) | Disables gradient checkpoint execution for native training. The disabled state and any explicit segment count are retained together in the immutable training policy and exact-resume identity. Disabling checkpointing can materially increase training memory. |
 | `training.checkpoint_interval` | optional unsigned integer; omitted (`None`) | `KILN_TRAINING_CHECKPOINT_INTERVAL` (implemented) | `KILN_CHECKPOINT_INTERVAL` (deprecated compatibility) | Must be greater than zero when set. Number of committed optimizer steps between checkpoints; per-job configuration overrides it. Omission disables periodic checkpoints. |
 | `training.webhook_url` | optional string; omitted (`None`) | `KILN_TRAINING_WEBHOOK_URL` (implemented) | `KILN_TRAINING_WEBHOOK_URL` | Must be a non-empty valid HTTP(S) URL. An exactly empty environment value clears a TOML URL; whitespace is not a clearing value and fails validation. Delivery is fire-and-forget with a five-second timeout after terminal state is recorded. |
 | `training.max_queued_jobs` | unsigned integer; `32` | `KILN_TRAINING_MAX_QUEUED_JOBS` (implemented) | `KILN_TRAINING_MAX_QUEUED_JOBS` | Must be greater than zero. At capacity, submissions return HTTP 503 with `Retry-After: 30`. |
@@ -215,7 +257,7 @@ Malformed or non-UTF-8 `RUST_LOG` is fatal.
 |---|---|---|---|---|
 | `prefix_cache.enabled` | boolean; `true` | `KILN_PREFIX_CACHE_ENABLED` (implemented) | `KILN_PREFIX_CACHE_ENABLED` | Enables reuse of KV blocks and recurrent-state snapshots for shared prompt prefixes. |
 | `prefix_cache.max_blocks` | optional unsigned integer; omitted (`None`) | `KILN_PREFIX_CACHE_MAX_BLOCKS` (implemented) | `KILN_PREFIX_CACHE_MAX_BLOCKS` | Must be greater than zero when set. `None` resolves to half of the allocated KV block pool. |
-| `prefix_cache.max_entries` | optional unsigned integer; omitted (`None`) | `KILN_PREFIX_CACHE_MAX_ENTRIES` (implemented) | `KILN_PREFIX_CACHE_MAX_ENTRIES` | Must be greater than zero when set. `None` resolves from detected VRAM and per-entry recurrent-state bytes, with at least one entry. |
+| `prefix_cache.max_entries` | optional unsigned integer; omitted (`None`) | `KILN_PREFIX_CACHE_MAX_ENTRIES` (implemented) | `KILN_PREFIX_CACHE_MAX_ENTRIES` | Must be greater than zero when set. `None` resolves from the relevant safe allocation tier and per-entry recurrent-state bytes, with at least one entry. Vulkan reserves this state from the separately bounded host-backed tier before sizing its host-resident KV pool; an explicit count that cannot fit stops startup. |
 
 ## `[speculative]`
 
@@ -345,13 +387,53 @@ timeout.
 
 ## Effective values and provenance
 
+### Library runtime boundaries
+
+Applications embedding `kiln-model` directly must initialize accelerator
+memory governance as an explicit startup step. Call
+`InferenceMemoryRuntime::initialize(device, governor_config)` before building
+the runner, then pass the returned binding to
+`ModelRunner::new_with_initialized_runtime`. Initialization validates the
+backend/probe physical-device identity, detects safe capacity, treats
+`GovernorConfig::capacity_limit_bytes` as a cap, publishes a live sample, and
+starts the background sampler. The fallible runner constructor verifies the
+binding against the model-weight device and installed process policy without
+probing again. `ModelRunner::new`, `new_with_options`, and
+`new_with_runtime_options` remain non-probing compatibility constructors for
+owners such as `kiln-server` that install the same process-wide policy before
+model construction.
+
+Accelerator training has the same explicit identity rule. Construct
+`TrainingRuntimeContext::new_for_device(device, effective_vram, policy)` and
+use the `*_with_runtime` SFT, GRPO, streamed-GRPO, or OPD entry point. A context
+without a device binding cannot authorize accelerator-backed weights. Weight
+storage and native training execution must currently name the same device.
+Vulkan serving uses CPU-host weight handles, but its full-model resident upload
+path is not production-qualified and is therefore rejected before queue or
+dataset admission with `training_backend_unsupported`; there is no environment
+escape hatch. Vulkan-device training fixtures remain valid when their weights
+are genuinely Vulkan-resident. Use the HF/TRL export/import workflow for
+production training while serving through the hybrid Vulkan backend.
+
 Kiln currently exposes several complementary, partial views:
 
 - `kiln config --file <path>` performs authoritative parsing and validation,
   then prints a human-oriented subset of resolved fields.
 - `GET /v1/config` reports runtime diagnostics for serving profile, effective
-  decode width, VRAM/KV state, checkpoint segmentation, memory budgets, and
-  generation defaults. It is not a serialization of all accepted TOML.
+  decode width, VRAM/KV state, native-training runtime/weight devices and
+  support reason, checkpoint segmentation, memory budgets, and generation
+  defaults. `training.native_training_supported=false` is accompanied by
+  `training.native_training_unavailable_reason` and matches the admission
+  error without scanning a corpus. When checkpoint execution is disabled,
+  `training.checkpoint_segments` is `0`; an optional segment count retained in
+  `training.checkpoint_policy` is provenance, not an active execution plan. The
+  endpoint is not a serialization of all accepted TOML.
+- `GET /v1/config` also reports cached-sample age, maximum age, staleness,
+  sampler requirement/liveness/health, cgroup `memory.high`, and the separately
+  bounded `vram.live.raw_observations.host_backed` tier. `/health` exposes the
+  same liveness decision, while `/metrics` exports fixed-cardinality gauges for
+  alerting. A stale or failed sample remains visible diagnostically but
+  contributes zero allocation headroom.
 - `/health` and `/v1/debug/model-state` expose config hashes and other runtime
   identity data.
 - Startup logs record serving-profile provenance and configured/backend/final
@@ -360,8 +442,8 @@ Kiln currently exposes several complementary, partial views:
 Explicit source tracking (`default`, `config_file`, or `environment`) currently
 exists for `server.serving_profile`, `server.deterministic`,
 `server.stream_stall_grace_ms`, the three batching/prefill budgets, and
-`server.max_decode_batch`. Other fields have resolved values but do not yet
-carry per-field source metadata.
+`server.max_decode_batch`, and `memory.reclaim_mode`. Other fields have resolved
+values but do not yet carry per-field source metadata.
 
 The `kiln_env_config_hash` binds the serialized effective typed configuration
 and the process's complete `KILN_*` environment map. It is an identity digest,
@@ -382,15 +464,9 @@ These are current implementation facts, not recommended architecture:
 2. **Streaming prefill:** `[streaming_prefill]` is parsed and validated, but
    lower model helpers read `KILN_STREAMING_*` and backend policy directly.
    TOML-only values do not control dispatch.
-3. **Gradient checkpoint selection:**
-   `training.grad_checkpoint_segments` and `training.no_grad_checkpoint` are
-   typed mirrors while training admission and lower crates still read
-   `KILN_GRAD_CHECKPOINT_SEGMENTS` and `KILN_NO_GRAD_CHECKPOINT`.
-4. **VRAM override:** `memory.gpu_memory_gb` is typed and validated, but the
-   detector currently consumes `KILN_GPU_MEMORY_GB` directly.
-5. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
+3. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
    typed object with provenance and backend-derived values.
-6. **Deprecated aliases:** 43 non-canonical spellings across 42 fields remain
+4. **Deprecated aliases:** 43 non-canonical spellings across 42 fields remain
    temporarily for compatibility, including `KILN_DEFAULT_NO_THINK`. Each use
    warns at startup; canonical and compatibility names cannot silently
    disagree.

@@ -116,7 +116,7 @@ The first build takes 15-30 minutes (CUDA kernel compilation). Subsequent builds
 cargo build --release --features vulkan
 ```
 
-Kiln auto-detects Vulkan at startup and logs `Vulkan available — using Vulkan GPU (AMD/Intel)`. `KILN_VULKAN_DEVICE=0` pins a zero-based Vulkan physical device; `GGML_VK_VISIBLE_DEVICES=0,1` is also honored for llama.cpp compatibility. Invalid values produce a warning and Kiln falls back to automatic discrete-GPU selection, then CPU if Vulkan is not usable.
+Kiln auto-detects Vulkan at startup and logs `Vulkan available — using Vulkan GPU (AMD/Intel)`. Until backend selection and the memory governor share a PCI-address or UUID identity, accelerator startup is deliberately restricted to logical device `0` with exactly one matching physical DRM device. `KILN_VULKAN_DEVICE` and `GGML_VK_VISIBLE_DEVICES` are rejected as ambiguous remapping controls rather than silently binding the governor to a different GPU.
 
 **Linux + AMD ROCm/HIP:**
 

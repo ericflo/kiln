@@ -421,6 +421,32 @@ impl ApiError {
         }
     }
 
+    /// 503 returned when another submission is currently performing the
+    /// bounded dataset scan/materialization needed for authoritative memory
+    /// admission. Serializing that work prevents concurrent large submissions
+    /// from multiplying host-RAM pressure before either reaches the FIFO.
+    pub fn training_admission_busy() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "training_admission_busy",
+            message: "Another training dataset is currently being admitted".to_string(),
+            hint: "Retry after the current dataset scan completes.",
+            retry_after_seconds: Some(1),
+        }
+    }
+
+    pub fn training_prepared_data_full(current_bytes: u64, requested_bytes: u64) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "training_prepared_data_full",
+            message: format!(
+                "Live training data is at its memory limit ({current_bytes} bytes admitted; this admission needs {requested_bytes} bytes)"
+            ),
+            hint: "Wait for queued or running jobs to release admitted data and projected teacher-fixture memory before retrying.",
+            retry_after_seconds: Some(30),
+        }
+    }
+
     /// 503 returned when the in-memory training-jobs tracking map has
     /// reached its configured cap. Distinct from `training_queue_full`:
     /// this fires when too many terminal (`Completed` / `Failed`) entries
@@ -461,6 +487,26 @@ impl ApiError {
             code: "training_invalid_request",
             message: format!("Invalid training request: {detail}"),
             hint: "Correct the field named in the error message, then retry the same request.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn training_request_too_large(surface: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "training_request_too_large",
+            message: format!("{surface} exceeds the configured request-body limit"),
+            hint: "Use dataset_path or an uploaded dataset for large corpora, or split inline training data into smaller jobs.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn training_backend_unsupported(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::NOT_IMPLEMENTED,
+            code: "training_backend_unsupported",
+            message: format!("Native training is unavailable on the selected backend: {detail}"),
+            hint: "Use the documented HF/TRL export-and-import workflow, or select a backend whose native training path is production-qualified.",
             retry_after_seconds: None,
         }
     }

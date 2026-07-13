@@ -5978,6 +5978,7 @@ pub const MATERIALIZED_FULL_ATTN_SCORE_BUDGET_MB: usize = 2048;
 pub const MATERIALIZED_FULL_ATTN_DYNAMIC_SCORE_BUDGET_MAX_MB: usize = 32 * 1024;
 pub const MATERIALIZED_FULL_ATTN_DYNAMIC_SCORE_BUDGET_FREE_DIVISOR: usize = 3;
 const MATERIALIZED_FULL_ATTN_TILE_GRANULARITY: usize = 128;
+const MATERIALIZED_FULL_ATTN_FORWARD_SCRATCH_BUFFERS: usize = 3;
 const DEFAULT_FULL_ATTN_SCORE_TILE_MAX_ELEMENTS: usize = 1 << 29;
 pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 2048;
@@ -6229,23 +6230,40 @@ fn full_attn_score_tile_max_elements(device: &Device) -> usize {
     DEFAULT_FULL_ATTN_SCORE_TILE_MAX_ELEMENTS
 }
 
-fn full_attn_materialized_score_budget_mb(device: &Device) -> usize {
-    if let Some(override_mb) = full_attn_materialized_score_budget_mb_env_override() {
-        return override_mb;
+fn vram_probe_selector_for_device(device: &Device) -> kiln_memory::vram::VramProbeSelector {
+    device.memory_probe_selector()
+}
+
+fn published_accelerator_available_bytes(device: &Device) -> Option<u64> {
+    let selector = vram_probe_selector_for_device(device);
+    if kiln_memory::MemoryGovernor::global_configuration().selector != selector {
+        return None;
     }
-    if !full_attn_materialized_scores_for_device(device) {
-        return MATERIALIZED_FULL_ATTN_SCORE_BUDGET_MB;
-    }
-    let snapshot = kiln_memory::vram::current_memory_snapshot();
-    if snapshot.free_bytes == 0 {
-        return MATERIALIZED_FULL_ATTN_SCORE_BUDGET_MB;
-    }
-    let dynamic_mb = (snapshot.free_bytes as usize)
+    kiln_memory::MemoryGovernor::try_global_cached_available_bytes()
+}
+
+fn dynamic_full_attn_materialized_score_budget_mb(
+    override_mb: Option<usize>,
+    available_bytes: Option<u64>,
+) -> usize {
+    let Some(available_bytes) = available_bytes else {
+        return 0;
+    };
+    let safe_mb = (available_bytes.min(usize::MAX as u64) as usize)
         / MATERIALIZED_FULL_ATTN_DYNAMIC_SCORE_BUDGET_FREE_DIVISOR
         / (1024 * 1024);
-    dynamic_mb.clamp(
-        MATERIALIZED_FULL_ATTN_SCORE_BUDGET_MB,
-        MATERIALIZED_FULL_ATTN_DYNAMIC_SCORE_BUDGET_MAX_MB,
+    let safe_mb = safe_mb.min(MATERIALIZED_FULL_ATTN_DYNAMIC_SCORE_BUDGET_MAX_MB);
+    override_mb.map_or(safe_mb, |requested| requested.min(safe_mb))
+}
+
+fn full_attn_materialized_score_budget_mb(device: &Device) -> usize {
+    let override_mb = full_attn_materialized_score_budget_mb_env_override();
+    if !full_attn_materialized_scores_for_device(device) {
+        return override_mb.unwrap_or(MATERIALIZED_FULL_ATTN_SCORE_BUDGET_MB);
+    }
+    dynamic_full_attn_materialized_score_budget_mb(
+        override_mb,
+        published_accelerator_available_bytes(device),
     )
 }
 
@@ -6273,6 +6291,7 @@ fn full_attn_score_dtype_bytes(dtype: DType) -> usize {
 fn full_attn_adaptive_max_tile_tokens(
     device: &Device,
     dtype: DType,
+    batch: usize,
     key_prefix_len: usize,
     num_heads: usize,
     base_tile_tokens: usize,
@@ -6282,6 +6301,7 @@ fn full_attn_adaptive_max_tile_tokens(
     full_attn_adaptive_max_tile_tokens_with_budget(
         device,
         dtype,
+        batch,
         key_prefix_len,
         num_heads,
         base_tile_tokens,
@@ -6293,6 +6313,7 @@ fn full_attn_adaptive_max_tile_tokens(
 fn full_attn_adaptive_max_tile_tokens_with_budget(
     device: &Device,
     dtype: DType,
+    batch: usize,
     key_prefix_len: usize,
     num_heads: usize,
     base_tile_tokens: usize,
@@ -6300,6 +6321,7 @@ fn full_attn_adaptive_max_tile_tokens_with_budget(
     budget_mb: usize,
 ) -> usize {
     if base_tile_tokens == 0
+        || batch == 0
         || key_prefix_len == 0
         || num_heads == 0
         || scratch_buffers == 0
@@ -6310,7 +6332,8 @@ fn full_attn_adaptive_max_tile_tokens_with_budget(
 
     let budget_bytes = budget_mb.saturating_mul(1024 * 1024);
     let score_bytes = full_attn_score_dtype_bytes(dtype);
-    let denom = num_heads
+    let denom = batch
+        .saturating_mul(num_heads)
         .saturating_mul(key_prefix_len)
         .saturating_mul(score_bytes)
         .saturating_mul(scratch_buffers);
@@ -6318,7 +6341,9 @@ fn full_attn_adaptive_max_tile_tokens_with_budget(
         return base_tile_tokens;
     }
     let budgeted = (budget_bytes / denom).max(1);
-    let score_element_denom = num_heads.saturating_mul(key_prefix_len);
+    let score_element_denom = batch
+        .saturating_mul(num_heads)
+        .saturating_mul(key_prefix_len);
     let budgeted = if score_element_denom == 0 {
         budgeted
     } else {
@@ -6338,6 +6363,7 @@ fn full_attn_adaptive_max_tile_tokens_with_budget(
 fn full_attn_adaptive_tile_len(
     device: &Device,
     dtype: DType,
+    batch: usize,
     tile_start: usize,
     remaining: usize,
     num_heads: usize,
@@ -6348,6 +6374,7 @@ fn full_attn_adaptive_tile_len(
     full_attn_adaptive_tile_len_with_budget(
         device,
         dtype,
+        batch,
         tile_start,
         remaining,
         num_heads,
@@ -6360,6 +6387,7 @@ fn full_attn_adaptive_tile_len(
 fn full_attn_adaptive_tile_len_with_budget(
     device: &Device,
     dtype: DType,
+    batch: usize,
     tile_start: usize,
     remaining: usize,
     num_heads: usize,
@@ -6370,6 +6398,7 @@ fn full_attn_adaptive_tile_len_with_budget(
     let mut tile_len = remaining.min(base_tile_tokens.max(1));
     if tile_len <= GDN_CHUNK_SIZE
         || !full_attn_materialized_scores_for_device(device)
+        || batch == 0
         || num_heads == 0
         || scratch_buffers == 0
     {
@@ -6381,6 +6410,7 @@ fn full_attn_adaptive_tile_len_with_budget(
         let max_for_prefix = full_attn_adaptive_max_tile_tokens_with_budget(
             device,
             dtype,
+            batch,
             key_prefix_len,
             num_heads,
             base_tile_tokens,
@@ -6403,22 +6433,25 @@ fn full_attn_adaptive_tile_len_with_budget(
 fn full_attn_adaptive_tile_plan_summary(
     device: &Device,
     dtype: DType,
+    batch: usize,
     seq_len: usize,
     num_heads: usize,
     base_tile_tokens: usize,
     scratch_buffers: usize,
     budget_mb: usize,
-) -> (usize, usize, usize, usize) {
+) -> (usize, usize, usize, usize, Option<u64>) {
     let mut tile_start = 0usize;
     let mut tile_count = 0usize;
     let mut first_tile = 0usize;
     let mut min_tile = usize::MAX;
     let mut max_tile = 0usize;
+    let mut peak_scratch_bytes = Some(0u64);
     while tile_start < seq_len {
         let remaining = seq_len - tile_start;
         let tile_len = full_attn_adaptive_tile_len_with_budget(
             device,
             dtype,
+            batch,
             tile_start,
             remaining,
             num_heads,
@@ -6432,12 +6465,52 @@ fn full_attn_adaptive_tile_plan_summary(
         tile_count += 1;
         min_tile = min_tile.min(tile_len);
         max_tile = max_tile.max(tile_len);
-        tile_start += tile_len;
+        let tile_end = tile_start + tile_len;
+        peak_scratch_bytes = peak_scratch_bytes.and_then(|peak| {
+            full_attn_materialized_scratch_bytes(
+                dtype,
+                batch,
+                num_heads,
+                tile_len,
+                tile_end,
+                scratch_buffers,
+            )
+            .map(|tile_bytes| peak.max(tile_bytes))
+        });
+        tile_start = tile_end;
     }
     if tile_count == 0 {
         min_tile = 0;
     }
-    (tile_count, first_tile, min_tile, max_tile)
+    (
+        tile_count,
+        first_tile,
+        min_tile,
+        max_tile,
+        peak_scratch_bytes,
+    )
+}
+
+fn full_attn_materialized_scratch_bytes(
+    dtype: DType,
+    batch: usize,
+    num_heads: usize,
+    query_tokens: usize,
+    key_tokens: usize,
+    scratch_buffers: usize,
+) -> Option<u64> {
+    let mut bytes = 1u64;
+    for factor in [
+        batch,
+        num_heads,
+        query_tokens,
+        key_tokens,
+        full_attn_score_dtype_bytes(dtype),
+        scratch_buffers,
+    ] {
+        bytes = bytes.checked_mul(u64::try_from(factor).ok()?)?;
+    }
+    Some(bytes)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6464,7 +6537,7 @@ impl FullAttnChunkMode {
             // scores, scaled scores, and softmax probabilities concurrently.
             // Budget against all three exact score-sized buffers so adaptive
             // tiles do not ask ROCm to map oversized tensors at long prefixes.
-            Self::DetachedBoundary => 3,
+            Self::DetachedBoundary => MATERIALIZED_FULL_ATTN_FORWARD_SCRATCH_BUFFERS,
             // Tape replay also has to survive backward. The fast ROCm route
             // materializes p/dp/ds score-sized tensors around BLASLt matmuls;
             // charging the replay tiler for those buffers lets long-context
@@ -19866,7 +19939,7 @@ pub fn gqa_attention_q_gate_prefill(
     attn_output_gate: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<(Tensor, Option<Tensor>)> {
-    let (_batch, seq_len, _hidden) = x.dims3()?;
+    let (batch, seq_len, _hidden) = x.dims3()?;
     let use_metal_decode_gemv = false;
     let (lora_layer, lora_scale) = match lora {
         Some((l, s)) => (Some(l), s),
@@ -20097,7 +20170,7 @@ fn try_kt_gqa_sdpa_matmuls(
     v: &Tensor,
     seq_len: usize,
     scale: f64,
-) -> Result<Option<Tensor>> {
+) -> Result<Option<(Tensor, Option<kiln_memory::governor::Reservation<'static>>)>> {
     if !cuda_use_kt_api_gqa_sdpa() {
         return Ok(None);
     }
@@ -20152,6 +20225,7 @@ fn try_kt_gqa_sdpa_matmuls(
     {
         return Ok(None);
     }
+    let materialized_scratch_reservation = reserve_gqa_materialized_scratch(q, k)?;
 
     kiln_nvtx::range!(c"kiln/gqa_sdpa_kt");
 
@@ -20178,7 +20252,7 @@ fn try_kt_gqa_sdpa_matmuls(
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    Ok(Some(attn_output))
+    Ok(Some((attn_output, materialized_scratch_reservation)))
 }
 
 #[cfg(feature = "rocm")]
@@ -20207,6 +20281,7 @@ fn try_rocm_gqa_sdpa_f32_materialized(
     {
         return Ok(None);
     }
+    let _materialized_scratch_reservation = reserve_gqa_materialized_scratch(q, k)?;
 
     let q_f32 = if dtype == DType::F32 {
         q.clone()
@@ -20377,6 +20452,40 @@ fn gqa_sdpa_materialized_default(
     Ok(out)
 }
 
+fn reserve_gqa_materialized_scratch(
+    q: &Tensor,
+    k: &Tensor,
+) -> Result<Option<kiln_memory::governor::Reservation<'static>>> {
+    if !full_attn_materialized_scores_for_device(&q.device()) {
+        return Ok(None);
+    }
+    let selector = q.device().memory_probe_selector();
+    if kiln_memory::MemoryGovernor::global_configuration().selector != selector {
+        anyhow::bail!(
+            "materialized attention rejected: the memory governor does not match the active device (device={:?}, expected_selector={selector:?})",
+            q.device()
+        );
+    }
+    let (batch, heads, query_tokens, _) = q.dims4()?;
+    let (_, _, key_tokens, _) = k.dims4()?;
+    let scratch_bytes = full_attn_materialized_scratch_bytes(
+        q.dtype(),
+        batch,
+        heads,
+        query_tokens,
+        key_tokens,
+        MATERIALIZED_FULL_ATTN_FORWARD_SCRATCH_BUFFERS,
+    )
+    .ok_or_else(|| anyhow::anyhow!("materialized attention scratch-byte calculation overflowed"))?;
+    let reservation = kiln_memory::MemoryGovernor::try_global_cached_reserve(scratch_bytes)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "materialized attention rejected: concurrent memory reservations exhausted the published scratch budget (requested_bytes={scratch_bytes}, batch={batch}, heads={heads}, query_tokens={query_tokens}, key_tokens={key_tokens})"
+            )
+        })?;
+    Ok(Some(reservation))
+}
+
 fn gqa_sdpa_materialized_exact(
     q: &Tensor,
     k: &Tensor,
@@ -20393,6 +20502,7 @@ fn gqa_sdpa_materialized_exact(
         return Ok(out);
     }
 
+    let _materialized_scratch_reservation = reserve_gqa_materialized_scratch(q, k)?;
     gqa_sdpa_materialized_default(q, k, v, seq_len, kv_len, scale, debug_finite)
 }
 
@@ -20531,11 +20641,16 @@ pub fn gqa_attention_core_prefill(
     // The helper returns the SAME head-FIRST `[B, nq, T, hd]` `attn_output`,
     // so the `try_tape_sdpa_fallback_cuda` adapter + transpose/reshape-back
     // logic below is byte-for-byte identical regardless of which path ran.
+    #[cfg(feature = "cuda")]
+    let mut _cuda_fast_scratch_reservation = None;
     let attn_output = {
         #[cfg(feature = "cuda")]
         {
             match try_kt_gqa_sdpa_matmuls(&q, &k, &v, seq_len, scale)? {
-                Some(out) => out,
+                Some((out, reservation)) => {
+                    _cuda_fast_scratch_reservation = reservation;
+                    out
+                }
                 None => {
                     gqa_sdpa_materialized_exact(&q, &k, &v, seq_len, kv_len, scale, debug_finite)?
                 }
@@ -25240,6 +25355,9 @@ fn transformer_block_detached_prefill_chunked(
     if base_tile_size == 0 {
         return Ok(None);
     }
+    let GpuAttentionWeights::Full(attn_weights) = &layer.attention else {
+        return Ok(None);
+    };
     let debug_finite = debug_full_attn_finite_checks();
     let trace_tile_dispatch = trace_full_attn_tile_dispatch();
     let trace_stage_timings = trace_full_attn_stage_timings();
@@ -25254,20 +25372,42 @@ fn transformer_block_detached_prefill_chunked(
     let materialized_score_budget_mb = full_attn_materialized_score_budget_mb(&x.device());
     let materialized_scratch_buffers =
         mode.materialized_scratch_buffers_for_tile_plan(backend, &x.device(), x.dtype(), head_dim);
-    let (tile_count, first_tile_size, min_tile_size, max_tile_size) =
+    if materialized_scratch_buffers > 0 {
+        let minimum_query_tile = seq_len.min(MATERIALIZED_FULL_ATTN_TILE_GRANULARITY);
+        let minimum_bounded_scratch_bytes = full_attn_materialized_scratch_bytes(
+            x.dtype(),
+            batch,
+            num_heads,
+            minimum_query_tile,
+            seq_len,
+            materialized_scratch_buffers,
+        )
+        .unwrap_or(u64::MAX);
+        let published_budget_bytes = u64::try_from(materialized_score_budget_mb)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(1024 * 1024);
+        if published_budget_bytes < minimum_bounded_scratch_bytes {
+            anyhow::bail!(
+                "full-attention prefill rejected: published memory budget cannot sustain a bounded tile plan (budget_bytes={published_budget_bytes}, minimum_scratch_bytes={minimum_bounded_scratch_bytes}, batch={batch}, sequence_tokens={seq_len}, heads={num_heads}, minimum_query_tile={minimum_query_tile})"
+            );
+        }
+    }
+    let (tile_count, first_tile_size, min_tile_size, max_tile_size, peak_scratch_bytes) =
         full_attn_adaptive_tile_plan_summary(
             &x.device(),
             x.dtype(),
+            batch,
             seq_len,
             num_heads,
             base_tile_size,
             materialized_scratch_buffers,
             materialized_score_budget_mb,
         );
-
-    let GpuAttentionWeights::Full(attn_weights) = &layer.attention else {
-        return Ok(None);
-    };
+    let peak_scratch_bytes = peak_scratch_bytes.ok_or_else(|| {
+        anyhow::anyhow!(
+            "full-attention prefill rejected: materialized scratch-byte calculation overflowed"
+        )
+    })?;
 
     tracing::info!(
         layer = full_attn_layer_idx,
@@ -25279,6 +25419,7 @@ fn transformer_block_detached_prefill_chunked(
         max_tile_size,
         score_budget_mb = materialized_score_budget_mb,
         scratch_buffers = materialized_scratch_buffers,
+        peak_scratch_bytes,
         flash_tile_guaranteed =
             mode.flash_tile_guaranteed(backend, &x.device(), x.dtype(), head_dim),
         mode = mode.label(),
@@ -25396,6 +25537,7 @@ fn transformer_block_detached_prefill_chunked(
         let tile_len = full_attn_adaptive_tile_len_with_budget(
             &x.device(),
             x.dtype(),
+            batch,
             tile_start,
             remaining,
             num_heads,
@@ -40407,6 +40549,104 @@ mod tests {
     }
 
     #[test]
+    fn vram_probe_selector_tracks_active_tensor_device() {
+        use kiln_memory::vram::{LinuxDrmVendor, VramProbeSelector};
+
+        assert_eq!(
+            vram_probe_selector_for_device(&Device::Cuda(2)),
+            VramProbeSelector::Nvidia(2)
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(&Device::Rocm(1)),
+            VramProbeSelector::LinuxDrm {
+                index: 1,
+                vendor: Some(LinuxDrmVendor::Amd),
+            }
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(&Device::Vulkan(3)),
+            VramProbeSelector::LinuxDrm {
+                index: 3,
+                vendor: None,
+            }
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(&Device::Metal(4)),
+            VramProbeSelector::AppleUnified
+        );
+        assert_eq!(
+            vram_probe_selector_for_device(&Device::Cpu),
+            VramProbeSelector::None
+        );
+    }
+
+    #[test]
+    fn tighter_published_budget_reduces_full_attention_sizing() {
+        let roomy = Some(24 * 1024 * 1024 * 1024);
+        let tight = Some(2 * 1024 * 1024 * 1024);
+        assert!(
+            dynamic_full_attn_materialized_score_budget_mb(None, tight)
+                < dynamic_full_attn_materialized_score_budget_mb(None, roomy)
+        );
+        assert_eq!(
+            dynamic_full_attn_materialized_score_budget_mb(None, Some(0)),
+            0
+        );
+        assert_eq!(
+            dynamic_full_attn_materialized_score_budget_mb(Some(2048), None),
+            0
+        );
+        assert_eq!(
+            dynamic_full_attn_materialized_score_budget_mb(Some(512), Some(3 * 1024 * 1024)),
+            1
+        );
+    }
+
+    #[test]
+    fn materialized_attention_scratch_accounts_for_every_live_score_buffer() {
+        assert_eq!(
+            full_attn_materialized_scratch_bytes(DType::BF16, 1, 16, 128, 4096, 8),
+            Some(256 * 1024 * 1024)
+        );
+        assert_eq!(
+            full_attn_materialized_scratch_bytes(DType::BF16, 4, 16, 128, 4096, 8),
+            Some(1024 * 1024 * 1024),
+            "score scratch is shaped [batch, heads, query, key]"
+        );
+        assert_eq!(
+            full_attn_materialized_scratch_bytes(DType::F32, usize::MAX, 2, 2, 2, 2,),
+            None,
+            "overflow must reject admission instead of wrapping the reservation"
+        );
+
+        let single_batch_plan = full_attn_adaptive_tile_plan_summary(
+            &Device::Cpu,
+            DType::BF16,
+            1,
+            64,
+            8,
+            64,
+            MATERIALIZED_FULL_ATTN_FORWARD_SCRATCH_BUFFERS,
+            usize::MAX,
+        );
+        let four_batch_plan = full_attn_adaptive_tile_plan_summary(
+            &Device::Cpu,
+            DType::BF16,
+            4,
+            64,
+            8,
+            64,
+            MATERIALIZED_FULL_ATTN_FORWARD_SCRATCH_BUFFERS,
+            usize::MAX,
+        );
+        assert_eq!(
+            four_batch_plan.4,
+            single_batch_plan.4.and_then(|bytes| bytes.checked_mul(4)),
+            "the complete tile plan must carry the batch dimension into its peak"
+        );
+    }
+
+    #[test]
     fn test_streaming_prefill_env_helpers() {
         // Each nextest test runs in its own process, so env-var manipulation
         // here is safe. We verify the dispatch helpers return what
@@ -40544,6 +40784,7 @@ mod tests {
             full_attn_adaptive_tile_len(
                 &Device::Cuda(0),
                 DType::BF16,
+                1,
                 100_000,
                 DETACHED_FULL_ATTN_CUDA_DEFAULT_TILE,
                 16,
@@ -40551,6 +40792,32 @@ mod tests {
                 1,
             ) < DETACHED_FULL_ATTN_CUDA_DEFAULT_TILE,
             "CUDA materialized SDPA fallback must also shrink long-prefix exact query tiles"
+        );
+        let batch_one_tile = full_attn_adaptive_tile_len_with_budget(
+            &Device::Cuda(0),
+            DType::BF16,
+            1,
+            4096,
+            4096,
+            16,
+            4096,
+            MATERIALIZED_FULL_ATTN_FORWARD_SCRATCH_BUFFERS,
+            512,
+        );
+        let batch_four_tile = full_attn_adaptive_tile_len_with_budget(
+            &Device::Cuda(0),
+            DType::BF16,
+            4,
+            4096,
+            4096,
+            16,
+            4096,
+            MATERIALIZED_FULL_ATTN_FORWARD_SCRATCH_BUFFERS,
+            512,
+        );
+        assert!(
+            batch_four_tile < batch_one_tile,
+            "a fixed score budget must select a smaller tile at batch four, batch_one={batch_one_tile} batch_four={batch_four_tile}"
         );
         unsafe {
             std::env::set_var(
@@ -40561,6 +40828,7 @@ mod tests {
         let rocm_low_budget_long_prefix_tile = full_attn_adaptive_tile_len(
             &Device::Rocm(0),
             DType::BF16,
+            1,
             100_000,
             DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE,
             16,
@@ -40584,6 +40852,7 @@ mod tests {
         let rocm_high_budget_long_prefix_tile = full_attn_adaptive_tile_len(
             &Device::Rocm(0),
             DType::BF16,
+            1,
             100_000,
             DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE,
             16,

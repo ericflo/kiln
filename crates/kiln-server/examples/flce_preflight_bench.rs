@@ -16,8 +16,8 @@
 //!     --example flce_preflight_bench -- --model-path /path/to/Qwen3.5-4B
 //!
 //! Env toggles honored by the inner training loop:
-//!   KILN_GRAD_CHECKPOINT_SEGMENTS  (default 4; audit math assumed ON)
-//!   KILN_NO_GRAD_CHECKPOINT=1      (disables checkpointing)
+//! Server checkpoint behavior comes from typed `[training]` configuration;
+//! standalone benchmark code uses automatic checkpoint planning.
 
 use anyhow::{Context, Result};
 use kiln_core::config::ModelConfig;

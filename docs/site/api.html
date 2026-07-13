@@ -318,24 +318,187 @@
         <div class="label mb-3">Run and observe</div>
         <h2 id="server-status" class="text-2xl font-semibold mb-4">Server status, metrics, UI, and config</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
-          <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics, including bounded base-weight aggregate and execution-identity summaries plus closed ROCm graph fallback reason and latency counters under <code>decode_runtime.rocm_graphs.fallbacks</code>. A real backend without valid execution provenance is not ready.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics, including bounded base-weight aggregate and execution-identity summaries, memory-sampler age/liveness, a separately bounded host-backed tier when present, plus closed ROCm graph fallback reason and latency counters under <code>decode_runtime.rocm_graphs.fallbacks</code>. A real backend without valid execution provenance is not ready.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/health</code> &mdash; /v1 compatibility alias for the same health and diagnostics response.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, training progress, and bounded thinking-budget provenance/outcomes.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, sampler freshness/liveness, training progress, and bounded thinking-budget provenance/outcomes.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/ui</code> &mdash; embedded dashboard for status, adapters, training, and chat.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/decode</code> &mdash; live decode tokens/sec and inter-token latency stats used by the dashboard.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history with effective thinking-budget provenance and outcomes for the dashboard's request panel.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return the current server configuration and effective generation defaults.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, device-scoped memory capacity and live availability diagnostics, effective training and KV-cache policy, memory-budget partitions, and generation defaults.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest and execution-provenance record.</div>
         </div>
         <div class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Check runtime configuration</h3>
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/config | python3 -m json.tool</code></pre>
           <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-            Reports detected VRAM, KV-cache sizing and FP8 state, checkpointing, memory budget, and
-            effective thinking defaults. The Playground uses the same response to preview the resolved
-            token/time pair before send, marking each dimension as server- or request-owned.
+            The response keeps startup capacity resolution, the current safe memory sample, and the
+            budget derived from effective capacity separate. Every <code>*_gib</code> value uses
+            1 GiB = 1,073,741,824 bytes and is paired with an exact <code>*_bytes</code> value where the
+            response exposes both units. The Playground uses the same response to preview the resolved
+            thinking token/time pair before send, marking each dimension as server- or request-owned.
           </p>
+          <div class="grid gap-4 mt-4">
+            <section class="pt-4" style="border-top: 1px solid var(--line);">
+              <h4 class="font-semibold mb-2"><code>vram</code>: device and startup capacity resolution</h4>
+              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>probe_selector</code> identifies the device actually being served, using
+                <code>nvidia:N</code>, <code>linux-drm:amd:N</code>, <code>linux-drm:intel:N</code>,
+                <code>linux-drm:any:N</code>, <code>apple-unified</code>, <code>auto</code>, or
+                <code>none</code>. <code>unified</code> says whether GPU and host memory share capacity.
+                <code>physical_capacity_bytes</code>/<code>physical_capacity_gib</code> and
+                <code>physical_capacity_source</code> report the device-scoped detected capacity. On a
+                unified-memory device this is the host- and cgroup-bounded safe capacity, not the
+                driver&rsquo;s potentially much larger address space. Linux DRM never promotes GTT into
+                primary device-local capacity when the driver reports nonzero VRAM. A large carved
+                pool such as Strix Halo&rsquo;s 96 GiB VRAM therefore remains the primary pool, while GTT
+                and Linux host headroom are governed as a separate host-backed tier for allocations
+                that actually use it.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>configured_capacity_bytes</code>/<code>configured_capacity_gib</code> contain the
+                optional configured request, or <code>null</code> when no cap was set. Configuration is
+                cap-only: it can reduce detected capacity but can never expand it.
+                <code>effective_capacity_bytes</code>/<code>effective_capacity_gib</code> and
+                <code>effective_capacity_source</code> are the capacity used by planning.
+                <code>configured_capacity_clamped</code> is <code>true</code> when a configured request
+                exceeded safe detected capacity and was reduced to that limit.
+              </p>
+            </section>
+            <section class="pt-4" style="border-top: 1px solid var(--line);">
+              <h4 class="font-semibold mb-2"><code>vram.live</code>: current safe availability</h4>
+              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>total_bytes</code>/<code>total_gib</code>, <code>used_bytes</code>/<code>used_gib</code>,
+                and <code>available_bytes</code>/<code>available_gib</code> are the most recent bounded
+                governor sample; <code>source</code> records the probe that supplied it. The endpoint
+                reads the governor cache instead of launching a synchronous device probe on the request
+                path. <code>sample_age_ms</code>, <code>sample_max_age_ms</code>,
+                <code>sample_stale</code>, <code>sampler_required</code>,
+                <code>sampler_running</code>, and <code>sampler_healthy</code> make its freshness and
+                worker liveness explicit. The maximum healthy age is
+                <code>max(5000 ms, 4 * probe_ms)</code>. A failed or stale sample, or a stopped required
+                sampler, retains diagnostic capacity/provenance but contributes zero allocation
+                headroom.
+                <code>effective_capacity_available_bytes</code>/<code>effective_capacity_available_gib</code>
+                additionally apply the startup effective cap. <code>usable_after_governor_floor_bytes</code>/
+                <code>usable_after_governor_floor_gib</code> then subtract the configured governor floor
+                and live soft reservations. <code>soft_reserved_bytes</code>/<code>soft_reserved_gib</code>
+                and <code>pressure</code> expose those live policy inputs directly.
+                These last two pairs are the useful admission values when driver-free memory, the
+                configured cap, and the safety floor disagree.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>raw_observations</code> preserves the inputs in exact bytes for diagnosis:
+                <code>probe_failed</code>, <code>driver_total_bytes</code>, <code>driver_used_bytes</code>,
+                <code>driver_free_bytes</code>, <code>driver_vram_total_bytes</code>,
+                <code>driver_vram_used_bytes</code>, <code>driver_gtt_total_bytes</code>,
+                <code>driver_gtt_used_bytes</code>, <code>host_total_bytes</code>,
+                <code>host_available_bytes</code>, <code>cgroup_limit_bytes</code>,
+                <code>cgroup_high_bytes</code>,
+                <code>cgroup_current_bytes</code>, <code>cgroup_remaining_bytes</code>, and
+                <code>unified_reserve_bytes</code>. <code>host_backed</code> is either <code>null</code>
+                or an exact byte/GiB object with <code>total</code>, <code>used</code>, and <code>free</code>
+                values for the independently admissible GTT/host tier. It is bounded by driver GTT,
+                host <code>MemAvailable</code>, the strictest finite cgroup <code>memory.max</code> and
+                <code>memory.high</code> ancestor headroom, and the host reserve. Vulkan&rsquo;s current
+                host-resident KV and recurrent prefix state must fit this tier as well as the primary
+                accelerator budget. An unavailable observation is <code>null</code>;
+                <code>probe_failed=true</code> means the latest sample failed, in which case effective
+                free memory is forced to zero while the last known capacity and provenance remain visible.
+                The safe bounded values derived from the observations remain in the surrounding
+                <code>live</code> fields.
+              </p>
+            </section>
+            <section class="pt-4" style="border-top: 1px solid var(--line);">
+              <h4 class="font-semibold mb-2">Memory alerting contract</h4>
+              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Prometheus exports <code>kiln_gpu_memory_probe_failed</code>,
+                <code>kiln_gpu_memory_sample_healthy</code>,
+                <code>kiln_gpu_memory_sample_stale</code>,
+                <code>kiln_gpu_memory_sample_age_seconds</code>,
+                <code>kiln_gpu_memory_sample_max_age_seconds</code>,
+                <code>kiln_gpu_memory_sampler_required</code>, and
+                <code>kiln_gpu_memory_sampler_running</code>. Alert whenever a required sampler is not
+                running, the sample is unhealthy, or probe failure persists. When a host-backed tier
+                exists, <code>kiln_gpu_host_backed_memory_bytes{kind="total|used|free"}</code> exposes
+                its three fixed series. These metrics are rendered from one cached observation and do
+                not trigger a driver probe.
+              </p>
+            </section>
+            <section class="pt-4" style="border-top: 1px solid var(--line);">
+              <h4 class="font-semibold mb-2"><code>vram.governor</code>: resolved memory policy</h4>
+              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>floor_bytes</code>/<code>floor_gib</code> is the free-memory reserve,
+                <code>capacity_limit_bytes</code>/<code>capacity_limit_gib</code> is the immutable
+                cap enforced by governor admission,
+                <code>probe_ms</code> is the typed probe cadence.
+                <code>reclaim_mode_requested</code> is the configured <code>off</code>,
+                <code>on-demand</code>, or <code>automatic</code> policy, while
+                <code>reclaim_mode_effective</code> is the behavior the running serving profile permits.
+                <code>reclaim_disabled_by_serving_profile</code> reports whether that profile gates
+                allocator reclaim off, and <code>reclaim_mode_source</code> reports whether the requested
+                value came from <code>default</code>, <code>config_file</code>, or <code>environment</code>.
+                These are process-lifetime values resolved before the global governor starts; the
+                endpoint does not re-read environment variables.
+              </p>
+            </section>
+            <section class="pt-4" style="border-top: 1px solid var(--line);">
+              <h4 class="font-semibold mb-2"><code>training</code>: execution support, checkpoint policy, and provenance</h4>
+              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>runtime_device</code> names the immutable native-training execution binding and
+                <code>model_weight_device</code> names the frozen weight representation.
+                <code>native_training_supported</code> is true only when the running backend and those
+                identities can execute native training; when false,
+                <code>native_training_unavailable_reason</code> carries the same fail-closed reason returned
+                by training submission before corpus admission. This makes Vulkan&rsquo;s hybrid CPU-host
+                weight limitation visible without attempting a job.
+                <code>checkpoint_policy</code> is a tagged object whose <code>mode</code> is
+                <code>auto</code>, <code>explicit_segments</code> with <code>segments</code>, or
+                <code>disabled</code> with an optional retained <code>segments</code> value.
+                <code>checkpoint_segments</code> is the effective segment count, reported as
+                <code>0</code> whenever checkpointing is disabled, and
+                <code>checkpointing_enabled</code> is the resulting execution switch. A segment
+                value retained inside a disabled <code>checkpoint_policy</code> records configuration
+                provenance only; it is not executed.
+                <code>checkpoint_segments_source</code> is <code>auto</code>,
+                <code>conservative_fallback</code>, <code>configured</code>, or <code>disabled</code>, so
+                an operator can distinguish a measured automatic choice from a fail-closed fallback.
+              </p>
+            </section>
+            <section class="pt-4" style="border-top: 1px solid var(--line);">
+              <h4 class="font-semibold mb-2"><code>memory_budget</code>: effective-cap partition</h4>
+              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>total_vram_bytes</code>/<code>total_vram_gib</code>,
+                <code>model_bytes</code>/<code>model_gib</code>,
+                <code>kv_cache_bytes</code>/<code>kv_cache_gib</code>, and
+                <code>training_budget_bytes</code>/<code>training_budget_gib</code> expose the exact
+                partition used by the running server. <code>inference_memory_fraction</code> records the
+                fraction assigned to inference. These values derive from effective capacity, never an
+                unclamped configuration request or raw unified-memory driver total.
+              </p>
+            </section>
+            <section class="pt-4" style="border-top: 1px solid var(--line);">
+              <h4 class="font-semibold mb-2">Other resolved runtime groups</h4>
+              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>serving_profile</code> returns <code>profile</code>, its <code>source</code>, the
+                immutability and request-override flags, <code>effective_policy_source</code>, and the
+                complete effective policy for inference admission, training GPU ownership, adapter
+                transitions, dynamic KV resize, allocator reclaim, live graph capture, and exclusive
+                GPU behavior. <code>decode_runtime.deterministic</code> reports <code>enabled</code> and
+                <code>source</code>; <code>decode_runtime.max_decode_batch</code> reports
+                <code>configured</code>, <code>configured_source</code>, <code>backend_policy</code>,
+                <code>effective</code>, and <code>effective_source</code>.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>kv_cache</code> reports <code>num_blocks</code>, <code>num_blocks_source</code>, and
+                <code>fp8_enabled</code>. <code>generation</code> reports
+                <code>default_thinking_enabled</code>, <code>default_thinking_budget_tokens</code>,
+                <code>default_thinking_budget_ms</code>, and <code>fold_reasoning_into_content</code>.
+                Nullable generation defaults are returned as <code>null</code> when the server leaves that
+                request dimension unset.
+              </p>
+            </section>
+          </div>
         </div>
         <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-dim);">
           The loader hashes every immutable startup-snapshot shard once and retains a strict <code>kiln.base-weight-shards.v1</code> manifest. Health returns only its aggregate, algorithm, count, and total bytes; the gated debug endpoint returns filenames, exact sizes, and complete per-shard SHA-256 values. Training and eval artifacts reuse this in-memory identity without reading model files mid-inference. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/BASE_WEIGHT_PROVENANCE.md">base-weight provenance contract</a>.
@@ -711,7 +874,7 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           Native SFT renders TRL&rsquo;s prefix-preserving Qwen3.5 training template with <code>add_generation_prompt=false</code>. Loss covers the thinking/answer/tool-call body, <code>&lt;|im_end|&gt;</code>, and trailing newline; assistant role headers plus system, user, and tool-response turns use the <code>-100</code> ignore label. Exact rendered text, token IDs, and labels are checked against source-pinned Hugging Face and TRL sources for plain, thinking, tool-call, tool-response, and multi-turn examples. See <a href="https://github.com/ericflo/kiln/blob/main/docs/sft-tokenization.md">SFT Tokenization and Assistant-Only Loss</a> for the normative contract and reproduction command.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          Native SFT accepts one fixed profile: <code>native_online_lora_v1</code>. One conversation is one optimizer update at a constant learning rate; accumulation is 1, with no warmup, decay, or gradient clipping. Unknown profile names and general-trainer fields return structured <code>training_invalid_request</code> errors. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/NATIVE_SFT_PROFILE.md">Native SFT Profile</a> for update, precision, optimizer-state, checkpoint, and MTP semantics. Use the HF/TRL route for broader training: SFT and recorded-GRPO exports snapshot their canonical corpus, exact model/tokenizer/template provenance, optional split, and optional adapter into one private immutable registry, embed the task-aware pinned runner, and revalidate every byte before download. GRPO accepts exactly one provenance-complete inline group array or server-local canonical JSONL path. <code>kiln train hf export-sft</code> and <code>export-grpo</code> wrap creation, redirect-free streamed download, strict single-root archive validation, manifest verification, atomic no-clobber local publication, and default server cleanup; <code>list</code> and <code>delete</code> manage retained exports. <code>kiln train hf import-peft</code> verifies the completed local bundle before connecting, streams its deterministic corpus-free envelope through bounded memory, and accepts success only when HTTP 201, JSON, strong ETag, import digest, PEFT content revision, installed byte count, six-file count, task, and source identities match values derived locally; it retains the source bundle on every outcome. The raw PEFT import API accepts only the derived ten-file envelope, caps compressed/expanded/metadata resources, compares the complete current resident identity, validates every LoRA A/B shape, shares the adapter mutation barrier and strict disk quota, and stores a self-verifying <code>kiln.hf-trl-import.v1</code> receipt before kernel-enforced no-replace publication. The versioned identity model, 256 MiB inline-body ceiling, 256-export registry cap, 2 GiB import-body ceiling, and lifecycle are documented in the <a href="https://github.com/ericflo/kiln/blob/main/docs/HF_TRL_INTEROP.md">HF/TRL Interoperability Contract</a>.
+          Native SFT accepts one fixed profile: <code>native_online_lora_v1</code>. One conversation is one optimizer update at a constant learning rate; accumulation is 1, with no warmup, decay, or gradient clipping. Unknown profile names and general-trainer fields return structured <code>training_invalid_request</code> errors. A hybrid Vulkan server deliberately returns <code>training_backend_unsupported</code> before dataset admission: its serving weights use CPU-host handles, while the multi-GiB full-model resident Vulkan training path has not passed the production qualification gates. There is no environment bypass; use HF/TRL export/import until that substrate is proven. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/NATIVE_SFT_PROFILE.md">Native SFT Profile</a> for update, precision, optimizer-state, checkpoint, and MTP semantics. Use the HF/TRL route for broader training: SFT and recorded-GRPO exports snapshot their canonical corpus, exact model/tokenizer/template provenance, optional split, and optional adapter into one private immutable registry, embed the task-aware pinned runner, and revalidate every byte before download. GRPO accepts exactly one provenance-complete inline group array or server-local canonical JSONL path. <code>kiln train hf export-sft</code> and <code>export-grpo</code> wrap creation, redirect-free streamed download, strict single-root archive validation, manifest verification, atomic no-clobber local publication, and default server cleanup; <code>list</code> and <code>delete</code> manage retained exports. <code>kiln train hf import-peft</code> verifies the completed local bundle before connecting, streams its deterministic corpus-free envelope through bounded memory, and accepts success only when HTTP 201, JSON, strong ETag, import digest, PEFT content revision, installed byte count, six-file count, task, and source identities match values derived locally; it retains the source bundle on every outcome. The raw PEFT import API accepts only the derived ten-file envelope, caps compressed/expanded/metadata resources, compares the complete current resident identity, validates every LoRA A/B shape, shares the adapter mutation barrier and strict disk quota, and stores a self-verifying <code>kiln.hf-trl-import.v1</code> receipt before kernel-enforced no-replace publication. The versioned identity model, 256 MiB inline-body ceiling, 256-export registry cap, 2 GiB import-body ceiling, and lifecycle are documented in the <a href="https://github.com/ericflo/kiln/blob/main/docs/HF_TRL_INTEROP.md">HF/TRL Interoperability Contract</a>.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           Every SFT source uses one row-admission contract. <code>config.invalid_row_policy</code> is <code>fail</code> by default; explicit <code>skip</code> queues only valid rows and records ordered kept/rejected SHA-256 identities under <code>train_receipt.json</code> &rarr; <code>data.sft_ingestion</code>. Server-local JSONL is revalidated against its submit-time manifest before GPU ownership. See <a href="https://github.com/ericflo/kiln/blob/main/docs/sft-ingestion.md">SFT Ingestion, Invalid Rows, and Row Identity</a>.

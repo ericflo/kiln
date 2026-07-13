@@ -54,8 +54,7 @@ pub fn env_tristate(name: &str) -> Option<bool> {
 /// Shared mutex for tests in any module of `kiln-core` that mutate
 /// process-global env vars via `std::env::set_var` / `remove_var`.
 /// Hold it for the lifetime of the test so neighboring tests that
-/// READ env vars (e.g. `vram::detect_vram` reading
-/// `KILN_GPU_MEMORY_GB`) see consistent values.
+/// READ env vars see consistent values.
 ///
 /// Exposed `pub` (gated to `cfg(test)`) so tests in sibling modules
 /// (vram, etc.) can use the same lock instead of inventing their own

@@ -25,18 +25,20 @@ use crate::error::ApiError;
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_preflight::{
-    self, EstimateOptions, WeightResidency, auto_fit_checkpoint_segments,
-    available_for_training_bytes, estimate_step_working_set_with_options,
-    estimate_vk_native_recompute_working_set, format_oom_message_with_source,
+    self, EstimateOptions, LoraResidency, WeightResidency, auto_fit_checkpoint_segments,
+    estimate_step_working_set_with_options,
+    estimate_vk_native_recompute_working_set_with_residency, format_oom_message_with_source,
 };
 use crate::training_queue::{QueueEntry, QueuedJob};
 use kiln_memory::vram::VramSource;
 
+#[derive(Debug)]
 struct GrpoSubmissionStats {
     num_groups: Option<usize>,
     total_completions: Option<usize>,
     max_seq_len: usize,
     streaming_dataset: bool,
+    source_receipt: Option<crate::training_queue::GrpoJsonlAdmissionReceipt>,
 }
 
 pub(crate) fn parse_training_json<T>(
@@ -44,10 +46,18 @@ pub(crate) fn parse_training_json<T>(
     surface: &str,
 ) -> Result<T, ApiError> {
     payload.map(|Json(value)| value).map_err(|error| {
-        ApiError::training_invalid_request(format!("invalid {surface} JSON: {}", error.body_text()))
+        if error.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::training_request_too_large(surface)
+        } else {
+            ApiError::training_invalid_request(format!(
+                "invalid {surface} JSON: {}",
+                error.body_text()
+            ))
+        }
     })
 }
 
+#[derive(Debug, Clone)]
 struct SftSubmissionStats {
     rows_read: usize,
     num_examples: usize,
@@ -55,6 +65,11 @@ struct SftSubmissionStats {
     max_seq_len: usize,
     max_supervised_tokens: usize,
     streaming_dataset: bool,
+}
+
+struct TrainingAdmissionResult {
+    queue_position: usize,
+    sft_summaries: std::collections::HashMap<String, SftSubmissionStats>,
 }
 
 fn retained_correction_ids(
@@ -200,17 +215,6 @@ fn training_activation_estimate_for_state(
     )
 }
 
-fn checkpoint_env_override_present() -> bool {
-    std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .is_some()
-        || std::env::var("KILN_NO_GRAD_CHECKPOINT")
-            .as_deref()
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-}
-
 fn effective_checkpoint_segments(config: kiln_train::CheckpointConfig) -> usize {
     if config.enabled {
         config.num_segments
@@ -219,29 +223,15 @@ fn effective_checkpoint_segments(config: kiln_train::CheckpointConfig) -> usize 
     }
 }
 
-fn auto_mode_reservation_segments(
-    cfg: &kiln_core::config::ModelConfig,
-    fit_segments: usize,
-) -> usize {
-    // Auto mode resolves the real checkpoint plan per example/group in
-    // kiln-train. Queue admission only needs a conservative reservation for
-    // the largest submitted row, so reserve the most checkpointed shape the
-    // shared trainer can use instead of pinning every row to that plan.
-    cfg.num_layers.max(fit_segments).max(1)
-}
-
 fn combine_training_available_bytes(
     live_bytes: u64,
     allocator_bytes: Option<u64>,
     reclaimable_kv_bytes: u64,
     total_bytes: u64,
     floor_bytes: u64,
-    vram_source: VramSource,
+    unified_memory: bool,
 ) -> u64 {
-    let base = if matches!(
-        vram_source,
-        VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon
-    ) {
+    let base = if unified_memory {
         live_bytes
     } else {
         allocator_bytes.map_or(live_bytes, |bytes| live_bytes.max(bytes))
@@ -254,15 +244,29 @@ fn combine_training_available_bytes(
     }
 }
 
+fn apply_configured_training_budget_cap(
+    available_bytes: u64,
+    configured_training_memory_gb: Option<f64>,
+    effective_training_budget_bytes: u64,
+) -> u64 {
+    if configured_training_memory_gb.is_some() {
+        available_bytes.min(effective_training_budget_bytes)
+    } else {
+        available_bytes
+    }
+}
+
 fn dynamic_training_availability(
     state: &AppState,
     vram: &kiln_memory::vram::GpuVramInfo,
-    live_available: u64,
+    live_policy_available: u64,
+    soft_reserved: u64,
 ) -> TrainingMemoryAvailability {
     let governor = kiln_memory::MemoryGovernor::global();
     let floor_bytes = governor.config().floor_bytes;
-    let soft_reserved = governor.soft_reserved_bytes();
-    let live_bytes = live_available.saturating_sub(soft_reserved);
+    // The governor has already applied the effective capacity, safety floor,
+    // and outstanding soft reservations to this value.
+    let live_bytes = live_policy_available;
     let mut allocator_bytes = None;
     let mut reclaimable_kv_bytes = 0u64;
 
@@ -296,14 +300,26 @@ fn dynamic_training_availability(
         }
     }
 
-    let bytes = combine_training_available_bytes(
+    let dynamic_bytes = combine_training_available_bytes(
         live_bytes,
         allocator_bytes,
         reclaimable_kv_bytes,
         vram.total_bytes,
         floor_bytes,
-        vram.source,
+        vram.unified,
     );
+    let bytes = apply_configured_training_budget_cap(
+        dynamic_bytes,
+        state.memory_config.training_memory_gb,
+        state.memory_budget.training_budget_bytes,
+    );
+    if bytes < dynamic_bytes {
+        tracing::debug!(
+            dynamic_available_bytes = dynamic_bytes,
+            configured_training_budget_bytes = bytes,
+            "training availability capped by memory.training_memory_gb"
+        );
+    }
     TrainingMemoryAvailability {
         bytes,
         live_bytes,
@@ -312,26 +328,196 @@ fn dynamic_training_availability(
     }
 }
 
-fn validate_grpo_jsonl_submission_head(
+fn validate_grpo_jsonl_submission(
     dataset_path: &str,
-    tokenizer: Option<&kiln_core::tokenizer::KilnTokenizer>,
+    snapshot_root: &Path,
+    prepared_data_permit: &mut crate::training_queue::PreparedTrainingDataPermit,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     config: &kiln_train::GrpoConfig,
+    model_num_layers: usize,
 ) -> Result<GrpoSubmissionStats, ApiError> {
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
+    use std::fs::OpenOptions;
+    use std::io::{BufRead, BufReader, Read, Seek, Write};
 
-    let file = File::open(dataset_path).map_err(|e| {
+    use sha2::{Digest, Sha256};
+
+    let canonical_path = std::fs::canonicalize(dataset_path).map_err(|e| {
+        ApiError::training_invalid_request(format!(
+            "failed to resolve GRPO dataset_path '{dataset_path}': {e}"
+        ))
+    })?;
+
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        options.open(&canonical_path)
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(&canonical_path);
+    let file = file.map_err(|e| {
         ApiError::training_invalid_request(format!(
             "failed to open GRPO dataset_path '{dataset_path}': {e}"
         ))
     })?;
-    let reader = BufReader::new(file);
+    let metadata = file.metadata().map_err(|e| {
+        ApiError::training_invalid_request(format!(
+            "failed to inspect GRPO dataset_path '{dataset_path}': {e}"
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(ApiError::training_invalid_request(format!(
+            "GRPO dataset_path '{dataset_path}' must resolve to a regular file"
+        )));
+    }
+    if metadata.len() > kiln_train::HF_TRL_GRPO_MAX_DATASET_BYTES {
+        return Err(ApiError::training_invalid_request(format!(
+            "GRPO dataset_path '{dataset_path}' is {} bytes; maximum supported size is {} bytes",
+            metadata.len(),
+            kiln_train::HF_TRL_GRPO_MAX_DATASET_BYTES
+        )));
+    }
+    if metadata.len() > crate::training_queue::MAX_LIVE_PREPARED_TRAINING_BYTES {
+        return Err(ApiError::training_invalid_request(format!(
+            "GRPO dataset_path '{dataset_path}' is {} bytes; the live server-owned training-data limit is {} bytes",
+            metadata.len(),
+            crate::training_queue::MAX_LIVE_PREPARED_TRAINING_BYTES
+        )));
+    }
+    prepared_data_permit
+        .grow_to(metadata.len())
+        .map_err(|(current, requested)| {
+            ApiError::training_prepared_data_full(current, requested)
+        })?;
 
-    for (idx, line) in reader.lines().enumerate() {
-        let line = line.map_err(|e| {
+    let snapshot_root = crate::training_queue::prepare_grpo_snapshot_root(snapshot_root)
+        .map_err(ApiError::internal)?;
+    let snapshot_path = crate::training_queue::new_grpo_snapshot_path(&snapshot_root);
+    struct RemoveIncompleteSnapshot {
+        path: PathBuf,
+        armed: bool,
+    }
+    impl Drop for RemoveIncompleteSnapshot {
+        fn drop(&mut self) {
+            if self.armed {
+                let _ = crate::training_queue::remove_regular_grpo_snapshot(&self.path);
+            }
+        }
+    }
+    let mut cleanup_incomplete = RemoveIncompleteSnapshot {
+        path: snapshot_path.clone(),
+        armed: true,
+    };
+    // Declare the file after the cleanup guard so error unwinding closes the
+    // descriptor before removal on platforms that forbid deleting open files.
+    let mut snapshot = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&snapshot_path)
+        .map_err(|error| {
+            ApiError::internal(format!(
+                "create private GRPO admission snapshot {}: {error}",
+                snapshot_path.display()
+            ))
+        })?;
+    // Pin a read-only descriptor while the create-new writer still owns the
+    // name. The writer is closed before the snapshot becomes queued, so the
+    // retained descriptor cannot mutate admitted bytes.
+    #[cfg(unix)]
+    let snapshot_reader = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        options.open(&snapshot_path)
+    };
+    #[cfg(not(unix))]
+    let snapshot_reader = std::fs::File::open(&snapshot_path);
+    let mut snapshot_reader = snapshot_reader.map_err(|error| {
+        ApiError::internal(format!(
+            "pin private GRPO admission snapshot {}: {error}",
+            snapshot_path.display()
+        ))
+    })?;
+
+    let expected_bytes = metadata.len();
+    let mut reader = BufReader::with_capacity(256 * 1024, file);
+    let mut row = Vec::new();
+    let mut hasher = Sha256::new();
+    let mut bytes_read = 0u64;
+    let mut line_no = 0usize;
+    let mut groups = 0usize;
+    let mut completions = 0usize;
+    let mut max_seq_len = 0usize;
+    let mut max_row_bytes = 0u64;
+
+    loop {
+        row.clear();
+        let read = (&mut reader)
+            .take(kiln_train::trainer::MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES + 1)
+            .read_until(b'\n', &mut row)
+            .map_err(|e| {
+                ApiError::training_invalid_request(format!(
+                    "failed to read GRPO dataset_path '{dataset_path}' line {}: {e}",
+                    line_no + 1
+                ))
+            })?;
+        if read == 0 {
+            break;
+        }
+        line_no = line_no.checked_add(1).ok_or_else(|| {
+            ApiError::training_invalid_request("GRPO dataset line count overflow")
+        })?;
+        if row.len() as u64 > kiln_train::trainer::MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES {
+            return Err(ApiError::training_invalid_request(format!(
+                "GRPO JSONL line {line_no} in '{dataset_path}' exceeds the {} byte row limit",
+                kiln_train::trainer::MAX_STREAMED_GRPO_PREFLIGHT_ROW_BYTES
+            )));
+        }
+        max_row_bytes = max_row_bytes.max(row.len() as u64);
+        let projected_host_bytes = kiln_train::trainer::streamed_grpo_preflight_host_bytes(
+            groups,
+            completions,
+            max_row_bytes,
+            model_num_layers,
+            config.reward_filter_var_min.is_some() || config.reward_filter_var_max.is_some(),
+        )
+        .map_err(|error| {
             ApiError::training_invalid_request(format!(
-                "failed to read GRPO dataset_path '{dataset_path}' line {}: {e}",
-                idx + 1
+                "GRPO dataset_path '{dataset_path}' exceeds the streamed preflight host-memory contract before parsing line {line_no}: {error:#}"
+            ))
+        })?;
+        bytes_read = bytes_read.checked_add(read as u64).ok_or_else(|| {
+            ApiError::training_invalid_request("GRPO dataset byte count overflow")
+        })?;
+        if bytes_read > crate::training_queue::MAX_LIVE_PREPARED_TRAINING_BYTES {
+            return Err(ApiError::training_invalid_request(format!(
+                "GRPO dataset_path '{dataset_path}' grew beyond the live server-owned training-data limit of {} bytes while it was being admitted",
+                crate::training_queue::MAX_LIVE_PREPARED_TRAINING_BYTES
+            )));
+        }
+        let projected_admission_bytes = expected_bytes
+            .checked_add(projected_host_bytes)
+            .ok_or_else(|| ApiError::training_invalid_request("GRPO admission weight overflow"))?;
+        prepared_data_permit
+            .grow_to(projected_admission_bytes)
+            .map_err(|(current, requested)| {
+                ApiError::training_prepared_data_full(current, requested)
+            })?;
+        hasher.update(&row);
+        snapshot.write_all(&row).map_err(|error| {
+            ApiError::internal(format!(
+                "write GRPO admission snapshot {}: {error}",
+                snapshot_path.display()
+            ))
+        })?;
+        let line = std::str::from_utf8(&row).map_err(|e| {
+            ApiError::training_invalid_request(format!(
+                "GRPO JSONL line {line_no} in '{dataset_path}' is not UTF-8: {e}"
             ))
         })?;
         let trimmed = line.trim();
@@ -341,40 +527,150 @@ fn validate_grpo_jsonl_submission_head(
         let group: GrpoGroup = serde_json::from_str(trimmed).map_err(|e| {
             ApiError::training_invalid_request(format!(
                 "invalid GRPO JSONL group at line {} in '{dataset_path}': {e}",
-                idx + 1
+                line_no
             ))
         })?;
         if group.completions.is_empty() {
             return Err(ApiError::training_invalid_request(format!(
-                "GRPO JSONL first non-empty group at line {} in '{dataset_path}' has no completions",
-                idx + 1
+                "GRPO JSONL group at line {line_no} in '{dataset_path}' has no completions"
             )));
         }
-        if config.behavior_policy == kiln_train::BehaviorPolicy::Recorded {
-            let tokenizer = tokenizer.ok_or_else(|| {
-                ApiError::training_invalid_request(
-                    "behavior_policy=recorded requires a tokenizer-aware submission preflight",
-                )
-            })?;
-            kiln_train::trainer::validate_grpo_group_policy_data(&group, config, tokenizer)
-                .map_err(|error| {
-                    ApiError::training_invalid_request(format!(
-                        "invalid recorded behavior provenance in GRPO JSONL line {}: {error:#}",
-                        idx + 1
-                    ))
-                })?;
+        if group.completions.len() > kiln_train::HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP {
+            return Err(ApiError::training_invalid_request(format!(
+                "GRPO JSONL group at line {line_no} in '{dataset_path}' has {} completions; maximum is {}",
+                group.completions.len(),
+                kiln_train::HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP
+            )));
         }
-        return Ok(GrpoSubmissionStats {
-            num_groups: None,
-            total_completions: None,
-            max_seq_len: training_preflight::approximate_max_seq_len_grpo_group(&group, tokenizer),
-            streaming_dataset: true,
-        });
+        groups = groups.checked_add(1).ok_or_else(|| {
+            ApiError::training_invalid_request("GRPO dataset group count overflow")
+        })?;
+        if groups as u64 > kiln_train::HF_TRL_GRPO_MAX_GROUPS {
+            return Err(ApiError::training_invalid_request(format!(
+                "GRPO dataset_path '{dataset_path}' exceeds the {} group limit",
+                kiln_train::HF_TRL_GRPO_MAX_GROUPS
+            )));
+        }
+        completions = completions
+            .checked_add(group.completions.len())
+            .ok_or_else(|| {
+                ApiError::training_invalid_request("GRPO dataset completion count overflow")
+            })?;
+        let projected_host_bytes = kiln_train::trainer::streamed_grpo_preflight_host_bytes(
+            groups,
+            completions,
+            max_row_bytes,
+            model_num_layers,
+            config.reward_filter_var_min.is_some() || config.reward_filter_var_max.is_some(),
+        )
+        .map_err(|error| {
+            ApiError::training_invalid_request(format!(
+                "GRPO dataset_path '{dataset_path}' exceeds the streamed preflight host-memory contract at line {line_no}: {error:#}"
+            ))
+        })?;
+        let projected_admission_bytes = expected_bytes
+            .checked_add(projected_host_bytes)
+            .ok_or_else(|| ApiError::training_invalid_request("GRPO admission weight overflow"))?;
+        prepared_data_permit
+            .grow_to(projected_admission_bytes)
+            .map_err(|(current, requested)| {
+                ApiError::training_prepared_data_full(current, requested)
+            })?;
+        let row_max = kiln_train::trainer::validate_grpo_group_policy_data_and_max_seq_len(
+            &group, config, tokenizer, line_no,
+        )
+        .map_err(|error| {
+            ApiError::training_invalid_request(format!(
+                "invalid GRPO JSONL group at line {line_no} in '{dataset_path}': {error:#}"
+            ))
+        })?;
+        max_seq_len = max_seq_len.max(row_max);
     }
 
-    Err(ApiError::training_invalid_request(format!(
-        "GRPO dataset_path '{dataset_path}' contains no groups"
-    )))
+    if bytes_read != expected_bytes {
+        return Err(ApiError::training_invalid_request(format!(
+            "GRPO dataset_path '{dataset_path}' changed while it was being admitted: expected {expected_bytes} bytes, read {bytes_read}"
+        )));
+    }
+    if groups == 0 {
+        return Err(ApiError::training_invalid_request(format!(
+            "GRPO dataset_path '{dataset_path}' contains no groups"
+        )));
+    }
+    snapshot.flush().map_err(|error| {
+        ApiError::internal(format!(
+            "flush GRPO admission snapshot {}: {error}",
+            snapshot_path.display()
+        ))
+    })?;
+    snapshot.sync_data().map_err(|error| {
+        ApiError::internal(format!(
+            "sync GRPO admission snapshot {}: {error}",
+            snapshot_path.display()
+        ))
+    })?;
+    drop(snapshot);
+    let mut snapshot_permissions = std::fs::metadata(&snapshot_path)
+        .map_err(|error| {
+            ApiError::internal(format!(
+                "inspect GRPO admission snapshot {}: {error}",
+                snapshot_path.display()
+            ))
+        })?
+        .permissions();
+    snapshot_permissions.set_readonly(true);
+    std::fs::set_permissions(&snapshot_path, snapshot_permissions).map_err(|error| {
+        ApiError::internal(format!(
+            "make GRPO admission snapshot {} read-only: {error}",
+            snapshot_path.display()
+        ))
+    })?;
+    snapshot_reader.rewind().map_err(|error| {
+        ApiError::internal(format!(
+            "rewind GRPO admission snapshot {}: {error}",
+            snapshot_path.display()
+        ))
+    })?;
+    let preflight_host_bytes = kiln_train::trainer::streamed_grpo_preflight_host_bytes(
+        groups,
+        completions,
+        max_row_bytes,
+        model_num_layers,
+        config.reward_filter_var_min.is_some() || config.reward_filter_var_max.is_some(),
+    )
+    .map_err(|error| {
+        ApiError::training_invalid_request(format!(
+            "GRPO dataset_path '{dataset_path}' exceeds the streamed preflight host-memory contract: {error:#}"
+        ))
+    })?;
+    let admission_weight = bytes_read
+        .checked_add(preflight_host_bytes)
+        .ok_or_else(|| ApiError::training_invalid_request("GRPO admission weight overflow"))?;
+    prepared_data_permit
+        .grow_to(admission_weight)
+        .map_err(|(current, requested)| {
+            ApiError::training_prepared_data_full(current, requested)
+        })?;
+    let source_sha256 = format!("sha256:{:x}", hasher.finalize());
+    let receipt = crate::training_queue::GrpoJsonlAdmissionReceipt::new_server_owned(
+        snapshot_path,
+        snapshot_reader,
+        source_sha256,
+        bytes_read,
+        groups,
+        completions,
+        max_seq_len,
+        preflight_host_bytes,
+    )
+    .map_err(ApiError::internal)?;
+    cleanup_incomplete.armed = false;
+    Ok(GrpoSubmissionStats {
+        num_groups: Some(groups),
+        total_completions: Some(completions),
+        max_seq_len,
+        streaming_dataset: true,
+        source_receipt: Some(receipt),
+    })
 }
 
 /// Estimate the per-step working set against the corrected memory
@@ -386,9 +682,8 @@ fn validate_grpo_jsonl_submission_head(
 /// Validate a training submission fits in VRAM AND return the estimated per-step
 /// working-set bytes (so the caller can stash it on the queue entry and hold a
 /// governor reservation across the job — #24), plus the resolved dynamic
-/// checkpoint segment count. Returns zero bytes and no segment override when no
-/// estimate is available (no memory signal / zero-length); callers skip the
-/// reservation and let the trainer fall back to its own guard.
+/// checkpoint segment count. CPU-only execution has no accelerator reservation;
+/// an accelerated backend without a trustworthy live memory signal is rejected.
 fn enforce_training_preflight(
     state: &AppState,
     max_seq_len: usize,
@@ -396,6 +691,21 @@ fn enforce_training_preflight(
     lora_rank: usize,
     vk_native_recompute: bool,
 ) -> Result<PreflightAdmission, ApiError> {
+    let model_rank_ceiling = training_preflight::model_lora_rank_ceiling(&state.model_config);
+    if lora_rank == 0 || lora_rank > model_rank_ceiling {
+        return Err(ApiError::training_invalid_request(format!(
+            "LoRA rank {lora_rank} is invalid for this model; supported range is 1..={model_rank_ceiling}"
+        )));
+    }
+    // Vulkan's registry owns mirror buffers even on a dGPU; ROCm aliases
+    // storage even on an APU. Runtime backend identity is the only safe key.
+    options.lora_residency = match state.backend.as_ref() {
+        ModelBackend::Mock { .. } => LoraResidency::StorageOwned,
+        ModelBackend::Real { runner, .. } => runner
+            .read()
+            .map(|runner| LoraResidency::for_backend_name(runner.backend_name()))
+            .unwrap_or_else(|_| LoraResidency::for_backend_name("unknown")),
+    };
     if max_seq_len == 0 {
         return Ok(PreflightAdmission {
             reserved_bytes: 0,
@@ -409,19 +719,39 @@ fn enforce_training_preflight(
     if options.streaming_gdn_tile_tokens.is_none() {
         options.streaming_gdn_tile_tokens = activation_estimate.streaming_gdn_tile_tokens;
     }
-    let vram = kiln_memory::vram::detect_vram();
-    let live_available = available_for_training_bytes(&vram);
-    if live_available == u64::MAX {
-        // No memory signal at all — let the trainer be the line of
-        // defense. Better than rejecting every submission on machines
-        // where detection is misconfigured.
+    let vram = state.vram_info;
+    if state.vram_probe_selector == kiln_memory::vram::VramProbeSelector::None {
+        // CPU training does not allocate accelerator memory. Its allocations
+        // are governed by the host and do not belong in the VRAM governor.
         return Ok(PreflightAdmission {
             reserved_bytes: 0,
             checkpoint_segments: None,
         });
     }
-    let available = dynamic_training_availability(state, &vram, live_available);
-    if available.bytes > live_available {
+
+    let governor = kiln_memory::MemoryGovernor::global();
+    // HTTP admission consumes the sampler's last published observation. A
+    // driver/sysfs refresh can stall and therefore must not run on an async
+    // request thread.
+    let live_observation = governor.cached_observation();
+    let live_snapshot = live_observation.snapshot;
+    if vram.total_bytes == 0
+        || live_snapshot.total_bytes == 0
+        || !live_observation.sample_status.healthy
+    {
+        return Err(ApiError::training_will_not_fit(format!(
+            "training memory preflight could not establish a safe live capacity for the selected accelerator ({:?}); check /v1/config memory diagnostics",
+            state.vram_probe_selector
+        )));
+    }
+    let live_policy_available = live_observation.available_bytes;
+    let available = dynamic_training_availability(
+        state,
+        &vram,
+        live_policy_available,
+        live_observation.soft_reserved_bytes,
+    );
+    if available.bytes > live_policy_available {
         tracing::info!(
             live_available_gb = available.live_bytes as f64 / 1e9,
             effective_available_gb = available.bytes as f64 / 1e9,
@@ -430,10 +760,12 @@ fn enforce_training_preflight(
             "training preflight using dynamic memory availability"
         );
     }
-    let checkpoint_env_override = checkpoint_env_override_present();
-    let env_segments = if vk_native_recompute || checkpoint_env_override {
-        effective_checkpoint_segments(kiln_train::CheckpointConfig::from_env(
+    let checkpoint_policy = state.training_runtime.gradient_checkpoint_policy();
+    let checkpoint_policy_is_fixed = !checkpoint_policy.is_auto();
+    let configured_segments = if vk_native_recompute || checkpoint_policy_is_fixed {
+        effective_checkpoint_segments(kiln_train::CheckpointConfig::from_runtime(
             state.model_config.num_layers,
+            &state.training_runtime,
         ))
     } else {
         1
@@ -444,40 +776,33 @@ fn enforce_training_preflight(
     // must reflect that or the preflight will accept payloads that
     // ultimately exhaust the host. Once Phase 1.2 is deployed,
     // switch this to WeightResidency::SingleCopy.
-    let residency = WeightResidency::for_vram_source(vram.source);
-    // Whether the available budget already accounts for the loaded
-    // model. On unified APUs we read MemAvailable at submission time
-    // so the model is already deducted; including base weights again
-    // double-counts and over-rejects every job. On discrete GPUs the
-    // available number is a static pre-deduction reserve, so weights
-    // ARE still pending and must be counted. `KILN_GPU_MEMORY_GB` is
-    // an explicit operator override for this already-loaded server
-    // process, so treat it as a post-load budget as well.
-    let weights_already_resident = matches!(
-        vram.source,
-        kiln_memory::vram::VramSource::LinuxDrmSysfsUnified
-            | kiln_memory::vram::VramSource::AppleSilicon
-            | kiln_memory::vram::VramSource::EnvOverride
-    );
+    let residency = WeightResidency::for_vram(&vram);
+    // Admission uses a live driver/allocator snapshot from the already-running
+    // server, after model upload and KV allocation. Base weights are therefore
+    // already deducted on every accelerator topology; counting them again
+    // would reject CUDA/ROCm jobs roughly one model footprint too early.
+    let weights_already_resident = true;
     let (num_segments, estimate) = if vk_native_recompute {
         (
-            env_segments,
-            estimate_vk_native_recompute_working_set(
+            configured_segments,
+            estimate_vk_native_recompute_working_set_with_residency(
                 &state.model_config,
                 max_seq_len,
                 lora_rank,
                 residency,
                 weights_already_resident,
+                options.optimizer,
+                options.lora_residency,
             ),
         )
-    } else if checkpoint_env_override {
+    } else if checkpoint_policy_is_fixed {
         (
-            env_segments,
+            configured_segments,
             estimate_step_working_set_with_options(
                 &state.model_config,
                 max_seq_len,
                 lora_rank,
-                env_segments,
+                configured_segments,
                 residency,
                 weights_already_resident,
                 options,
@@ -495,6 +820,24 @@ fn enforce_training_preflight(
             available.bytes,
         )
     };
+    let rank_ceiling = training_preflight::lora_rank_ceiling_for_budget(
+        &state.model_config,
+        options.optimizer,
+        options.lora_residency,
+        available.bytes,
+        &estimate,
+    );
+    if estimate.breakdown.fixed_bytes() <= available.bytes && lora_rank > rank_ceiling.effective {
+        return Err(ApiError::training_will_not_fit(format!(
+            "LoRA rank {lora_rank} exceeds the live memory ceiling {} for optimizer {:?} with {:?} residency (model ceiling {}, resource ceiling {}, {} bytes per rank); lower lora_rank or free accelerator memory",
+            rank_ceiling.effective,
+            options.optimizer,
+            options.lora_residency,
+            rank_ceiling.model,
+            rank_ceiling.resource,
+            rank_ceiling.bytes_per_rank
+        )));
+    }
     if estimate.total_bytes > available.bytes {
         let msg = format_oom_message_with_source(
             &estimate,
@@ -505,31 +848,11 @@ fn enforce_training_preflight(
         );
         return Err(ApiError::training_will_not_fit(msg));
     }
-    let checkpoint_segments = if vk_native_recompute || checkpoint_env_override {
-        Some(num_segments)
-    } else {
-        None
-    };
-    let reserved_bytes = if vk_native_recompute || checkpoint_env_override {
-        estimate.total_bytes
-    } else {
-        let reservation_segments =
-            auto_mode_reservation_segments(&state.model_config, num_segments);
-        if reservation_segments == num_segments {
-            estimate.total_bytes
-        } else {
-            estimate_step_working_set_with_options(
-                &state.model_config,
-                max_seq_len,
-                lora_rank,
-                reservation_segments,
-                residency,
-                weights_already_resident,
-                options,
-            )
-            .total_bytes
-        }
-    };
+    // Carry the exact live-admitted plan into the queued job. Replanning from
+    // static startup capacity can select fewer segments and exceed both the
+    // live fit decision and its reservation.
+    let checkpoint_segments = Some(num_segments);
+    let reserved_bytes = estimate.total_bytes;
     Ok(PreflightAdmission {
         reserved_bytes,
         checkpoint_segments,
@@ -870,6 +1193,11 @@ fn validate_distill_merge_at_submit(
             "distill_merge: sources must be non-empty".to_string(),
         ));
     }
+    if req.rollout_budget == 0 {
+        return Err(ApiError::training_invalid_request(
+            "distill_merge: rollout_budget must be greater than zero".to_string(),
+        ));
+    }
     validate_opd_config_at_submit(&req.config)?;
     require_off_policy_fixture_mode("distill_merge", &req.config)?;
     validate_lora_scale_at_submit(
@@ -877,8 +1205,21 @@ fn validate_distill_merge_at_submit(
         req.config.lora_alpha,
         req.config.allow_high_lora_scale,
     )?;
+    let mut source_names = std::collections::HashSet::with_capacity(req.sources.len());
     for source in &req.sources {
         super::adapters::validate_adapter_name(&source.adapter)?;
+        if !source_names.insert(source.adapter.as_str()) {
+            return Err(ApiError::training_invalid_request(format!(
+                "distill_merge: duplicate source adapter {:?}",
+                source.adapter
+            )));
+        }
+        if !source.weight.is_finite() || source.weight <= 0.0 {
+            return Err(ApiError::training_invalid_request(format!(
+                "distill_merge: source adapter {:?} weight must be finite and greater than zero",
+                source.adapter
+            )));
+        }
         let dir = state.adapter_dir.join(&source.adapter);
         if !dir.is_dir() {
             return Err(ApiError::training_invalid_request(format!(
@@ -889,6 +1230,73 @@ fn validate_distill_merge_at_submit(
         }
     }
     Ok(())
+}
+
+fn validate_distill_merge_sampling_contract(
+    req: &kiln_train::DistillMergeRequest,
+    materialized_counts: &[usize],
+) -> Result<usize, ApiError> {
+    if req.sources.len() != materialized_counts.len()
+        || materialized_counts.is_empty()
+        || materialized_counts.contains(&0)
+    {
+        return Err(ApiError::internal(
+            "distill_merge sampling validation received mismatched materialized sources",
+        ));
+    }
+    let prompt_count = materialized_counts
+        .iter()
+        .try_fold(0usize, |total, count| total.checked_add(*count))
+        .ok_or_else(|| {
+            ApiError::training_invalid_request("DistillMerge aggregate prompt count overflow")
+        })?;
+    let expected_rollout_budget = prompt_count.checked_mul(req.config.epochs).ok_or_else(|| {
+        ApiError::training_invalid_request("DistillMerge prompt count times epochs overflows")
+    })?;
+    let weight_sum = req.sources.iter().map(|source| source.weight).sum::<f64>();
+    let weights_match_materialized_mixture = weight_sum.is_finite()
+        && weight_sum > 0.0
+        && req
+            .sources
+            .iter()
+            .zip(materialized_counts)
+            .all(|(source, count)| {
+                let declared = source.weight / weight_sum;
+                let materialized = *count as f64 / prompt_count as f64;
+                (declared - materialized).abs() <= 1e-12
+            });
+    if req.rollout_budget != expected_rollout_budget || !weights_match_materialized_mixture {
+        return Err(ApiError::training_invalid_request(format!(
+            "distill_merge cannot silently approximate weighted sampling: this materialized corpus executes {expected_rollout_budget} prompt-epochs and source shares proportional to replay row counts; set rollout_budget={expected_rollout_budget} and each source weight proportional to its replay row count, or pre-sample the replay logs accordingly"
+        )));
+    }
+    Ok(expected_rollout_budget)
+}
+
+fn distill_merge_prompt_sequence_sha256(
+    prompt: &kiln_train::opd::OpdPrompt,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+) -> Result<[u8; 32], ApiError> {
+    use sha2::{Digest, Sha256};
+
+    let example = kiln_train::SftExample {
+        messages: prompt.messages.clone(),
+    };
+    let (tokens, _) =
+        kiln_train::trainer::tokenize_for_training(&example, tokenizer).map_err(|error| {
+            ApiError::training_invalid_request(format!(
+                "distill_merge prompt failed canonical training tokenization: {error:#}"
+            ))
+        })?;
+    let mut digest = Sha256::new();
+    digest.update((tokens.len() as u64).to_be_bytes());
+    for token in tokens {
+        digest.update(token.to_be_bytes());
+    }
+    let output = digest.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&output);
+    Ok(key)
 }
 
 fn validate_distill_self_at_submit(req: &kiln_train::DistillSelfRequest) -> Result<(), ApiError> {
@@ -1072,81 +1480,24 @@ pub(crate) async fn admit_sft_request(
         return Err(ApiError::training_tracked_full(max_tracked));
     }
 
-    // The corrections feed: dataset "corrections:active" resolves the
-    // durable basket's trainable rows (hand-written ideal, not yet
-    // trained) server-side. The consumed row ids ride the job and flip
-    // to trained_into ON COMPLETION — a failed job leaves the basket
-    // intact and re-trainable.
-    let mut consumed_correction_ids: Vec<String> = Vec::new();
-    let mut inline_source = "inline";
     if let Some(path) = req.dataset_path.take() {
         let path = path.trim().to_string();
         if !path.is_empty() {
             req.dataset_path = Some(path);
         }
     }
-    if req.dataset_path.is_some() && (!req.examples.is_empty() || req.dataset.is_some()) {
+    let source_count = usize::from(!req.examples.is_empty())
+        + usize::from(req.dataset_path.is_some())
+        + usize::from(req.dataset.is_some());
+    if source_count != 1 {
         return Err(ApiError::training_invalid_request(
             "SFT request must use exactly one of examples, dataset_path, or dataset",
-        ));
-    }
-    if req.dataset_path.is_none() && req.examples.is_empty() && req.dataset.is_none() {
-        return Err(ApiError::training_invalid_request(
-            "SFT request needs examples, dataset_path, or dataset",
         ));
     }
     if let Some(name) = req.config.output_name.as_deref() {
         super::adapters::validate_adapter_name(name)?;
     }
     validate_sft_config_at_submit(&req.config)?;
-
-    if req.dataset.as_deref() == Some("corrections:active") {
-        req.dataset = None;
-        if !req.examples.is_empty() {
-            return Err(ApiError::training_invalid_request(
-                "SFT request must use exactly one of examples, dataset_path, or dataset",
-            ));
-        }
-        let store = super::corrections::CorrectionsStore::for_state(&state);
-        let (ids, examples) = store.trainable_rows();
-        if examples.is_empty() {
-            return Err(ApiError::training_invalid_request(
-                "corrections:active has no trainable rows — write an ideal answer \
-                 (different from the original) for at least one correction first",
-            ));
-        }
-        consumed_correction_ids = ids;
-        req.examples = examples;
-        inline_source = "corrections";
-    }
-
-    // Train-by-dataset-name: resolve an uploaded dataset (the eval dataset
-    // store) into inline examples server-side. The UI/CLI sends just the name,
-    // so rows never round-trip through the client and the whole dataset trains
-    // (the rows preview endpoint clamps at 5000 — this path has no such cap).
-    let named_dataset_source = if let Some(dataset_name) = req.dataset.take() {
-        if !req.examples.is_empty() {
-            return Err(ApiError::training_invalid_request(
-                "SFT request must use exactly one of examples, dataset_path, or dataset",
-            ));
-        }
-        let registry = state
-            .dataset_registry
-            .as_ref()
-            .ok_or_else(ApiError::dataset_registry_unavailable)?;
-        let dataset_dir = registry.dataset_dir(&dataset_name).map_err(|e| match e {
-            crate::eval::DatasetError::NotFound(_) => ApiError::dataset_not_found(&dataset_name),
-            crate::eval::DatasetError::InvalidName(_) => ApiError::dataset_invalid(&dataset_name),
-            other => ApiError::dataset_invalid(format!("{other}")),
-        })?;
-        let data_path = dataset_dir.join("data.jsonl");
-        if !data_path.is_file() {
-            return Err(ApiError::dataset_not_found(&dataset_name));
-        }
-        Some((dataset_name, data_path))
-    } else {
-        None
-    };
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req
@@ -1169,104 +1520,8 @@ pub(crate) async fn admit_sft_request(
         return Err(ApiError::mock_mode_no_training());
     }
 
-    let streaming_dataset = req.dataset_path.is_some();
-    let prepared = if let Some((dataset_name, data_path)) = named_dataset_source {
-        crate::sft_dataset::prepare_sft_jsonl(
-            &data_path,
-            state.tokenizer.as_ref(),
-            req.config.invalid_row_policy,
-            "named_dataset",
-            Some(dataset_name.clone()),
-        )
-        .map_err(|error| {
-            ApiError::training_invalid_request(format!(
-                "invalid SFT dataset {dataset_name:?}: {error:#}"
-            ))
-        })?
-    } else if let Some(path) = req.dataset_path.as_deref() {
-        let path = Path::new(path);
-        crate::sft_dataset::prepare_sft_jsonl(
-            path,
-            state.tokenizer.as_ref(),
-            req.config.invalid_row_policy,
-            "dataset_path",
-            Some(path.display().to_string()),
-        )
-        .map_err(|error| {
-            ApiError::training_invalid_request(format!(
-                "invalid SFT dataset_path '{}': {error:#}",
-                path.display()
-            ))
-        })?
-    } else {
-        kiln_train::prepare_sft_examples(
-            std::mem::take(&mut req.examples),
-            state.tokenizer.as_ref(),
-            req.config.invalid_row_policy,
-            inline_source,
-            None,
-        )
-        .map_err(|error| {
-            ApiError::training_invalid_request(format!("invalid SFT rows: {error:#}"))
-        })?
-    };
-    let stats = SftSubmissionStats {
-        rows_read: prepared.ingestion.rows_read,
-        num_examples: prepared.ingestion.rows_kept,
-        rows_rejected: prepared.ingestion.rows_rejected,
-        max_seq_len: prepared.max_seq_len,
-        max_supervised_tokens: prepared.max_supervised_tokens,
-        streaming_dataset,
-    };
-    if inline_source == "corrections" {
-        consumed_correction_ids =
-            retained_correction_ids(consumed_correction_ids, &prepared.ingestion)?;
-    }
-    if !streaming_dataset {
-        req.examples = prepared.examples;
-    }
-    req.ingestion = Some(prepared.ingestion);
-    let num_examples = stats.num_examples;
     let invalid_row_policy = req.config.invalid_row_policy;
     let training_profile = req.config.training_profile;
-
-    // Working-set preflight: refuse jobs that won't fit in the
-    // corrected memory budget. Better than OOM-killing the server
-    // partway through the first step.
-    let max_seq_len = stats.max_seq_len;
-    let max_supervised_tokens = stats.max_supervised_tokens;
-    let admission = enforce_training_preflight(
-        &state,
-        max_seq_len,
-        EstimateOptions {
-            max_supervised_tokens: Some(max_supervised_tokens),
-            recompute_boundaries: training_preflight::recompute_checkpoint_boundaries_for_seq_len(
-                max_seq_len,
-            ),
-            ..Default::default()
-        },
-        req.config.lora_rank,
-        // Vulkan now trains through the shared kt-tape path (segment-
-        // checkpointed), not the deleted vk_native recompute fork, so the
-        // preflight uses the standard segment-checkpoint working-set estimate.
-        false,
-    )?;
-    req.config.grad_checkpoint_segments = admission.checkpoint_segments;
-    let reserved_bytes = admission.reserved_bytes;
-
-    tracing::info!(
-        num_examples,
-        training_profile = %training_profile,
-        rows_read = stats.rows_read,
-        rows_rejected = stats.rows_rejected,
-        invalid_row_policy = %invalid_row_policy,
-        job_id = %job_id,
-        adapter = %adapter_name,
-        max_seq_len,
-        dataset_path = req.dataset_path.as_deref().unwrap_or(""),
-        streaming_dataset = stats.streaming_dataset,
-        "SFT training request queued"
-    );
 
     // Register the job in the tracking map
     let info = TrainingJobInfo {
@@ -1282,7 +1537,7 @@ pub(crate) async fn admit_sft_request(
         submitted_at: std::time::Instant::now(),
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
-        consumed_correction_ids,
+        consumed_correction_ids: Vec::new(),
         finished_at: None,
         finished_unix_ms: None,
         error: None,
@@ -1293,18 +1548,39 @@ pub(crate) async fn admit_sft_request(
         cancel_requested: Default::default(),
     };
     // Enqueue and publish the tracking record under one admission lock pair.
-    let queue_position = admit_training_jobs(
+    let mut admission = admit_training_jobs_with_summary(
         &state,
         vec![(
             info,
             QueueEntry {
                 job_id: job_id.clone(),
-                reserved_bytes,
+                reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                prepared_data: Default::default(),
+                prepared_data_permit: Default::default(),
                 job: QueuedJob::Sft(req),
             },
         )],
     )?;
+    let stats = admission.sft_summaries.remove(&job_id).ok_or_else(|| {
+        ApiError::internal("SFT admission completed without an exact corpus summary")
+    })?;
+    let queue_position = admission.queue_position;
+    let num_examples = stats.num_examples;
+
+    tracing::info!(
+        num_examples,
+        training_profile = %training_profile,
+        rows_read = stats.rows_read,
+        rows_rejected = stats.rows_rejected,
+        invalid_row_policy = %invalid_row_policy,
+        job_id = %job_id,
+        adapter = %adapter_name,
+        max_seq_len = stats.max_seq_len,
+        max_supervised_tokens = stats.max_supervised_tokens,
+        streaming_dataset = stats.streaming_dataset,
+        "SFT training request queued after bounded corpus admission"
+    );
 
     Ok(TrainingResponse {
         job_id,
@@ -1320,8 +1596,9 @@ pub(crate) async fn admit_sft_request(
 
 async fn submit_grpo(
     State(state): State<AppState>,
-    Json(mut req): Json<GrpoRequest>,
+    payload: Result<Json<GrpoRequest>, JsonRejection>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    let mut req = parse_training_json(payload, "GRPO request")?;
     ensure_training_backend_admission(&state)?;
     // Reject new jobs during shutdown
     if state.shutdown.load(Ordering::Relaxed) {
@@ -1378,8 +1655,17 @@ async fn submit_grpo(
     }
     validate_grpo_submission_source(&req, Some(state.tokenizer.as_ref()))?;
 
-    let stats = if let Some(path) = req.dataset_path.as_deref() {
-        validate_grpo_jsonl_submission_head(path, Some(state.tokenizer.as_ref()), &req.config)?
+    let stats = if req.dataset_path.is_some() {
+        // The authoritative queue admission performs the bounded full-corpus
+        // scan while holding the process admission permit. Do not duplicate
+        // that expensive work on the async handler before capacity is owned.
+        GrpoSubmissionStats {
+            num_groups: None,
+            total_completions: None,
+            max_seq_len: 0,
+            streaming_dataset: true,
+            source_receipt: None,
+        }
     } else {
         GrpoSubmissionStats {
             num_groups: Some(req.groups.len()),
@@ -1389,6 +1675,7 @@ async fn submit_grpo(
                 Some(state.tokenizer.as_ref()),
             ),
             streaming_dataset: false,
+            source_receipt: None,
         }
     };
     let job_id = uuid::Uuid::new_v4().to_string();
@@ -1421,10 +1708,9 @@ async fn submit_grpo(
     if stats.streaming_dataset {
         tracing::info!(
             dataset_path = req.dataset_path.as_deref().unwrap_or_default(),
-            max_seq_len_first_group = stats.max_seq_len,
             job_id = %job_id,
             adapter = %adapter_name,
-            "streamed GRPO training request queued"
+            "streamed GRPO training request entering bounded full-corpus admission"
         );
     } else {
         tracing::info!(
@@ -1440,25 +1726,6 @@ async fn submit_grpo(
     if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
         return Err(ApiError::mock_mode_no_training());
     }
-
-    // Working-set preflight (see submit_sft for rationale). Vulkan trains
-    // through the shared kt-tape (segment-checkpointed) path now, not the
-    // deleted vk_native recompute fork, so the standard estimate applies.
-    let max_seq_len = stats.max_seq_len;
-    let admission = enforce_training_preflight(
-        &state,
-        max_seq_len,
-        EstimateOptions {
-            recompute_boundaries: training_preflight::recompute_checkpoint_boundaries_for_seq_len(
-                max_seq_len,
-            ),
-            ..Default::default()
-        },
-        req.config.lora_rank,
-        false,
-    )?;
-    req.config.grad_checkpoint_segments = admission.checkpoint_segments;
-    let reserved_bytes = admission.reserved_bytes;
 
     // Register the job in the tracking map
     let info = TrainingJobInfo {
@@ -1491,8 +1758,12 @@ async fn submit_grpo(
             info,
             QueueEntry {
                 job_id: job_id.clone(),
-                reserved_bytes,
+                // The authoritative queue admission scans/materializes every
+                // job source and overwrites this estimate before publication.
+                reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                prepared_data: Default::default(),
+                prepared_data_permit: Default::default(),
                 job: QueuedJob::Grpo(req),
             },
         )],
@@ -1528,8 +1799,9 @@ async fn submit_grpo(
 /// Job tracking via `/v1/train/status`, `/v1/train/queue`, etc.
 async fn submit_opd(
     State(state): State<AppState>,
-    Json(mut req): Json<OpdRequest>,
+    payload: Result<Json<OpdRequest>, JsonRejection>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    let mut req = parse_training_json(payload, "OPD request")?;
     ensure_training_backend_admission(&state)?;
     // Reject during shutdown.
     if state.shutdown.load(Ordering::Relaxed) {
@@ -1670,36 +1942,6 @@ async fn submit_opd(
         return Err(ApiError::mock_mode_no_training());
     }
 
-    // Register the job and enqueue. OPD now runs through the real
-    // trainer body (kiln_train::opd::opd_train) — same GPU lock /
-    // replay / hot-swap / receipt semantics as SFT and GRPO. Wiring
-    // OPD into the SFT/GRPO working-set preflight (so the §8.5
-    // capacity calc applies) is a follow-up.
-    // Working-set reservation (#36): OPD previously skipped the preflight
-    // entirely (no VRAM check, no governor reservation). Estimate its footprint
-    // — longest prompt + rollout budget — and reserve it like SFT/GRPO, so the
-    // KV autoscaler accounts for OPD and a too-large job is rejected instead of
-    // OOMing mid-run.
-    let opd_max_seq_len = training_preflight::approximate_max_seq_len_opd(
-        &req.prompts,
-        req.config.max_tokens,
-        Some(state.tokenizer.as_ref()),
-    );
-    let reserved_bytes = enforce_training_preflight(
-        &state,
-        opd_max_seq_len,
-        EstimateOptions {
-            max_supervised_tokens: None,
-            recompute_boundaries: training_preflight::recompute_checkpoint_boundaries_for_seq_len(
-                opd_max_seq_len,
-            ),
-            ..Default::default()
-        },
-        req.config.lora_rank,
-        false,
-    )?
-    .reserved_bytes;
-
     let info = TrainingJobInfo {
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
@@ -1729,8 +1971,10 @@ async fn submit_opd(
             info,
             QueueEntry {
                 job_id: job_id.clone(),
-                reserved_bytes, // #36: OPD working-set reservation (preflight estimate)
+                reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                prepared_data: Default::default(),
+                prepared_data_permit: Default::default(),
                 job: QueuedJob::Opd(req),
             },
         )],
@@ -1757,8 +2001,9 @@ async fn submit_opd(
 /// as `/v1/train/opd`.
 async fn submit_distill_refresh(
     State(state): State<AppState>,
-    Json(mut req): Json<DistillRefreshRequest>,
+    payload: Result<Json<DistillRefreshRequest>, JsonRejection>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    let mut req = parse_training_json(payload, "distill/refresh request")?;
     ensure_training_backend_admission(&state)?;
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
@@ -1835,17 +2080,6 @@ async fn submit_distill_refresh(
         return Err(ApiError::mock_mode_no_training());
     }
 
-    // Preflight BEFORE the tracking insert — a 413 here must not leave an
-    // orphaned Queued entry in the jobs map.
-    let reserved_bytes = distill_working_set_reservation(
-        &state,
-        match &req.new_data {
-            kiln_train::NewKnowledgeSource::Inline { examples } => examples.as_slice(),
-            kiln_train::NewKnowledgeSource::Dataset { .. } => &[],
-        },
-        &req.config,
-    )?;
-
     let info = TrainingJobInfo {
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
@@ -1877,8 +2111,10 @@ async fn submit_distill_refresh(
             info,
             QueueEntry {
                 job_id: job_id.clone(),
-                reserved_bytes,
+                reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                prepared_data: Default::default(),
+                prepared_data_permit: Default::default(),
                 job: QueuedJob::DistillRefresh(req),
             },
         )],
@@ -1898,8 +2134,9 @@ async fn submit_distill_refresh(
 /// `POST /v1/adapters/distill_merge` — §3.4 behaviour-space merge.
 async fn submit_distill_merge(
     State(state): State<AppState>,
-    Json(mut req): Json<DistillMergeRequest>,
+    payload: Result<Json<DistillMergeRequest>, JsonRejection>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    let mut req = parse_training_json(payload, "distill_merge request")?;
     ensure_training_backend_admission(&state)?;
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
@@ -1937,7 +2174,6 @@ async fn submit_distill_merge(
         }
     }
     enforce_queue_caps(&state)?;
-    let reserved_bytes = distill_working_set_reservation(&state, &[], &req.config)?;
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
     let auto_load = req.config.auto_load;
@@ -1953,7 +2189,6 @@ async fn submit_distill_merge(
         &adapter_name,
         auto_load,
         effective_seed,
-        reserved_bytes,
         QueuedJob::DistillMerge(req),
     )?;
     Ok(Json(TrainingResponse {
@@ -1970,8 +2205,9 @@ async fn submit_distill_merge(
 /// `POST /v1/distill/pump` — §3.5 Knowledge Pump.
 async fn submit_distill_pump(
     State(state): State<AppState>,
-    Json(mut req): Json<DistillPumpRequest>,
+    payload: Result<Json<DistillPumpRequest>, JsonRejection>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    let mut req = parse_training_json(payload, "distill/pump request")?;
     ensure_training_backend_admission(&state)?;
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
@@ -2006,13 +2242,6 @@ async fn submit_distill_pump(
     let source_max_top_k = registered_teacher_top_k_limit(&teacher_spec, req.config.top_k);
     let top_k_adjustment = resolve_opd_top_k_at_submit(&mut req.config, source_max_top_k)?;
     enforce_queue_caps(&state)?;
-    let inline_prompts: &[kiln_train::opd::OpdPrompt] = match &req.mode {
-        kiln_train::DistillPumpMode::Examples { examples } => examples.as_slice(),
-        // Domain/Wide resolve to short seed prompts at run time; the
-        // rollout budget dominates the working set.
-        _ => &[],
-    };
-    let reserved_bytes = distill_working_set_reservation(&state, inline_prompts, &req.config)?;
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
     let auto_load = req.config.auto_load;
@@ -2028,7 +2257,6 @@ async fn submit_distill_pump(
         &adapter_name,
         auto_load,
         effective_seed,
-        reserved_bytes,
         QueuedJob::DistillPump(req),
     )?;
     Ok(Json(TrainingResponse {
@@ -2045,8 +2273,9 @@ async fn submit_distill_pump(
 /// `POST /v1/distill/self` — §3.12 PI self-distillation.
 async fn submit_distill_self(
     State(state): State<AppState>,
-    Json(mut req): Json<DistillSelfRequest>,
+    payload: Result<Json<DistillSelfRequest>, JsonRejection>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
+    let mut req = parse_training_json(payload, "distill/self request")?;
     ensure_training_backend_admission(&state)?;
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
@@ -2072,11 +2301,6 @@ async fn submit_distill_self(
     let requested_top_k = req.config.top_k;
     let top_k_adjustment = resolve_opd_top_k_at_submit(&mut req.config, requested_top_k)?;
     enforce_queue_caps(&state)?;
-    let reserved_bytes = distill_working_set_reservation(
-        &state,
-        req.prompts.as_deref().unwrap_or(&[]),
-        &req.config,
-    )?;
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
     let auto_load = req.config.auto_load;
@@ -2092,7 +2316,6 @@ async fn submit_distill_self(
         &adapter_name,
         auto_load,
         effective_seed,
-        reserved_bytes,
         QueuedJob::DistillSelf(req),
     )?;
     Ok(Json(TrainingResponse {
@@ -2181,13 +2404,29 @@ fn validate_training_admission_capacity(
     Ok(())
 }
 
+#[cfg(test)]
+fn validate_prepared_training_data_capacity(
+    current_bytes: u64,
+    requested_bytes: u64,
+) -> Result<(), ApiError> {
+    if current_bytes.saturating_add(requested_bytes)
+        > crate::training_queue::MAX_LIVE_PREPARED_TRAINING_BYTES
+    {
+        return Err(ApiError::training_prepared_data_full(
+            current_bytes,
+            requested_bytes,
+        ));
+    }
+    Ok(())
+}
+
 fn admit_training_jobs_into(
     training_jobs: &crate::state::TrainingJobs,
     training_queue: &crate::training_queue::SharedTrainingQueue,
     max_queued: usize,
     max_tracked: usize,
     training_supported: bool,
-    pending: Vec<(TrainingJobInfo, QueueEntry)>,
+    mut pending: Vec<(TrainingJobInfo, QueueEntry)>,
 ) -> Result<usize, ApiError> {
     let additional_jobs = pending.len();
 
@@ -2204,7 +2443,6 @@ fn admit_training_jobs_into(
         additional_jobs,
         training_supported,
     )?;
-
     let mut pending_ids = std::collections::HashSet::with_capacity(additional_jobs);
     for (info, entry) in &pending {
         if info.job_id != entry.job_id {
@@ -2217,6 +2455,24 @@ fn admit_training_jobs_into(
             return Err(ApiError::internal(format!(
                 "training admission duplicate job id: {}",
                 info.job_id
+            )));
+        }
+    }
+
+    for (_, entry) in &mut pending {
+        let bytes = entry.prepared_data.admission_weight_bytes();
+        if entry.prepared_data_permit.bytes() == 0 {
+            entry.prepared_data_permit =
+                crate::training_queue::PreparedTrainingDataPermit::acquire(bytes).map_err(
+                    |(current, requested)| {
+                        ApiError::training_prepared_data_full(current, requested)
+                    },
+                )?;
+        } else if entry.prepared_data_permit.bytes() < bytes {
+            return Err(ApiError::internal(format!(
+                "training entry {} prepared-data permit covers {} bytes but materialized data requires at least {bytes}",
+                entry.job_id,
+                entry.prepared_data_permit.bytes()
             )));
         }
     }
@@ -2279,16 +2535,1042 @@ fn ensure_training_backend_admission(state: &AppState) -> Result<(), ApiError> {
             state.serving_profile.profile(),
             "training GPU ownership",
         )
+    })?;
+
+    if matches!(state.backend.as_ref(), ModelBackend::Real { .. }) {
+        state
+            .training_runtime
+            .resolve_device_for_weights(state.model_weight_device)
+            .map_err(ApiError::training_backend_unsupported)?;
+    }
+    Ok(())
+}
+
+const MAX_MATERIALIZED_OPD_DATASET_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_MATERIALIZED_OPD_PROMPTS: usize = 100_000;
+const MAX_MATERIALIZED_OPD_PROMPT_BYTES: u64 = 64 * 1024 * 1024;
+static TRAINING_DATA_ADMISSION_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+fn sft_materialized_weight_bytes(
+    examples: &[kiln_train::SftExample],
+    ingestion: &kiln_train::SftIngestionReceipt,
+) -> Result<u64, ApiError> {
+    if examples.len() > crate::sft_dataset::MAX_SFT_JSONL_ROWS {
+        return Err(ApiError::training_invalid_request(format!(
+            "SFT corpus has {} rows; maximum is {}",
+            examples.len(),
+            crate::sft_dataset::MAX_SFT_JSONL_ROWS
+        )));
+    }
+    let mut encoded_bytes = 0u64;
+    for (index, example) in examples.iter().enumerate() {
+        let bytes = serde_json::to_vec(example).map_err(|error| {
+            ApiError::training_invalid_request(format!(
+                "SFT row {index} could not be measured: {error}"
+            ))
+        })?;
+        if bytes.len() > crate::sft_dataset::MAX_SFT_JSONL_ROW_BYTES {
+            return Err(ApiError::training_invalid_request(format!(
+                "SFT row {index} is {} bytes; maximum is {}",
+                bytes.len(),
+                crate::sft_dataset::MAX_SFT_JSONL_ROW_BYTES
+            )));
+        }
+        encoded_bytes = encoded_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| ApiError::training_invalid_request("SFT corpus size overflow"))?;
+        if encoded_bytes > crate::sft_dataset::MAX_SFT_JSONL_BYTES {
+            return Err(ApiError::training_invalid_request(format!(
+                "SFT corpus materializes to more than {} bytes; split it into smaller jobs",
+                crate::sft_dataset::MAX_SFT_JSONL_BYTES
+            )));
+        }
+    }
+    let receipt_bytes = serde_json::to_vec(ingestion)
+        .map_err(|error| ApiError::internal(format!("measure SFT ingestion receipt: {error}")))?
+        .len() as u64;
+    Ok(encoded_bytes
+        .saturating_mul(4)
+        .saturating_add(receipt_bytes.saturating_mul(2)))
+}
+
+fn validate_materialized_opd_prompts(
+    surface: &str,
+    prompts: &[kiln_train::opd::OpdPrompt],
+) -> Result<(), ApiError> {
+    measure_materialized_opd_prompts(surface, prompts).map(|_| ())
+}
+
+fn measure_materialized_opd_prompts(
+    surface: &str,
+    prompts: &[kiln_train::opd::OpdPrompt],
+) -> Result<(usize, u64), ApiError> {
+    if prompts.is_empty() {
+        return Err(ApiError::training_invalid_request(format!(
+            "{surface} resolved to zero prompts"
+        )));
+    }
+    if prompts.len() > MAX_MATERIALIZED_OPD_PROMPTS {
+        return Err(ApiError::training_invalid_request(format!(
+            "{surface} resolved to {} prompts; maximum is {MAX_MATERIALIZED_OPD_PROMPTS}",
+            prompts.len()
+        )));
+    }
+    if let Some(index) = prompts.iter().position(|prompt| prompt.messages.is_empty()) {
+        return Err(ApiError::training_invalid_request(format!(
+            "{surface} prompt {index} has no messages"
+        )));
+    }
+    let mut encoded_bytes = 0u64;
+    for (index, prompt) in prompts.iter().enumerate() {
+        let bytes = serde_json::to_vec(prompt).map_err(|error| {
+            ApiError::training_invalid_request(format!(
+                "{surface} prompt {index} could not be measured: {error}"
+            ))
+        })?;
+        encoded_bytes = encoded_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| {
+                ApiError::training_invalid_request(format!(
+                    "{surface} materialized prompt size overflow"
+                ))
+            })?;
+        if encoded_bytes > MAX_MATERIALIZED_OPD_PROMPT_BYTES {
+            return Err(ApiError::training_invalid_request(format!(
+                "{surface} materializes to more than {MAX_MATERIALIZED_OPD_PROMPT_BYTES} bytes; split it into smaller jobs"
+            )));
+        }
+    }
+    Ok((prompts.len(), encoded_bytes))
+}
+
+fn exact_opd_admission_max_seq_len(
+    prompts: &[kiln_train::opd::OpdPrompt],
+    config: &kiln_train::OpdConfig,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+) -> Result<usize, ApiError> {
+    let mut longest = 0usize;
+    for (index, prompt) in prompts.iter().enumerate() {
+        let rendered = tokenizer
+            .apply_chat_template(&prompt.messages)
+            .map_err(|error| {
+                ApiError::training_invalid_request(format!(
+                    "OPD prompt {index} failed chat-template rendering during admission: {error}"
+                ))
+            })?;
+        let tokens = tokenizer.encode(&rendered).map_err(|error| {
+            ApiError::training_invalid_request(format!(
+                "OPD prompt {index} failed tokenization during admission: {error}"
+            ))
+        })?;
+        longest = longest.max(tokens.len());
+    }
+    longest.checked_add(config.max_tokens).ok_or_else(|| {
+        ApiError::training_invalid_request("OPD prompt plus rollout token count overflow")
     })
+}
+
+fn conservative_opd_fixture_sequence_tokens(
+    prompt: &kiln_train::opd::OpdPrompt,
+    config: &kiln_train::OpdConfig,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+) -> Result<u64, ApiError> {
+    // Runtime fixture keys use tokenized sequences, but charging at least one
+    // token per compact source byte also covers owned strings, trajectory
+    // masks, asymmetric teacher context, and chat-template bookkeeping.
+    let source_bytes = serde_json::to_vec(prompt)
+        .map_err(|error| {
+            ApiError::training_invalid_request(format!(
+                "measure OPD prompt for teacher-fixture admission: {error}"
+            ))
+        })?
+        .len() as u64;
+    let rendered_tokens = if prompt.trajectory.is_empty() {
+        let rendered = tokenizer
+            .apply_chat_template(&prompt.messages)
+            .map_err(|error| {
+                ApiError::training_invalid_request(format!(
+                    "render OPD prompt for teacher-fixture admission: {error}"
+                ))
+            })?;
+        tokenizer
+            .encode(&rendered)
+            .map_err(|error| {
+                ApiError::training_invalid_request(format!(
+                    "tokenize OPD prompt for teacher-fixture admission: {error}"
+                ))
+            })?
+            .len() as u64
+    } else {
+        kiln_train::trajectory_mask::build_masks_from_trajectory(
+            &prompt.trajectory,
+            &prompt.messages,
+            tokenizer,
+            &kiln_train::trajectory_mask::MaskConfig::default(),
+        )
+        .map_err(|error| {
+            ApiError::training_invalid_request(format!(
+                "tokenize OPD trajectory for teacher-fixture admission: {error:#}"
+            ))
+        })?
+        .input_ids
+        .len() as u64
+    };
+    let rollout_tokens = if matches!(
+        config.training_mode,
+        kiln_train::opd::OpdTrainingMode::OnPolicy
+    ) {
+        config.max_tokens as u64
+    } else {
+        0
+    };
+    source_bytes
+        .max(rendered_tokens)
+        .checked_add(rollout_tokens)
+        // Fixed slack covers generation/chat-template sentinel tokens whose
+        // text is not present in the serialized prompt.
+        .and_then(|tokens| tokens.checked_add(64))
+        .ok_or_else(|| {
+            ApiError::training_invalid_request("OPD teacher-fixture token bound overflow")
+        })
+}
+
+fn conservative_opd_fixture_bytes(
+    prompts: &[kiln_train::opd::OpdPrompt],
+    config: &kiln_train::OpdConfig,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    extra_teacher_context_bytes: u64,
+    fixture_copies: u64,
+) -> Result<u64, ApiError> {
+    let sequence_tokens = prompts.iter().try_fold(0u64, |total, prompt| {
+        total
+            .checked_add(conservative_opd_fixture_sequence_tokens(
+                prompt, config, tokenizer,
+            )?)
+            .ok_or_else(|| {
+                ApiError::training_invalid_request("OPD teacher-fixture token total overflow")
+            })
+    })?;
+    let sequence_tokens = sequence_tokens
+        .checked_add(extra_teacher_context_bytes)
+        .ok_or_else(|| ApiError::training_invalid_request("OPD teacher context size overflow"))?;
+    crate::training_queue::conservative_teacher_fixture_bytes(
+        sequence_tokens,
+        config.top_k as u64,
+        fixture_copies,
+    )
+    .ok_or_else(|| {
+        ApiError::training_invalid_request("OPD teacher-fixture memory estimate overflow")
+    })
+}
+
+fn queued_request_weight_bytes<T: serde::Serialize>(request: &T) -> u64 {
+    serde_json::to_vec(request)
+        .ok()
+        .and_then(|bytes| u64::try_from(bytes.len()).ok())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(4)
+}
+
+fn retained_teacher_fixture_bytes_for_entry(
+    state: &AppState,
+    entry: &QueueEntry,
+) -> Result<u64, ApiError> {
+    use crate::training_queue::PreparedTrainingData;
+
+    let tokenizer = state.tokenizer.as_ref();
+    match (&entry.job, &entry.prepared_data) {
+        (QueuedJob::Sft(_), _) | (QueuedJob::Grpo(_), _) => Ok(0),
+        (QueuedJob::Opd(request), prepared) => {
+            let prompts = match prepared {
+                PreparedTrainingData::None => request.prompts.as_slice(),
+                PreparedTrainingData::OpdPrompts(prompts) => prompts.as_slice(),
+                PreparedTrainingData::OpdOffPolicy(data) => data.prepared.prompts.as_slice(),
+                _ => {
+                    return Err(ApiError::internal(
+                        "OPD teacher-fixture admission received mismatched prepared data",
+                    ));
+                }
+            };
+            conservative_opd_fixture_bytes(prompts, &request.config, tokenizer, 0, 1)
+        }
+        (
+            QueuedJob::DistillRefresh(request),
+            PreparedTrainingData::DistillRefreshPrompts(prompts),
+        ) => conservative_opd_fixture_bytes(prompts, &request.config, tokenizer, 0, 1),
+        (
+            QueuedJob::DistillMerge(request),
+            PreparedTrainingData::DistillMergePrompts(per_source),
+        ) => per_source.iter().try_fold(0u64, |total, source| {
+            total
+                .checked_add(conservative_opd_fixture_bytes(
+                    &source.prompts,
+                    &request.config,
+                    tokenizer,
+                    0,
+                    // Merge transplants each source fixture into the unified
+                    // fixture while both maps are live.
+                    2,
+                )?)
+                .ok_or_else(|| {
+                    ApiError::training_invalid_request(
+                        "DistillMerge teacher-fixture memory estimate overflow",
+                    )
+                })
+        }),
+        (QueuedJob::DistillPump(request), PreparedTrainingData::DistillPumpPrompts(prompts)) => {
+            conservative_opd_fixture_bytes(prompts, &request.config, tokenizer, 0, 1)
+        }
+        (QueuedJob::DistillSelf(request), PreparedTrainingData::None) => {
+            let prompts = request.prompts.as_deref().unwrap_or(&[]);
+            let extra_context_bytes = request
+                .ground_truth
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .chain(request.documents.as_deref().unwrap_or(&[]))
+                .try_fold(0u64, |total, context| {
+                    total.checked_add(context.len() as u64).ok_or_else(|| {
+                        ApiError::training_invalid_request(
+                            "self-distillation teacher context size overflow",
+                        )
+                    })
+                })?;
+            // The self-distill builder temporarily retains teacher-keyed and
+            // student-keyed fixtures at the same time.
+            conservative_opd_fixture_bytes(
+                prompts,
+                &request.config,
+                tokenizer,
+                extra_context_bytes,
+                2,
+            )
+        }
+        _ => Err(ApiError::internal(
+            "teacher-fixture admission received mismatched queued/prepared data",
+        )),
+    }
+}
+
+fn acquire_training_entry_prepared_data_permit(
+    state: &AppState,
+    entry: &mut QueueEntry,
+) -> Result<(), ApiError> {
+    let materialized_bytes = entry.prepared_data.admission_weight_bytes();
+    let deferred_fixture_bytes = retained_teacher_fixture_bytes_for_entry(state, entry)?;
+    let queued_request_bytes = match &entry.job {
+        QueuedJob::Opd(request) => queued_request_weight_bytes(request),
+        QueuedJob::DistillRefresh(request) => queued_request_weight_bytes(request),
+        QueuedJob::DistillMerge(request) => queued_request_weight_bytes(request),
+        QueuedJob::DistillPump(request) => queued_request_weight_bytes(request),
+        QueuedJob::DistillSelf(request) => queued_request_weight_bytes(request),
+        QueuedJob::Sft(_) | QueuedJob::Grpo(_) => 0,
+    };
+    let required_bytes = materialized_bytes
+        .checked_add(deferred_fixture_bytes)
+        .and_then(|bytes| bytes.checked_add(queued_request_bytes))
+        .ok_or_else(|| {
+            ApiError::training_invalid_request("prepared training-data memory estimate overflow")
+        })?;
+    entry
+        .prepared_data_permit
+        .grow_to(required_bytes)
+        .map_err(|(current, requested)| {
+            ApiError::training_prepared_data_full(current, requested)
+        })?;
+    Ok(())
+}
+
+fn opd_preflight_admission(
+    state: &AppState,
+    prompts: &[kiln_train::opd::OpdPrompt],
+    config: &kiln_train::OpdConfig,
+    lora_rank: usize,
+) -> Result<PreflightAdmission, ApiError> {
+    let max_seq_len = exact_opd_admission_max_seq_len(prompts, config, state.tokenizer.as_ref())?;
+    enforce_training_preflight(
+        state,
+        max_seq_len,
+        EstimateOptions {
+            max_supervised_tokens: None,
+            optimizer: config.optimizer,
+            ..Default::default()
+        },
+        lora_rank,
+        false,
+    )
+}
+
+fn load_bounded_off_policy_dataset(
+    path: &str,
+    prepared_data_permit: &mut crate::training_queue::PreparedTrainingDataPermit,
+) -> Result<(PathBuf, u64, kiln_train::LoadedOffPolicyDistillationDataset), ApiError> {
+    use std::io::Read;
+
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        ApiError::training_invalid_request(format!(
+            "failed to resolve OPD dataset_path {path:?}: {error}"
+        ))
+    })?;
+    let file = std::fs::File::open(&canonical).map_err(|error| {
+        ApiError::training_invalid_request(format!(
+            "failed to open OPD dataset_path {path:?}: {error}"
+        ))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        ApiError::training_invalid_request(format!(
+            "failed to inspect OPD dataset_path {path:?}: {error}"
+        ))
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_MATERIALIZED_OPD_DATASET_BYTES {
+        return Err(ApiError::training_invalid_request(format!(
+            "OPD dataset_path {path:?} must be a regular file no larger than {MAX_MATERIALIZED_OPD_DATASET_BYTES} bytes (found {} bytes)",
+            metadata.len()
+        )));
+    }
+    prepared_data_permit
+        .grow_to(metadata.len().saturating_mul(8))
+        .map_err(|(current, requested)| {
+            ApiError::training_prepared_data_full(current, requested)
+        })?;
+    let expected_bytes = metadata.len();
+    let mut source = Vec::with_capacity(expected_bytes as usize);
+    file.take(MAX_MATERIALIZED_OPD_DATASET_BYTES + 1)
+        .read_to_end(&mut source)
+        .map_err(|error| {
+            ApiError::training_invalid_request(format!(
+                "read off-policy OPD dataset_path {path:?}: {error}"
+            ))
+        })?;
+    prepared_data_permit
+        .grow_to((source.len() as u64).saturating_mul(8))
+        .map_err(|(current, requested)| {
+            ApiError::training_prepared_data_full(current, requested)
+        })?;
+    if source.len() as u64 > MAX_MATERIALIZED_OPD_DATASET_BYTES
+        || source.len() as u64 != expected_bytes
+    {
+        return Err(ApiError::training_invalid_request(format!(
+            "OPD dataset_path {path:?} changed while it was being admitted: expected {expected_bytes} bytes, read {}",
+            source.len()
+        )));
+    }
+    let source = std::str::from_utf8(&source).map_err(|error| {
+        ApiError::training_invalid_request(format!(
+            "off-policy OPD dataset_path {path:?} is not UTF-8: {error}"
+        ))
+    })?;
+    let loaded =
+        kiln_train::parse_off_policy_distillation_dataset_str(source).map_err(|error| {
+            ApiError::training_invalid_request(format!(
+                "load off-policy OPD dataset_path {path:?}: {error:#}"
+            ))
+        })?;
+    if loaded.examples.is_empty() {
+        return Err(ApiError::training_invalid_request(format!(
+            "OPD dataset_path {path:?} contains no examples"
+        )));
+    }
+    Ok((canonical, expected_bytes, loaded))
+}
+
+fn prepare_off_policy_opd_admission(
+    state: &AppState,
+    req: &mut OpdRequest,
+    teacher_spec: &super::teachers::TeacherSpec,
+    prepared_data_permit: &mut crate::training_queue::PreparedTrainingDataPermit,
+) -> Result<crate::training_queue::PreparedOffPolicyAdmission, ApiError> {
+    let path = req.dataset_path.as_deref().ok_or_else(|| {
+        ApiError::internal("off-policy OPD materialization requires dataset_path")
+    })?;
+    let (canonical, source_size_bytes, loaded) =
+        load_bounded_off_policy_dataset(path, prepared_data_permit)?;
+    let contains_numeric_teacher_logits = loaded.examples.iter().any(|example| {
+        example
+            .teacher_tokens
+            .iter()
+            .any(|token| token.logprob.is_some() || !token.top_logprobs.is_empty())
+    });
+    let teacher_identity = loaded
+        .manifest
+        .as_ref()
+        .map(|manifest| manifest.teacher_identity().clone());
+    if contains_numeric_teacher_logits && teacher_identity.is_none() {
+        return Err(ApiError::training_invalid_request(format!(
+            "off-policy OPD dataset_path {path:?} contains numeric teacher logits but has no canonical {} first record",
+            kiln_train::OFF_POLICY_DISTILLATION_MANIFEST_SCHEMA_V1
+        )));
+    }
+    if let Some(identity) = teacher_identity.as_ref() {
+        let expected = teacher_spec.identity.as_ref().ok_or_else(|| {
+            ApiError::training_invalid_request(format!(
+                "off-policy OPD dataset_path {path:?} declares teacher revision sha256:{}, but registered teacher {:?} has no authoritative identity",
+                identity.content_revision(),
+                teacher_spec.alias
+            ))
+        })?;
+        if identity != expected {
+            return Err(ApiError::training_invalid_request(format!(
+                "off-policy OPD dataset_path {path:?} teacher revision sha256:{} does not match pinned registered teacher revision sha256:{}",
+                identity.content_revision(),
+                expected.content_revision()
+            )));
+        }
+    }
+    let source_sha256 = loaded.source_sha256.clone();
+    // Reserve the worst-case retained fixture before building it. The parsed
+    // source is bounded independently, while the top-K maps can be hundreds of
+    // times wider than JSON. Building first and checking afterward would let a
+    // small admitted source transiently allocate multiple GiB.
+    let projected_prompts = loaded
+        .examples
+        .iter()
+        .map(|example| {
+            if example.trajectory.is_empty() {
+                let mut messages = example.messages.clone();
+                messages.push(kiln_train::ChatMessage::new(
+                    "assistant",
+                    example.teacher_response.clone(),
+                ));
+                kiln_train::opd::OpdPrompt {
+                    messages,
+                    teacher_extra_messages: Vec::new(),
+                    trajectory: Vec::new(),
+                }
+            } else {
+                kiln_train::opd::OpdPrompt {
+                    messages: example.messages.clone(),
+                    teacher_extra_messages: Vec::new(),
+                    trajectory: example.trajectory.clone(),
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    let projected_materialized_bytes = source_size_bytes
+        .saturating_mul(8)
+        .max(crate::training_queue::PreparedTrainingData::prompt_weight_bytes(&projected_prompts));
+    let projected_fixture_bytes = conservative_opd_fixture_bytes(
+        &projected_prompts,
+        &req.config,
+        state.tokenizer.as_ref(),
+        0,
+        1,
+    )?;
+    let projected_total = projected_materialized_bytes
+        .checked_add(projected_fixture_bytes)
+        .and_then(|bytes| bytes.checked_add(queued_request_weight_bytes(req)))
+        .ok_or_else(|| {
+            ApiError::training_invalid_request("off-policy OPD prepared-data estimate overflow")
+        })?;
+    prepared_data_permit
+        .grow_to(projected_total)
+        .map_err(|(current, requested)| {
+            ApiError::training_prepared_data_full(current, requested)
+        })?;
+    drop(projected_prompts);
+    let prepared = kiln_train::prepare_off_policy_distillation_dataset_with_identity(
+        &loaded.examples,
+        state.tokenizer.as_ref(),
+        req.teacher.clone(),
+        teacher_identity.clone(),
+        state.model_config.vocab_size,
+        req.config.top_k,
+        req.config.objective,
+        req.config.echo.as_ref(),
+    )
+    .map_err(|error| {
+        ApiError::training_invalid_request(format!(
+            "prepare off-policy OPD dataset_path {path:?}: {error:#}"
+        ))
+    })?;
+    validate_materialized_opd_prompts("OPD dataset_path", &prepared.prompts)?;
+    req.dataset_path = Some(canonical.to_string_lossy().into_owned());
+    Ok(crate::training_queue::PreparedOffPolicyAdmission {
+        prepared,
+        source_sha256,
+        source_size_bytes,
+        teacher_identity,
+    })
+}
+
+fn prepare_training_entry_admission(
+    state: &AppState,
+    info: &mut TrainingJobInfo,
+    entry: &mut QueueEntry,
+) -> Result<(), ApiError> {
+    use crate::training_queue::{
+        PreparedDistillMergeSource, PreparedSftAdmission, PreparedTrainingData, QueuedJob,
+    };
+
+    match &mut entry.job {
+        QueuedJob::Sft(req) => {
+            if !matches!(entry.prepared_data, PreparedTrainingData::None) {
+                return Err(ApiError::internal(
+                    "SFT queue entry carried unexpected prepared training data",
+                ));
+            }
+            let source_count = usize::from(!req.examples.is_empty())
+                + usize::from(req.dataset_path.is_some())
+                + usize::from(req.dataset.is_some());
+            if source_count != 1 {
+                return Err(ApiError::training_invalid_request(
+                    "SFT request must use exactly one of examples, dataset_path, or dataset",
+                ));
+            }
+            let prepared = if let Some(dataset_name) = req.dataset.as_deref() {
+                if dataset_name == "corrections:active" {
+                    let store = super::corrections::CorrectionsStore::for_state(state);
+                    let (ids, examples) = store.trainable_rows();
+                    if examples.is_empty() {
+                        return Err(ApiError::training_invalid_request(
+                            "corrections:active has no trainable rows; write an ideal answer for at least one correction first",
+                        ));
+                    }
+                    let prepared = kiln_train::prepare_sft_examples(
+                        examples,
+                        state.tokenizer.as_ref(),
+                        req.config.invalid_row_policy,
+                        "corrections",
+                        Some(dataset_name.to_string()),
+                    )
+                    .map_err(|error| {
+                        ApiError::training_invalid_request(format!(
+                            "invalid corrections SFT rows: {error:#}"
+                        ))
+                    })?;
+                    info.consumed_correction_ids =
+                        retained_correction_ids(ids, &prepared.ingestion)?;
+                    prepared
+                } else {
+                    let registry = state
+                        .dataset_registry
+                        .as_ref()
+                        .ok_or_else(ApiError::dataset_registry_unavailable)?;
+                    let dataset_dir =
+                        registry
+                            .dataset_dir(dataset_name)
+                            .map_err(|error| match error {
+                                crate::eval::DatasetError::NotFound(_) => {
+                                    ApiError::dataset_not_found(dataset_name)
+                                }
+                                crate::eval::DatasetError::InvalidName(_) => {
+                                    ApiError::dataset_invalid(dataset_name)
+                                }
+                                other => ApiError::dataset_invalid(format!("{other}")),
+                            })?;
+                    let data_path = dataset_dir.join("data.jsonl");
+                    crate::sft_dataset::prepare_sft_jsonl(
+                        &data_path,
+                        state.tokenizer.as_ref(),
+                        req.config.invalid_row_policy,
+                        "named_dataset",
+                        Some(dataset_name.to_string()),
+                    )
+                    .map_err(|error| {
+                        ApiError::training_invalid_request(format!(
+                            "invalid SFT dataset {dataset_name:?}: {error:#}"
+                        ))
+                    })?
+                }
+            } else if let Some(path) = req.dataset_path.as_deref() {
+                let canonical = std::fs::canonicalize(path).map_err(|error| {
+                    ApiError::training_invalid_request(format!(
+                        "failed to resolve SFT dataset_path {path:?}: {error}"
+                    ))
+                })?;
+                let prepared = crate::sft_dataset::prepare_sft_jsonl(
+                    &canonical,
+                    state.tokenizer.as_ref(),
+                    req.config.invalid_row_policy,
+                    "dataset_path",
+                    Some(canonical.display().to_string()),
+                )
+                .map_err(|error| {
+                    ApiError::training_invalid_request(format!(
+                        "invalid SFT dataset_path {path:?}: {error:#}"
+                    ))
+                })?;
+                req.dataset_path = Some(canonical.to_string_lossy().into_owned());
+                prepared
+            } else {
+                kiln_train::prepare_sft_examples(
+                    std::mem::take(&mut req.examples),
+                    state.tokenizer.as_ref(),
+                    req.config.invalid_row_policy,
+                    "inline",
+                    None,
+                )
+                .map_err(|error| {
+                    ApiError::training_invalid_request(format!("invalid SFT rows: {error:#}"))
+                })?
+            };
+            let admission_weight_bytes =
+                sft_materialized_weight_bytes(&prepared.examples, &prepared.ingestion)?;
+            let admission = enforce_training_preflight(
+                state,
+                prepared.max_seq_len,
+                EstimateOptions {
+                    max_supervised_tokens: Some(prepared.max_supervised_tokens),
+                    recompute_boundaries:
+                        training_preflight::recompute_checkpoint_boundaries_for_seq_len(
+                            prepared.max_seq_len,
+                        ),
+                    optimizer: req.config.optimizer,
+                    ..Default::default()
+                },
+                req.config.lora_rank,
+                false,
+            )?;
+            req.config.grad_checkpoint_segments = admission.checkpoint_segments;
+            req.ingestion = Some(prepared.ingestion.clone());
+            req.examples = prepared.examples;
+            // The queue owns the exact admitted rows. Preserve source identity
+            // in the ingestion receipt, while keeping the replay request a
+            // valid single-source inline SFT payload.
+            req.dataset_path = None;
+            req.dataset = None;
+            entry.reserved_bytes = admission.reserved_bytes;
+            entry.prepared_data = PreparedTrainingData::Sft(PreparedSftAdmission {
+                ingestion: prepared.ingestion,
+                max_seq_len: prepared.max_seq_len,
+                max_supervised_tokens: prepared.max_supervised_tokens,
+                admission_weight_bytes,
+            });
+        }
+        QueuedJob::Grpo(req) => {
+            if req.dataset_path.is_some() == !req.groups.is_empty() {
+                return Err(ApiError::training_invalid_request(
+                    "GRPO request must use exactly one of groups or dataset_path",
+                ));
+            }
+            let (max_seq_len, prepared) = if let Some(path) = req.dataset_path.as_deref() {
+                let receipt = match std::mem::take(&mut entry.prepared_data) {
+                    PreparedTrainingData::None => validate_grpo_jsonl_submission(
+                        path,
+                        &state.adapter_dir.join(".training-inputs"),
+                        &mut entry.prepared_data_permit,
+                        state.tokenizer.as_ref(),
+                        &req.config,
+                        state.model_config.num_layers,
+                    )?
+                    .source_receipt
+                    .ok_or_else(|| ApiError::internal("GRPO scan omitted source receipt"))?,
+                    PreparedTrainingData::GrpoJsonl(receipt) => receipt,
+                    _ => {
+                        return Err(ApiError::internal(
+                            "GRPO queue entry carried mismatched prepared training data",
+                        ));
+                    }
+                };
+                req.dataset_path = Some(receipt.path.to_string_lossy().into_owned());
+                (
+                    receipt.max_seq_len,
+                    PreparedTrainingData::GrpoJsonl(receipt),
+                )
+            } else {
+                if !matches!(entry.prepared_data, PreparedTrainingData::None) {
+                    return Err(ApiError::internal(
+                        "inline GRPO queue entry carried external source data",
+                    ));
+                }
+                let mut maximum = 0usize;
+                for (index, group) in req.groups.iter().enumerate() {
+                    let row_max =
+                        kiln_train::trainer::validate_grpo_group_policy_data_and_max_seq_len(
+                            group,
+                            &req.config,
+                            state.tokenizer.as_ref(),
+                            index + 1,
+                        )
+                        .map_err(|error| {
+                            ApiError::training_invalid_request(format!(
+                                "invalid inline GRPO group {index}: {error:#}"
+                            ))
+                        })?;
+                    maximum = maximum.max(row_max);
+                }
+                (maximum, PreparedTrainingData::None)
+            };
+            let admission = enforce_training_preflight(
+                state,
+                max_seq_len,
+                EstimateOptions {
+                    optimizer: req.config.optimizer,
+                    ..Default::default()
+                },
+                req.config.lora_rank,
+                false,
+            )?;
+            req.config.grad_checkpoint_segments = admission.checkpoint_segments;
+            entry.reserved_bytes = admission.reserved_bytes;
+            entry.prepared_data = prepared;
+        }
+        QueuedJob::Opd(req) => {
+            if req.dataset_path.is_some() == !req.prompts.is_empty() {
+                return Err(ApiError::training_invalid_request(
+                    "OPD request must use exactly one of prompts or dataset_path",
+                ));
+            }
+            validate_opd_config_at_submit(&req.config)?;
+            let prepared = if let Some(path) = req.dataset_path.as_deref() {
+                if !matches!(entry.prepared_data, PreparedTrainingData::None) {
+                    return Err(ApiError::internal(
+                        "OPD queue entry carried caller-supplied prepared training data",
+                    ));
+                }
+                if crate::dataset_resolve::is_agent_traces_selector(path) {
+                    let prompts = crate::dataset_resolve::resolve_agent_trace_prompts(
+                        &state.adapter_dir,
+                        path,
+                        crate::recent_requests::now_unix_ms() as i64,
+                    )
+                    .map_err(ApiError::training_invalid_request)?;
+                    validate_materialized_opd_prompts("OPD agent-trace selector", &prompts)?;
+                    PreparedTrainingData::OpdPrompts(prompts)
+                } else {
+                    let teacher_spec = entry.teacher_bindings.first().ok_or_else(|| {
+                        ApiError::internal("OPD dataset admission has no pinned teacher")
+                    })?;
+                    PreparedTrainingData::OpdOffPolicy(prepare_off_policy_opd_admission(
+                        state,
+                        req,
+                        teacher_spec,
+                        &mut entry.prepared_data_permit,
+                    )?)
+                }
+            } else {
+                validate_materialized_opd_prompts("OPD request", &req.prompts)?;
+                PreparedTrainingData::None
+            };
+            let prompts = match &prepared {
+                PreparedTrainingData::OpdPrompts(prompts) => prompts.as_slice(),
+                PreparedTrainingData::OpdOffPolicy(data) => data.prepared.prompts.as_slice(),
+                PreparedTrainingData::None => req.prompts.as_slice(),
+                _ => unreachable!("OPD admission constructed an OPD variant"),
+            };
+            let admission =
+                opd_preflight_admission(state, prompts, &req.config, req.config.lora_rank)?;
+            req.config.grad_checkpoint_segments = admission.checkpoint_segments;
+            entry.reserved_bytes = admission.reserved_bytes;
+            entry.prepared_data = prepared;
+        }
+        QueuedJob::DistillRefresh(req) => {
+            if !matches!(entry.prepared_data, PreparedTrainingData::None) {
+                return Err(ApiError::internal(
+                    "DistillRefresh queue entry carried caller-supplied prepared training data",
+                ));
+            }
+            validate_opd_config_at_submit(&req.config)?;
+            let prompts = match &req.new_data {
+                kiln_train::NewKnowledgeSource::Inline { examples } => examples.clone(),
+                kiln_train::NewKnowledgeSource::Dataset { dataset } => {
+                    crate::dataset_resolve::resolve_opd_dataset_selector(
+                        dataset,
+                        &state.adapter_dir,
+                        state.dataset_registry.as_deref(),
+                        crate::recent_requests::now_unix_ms() as i64,
+                    )
+                    .map_err(ApiError::training_invalid_request)?
+                }
+            };
+            validate_materialized_opd_prompts("DistillRefresh new_data", &prompts)?;
+            let admission =
+                opd_preflight_admission(state, &prompts, &req.config, req.config.lora_rank)?;
+            req.config.grad_checkpoint_segments = admission.checkpoint_segments;
+            entry.reserved_bytes = admission.reserved_bytes;
+            entry.prepared_data = PreparedTrainingData::DistillRefreshPrompts(prompts);
+        }
+        QueuedJob::DistillMerge(req) => {
+            if !matches!(entry.prepared_data, PreparedTrainingData::None) {
+                return Err(ApiError::internal(
+                    "DistillMerge queue entry carried caller-supplied prepared training data",
+                ));
+            }
+            validate_opd_config_at_submit(&req.config)?;
+            if req.sources.is_empty() {
+                return Err(ApiError::training_invalid_request(
+                    "distill_merge: sources must be non-empty",
+                ));
+            }
+            if req.rollout_budget == 0 {
+                return Err(ApiError::training_invalid_request(
+                    "distill_merge: rollout_budget must be greater than zero",
+                ));
+            }
+            let mut per_source = Vec::with_capacity(req.sources.len());
+            let mut aggregate_prompt_count = 0usize;
+            let mut aggregate_prompt_bytes = 0u64;
+            let mut max_seq_len = 0usize;
+            let mut source_names = std::collections::HashSet::with_capacity(req.sources.len());
+            let mut prompt_owners = std::collections::HashMap::new();
+            let _adapter_guard = crate::adapter_swap::adapter_mutation_guard_blocking(state)
+                .map_err(ApiError::training_invalid_request)?;
+            for source in &req.sources {
+                super::adapters::validate_adapter_name(&source.adapter)?;
+                if !source_names.insert(source.adapter.as_str()) {
+                    return Err(ApiError::training_invalid_request(format!(
+                        "distill_merge: duplicate source adapter {:?}",
+                        source.adapter
+                    )));
+                }
+                if !source.weight.is_finite() || source.weight <= 0.0 {
+                    return Err(ApiError::training_invalid_request(format!(
+                        "distill_merge: source adapter {:?} weight must be finite and greater than zero",
+                        source.adapter
+                    )));
+                }
+                let source_dir = std::fs::canonicalize(state.adapter_dir.join(&source.adapter))
+                    .map_err(|error| {
+                        ApiError::training_invalid_request(format!(
+                            "distill_merge: resolve source adapter `{}`: {error}",
+                            source.adapter
+                        ))
+                    })?;
+                let prompts =
+                    crate::training_queue::derive_source_prompts(&source_dir, &source.adapter)
+                        .map_err(ApiError::training_invalid_request)?;
+                let (source_prompt_count, source_prompt_bytes) = measure_materialized_opd_prompts(
+                    &format!("DistillMerge source {:?}", source.adapter),
+                    &prompts,
+                )?;
+                aggregate_prompt_count = aggregate_prompt_count
+                    .checked_add(source_prompt_count)
+                    .ok_or_else(|| {
+                        ApiError::training_invalid_request(
+                            "DistillMerge aggregate prompt count overflow",
+                        )
+                    })?;
+                aggregate_prompt_bytes = aggregate_prompt_bytes
+                    .checked_add(source_prompt_bytes)
+                    .ok_or_else(|| {
+                        ApiError::training_invalid_request(
+                            "DistillMerge aggregate prompt size overflow",
+                        )
+                    })?;
+                if aggregate_prompt_count > MAX_MATERIALIZED_OPD_PROMPTS
+                    || aggregate_prompt_bytes > MAX_MATERIALIZED_OPD_PROMPT_BYTES
+                {
+                    return Err(ApiError::training_invalid_request(format!(
+                        "DistillMerge materializes {aggregate_prompt_count} prompts / {aggregate_prompt_bytes} bytes across sources; maximum is {MAX_MATERIALIZED_OPD_PROMPTS} prompts / {MAX_MATERIALIZED_OPD_PROMPT_BYTES} bytes"
+                    )));
+                }
+                for prompt in &prompts {
+                    let prompt_key =
+                        distill_merge_prompt_sequence_sha256(prompt, state.tokenizer.as_ref())?;
+                    if let Some(owner) = prompt_owners.get(&prompt_key) {
+                        if owner != &source.adapter {
+                            return Err(ApiError::training_invalid_request(format!(
+                                "distill_merge: source adapters {owner:?} and {:?} contain the same tokenized prompt; shared prompts require weighted multi-teacher aggregation, which is not implemented, so deduplicate or pre-sample the replay logs before submitting",
+                                source.adapter
+                            )));
+                        }
+                    } else {
+                        prompt_owners.insert(prompt_key, source.adapter.clone());
+                    }
+                }
+                max_seq_len = max_seq_len.max(exact_opd_admission_max_seq_len(
+                    &prompts,
+                    &req.config,
+                    state.tokenizer.as_ref(),
+                )?);
+                let source_identity =
+                    kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(&source_dir)
+                        .map_err(|error| {
+                            ApiError::training_invalid_request(format!(
+                                "distill_merge: fingerprint source adapter `{}` at {}: {error:#}",
+                                source.adapter,
+                                source_dir.display()
+                            ))
+                        })?;
+                per_source.push(PreparedDistillMergeSource {
+                    source: source.clone(),
+                    prompts,
+                    adapter_path: source_dir,
+                    source_identity,
+                });
+            }
+            let materialized_counts = per_source
+                .iter()
+                .map(|source| source.prompts.len())
+                .collect::<Vec<_>>();
+            validate_distill_merge_sampling_contract(req, &materialized_counts)?;
+            let admission = enforce_training_preflight(
+                state,
+                max_seq_len,
+                EstimateOptions {
+                    optimizer: req.config.optimizer,
+                    ..Default::default()
+                },
+                req.config.lora_rank,
+                false,
+            )?;
+            req.config.grad_checkpoint_segments = admission.checkpoint_segments;
+            entry.reserved_bytes = admission.reserved_bytes;
+            entry.prepared_data = PreparedTrainingData::DistillMergePrompts(per_source);
+        }
+        QueuedJob::DistillPump(req) => {
+            if !matches!(entry.prepared_data, PreparedTrainingData::None) {
+                return Err(ApiError::internal(
+                    "DistillPump queue entry carried caller-supplied prepared training data",
+                ));
+            }
+            validate_opd_config_at_submit(&req.config)?;
+            let prompts = match &req.mode {
+                kiln_train::DistillPumpMode::Examples { examples } => examples.clone(),
+                kiln_train::DistillPumpMode::Domain { domain } => {
+                    crate::training_queue::canonical_domain_seed_prompts(domain)
+                        .map_err(ApiError::training_invalid_request)?
+                }
+                kiln_train::DistillPumpMode::Wide { .. } => {
+                    crate::training_queue::wide_seed_prompts()
+                }
+            };
+            validate_materialized_opd_prompts("DistillPump mode", &prompts)?;
+            let lora_rank = req.rank.unwrap_or(req.config.lora_rank);
+            let admission = opd_preflight_admission(state, &prompts, &req.config, lora_rank)?;
+            req.config.grad_checkpoint_segments = admission.checkpoint_segments;
+            entry.reserved_bytes = admission.reserved_bytes;
+            entry.prepared_data = PreparedTrainingData::DistillPumpPrompts(prompts);
+        }
+        QueuedJob::DistillSelf(req) => {
+            if !matches!(entry.prepared_data, PreparedTrainingData::None) {
+                return Err(ApiError::internal(
+                    "DistillSelf queue entry carried unexpected prepared training data",
+                ));
+            }
+            validate_opd_config_at_submit(&req.config)?;
+            let prompts = req.prompts.as_deref().unwrap_or(&[]);
+            validate_materialized_opd_prompts("DistillSelf request", prompts)?;
+            let admission =
+                opd_preflight_admission(state, prompts, &req.config, req.config.lora_rank)?;
+            req.config.grad_checkpoint_segments = admission.checkpoint_segments;
+            entry.reserved_bytes = admission.reserved_bytes;
+            entry.prepared_data = PreparedTrainingData::None;
+        }
+    }
+    Ok(())
 }
 
 /// Atomically reserve queue/tracking capacity and publish a complete batch.
 /// A rejected batch leaves both the tracking map and FIFO unchanged.
-pub(crate) fn admit_training_jobs(
+fn admit_training_jobs_with_summary(
     state: &AppState,
     mut pending: Vec<(TrainingJobInfo, QueueEntry)>,
-) -> Result<usize, ApiError> {
+) -> Result<TrainingAdmissionResult, ApiError> {
     ensure_training_backend_admission(state)?;
+    let admission_lock = TRAINING_DATA_ADMISSION_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+    let _admission_guard = match admission_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            return Err(ApiError::training_admission_busy());
+        }
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    };
+    // Own the single process admission permit, then reject full queues before
+    // reading or materializing any caller-controlled dataset. Final
+    // publication rechecks both caps atomically.
+    enforce_queue_capacity_for(state, pending.len())?;
     for (info, entry) in &mut pending {
         if let QueuedJob::Sft(req) = &entry.job {
             validate_sft_config_at_submit(&req.config)?;
@@ -2309,14 +3591,52 @@ pub(crate) fn admit_training_jobs(
         info.effective_seed = Some(effective_seed);
     }
     pin_registered_teachers(state, &mut pending)?;
-    admit_training_jobs_into(
+    for (info, entry) in &mut pending {
+        prepare_training_entry_admission(state, info, entry)?;
+        acquire_training_entry_prepared_data_permit(state, entry)?;
+    }
+    let sft_summaries = pending
+        .iter()
+        .filter_map(|(info, entry)| {
+            let crate::training_queue::PreparedTrainingData::Sft(prepared) = &entry.prepared_data
+            else {
+                return None;
+            };
+            Some((
+                info.job_id.clone(),
+                SftSubmissionStats {
+                    rows_read: prepared.ingestion.rows_read,
+                    num_examples: prepared.ingestion.rows_kept,
+                    rows_rejected: prepared.ingestion.rows_rejected,
+                    max_seq_len: prepared.max_seq_len,
+                    max_supervised_tokens: prepared.max_supervised_tokens,
+                    streaming_dataset: !matches!(
+                        prepared.ingestion.source.as_str(),
+                        "inline" | "corrections"
+                    ),
+                },
+            ))
+        })
+        .collect();
+    let queue_position = admit_training_jobs_into(
         &state.training_jobs,
         &state.training_queue,
         state.max_queued_training_jobs,
         state.max_tracked_jobs,
         !matches!(state.backend.as_ref(), ModelBackend::Mock { .. }),
         pending,
-    )
+    )?;
+    Ok(TrainingAdmissionResult {
+        queue_position,
+        sft_summaries,
+    })
+}
+
+pub(crate) fn admit_training_jobs(
+    state: &AppState,
+    pending: Vec<(TrainingJobInfo, QueueEntry)>,
+) -> Result<usize, ApiError> {
+    admit_training_jobs_with_summary(state, pending).map(|result| result.queue_position)
 }
 
 /// Return exact decimal seeds for a just-admitted group of jobs. Composite
@@ -2343,37 +3663,6 @@ pub(crate) fn admitted_training_seeds(
         .collect()
 }
 
-/// Working-set preflight for distill-family jobs: longest inline prompt
-/// plus the rollout budget, same estimator SFT/GRPO/OPD use. Distill jobs
-/// used to enqueue with `reserved_bytes: 0` — no VRAM check, no governor
-/// reservation — on a host that has been hard-crashed by exactly that
-/// class of unchecked training allocation before.
-fn distill_working_set_reservation(
-    state: &AppState,
-    inline_prompts: &[kiln_train::opd::OpdPrompt],
-    config: &kiln_train::OpdConfig,
-) -> Result<u64, ApiError> {
-    let max_seq_len = training_preflight::approximate_max_seq_len_opd(
-        inline_prompts,
-        config.max_tokens,
-        Some(state.tokenizer.as_ref()),
-    );
-    Ok(enforce_training_preflight(
-        state,
-        max_seq_len,
-        EstimateOptions {
-            max_supervised_tokens: None,
-            recompute_boundaries: training_preflight::recompute_checkpoint_boundaries_for_seq_len(
-                max_seq_len,
-            ),
-            ..Default::default()
-        },
-        config.lora_rank,
-        false,
-    )?
-    .reserved_bytes)
-}
-
 /// Shared registration+enqueue for distill_* endpoints. Same shape as
 /// `submit_distill_refresh`/`submit_opd` but inlined for the simpler
 /// distill variants.
@@ -2383,7 +3672,6 @@ fn register_and_enqueue_distill(
     adapter_name: &str,
     auto_load: bool,
     effective_seed: u64,
-    reserved_bytes: u64,
     job: QueuedJob,
 ) -> Result<usize, ApiError> {
     let info = TrainingJobInfo {
@@ -2415,8 +3703,10 @@ fn register_and_enqueue_distill(
             info,
             QueueEntry {
                 job_id: job_id.to_string(),
-                reserved_bytes,
+                reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                prepared_data: Default::default(),
+                prepared_data_permit: Default::default(),
                 job,
             },
         )],
@@ -3034,15 +4324,21 @@ async fn job_detail(
     Ok(Json(detail))
 }
 
-pub fn routes() -> Router<AppState> {
+const TRAINING_REQUEST_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
+fn routes_with_body_limit(limit_bytes: usize) -> Router<AppState> {
     Router::new()
         .route(
             "/v1/train/sft",
-            post(submit_sft).layer(DefaultBodyLimit::disable()),
+            post(submit_sft).layer(DefaultBodyLimit::max(limit_bytes)),
         )
         .route(
             "/v1/train/grpo",
-            post(submit_grpo).layer(DefaultBodyLimit::disable()),
+            post(submit_grpo).layer(DefaultBodyLimit::max(limit_bytes)),
+        )
+        .route(
+            "/v1/training/grpo",
+            post(submit_grpo).layer(DefaultBodyLimit::max(limit_bytes)),
         )
         // Canonical alias for /v1/train/grpo after the ECHO trajectory
         // schema landing. The "agentic" name reflects what the endpoint
@@ -3051,27 +4347,27 @@ pub fn routes() -> Router<AppState> {
         // keep working unchanged.
         .route(
             "/v1/train/agentic",
-            post(submit_grpo).layer(DefaultBodyLimit::disable()),
+            post(submit_grpo).layer(DefaultBodyLimit::max(limit_bytes)),
         )
         .route(
             "/v1/train/opd",
-            post(submit_opd).layer(DefaultBodyLimit::disable()),
+            post(submit_opd).layer(DefaultBodyLimit::max(limit_bytes)),
         )
         .route(
             "/v1/distill/refresh",
-            post(submit_distill_refresh).layer(DefaultBodyLimit::disable()),
+            post(submit_distill_refresh).layer(DefaultBodyLimit::max(limit_bytes)),
         )
         .route(
             "/v1/adapters/distill_merge",
-            post(submit_distill_merge).layer(DefaultBodyLimit::disable()),
+            post(submit_distill_merge).layer(DefaultBodyLimit::max(limit_bytes)),
         )
         .route(
             "/v1/distill/pump",
-            post(submit_distill_pump).layer(DefaultBodyLimit::disable()),
+            post(submit_distill_pump).layer(DefaultBodyLimit::max(limit_bytes)),
         )
         .route(
             "/v1/distill/self",
-            post(submit_distill_self).layer(DefaultBodyLimit::disable()),
+            post(submit_distill_self).layer(DefaultBodyLimit::max(limit_bytes)),
         )
         .route("/v1/train/status", get(training_status))
         .route("/v1/train/status/{job_id}", get(job_status))
@@ -3081,6 +4377,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/v1/train/queue", get(list_queue))
         .route("/v1/train/queue/{job_id}", delete(cancel_queued_job))
+}
+
+pub fn routes() -> Router<AppState> {
+    routes_with_body_limit(TRAINING_REQUEST_BODY_LIMIT_BYTES)
 }
 
 #[cfg(test)]
@@ -3099,8 +4399,49 @@ mod tests {
         SftExample, SftInvalidRowPolicy,
     };
     use std::sync::{Arc, Barrier, RwLock};
+    use tower::ServiceExt;
 
     use crate::TEST_ENV_LOCK as ENV_LOCK;
+
+    #[tokio::test]
+    async fn training_routes_reject_oversized_json_before_handler_admission() {
+        let app = routes_with_body_limit(128).with_state(teacher_binding_test_state());
+        for route in [
+            "/v1/train/sft",
+            "/v1/train/grpo",
+            "/v1/training/grpo",
+            "/v1/train/agentic",
+            "/v1/train/opd",
+            "/v1/distill/refresh",
+            "/v1/adapters/distill_merge",
+            "/v1/distill/pump",
+            "/v1/distill/self",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::post(route)
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .body(axum::body::Body::from(vec![b' '; 129]))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "{route}"
+            );
+            let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                body["error"]["code"], "training_request_too_large",
+                "{route}: {body}"
+            );
+        }
+    }
 
     #[test]
     fn correction_ids_follow_the_server_owned_skip_manifest() {
@@ -3142,6 +4483,33 @@ mod tests {
                 .message
                 .contains("row IDs (2) differ from ingested rows (3)")
         );
+    }
+
+    #[test]
+    fn distill_merge_rejects_unimplemented_weight_or_budget_semantics() {
+        let mut request: DistillMergeRequest = serde_json::from_value(serde_json::json!({
+            "name": "merged",
+            "sources": [
+                {"adapter": "one", "weight": 1.0},
+                {"adapter": "two", "weight": 2.0}
+            ],
+            "rollout_budget": 6,
+            "config": {"epochs": 2}
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_distill_merge_sampling_contract(&request, &[1, 2]).unwrap(),
+            6
+        );
+
+        request.sources[1].weight = 1.0;
+        let error = validate_distill_merge_sampling_contract(&request, &[1, 2]).unwrap_err();
+        assert!(error.message.contains("cannot silently approximate"));
+
+        request.sources[1].weight = 2.0;
+        request.rollout_budget = 5;
+        let error = validate_distill_merge_sampling_contract(&request, &[1, 2]).unwrap_err();
+        assert!(error.message.contains("rollout_budget=6"));
     }
 
     fn discovery_teacher_identity() -> kiln_train::TeacherIdentityV1 {
@@ -3523,6 +4891,8 @@ mod tests {
                 job_id,
                 reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                prepared_data: Default::default(),
+                prepared_data_permit: Default::default(),
                 job: QueuedJob::Sft(request),
             },
         )
@@ -4196,14 +5566,7 @@ mod tests {
     fn dynamic_training_available_counts_allocator_and_reclaimable_kv() {
         let gb = 1024 * 1024 * 1024;
         assert_eq!(
-            combine_training_available_bytes(
-                21 * gb,
-                Some(80 * gb),
-                8 * gb,
-                120 * gb,
-                gb,
-                VramSource::NvidiaSmi,
-            ),
+            combine_training_available_bytes(21 * gb, Some(80 * gb), 8 * gb, 120 * gb, gb, false,),
             88 * gb
         );
     }
@@ -4212,14 +5575,7 @@ mod tests {
     fn dynamic_training_available_does_not_trust_allocator_over_live_unified_memory() {
         let gb = 1024 * 1024 * 1024;
         assert_eq!(
-            combine_training_available_bytes(
-                21 * gb,
-                Some(80 * gb),
-                8 * gb,
-                120 * gb,
-                gb,
-                VramSource::LinuxDrmSysfsUnified,
-            ),
+            combine_training_available_bytes(21 * gb, Some(80 * gb), 8 * gb, 120 * gb, gb, true,),
             29 * gb
         );
     }
@@ -4228,31 +5584,69 @@ mod tests {
     fn dynamic_training_available_is_capped_by_total_minus_floor() {
         let gb = 1024 * 1024 * 1024;
         assert_eq!(
-            combine_training_available_bytes(
-                21 * gb,
-                Some(118 * gb),
-                8 * gb,
-                120 * gb,
-                gb,
-                VramSource::NvidiaSmi,
-            ),
+            combine_training_available_bytes(21 * gb, Some(118 * gb), 8 * gb, 120 * gb, gb, false,),
             119 * gb
         );
     }
 
     #[test]
-    fn auto_mode_reservation_uses_max_checkpointed_shape_for_long_rows() {
+    fn configured_training_memory_is_an_enforced_working_set_cap() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(
+            apply_configured_training_budget_cap(20 * gb, Some(4.0), 4 * gb),
+            4 * gb
+        );
+        assert_eq!(
+            apply_configured_training_budget_cap(20 * gb, None, 4 * gb),
+            20 * gb
+        );
+    }
+
+    #[test]
+    fn queued_materialized_training_data_has_an_aggregate_host_memory_cap() {
+        validate_prepared_training_data_capacity(128 * 1024 * 1024, 64 * 1024 * 1024).unwrap();
+        let error = validate_prepared_training_data_capacity(480 * 1024 * 1024, 64 * 1024 * 1024)
+            .unwrap_err();
+        assert_eq!(error.code, "training_prepared_data_full");
+        assert_eq!(error.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn teacher_fixture_admission_charges_top_k_pairs_and_overlapping_batches() {
+        let small = crate::training_queue::conservative_teacher_fixture_bytes(1_024, 4, 1)
+            .expect("small fixture estimate");
+        let wide = crate::training_queue::conservative_teacher_fixture_bytes(1_024, 32, 1)
+            .expect("wide fixture estimate");
+        let self_distill = crate::training_queue::conservative_teacher_fixture_bytes(1_024, 32, 2)
+            .expect("self-distill fixture estimate");
+        assert!(wide > small);
+        assert_eq!(self_distill, wide * 2);
+
+        let million_token_top_k =
+            crate::training_queue::conservative_teacher_fixture_bytes(1_000_000, 32, 1)
+                .expect("large fixture estimate");
+        assert!(
+            million_token_top_k > crate::training_queue::MAX_LIVE_PREPARED_TRAINING_BYTES,
+            "a small textual corpus must not hide a multi-GiB-capable top-K fixture"
+        );
+    }
+
+    #[test]
+    fn auto_mode_reservation_uses_the_live_admitted_exact_plan() {
         let cfg = kiln_core::config::ModelConfig::qwen3_5_4b();
         let gb = 1024 * 1024 * 1024;
         let vram = kiln_memory::vram::GpuVramInfo {
             total_bytes: 120 * gb,
             source: VramSource::LinuxDrmSysfsUnified,
+            unified: true,
         };
         let options = EstimateOptions {
             max_supervised_tokens: Some(512),
             recompute_boundaries: true,
             activation_bytes_per_elem: Some(10),
             streaming_gdn_tile_tokens: Some(1024),
+            optimizer: kiln_train::Optimizer::default(),
+            lora_residency: LoraResidency::default(),
         };
         let max_seq_len = 104_412;
         let one_segment = training_preflight::estimate_step_working_set_with_options(
@@ -4260,28 +5654,34 @@ mod tests {
             max_seq_len,
             8,
             1,
-            WeightResidency::for_vram_source(vram.source),
+            WeightResidency::for_vram(&vram),
             true,
             options,
         );
-        let reservation_segments = auto_mode_reservation_segments(&cfg, 1);
-        assert_eq!(
-            reservation_segments, cfg.num_layers,
-            "auto-mode queue accounting should reserve the largest row with maximum checkpointing"
-        );
-        let reserved = training_preflight::estimate_step_working_set_with_options(
+        let eight_segments = training_preflight::estimate_step_working_set_with_options(
             &cfg,
             max_seq_len,
             8,
-            reservation_segments,
-            WeightResidency::for_vram_source(vram.source),
+            8,
+            WeightResidency::for_vram(&vram),
             true,
             options,
         );
-        assert!(
-            reserved.total_bytes < one_segment.total_bytes,
-            "reservation should shrink when runtime-style checkpointing engages"
+        let (admitted_segments, admitted) = training_preflight::auto_fit_checkpoint_segments(
+            &cfg,
+            max_seq_len,
+            8,
+            cfg.num_layers,
+            WeightResidency::for_vram(&vram),
+            true,
+            options,
+            eight_segments.total_bytes,
         );
+        assert!(
+            admitted_segments > 1 && admitted.total_bytes <= eight_segments.total_bytes,
+            "live-tight admission should resolve a checkpointed plan"
+        );
+        assert!(one_segment.total_bytes > admitted.total_bytes);
     }
 
     #[test]
@@ -4374,22 +5774,120 @@ mod tests {
     }
 
     #[test]
-    fn grpo_dataset_path_submission_validation_is_head_only() {
+    fn grpo_dataset_path_submission_rejects_an_invalid_tail_row() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("grpo.jsonl");
-        let first = serde_json::to_string(&grpo_group()).unwrap();
+        let mut first_group = grpo_group();
+        first_group.messages = vec![ChatMessage::new("user", "a")];
+        first_group.completions[0].text = "b".to_string();
+        let first = serde_json::to_string(&first_group).unwrap();
         std::fs::write(&path, format!("{first}\nthis is not json\n")).unwrap();
+        let tokenizer = crate::api::test_tokenizer().with_chat_template(
+            "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
+        );
 
-        let stats = validate_grpo_jsonl_submission_head(
+        let mut permit = crate::training_queue::PreparedTrainingDataPermit::default();
+        let error = validate_grpo_jsonl_submission(
             path.to_str().unwrap(),
-            None,
+            dir.path(),
+            &mut permit,
+            &tokenizer,
             &GrpoConfig::default(),
+            2,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("line 2"), "{}", error.message);
+        assert!(
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with("grpo-")),
+            "invalid admission must remove its incomplete private snapshot"
+        );
+    }
+
+    #[test]
+    fn grpo_dataset_path_submission_scans_every_row_for_the_maximum_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grpo.jsonl");
+        let mut short = grpo_group();
+        short.messages = vec![ChatMessage::new("user", "a")];
+        short.completions[0].text = "b".to_string();
+        let mut long = grpo_group();
+        long.completions[0].text = "ab".repeat(64);
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&short).unwrap(),
+                serde_json::to_string(&long).unwrap()
+            ),
+        )
+        .unwrap();
+        let tokenizer = crate::api::test_tokenizer().with_chat_template(
+            "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
+        );
+
+        let mut permit = crate::training_queue::PreparedTrainingDataPermit::default();
+        let stats = validate_grpo_jsonl_submission(
+            path.to_str().unwrap(),
+            dir.path(),
+            &mut permit,
+            &tokenizer,
+            &GrpoConfig::default(),
+            2,
         )
         .unwrap();
         assert!(stats.streaming_dataset);
-        assert_eq!(stats.num_groups, None);
-        assert_eq!(stats.total_completions, None);
+        assert_eq!(stats.num_groups, Some(2));
+        assert_eq!(stats.total_completions, Some(2));
         assert!(stats.max_seq_len > 0);
+        let receipt = stats.source_receipt.unwrap();
+        assert_eq!(receipt.groups, 2);
+        assert_eq!(receipt.completions, 2);
+        assert_eq!(receipt.max_seq_len, stats.max_seq_len);
+        assert!(receipt.source_sha256.starts_with("sha256:"));
+        let original = std::fs::canonicalize(&path).unwrap();
+        assert_ne!(receipt.path, original);
+        assert!(receipt.server_owned);
+        assert!(
+            std::fs::metadata(&receipt.path)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        let snapshot_path = receipt.path.clone();
+        let snapshot_sha256 = kiln_train::train_receipt::sha256_file(&snapshot_path).unwrap();
+        std::fs::write(&path, b"caller replaced the original after admission\n").unwrap();
+        assert_eq!(
+            kiln_train::train_receipt::sha256_file(&snapshot_path).unwrap(),
+            snapshot_sha256,
+            "the trainer source must be independent of the caller path"
+        );
+        assert_eq!(
+            permit.bytes(),
+            receipt.size_bytes + receipt.preflight_host_bytes
+        );
+        drop(receipt);
+        assert!(!snapshot_path.exists());
+    }
+
+    #[test]
+    fn opd_dataset_materialization_is_bounded_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("too-large.jsonl");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_MATERIALIZED_OPD_DATASET_BYTES + 1)
+            .unwrap();
+
+        let mut permit = crate::training_queue::PreparedTrainingDataPermit::default();
+        let error =
+            load_bounded_off_policy_dataset(path.to_str().unwrap(), &mut permit).unwrap_err();
+        assert!(
+            error.message.contains("no larger than"),
+            "{}",
+            error.message
+        );
     }
 
     fn opd_request_payload() -> OpdRequest {
@@ -4420,6 +5918,26 @@ mod tests {
             OpdLossGranularity::TeacherTopK
         ));
         assert_eq!(parsed.config.max_tokens, 7168);
+    }
+
+    #[test]
+    fn opd_checkpoint_plan_is_not_client_deserializable() {
+        let req: OpdRequest = serde_json::from_value(serde_json::json!({
+            "prompts": [{"messages": [{"role": "user", "content": "a"}]}],
+            "teacher": "fixture",
+            "config": {"grad_checkpoint_segments": 1}
+        }))
+        .unwrap();
+        assert_eq!(req.config.grad_checkpoint_segments, None);
+        let encoded = serde_json::to_value(&req.config).unwrap();
+        assert!(encoded.get("grad_checkpoint_segments").is_none());
+
+        let mut admitted = req.config;
+        admitted.grad_checkpoint_segments = Some(7);
+        assert_eq!(
+            serde_json::to_value(&admitted).unwrap()["grad_checkpoint_segments"],
+            7
+        );
     }
 
     #[test]

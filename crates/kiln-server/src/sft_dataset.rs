@@ -1,18 +1,16 @@
-use std::{fs::File, io::BufReader, path::Path};
+use std::{fs::File, io::Read, path::Path};
 
 use anyhow::{Context, Result};
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_train::{SftInvalidRowPolicy, SftPreparedDataset};
 
-fn open_sft_jsonl(path: &Path) -> Result<BufReader<File>> {
-    let file = File::open(path)
-        .with_context(|| format!("failed to open SFT dataset_path {}", path.display()))?;
-    Ok(BufReader::new(file))
-}
+pub(crate) const MAX_SFT_JSONL_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_SFT_JSONL_ROW_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_SFT_JSONL_ROWS: usize = 100_000;
 
 /// Parse and tokenize a complete SFT JSONL source through the shared
-/// `kiln-train` admission contract. The caller may retain only the receipt at
-/// submission time and repeat this operation in the worker to detect mutation.
+/// `kiln-train` admission contract. The caller queues the owned examples and
+/// receipt together, so the worker never reopens a mutable source path.
 pub(crate) fn prepare_sft_jsonl(
     path: &Path,
     tokenizer: &KilnTokenizer,
@@ -20,8 +18,53 @@ pub(crate) fn prepare_sft_jsonl(
     source: &str,
     source_locator: Option<String>,
 ) -> Result<SftPreparedDataset> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open SFT dataset_path {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect SFT dataset_path {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "SFT dataset_path {} must be a regular file",
+        path.display()
+    );
+    anyhow::ensure!(
+        metadata.len() <= MAX_SFT_JSONL_BYTES,
+        "SFT dataset_path {} is {} bytes; maximum is {MAX_SFT_JSONL_BYTES}",
+        path.display(),
+        metadata.len()
+    );
+    let expected_bytes = metadata.len();
+    let mut bytes = Vec::with_capacity(expected_bytes as usize);
+    file.take(MAX_SFT_JSONL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read SFT dataset_path {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_SFT_JSONL_BYTES && bytes.len() as u64 == expected_bytes,
+        "SFT dataset_path {} changed while it was being admitted: expected {expected_bytes} bytes, read {}",
+        path.display(),
+        bytes.len()
+    );
+    let mut rows = 0usize;
+    for (line_index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        anyhow::ensure!(
+            line.len() <= MAX_SFT_JSONL_ROW_BYTES,
+            "SFT dataset_path {} line {} is {} bytes; maximum row size is {MAX_SFT_JSONL_ROW_BYTES}",
+            path.display(),
+            line_index + 1,
+            line.len()
+        );
+        if !line.iter().all(u8::is_ascii_whitespace) {
+            rows = rows.saturating_add(1);
+            anyhow::ensure!(
+                rows <= MAX_SFT_JSONL_ROWS,
+                "SFT dataset_path {} exceeds the {MAX_SFT_JSONL_ROWS} row limit",
+                path.display()
+            );
+        }
+    }
     kiln_train::prepare_sft_jsonl(
-        open_sft_jsonl(path)?,
+        std::io::Cursor::new(bytes),
         tokenizer,
         policy,
         source,

@@ -67,7 +67,7 @@ impl Device {
         matches!(self, Device::Cpu)
     }
 
-    /// Is this device any kind of GPU (CUDA / Metal / Vulkan)?
+    /// Is this device any kind of GPU (CUDA / ROCm / Metal / Vulkan)?
     pub const fn is_gpu(self) -> bool {
         !self.is_cpu()
     }
@@ -90,6 +90,27 @@ impl Device {
             Device::Metal(_) => Backend::Metal,
             Device::Vulkan(_) => Backend::Vulkan,
             Device::Rocm(_) => Backend::Rocm,
+        }
+    }
+
+    /// Device-scoped operating-system memory probe selector.
+    ///
+    /// This mapping is shared by server startup, training, model hot paths,
+    /// and backend qualification so runtime allocation and memory governance
+    /// cannot silently select different logical devices.
+    pub const fn memory_probe_selector(self) -> kiln_memory::VramProbeSelector {
+        match self {
+            Device::Cpu => kiln_memory::VramProbeSelector::None,
+            Device::Cuda(index) => kiln_memory::VramProbeSelector::Nvidia(index),
+            Device::Rocm(index) => kiln_memory::VramProbeSelector::LinuxDrm {
+                index,
+                vendor: Some(kiln_memory::LinuxDrmVendor::Amd),
+            },
+            Device::Vulkan(index) => kiln_memory::VramProbeSelector::LinuxDrm {
+                index,
+                vendor: None,
+            },
+            Device::Metal(_) => kiln_memory::VramProbeSelector::AppleUnified,
         }
     }
 

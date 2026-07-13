@@ -13,8 +13,9 @@
 //! * [`vram`] — the low-level probes and [`vram::current_memory_snapshot`], the
 //!   keystone every other subsystem reads (KV-cache sizing, graph-capture
 //!   headroom, the budget arbiter, allocator pressure response). Unified-memory
-//!   aware: on an APU / Apple Silicon, "free" tracks host RAM, not a VRAM
-//!   carveout.
+//!   aware when the driver exposes an unambiguous host-shared topology; Apple
+//!   free tracks host pressure, while ambiguous Linux DRM heaps fail closed to
+//!   device-local VRAM rather than promoting GTT into allocation capacity.
 //!
 //! Subsequent layers (the continuous `MemoryGovernor`, the pressure-aware
 //! allocator hooks, and the training/inference budget arbiter) build on top of
@@ -25,14 +26,14 @@ pub mod governor;
 pub mod vram;
 
 pub use governor::{
-    AutomaticReclaimStats, GovernorConfig, MEMORY_RECLAIM_MODE_ENV, MemoryGovernor, MemoryPressure,
-    MemoryReclaimMode, MemorySource, OsProbe, Reservation,
+    AutomaticReclaimStats, CachedSampleStatus, GlobalGovernorConfiguration,
+    GlobalGovernorConfigurationError, GovernorConfig, MemoryGovernor, MemoryGovernorObservation,
+    MemoryPressure, MemoryReclaimMode, MemorySource, OsProbe, Reservation,
 };
-pub use vram::{MemorySnapshot, current_free_bytes, current_memory_snapshot};
-
-/// Process-wide lock serializing tests that mutate environment variables that
-/// the memory probes read (e.g. `KILN_GPU_MEMORY_GB`,
-/// `KILN_TRAINING_MEMORY_RESERVE_GB`). `cargo nextest` runs each test in its own
-/// process so this is belt-and-suspenders for `cargo test`'s shared-process
-/// model. Moved here with `vram` from `kiln-core::env_flag`.
-pub static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub use vram::{
+    LinuxDrmVendor, MemorySnapshot, MemorySnapshotObservations, MemoryTierSnapshot,
+    VramCapacityResolution, VramProbeIdentityError, VramProbeSelector, current_free_bytes,
+    current_free_bytes_for, current_free_vram_bytes, current_free_vram_bytes_for,
+    current_memory_snapshot, current_memory_snapshot_for, detect_used_vram, detect_used_vram_for,
+    detect_vram, detect_vram_for, resolve_vram_capacity, validate_vram_probe_identity,
+};
