@@ -5281,8 +5281,15 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "LoRA tape mixed-base routing should not keep a local Vulkan mixed-dtype policy: {forbidden}"
         );
     }
+    let tape_support_guard = source_between(
+        &trainer_source,
+        "fn ensure_tape_forward_backward_supported(",
+        "#[cfg(not(any(",
+    );
     assert!(
-        trainer_source.contains("base_dtype_supports_tape_for_backend(weights, backend)"),
+        tape_support_guard.contains("training_precision_policy_for_backend(backend)")
+            && tape_support_guard
+                .contains("base_dtype_supports_tape_for_policy(weights, precision_policy)"),
         "SFT/GRPO tape eligibility should consume backend precision policy"
     );
     assert!(
