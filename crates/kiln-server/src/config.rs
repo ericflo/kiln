@@ -2360,38 +2360,372 @@ pub struct SpeculativeDecodingConfig {
     pub draft_layers: usize,
 }
 
-/// Streaming/tiled prefill settings. Canonical startup overrides use
-/// `KILN_STREAMING_PREFILL_<FIELD>`; shorter `KILN_STREAMING_*` spellings are
-/// compatibility-only.
+/// Operator intent for whether the selected backend may use streaming prefill.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamingPrefillMode {
+    /// Defer to the selected backend's immutable policy.
+    #[default]
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+impl StreamingPrefillMode {
+    fn parse_config(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "enabled" => Ok(Self::Enabled),
+            "disabled" => Ok(Self::Disabled),
+            _ => anyhow::bail!(
+                "streaming_prefill.mode must be one of auto, enabled, or disabled, got {raw:?}"
+            ),
+        }
+    }
+
+    fn parse_environment(name: &str, raw: &str) -> Result<Self> {
+        if name == "KILN_STREAMING_PREFILL_MODE" {
+            return Self::parse_config(raw).with_context(|| format!("invalid {name}"));
+        }
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "enabled" | "1" | "true" | "yes" | "on" => Ok(Self::Enabled),
+            "disabled" | "0" | "false" | "no" | "off" => Ok(Self::Disabled),
+            _ => anyhow::bail!(
+                "{name} must be one of auto, enabled, disabled, true, false, 1, 0, yes, no, on, or off, got {raw:?}"
+            ),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+impl fmt::Display for StreamingPrefillMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Source-tracked streaming-prefill mode selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamingPrefillModeSetting {
+    mode: StreamingPrefillMode,
+    source: ConfigValueSource,
+}
+
+impl StreamingPrefillModeSetting {
+    pub const fn new(mode: StreamingPrefillMode, source: ConfigValueSource) -> Self {
+        Self { mode, source }
+    }
+
+    pub const fn mode(self) -> StreamingPrefillMode {
+        self.mode
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        Ok(Self::new(
+            StreamingPrefillMode::parse_environment(name, raw)?,
+            ConfigValueSource::Environment,
+        ))
+    }
+}
+
+impl Default for StreamingPrefillModeSetting {
+    fn default() -> Self {
+        Self::new(StreamingPrefillMode::Auto, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for StreamingPrefillModeSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.mode.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamingPrefillModeSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::new(
+            StreamingPrefillMode::parse_config(&raw).map_err(serde::de::Error::custom)?,
+            ConfigValueSource::ConfigFile,
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawStreamingPrefillTokenSetting {
+    Tokens(usize),
+    Mode(String),
+}
+
+macro_rules! define_streaming_prefill_token_setting {
+    ($name:ident, $field:literal, $validator:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct $name {
+            configured: Option<usize>,
+            source: ConfigValueSource,
+        }
+
+        impl $name {
+            pub fn new(configured: Option<usize>, source: ConfigValueSource) -> Result<Self> {
+                if let Some(tokens) = configured {
+                    $validator($field, tokens)?;
+                }
+                Ok(Self { configured, source })
+            }
+
+            pub const fn configured(self) -> Option<usize> {
+                self.configured
+            }
+
+            pub const fn source(self) -> ConfigValueSource {
+                self.source
+            }
+
+            fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+                let trimmed = raw.trim();
+                if trimmed.eq_ignore_ascii_case("auto") {
+                    return Ok(Self {
+                        configured: None,
+                        source: ConfigValueSource::Environment,
+                    });
+                }
+                let tokens = trimmed.parse::<usize>().with_context(|| {
+                    format!("{name} must be 'auto' or a positive decimal integer, got {raw:?}")
+                })?;
+                Self::new(Some(tokens), ConfigValueSource::Environment)
+                    .with_context(|| format!("invalid {name} value {raw:?}"))
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    configured: None,
+                    source: ConfigValueSource::Default,
+                }
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                match self.configured {
+                    Some(tokens) => serializer.serialize_u64(tokens as u64),
+                    None => serializer.serialize_str("auto"),
+                }
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                match RawStreamingPrefillTokenSetting::deserialize(deserializer)? {
+                    RawStreamingPrefillTokenSetting::Tokens(tokens) => {
+                        Self::new(Some(tokens), ConfigValueSource::ConfigFile)
+                            .map_err(serde::de::Error::custom)
+                    }
+                    RawStreamingPrefillTokenSetting::Mode(mode)
+                        if mode.trim().eq_ignore_ascii_case("auto") =>
+                    {
+                        Ok(Self {
+                            configured: None,
+                            source: ConfigValueSource::ConfigFile,
+                        })
+                    }
+                    RawStreamingPrefillTokenSetting::Mode(mode) => {
+                        Err(serde::de::Error::custom(format!(
+                            "{} must be 'auto' or a positive integer, got {mode:?}",
+                            $field
+                        )))
+                    }
+                }
+            }
+        }
+    };
+}
+
+fn validate_streaming_prefill_positive_tokens(field: &str, tokens: usize) -> Result<()> {
+    if tokens == 0 {
+        anyhow::bail!("{field} must be a positive integer, got {tokens}");
+    }
+    Ok(())
+}
+
+fn validate_streaming_prefill_tile_tokens(field: &str, tokens: usize) -> Result<()> {
+    if tokens == 0 || tokens % 64 != 0 {
+        anyhow::bail!("{field} must be a positive multiple of 64, got {tokens}");
+    }
+    Ok(())
+}
+
+define_streaming_prefill_token_setting!(
+    StreamingPrefillThresholdTokens,
+    "streaming_prefill.threshold_tokens",
+    validate_streaming_prefill_positive_tokens
+);
+define_streaming_prefill_token_setting!(
+    StreamingPrefillTileTokens,
+    "streaming_prefill.tile_tokens",
+    validate_streaming_prefill_tile_tokens
+);
+define_streaming_prefill_token_setting!(
+    StreamingPrefillTapeTileTokens,
+    "streaming_prefill.tape_tile_tokens",
+    validate_streaming_prefill_tile_tokens
+);
+define_streaming_prefill_token_setting!(
+    StreamingPrefillDetachedFullAttnTileTokens,
+    "streaming_prefill.detached_full_attn_tile_tokens",
+    validate_streaming_prefill_tile_tokens
+);
+
+/// Source-tracked last-token LM-head optimization selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamingPrefillLastTokenLmHead {
+    enabled: bool,
+    source: ConfigValueSource,
+}
+
+impl StreamingPrefillLastTokenLmHead {
+    pub const fn new(enabled: bool, source: ConfigValueSource) -> Self {
+        Self { enabled, source }
+    }
+
+    pub const fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        Ok(Self::new(
+            parse_required_bool_env(name, raw)?,
+            ConfigValueSource::Environment,
+        ))
+    }
+}
+
+impl Default for StreamingPrefillLastTokenLmHead {
+    fn default() -> Self {
+        Self::new(true, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for StreamingPrefillLastTokenLmHead {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bool(self.enabled)
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamingPrefillLastTokenLmHead {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::new(
+            bool::deserialize(deserializer)?,
+            ConfigValueSource::ConfigFile,
+        ))
+    }
+}
+
+/// Streaming/tiled prefill settings. Canonical startup overrides are derived
+/// mechanically as `KILN_STREAMING_PREFILL_<FIELD>`; old shorter names remain
+/// strict compatibility aliases.
 ///
-/// When enabled, long-context prefill iterates over the sequence in tiles of
-/// `tile_tokens` tokens, carrying O(1) GDN recurrent state across tile
-/// boundaries and writing full-attention K/V into the paged cache per tile.
-/// This caps peak activation memory so that production-shaped 8k+ token
-/// CUDA prefills and ≥65k-token long prefills fit on a 48 GiB A6000.
-///
-/// `tile_tokens` must be a positive multiple of 64 (the GDN chunk size).
-///
-/// Production startup resolves the canonical names above into this typed
-/// object. Lower `kiln-model` helpers temporarily still read compatibility
-/// `KILN_STREAMING_*` spellings directly; that split-read path is a migration
-/// limitation rather than a second public contract. The generic config default
-/// keeps streaming OFF unless explicitly set, while runtime device policy
-/// enables streaming by default for CUDA, ROCm, and Metal prompts at 2,048 or
-/// more tokens.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+/// `auto` values preserve backend policy. Every concrete tile size must be a
+/// positive multiple of 64, the recurrent-attention chunk size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct StreamingPrefillConfig {
-    /// Force tiled/streaming prefill on through config/env. Runtime device
-    /// policy may still enable it for long CUDA/Metal prompts when unset.
-    pub enabled: bool,
-    /// Tile size in tokens (generic default: 8192). Must be a positive
-    /// multiple of 64.
-    pub tile_tokens: usize,
-    /// On the final tile, compute the LM head only for the last row instead
-    /// of the full hidden state. Safe for inference because RMSNorm is
-    /// per-position. Default: true.
-    pub last_token_lm_head: bool,
+    pub mode: StreamingPrefillModeSetting,
+    pub threshold_tokens: StreamingPrefillThresholdTokens,
+    pub tile_tokens: StreamingPrefillTileTokens,
+    pub tape_tile_tokens: StreamingPrefillTapeTileTokens,
+    pub detached_full_attn_tile_tokens: StreamingPrefillDetachedFullAttnTileTokens,
+    pub last_token_lm_head: StreamingPrefillLastTokenLmHead,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawStreamingPrefillConfig {
+    mode: Option<StreamingPrefillModeSetting>,
+    enabled: Option<bool>,
+    threshold_tokens: Option<StreamingPrefillThresholdTokens>,
+    tile_tokens: Option<StreamingPrefillTileTokens>,
+    tape_tile_tokens: Option<StreamingPrefillTapeTileTokens>,
+    detached_full_attn_tile_tokens: Option<StreamingPrefillDetachedFullAttnTileTokens>,
+    last_token_lm_head: Option<StreamingPrefillLastTokenLmHead>,
+}
+
+impl<'de> Deserialize<'de> for StreamingPrefillConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawStreamingPrefillConfig::deserialize(deserializer)?;
+        let mode = match (raw.mode, raw.enabled) {
+            (Some(mode), Some(enabled)) => {
+                let legacy_mode = if enabled {
+                    StreamingPrefillMode::Enabled
+                } else {
+                    StreamingPrefillMode::Disabled
+                };
+                if mode.mode() != legacy_mode {
+                    return Err(serde::de::Error::custom(format!(
+                        "conflicting streaming_prefill.mode={} and legacy streaming_prefill.enabled={enabled}",
+                        mode.mode()
+                    )));
+                }
+                mode
+            }
+            (Some(mode), None) => mode,
+            (None, Some(enabled)) => StreamingPrefillModeSetting::new(
+                if enabled {
+                    StreamingPrefillMode::Enabled
+                } else {
+                    StreamingPrefillMode::Disabled
+                },
+                ConfigValueSource::ConfigFile,
+            ),
+            (None, None) => StreamingPrefillModeSetting::default(),
+        };
+
+        Ok(Self {
+            mode,
+            threshold_tokens: raw.threshold_tokens.unwrap_or_default(),
+            tile_tokens: raw.tile_tokens.unwrap_or_default(),
+            tape_tile_tokens: raw.tape_tile_tokens.unwrap_or_default(),
+            detached_full_attn_tile_tokens: raw.detached_full_attn_tile_tokens.unwrap_or_default(),
+            last_token_lm_head: raw.last_token_lm_head.unwrap_or_default(),
+        })
+    }
 }
 
 /// Adapter-storage settings. Canonical startup overrides use
@@ -2585,6 +2919,37 @@ impl NormalizedEnvValue for DirectDecodeRendezvousWaitUs {
 impl NormalizedEnvValue for DirectDecodeRendezvousMixedSeqLens {
     fn normalized_env_value(&self) -> String {
         self.configured().normalized_env_value()
+    }
+}
+
+impl NormalizedEnvValue for StreamingPrefillModeSetting {
+    fn normalized_env_value(&self) -> String {
+        self.mode().as_str().to_owned()
+    }
+}
+
+macro_rules! impl_normalized_streaming_prefill_tokens {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl NormalizedEnvValue for $type {
+                fn normalized_env_value(&self) -> String {
+                    self.configured().normalized_env_value()
+                }
+            }
+        )+
+    };
+}
+
+impl_normalized_streaming_prefill_tokens!(
+    StreamingPrefillThresholdTokens,
+    StreamingPrefillTileTokens,
+    StreamingPrefillTapeTileTokens,
+    StreamingPrefillDetachedFullAttnTileTokens,
+);
+
+impl NormalizedEnvValue for StreamingPrefillLastTokenLmHead {
+    fn normalized_env_value(&self) -> String {
+        self.enabled().normalized_env_value()
     }
 }
 
@@ -2882,12 +3247,43 @@ macro_rules! public_env_parser {
     (direct_decode_rendezvous_mixed_seq_lens) => {
         DirectDecodeRendezvousMixedSeqLens::from_named_environment_value
     };
+    (streaming_prefill_mode) => {
+        StreamingPrefillModeSetting::from_named_environment_value
+    };
+    (streaming_prefill_threshold_tokens) => {
+        StreamingPrefillThresholdTokens::from_named_environment_value
+    };
+    (streaming_prefill_tile_tokens) => {
+        StreamingPrefillTileTokens::from_named_environment_value
+    };
+    (streaming_prefill_tape_tile_tokens) => {
+        StreamingPrefillTapeTileTokens::from_named_environment_value
+    };
+    (streaming_prefill_detached_full_attn_tile_tokens) => {
+        StreamingPrefillDetachedFullAttnTileTokens::from_named_environment_value
+    };
+    (streaming_prefill_last_token_lm_head) => {
+        StreamingPrefillLastTokenLmHead::from_named_environment_value
+    };
     (spec_method) => {
         parse_public_spec_method
     };
 }
 
 macro_rules! public_env_field {
+    ($kind:ident, $section:ident.$field:ident, [$($legacy:expr),+ $(,)?]) => {
+        PublicEnvField {
+            section: stringify!($section),
+            field: stringify!($field),
+            supported_aliases: &[$(EnvAlias::value($legacy)),+],
+            apply: |config, name, raw| {
+                let value = (public_env_parser!($kind))(name, raw)?;
+                let normalized = value.normalized_env_value();
+                config.$section.$field = value;
+                Ok(normalized)
+            },
+        }
+    };
     ($kind:ident, $section:ident.$field:ident, $legacy:expr) => {
         PublicEnvField {
             section: stringify!($section),
@@ -3118,14 +3514,33 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         "KILN_SPEC_NUM_TOKENS"
     ),
     public_env_field!(usize, speculative.draft_layers, "KILN_SPEC_DRAFT_LAYERS"),
-    public_env_field!(bool, streaming_prefill.enabled, "KILN_STREAMING_PREFILL"),
     public_env_field!(
-        usize,
+        streaming_prefill_mode,
+        streaming_prefill.mode,
+        ["KILN_STREAMING_PREFILL", "KILN_STREAMING_PREFILL_ENABLED"]
+    ),
+    public_env_field!(
+        streaming_prefill_threshold_tokens,
+        streaming_prefill.threshold_tokens,
+        "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS"
+    ),
+    public_env_field!(
+        streaming_prefill_tile_tokens,
         streaming_prefill.tile_tokens,
         "KILN_STREAMING_TILE_TOKENS"
     ),
     public_env_field!(
-        bool,
+        streaming_prefill_tape_tile_tokens,
+        streaming_prefill.tape_tile_tokens,
+        "KILN_TAPE_STREAMING_TILE_TOKENS"
+    ),
+    public_env_field!(
+        streaming_prefill_detached_full_attn_tile_tokens,
+        streaming_prefill.detached_full_attn_tile_tokens,
+        "KILN_DETACHED_FULL_ATTN_TILE_TOKENS"
+    ),
+    public_env_field!(
+        streaming_prefill_last_token_lm_head,
         streaming_prefill.last_token_lm_head,
         "KILN_STREAMING_LAST_TOKEN_LM_HEAD"
     ),
@@ -3396,9 +3811,12 @@ impl SpeculativeDecodingConfig {
 impl Default for StreamingPrefillConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            tile_tokens: 8192,
-            last_token_lm_head: true,
+            mode: StreamingPrefillModeSetting::default(),
+            threshold_tokens: StreamingPrefillThresholdTokens::default(),
+            tile_tokens: StreamingPrefillTileTokens::default(),
+            tape_tile_tokens: StreamingPrefillTapeTileTokens::default(),
+            detached_full_attn_tile_tokens: StreamingPrefillDetachedFullAttnTileTokens::default(),
+            last_token_lm_head: StreamingPrefillLastTokenLmHead::default(),
         }
     }
 }
@@ -3738,11 +4156,31 @@ impl KilnConfig {
                 self.speculative.draft_layers
             );
         }
-        if self.streaming_prefill.tile_tokens == 0 || self.streaming_prefill.tile_tokens % 64 != 0 {
-            anyhow::bail!(
-                "streaming_prefill.tile_tokens must be a positive multiple of 64, got {}",
-                self.streaming_prefill.tile_tokens
-            );
+        if let Some(tokens) = self.streaming_prefill.threshold_tokens.configured() {
+            validate_streaming_prefill_positive_tokens(
+                "streaming_prefill.threshold_tokens",
+                tokens,
+            )?;
+        }
+        for (field, tokens) in [
+            (
+                "streaming_prefill.tile_tokens",
+                self.streaming_prefill.tile_tokens.configured(),
+            ),
+            (
+                "streaming_prefill.tape_tile_tokens",
+                self.streaming_prefill.tape_tile_tokens.configured(),
+            ),
+            (
+                "streaming_prefill.detached_full_attn_tile_tokens",
+                self.streaming_prefill
+                    .detached_full_attn_tile_tokens
+                    .configured(),
+            ),
+        ] {
+            if let Some(tokens) = tokens {
+                validate_streaming_prefill_tile_tokens(field, tokens)?;
+            }
         }
 
         if self.prefix_cache.max_blocks == Some(0) {
@@ -4046,8 +4484,11 @@ mod tests {
         "KILN_SPECULATIVE_ENABLED",
         "KILN_SPECULATIVE_METHOD",
         "KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS",
-        "KILN_STREAMING_PREFILL_ENABLED",
+        "KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS",
         "KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD",
+        "KILN_STREAMING_PREFILL_MODE",
+        "KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS",
+        "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS",
         "KILN_STREAMING_PREFILL_TILE_TOKENS",
         "KILN_TRAINING_CHECKPOINT_INTERVAL",
         "KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS",
@@ -4330,9 +4771,34 @@ mod tests {
             MAX_SPECULATIVE_DRAFT_TOKENS
         );
         assert_eq!(config.speculative.draft_layers, 8);
-        assert!(!config.streaming_prefill.enabled);
-        assert_eq!(config.streaming_prefill.tile_tokens, 8192);
-        assert!(config.streaming_prefill.last_token_lm_head);
+        assert_eq!(
+            config.streaming_prefill.mode.mode(),
+            StreamingPrefillMode::Auto
+        );
+        assert_eq!(config.streaming_prefill.threshold_tokens.configured(), None);
+        assert_eq!(config.streaming_prefill.tile_tokens.configured(), None);
+        assert_eq!(config.streaming_prefill.tape_tile_tokens.configured(), None);
+        assert_eq!(
+            config
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .configured(),
+            None
+        );
+        assert!(config.streaming_prefill.last_token_lm_head.enabled());
+        for source in [
+            config.streaming_prefill.mode.source(),
+            config.streaming_prefill.threshold_tokens.source(),
+            config.streaming_prefill.tile_tokens.source(),
+            config.streaming_prefill.tape_tile_tokens.source(),
+            config
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .source(),
+            config.streaming_prefill.last_token_lm_head.source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::Default);
+        }
         assert_eq!(
             config.adapters.max_disk_bytes,
             Some(100 * 1024u64.pow(3)),
@@ -4415,7 +4881,7 @@ mod tests {
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 71);
+        assert_eq!(original_len, 74);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -4449,9 +4915,9 @@ mod tests {
                     .any(|alias| alias.name != canonical)
             })
             .count();
-        assert_eq!(canonical_only_aliases, 21);
-        assert_eq!(compatibility_aliases, 51);
-        assert_eq!(compatibility_alias_fields, 50);
+        assert_eq!(canonical_only_aliases, 22);
+        assert_eq!(compatibility_aliases, 54);
+        assert_eq!(compatibility_alias_fields, 52);
 
         for field in PUBLIC_ENV_FIELDS {
             assert_eq!(
@@ -4486,7 +4952,7 @@ mod tests {
                 .len(),
             14
         );
-        assert_eq!(serialized_leaves.len(), 79);
+        assert_eq!(serialized_leaves.len(), 82);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 8);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -4529,7 +4995,7 @@ mod tests {
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_seventy_one_public_fields() {
+    fn public_env_canonical_only_loads_all_seventy_four_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
@@ -4595,8 +5061,14 @@ mod tests {
             ("KILN_SPECULATIVE_METHOD", "native-mtp"),
             ("KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS", "3"),
             ("KILN_SPECULATIVE_DRAFT_LAYERS", "2"),
-            ("KILN_STREAMING_PREFILL_ENABLED", "true"),
+            ("KILN_STREAMING_PREFILL_MODE", "enabled"),
+            ("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS", "1024"),
             ("KILN_STREAMING_PREFILL_TILE_TOKENS", "2048"),
+            ("KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS", "4096"),
+            (
+                "KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS",
+                "512",
+            ),
             ("KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD", "false"),
             ("KILN_ADAPTERS_MAX_DISK_BYTES", "1024"),
             ("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES", "512"),
@@ -4724,9 +5196,30 @@ mod tests {
         assert_eq!(config.speculative.method, SpecMethod::Mtp);
         assert_eq!(config.speculative.num_speculative_tokens, 3);
         assert_eq!(config.speculative.draft_layers, 2);
-        assert!(config.streaming_prefill.enabled);
-        assert_eq!(config.streaming_prefill.tile_tokens, 2048);
-        assert!(!config.streaming_prefill.last_token_lm_head);
+        assert_eq!(
+            config.streaming_prefill.mode.mode(),
+            StreamingPrefillMode::Enabled
+        );
+        assert_eq!(
+            config.streaming_prefill.threshold_tokens.configured(),
+            Some(1024)
+        );
+        assert_eq!(
+            config.streaming_prefill.tile_tokens.configured(),
+            Some(2048)
+        );
+        assert_eq!(
+            config.streaming_prefill.tape_tile_tokens.configured(),
+            Some(4096)
+        );
+        assert_eq!(
+            config
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .configured(),
+            Some(512)
+        );
+        assert!(!config.streaming_prefill.last_token_lm_head.enabled());
         assert_eq!(config.adapters.max_disk_bytes, Some(1024));
         assert_eq!(config.adapters.composed_cache_max_bytes, Some(512));
         assert_eq!(config.adapters.composed_cache_max_entries, Some(6));
@@ -4759,6 +5252,15 @@ mod tests {
                 .batching
                 .direct_decode_rendezvous_mixed_seq_lens
                 .source(),
+            config.streaming_prefill.mode.source(),
+            config.streaming_prefill.threshold_tokens.source(),
+            config.streaming_prefill.tile_tokens.source(),
+            config.streaming_prefill.tape_tile_tokens.source(),
+            config
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .source(),
+            config.streaming_prefill.last_token_lm_head.source(),
         ] {
             assert_eq!(source, ConfigValueSource::Environment);
         }
@@ -4794,6 +5296,11 @@ mod tests {
                 "true",
             ),
             ("KILN_DECODE_BATCH_MIXED_SEQ", "yes"),
+            ("KILN_STREAMING_PREFILL_MODE", "enabled"),
+            ("KILN_STREAMING_PREFILL_ENABLED", "true"),
+            ("KILN_STREAMING_PREFILL", "on"),
+            ("KILN_STREAMING_PREFILL_TILE_TOKENS", "2048"),
+            ("KILN_STREAMING_TILE_TOKENS", "02048"),
             ("KILN_MEMORY_INFERENCE_MEMORY_FRACTION", "0.70"),
             ("KILN_INFERENCE_MEMORY_FRACTION", ".7"),
         ] {
@@ -4839,6 +5346,14 @@ mod tests {
         assert_eq!(
             config.server.serving_profile.profile(),
             ServingProfile::Experimental
+        );
+        assert_eq!(
+            config.streaming_prefill.mode.mode(),
+            StreamingPrefillMode::Enabled
+        );
+        assert_eq!(
+            config.streaming_prefill.tile_tokens.configured(),
+            Some(2048)
         );
         assert_eq!(config.memory.inference_memory_fraction, 0.7);
     }
@@ -4898,6 +5413,15 @@ mod tests {
                 "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
                 "sometimes",
             ),
+            ("KILN_STREAMING_PREFILL_MODE", "true"),
+            ("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS", "0"),
+            ("KILN_STREAMING_PREFILL_TILE_TOKENS", "65"),
+            ("KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS", "127"),
+            (
+                "KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS",
+                "not-auto",
+            ),
+            ("KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD", "sometimes"),
             ("KILN_MEMORY_RECLAIM_MODE", "whenever"),
             ("KILN_SPECULATIVE_METHOD", "guessing"),
             ("KILN_REQUEST_LOG_COMPRESS", "occasionally"),
@@ -5920,6 +6444,37 @@ direct_decode_rendezvous_mixed_seq_lens = false
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn streaming_prefill_non_unicode_canonical_and_alias_inputs_are_fatal() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for name in [
+            "KILN_STREAMING_PREFILL_MODE",
+            "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS",
+            "KILN_STREAMING_PREFILL_TILE_TOKENS",
+            "KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS",
+            "KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS",
+            "KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD",
+            "KILN_STREAMING_PREFILL_ENABLED",
+            "KILN_STREAMING_PREFILL",
+            "KILN_STREAMING_TILE_TOKENS",
+            "KILN_TAPE_STREAMING_TILE_TOKENS",
+            "KILN_DETACHED_FULL_ATTN_TILE_TOKENS",
+            "KILN_STREAMING_LAST_TOKEN_LM_HEAD",
+        ] {
+            let invalid = OsString::from_vec(vec![b'1', 0xff]);
+            environment.set_os(name, &invalid);
+            let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+            environment.remove(name);
+            let detail = format!("{error:#}");
+            assert!(detail.contains(name), "{name}: {detail}");
+            assert!(detail.contains("UTF-8"), "{name}: {detail}");
+        }
+    }
+
     #[test]
     fn public_env_canonical_spelling_that_is_also_alias_is_applied_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6328,8 +6883,11 @@ num_speculative_tokens = 6
 draft_layers = 10
 
 [streaming_prefill]
-enabled = true
+mode = "enabled"
+threshold_tokens = 1024
 tile_tokens = 4096
+tape_tile_tokens = 2048
+detached_full_attn_tile_tokens = 512
 last_token_lm_head = false
 
 [adapters]
@@ -6435,9 +6993,43 @@ composed_cache_max_entries = 8
         assert!(config.speculative.enabled);
         assert_eq!(config.speculative.num_speculative_tokens, 6);
         assert_eq!(config.speculative.draft_layers, 10);
-        assert!(config.streaming_prefill.enabled);
-        assert_eq!(config.streaming_prefill.tile_tokens, 4096);
-        assert!(!config.streaming_prefill.last_token_lm_head);
+        assert_eq!(
+            config.streaming_prefill.mode.mode(),
+            StreamingPrefillMode::Enabled
+        );
+        assert_eq!(
+            config.streaming_prefill.threshold_tokens.configured(),
+            Some(1024)
+        );
+        assert_eq!(
+            config.streaming_prefill.tile_tokens.configured(),
+            Some(4096)
+        );
+        assert_eq!(
+            config.streaming_prefill.tape_tile_tokens.configured(),
+            Some(2048)
+        );
+        assert_eq!(
+            config
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .configured(),
+            Some(512)
+        );
+        assert!(!config.streaming_prefill.last_token_lm_head.enabled());
+        for source in [
+            config.streaming_prefill.mode.source(),
+            config.streaming_prefill.threshold_tokens.source(),
+            config.streaming_prefill.tile_tokens.source(),
+            config.streaming_prefill.tape_tile_tokens.source(),
+            config
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .source(),
+            config.streaming_prefill.last_token_lm_head.source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::ConfigFile);
+        }
         assert_eq!(config.adapters.max_disk_bytes, Some(5_368_709_120));
         assert_eq!(
             config.adapters.composed_cache_max_bytes,
@@ -6546,18 +7138,356 @@ reclaim_mode = "whenever"
     }
 
     #[test]
-    fn test_validation_rejects_bad_streaming_tile_tokens() {
-        let mut config = KilnConfig::default();
-        config.streaming_prefill.tile_tokens = 0;
-        assert!(config.validate().is_err());
+    fn streaming_prefill_toml_is_strict_source_tracked_and_legacy_compatible() {
+        for mode in ["auto", "enabled", "disabled"] {
+            let config: KilnConfig =
+                toml::from_str(&format!("[streaming_prefill]\nmode = {mode:?}\n")).unwrap();
+            assert_eq!(config.streaming_prefill.mode.mode().as_str(), mode);
+            assert_eq!(
+                config.streaming_prefill.mode.source(),
+                ConfigValueSource::ConfigFile
+            );
+        }
 
-        let mut config2 = KilnConfig::default();
-        config2.streaming_prefill.tile_tokens = 100; // not a multiple of 64
-        assert!(config2.validate().is_err());
+        for (enabled, expected) in [
+            (true, StreamingPrefillMode::Enabled),
+            (false, StreamingPrefillMode::Disabled),
+        ] {
+            let config: KilnConfig =
+                toml::from_str(&format!("[streaming_prefill]\nenabled = {enabled}\n")).unwrap();
+            assert_eq!(config.streaming_prefill.mode.mode(), expected);
+            assert_eq!(
+                config.streaming_prefill.mode.source(),
+                ConfigValueSource::ConfigFile
+            );
+        }
 
-        let mut config3 = KilnConfig::default();
-        config3.streaming_prefill.tile_tokens = 64;
-        assert!(config3.validate().is_ok());
+        for document in [
+            "[streaming_prefill]\nmode = 'enabled'\nenabled = true\n",
+            "[streaming_prefill]\nmode = 'disabled'\nenabled = false\n",
+        ] {
+            toml::from_str::<KilnConfig>(document).unwrap();
+        }
+        for document in [
+            "[streaming_prefill]\nmode = 'enabled'\nenabled = false\n",
+            "[streaming_prefill]\nmode = 'disabled'\nenabled = true\n",
+            "[streaming_prefill]\nmode = 'auto'\nenabled = true\n",
+        ] {
+            let error = toml::from_str::<KilnConfig>(document).unwrap_err();
+            let detail = error.to_string();
+            assert!(detail.contains("streaming_prefill.mode"), "{detail}");
+            assert!(detail.contains("streaming_prefill.enabled"), "{detail}");
+        }
+
+        let explicit: KilnConfig = toml::from_str(
+            r#"
+[streaming_prefill]
+threshold_tokens = 1
+tile_tokens = 64
+tape_tile_tokens = 128
+detached_full_attn_tile_tokens = 192
+last_token_lm_head = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            explicit.streaming_prefill.threshold_tokens.configured(),
+            Some(1)
+        );
+        assert_eq!(
+            explicit.streaming_prefill.tile_tokens.configured(),
+            Some(64)
+        );
+        assert_eq!(
+            explicit.streaming_prefill.tape_tile_tokens.configured(),
+            Some(128)
+        );
+        assert_eq!(
+            explicit
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .configured(),
+            Some(192)
+        );
+        assert!(!explicit.streaming_prefill.last_token_lm_head.enabled());
+        for source in [
+            explicit.streaming_prefill.threshold_tokens.source(),
+            explicit.streaming_prefill.tile_tokens.source(),
+            explicit.streaming_prefill.tape_tile_tokens.source(),
+            explicit
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .source(),
+            explicit.streaming_prefill.last_token_lm_head.source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::ConfigFile);
+        }
+
+        let automatic: KilnConfig = toml::from_str(
+            r#"
+[streaming_prefill]
+threshold_tokens = "auto"
+tile_tokens = "auto"
+tape_tile_tokens = "auto"
+detached_full_attn_tile_tokens = "auto"
+"#,
+        )
+        .unwrap();
+        for configured in [
+            automatic.streaming_prefill.threshold_tokens.configured(),
+            automatic.streaming_prefill.tile_tokens.configured(),
+            automatic.streaming_prefill.tape_tile_tokens.configured(),
+            automatic
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .configured(),
+        ] {
+            assert_eq!(configured, None);
+        }
+        for source in [
+            automatic.streaming_prefill.threshold_tokens.source(),
+            automatic.streaming_prefill.tile_tokens.source(),
+            automatic.streaming_prefill.tape_tile_tokens.source(),
+            automatic
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::ConfigFile);
+        }
+
+        for document in [
+            "[streaming_prefill]\nmode = 'sometimes'\n",
+            "[streaming_prefill]\nmode = true\n",
+            "[streaming_prefill]\nenabled = 'true'\n",
+            "[streaming_prefill]\nthreshold_tokens = 0\n",
+            "[streaming_prefill]\nthreshold_tokens = 'many'\n",
+            "[streaming_prefill]\ntile_tokens = 0\n",
+            "[streaming_prefill]\ntile_tokens = 63\n",
+            "[streaming_prefill]\ntape_tile_tokens = 65\n",
+            "[streaming_prefill]\ndetached_full_attn_tile_tokens = 127\n",
+            "[streaming_prefill]\nlast_token_lm_head = 'true'\n",
+        ] {
+            let error = toml::from_str::<KilnConfig>(document).unwrap_err();
+            let detail = error.to_string();
+            assert!(
+                detail.contains("streaming_prefill")
+                    || detail.contains("invalid type")
+                    || detail.contains("data did not match"),
+                "unexpected error for {document:?}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_prefill_legacy_env_aliases_override_toml_with_environment_provenance() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for (name, value) in [
+            ("KILN_STREAMING_PREFILL_ENABLED", "on"),
+            ("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS", "1024"),
+            ("KILN_STREAMING_TILE_TOKENS", "2048"),
+            ("KILN_TAPE_STREAMING_TILE_TOKENS", "4096"),
+            ("KILN_DETACHED_FULL_ATTN_TILE_TOKENS", "512"),
+            ("KILN_STREAMING_LAST_TOKEN_LM_HEAD", "off"),
+        ] {
+            environment.set(name, value);
+        }
+
+        let mut config: KilnConfig = toml::from_str(
+            r#"
+[streaming_prefill]
+mode = "disabled"
+threshold_tokens = "auto"
+tile_tokens = "auto"
+tape_tile_tokens = "auto"
+detached_full_attn_tile_tokens = "auto"
+last_token_lm_head = true
+"#,
+        )
+        .unwrap();
+        config.apply_env_overrides().unwrap();
+
+        assert_eq!(
+            config.streaming_prefill.mode.mode(),
+            StreamingPrefillMode::Enabled
+        );
+        assert_eq!(
+            config.streaming_prefill.threshold_tokens.configured(),
+            Some(1024)
+        );
+        assert_eq!(
+            config.streaming_prefill.tile_tokens.configured(),
+            Some(2048)
+        );
+        assert_eq!(
+            config.streaming_prefill.tape_tile_tokens.configured(),
+            Some(4096)
+        );
+        assert_eq!(
+            config
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .configured(),
+            Some(512)
+        );
+        assert!(!config.streaming_prefill.last_token_lm_head.enabled());
+        for source in [
+            config.streaming_prefill.mode.source(),
+            config.streaming_prefill.threshold_tokens.source(),
+            config.streaming_prefill.tile_tokens.source(),
+            config.streaming_prefill.tape_tile_tokens.source(),
+            config
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .source(),
+            config.streaming_prefill.last_token_lm_head.source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::Environment);
+        }
+
+        for name in [
+            "KILN_STREAMING_PREFILL_ENABLED",
+            "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS",
+            "KILN_STREAMING_TILE_TOKENS",
+            "KILN_TAPE_STREAMING_TILE_TOKENS",
+            "KILN_DETACHED_FULL_ATTN_TILE_TOKENS",
+            "KILN_STREAMING_LAST_TOKEN_LM_HEAD",
+        ] {
+            environment.remove(name);
+        }
+        environment.set("KILN_STREAMING_PREFILL", "false");
+        let mut shorter_alias = KilnConfig::default();
+        shorter_alias.apply_env_overrides().unwrap();
+        assert_eq!(
+            shorter_alias.streaming_prefill.mode.mode(),
+            StreamingPrefillMode::Disabled
+        );
+        assert_eq!(
+            shorter_alias.streaming_prefill.mode.source(),
+            ConfigValueSource::Environment
+        );
+
+        environment.remove("KILN_STREAMING_PREFILL");
+        for name in [
+            "KILN_STREAMING_PREFILL_MODE",
+            "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS",
+            "KILN_STREAMING_PREFILL_TILE_TOKENS",
+            "KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS",
+            "KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS",
+        ] {
+            environment.set(name, "auto");
+        }
+        let mut automatic = KilnConfig::default();
+        automatic.apply_env_overrides().unwrap();
+        assert_eq!(
+            automatic.streaming_prefill.mode.mode(),
+            StreamingPrefillMode::Auto
+        );
+        for configured in [
+            automatic.streaming_prefill.threshold_tokens.configured(),
+            automatic.streaming_prefill.tile_tokens.configured(),
+            automatic.streaming_prefill.tape_tile_tokens.configured(),
+            automatic
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .configured(),
+        ] {
+            assert_eq!(configured, None);
+        }
+        for source in [
+            automatic.streaming_prefill.mode.source(),
+            automatic.streaming_prefill.threshold_tokens.source(),
+            automatic.streaming_prefill.tile_tokens.source(),
+            automatic.streaming_prefill.tape_tile_tokens.source(),
+            automatic
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::Environment);
+        }
+    }
+
+    #[test]
+    fn streaming_prefill_canonical_and_legacy_env_conflicts_fail_closed_pairwise() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for (canonical, canonical_value, legacy, legacy_value, field) in [
+            (
+                "KILN_STREAMING_PREFILL_MODE",
+                "enabled",
+                "KILN_STREAMING_PREFILL_ENABLED",
+                "false",
+                "streaming_prefill.mode",
+            ),
+            (
+                "KILN_STREAMING_PREFILL_MODE",
+                "disabled",
+                "KILN_STREAMING_PREFILL",
+                "true",
+                "streaming_prefill.mode",
+            ),
+            (
+                "KILN_STREAMING_PREFILL_TILE_TOKENS",
+                "2048",
+                "KILN_STREAMING_TILE_TOKENS",
+                "4096",
+                "streaming_prefill.tile_tokens",
+            ),
+            (
+                "KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS",
+                "2048",
+                "KILN_TAPE_STREAMING_TILE_TOKENS",
+                "4096",
+                "streaming_prefill.tape_tile_tokens",
+            ),
+            (
+                "KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS",
+                "2048",
+                "KILN_DETACHED_FULL_ATTN_TILE_TOKENS",
+                "4096",
+                "streaming_prefill.detached_full_attn_tile_tokens",
+            ),
+            (
+                "KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD",
+                "true",
+                "KILN_STREAMING_LAST_TOKEN_LM_HEAD",
+                "false",
+                "streaming_prefill.last_token_lm_head",
+            ),
+        ] {
+            environment.set(canonical, canonical_value);
+            environment.set(legacy, legacy_value);
+            let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+            environment.remove(canonical);
+            environment.remove(legacy);
+            let detail = format!("{error:#}");
+            assert!(detail.contains(field), "{detail}");
+            assert!(detail.contains(canonical), "{detail}");
+            assert!(detail.contains(legacy), "{detail}");
+        }
+    }
+
+    #[test]
+    fn streaming_prefill_malformed_legacy_env_aliases_fail_closed() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+        for (name, invalid) in [
+            ("KILN_STREAMING_PREFILL", "automatic-ish"),
+            ("KILN_STREAMING_PREFILL_ENABLED", "automatic-ish"),
+            ("KILN_STREAMING_TILE_TOKENS", "65"),
+            ("KILN_TAPE_STREAMING_TILE_TOKENS", "127"),
+            ("KILN_DETACHED_FULL_ATTN_TILE_TOKENS", "-1"),
+            ("KILN_STREAMING_LAST_TOKEN_LM_HEAD", "sometimes"),
+        ] {
+            environment.set(name, invalid);
+            let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+            environment.remove(name);
+            let detail = format!("{error:#}");
+            assert!(detail.contains(name), "{name}: {detail}");
+            assert!(detail.contains(&format!("{invalid:?}")), "{name}: {detail}");
+        }
     }
 
     #[test]
@@ -7282,9 +8212,22 @@ max_prefill_layers_per_cycle = 8
         assert!(config.speculative.enabled);
         assert_eq!(config.speculative.num_speculative_tokens, 6);
         assert_eq!(config.speculative.draft_layers, 10);
-        assert!(config.streaming_prefill.enabled);
-        assert_eq!(config.streaming_prefill.tile_tokens, 2048);
-        assert!(!config.streaming_prefill.last_token_lm_head);
+        assert_eq!(
+            config.streaming_prefill.mode.mode(),
+            StreamingPrefillMode::Enabled
+        );
+        assert_eq!(
+            config.streaming_prefill.tile_tokens.configured(),
+            Some(2048)
+        );
+        assert!(!config.streaming_prefill.last_token_lm_head.enabled());
+        for source in [
+            config.streaming_prefill.mode.source(),
+            config.streaming_prefill.tile_tokens.source(),
+            config.streaming_prefill.last_token_lm_head.source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::Environment);
+        }
 
         // Clean up
         unsafe {
@@ -7639,7 +8582,10 @@ served_model_id = "from-toml"
             "KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES",
             "KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES",
             "KILN_STREAMING_PREFILL",
+            "KILN_STREAMING_PREFILL_ENABLED",
             "KILN_STREAMING_TILE_TOKENS",
+            "KILN_TAPE_STREAMING_TILE_TOKENS",
+            "KILN_DETACHED_FULL_ATTN_TILE_TOKENS",
             "KILN_STREAMING_LAST_TOKEN_LM_HEAD",
         ];
 
@@ -7708,11 +8654,6 @@ served_model_id = "from-toml"
                 "speculative.num_speculative_tokens",
                 "5",
                 "[speculative]\nnum_speculative_tokens = 5",
-            ),
-            (
-                "streaming_prefill.tile_tokens",
-                "63",
-                "[streaming_prefill]\ntile_tokens = 63",
             ),
             (
                 "request_log.max_file_bytes",

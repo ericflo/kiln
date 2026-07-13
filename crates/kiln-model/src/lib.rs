@@ -80,7 +80,7 @@ pub use backend::{
 // with the candle-parity opt-in feature; production uses `for_device_kt`.
 pub use cancel::CancelHandle;
 pub use engine::Engine;
-pub use forward::LinearAttentionState;
+pub use forward::{LinearAttentionState, StreamingPrefillExecutionPolicy, StreamingPrefillMode};
 pub use generate::{
     BackendHealthHandle, BackendHealthSnapshot, DecodeBatcher, DecodeBatcherConfig,
     DecodeBatcherStats, ExternalYieldSyncStats, FinishReason, GenerationOutput,

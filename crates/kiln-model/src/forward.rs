@@ -16,16 +16,11 @@ use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-#[cfg(any(
-    feature = "cuda",
-    feature = "metal",
-    feature = "vulkan",
-    feature = "rocm"
-))]
 use crate::backend::BackendIdentity;
 use crate::backend::capability::{
     BackendCapabilityQueries, InferenceRecurrentStatePolicy, MatmulRequest, ProjectionLoadPolicy,
-    Support, decode_hot_path_debug_fallback_enabled_for_backend,
+    StreamingPrefillAutoDispatch, StreamingPrefillBackendPolicy, Support,
+    decode_hot_path_debug_fallback_enabled_for_backend,
     decode_hot_path_debug_fallback_env_for_backend,
 };
 use crate::backend::{
@@ -5942,16 +5937,14 @@ fn marlin_bf16_drop_disabled() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 7: streaming/tiled GDN prefill — env-derived configuration.
+// Phase 7: streaming/tiled GDN prefill execution policy.
 //
-// Dispatch can be forced on/off via `KILN_STREAMING_PREFILL=1|0`. Without an
-// override, CUDA, ROCm, and Metal enable streaming for long prompts where tiled
-// prefill materially reduces peak activation memory. When enabled, prefill is
-// performed as a sequence of fixed-size tiles so the per-layer materialized GDN
-// intermediates only ever cover one tile at a time. The recurrent state in
-// `LinearAttentionState` already provides the O(1) hand-off required for
-// bit-exact agreement with the monolithic path. Vulkan remains opt-in here
-// because its GDN training path still has backend-specific residency constraints.
+// Startup resolves typed configuration over backend defaults and injects the
+// immutable result. CUDA, ROCm, and Metal enable streaming automatically for
+// long prompts where tiled prefill materially reduces peak activation memory.
+// The recurrent state in `LinearAttentionState` provides the O(1) hand-off
+// required for bit-exact agreement with the monolithic path. Vulkan remains
+// opt-in because its GDN training path has backend-specific residency constraints.
 // ---------------------------------------------------------------------------
 
 /// Fallback tile size for explicit streaming prefill on devices without a
@@ -6013,101 +6006,192 @@ fn streaming_prefill_device_kind(device: &Device) -> StreamingPrefillDeviceKind 
     }
 }
 
-fn streaming_prefill_env_override() -> Option<bool> {
-    std::env::var("KILN_STREAMING_PREFILL")
-        .ok()
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .and_then(|v| match v.as_str() {
-            "1" | "true" | "yes" => Some(true),
-            "0" | "false" | "no" => Some(false),
-            _ => None,
-        })
+/// Operator selection for streaming-prefill execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StreamingPrefillMode {
+    /// Apply the owning backend's automatic prompt-length policy.
+    Auto,
+    /// Stream every non-empty prefill, regardless of prompt length.
+    Enabled,
+    /// Keep streaming-prefill execution disabled.
+    Disabled,
 }
 
-/// Read `KILN_STREAMING_PREFILL` and return whether the streaming prefill
-/// dispatch was explicitly enabled. Defaults to false for compatibility with
-/// tests and non-device-aware callers.
-pub fn streaming_prefill_enabled() -> bool {
-    streaming_prefill_env_override().unwrap_or(false)
+/// Fully resolved, immutable streaming-prefill execution policy.
+///
+/// Startup configuration is resolved into this value once and injected into
+/// model execution. The model layer never consults process environment while a
+/// request is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StreamingPrefillExecutionPolicy {
+    mode: StreamingPrefillMode,
+    auto_dispatch: StreamingPrefillAutoDispatch,
+    base_tile_tokens: usize,
+    tape_tile_tokens: usize,
+    detached_full_attn_tile_tokens: usize,
+    detached_full_attn_boundary_tile_tokens: usize,
+    detached_full_attn_tape_replay_tile_tokens: usize,
+    last_token_lm_head: bool,
 }
 
-fn streaming_prefill_default_for(kind: StreamingPrefillDeviceKind, seq_len: usize) -> bool {
-    match kind {
-        StreamingPrefillDeviceKind::Cuda => seq_len >= STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD,
-        StreamingPrefillDeviceKind::Rocm => seq_len >= STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD,
-        StreamingPrefillDeviceKind::Metal => seq_len >= streaming_prefill_threshold_tokens(),
-        StreamingPrefillDeviceKind::Vulkan => false,
-        StreamingPrefillDeviceKind::Cpu => false,
+impl StreamingPrefillExecutionPolicy {
+    /// Resolve configured values over backend-owned defaults.
+    ///
+    /// A threshold override changes the crossover only for backends whose auto
+    /// policy already permits streaming. It does not make CPU or Vulkan auto
+    /// dispatch streaming. A detached-full-attention override applies to the
+    /// ordinary, detached-boundary, and tape-replay variants, matching the
+    /// single public configuration field.
+    pub const fn resolve(
+        backend: StreamingPrefillBackendPolicy,
+        mode: StreamingPrefillMode,
+        threshold_tokens: Option<usize>,
+        base_tile_tokens: Option<usize>,
+        tape_tile_tokens: Option<usize>,
+        detached_full_attn_tile_tokens: Option<usize>,
+        last_token_lm_head: bool,
+    ) -> Self {
+        let auto_dispatch = match (backend.auto_dispatch, threshold_tokens) {
+            (StreamingPrefillAutoDispatch::PromptTokensAtLeast(_), Some(threshold_tokens)) => {
+                StreamingPrefillAutoDispatch::PromptTokensAtLeast(threshold_tokens)
+            }
+            (auto_dispatch, _) => auto_dispatch,
+        };
+        let configured_base_tile_tokens = base_tile_tokens;
+        let base_tile_tokens = match configured_base_tile_tokens {
+            Some(tile_tokens) => tile_tokens,
+            None => backend.base_tile_tokens,
+        };
+        let tape_tile_tokens = match tape_tile_tokens {
+            Some(tile_tokens) => tile_tokens,
+            None => match configured_base_tile_tokens {
+                Some(_) => base_tile_tokens,
+                None => backend.tape_tile_tokens,
+            },
+        };
+        let (
+            detached_full_attn_tile_tokens,
+            detached_full_attn_boundary_tile_tokens,
+            detached_full_attn_tape_replay_tile_tokens,
+        ) = match detached_full_attn_tile_tokens {
+            Some(tile_tokens) => (tile_tokens, tile_tokens, tile_tokens),
+            None => match configured_base_tile_tokens {
+                Some(_) => (base_tile_tokens, base_tile_tokens, base_tile_tokens),
+                None => (
+                    backend.detached_full_attn_tile_tokens,
+                    backend.detached_full_attn_boundary_tile_tokens,
+                    backend.detached_full_attn_tape_replay_tile_tokens,
+                ),
+            },
+        };
+        Self {
+            mode,
+            auto_dispatch,
+            base_tile_tokens,
+            tape_tile_tokens,
+            detached_full_attn_tile_tokens,
+            detached_full_attn_boundary_tile_tokens,
+            detached_full_attn_tape_replay_tile_tokens,
+            last_token_lm_head,
+        }
     }
+
+    pub fn for_runtime(backend: &dyn BackendRuntime) -> Self {
+        Self::from_backend_policy(StreamingPrefillBackendPolicy::for_backend(
+            BackendIdentity::runtime_name(backend),
+            BackendIdentity::runtime_device(backend),
+        ))
+    }
+
+    pub fn for_device(device: Device) -> Self {
+        Self::from_backend_policy(StreamingPrefillBackendPolicy::for_device(device))
+    }
+
+    pub const fn from_backend_policy(backend: StreamingPrefillBackendPolicy) -> Self {
+        Self::resolve(
+            backend,
+            StreamingPrefillMode::Auto,
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+    }
+
+    pub const fn mode(self) -> StreamingPrefillMode {
+        self.mode
+    }
+
+    pub const fn threshold_tokens(self) -> Option<usize> {
+        self.auto_dispatch.minimum_prompt_tokens()
+    }
+
+    pub const fn enabled_for(self, seq_len: usize) -> bool {
+        match self.mode {
+            StreamingPrefillMode::Auto => self.auto_dispatch.enabled_for_prompt_tokens(seq_len),
+            StreamingPrefillMode::Enabled => seq_len > 0,
+            StreamingPrefillMode::Disabled => false,
+        }
+    }
+
+    pub const fn base_tile_tokens(self) -> usize {
+        self.base_tile_tokens
+    }
+
+    pub const fn base_tile_tokens_for(self, _seq_len: usize) -> usize {
+        self.base_tile_tokens
+    }
+
+    pub const fn tape_tile_tokens(self) -> usize {
+        self.tape_tile_tokens
+    }
+
+    pub const fn detached_full_attn_tile_tokens(self) -> usize {
+        self.detached_full_attn_tile_tokens
+    }
+
+    pub const fn detached_full_attn_boundary_tile_tokens(self) -> usize {
+        self.detached_full_attn_boundary_tile_tokens
+    }
+
+    pub const fn detached_full_attn_tape_replay_tile_tokens(self) -> usize {
+        self.detached_full_attn_tape_replay_tile_tokens
+    }
+
+    pub const fn last_token_lm_head(self) -> bool {
+        self.last_token_lm_head
+    }
+}
+
+/// Compatibility helper for non-device-aware callers. Startup configuration
+/// should instead inject a [`StreamingPrefillExecutionPolicy`].
+pub fn streaming_prefill_enabled() -> bool {
+    false
 }
 
 /// Device-aware streaming prefill policy for production prefill dispatch.
 ///
-/// Env overrides win. Without an override, long CUDA/ROCm prompts use tiled prefill
-/// by default because it cuts peak GDN activation memory enough to make
-/// production-shaped prefill fit; long Metal prompts use the macOS desktop
-/// threshold because it improves TTFT at common chat context sizes.
+/// This compatibility wrapper is env-free and resolves the backend default.
+/// Configured production policy should be injected through an explicit-policy
+/// forward variant.
 pub fn streaming_prefill_enabled_for(device: &Device, seq_len: usize) -> bool {
-    if let Some(enabled) = streaming_prefill_env_override() {
-        return enabled;
-    }
-    streaming_prefill_default_for(streaming_prefill_device_kind(device), seq_len)
+    StreamingPrefillExecutionPolicy::for_device(*device).enabled_for(seq_len)
 }
 
-fn streaming_prefill_threshold_tokens_env_override() -> Option<usize> {
-    std::env::var("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-}
-
-/// Read `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` for Metal's automatic
-/// streaming dispatch threshold. Malformed or zero values fall back to the
-/// production default.
+/// Portable automatic dispatch threshold retained for compatibility callers.
 pub fn streaming_prefill_threshold_tokens() -> usize {
-    streaming_prefill_threshold_tokens_env_override()
-        .unwrap_or(STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD)
+    STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
 }
 
-fn gdn_streaming_tile_env_override(name: &str) -> Option<usize> {
-    std::env::var(name)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0 && n % GDN_CHUNK_SIZE == 0)
-}
-
-fn streaming_tile_tokens_env_override() -> Option<usize> {
-    gdn_streaming_tile_env_override("KILN_STREAMING_TILE_TOKENS")
-}
-
-fn detached_full_attn_tile_tokens_env_override() -> Option<usize> {
-    gdn_streaming_tile_env_override("KILN_DETACHED_FULL_ATTN_TILE_TOKENS")
-        .or_else(streaming_tile_tokens_env_override)
-}
-
-fn tape_streaming_tile_tokens_env_override() -> Option<usize> {
-    gdn_streaming_tile_env_override("KILN_TAPE_STREAMING_TILE_TOKENS")
-        // Compatibility alias for the deleted exact-GDN tiled reverse caller.
-        .or_else(|| gdn_streaming_tile_env_override("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS"))
-        .or_else(streaming_tile_tokens_env_override)
-}
-
-/// Read `KILN_STREAMING_TILE_TOKENS` (positive multiple of `GDN_CHUNK_SIZE`).
-/// Falls back to `STREAMING_PREFILL_DEFAULT_TILE` when unset, malformed, zero,
-/// or not a multiple of 64.
+/// Portable tile default retained for compatibility callers.
 pub fn streaming_tile_tokens() -> usize {
-    streaming_tile_tokens_env_override().unwrap_or(STREAMING_PREFILL_DEFAULT_TILE)
+    STREAMING_PREFILL_DEFAULT_TILE
 }
 
-/// Device-aware tile-size default. Env overrides win; otherwise Metal uses a
-/// smaller tile because it measured faster for long desktop TTFT.
+/// Device-aware, env-free backend tile default.
 pub fn streaming_tile_tokens_for(device: &Device) -> usize {
-    streaming_tile_tokens_env_override().unwrap_or_else(|| {
-        crate::backend::training_precision_policy_for_device_kt(*device)
-            .streaming_prefill_tile_tokens
-    })
+    StreamingPrefillExecutionPolicy::for_device(*device).base_tile_tokens()
 }
 
 /// Tile size for detached full-attention boundary forwards during
@@ -6115,28 +6199,7 @@ pub fn streaming_tile_tokens_for(device: &Device) -> usize {
 /// full-attention uses FlashAttention over a query tile and a prefix KV span,
 /// while GDN tiles carry recurrent-state and backward-memory constraints.
 pub fn detached_full_attn_tile_tokens_for(device: &Device) -> usize {
-    detached_full_attn_tile_tokens_env_override().unwrap_or_else(|| {
-        crate::backend::training_precision_policy_for_device_kt(*device)
-            .detached_full_attn_tile_tokens
-    })
-}
-
-fn detached_full_attn_boundary_tile_tokens_for(device: &Device) -> usize {
-    detached_full_attn_tile_tokens_env_override().unwrap_or_else(|| {
-        if rocm_online_full_attn_boundary_tile_enabled(device) {
-            DETACHED_FULL_ATTN_ROCM_ONLINE_DEFAULT_TILE
-        } else {
-            crate::backend::training_precision_policy_for_device_kt(*device)
-                .detached_full_attn_boundary_tile_tokens
-        }
-    })
-}
-
-fn detached_full_attn_tape_replay_tile_tokens_for(device: &Device) -> usize {
-    detached_full_attn_tile_tokens_env_override().unwrap_or_else(|| {
-        crate::backend::training_precision_policy_for_device_kt(*device)
-            .detached_full_attn_tape_replay_tile_tokens
-    })
+    StreamingPrefillExecutionPolicy::for_device(*device).detached_full_attn_tile_tokens()
 }
 
 fn rocm_long_flash_attn_enabled() -> bool {
@@ -6146,22 +6209,6 @@ fn rocm_long_flash_attn_enabled() -> bool {
 #[cfg(feature = "rocm")]
 fn rocm_native_rectangular_causal_flash_enabled() -> bool {
     kiln_core::env_flag::env_flag("KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL", true)
-}
-
-fn rocm_online_full_attn_boundary_tile_enabled(device: &Device) -> bool {
-    #[cfg(feature = "rocm")]
-    {
-        matches!(
-            streaming_prefill_device_kind(device),
-            StreamingPrefillDeviceKind::Rocm
-        ) && rocm_long_flash_attn_enabled()
-            && rocm_native_rectangular_causal_flash_enabled()
-    }
-    #[cfg(not(feature = "rocm"))]
-    {
-        let _ = device;
-        false
-    }
 }
 
 fn long_prefill_leaf_flash_allowed_for_device(
@@ -6640,16 +6687,7 @@ impl FullAttnChunkMode {
 /// forwards use their own larger tile selector because they are not tape
 /// recording and are FlashAttention-backed.
 pub fn tape_streaming_tile_tokens_for(device: &Device) -> usize {
-    tape_streaming_tile_tokens_env_override().unwrap_or_else(|| {
-        crate::backend::training_precision_policy_for_device_kt(*device).tape_streaming_tile_tokens
-    })
-}
-
-fn streaming_tile_tokens_for_paged_prefill(device: &Device, seq_len: usize) -> usize {
-    streaming_tile_tokens_env_override().unwrap_or_else(|| {
-        crate::backend::training_precision_policy_for_device_kt(*device)
-            .streaming_prefill_tile_tokens_for_seq_len(seq_len)
-    })
+    StreamingPrefillExecutionPolicy::for_device(*device).tape_tile_tokens()
 }
 
 fn trace_model_segment_timings() -> bool {
@@ -7071,19 +7109,13 @@ fn log_model_segment_timing(
     }
 }
 
-/// Read `KILN_STREAMING_LAST_TOKEN_LM_HEAD`. Defaults to true: in streaming
-/// mode only the final token's logits are needed for sampling, so the LM head
-/// projection is collapsed to a single row per prefill. Set to `0` to compute
-/// full per-tile logits (still throwing them away for non-final tiles, but
-/// useful for parity tests against the monolithic path).
+/// Compatibility default for streaming LM-head execution.
+///
+/// In streaming mode only the final token's logits are needed for sampling, so
+/// the LM head projection is collapsed to a single row per prefill. Production
+/// callers inject the resolved value through a streaming execution policy.
 pub fn streaming_last_token_lm_head() -> bool {
-    match std::env::var("KILN_STREAMING_LAST_TOKEN_LM_HEAD")
-        .ok()
-        .as_deref()
-    {
-        Some(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"),
-        None => true,
-    }
+    true
 }
 
 /// Sidecar record: which slot in `layers[layer_idx]` a queued Marlin pack
@@ -17112,8 +17144,8 @@ pub fn gdn_recurrent_backward_no_grad(
 /// [`gated_deltanet_forward`] itself (the same way the inference streaming
 /// path handles a non-aligned final tile).
 ///
-/// Used by [`model_forward_segment`] when `KILN_STREAMING_PREFILL=1` is set
-/// and the segment's seq_len exceeds `tile_size`.
+/// Used by [`model_forward_segment_with_policy`] when the injected policy
+/// enables streaming and the segment's sequence length exceeds `tile_size`.
 pub fn gated_deltanet_forward_streaming(
     backend: &dyn BackendRuntime,
     x: &Tensor,
@@ -25124,6 +25156,44 @@ pub fn transformer_block(
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
+    transformer_block_with_policy(
+        backend,
+        x,
+        layer,
+        config,
+        positions,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        rotary_dim,
+        inv_freq,
+        rms_norm_eps,
+        kv_cache,
+        full_attn_layer_idx,
+        lora,
+        StreamingPrefillExecutionPolicy::for_runtime(backend),
+    )
+}
+
+/// Explicit-policy variant of [`transformer_block`].
+#[allow(clippy::too_many_arguments)]
+pub fn transformer_block_with_policy(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    layer: &GpuLayerWeights,
+    config: &kiln_core::config::ModelConfig,
+    positions: &[u32],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rms_norm_eps: f64,
+    kv_cache: Option<&mut KvCache>,
+    full_attn_layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
         GpuAttentionWeights::Linear(_) => {
@@ -25150,6 +25220,7 @@ pub fn transformer_block(
         kv_cache.is_some(),
         full_attn_layer_idx,
         lora,
+        streaming_prefill,
     )? {
         return Ok(out);
     }
@@ -25298,6 +25369,7 @@ fn transformer_block_detached_prefill_chunked(
     has_kv_cache: bool,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<Option<Tensor>> {
     #[cfg(any(
         feature = "cuda",
@@ -25318,7 +25390,7 @@ fn transformer_block_detached_prefill_chunked(
         return Ok(None);
     }
     let (batch, seq_len, _hidden) = x.dims3()?;
-    if !streaming_prefill_enabled_for(&x.device(), seq_len) {
+    if !streaming_prefill.enabled_for(seq_len) {
         return Ok(None);
     }
     let mode = if tape_scope_active {
@@ -25351,10 +25423,10 @@ fn transformer_block_detached_prefill_chunked(
     };
     let base_tile_size = match mode {
         FullAttnChunkMode::DetachedBoundary => {
-            detached_full_attn_boundary_tile_tokens_for(&x.device())
+            streaming_prefill.detached_full_attn_boundary_tile_tokens()
         }
         FullAttnChunkMode::TapeReplay => {
-            detached_full_attn_tape_replay_tile_tokens_for(&x.device())
+            streaming_prefill.detached_full_attn_tape_replay_tile_tokens()
         }
     };
     if base_tile_size == 0 {
@@ -27811,9 +27883,33 @@ pub fn model_forward_kt(
     token_ids: &[u32],
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
+    kv_cache: Option<&mut KvCache>,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    model_forward_kt_with_policy(
+        backend,
+        token_ids,
+        weights,
+        config,
+        kv_cache,
+        linear_state,
+        lora,
+        StreamingPrefillExecutionPolicy::for_runtime(backend),
+    )
+}
+
+/// Explicit-policy variant of [`model_forward_kt`].
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_kt_with_policy(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
     mut kv_cache: Option<&mut KvCache>,
     mut linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<Tensor> {
     let seq_len = token_ids.len();
 
@@ -27843,7 +27939,7 @@ pub fn model_forward_kt(
             GpuAttentionWeights::Full(_) => {
                 // Reborrow the cache for each layer call
                 let cache_ref = kv_cache.as_mut().map(|c| &mut **c);
-                hidden = transformer_block(
+                hidden = transformer_block_with_policy(
                     backend,
                     &hidden,
                     layer,
@@ -27858,6 +27954,7 @@ pub fn model_forward_kt(
                     cache_ref,
                     full_attn_idx,
                     layer_lora,
+                    streaming_prefill,
                 )
                 .with_context(|| format!("transformer block {i} (full attention)"))?;
                 full_attn_idx += 1;
@@ -27988,8 +28085,36 @@ pub fn model_forward_segment(
     positions: &[u32],
     start_layer: usize,
     end_layer: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    model_forward_segment_with_policy(
+        backend,
+        hidden,
+        weights,
+        config,
+        positions,
+        start_layer,
+        end_layer,
+        linear_state,
+        lora,
+        StreamingPrefillExecutionPolicy::for_runtime(backend),
+    )
+}
+
+/// Explicit-policy variant of [`model_forward_segment`].
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_segment_with_policy(
+    backend: &dyn BackendRuntime,
+    hidden: Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    positions: &[u32],
+    start_layer: usize,
+    end_layer: usize,
     mut linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<Tensor> {
     // (#1443 step 3) Defensive policy-owned activation cast for direct callers
     // (gradient-checkpointing recompute) that may hand in a pre-cast hidden.
@@ -28015,7 +28140,7 @@ pub fn model_forward_segment(
     // attention/GDN scratch allocations are bounded by the backend tile policy.
     let (_, seq_len, _) = hidden.dims3()?;
     let stream_device = hidden.device().clone();
-    let streaming = streaming_prefill_enabled_for(&stream_device, seq_len);
+    let streaming = streaming_prefill.enabled_for(seq_len);
     #[cfg(any(
         feature = "cuda",
         feature = "metal",
@@ -28032,9 +28157,9 @@ pub fn model_forward_segment(
     let tape_scope_active = false;
     let stream_tile = if streaming {
         if tape_scope_active {
-            tape_streaming_tile_tokens_for(&stream_device)
+            streaming_prefill.tape_tile_tokens()
         } else {
-            streaming_tile_tokens_for(&stream_device)
+            streaming_prefill.base_tile_tokens_for(seq_len)
         }
     } else {
         0
@@ -28067,7 +28192,7 @@ pub fn model_forward_segment(
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
                 // Training doesn't use KV cache
-                hidden = transformer_block(
+                hidden = transformer_block_with_policy(
                     backend,
                     &hidden,
                     layer,
@@ -28082,6 +28207,7 @@ pub fn model_forward_segment(
                     None, // no KV cache for training
                     full_attn_idx,
                     layer_lora,
+                    streaming_prefill,
                 )
                 .with_context(|| format!("segment transformer block {i} (full attention)"))?;
                 full_attn_idx += 1;
@@ -28465,9 +28591,31 @@ pub fn model_forward_no_head(
     linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
+    model_forward_no_head_with_policy(
+        backend,
+        token_ids,
+        weights,
+        config,
+        linear_state,
+        lora,
+        StreamingPrefillExecutionPolicy::for_runtime(backend),
+    )
+}
+
+/// Explicit-policy variant of [`model_forward_no_head`].
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_no_head_with_policy(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+) -> Result<Tensor> {
     let (hidden, positions) = model_forward_embed(token_ids, weights)?;
     let num_layers = weights.layers.len();
-    let hidden = model_forward_segment(
+    let hidden = model_forward_segment_with_policy(
         backend,
         hidden,
         weights,
@@ -28477,6 +28625,7 @@ pub fn model_forward_no_head(
         num_layers,
         linear_state,
         lora,
+        streaming_prefill,
     )?;
     let normed = {
         kiln_nvtx::range!(c"kiln/final_rmsnorm");
@@ -31557,15 +31706,15 @@ pub(crate) fn model_forward_paged_last_token_layer_group(
 
 /// Streaming/tiled paged prefill — the Phase 7 long-context entry point.
 ///
-/// Iterates `token_ids` in fixed-size tiles (default 8192 tokens, configurable
-/// via `KILN_STREAMING_TILE_TOKENS`, must be a multiple of `GDN_CHUNK_SIZE`)
+/// Iterates `token_ids` in fixed-size tiles (the portable default is 8192
+/// tokens and every configured value must be a multiple of `GDN_CHUNK_SIZE`)
 /// and dispatches each tile through `model_forward_paged_inner`. The
 /// `LinearAttentionState` carries GDN recurrent + conv state across tile
 /// boundaries; the paged KV cache is filled tile-by-tile via `start_pos +
 /// cursor`. Only the final tile runs the LM head — non-final tiles use
-/// `LmHeadMode::Skip`. When `KILN_STREAMING_LAST_TOKEN_LM_HEAD=0` the final
-/// tile uses `LmHeadMode::Full` instead so callers can compare per-position
-/// logits against the monolithic path.
+/// `LmHeadMode::Skip`. The injected policy may instead select
+/// `LmHeadMode::Full` on the final tile for per-position parity comparisons
+/// against the monolithic path.
 ///
 /// Returns logits with shape `[1, 1, vocab_size]` (last-token only) or
 /// `[1, last_tile_len, vocab_size]` when full LM head is requested.
@@ -31585,7 +31734,35 @@ pub fn model_forward_paged_streaming(
     linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
-    model_forward_paged_streaming_with_progress(
+    model_forward_paged_streaming_with_policy(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        StreamingPrefillExecutionPolicy::for_runtime(backend),
+    )
+}
+
+/// Explicit-policy variant of [`model_forward_paged_streaming`].
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_streaming_with_policy(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+) -> Result<Tensor> {
+    model_forward_paged_streaming_with_progress_and_policy(
         backend,
         token_ids,
         weights,
@@ -31596,6 +31773,7 @@ pub fn model_forward_paged_streaming(
         linear_state,
         lora,
         None,
+        streaming_prefill,
     )
 }
 
@@ -31612,7 +31790,37 @@ pub fn model_forward_paged_streaming_with_progress(
     lora: Option<&LoraWeights>,
     progress: Option<&crate::cancel::CancelHandle>,
 ) -> Result<Tensor> {
-    model_forward_paged_streaming_with_progress_offset(
+    model_forward_paged_streaming_with_progress_and_policy(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        progress,
+        StreamingPrefillExecutionPolicy::for_runtime(backend),
+    )
+}
+
+/// Progress-aware explicit-policy streaming prefill.
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_streaming_with_progress_and_policy(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    progress: Option<&crate::cancel::CancelHandle>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+) -> Result<Tensor> {
+    model_forward_paged_streaming_with_progress_offset_and_policy(
         backend,
         token_ids,
         weights,
@@ -31624,6 +31832,7 @@ pub fn model_forward_paged_streaming_with_progress(
         lora,
         progress,
         0,
+        streaming_prefill,
     )
 }
 
@@ -31645,6 +31854,37 @@ pub(crate) fn model_forward_paged_streaming_with_progress_offset(
     progress: Option<&crate::cancel::CancelHandle>,
     progress_offset: u64,
 ) -> Result<Tensor> {
+    model_forward_paged_streaming_with_progress_offset_and_policy(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        progress,
+        progress_offset,
+        StreamingPrefillExecutionPolicy::for_runtime(backend),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn model_forward_paged_streaming_with_progress_offset_and_policy(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    progress: Option<&crate::cancel::CancelHandle>,
+    progress_offset: u64,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+) -> Result<Tensor> {
     model_forward_paged_streaming_with(
         backend,
         token_ids,
@@ -31655,8 +31895,8 @@ pub(crate) fn model_forward_paged_streaming_with_progress_offset(
         start_pos,
         linear_state,
         lora,
-        streaming_tile_tokens_for_paged_prefill(&weights.embed_tokens.device(), token_ids.len()),
-        streaming_last_token_lm_head(),
+        streaming_prefill.base_tile_tokens_for(token_ids.len()),
+        streaming_prefill.last_token_lm_head(),
         progress,
         progress_offset,
     )
@@ -31678,6 +31918,35 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden(
     linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<(Tensor, Tensor)> {
+    model_forward_paged_streaming_last_token_with_last_hidden_with_policy(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        StreamingPrefillExecutionPolicy::for_runtime(backend),
+    )
+}
+
+/// Explicit-policy variant of
+/// [`model_forward_paged_streaming_last_token_with_last_hidden`].
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_streaming_last_token_with_last_hidden_with_policy(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+) -> Result<(Tensor, Tensor)> {
     model_forward_paged_streaming_last_token_with_last_hidden_with(
         backend,
         token_ids,
@@ -31688,7 +31957,7 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden(
         start_pos,
         linear_state,
         lora,
-        streaming_tile_tokens_for_paged_prefill(&weights.embed_tokens.device(), token_ids.len()),
+        streaming_prefill.base_tile_tokens_for(token_ids.len()),
     )
 }
 
@@ -31706,6 +31975,34 @@ pub fn model_forward_paged_streaming_last_token_hidden(
     linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
+    model_forward_paged_streaming_last_token_hidden_with_policy(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        StreamingPrefillExecutionPolicy::for_runtime(backend),
+    )
+}
+
+/// Explicit-policy variant of [`model_forward_paged_streaming_last_token_hidden`].
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_streaming_last_token_hidden_with_policy(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    streaming_prefill: StreamingPrefillExecutionPolicy,
+) -> Result<Tensor> {
     model_forward_paged_streaming_last_token_hidden_with(
         backend,
         token_ids,
@@ -31716,7 +32013,7 @@ pub fn model_forward_paged_streaming_last_token_hidden(
         start_pos,
         linear_state,
         lora,
-        streaming_tile_tokens_for_paged_prefill(&weights.embed_tokens.device(), token_ids.len()),
+        streaming_prefill.base_tile_tokens_for(token_ids.len()),
     )
 }
 
@@ -40160,11 +40457,9 @@ mod tests {
     /// monolithic [`gated_deltanet_forward`] on a small GDN-only input. Both
     /// paths must produce equal output tensors and equal final state.
     ///
-    /// This test does NOT touch any `KILN_STREAMING_PREFILL` env vars so it
-    /// is safe under multi-threaded `cargo test`; the env-driven dispatch
-    /// inside `model_forward_segment` is exercised separately by
-    /// `test_model_forward_segment_streaming_matches_monolithic_cpu` (which
-    /// relies on nextest per-test process isolation).
+    /// This test uses explicit parameters and is safe under a parallel test
+    /// runner. Policy dispatch inside `model_forward_segment` is exercised by
+    /// `test_model_forward_segment_streaming_matches_monolithic_cpu`.
     #[test]
     fn test_gated_deltanet_forward_streaming_matches_monolithic_cpu() -> Result<()> {
         let config = streaming_test_config();
@@ -40280,14 +40575,9 @@ mod tests {
     /// Phase 10 — training-time streaming GDN parity for `model_forward_segment`.
     ///
     /// Runs `model_forward_segment` over the full layer stack twice on the
-    /// same input: once monolithic (env unset), once with
-    /// `KILN_STREAMING_PREFILL=1` and `KILN_STREAMING_TILE_TOKENS=64` so the
-    /// 192-token input is split into 3 tiles. The two outputs must match
-    /// within FP32 tolerance and the final per-layer state must match.
-    ///
-    /// Relies on nextest per-test process isolation for safe env-var
-    /// manipulation; `cargo nextest run` is the canonical kiln test runner
-    /// (see `crates/kiln-model/src/forward.rs` `test_streaming_prefill_env_helpers`).
+    /// same input: once with an explicitly disabled policy and once with an
+    /// explicitly enabled 64-token tile so the 192-token input is split into
+    /// three tiles. The two outputs and final per-layer state must match.
     #[test]
     fn test_model_forward_segment_streaming_matches_monolithic_cpu() -> Result<()> {
         let config = streaming_test_config();
@@ -40312,13 +40602,29 @@ mod tests {
         let hidden = Tensor::new(&data, &device)?.reshape((1, total, config.hidden_size))?;
         let positions: Vec<u32> = (0..total as u32).collect();
 
-        // Monolithic — env vars unset for this thread/process.
-        unsafe {
-            std::env::remove_var("KILN_STREAMING_PREFILL");
-            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
-        }
+        let backend_defaults = StreamingPrefillBackendPolicy::for_backend("cpu", device);
+        let monolithic_policy = StreamingPrefillExecutionPolicy::resolve(
+            backend_defaults,
+            StreamingPrefillMode::Disabled,
+            None,
+            None,
+            None,
+            None,
+            true,
+        );
+        let streaming_policy = StreamingPrefillExecutionPolicy::resolve(
+            backend_defaults,
+            StreamingPrefillMode::Enabled,
+            None,
+            Some(tile),
+            Some(tile),
+            Some(tile),
+            true,
+        );
+
+        // Monolithic.
         let mut mono_state = LinearAttentionState::new(&config, &device)?;
-        let mono_out = model_forward_segment(
+        let mono_out = model_forward_segment_with_policy(
             &backend,
             hidden.clone(),
             &weights,
@@ -40328,16 +40634,12 @@ mod tests {
             config.num_layers,
             Some(&mut mono_state),
             None,
+            monolithic_policy,
         )?;
 
-        // Streaming — env vars set so streaming_prefill_enabled_for(Cpu, T)
-        // returns true and tile_size = 64.
-        unsafe {
-            std::env::set_var("KILN_STREAMING_PREFILL", "1");
-            std::env::set_var("KILN_STREAMING_TILE_TOKENS", tile.to_string());
-        }
+        // Streaming with a pure, request-independent policy value.
         let mut stream_state = LinearAttentionState::new(&config, &device)?;
-        let stream_out = model_forward_segment(
+        let stream_out = model_forward_segment_with_policy(
             &backend,
             hidden.clone(),
             &weights,
@@ -40347,12 +40649,8 @@ mod tests {
             config.num_layers,
             Some(&mut stream_state),
             None,
+            streaming_policy,
         )?;
-        // Restore for subsequent tests in this process (best-effort).
-        unsafe {
-            std::env::remove_var("KILN_STREAMING_PREFILL");
-            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
-        }
 
         assert_eq!(mono_out.dims(), stream_out.dims());
         let mv = mono_out.flatten_all()?.to_vec1::<f32>()?;
@@ -40652,60 +40950,32 @@ mod tests {
     }
 
     #[test]
-    fn test_streaming_prefill_env_helpers() {
-        // Each nextest test runs in its own process, so env-var manipulation
-        // here is safe. We verify the dispatch helpers return what
-        // `model_forward_paged_streaming` reads from the environment.
-        unsafe {
-            std::env::remove_var("KILN_STREAMING_PREFILL");
-            std::env::remove_var("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS");
-            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
-            std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
-            std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
-            std::env::remove_var("KILN_DETACHED_FULL_ATTN_TILE_TOKENS");
-            std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
-        }
+    fn test_streaming_prefill_execution_policy() {
         assert!(!streaming_prefill_enabled(), "default must be disabled");
-        assert!(!streaming_prefill_default_for(
-            StreamingPrefillDeviceKind::Cpu,
-            STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD
-        ));
-        assert!(!streaming_prefill_default_for(
-            StreamingPrefillDeviceKind::Cuda,
-            STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD - 1
-        ));
-        assert!(streaming_prefill_default_for(
-            StreamingPrefillDeviceKind::Cuda,
-            STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD
-        ));
-        assert!(streaming_prefill_default_for(
-            StreamingPrefillDeviceKind::Cuda,
-            12_000
-        ));
-        assert!(streaming_prefill_default_for(
-            StreamingPrefillDeviceKind::Cuda,
-            43_814
-        ));
-        assert!(!streaming_prefill_default_for(
-            StreamingPrefillDeviceKind::Rocm,
-            STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD - 1
-        ));
-        assert!(streaming_prefill_default_for(
-            StreamingPrefillDeviceKind::Rocm,
-            STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD
-        ));
-        assert!(!streaming_prefill_default_for(
-            StreamingPrefillDeviceKind::Metal,
-            STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD - 1
-        ));
-        assert!(streaming_prefill_default_for(
-            StreamingPrefillDeviceKind::Metal,
-            STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
-        ));
-        assert!(!streaming_prefill_default_for(
-            StreamingPrefillDeviceKind::Vulkan,
-            43_814
-        ));
+        let cpu_backend = StreamingPrefillBackendPolicy::for_backend("cpu", Device::Cpu);
+        let cpu_default = StreamingPrefillExecutionPolicy::from_backend_policy(cpu_backend);
+        let cuda_default = StreamingPrefillExecutionPolicy::from_backend_policy(
+            StreamingPrefillBackendPolicy::for_backend("cuda", Device::Cuda(0)),
+        );
+        let rocm_default = StreamingPrefillExecutionPolicy::from_backend_policy(
+            StreamingPrefillBackendPolicy::for_backend("rocm", Device::Rocm(0)),
+        );
+        let metal_default = StreamingPrefillExecutionPolicy::from_backend_policy(
+            StreamingPrefillBackendPolicy::for_backend("metal", Device::Metal(0)),
+        );
+        let vulkan_default = StreamingPrefillExecutionPolicy::from_backend_policy(
+            StreamingPrefillBackendPolicy::for_backend("vulkan", Device::Vulkan(0)),
+        );
+        assert!(!cpu_default.enabled_for(STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD));
+        assert!(!cuda_default.enabled_for(STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD - 1));
+        assert!(cuda_default.enabled_for(STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD));
+        assert!(cuda_default.enabled_for(12_000));
+        assert!(cuda_default.enabled_for(43_814));
+        assert!(!rocm_default.enabled_for(STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD - 1));
+        assert!(rocm_default.enabled_for(STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD));
+        assert!(!metal_default.enabled_for(STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD - 1));
+        assert!(metal_default.enabled_for(STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD));
+        assert!(!vulkan_default.enabled_for(43_814));
         assert_eq!(
             streaming_prefill_threshold_tokens(),
             STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
@@ -40715,19 +40985,10 @@ mod tests {
             STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
         ));
         assert_eq!(streaming_tile_tokens(), STREAMING_PREFILL_DEFAULT_TILE);
-        // CPU-as-Vulkan-sentinel: on a Vulkan-capable host (feature +
-        // device present) the per-device policy treats CPU-device tensors
-        // as the Vulkan substrate, so the tile is the Vulkan-tuned value;
-        // on hosts without a Vulkan device (CI runners) it stays portable.
-        #[cfg(feature = "vulkan")]
-        let expected_cpu_tile = if crate::backend::vulkan_training_substrate_active() {
-            crate::backend::TrainingPrecisionPolicy::vulkan().streaming_prefill_tile_tokens
-        } else {
+        assert_eq!(
+            streaming_tile_tokens_for(&Device::Cpu),
             STREAMING_PREFILL_DEFAULT_TILE
-        };
-        #[cfg(not(feature = "vulkan"))]
-        let expected_cpu_tile = STREAMING_PREFILL_DEFAULT_TILE;
-        assert_eq!(streaming_tile_tokens_for(&Device::Cpu), expected_cpu_tile);
+        );
         assert_eq!(
             streaming_tile_tokens_for(&Device::Cuda(0)),
             STREAMING_PREFILL_CUDA_DEFAULT_TILE
@@ -40745,23 +41006,19 @@ mod tests {
             DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE
         );
         assert_eq!(
-            detached_full_attn_boundary_tile_tokens_for(&Device::Cuda(0)),
-            DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE
-        );
-        #[cfg(feature = "rocm")]
-        let expected_rocm_boundary_tile = DETACHED_FULL_ATTN_ROCM_ONLINE_DEFAULT_TILE;
-        #[cfg(not(feature = "rocm"))]
-        let expected_rocm_boundary_tile = DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE;
-        assert_eq!(
-            detached_full_attn_boundary_tile_tokens_for(&Device::Rocm(0)),
-            expected_rocm_boundary_tile
-        );
-        assert_eq!(
-            detached_full_attn_tape_replay_tile_tokens_for(&Device::Cuda(0)),
+            cuda_default.detached_full_attn_boundary_tile_tokens(),
             DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE
         );
         assert_eq!(
-            detached_full_attn_tape_replay_tile_tokens_for(&Device::Rocm(0)),
+            rocm_default.detached_full_attn_boundary_tile_tokens(),
+            DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE
+        );
+        assert_eq!(
+            cuda_default.detached_full_attn_tape_replay_tile_tokens(),
+            DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE
+        );
+        assert_eq!(
+            rocm_default.detached_full_attn_tape_replay_tile_tokens(),
             DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE
         );
         let portable_rocm_backend = CpuBackend::new(Device::Rocm(0));
@@ -40898,98 +41155,89 @@ mod tests {
                 streaming_tile_tokens_for(&device),
                 STREAMING_PREFILL_METAL_DEFAULT_TILE
             );
-            unsafe {
-                std::env::set_var("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS", "1024");
-            }
-            assert_eq!(streaming_prefill_threshold_tokens(), 1024);
-            assert!(!streaming_prefill_default_for(
-                StreamingPrefillDeviceKind::Metal,
-                1023
-            ));
-            assert!(streaming_prefill_default_for(
-                StreamingPrefillDeviceKind::Metal,
-                1024
-            ));
-            assert!(!streaming_prefill_enabled_for(&device, 1023));
-            assert!(streaming_prefill_enabled_for(&device, 1024));
         }
 
-        unsafe {
-            std::env::set_var("KILN_STREAMING_PREFILL", "1");
-        }
-        assert!(streaming_prefill_enabled());
-        assert!(streaming_prefill_enabled_for(&Device::Cpu, 1));
+        let forced_on = StreamingPrefillExecutionPolicy::resolve(
+            cpu_backend,
+            StreamingPrefillMode::Enabled,
+            Some(1_024),
+            Some(256),
+            Some(128),
+            Some(512),
+            false,
+        );
+        assert_eq!(forced_on.mode(), StreamingPrefillMode::Enabled);
+        assert_eq!(forced_on.threshold_tokens(), None);
+        assert!(!forced_on.enabled_for(0));
+        assert!(forced_on.enabled_for(1));
+        assert_eq!(forced_on.base_tile_tokens(), 256);
+        assert_eq!(forced_on.base_tile_tokens_for(usize::MAX), 256);
+        assert_eq!(forced_on.tape_tile_tokens(), 128);
+        assert_eq!(forced_on.detached_full_attn_tile_tokens(), 512);
+        assert_eq!(forced_on.detached_full_attn_boundary_tile_tokens(), 512);
+        assert_eq!(forced_on.detached_full_attn_tape_replay_tile_tokens(), 512);
+        assert!(!forced_on.last_token_lm_head());
 
-        unsafe {
-            std::env::set_var("KILN_STREAMING_PREFILL", "0");
-        }
-        assert!(!streaming_prefill_enabled());
-        assert!(!streaming_prefill_enabled_for(
-            &Device::Cpu,
-            STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
-        ));
-
-        unsafe {
-            std::env::set_var("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS", "0");
-        }
+        let inherited_specialized_tiles = StreamingPrefillExecutionPolicy::resolve(
+            StreamingPrefillBackendPolicy::for_backend("cuda", Device::Cuda(0)),
+            StreamingPrefillMode::Auto,
+            None,
+            Some(256),
+            None,
+            None,
+            true,
+        );
+        assert_eq!(inherited_specialized_tiles.base_tile_tokens(), 256);
+        assert_eq!(inherited_specialized_tiles.tape_tile_tokens(), 256);
         assert_eq!(
-            streaming_prefill_threshold_tokens(),
-            STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
+            inherited_specialized_tiles.detached_full_attn_tile_tokens(),
+            256
+        );
+        assert_eq!(
+            inherited_specialized_tiles.detached_full_attn_boundary_tile_tokens(),
+            256
+        );
+        assert_eq!(
+            inherited_specialized_tiles.detached_full_attn_tape_replay_tile_tokens(),
+            256
         );
 
-        unsafe {
-            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "256");
-        }
-        assert_eq!(streaming_tile_tokens(), 256);
-        assert_eq!(streaming_tile_tokens_for(&Device::Cpu), 256);
-        assert_eq!(detached_full_attn_tile_tokens_for(&Device::Rocm(0)), 256);
-        assert_eq!(tape_streaming_tile_tokens_for(&Device::Cuda(0)), 256);
+        let forced_off = StreamingPrefillExecutionPolicy::resolve(
+            StreamingPrefillBackendPolicy::for_backend("cuda", Device::Cuda(0)),
+            StreamingPrefillMode::Disabled,
+            Some(1),
+            None,
+            None,
+            None,
+            true,
+        );
+        assert!(!forced_off.enabled_for(usize::MAX));
 
-        unsafe {
-            std::env::set_var("KILN_DETACHED_FULL_ATTN_TILE_TOKENS", "512");
-        }
-        assert_eq!(detached_full_attn_tile_tokens_for(&Device::Rocm(0)), 512);
+        let cuda_auto = StreamingPrefillExecutionPolicy::resolve(
+            StreamingPrefillBackendPolicy::for_backend("cuda", Device::Cuda(0)),
+            StreamingPrefillMode::Auto,
+            Some(1_024),
+            None,
+            None,
+            None,
+            true,
+        );
+        assert_eq!(cuda_auto.threshold_tokens(), Some(1_024));
+        assert!(!cuda_auto.enabled_for(1_023));
+        assert!(cuda_auto.enabled_for(1_024));
 
-        unsafe {
-            std::env::set_var("KILN_TAPE_STREAMING_TILE_TOKENS", "128");
-        }
-        assert_eq!(tape_streaming_tile_tokens_for(&Device::Cuda(0)), 128);
-
-        unsafe {
-            std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
-            std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "192");
-        }
-        assert_eq!(tape_streaming_tile_tokens_for(&Device::Cuda(0)), 192);
-
-        unsafe {
-            std::env::set_var("KILN_TAPE_STREAMING_TILE_TOKENS", "130");
-            std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "65");
-        }
-        assert_eq!(tape_streaming_tile_tokens_for(&Device::Cuda(0)), 256);
-
-        // Bad value (not a multiple of GDN_CHUNK_SIZE) falls back to default.
-        unsafe {
-            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "65");
-            std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
-            std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
-        }
-        assert_eq!(streaming_tile_tokens(), STREAMING_PREFILL_DEFAULT_TILE);
-
-        unsafe {
-            std::env::set_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD", "0");
-        }
-        assert!(!streaming_last_token_lm_head());
-
-        // Cleanup so this test does not leak state to peers (defensive even
-        // though nextest isolates by process).
-        unsafe {
-            std::env::remove_var("KILN_STREAMING_PREFILL");
-            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
-            std::env::remove_var("KILN_DETACHED_FULL_ATTN_TILE_TOKENS");
-            std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
-            std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
-            std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
-        }
+        let cpu_auto = StreamingPrefillExecutionPolicy::resolve(
+            cpu_backend,
+            StreamingPrefillMode::Auto,
+            Some(1),
+            None,
+            None,
+            None,
+            true,
+        );
+        assert_eq!(cpu_auto.threshold_tokens(), None);
+        assert!(!cpu_auto.enabled_for(usize::MAX));
+        assert!(streaming_last_token_lm_head());
     }
 
     // (#1082) Deleted test_cuda_rotary_one_bwd_kt_bridge_default_matches_candle_path:
