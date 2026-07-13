@@ -2060,6 +2060,26 @@ async function waitForPanelText(page, selector, pattern, message) {
   ).catch(() => fail(`${message}: ${selector} did not render text matching ${pattern}`));
 }
 
+async function evalDrillTabbableState(page, focusTarget = null) {
+  return page.evaluate((target) => {
+    const modal = document.getElementById('eval-drill-modal');
+    const selector = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+    const tabbables = Array.from(modal.querySelectorAll(selector)).filter((node) => {
+      if (node.closest('[hidden]')) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 || rect.height > 0;
+    });
+    if (target === 'first') tabbables[0]?.focus();
+    if (target === 'last') tabbables[tabbables.length - 1]?.focus();
+    return {
+      count: tabbables.length,
+      activeIsFirst: document.activeElement === tabbables[0],
+      activeIsLast: document.activeElement === tabbables[tabbables.length - 1],
+      active: document.activeElement?.id || document.activeElement?.tagName || 'none',
+    };
+  }, focusTarget);
+}
+
 async function expectDirectDecodeRendezvousRuntimeConfig(page, scenarioLabel) {
   const prefix = `${scenarioLabel} runtime config`;
   const selector = '#runtime-config-body';
@@ -2974,40 +2994,21 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     // must finish rendering first so the tabbable set is stable.
     await page.waitForFunction(() => document.querySelector('#eval-drill-modal .outcome-item'), { timeout: 5000 })
       .catch(() => fail('Eval drill outcomes did not render before the Tab-trap checks'));
-    const trapReady = await page.evaluate(() => {
-      const modal = document.getElementById('eval-drill-modal');
-      const sel = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
-      const list = Array.from(modal.querySelectorAll(sel)).filter((n) => {
-        if (n.closest('[hidden]')) return false;
-        const r = n.getBoundingClientRect();
-        return r.width > 0 || r.height > 0;
-      });
-      if (list.length < 2) return false;
-      list[0].setAttribute('data-smoke-first-tabbable', '1');
-      list[list.length - 1].setAttribute('data-smoke-last-tabbable', '1');
-      list[list.length - 1].focus();
-      return true;
-    });
-    if (!trapReady) fail('Eval drill should expose at least two tabbables for the Tab-trap checks');
+    const trapReady = await evalDrillTabbableState(page, 'last');
+    if (trapReady.count < 2) fail('Eval drill should expose at least two tabbables for the Tab-trap checks');
     await page.keyboard.press('Tab');
-    const wrappedForward = await page.evaluate(() => document.activeElement?.hasAttribute('data-smoke-first-tabbable') || false);
-    if (!wrappedForward) {
-      const got = await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName || 'none');
-      fail(`Tab from the last tabbable should wrap to the first inside the eval drill, got activeElement=${got}`);
+    const forwardFocus = await evalDrillTabbableState(page);
+    if (!forwardFocus.activeIsFirst) {
+      fail(`Tab from the last tabbable should wrap to the current first inside the eval drill, got activeElement=${forwardFocus.active}`);
     }
-    await page.evaluate(() => document.querySelector('[data-smoke-first-tabbable]')?.focus());
+    await evalDrillTabbableState(page, 'first');
     await page.keyboard.down('Shift');
     await page.keyboard.press('Tab');
     await page.keyboard.up('Shift');
-    const wrappedBackward = await page.evaluate(() => document.activeElement?.hasAttribute('data-smoke-last-tabbable') || false);
-    if (!wrappedBackward) {
-      const got = await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName || 'none');
-      fail(`Shift+Tab from the first tabbable should wrap to the last inside the eval drill, got activeElement=${got}`);
+    const backwardFocus = await evalDrillTabbableState(page);
+    if (!backwardFocus.activeIsLast) {
+      fail(`Shift+Tab from the first tabbable should wrap to the current last inside the eval drill, got activeElement=${backwardFocus.active}`);
     }
-    await page.evaluate(() => {
-      document.querySelector('[data-smoke-first-tabbable]')?.removeAttribute('data-smoke-first-tabbable');
-      document.querySelector('[data-smoke-last-tabbable]')?.removeAttribute('data-smoke-last-tabbable');
-    });
 
     // Escape closes the drill through its own user-close fn (the hash
     // entry is consumed exactly like the X button) AND focus returns to
