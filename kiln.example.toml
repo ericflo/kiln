@@ -118,9 +118,9 @@ model_id = "Qwen/Qwen3.5-4B"
                                       # snapshot. Reflink/clonefile is used when
                                       # available; otherwise startup needs room
                                       # for a full copy. KILN_MODEL_SNAPSHOT_DIR
-                                      # overrides this value. The snapshot lives
-                                      # until deferred MTP no longer needs it
-                                      # (normally process exit) and is cleaned.
+                                      # overrides this value. The snapshot remains
+                                      # leased by the running model and is cleaned
+                                      # when that lease ends.
 # served_model_id = "Qwen3.5-4B" # ID exposed at /v1/models and echoed in chat completion
                                       # responses. Default: derived from `model_id` by stripping
                                       # everything up to and including the last "/" (so
@@ -223,17 +223,14 @@ enabled = true                        # Reuse KV cache blocks for shared prompt 
                                       # on Qwen3.5-4B, separate from KV blocks.
 
 [speculative]
-enabled = false                       # Self-speculative decoding for direct non-streaming
-                                      # generation. Direct SSE streams temporarily use settled
-                                      # single-token decode even when this is enabled.
-method = "off"                         # off, skip_layer, or mtp. enabled=true with off retains
-                                      # the legacy skip_layer fallback.
-num_speculative_tokens = 256          # Upper bound on drafted tokens per step (the paged
-                                      # skip-layer draft adapts within this budget)
-draft_layers = 8                      # First N layers used as draft model
-                                      # Also settable via KILN_SPECULATIVE_ENABLED,
-                                      # KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS, and
-                                      # KILN_SPECULATIVE_DRAFT_LAYERS env vars.
+enabled = false                       # Serving is fail-closed to speculative decoding.
+                                      # Every effective non-off setting fails `kiln config`
+                                      # and server startup before model weights are loaded.
+method = "off"                        # Keep `off`. `enabled=true` with `off` resolves to the
+                                      # legacy skip_layer method and is therefore rejected too.
+num_speculative_tokens = 4            # Draft-window default and hard ceiling. Planned local
+                                      # accelerator qualification covers K=1, K=2, and K=4.
+draft_layers = 8                      # Retained qualification geometry; it has no serving route.
 
 [streaming_prefill]
 enabled = false                       # Typed long-prefill policy. Runtime propagation into all

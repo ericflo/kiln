@@ -955,10 +955,12 @@ pub(crate) fn validate_lora_scale_at_submit(
         .map_err(|e| ApiError::training_invalid_request(format!("{e:#}")))
 }
 
-fn validate_sft_config_at_submit(config: &kiln_train::SftConfig) -> Result<(), ApiError> {
+fn normalize_sft_config_at_submit(config: &mut kiln_train::SftConfig) -> Result<(), ApiError> {
     config
         .validate_native_contract()
-        .map_err(|error| ApiError::training_invalid_request(format!("{error:#}")))
+        .map_err(|error| ApiError::training_invalid_request(format!("{error:#}")))?;
+    crate::training_queue::normalize_server_sft_mtp_policy(config)
+        .map_err(ApiError::training_invalid_request)
 }
 
 fn validate_opd_loss_at_submit(loss: kiln_train::OpdLossGranularity) -> Result<(), ApiError> {
@@ -1498,7 +1500,7 @@ pub(crate) async fn admit_sft_request(
     if let Some(name) = req.config.output_name.as_deref() {
         super::adapters::validate_adapter_name(name)?;
     }
-    validate_sft_config_at_submit(&req.config)?;
+    normalize_sft_config_at_submit(&mut req.config)?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req
@@ -3572,8 +3574,8 @@ fn admit_training_jobs_with_summary(
     // metadata before checking whether this backend can train. Keep every
     // caller-controlled dataset scan/materialization after the capacity check.
     for (info, entry) in &mut pending {
-        if let QueuedJob::Sft(req) = &entry.job {
-            validate_sft_config_at_submit(&req.config)?;
+        if let QueuedJob::Sft(req) = &mut entry.job {
+            normalize_sft_config_at_submit(&mut req.config)?;
         }
         let effective_seed = crate::training_queue::materialize_queued_job_effective_seed(
             &mut entry.job,
@@ -4900,6 +4902,47 @@ mod tests {
                 job: QueuedJob::Sft(request),
             },
         )
+    }
+
+    #[test]
+    fn server_sft_normalizes_implicit_mtp_training_to_disabled() {
+        let mut config = SftConfig::default();
+        assert_eq!(config.train_mtp, None);
+
+        normalize_sft_config_at_submit(&mut config).unwrap();
+
+        assert_eq!(config.train_mtp, Some(false));
+    }
+
+    #[test]
+    fn server_sft_rejects_explicit_mtp_training() {
+        let mut config = SftConfig {
+            train_mtp: Some(true),
+            ..SftConfig::default()
+        };
+
+        let error = normalize_sft_config_at_submit(&mut config).unwrap_err();
+
+        assert_eq!(error.code, "training_invalid_request");
+        assert!(error.message.contains("train_mtp=true"), "{error:?}");
+        assert!(error.message.contains("GPU-ownership"), "{error:?}");
+    }
+
+    #[test]
+    fn central_admission_rejects_mtp_sft_without_publication() {
+        let state = teacher_binding_test_state();
+        let (info, mut entry) = pending_sft_job("mtp-sft");
+        let QueuedJob::Sft(request) = &mut entry.job else {
+            unreachable!("pending_sft_job must construct SFT")
+        };
+        request.config.train_mtp = Some(true);
+
+        let error = admit_training_jobs(&state, vec![(info, entry)]).unwrap_err();
+
+        assert_eq!(error.code, "training_invalid_request");
+        assert!(error.message.contains("train_mtp=true"), "{error:?}");
+        assert!(state.training_jobs.read().unwrap().is_empty());
+        assert_eq!(state.training_queue.lock().unwrap().len(), 0);
     }
 
     #[test]

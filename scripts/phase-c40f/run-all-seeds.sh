@@ -5,7 +5,6 @@ source /root/.kiln-build-env
 export KILN_CUDA_ARCHS=86
 export CARGO_PROFILE_DEV_DEBUG=0
 export KILN_W4A16=0
-export KILN_MTP_ARGMAX_FP32=1
 export KILN_SPEC_ENABLED=1
 export KILN_SPEC_METHOD=mtp
 export KILN_CUDA_GRAPHS=true

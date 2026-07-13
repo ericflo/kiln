@@ -1,11 +1,15 @@
 use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
-use crate::config::{ConfigValueSource, DecodeRuntimeConfig, ServingProfileDiagnostics};
+use crate::config::{
+    ConfigValueSource, DecodeRuntimeConfig, ServingProfileDiagnostics, SpecMethod,
+};
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::state::{AppState, ModelBackend};
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const SPECULATIVE_SERVING_UNAVAILABLE_REASON: &str =
+    "pending_cancel_safe_local_accelerator_qualification";
 
 fn gib(bytes: u64) -> f64 {
     bytes as f64 / BYTES_PER_GIB
@@ -15,6 +19,7 @@ fn gib(bytes: u64) -> f64 {
 struct ConfigResponse {
     serving_profile: ServingProfileDiagnostics,
     decode_runtime: DecodeRuntimeConfig,
+    speculative: SpeculativeConfig,
     vram: VramConfig,
     kv_cache: KvCacheConfig,
     training: TrainingConfig,
@@ -148,6 +153,27 @@ struct GenerationConfig {
     fold_reasoning_into_content: bool,
 }
 
+#[derive(Serialize)]
+struct SpeculativeConfig {
+    enabled: bool,
+    configured_method: SpecMethod,
+    configured_effective_method: SpecMethod,
+    serving_effective_method: SpecMethod,
+    num_speculative_tokens: usize,
+    draft_layers: usize,
+    configured_policy_immutable_after_startup: bool,
+    serving_routable: bool,
+    serving_unavailable_reason: &'static str,
+    draft_token_ceiling: usize,
+    backend_mtp: SpeculativeBackendMtpConfig,
+}
+
+#[derive(Serialize)]
+struct SpeculativeBackendMtpConfig {
+    support: &'static str,
+    native: bool,
+}
+
 async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
     let memory_observation =
         CachedMemoryGovernorObservation::capture_global_for(state.vram_probe_selector);
@@ -199,6 +225,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
         serving_profile: state.serving_profile.diagnostics(),
         decode_runtime: state.decode_runtime_config,
+        speculative: build_speculative_config(&state),
         vram: build_vram_config(&state, memory_observation),
         kv_cache: KvCacheConfig {
             num_blocks,
@@ -239,6 +266,43 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             fold_reasoning_into_content: state.fold_reasoning_into_content,
         },
     })
+}
+
+fn build_speculative_config(state: &AppState) -> SpeculativeConfig {
+    let configured = state.speculative_config;
+    let configured_effective_method = configured.effective_method();
+    let runtime = state.speculative_runtime_policy;
+    let native_mtp = runtime.mtp_support.is_native();
+    SpeculativeConfig {
+        enabled: configured.enabled,
+        configured_method: configured.method,
+        configured_effective_method,
+        serving_effective_method: SpecMethod::Off,
+        num_speculative_tokens: configured.num_speculative_tokens,
+        draft_layers: configured.draft_layers,
+        configured_policy_immutable_after_startup: true,
+        serving_routable: false,
+        serving_unavailable_reason: SPECULATIVE_SERVING_UNAVAILABLE_REASON,
+        draft_token_ceiling: crate::config::MAX_SPECULATIVE_DRAFT_TOKENS,
+        backend_mtp: SpeculativeBackendMtpConfig {
+            support: support_name(runtime.mtp_support),
+            native: native_mtp,
+        },
+    }
+}
+
+fn support_name(support: kiln_model::Support) -> &'static str {
+    use kiln_model::Support;
+
+    match support {
+        Support::Native => "native",
+        Support::NativeWithConstraints => "native_with_constraints",
+        Support::HostFallbackAllowed => "host_fallback_allowed",
+        Support::Declined => "declined",
+        Support::Unsupported => "unsupported",
+        Support::DisabledByEnv => "disabled_by_env",
+        Support::RequiresFeature => "requires_feature",
+    }
 }
 
 fn build_vram_config(state: &AppState, observation: CachedMemoryGovernorObservation) -> VramConfig {
@@ -430,6 +494,29 @@ mod tests {
             json["decode_runtime"]["max_decode_batch"]["effective_source"],
             "backend_policy"
         );
+        assert_eq!(json["speculative"]["enabled"], false);
+        assert_eq!(json["speculative"]["configured_method"], "off");
+        assert_eq!(json["speculative"]["configured_effective_method"], "off");
+        assert_eq!(json["speculative"]["serving_effective_method"], "off");
+        assert_eq!(
+            json["speculative"]["num_speculative_tokens"],
+            crate::config::MAX_SPECULATIVE_DRAFT_TOKENS
+        );
+        assert_eq!(json["speculative"]["draft_layers"], 8);
+        assert_eq!(
+            json["speculative"]["configured_policy_immutable_after_startup"],
+            true
+        );
+        assert_eq!(json["speculative"]["serving_routable"], false);
+        assert_eq!(
+            json["speculative"]["serving_unavailable_reason"],
+            SPECULATIVE_SERVING_UNAVAILABLE_REASON
+        );
+        assert_eq!(
+            json["speculative"]["draft_token_ceiling"],
+            crate::config::MAX_SPECULATIVE_DRAFT_TOKENS
+        );
+        assert_eq!(json["speculative"]["backend_mtp"]["support"], "unsupported");
         let policy = &json["serving_profile"]["effective_policy"];
         for field in [
             "inference_admission",
@@ -458,6 +545,102 @@ mod tests {
         );
         assert_eq!(json["training"]["checkpoint_policy"]["mode"], "auto");
         assert!(json["vram"]["live"]["raw_observations"]["driver_total_bytes"].is_null());
+    }
+
+    #[test]
+    fn speculative_snapshot_distinguishes_configured_policy_from_serving_policy() {
+        let mut state = make_test_state();
+        state.speculative_config = crate::config::SpeculativeDecodingConfig {
+            enabled: true,
+            method: SpecMethod::Mtp,
+            num_speculative_tokens: 4,
+            draft_layers: 6,
+        };
+        state.speculative_runtime_policy =
+            crate::state::SpeculativeRuntimePolicy::new(kiln_model::Support::NativeWithConstraints);
+
+        let json = serde_json::to_value(build_speculative_config(&state)).unwrap();
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["configured_method"], "mtp");
+        assert_eq!(json["configured_effective_method"], "mtp");
+        assert_eq!(json["serving_effective_method"], "off");
+        assert_eq!(json["num_speculative_tokens"], 4);
+        assert_eq!(json["draft_layers"], 6);
+        assert_eq!(json["configured_policy_immutable_after_startup"], true);
+        assert_eq!(json["serving_routable"], false);
+        assert_eq!(
+            json["serving_unavailable_reason"],
+            SPECULATIVE_SERVING_UNAVAILABLE_REASON
+        );
+        assert_eq!(json["draft_token_ceiling"], 4);
+
+        assert_eq!(json["backend_mtp"]["support"], "native_with_constraints");
+        assert_eq!(json["backend_mtp"]["native"], true);
+        assert!(json.get("routing").is_none());
+    }
+
+    #[test]
+    fn speculative_snapshot_preserves_configured_and_effective_method() {
+        let mut state = make_test_state();
+        state.speculative_config = crate::config::SpeculativeDecodingConfig {
+            enabled: true,
+            method: SpecMethod::Off,
+            num_speculative_tokens: 4,
+            draft_layers: 4,
+        };
+
+        let json = serde_json::to_value(build_speculative_config(&state)).unwrap();
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["configured_method"], "off");
+        assert_eq!(json["configured_effective_method"], "skip_layer");
+        assert_eq!(json["serving_effective_method"], "off");
+        assert_eq!(json["serving_routable"], false);
+    }
+
+    #[test]
+    fn speculative_backend_support_names_are_stable_and_exhaustive() {
+        use kiln_model::Support;
+
+        for (support, expected) in [
+            (Support::Native, "native"),
+            (Support::NativeWithConstraints, "native_with_constraints"),
+            (Support::HostFallbackAllowed, "host_fallback_allowed"),
+            (Support::Declined, "declined"),
+            (Support::Unsupported, "unsupported"),
+            (Support::DisabledByEnv, "disabled_by_env"),
+            (Support::RequiresFeature, "requires_feature"),
+        ] {
+            assert_eq!(support_name(support), expected);
+        }
+    }
+
+    #[test]
+    fn speculative_config_api_reports_only_immutable_policy_and_backend_facts() {
+        let source = include_str!("config.rs");
+        let section = source
+            .split("fn build_speculative_config")
+            .nth(1)
+            .unwrap()
+            .split("fn build_vram_config")
+            .next()
+            .unwrap();
+
+        assert!(section.contains("state.speculative_config"));
+        assert!(section.contains("state.speculative_runtime_policy"));
+        assert!(section.contains("serving_effective_method: SpecMethod::Off"));
+        assert!(section.contains("serving_routable: false"));
+        assert!(section.contains("SPECULATIVE_SERVING_UNAVAILABLE_REASON"));
+        assert!(
+            section.contains("draft_token_ceiling: crate::config::MAX_SPECULATIVE_DRAFT_TOKENS")
+        );
+        assert!(!section.contains("runtime.decode_policy"));
+        assert!(!section.contains("mtp_max_prompt_tokens"));
+        assert!(!section.contains("long_prompt_skip_layer"));
+        assert!(!section.contains("std::env"));
+        assert!(!section.contains("backend_health_handle()"));
+        assert!(!section.contains("available_permits()"));
+        assert!(!section.contains("try_global_cached_available_bytes()"));
+        assert!(!section.contains("runner"));
     }
 
     #[tokio::test]

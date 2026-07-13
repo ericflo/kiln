@@ -1565,7 +1565,13 @@ authenticated reverse proxy or keep it on a private network (see README \"Securi
 pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
     use crate::config::KilnConfig;
 
-    match KilnConfig::load(file) {
+    match KilnConfig::load(file).and_then(|config| {
+        config
+            .speculative
+            .validate_for_model(&kiln_core::config::ModelConfig::qwen3_5_4b())?;
+        config.speculative.validate_for_serving()?;
+        Ok(config)
+    }) {
         Ok(config) => {
             println!("{} Configuration is valid", style("✓").green().bold());
             println!();
@@ -1621,8 +1627,8 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
             );
             println!(
                 "  {} {}",
-                style("Speculative (direct non-streaming):").dim(),
-                config.speculative.enabled
+                style("Speculative serving:").dim(),
+                "off (pending local accelerator qualification)"
             );
             if let Some(warning) = non_loopback_host_warning(&config.server.host) {
                 println!();

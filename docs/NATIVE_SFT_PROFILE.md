@@ -133,9 +133,10 @@ a compile-only check or a missing-device skip is not hardware evidence.
 
 ## Optional MTP alignment
 
-When the base checkpoint contains native `mtp.*` weights, `train_mtp: null`
-(the default) runs a separate post-SFT draft-block LoRA alignment pass;
-`train_mtp: false` disables it and `true` requests it explicitly. This pass:
+The standalone `kiln-train` library retains an offline MTP-alignment mode. When
+the base checkpoint contains native `mtp.*` weights, `train_mtp: null` uses the
+library's historical automatic behavior, `false` disables it, and `true`
+requests it explicitly. This separate post-SFT pass:
 
 - trains only the MTP block's LoRA parameters;
 - visits each admitted conversation at most once, independently of `epochs`;
@@ -144,9 +145,21 @@ When the base checkpoint contains native `mtp.*` weights, `train_mtp: null`
 - is outside the main-phase step count and exact-resume cursor; and
 - is skipped when the base model has no MTP weights.
 
-The main adapter remains usable if automatic MTP alignment fails; Kiln logs the
-failure and omits the MTP LoRA tensors. This auxiliary phase therefore must not
-be interpreted as part of the exact main-phase continuation guarantee.
+The live server does not permit this phase. Every server SFT admission
+normalizes an omitted or explicit-false value to `train_mtp: false`; explicit
+`true` returns `training_invalid_request` before the job is published. The
+worker checks the normalized value again before corpus or GPU work. This is
+fail-closed because the alignment phase does not yet participate in the
+server's GPU-step coordination, memory reservation, progress cancellation, or
+settlement contracts and can otherwise materialize deferred MTP weights while
+inference is active. Use the offline library only in an isolated process until
+that phase has passed the same accelerator qualification gates as other
+server-owned training.
+
+For offline library use, the main adapter remains usable if automatic MTP
+alignment fails; the library logs the failure and omits the MTP LoRA tensors.
+This auxiliary phase therefore must not be interpreted as part of the exact
+main-phase continuation guarantee.
 
 ## Artifacts and resume
 

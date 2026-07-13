@@ -517,10 +517,6 @@
           <input type="checkbox" id="prefix_cache" />
           <span class="hint">Reuses computation for repeated prompt prefixes. Recommended on.</span>
         </label>
-        <label class="row"><span class="name">Speculative decoding</span>
-          <input type="checkbox" id="speculative_decoding" />
-          <span class="hint">Accelerates direct non-streaming requests. Direct SSE streams use settled single-token decode.</span>
-        </label>
       </fieldset>
 
       <fieldset>
@@ -615,7 +611,7 @@
       const fields = [
         "kiln_binary", "model_path", "host", "port",
         "inference_fraction", "fp8_kv_cache", "cuda_graphs",
-        "prefix_cache", "speculative_decoding", "adapter_dir",
+        "prefix_cache", "adapter_dir",
         "served_model_id", "default_thinking_budget_tokens",
         "default_thinking_budget_seconds",
         "auto_start", "auto_restart", "launch_at_login",
@@ -792,7 +788,6 @@
           fp8_kv_cache: n("fp8_kv_cache").checked,
           cuda_graphs: n("cuda_graphs").checked,
           prefix_cache: n("prefix_cache").checked,
-          speculative_decoding: n("speculative_decoding").checked,
           adapter_dir: strOrNull("adapter_dir"),
           served_model_id: strOrNull("served_model_id"),
           ...thinkingBudget,
@@ -812,7 +807,6 @@
         n("fp8_kv_cache").checked = !!s.fp8_kv_cache;
         n("cuda_graphs").checked = !!s.cuda_graphs;
         n("prefix_cache").checked = !!s.prefix_cache;
-        n("speculative_decoding").checked = !!s.speculative_decoding;
         n("adapter_dir").value = s.adapter_dir || "";
         n("served_model_id").value = s.served_model_id || "";
         const hasTokenBudget = s.default_thinking_budget_tokens !== null &&

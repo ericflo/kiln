@@ -67,6 +67,13 @@ use crate::speculative::{
 
 use kiln_core::block::{BlockManager, BlockTable};
 
+const SPECULATIVE_GENERATION_UNAVAILABLE_REASON: &str = "speculative generation is disabled pending cancellation-safe owner settlement and local accelerator qualification";
+
+#[inline]
+fn ensure_speculative_generation_available() -> Result<()> {
+    anyhow::bail!(SPECULATIVE_GENERATION_UNAVAILABLE_REASON)
+}
+
 /// Returns `Err` with a stable error message if `cancel` has been signalled.
 ///
 /// Decode loops poll this between tokens so that `kiln-server` can drain a
@@ -1994,7 +2001,9 @@ impl SharedBlockReservation<'_> {
         result: Result<T>,
     ) -> Result<T> {
         self.release_after_settlement_with(boundary, result, || {
-            runner.synchronize_external_yield(boundary)
+            catch_external_yield_sync_panic(&runner.backend_health, boundary, || {
+                runner.synchronize_external_yield(boundary)
+            })
         })
     }
 
@@ -6966,6 +6975,9 @@ impl ModelRunner {
         )
     }
 
+    /// Unavailable high-level paged speculative generation entry point.
+    ///
+    /// Currently returns a stable fail-closed error before inspecting inputs.
     pub fn generate_paged_speculative_shared_tokens(
         &self,
         prompt_tokens: &[TokenId],
@@ -6975,6 +6987,7 @@ impl ModelRunner {
         spec_config: &SpeculativeConfig,
         cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
+        ensure_speculative_generation_available()?;
         if params.thinking_budget.is_some() {
             return self.generate_paged_shared_tokens(
                 prompt_tokens,
@@ -7777,16 +7790,18 @@ impl ModelRunner {
     /// Generate text using self-speculative decoding (skip-layer draft).
     ///
     /// The first `spec_config.draft_layers` layers of the model propose candidate
-    /// tokens, and the full model verifies them in a single forward pass. Accepted
-    /// tokens are emitted in batches, giving 1.5-2.5x decode speedup.
+    /// tokens, and the full model verifies them in a single forward pass. Any
+    /// speedup is backend- and workload-dependent and requires qualification.
     ///
-    /// Falls back to standard generation if speculative config is invalid.
+    /// Currently returns a stable fail-closed error before tokenization or any
+    /// accelerator work.
     pub fn generate_speculative(
         &self,
         prompt: &str,
         params: &SamplingParams,
         spec_config: &SpeculativeConfig,
     ) -> Result<GenerationOutput> {
+        ensure_speculative_generation_available()?;
         let prompt_tokens = self
             .tokenizer
             .encode(prompt)
@@ -7808,17 +7823,17 @@ impl ModelRunner {
         })
     }
 
-    /// Speculative generation loop operating on token IDs.
+    /// Unavailable speculative generation loop operating on token IDs.
     ///
-    /// 1. Prefill: standard full-model forward pass on the prompt.
-    /// 2. Decode: draft K tokens with first N layers, verify with full model,
-    ///    accept/reject via rejection sampling.
+    /// Currently returns a stable fail-closed error before inspecting inputs or
+    /// performing accelerator work.
     pub fn generate_from_tokens_speculative(
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         spec_config: &SpeculativeConfig,
     ) -> Result<GenerationOutput> {
+        ensure_speculative_generation_available()?;
         use rand::SeedableRng;
 
         if params.thinking_budget.is_some() {
@@ -7998,24 +8013,16 @@ impl ModelRunner {
         })
     }
 
-    /// Generate text using native MTP (Multi-Token Prediction) speculative decoding.
+    /// Unavailable native-MTP speculative text generation entry point.
     ///
-    /// Uses the model's pretrained MTP head to draft a single candidate token per
-    /// step (Qwen3.5-4B ships `num_nextn_predict_layers=1`), which the base model
-    /// then verifies in a fused forward pass that emits both the draft-position
-    /// target and a bonus token for the accept case.
-    ///
-    /// Requires the checkpoint to carry `mtp.*` tensors; returns an error
-    /// otherwise. Greedy-only (temperature == 0); the stochastic
-    /// rejection-sampling variant is a follow-up.
-    ///
-    /// Reports α (acceptance rate) via the returned [`MtpGenerationOutput`] so
-    /// bench callers can publish it alongside throughput numbers.
+    /// Currently returns a stable fail-closed error before tokenization, weight
+    /// materialization, or accelerator work.
     pub fn generate_mtp_speculative(
         &self,
         prompt: &str,
         params: &SamplingParams,
     ) -> Result<MtpGenerationOutput> {
+        ensure_speculative_generation_available()?;
         let prompt_tokens = self
             .tokenizer
             .encode(prompt)
@@ -8039,22 +8046,16 @@ impl ModelRunner {
         })
     }
 
-    /// Native MTP speculative generation operating on token IDs.
+    /// Unavailable native-MTP speculative generation over token IDs.
     ///
-    /// 1. Prefill: paged forward pass on the prompt that returns both logits and
-    ///    the last-row pre-final-norm hidden state (`h_prev`).
-    /// 2. Decode: per iteration, call [`speculative_mtp_decode_step`] which
-    ///    drafts via the MTP head, verifies via the base model, and reports the
-    ///    accepted tokens plus advanced positions for the next call.
-    ///
-    /// Two paged caches are used: the base cache (sized for the model's
-    /// full-attention layers) and a 1-layer MTP cache. They have independent
-    /// position counters because the MTP layer only commits a slot on accept.
+    /// Currently returns a stable fail-closed error before inspecting inputs,
+    /// materializing deferred weights, or allocating caches.
     pub fn generate_from_tokens_mtp_speculative(
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
     ) -> Result<MtpGenerationOutput> {
+        ensure_speculative_generation_available()?;
         use rand::SeedableRng;
 
         if params.thinking_budget.is_some() {
@@ -8335,15 +8336,15 @@ impl ModelRunner {
 
     /// Streaming self-speculative decoding (skip-layer draft).
     ///
-    /// Mirrors [`generate_from_tokens_speculative`] but emits committed tokens
-    /// incrementally through the returned channel so the SSE desktop path can
-    /// benefit from the existing speculative setting.
+    /// Currently returns a stable fail-closed error before tokenization,
+    /// channel creation, or accelerator work.
     pub fn generate_streaming_speculative(
         &self,
         prompt: &str,
         params: &SamplingParams,
         spec_config: &SpeculativeConfig,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
+        ensure_speculative_generation_available()?;
         use rand::SeedableRng;
 
         if params.thinking_budget.is_some() {
@@ -8522,14 +8523,14 @@ impl ModelRunner {
 
     /// Streaming native-MTP speculative decoding.
     ///
-    /// Mirrors [`generate_from_tokens_mtp_speculative`] but emits committed
-    /// tokens as they are accepted so the desktop streaming path can use MTP
-    /// when the checkpoint and request settings allow it.
+    /// Currently returns a stable fail-closed error before tokenization,
+    /// deferred-weight materialization, channel creation, or accelerator work.
     pub fn generate_streaming_mtp_speculative(
         &self,
         prompt: &str,
         params: &SamplingParams,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
+        ensure_speculative_generation_available()?;
         use rand::SeedableRng;
 
         if params.thinking_budget.is_some() {
@@ -9448,6 +9449,9 @@ impl ModelRunner {
         })
     }
 
+    /// Unavailable high-level paged speculative streaming entry point.
+    ///
+    /// Currently returns a stable fail-closed error before inspecting inputs.
     pub fn generate_streaming_paged_speculative_shared_tokens(
         &self,
         prompt_tokens: &[TokenId],
@@ -9457,6 +9461,7 @@ impl ModelRunner {
         spec_config: &SpeculativeConfig,
         cancel: Option<&CancelHandle>,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
+        ensure_speculative_generation_available()?;
         check_cancelled(cancel)?;
         if params.thinking_budget.is_some() {
             anyhow::ensure!(
@@ -10431,6 +10436,49 @@ mod tests {
     ];
 
     #[test]
+    fn speculative_generation_unavailable_reason_is_stable() {
+        let error = ensure_speculative_generation_available()
+            .expect_err("unqualified speculative generation must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "speculative generation is disabled pending cancellation-safe owner settlement and local accelerator qualification"
+        );
+    }
+
+    #[test]
+    fn public_speculative_generation_entry_points_guard_before_work() {
+        let source = include_str!("generate.rs");
+        let entry_points = [
+            "generate_paged_speculative_shared_tokens",
+            "generate_speculative",
+            "generate_from_tokens_speculative",
+            "generate_mtp_speculative",
+            "generate_from_tokens_mtp_speculative",
+            "generate_streaming_speculative",
+            "generate_streaming_mtp_speculative",
+            "generate_streaming_paged_speculative_shared_tokens",
+        ];
+
+        for entry_point in entry_points {
+            let signature = format!("    pub fn {entry_point}(");
+            let function_start = source
+                .find(&signature)
+                .unwrap_or_else(|| panic!("missing public entry point {entry_point}"));
+            let body_start = function_start
+                + source[function_start..]
+                    .find('{')
+                    .unwrap_or_else(|| panic!("missing body for public entry point {entry_point}"))
+                + 1;
+            assert!(
+                source[body_start..]
+                    .trim_start()
+                    .starts_with("ensure_speculative_generation_available()?;"),
+                "{entry_point} must reject unqualified speculative generation before doing work"
+            );
+        }
+    }
+
+    #[test]
     fn inference_memory_binding_accepts_only_exact_or_vulkan_host_weights() {
         let binding = InferenceMemoryRuntime {
             device: kiln_tensor::Device::Vulkan(0),
@@ -10543,6 +10591,15 @@ mod tests {
 
     #[test]
     fn shared_block_reservation_retains_pages_when_settlement_fails() -> anyhow::Result<()> {
+        #[derive(Debug)]
+        struct DropProbe(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let result_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let block_manager = Mutex::new(BlockManager::new(4, 4));
         let block_ids = block_manager.lock().unwrap().allocate(1)?;
         let reservation = SharedBlockReservation {
@@ -10551,13 +10608,34 @@ mod tests {
         };
 
         let error = reservation
-            .release_after_settlement_with("injected shared reservation settlement", Ok(()), || {
-                anyhow::bail!("injected sync failure")
-            })
+            .release_after_settlement_with(
+                "injected shared reservation settlement",
+                Ok(DropProbe(Arc::clone(&result_drops))),
+                || anyhow::bail!("injected sync failure"),
+            )
             .expect_err("settlement failure must fail the request");
         assert!(error.to_string().contains("injected sync failure"));
+        assert_eq!(result_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(block_manager.lock().unwrap().num_used(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn shared_block_reservation_runner_sync_is_panic_fenced() {
+        let source = include_str!("generate.rs");
+        let start = source
+            .find("impl SharedBlockReservation<'_> {")
+            .expect("shared reservation implementation");
+        let end = start
+            + source[start..]
+                .find("\n}\n\nimpl Drop for SharedBlockReservation<'_>")
+                .expect("shared reservation implementation end");
+        let body = &source[start..end];
+
+        assert!(body.contains("catch_external_yield_sync_panic("));
+        assert!(body.contains("&runner.backend_health"));
+        assert!(body.contains("runner.synchronize_external_yield(boundary)"));
+        assert!(body.contains("std::mem::forget(result)"));
     }
 
     #[test]

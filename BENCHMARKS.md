@@ -30,6 +30,13 @@ The driver:
 - writes an atomic, self-hashing receipt and can require exact prompt/output
   hashes to match a reference engine receipt.
 
+Current serving accepts only effective speculative method `off`; this driver
+therefore measures the ordinary serving path. A configured `skip_layer` or
+`mtp` method fails `kiln config` and startup before model loading. The retained
+benchmark-only speculative implementation may be exercised only by an isolated
+qualification harness with explicit accelerator evidence at the bounded
+K=1/K=2/K=4 matrix. It is not a serving or Desktop bypass.
+
 `client_visible_itl_ms_*` is deliberately named: it measures non-empty
 semantic SSE-event arrival, which is the only engine-neutral client signal.
 An engine may coalesce multiple tokenizer tokens into one visible event. The
@@ -126,6 +133,11 @@ measurement is in progress.
 | kiln env | `KILN_W4A16=1`, `KILN_CUDA_GRAPHS=true` |
 | kiln binary | `kiln-bench` |
 
+This table describes the historical PR #536 benchmark revision, not a current
+serving configuration. Current production loading uses `load_mtp=false`, and
+the current K default and hard ceiling are 4. Re-running speculative research
+requires an isolated qualification harness rather than `kiln serve`.
+
 The current single-stream protocol is `--paged --prompt-tokens 512
 --max-output-tokens 128 --skip-training --prompt-subset humaneval
 --chat-template --latency-only --temperature 0.0 --seed N` with three fresh
@@ -208,12 +220,13 @@ producing a bit-for-bit accept/reject trace match against kiln's c1_attr CSVs
 and median α 0.2500 vs kiln 0.3636, the verdict was `kiln_above_hf`. See
 PR #534.
 
-The headline takeaway is structural rather than numeric: as of this refresh,
-**kiln is the only stack producing end-to-end Qwen3.5-4B + native MTP decode
-numbers on a stock A6000 / driver 550.x base image.** Comparison tables here
-will fill in as upstream stacks regain support.
+The historical takeaway was structural rather than numeric: this kiln revision
+was the only audited stack that produced end-to-end Qwen3.5-4B + native-MTP
+decode numbers on the stock A6000 / driver 550.x image. That historical result
+does not describe the current serving surface or satisfy its qualification
+gate.
 
-### Native MTP self-spec — α below break-even at bs=1
+### Historical native MTP self-spec - α below break-even at bs=1
 
 PR #536 ran a three-seed MTP-On vs MTP-Off A/B against post-#535 main:
 
@@ -227,14 +240,16 @@ the last bs=1 measurement (PR #316: α=0.124, MTP-On −25.1 % slower) but is
 still below the bs=1 break-even floor of α≈0.72; one seed (α=0.778) cleared
 the floor at +8.5 %, the other two (α=0.620, α=0.684) lost 9.2 % and 4.3 %
 respectively. P99 ITL roughly doubles when MTP is on because rejected-draft
-steps add a heavy tail. `KILN_SPEC_METHOD=mtp` therefore stays opt-in and
-gated on prompt length; see PR #536 and `docs/archive/phase-c/phase-c66/` for reopen
-triggers.
+steps add a heavy tail. This experiment is not an opt-in serving route:
+current `kiln config` and startup reject MTP before model loading. See PR #536
+and `docs/archive/phase-c/phase-c66/` for the archived evidence and reopen
+triggers; any new run must use the isolated K=1/2/4 qualification harness.
 
-This is the operative reason kiln's headline decode tok/s is what it is: the
-quantized + GDN-fused base path is already running close to its bs=1 ceiling
-on A6000, and the most obvious next-step lever (native MTP self-spec) does
-not yet pay back the verifier cost at current α.
+For that historical revision, the quantized + GDN-fused base path was already
+close to its bs=1 ceiling on A6000 and native MTP did not pay back verifier
+cost at the measured α. Current performance claims must come from the ordinary
+serving protocol above; speculative promotion requires separate qualification
+evidence rather than extrapolation from this experiment.
 
 ### Historical batched concurrent-decode throughput (L40S sm_89, May 2026)
 

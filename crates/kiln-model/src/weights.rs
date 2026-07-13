@@ -708,8 +708,9 @@ pub struct ModelWeights {
     pub final_norm: WeightTensor,
     /// Optional native MTP head (Qwen3.5-4B ships one, other variants may not).
     /// Populated when `num_nextn_predict_layers > 0` in the model config AND the
-    /// `mtp.*` tensors are present in the checkpoint. Consumed by
-    /// `KILN_SPEC_METHOD=mtp` at serve time.
+    /// `mtp.*` tensors are present in the checkpoint. Serving startup keeps this
+    /// eager value empty and retains a deferred source instead; explicit later
+    /// consumers can still materialize that source.
     pub mtp: Option<MtpWeights>,
     /// Optional deferred native-MTP source. When present, the checkpoint ships
     /// `mtp.*` tensors but the caller elected not to materialize them during

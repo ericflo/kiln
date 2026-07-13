@@ -26,7 +26,7 @@ use kiln_model::{
     BackendCapabilityQueries, ModelRunner, ModelRunnerRuntimeOptions, StartupCapabilities,
 };
 use kiln_scheduler::{Scheduler, SchedulerConfig};
-use state::{AppState, GpuCoordinationLock, ModelBackend};
+use state::{AppState, GpuCoordinationLock, ModelBackend, SpeculativeRuntimePolicy};
 
 fn resolve_model_runner_runtime_options(
     policy: kiln_server::config::ServingRuntimePolicy,
@@ -533,6 +533,11 @@ async fn main() -> Result<()> {
     kiln_server::agent_runs::set_self_url(host, port);
 
     let model_config = ModelConfig::qwen3_5_4b();
+    config
+        .speculative
+        .validate_for_model(&model_config)
+        .context("invalid speculative decoding configuration for the selected model")?;
+    config.speculative.validate_for_serving()?;
     let model_path = config.model.path.as_deref();
     let served_model_id = config.model.effective_served_model_id();
     let model_defaults_profile = config.model.defaults_profile();
@@ -646,9 +651,22 @@ async fn main() -> Result<()> {
                 .governor_config_for_capacity(capacity_resolution.effective.total_bytes),
         )
         .context("failed to configure the process-wide memory governor")?;
-        let decode_batcher_policy = kiln_model::backend::for_device_kt(&device_kt)
-            .backend_capabilities()
-            .decode_batcher;
+        let memory_governor = kiln_memory::MemoryGovernor::global();
+        if vram_probe_selector != kiln_memory::vram::VramProbeSelector::None {
+            let startup_memory = memory_governor.refresh();
+            anyhow::ensure!(
+                startup_memory.total_bytes > 0 && !startup_memory.observations.probe_failed,
+                "selected-device memory probe failed before model loading"
+            );
+            anyhow::ensure!(
+                memory_governor.start_sampler(),
+                "failed to start the selected-device memory sampler before model loading"
+            );
+        }
+        let backend_capabilities =
+            kiln_model::backend::for_device_kt(&device_kt).backend_capabilities();
+        let decode_batcher_policy = backend_capabilities.decode_batcher;
+        let speculative_mtp_support = backend_capabilities.decode.mtp_speculative_generation;
         let startup_decode_runtime = kiln_server::batching_engine::resolve_decode_runtime_config(
             config.server.deterministic,
             config.server.max_decode_batch,
@@ -775,6 +793,7 @@ async fn main() -> Result<()> {
         tracing::debug!(
             "training endpoints available — in-process LoRA training (no sidecar needed)"
         );
+        let speculative_runtime_policy = SpeculativeRuntimePolicy::new(speculative_mtp_support);
         AppState::new_real_with_serving_profile(
             model_config,
             runner,
@@ -784,6 +803,8 @@ async fn main() -> Result<()> {
             &config.memory,
             response_delivery_policy,
             startup_decode_runtime,
+            config.speculative,
+            speculative_runtime_policy,
             config.server.max_batch_tokens,
             config.server.max_prefill_tokens_per_cycle,
             config.server.max_prefill_layers_per_cycle,
@@ -845,6 +866,7 @@ async fn main() -> Result<()> {
 
     // Apply server-level checkpoint_interval from config
     state.serving_profile = config.server.serving_profile;
+    state.speculative_config = config.speculative;
     state.memory_config = config.memory.clone();
     state.training_runtime = kiln_train::TrainingRuntimeContext::new_for_device(
         state

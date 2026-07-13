@@ -802,13 +802,12 @@ pub struct SftConfig {
     pub lora_rank: usize,
     #[serde(default = "default_alpha")]
     pub lora_alpha: f32,
-    /// Train the native MTP draft block's LoRA alongside the adapter
-    /// (post-SFT alignment phase — MTP training plan PR-B). `None` (the
-    /// default) auto-enables when the checkpoint ships `mtp.*` tensors:
-    /// every LoRA step moves the served distribution away from the
-    /// frozen draft head, so speculative-decode acceptance decays exactly
-    /// in proportion to personalization unless the draft trains too.
-    /// `Some(false)` opts out.
+    /// Select the separate post-SFT native-MTP LoRA alignment phase.
+    /// Standalone `kiln-train` treats `None` as automatic when the checkpoint
+    /// ships `mtp.*` tensors, `Some(false)` as disabled, and `Some(true)` as an
+    /// explicit request. Server SFT instead normalizes `None` to `Some(false)`
+    /// and rejects `Some(true)` until this phase participates in server GPU
+    /// coordination, memory admission, cancellation, and settlement.
     #[serde(default)]
     pub train_mtp: Option<bool>,
     /// If set, continue training from this adapter instead of starting fresh.

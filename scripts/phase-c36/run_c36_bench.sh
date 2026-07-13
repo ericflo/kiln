@@ -8,7 +8,6 @@ export KILN_SPEC_ENABLED=1
 export KILN_SPEC_METHOD=mtp
 export KILN_W4A16=1
 export KILN_CUDA_GRAPHS=true
-export KILN_MTP_ARGMAX_FP32=1
 
 START=$(date +%s)
 echo "[$(date '+%H:%M:%S')] C36 bench start" | tee -a /tmp/c36.log

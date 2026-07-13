@@ -30,6 +30,26 @@
   `KILN_DEFAULT_THINKING_BUDGET_MS` set inheritable defaults. Both default to
   unlimited; request `null` opts out of a configured dimension and `0` closes
   thinking immediately.
+- speculative serving: all speculative request and Desktop routes are now
+  fail-closed pending local accelerator qualification. `kiln config` and
+  startup reject every effective non-off policy before model loading,
+  including the legacy `enabled=true`, `method="off"` skip-layer fallback.
+  Ordinary streaming, non-streaming, and batched generation remain on the
+  settled single-token/batching paths, and production model loading uses
+  `load_mtp=false`.
+- speculative bounds and diagnostics: the draft-window default and hard ceiling
+  are K=4 pending planned local K=1/2/4 qualification. `/v1/config` separates
+  configured intent from the immutable serving policy (`off`, not routable),
+  reports the backend MTP capability as a diagnostic only, and exposes no live
+  speculative routing, admission, scope, or loaded-weight state.
+- speculative and training containment: public high-level `ModelRunner`
+  speculative methods reject before tokenization or allocation while the
+  low-level research steps have no serving call site; the repository's direct
+  caller is the isolated qualification bench.
+  Server SFT normalizes omitted `train_mtp` to false, rejects explicit true
+  before queue publication, and rechecks the invariant in the worker so a live
+  server cannot lazily upload and train deferred MTP weights outside GPU
+  coordination, memory admission, cancellation, and settlement.
 - correctness: the time clock begins with the first decode candidate, excluding
   queue and prefill, and is checked at token boundaries. Timed requests bypass
   deterministic completion caches; token budgets participate in cache keys.
@@ -49,9 +69,9 @@
   structured `generation_error` SSE event followed by `[DONE]`.
 - streaming delivery: finish, usage, and `[DONE]` are committed out of band
   after cache/accounting work, so a full ordinary-delta queue cannot hold model
-  cleanup or suppress the terminal events. Direct `stream: true` requests fall
-  back from MTP or skip-layer speculation to threaded single-token decode until
-  those speculative paths provide the same explicit settlement contract.
+  cleanup or suppress the terminal events. All request modes use the ordinary
+  decode route; MTP and skip-layer serving fail before model loading until they
+  provide the same explicit settlement contract and pass local qualification.
 - legacy paged streaming: the synchronous mutable-`BlockManager` compatibility
   API now holds pages, recurrent state, logits, and graph coordination through
   one backend-settlement epilogue on success, error, receiver drop, or panic.

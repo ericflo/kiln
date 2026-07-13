@@ -703,9 +703,10 @@ accepted through the normal decode path, enters KV and generated-token history,
 and is visible to the next model step. Once the sequence is complete, the state
 machine becomes inert and ordinary answer generation resumes. The batching
 actor applies the same ordering to its first-token and decode-token paths. The
-ordinary flat, paged, streaming, and batched loops enforce the controller;
-speculative and MTP entry points fall back to the corresponding single-token
-loop while a budget is active so multi-token acceptance cannot skip a boundary.
+ordinary flat, paged, streaming, and batched loops enforce the controller.
+Speculative serving is unavailable, and the public high-level speculative and
+MTP model entry points fail closed before work, so multi-token acceptance cannot
+skip a thinking-budget boundary.
 
 Request limits use three states per dimension: omitted inherits the server
 default, explicit JSON `null` is unlimited, and a nonnegative number is a
@@ -749,28 +750,47 @@ See `crates/kiln-marlin-gemm/` for the kernel and `crates/kiln-model/src/marlin_
 
 ### Speculative Decoding
 
-Kiln has two self-speculative-decode paths, both off by default. Both use the
-same generic verify loop in `crates/kiln-model/src/speculative.rs`. Select one
-at startup with `[speculative]` or with both
-`KILN_SPECULATIVE_ENABLED=true` and
-`KILN_SPECULATIVE_METHOD={skip_layer|mtp}` (see
-`crates/kiln-server/src/config.rs`).
+Kiln retains two speculative implementations as research and qualification
+substrate: `skip_layer` uses the first `draft_layers` model layers as a draft,
+and `mtp` uses checkpoint MTP heads. Both share the verifier in
+`crates/kiln-model/src/speculative.rs`. Neither implementation has a serving
+route. Streaming, non-streaming, and batched requests all remain on the
+ordinary decode path.
 
-- **`skip_layer` (legacy)** — uses the first N layers of the main model as a draft. No extra VRAM, no separate checkpoint. Acceptance rate is workload-dependent and the default is `off`.
-- **`mtp` (native MTP, attempted, null on A6000)** — Qwen3.5-4B ships with a single pretrained MTP (Multi-Token Prediction) head (`mtp.*` tensors in the checkpoint). PRs #535 / #536 vendored this head, ran the existing draft-then-verify loop with the MTP head as the drafter, and benchmarked end-to-end self-spec decode on A6000 bs=1.
+The only serving policy currently accepted is effective `off`. `kiln config`
+and server startup reject every effective non-off policy before model weights
+are loaded. This includes `enabled = true` with `method = "off"`, which resolves
+to the legacy `skip_layer` fallback. A dormant method value is retained when
+`enabled = false`, but its effective method remains `off`. The production
+loader is called with `load_mtp = false`, which retains a deferred checkpoint
+source but does not upload MTP weights or prewarm either implementation.
+Public high-level model-library speculative entry points also reject before
+work. Server SFT normalizes omitted `train_mtp` to false and rejects explicit
+true, so training cannot materialize that deferred slot inside a live server.
 
-Result for native MTP: measured acceptance α = **0.69**, below the 0.72 break-even ceiling implied by the kiln-native verify cost (see `PROFILING-MTP-C40*.md`). PR #536 merged the implementation behind `KILN_ENABLE_MTP=0` (default off) so the code path stays exercised but the production decode path is unaffected. The cross-stack audits in PRs #532 (SGLang) and #533 (vLLM), plus the HF-transformers α microbench in PR #534, all corroborated kiln's native α and confirmed there was no missed implementation win — the 0.72 ceiling is a property of the Qwen3.5-4B MTP head, not a kiln bug.
+The draft window defaults to K=4 and is hard-capped at K=4 in both server
+configuration and the low-level model API. Promotion requires local
+accelerator qualification at K=1, K=2, and K=4, including cancellation,
+device-owner settlement, EOS, rejection and full-acceptance behavior,
+near-context capacity, timeout/panic quarantine, burst admission, and
+throughput evidence. Any speculative benchmark must run in an isolated
+qualification harness; the benchmark-only path is not a serving bypass.
 
-This supersedes the older skip-layer self-spec design described in the agent
-note `kiln-speculative-decoding-design`. Startup configuration flows through
-`[speculative]` in `kiln.toml`:
+The historical A6000 native-MTP experiment in PRs #535 / #536 measured
+acceptance α=0.69, below the approximately 0.72 break-even point for that
+implementation. Those results remain useful benchmark evidence, but do not
+establish present serving eligibility. The SGLang, vLLM, and Hugging Face
+cross-stack investigations are summarized in `BENCHMARKS.md`.
+
+The typed startup configuration remains visible so intent can be validated and
+reported consistently:
 
 ```toml
 [speculative]
-enabled = false                 # KILN_SPECULATIVE_ENABLED
-method = "off"                  # KILN_SPECULATIVE_METHOD: off | skip_layer | mtp
-num_speculative_tokens = 256    # KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS
-draft_layers = 8                # KILN_SPECULATIVE_DRAFT_LAYERS (skip_layer only)
+enabled = false
+method = "off"
+num_speculative_tokens = 4      # default and hard ceiling
+draft_layers = 8                # qualification geometry only
 ```
 
 See `crates/kiln-model/src/speculative.rs` for the verify loop and `crates/kiln-model/src/mtp_debug.rs` for the per-step instrumentation used during the α investigation.
@@ -814,7 +834,7 @@ enabled = true
 [speculative]
 enabled = false
 method = "off"
-num_speculative_tokens = 256
+num_speculative_tokens = 4
 draft_layers = 8
 ```
 

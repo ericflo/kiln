@@ -24,16 +24,12 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, ChatTemplateOptions, TokenizerError};
 use kiln_eval::qwen3::ParsedToolCall;
 use kiln_model::adapter_merge::{PeftLora, merge_concat};
-use kiln_model::{
-    CancelHandle, GenerationOutput, ModelRunner, PagedPrefixReuse, SpeculativeConfig,
-    SpeculativeDecodePolicy, StreamEvent,
-};
+use kiln_model::{CancelHandle, GenerationOutput, ModelRunner, PagedPrefixReuse, StreamEvent};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::batching_engine::{EngineActionTokenSource, EngineEvent, EngineRequest};
-use crate::config::{SpecMethod, SpeculativeDecodingConfig};
 use crate::error::ApiError;
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::metrics::RequestStatus;
@@ -2198,24 +2194,6 @@ pub(crate) fn encode_prompt_tokens(
         .unwrap()
         .insert(prompt_text.to_string(), tokens.clone());
     Ok(tokens)
-}
-
-/// Flush MTP acceptance-attribution rows (`KILN_C1_ATTR_PATH`) to the
-/// CSV. Appends and clears the in-memory sink; no-op (and free) when the
-/// env var is unset. The bench driver has always drained — this hook
-/// gives plain HTTP serving the same observability so the acceptance
-/// A/B can run against a live server.
-fn drain_c1_attr_csv_if_enabled() {
-    if !kiln_model::c1_attr::is_enabled() {
-        return;
-    }
-    if let Ok(path) = std::env::var("KILN_C1_ATTR_PATH") {
-        match kiln_model::c1_attr::drain_to_csv(&path) {
-            Ok(0) => {}
-            Ok(n) => tracing::debug!(rows = n, path = %path, "drained C1 MTP acceptance rows"),
-            Err(e) => tracing::warn!(error = %e, "C1 attr CSV drain failed"),
-        }
-    }
 }
 
 /// The serving context ceiling: the model's positional limit capped by
@@ -4480,141 +4458,6 @@ pub struct Delta {
     pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
-}
-
-#[derive(Debug, Clone)]
-enum ResolvedSpeculativeMode {
-    Off,
-    SkipLayer(SpeculativeConfig),
-    Mtp,
-}
-
-impl ResolvedSpeculativeMode {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::SkipLayer(_) => "skip_layer",
-            Self::Mtp => "mtp",
-        }
-    }
-}
-
-fn speculative_decode_policy_for_state(state: &AppState) -> (bool, SpeculativeDecodePolicy) {
-    let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
-        return (true, SpeculativeDecodePolicy::default());
-    };
-    let runner_guard = runner.read().unwrap();
-    let decode = runner_guard.backend_capabilities().decode;
-    (
-        decode.mtp_speculative_generation.is_native(),
-        decode.speculative_policy,
-    )
-}
-
-fn resolve_skip_layer_config(
-    model_config: &kiln_core::config::ModelConfig,
-    speculative: &SpeculativeDecodingConfig,
-) -> Option<SpeculativeConfig> {
-    let config = SpeculativeConfig {
-        num_speculative_tokens: speculative.num_speculative_tokens,
-        draft_layers: speculative.draft_layers,
-    };
-
-    config.validate(model_config).ok().map(|_| config)
-}
-
-fn resolve_speculative_mode_from_config(
-    model_config: &kiln_core::config::ModelConfig,
-    speculative: &SpeculativeDecodingConfig,
-    sampling: &SamplingParams,
-    prompt_tokens: usize,
-    mtp_supported: bool,
-    has_active_lora: bool,
-    native_mtp_allowed: bool,
-    speculative_policy: SpeculativeDecodePolicy,
-) -> ResolvedSpeculativeMode {
-    let skip_layer = resolve_skip_layer_config(model_config, speculative);
-
-    match speculative.effective_method() {
-        SpecMethod::Off => ResolvedSpeculativeMode::Off,
-        SpecMethod::SkipLayer => skip_layer
-            .map(ResolvedSpeculativeMode::SkipLayer)
-            .unwrap_or(ResolvedSpeculativeMode::Off),
-        SpecMethod::Mtp => {
-            let greedy = sampling.temperature == 0.0;
-            // MTP now rides with an active LoRA: the verify pass applies
-            // the adapter, so committed tokens are exactly the tuned
-            // model's output. The draft block applies the adapter's
-            // `mtp.*` LoRA when present (MTP-trained adapters); without
-            // it the base draft can only cost acceptance rate, never
-            // fidelity. The old `!has_active_lora` gate predates the
-            // adapter-threaded MTP path and silently denied the speedup
-            // to every tuned adapter — the product's primary traffic.
-            let greedy_without_lora = greedy && !has_active_lora;
-            if mtp_supported
-                && native_mtp_allowed
-                && greedy
-                && prompt_tokens <= speculative_policy.mtp_max_prompt_tokens
-            {
-                ResolvedSpeculativeMode::Mtp
-            } else if greedy_without_lora
-                && prompt_tokens >= speculative_policy.long_prompt_skip_layer_min_prompt_tokens
-                && sampling.max_tokens
-                    >= speculative_policy.long_prompt_skip_layer_min_output_tokens
-            {
-                skip_layer
-                    .map(ResolvedSpeculativeMode::SkipLayer)
-                    .unwrap_or(ResolvedSpeculativeMode::Off)
-            } else {
-                ResolvedSpeculativeMode::Off
-            }
-        }
-    }
-}
-
-fn resolve_speculative_mode(
-    state: &AppState,
-    sampling: &SamplingParams,
-    prompt_tokens: usize,
-    mtp_supported: bool,
-    has_active_lora: bool,
-) -> ResolvedSpeculativeMode {
-    // Forced thinking closure changes the accepted token at a precise decode
-    // boundary. A speculative block was verified against the model's sampled
-    // prefix, so replacing a token in the middle would invalidate every later
-    // accepted token in that block. Keep budgeted requests on single-token
-    // decode until speculative rollback can represent forced-token insertion.
-    if sampling.thinking_budget.is_some() {
-        return ResolvedSpeculativeMode::Off;
-    }
-    let speculative = SpeculativeDecodingConfig::from_env();
-    let (native_mtp_allowed, speculative_policy) = speculative_decode_policy_for_state(state);
-    resolve_speculative_mode_from_config(
-        &state.model_config,
-        &speculative,
-        sampling,
-        prompt_tokens,
-        mtp_supported,
-        has_active_lora,
-        native_mtp_allowed,
-        speculative_policy,
-    )
-}
-
-fn direct_stream_threaded_mode(mode: ResolvedSpeculativeMode) -> ResolvedSpeculativeMode {
-    let requested_mode = mode.name();
-    match mode {
-        ResolvedSpeculativeMode::Off => ResolvedSpeculativeMode::Off,
-        ResolvedSpeculativeMode::SkipLayer(_) | ResolvedSpeculativeMode::Mtp => {
-            tracing::info!(
-                event = "direct_stream_speculative_fallback",
-                requested_mode,
-                reason = "threaded_settlement_required",
-                "direct streaming selected cancellable threaded single-token decode"
-            );
-            ResolvedSpeculativeMode::Off
-        }
-    }
 }
 
 async fn chat_completions(
@@ -7980,18 +7823,11 @@ async fn generate_real(
     request_start: std::time::Instant,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let prompt_token_count = prompt_tokens.len();
-
-    let (mtp_supported, has_active_lora) = {
-        let guard = runner.read().unwrap();
-        (guard.weights.mtp.is_some(), guard.active_lora().is_some())
-    };
-    let speculative_mode = resolve_speculative_mode(
-        state,
-        sampling,
-        prompt_token_count,
-        mtp_supported,
-        has_active_lora,
-    );
+    let timeout = state.request_timeout;
+    let deadline = request_start
+        .checked_add(timeout)
+        .map(tokio::time::Instant::from_std)
+        .ok_or_else(|| ApiError::internal("request deadline overflowed"))?;
 
     // ModelRunner.generate_paged() is CPU-bound; run on a blocking thread to
     // avoid starving the tokio runtime.
@@ -7999,7 +7835,6 @@ async fn generate_real(
     let bm = block_manager.clone();
     let pc = paged_cache.clone();
     let prefix_cache = prefix_cache.clone();
-    let prompt = prompt_text.to_owned();
     let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
     let gpu_lock = state.gpu_lock.clone();
@@ -8007,12 +7842,6 @@ async fn generate_real(
     let memory_budget = state.memory_budget.clone();
     let vram_probe_selector = state.vram_probe_selector;
     let metrics = state.metrics.clone();
-    let timeout = state.request_timeout;
-    let mtp_acceptance = state.mtp_acceptance.clone();
-    let acceptance_adapter = adapter
-        .as_ref()
-        .map(|identity| identity.name.clone())
-        .unwrap_or_else(|| "base".to_string());
     let prefix_cache_diagnostic = std::sync::Arc::new(std::sync::Mutex::new("unknown"));
     let prefix_cache_diagnostic_inner = prefix_cache_diagnostic.clone();
     // Cooperative cancellation: `tokio::time::timeout` cancels the outer
@@ -8043,154 +7872,99 @@ async fn generate_real(
         let runner_guard = runner.read().unwrap();
         let result = (|| -> anyhow::Result<TimedGenerationOutput> {
             runner_guard.ensure_backend_healthy()?;
-            match speculative_mode {
-                ResolvedSpeculativeMode::Off => {
-                    let prefix_enabled = {
-                        let cache = prefix_cache.lock().unwrap();
-                        cache.is_enabled()
-                    };
-                    if !prefix_enabled {
-                        *prefix_cache_diagnostic_inner.lock().unwrap() = "disabled";
-                        runner_guard
-                            .generate_paged_shared_tokens(
-                                &prompt_tokens,
-                                &params,
-                                bm.as_ref(),
-                                pc.as_ref(),
-                                Some(&cancel_inner),
-                            )
-                            .map(TimedGenerationOutput::without_timings)
-                    } else {
-                        let pending_lookup = match RealPrefixCacheRequest::begin(
-                            &prefix_cache,
-                            &bm,
-                            adapter.clone(),
-                            &prompt_tokens,
-                            &params,
-                        ) {
-                            Ok(lookup) => lookup,
-                            Err(failure) => {
-                                let error = failure.settle(&runner_guard);
-                                return Err(error);
-                            }
-                        };
-                        let lookup = match pending_lookup.settle(&runner_guard) {
-                            Ok(lookup) => lookup,
-                            Err(error) => return Err(error),
-                        };
-                        let should_register_on_miss = lookup.should_register;
-                        let hit = lookup.hit;
-                        if hit.is_none() && !should_register_on_miss {
-                            *prefix_cache_diagnostic_inner.lock().unwrap() = "skipped";
-                            drop(lookup.request);
-                            return runner_guard
-                                .generate_paged_shared_tokens(
-                                    &prompt_tokens,
-                                    &params,
-                                    bm.as_ref(),
-                                    pc.as_ref(),
-                                    Some(&cancel_inner),
-                                )
-                                .map(TimedGenerationOutput::without_timings);
-                        }
-
-                        *prefix_cache_diagnostic_inner.lock().unwrap() =
-                            if hit.is_some() { "hit" } else { "miss" };
-                        let cached_prefix = hit.map(|hit| PagedPrefixReuse {
-                            cached_tokens: hit.cached_tokens,
-                            block_ids: hit.block_ids,
-                            linear_state: hit.linear_state,
-                            next_token: hit.next_token,
-                        });
-
-                        let result = runner_guard.generate_paged_shared_tokens_with_prefix_cache(
+            let prefix_enabled = {
+                let cache = prefix_cache.lock().unwrap();
+                cache.is_enabled()
+            };
+            if !prefix_enabled {
+                *prefix_cache_diagnostic_inner.lock().unwrap() = "disabled";
+                runner_guard
+                    .generate_paged_shared_tokens(
+                        &prompt_tokens,
+                        &params,
+                        bm.as_ref(),
+                        pc.as_ref(),
+                        Some(&cancel_inner),
+                    )
+                    .map(TimedGenerationOutput::without_timings)
+            } else {
+                let pending_lookup = match RealPrefixCacheRequest::begin(
+                    &prefix_cache,
+                    &bm,
+                    adapter.clone(),
+                    &prompt_tokens,
+                    &params,
+                ) {
+                    Ok(lookup) => lookup,
+                    Err(failure) => {
+                        let error = failure.settle(&runner_guard);
+                        return Err(error);
+                    }
+                };
+                let lookup = match pending_lookup.settle(&runner_guard) {
+                    Ok(lookup) => lookup,
+                    Err(error) => return Err(error),
+                };
+                let should_register_on_miss = lookup.should_register;
+                let hit = lookup.hit;
+                if hit.is_none() && !should_register_on_miss {
+                    *prefix_cache_diagnostic_inner.lock().unwrap() = "skipped";
+                    drop(lookup.request);
+                    return runner_guard
+                        .generate_paged_shared_tokens(
                             &prompt_tokens,
                             &params,
                             bm.as_ref(),
                             pc.as_ref(),
-                            cached_prefix,
                             Some(&cancel_inner),
-                        );
+                        )
+                        .map(TimedGenerationOutput::without_timings);
+                }
 
-                        let mut output = match result {
-                            Ok(output) => {
-                                metrics.observe_prefill_duration(
-                                    output.prefill_duration.as_secs_f64(),
-                                );
-                                metrics
-                                    .observe_decode_duration(output.decode_duration.as_secs_f64());
-                                output
-                            }
-                            Err(err) => {
-                                if runner_guard.backend_health_snapshot().quarantined {
-                                    std::mem::forget(lookup.request);
-                                }
-                                return Err(err);
-                            }
-                        };
-                        let mut registrations = Vec::new();
-                        if let Some(registration) = output.registration.take() {
-                            registrations.push(registration);
-                        }
-                        registrations.append(&mut output.extra_registrations);
-                        let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
-                        lookup.request.finish(registrations, allocated_blocks);
+                *prefix_cache_diagnostic_inner.lock().unwrap() =
+                    if hit.is_some() { "hit" } else { "miss" };
+                let cached_prefix = hit.map(|hit| PagedPrefixReuse {
+                    cached_tokens: hit.cached_tokens,
+                    block_ids: hit.block_ids,
+                    linear_state: hit.linear_state,
+                    next_token: hit.next_token,
+                });
 
-                        Ok(TimedGenerationOutput {
-                            output: output.output,
-                            ttft: Some(output.prefill_duration),
-                            decode_duration: Some(output.decode_duration),
-                        })
+                let result = runner_guard.generate_paged_shared_tokens_with_prefix_cache(
+                    &prompt_tokens,
+                    &params,
+                    bm.as_ref(),
+                    pc.as_ref(),
+                    cached_prefix,
+                    Some(&cancel_inner),
+                );
+
+                let mut output = match result {
+                    Ok(output) => {
+                        metrics.observe_prefill_duration(output.prefill_duration.as_secs_f64());
+                        metrics.observe_decode_duration(output.decode_duration.as_secs_f64());
+                        output
                     }
-                }
-                ResolvedSpeculativeMode::SkipLayer(spec_config) => {
-                    *prefix_cache_diagnostic_inner.lock().unwrap() = "not_used_speculative";
-                    if params.temperature == 0.0 {
-                        runner_guard
-                            .generate_paged_speculative_shared_tokens(
-                                &prompt_tokens,
-                                &params,
-                                bm.as_ref(),
-                                pc.as_ref(),
-                                &spec_config,
-                                Some(&cancel_inner),
-                            )
-                            .map(TimedGenerationOutput::without_timings)
-                    } else {
-                        let flat_spec_config = SpeculativeConfig {
-                            num_speculative_tokens: spec_config.num_speculative_tokens.min(4),
-                            draft_layers: spec_config.draft_layers,
-                        };
-                        runner_guard
-                            .generate_speculative(&prompt, &params, &flat_spec_config)
-                            .map(TimedGenerationOutput::without_timings)
-                    }
-                }
-                ResolvedSpeculativeMode::Mtp => {
-                    *prefix_cache_diagnostic_inner.lock().unwrap() = "not_used_speculative";
-                    let output = runner_guard.generate_mtp_speculative(&prompt, &params)?;
-                    // Per-adapter acceptance counters — the always-on
-                    // measurement (no KILN_C1_ATTR_PATH needed) that makes a
-                    // draft head's alpha visible per serving adapter.
-                    if output.total_draft_attempts > 0 {
-                        if let Ok(mut counters) = mtp_acceptance.lock() {
-                            let entry =
-                                counters.entry(acceptance_adapter.clone()).or_insert((0, 0));
-                            entry.0 += output.draft_accepted_count as u64;
-                            entry.1 += output.total_draft_attempts as u64;
+                    Err(err) => {
+                        if runner_guard.backend_health_snapshot().quarantined {
+                            std::mem::forget(lookup.request);
                         }
+                        return Err(err);
                     }
-                    // KILN_C1_ATTR_PATH acceptance instrumentation: rows are
-                    // pushed per draft step but only the bench driver ever
-                    // drained them — over plain HTTP serving the CSV never
-                    // materialized and the acceptance-rate A/B was unmeasurable.
-                    drain_c1_attr_csv_if_enabled();
-                    Ok(TimedGenerationOutput::without_timings(GenerationOutput {
-                        text: output.text,
-                        token_ids: output.token_ids,
-                        finish_reason: output.finish_reason,
-                    }))
+                };
+                let mut registrations = Vec::new();
+                if let Some(registration) = output.registration.take() {
+                    registrations.push(registration);
                 }
+                registrations.append(&mut output.extra_registrations);
+                let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
+                lookup.request.finish(registrations, allocated_blocks);
+
+                Ok(TimedGenerationOutput {
+                    output: output.output,
+                    ttft: Some(output.prefill_duration),
+                    decode_duration: Some(output.decode_duration),
+                })
             }
         })();
         if result.is_err() && runner_guard.backend_health_snapshot().quarantined {
@@ -8200,7 +7974,7 @@ async fn generate_real(
     });
 
     tokio::pin!(generation);
-    let output = match tokio::time::timeout(timeout, &mut generation).await {
+    let output = match tokio::time::timeout_at(deadline, &mut generation).await {
         Ok(join_result) => match join_result {
             Ok(Ok(output)) => {
                 observe_post_prefill_vram(&memory_budget, vram_probe_selector);
@@ -8708,19 +8482,6 @@ async fn generate_real_streaming(
     chat_request_cache_key: Option<DeterministicCacheKey>,
     chat_request_cache_owner: Option<ChatRequestCacheOwnerGuard>,
 ) -> Result<Response, ApiError> {
-    let (mtp_supported, has_active_lora) = {
-        let guard = runner.read().unwrap();
-        (guard.weights.mtp.is_some(), guard.active_lora().is_some())
-    };
-    let resolved_speculative_mode = resolve_speculative_mode(
-        state,
-        sampling,
-        prompt_tokens.len(),
-        mtp_supported,
-        has_active_lora,
-    );
-    let speculative_mode = direct_stream_threaded_mode(resolved_speculative_mode);
-
     let runner = runner.clone();
     let bm = block_manager.clone();
     let pc = paged_cache.clone();
@@ -8924,79 +8685,73 @@ async fn generate_real_streaming(
                         anyhow::bail!("direct streaming prefill cancelled before model work");
                     }
 
-                    match speculative_mode {
-                        ResolvedSpeculativeMode::Off => {
-                            let prefix_enabled = {
-                                let cache = prefix_cache.lock().unwrap();
-                                cache.is_enabled()
-                            };
-                            if !prefix_enabled {
-                                *prefix_cache_diagnostic_for_prefill.lock().unwrap() = "disabled";
-                                let output =
-                                    kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
-                                        runner.clone(),
-                                        prompt_tokens.clone(),
-                                        params.clone(),
-                                        bm.clone(),
-                                        pc.clone(),
-                                        decode_batcher.clone(),
-                                        cancel_for_prefill.clone(),
-                                        gpu_guard,
-                                    )?;
-                                return Ok(DirectModelStream::threaded(output));
-                            }
+                    let prefix_enabled = {
+                        let cache = prefix_cache.lock().unwrap();
+                        cache.is_enabled()
+                    };
+                    if !prefix_enabled {
+                        *prefix_cache_diagnostic_for_prefill.lock().unwrap() = "disabled";
+                        let output = kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
+                            runner.clone(),
+                            prompt_tokens.clone(),
+                            params.clone(),
+                            bm.clone(),
+                            pc.clone(),
+                            decode_batcher.clone(),
+                            cancel_for_prefill.clone(),
+                            gpu_guard,
+                        )?;
+                        return Ok(DirectModelStream::threaded(output));
+                    }
 
-                            let runner_guard = runner.read().map_err(|error| {
-                                anyhow::anyhow!(
-                                    "failed to acquire runner for prefix-cache lookup: {error}"
-                                )
-                            })?;
-                            runner_guard.ensure_backend_healthy()?;
-                            let backend_health = runner_guard.backend_health_handle();
-                            let (lookup, gpu_guard) = run_direct_prefix_lookup_with_panic_fence(
-                                &backend_health,
-                                gpu_guard,
-                                || {
-                                    RealPrefixCacheRequest::begin(
-                                        &prefix_cache,
-                                        &bm,
-                                        adapter.clone(),
-                                        &prompt_tokens,
-                                        &params,
-                                    )
-                                },
-                                |failure| failure.settle_borrowed(&runner_guard),
-                                |pending| pending.settle_borrowed(&runner_guard),
-                            )?;
-                            drop(runner_guard);
-                            let should_register_on_miss = lookup.should_register;
-                            let hit = lookup.hit;
-                            if hit.is_none() && !should_register_on_miss {
-                                *prefix_cache_diagnostic_for_prefill.lock().unwrap() = "skipped";
-                                drop(lookup.request);
-                                let output =
-                                    kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
-                                        runner.clone(),
-                                        prompt_tokens.clone(),
-                                        params.clone(),
-                                        bm.clone(),
-                                        pc.clone(),
-                                        decode_batcher.clone(),
-                                        cancel_for_prefill.clone(),
-                                        gpu_guard,
-                                    )?;
-                                return Ok(DirectModelStream::threaded(output));
-                            }
-                            *prefix_cache_diagnostic_for_prefill.lock().unwrap() =
-                                if hit.is_some() { "hit" } else { "miss" };
-                            let cached_prefix = hit.map(|hit| PagedPrefixReuse {
-                                cached_tokens: hit.cached_tokens,
-                                block_ids: hit.block_ids,
-                                linear_state: hit.linear_state,
-                                next_token: hit.next_token,
-                            });
+                    let runner_guard = runner.read().map_err(|error| {
+                        anyhow::anyhow!("failed to acquire runner for prefix-cache lookup: {error}")
+                    })?;
+                    runner_guard.ensure_backend_healthy()?;
+                    let backend_health = runner_guard.backend_health_handle();
+                    let (lookup, gpu_guard) = run_direct_prefix_lookup_with_panic_fence(
+                        &backend_health,
+                        gpu_guard,
+                        || {
+                            RealPrefixCacheRequest::begin(
+                                &prefix_cache,
+                                &bm,
+                                adapter.clone(),
+                                &prompt_tokens,
+                                &params,
+                            )
+                        },
+                        |failure| failure.settle_borrowed(&runner_guard),
+                        |pending| pending.settle_borrowed(&runner_guard),
+                    )?;
+                    drop(runner_guard);
+                    let should_register_on_miss = lookup.should_register;
+                    let hit = lookup.hit;
+                    if hit.is_none() && !should_register_on_miss {
+                        *prefix_cache_diagnostic_for_prefill.lock().unwrap() = "skipped";
+                        drop(lookup.request);
+                        let output = kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
+                            runner.clone(),
+                            prompt_tokens.clone(),
+                            params.clone(),
+                            bm.clone(),
+                            pc.clone(),
+                            decode_batcher.clone(),
+                            cancel_for_prefill.clone(),
+                            gpu_guard,
+                        )?;
+                        return Ok(DirectModelStream::threaded(output));
+                    }
+                    *prefix_cache_diagnostic_for_prefill.lock().unwrap() =
+                        if hit.is_some() { "hit" } else { "miss" };
+                    let cached_prefix = hit.map(|hit| PagedPrefixReuse {
+                        cached_tokens: hit.cached_tokens,
+                        block_ids: hit.block_ids,
+                        linear_state: hit.linear_state,
+                        next_token: hit.next_token,
+                    });
 
-                            let output = kiln_model::ModelRunner::
+                    let output = kiln_model::ModelRunner::
                                 spawn_streaming_paged_shared_tokens_with_prefix_cache(
                                     runner.clone(),
                                     prompt_tokens.clone(),
@@ -9019,14 +8774,7 @@ async fn generate_real_streaming(
                                         Ok(())
                                     },
                                 )?;
-                            Ok(DirectModelStream::threaded(output))
-                        }
-                        ResolvedSpeculativeMode::SkipLayer(_) | ResolvedSpeculativeMode::Mtp => {
-                            anyhow::bail!(
-                                "speculative mode reached direct streaming after threaded fallback"
-                            )
-                        }
-                    }
+                    Ok(DirectModelStream::threaded(output))
                 },
             );
 
@@ -11928,7 +11676,6 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SpecMethod;
     use kiln_core::config::ModelConfig;
 
     struct PromptLogprobDropProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
@@ -12719,14 +12466,6 @@ mod tests {
             temperature,
             ..Default::default()
         }
-    }
-
-    fn default_speculative_policy_for_test() -> SpeculativeDecodePolicy {
-        SpeculativeDecodePolicy::default()
-    }
-
-    fn metal_speculative_policy_for_test() -> SpeculativeDecodePolicy {
-        SpeculativeDecodePolicy::for_backend("metal", kiln_tensor::Device::Metal(0))
     }
 
     #[test]
@@ -14809,234 +14548,6 @@ mod tests {
                 .as_ref(),
             Some(&tool_calls)
         );
-    }
-
-    #[test]
-    fn speculative_toggle_defaults_to_skip_layer() {
-        let cfg = SpeculativeDecodingConfig {
-            enabled: true,
-            method: SpecMethod::Off,
-            num_speculative_tokens: 4,
-            draft_layers: 8,
-        };
-        let mode = resolve_speculative_mode_from_config(
-            &ModelConfig::qwen3_5_4b(),
-            &cfg,
-            &make_sampling(1.0),
-            16,
-            false,
-            false,
-            true,
-            default_speculative_policy_for_test(),
-        );
-
-        match mode {
-            ResolvedSpeculativeMode::SkipLayer(spec) => {
-                assert_eq!(spec.num_speculative_tokens, 4);
-                assert_eq!(spec.draft_layers, 8);
-            }
-            _ => panic!("desktop toggle should resolve to skip-layer"),
-        }
-    }
-
-    #[test]
-    fn direct_streaming_uses_only_the_threaded_settlement_mode() {
-        let skip = SpeculativeConfig {
-            num_speculative_tokens: 4,
-            draft_layers: 8,
-        };
-        assert!(matches!(
-            direct_stream_threaded_mode(ResolvedSpeculativeMode::Off),
-            ResolvedSpeculativeMode::Off
-        ));
-        assert!(matches!(
-            direct_stream_threaded_mode(ResolvedSpeculativeMode::SkipLayer(skip)),
-            ResolvedSpeculativeMode::Off
-        ));
-        assert!(matches!(
-            direct_stream_threaded_mode(ResolvedSpeculativeMode::Mtp),
-            ResolvedSpeculativeMode::Off
-        ));
-    }
-
-    #[test]
-    fn mtp_requires_greedy_request() {
-        let cfg = SpeculativeDecodingConfig {
-            enabled: true,
-            method: SpecMethod::Mtp,
-            num_speculative_tokens: 4,
-            draft_layers: 8,
-        };
-
-        let greedy = resolve_speculative_mode_from_config(
-            &ModelConfig::qwen3_5_4b(),
-            &cfg,
-            &make_sampling(0.0),
-            16,
-            true,
-            false,
-            true,
-            default_speculative_policy_for_test(),
-        );
-        assert!(matches!(greedy, ResolvedSpeculativeMode::Mtp));
-
-        let sampled = resolve_speculative_mode_from_config(
-            &ModelConfig::qwen3_5_4b(),
-            &cfg,
-            &make_sampling(0.7),
-            16,
-            true,
-            false,
-            true,
-            default_speculative_policy_for_test(),
-        );
-        assert!(matches!(sampled, ResolvedSpeculativeMode::Off));
-
-        // An active LoRA no longer disables MTP: the verify pass applies
-        // the adapter (output fidelity is anchored there), and MTP-trained
-        // adapters bring their own draft-block LoRA. Tuned adapters are
-        // kiln's primary traffic — they keep the speedup.
-        let with_lora = resolve_speculative_mode_from_config(
-            &ModelConfig::qwen3_5_4b(),
-            &cfg,
-            &make_sampling(0.0),
-            16,
-            true,
-            true,
-            true,
-            default_speculative_policy_for_test(),
-        );
-        assert!(matches!(with_lora, ResolvedSpeculativeMode::Mtp));
-
-        let long_prompt = resolve_speculative_mode_from_config(
-            &ModelConfig::qwen3_5_4b(),
-            &cfg,
-            &make_sampling(0.0),
-            SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
-            true,
-            false,
-            true,
-            default_speculative_policy_for_test(),
-        );
-        assert!(matches!(long_prompt, ResolvedSpeculativeMode::SkipLayer(_)));
-
-        let medium_prompt = resolve_speculative_mode_from_config(
-            &ModelConfig::qwen3_5_4b(),
-            &cfg,
-            &make_sampling(0.0),
-            512,
-            true,
-            false,
-            true,
-            default_speculative_policy_for_test(),
-        );
-        assert!(matches!(medium_prompt, ResolvedSpeculativeMode::Off));
-
-        let mut short_output_sampling = make_sampling(0.0);
-        short_output_sampling.max_tokens =
-            SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT - 1;
-        let long_prompt_short_output = resolve_speculative_mode_from_config(
-            &ModelConfig::qwen3_5_4b(),
-            &cfg,
-            &short_output_sampling,
-            SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
-            true,
-            false,
-            true,
-            default_speculative_policy_for_test(),
-        );
-        assert!(matches!(
-            long_prompt_short_output,
-            ResolvedSpeculativeMode::Off
-        ));
-    }
-
-    #[test]
-    fn mtp_short_prompt_stays_off_when_native_mtp_is_disallowed() {
-        let cfg = SpeculativeDecodingConfig {
-            enabled: true,
-            method: SpecMethod::Mtp,
-            num_speculative_tokens: 4,
-            draft_layers: 8,
-        };
-
-        let mode = resolve_speculative_mode_from_config(
-            &ModelConfig::qwen3_5_4b(),
-            &cfg,
-            &make_sampling(0.0),
-            64,
-            true,
-            false,
-            false,
-            default_speculative_policy_for_test(),
-        );
-        assert!(matches!(mode, ResolvedSpeculativeMode::Off));
-    }
-
-    #[test]
-    fn invalid_skip_layer_config_falls_back_to_off() {
-        let cfg = SpeculativeDecodingConfig {
-            enabled: true,
-            method: SpecMethod::SkipLayer,
-            num_speculative_tokens: 4,
-            draft_layers: ModelConfig::qwen3_5_4b().num_layers,
-        };
-        let mode = resolve_speculative_mode_from_config(
-            &ModelConfig::qwen3_5_4b(),
-            &cfg,
-            &make_sampling(1.0),
-            16,
-            false,
-            false,
-            true,
-            default_speculative_policy_for_test(),
-        );
-
-        assert!(matches!(mode, ResolvedSpeculativeMode::Off));
-    }
-
-    #[test]
-    fn mtp_metal_medium_prompt_stays_off_until_4096() {
-        let cfg = SpeculativeDecodingConfig {
-            enabled: true,
-            method: SpecMethod::Mtp,
-            num_speculative_tokens: 4,
-            draft_layers: 8,
-        };
-
-        let mode = resolve_speculative_mode_from_config(
-            &ModelConfig::qwen3_5_4b(),
-            &cfg,
-            &make_sampling(0.0),
-            2048,
-            true,
-            false,
-            false,
-            metal_speculative_policy_for_test(),
-        );
-        assert!(matches!(mode, ResolvedSpeculativeMode::Off));
-    }
-
-    #[test]
-    fn mtp_metal_4096_prompt_falls_back_to_skip_layer() {
-        let cfg = SpeculativeDecodingConfig {
-            enabled: true,
-            method: SpecMethod::Mtp,
-            num_speculative_tokens: 4,
-            draft_layers: 8,
-        };
-
-        let mode = resolve_speculative_mode_from_config(
-            &ModelConfig::qwen3_5_4b(),
-            &cfg,
-            &make_sampling(0.0),
-            SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
-            true,
-            false,
-            false,
-            metal_speculative_policy_for_test(),
-        );
-        assert!(matches!(mode, ResolvedSpeculativeMode::SkipLayer(_)));
     }
 
     // ── Batch completion endpoint ───────────────────────────────────

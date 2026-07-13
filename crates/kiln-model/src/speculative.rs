@@ -49,40 +49,19 @@ use crate::forward::{
 use crate::kv_cache::KvCache;
 use crate::sampling::{greedy_sample, greedy_sample_rows, sample_with_params};
 
-/// Phase C35 H13 A/B — read `KILN_MTP_ARGMAX_FP32=1` once per process, cached
-/// via `OnceLock`. When enabled, logits are promoted to FP32 before each
-/// greedy argmax inside `speculative_mtp_decode_step` (draft / batched verify).
-/// This matches vLLM's `rejection_sampler.py` which casts
-/// `raw_target_logits.to(torch.float32)` prior to argmax — BF16 argmax can
-/// flip top-1 under ties when two candidates share the same BF16 bucket.
-/// The bench prefill seed in `kiln-server::bench` mirrors this flag so every
-/// sampling site in the MTP path picks the same dtype.
-pub fn mtp_argmax_fp32_enabled() -> bool {
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<bool> = OnceLock::new();
-    *CACHE.get_or_init(|| std::env::var("KILN_MTP_ARGMAX_FP32").ok().as_deref() == Some("1"))
-}
-
-/// Helper for `mtp_argmax_fp32_enabled` — cast a logit tensor to FP32 when
-/// the flag is set, otherwise return it unchanged via `clone()`. The clone is
-/// cheap (tensor refcount bump, no data copy) and keeps the caller's borrow
-/// of the original tensor intact for downstream uses (e.g. C1 attribution
-/// top-k extraction, MTP debug logging).
-fn argmax_input(logits: &Tensor) -> Result<Tensor> {
-    if mtp_argmax_fp32_enabled() {
-        Ok(logits.to_dtype(DType::F32)?)
-    } else {
-        Ok(logits.clone())
-    }
-}
+/// Largest skip-layer verifier window admitted before accelerator qualification.
+///
+/// Verifier logits, synchronization points, and workspaces scale with this
+/// value. The planned hardware qualification matrix covers K=1,2,4, so larger
+/// windows remain rejected even when a caller bypasses the server config.
+pub const MAX_SPECULATIVE_TOKENS: usize = 4;
 
 /// Configuration for speculative decoding.
 #[derive(Debug, Clone)]
 pub struct SpeculativeConfig {
     /// Number of tokens the draft model proposes per speculation step.
     /// Higher values amortize verification cost but risk more rejections.
-    /// Typical range depends on the verifier path. The paged greedy path uses
-    /// a large default window to amortize full-model verification.
+    /// The default and pre-qualification hard ceiling are both K=4.
     pub num_speculative_tokens: usize,
 
     /// Number of layers to use for the draft model (skip-layer approach).
@@ -94,7 +73,7 @@ pub struct SpeculativeConfig {
 impl Default for SpeculativeConfig {
     fn default() -> Self {
         Self {
-            num_speculative_tokens: 256,
+            num_speculative_tokens: MAX_SPECULATIVE_TOKENS,
             draft_layers: 8,
         }
     }
@@ -106,6 +85,12 @@ impl SpeculativeConfig {
         anyhow::ensure!(
             self.num_speculative_tokens > 0,
             "num_speculative_tokens must be > 0, got {}",
+            self.num_speculative_tokens
+        );
+        anyhow::ensure!(
+            self.num_speculative_tokens <= MAX_SPECULATIVE_TOKENS,
+            "num_speculative_tokens must be <= {}, got {}",
+            MAX_SPECULATIVE_TOKENS,
             self.num_speculative_tokens
         );
         anyhow::ensure!(
@@ -383,6 +368,10 @@ pub fn draft_forward_for_state_init(
 
 /// Run one speculative decoding step: draft K tokens, verify with full model.
 ///
+/// This raw step is research/benchmark substrate for isolated qualification.
+/// It does not provide the cancellation, owner-settlement, context-capacity,
+/// or request-lifecycle contract required by serving.
+///
 /// `kv_cache`: the KV cache for the full model (already populated up to current position).
 /// `linear_state`: linear attention state for the full model.
 /// `draft_linear_state`: separate linear attention state for the draft model.
@@ -404,6 +393,7 @@ pub fn speculative_decode_step(
     rng: &mut StdRng,
     lora: Option<&crate::lora_loader::LoraWeights>,
 ) -> Result<SpeculativeStepResult> {
+    spec_config.validate(config)?;
     let k = spec_config.num_speculative_tokens;
     let temperature = params.temperature;
 
@@ -601,7 +591,10 @@ pub struct PagedSpeculativeStepResult {
     pub attempted_draft_tokens: usize,
 }
 
-/// Greedy-only skip-layer speculative decode on the production paged KV path.
+/// Greedy-only skip-layer speculative decode on the paged KV substrate.
+///
+/// This raw step is research/benchmark substrate for isolated qualification,
+/// not a lifecycle-safe serving API.
 ///
 /// This mirrors [`speculative_decode_step`] but avoids the flat `KvCache` path
 /// and skips probability-vector materialization that greedy acceptance does not
@@ -623,6 +616,7 @@ pub fn speculative_decode_step_paged_greedy(
     eos_token_ids: &[TokenId],
     lora: Option<&crate::lora_loader::LoraWeights>,
 ) -> Result<PagedSpeculativeStepResult> {
+    spec_config.validate(config)?;
     anyhow::ensure!(
         params.temperature == 0.0,
         "paged skip-layer speculative decode is greedy-only"
@@ -794,6 +788,10 @@ pub struct MtpSpeculativeStepResult {
 
 /// Run one native MTP (k=1) speculative decoding step.
 ///
+/// This raw step is research/benchmark substrate for isolated qualification.
+/// It does not provide the cancellation, owner-settlement, memory-admission,
+/// or request-lifecycle contract required by serving.
+///
 /// Implements the `draft → verify → accept/reject` pattern from the vLLM
 /// `qwen3_next_mtp` reference specialised to k=1 (Qwen3.5-4B ships
 /// `num_nextn_predict_layers=1`, so a single MTP draft per iteration is the
@@ -865,13 +863,7 @@ pub fn speculative_mtp_decode_step(
         lora,
     )
     .context("mtp draft step failed")?;
-    // Phase C35 H13 A/B — optional FP32 promotion before argmax. See
-    // `mtp_argmax_fp32_enabled` for motivation (vLLM parity). The original
-    // `mtp_logits` tensor is still borrowed downstream by C1 attribution and
-    // MTP debug top-k extraction, so `argmax_input` returns a cloned / cast
-    // view rather than consuming it.
-    let mtp_logits_for_argmax = argmax_input(&mtp_logits).context("mtp draft argmax cast")?;
-    let draft_token = greedy_sample(&mtp_logits_for_argmax).context("mtp draft sampling failed")?;
+    let draft_token = greedy_sample(&mtp_logits).context("mtp draft sampling failed")?;
 
     // 2. Verify the draft with one two-token base-model pass. This is the only
     // k=1 MTP shape that can amortize base-model overhead: on accept the pass
@@ -907,10 +899,8 @@ pub fn speculative_mtp_decode_step(
     // Position 0 predicts what follows `last_token`; position 1 predicts what
     // follows the accepted draft token (the speculative bonus). Sample both
     // verifier rows in one argmax to avoid a second device sync on accept.
-    let verify_logits_for_argmax =
-        argmax_input(&verify_logits).context("mtp verify argmax cast")?;
-    let verify_targets = greedy_sample_rows(&verify_logits_for_argmax)
-        .context("mtp batched verify sampling failed")?;
+    let verify_targets =
+        greedy_sample_rows(&verify_logits).context("mtp batched verify sampling failed")?;
     anyhow::ensure!(
         verify_targets.len() == 2,
         "mtp verifier returned {} target tokens for window 2",
@@ -1206,6 +1196,13 @@ mod tests {
         // Zero speculative tokens
         let config = SpeculativeConfig {
             num_speculative_tokens: 0,
+            draft_layers: 8,
+        };
+        assert!(config.validate(&model_config).is_err());
+
+        // Unbounded K can turn verifier logits into a fatal allocation.
+        let config = SpeculativeConfig {
+            num_speculative_tokens: MAX_SPECULATIVE_TOKENS + 1,
             draft_layers: 8,
         };
         assert!(config.validate(&model_config).is_err());

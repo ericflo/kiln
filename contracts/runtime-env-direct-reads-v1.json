@@ -4205,17 +4205,6 @@
       "surface": "source"
     },
     {
-      "api": "env_flag",
-      "argument": "KILN_ENABLE_METAL_NATIVE_MTP",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/capability.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "env_var",
       "argument_kind": "expression",
@@ -7065,17 +7054,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "KILN_MTP_ARGMAX_FP32",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/speculative.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env_flag",
       "argument": "KILN_DEBUG_SFT_FINITE",
       "argument_kind": "literal",
@@ -7968,17 +7946,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_C1_ATTR_PATH",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/completions.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_DISABLE_BATCH_PREPARED_PROMPTS",
       "argument_kind": "literal",
       "count": 1,
@@ -8133,6 +8100,17 @@
     },
     {
       "api": "var",
+      "argument": "name",
+      "argument_kind": "expression",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-server/src/bench.rs",
+      "phase": "runtime",
+      "surface": "source"
+    },
+    {
+      "api": "var",
       "argument": "KILN_BENCH_FORCE_MTP",
       "argument_kind": "literal",
       "count": 1,
@@ -8177,20 +8155,9 @@
     },
     {
       "api": "var",
-      "argument": "KILN_MTP_ARGMAX_FP32",
+      "argument": "KILN_QUALIFICATION",
       "argument_kind": "literal",
       "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/bench.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_SPEC_DRAFT_LAYERS",
-      "argument_kind": "literal",
-      "count": 2,
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-server/src/bench.rs",
@@ -8220,10 +8187,10 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "KILN_SPEC_NUM_TOKENS",
+      "api": "var_os",
+      "argument": "KILN_QUALIFICATION_CASE_RESULT",
       "argument_kind": "literal",
-      "count": 2,
+      "count": 1,
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-server/src/bench.rs",
@@ -8299,50 +8266,6 @@
     {
       "api": "var",
       "argument": "KILN_SERVED_MODEL_ID",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_SPEC_DRAFT_LAYERS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_SPEC_ENABLED",
-      "argument_kind": "literal",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_SPEC_METHOD",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_SPEC_NUM_TOKENS",
       "argument_kind": "literal",
       "count": 1,
       "language": "rust",
@@ -10732,7 +10655,7 @@
   "summary": {
     "process_mutation_call_sites": 625,
     "process_mutation_entries": 297,
-    "read_call_sites": 991,
-    "read_entries": 677
+    "read_call_sites": 981,
+    "read_entries": 670
   }
 }

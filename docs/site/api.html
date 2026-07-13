@@ -325,7 +325,7 @@
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/decode</code> &mdash; live decode tokens/sec and inter-token latency stats used by the dashboard.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history with effective thinking-budget provenance and outcomes for the dashboard's request panel.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, device-scoped memory capacity and live availability diagnostics, effective training and KV-cache policy, memory-budget partitions, and generation defaults.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective training and KV-cache policy, memory-budget partitions, and generation defaults.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest and execution-provenance record.</div>
         </div>
         <div class="endpoint mt-4">
@@ -440,6 +440,39 @@
                 value came from <code>default</code>, <code>config_file</code>, or <code>environment</code>.
                 These are process-lifetime values resolved before the global governor starts; the
                 endpoint does not re-read environment variables.
+              </p>
+            </section>
+            <section class="pt-4" style="border-top: 1px solid var(--line);">
+              <h4 class="font-semibold mb-2"><code>speculative</code>: configured intent and fail-closed serving policy</h4>
+              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Speculative decoding has no serving route. <code>kiln config</code> and startup reject
+                every effective non-off policy before model weights are loaded, including
+                <code>enabled=true</code> with <code>configured_method="off"</code>, whose legacy effective
+                method is <code>skip_layer</code>. Production loading uses <code>load_mtp=false</code>.
+                The draft-window default and hard ceiling are both K=4 pending planned local
+                accelerator qualification at K=1, K=2, and K=4.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>enabled</code>, <code>configured_method</code>,
+                <code>configured_effective_method</code>, <code>num_speculative_tokens</code>, and
+                <code>draft_layers</code> preserve typed startup intent.
+                <code>configured_policy_immutable_after_startup</code> is always true.
+                <code>serving_effective_method</code> is <code>off</code>,
+                <code>serving_routable</code> is false, and
+                <code>serving_unavailable_reason</code> is the stable
+                <code>pending_cancel_safe_local_accelerator_qualification</code> reason.
+                <code>draft_token_ceiling</code> reports the enforced value, currently 4.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>backend_mtp.support</code> is the backend capability classification:
+                <code>native</code>, <code>native_with_constraints</code>,
+                <code>host_fallback_allowed</code>, <code>declined</code>, <code>unsupported</code>,
+                <code>disabled_by_env</code>, or <code>requires_feature</code>.
+                <code>backend_mtp.native</code> is true only for the first two classifications.
+                These are diagnostics, not routing or loaded-weight authority. The response intentionally has no speculative
+                <code>weights_loaded</code>, <code>scope</code>, <code>admission</code>, or
+                <code>routing</code> object because the server loads, admits, and routes no
+                speculative work.
               </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
@@ -874,7 +907,7 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           Native SFT renders TRL&rsquo;s prefix-preserving Qwen3.5 training template with <code>add_generation_prompt=false</code>. Loss covers the thinking/answer/tool-call body, <code>&lt;|im_end|&gt;</code>, and trailing newline; assistant role headers plus system, user, and tool-response turns use the <code>-100</code> ignore label. Exact rendered text, token IDs, and labels are checked against source-pinned Hugging Face and TRL sources for plain, thinking, tool-call, tool-response, and multi-turn examples. See <a href="https://github.com/ericflo/kiln/blob/main/docs/sft-tokenization.md">SFT Tokenization and Assistant-Only Loss</a> for the normative contract and reproduction command.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          Native SFT accepts one fixed profile: <code>native_online_lora_v1</code>. One conversation is one optimizer update at a constant learning rate; accumulation is 1, with no warmup, decay, or gradient clipping. Unknown profile names and general-trainer fields return structured <code>training_invalid_request</code> errors. A hybrid Vulkan server deliberately returns <code>training_backend_unsupported</code> before dataset admission: its serving weights use CPU-host handles, while the multi-GiB full-model resident Vulkan training path has not passed the production qualification gates. There is no environment bypass; use HF/TRL export/import until that substrate is proven. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/NATIVE_SFT_PROFILE.md">Native SFT Profile</a> for update, precision, optimizer-state, checkpoint, and MTP semantics. Use the HF/TRL route for broader training: SFT and recorded-GRPO exports snapshot their canonical corpus, exact model/tokenizer/template provenance, optional split, and optional adapter into one private immutable registry, embed the task-aware pinned runner, and revalidate every byte before download. GRPO accepts exactly one provenance-complete inline group array or server-local canonical JSONL path. <code>kiln train hf export-sft</code> and <code>export-grpo</code> wrap creation, redirect-free streamed download, strict single-root archive validation, manifest verification, atomic no-clobber local publication, and default server cleanup; <code>list</code> and <code>delete</code> manage retained exports. <code>kiln train hf import-peft</code> verifies the completed local bundle before connecting, streams its deterministic corpus-free envelope through bounded memory, and accepts success only when HTTP 201, JSON, strong ETag, import digest, PEFT content revision, installed byte count, six-file count, task, and source identities match values derived locally; it retains the source bundle on every outcome. The raw PEFT import API accepts only the derived ten-file envelope, caps compressed/expanded/metadata resources, compares the complete current resident identity, validates every LoRA A/B shape, shares the adapter mutation barrier and strict disk quota, and stores a self-verifying <code>kiln.hf-trl-import.v1</code> receipt before kernel-enforced no-replace publication. The versioned identity model, 256 MiB inline-body ceiling, 256-export registry cap, 2 GiB import-body ceiling, and lifecycle are documented in the <a href="https://github.com/ericflo/kiln/blob/main/docs/HF_TRL_INTEROP.md">HF/TRL Interoperability Contract</a>.
+          Native SFT accepts one fixed profile: <code>native_online_lora_v1</code>. One conversation is one optimizer update at a constant learning rate; accumulation is 1, with no warmup, decay, or gradient clipping. Unknown profile names and general-trainer fields return structured <code>training_invalid_request</code> errors. Server SFT always normalizes omitted <code>train_mtp</code> to false and rejects explicit true before queue publication; the deferred MTP alignment phase remains offline-only until it participates in server GPU coordination, memory admission, cancellation, and settlement. A hybrid Vulkan server deliberately returns <code>training_backend_unsupported</code> before dataset admission: its serving weights use CPU-host handles, while the multi-GiB full-model resident Vulkan training path has not passed the production qualification gates. There is no environment bypass; use HF/TRL export/import until that substrate is proven. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/NATIVE_SFT_PROFILE.md">Native SFT Profile</a> for update, precision, optimizer-state, checkpoint, and MTP semantics. Use the HF/TRL route for broader training: SFT and recorded-GRPO exports snapshot their canonical corpus, exact model/tokenizer/template provenance, optional split, and optional adapter into one private immutable registry, embed the task-aware pinned runner, and revalidate every byte before download. GRPO accepts exactly one provenance-complete inline group array or server-local canonical JSONL path. <code>kiln train hf export-sft</code> and <code>export-grpo</code> wrap creation, redirect-free streamed download, strict single-root archive validation, manifest verification, atomic no-clobber local publication, and default server cleanup; <code>list</code> and <code>delete</code> manage retained exports. <code>kiln train hf import-peft</code> verifies the completed local bundle before connecting, streams its deterministic corpus-free envelope through bounded memory, and accepts success only when HTTP 201, JSON, strong ETag, import digest, PEFT content revision, installed byte count, six-file count, task, and source identities match values derived locally; it retains the source bundle on every outcome. The raw PEFT import API accepts only the derived ten-file envelope, caps compressed/expanded/metadata resources, compares the complete current resident identity, validates every LoRA A/B shape, shares the adapter mutation barrier and strict disk quota, and stores a self-verifying <code>kiln.hf-trl-import.v1</code> receipt before kernel-enforced no-replace publication. The versioned identity model, 256 MiB inline-body ceiling, 256-export registry cap, 2 GiB import-body ceiling, and lifecycle are documented in the <a href="https://github.com/ericflo/kiln/blob/main/docs/HF_TRL_INTEROP.md">HF/TRL Interoperability Contract</a>.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           Every SFT source uses one row-admission contract. <code>config.invalid_row_policy</code> is <code>fail</code> by default; explicit <code>skip</code> queues only valid rows and records ordered kept/rejected SHA-256 identities under <code>train_receipt.json</code> &rarr; <code>data.sft_ingestion</code>. Server-local JSONL is revalidated against its submit-time manifest before GPU ownership. See <a href="https://github.com/ericflo/kiln/blob/main/docs/sft-ingestion.md">SFT Ingestion, Invalid Rows, and Row Identity</a>.

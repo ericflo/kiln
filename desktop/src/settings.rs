@@ -766,10 +766,13 @@ fn sync_settings_directory(path: &Path) {
     }
 }
 
-pub fn normalize_for_platform(s: Settings) -> Settings {
+pub fn normalize_for_platform(mut s: Settings) -> Settings {
+    // Speculative serving is fail-closed until local accelerator
+    // qualification. Preserve the legacy field for settings compatibility,
+    // but never persist or launch an unavailable mode.
+    s.speculative_decoding = false;
     #[cfg(target_os = "macos")]
     {
-        let mut s = s;
         // These desktop toggles are CUDA-only today. Keep persisted settings
         // aligned with the actual macOS launch contract instead of storing
         // values the child process will ignore or internally override.
@@ -861,14 +864,8 @@ pub fn apply_to_supervisor_config(s: &Settings, cfg: &mut SupervisorConfig) {
         "KILN_PREFIX_CACHE_ENABLED".to_string(),
         bool_env(s.prefix_cache),
     ));
-    envs.push((
-        "KILN_SPEC_ENABLED".to_string(),
-        bool_env(s.speculative_decoding),
-    ));
-    envs.push((
-        "KILN_SPEC_METHOD".to_string(),
-        if s.speculative_decoding { "mtp" } else { "off" }.to_string(),
-    ));
+    envs.push(("KILN_SPECULATIVE_ENABLED".to_string(), "0".to_string()));
+    envs.push(("KILN_SPECULATIVE_METHOD".to_string(), "off".to_string()));
     if let Some(dir) = &s.adapter_dir {
         envs.push(("KILN_ADAPTER_DIR".to_string(), dir.display().to_string()));
     }
@@ -997,6 +994,7 @@ mod tests {
         s.port = 9000;
         s.host = "0.0.0.0".to_string();
         s.fp8_kv_cache = true;
+        s.speculative_decoding = true;
         s.model_path = Some(PathBuf::from("/models/foo"));
         s.adapter_dir = Some(PathBuf::from("/adapters"));
         s.served_model_id = Some("custom-id".to_string());
@@ -1028,18 +1026,10 @@ mod tests {
             Some(if cfg!(target_os = "macos") { "0" } else { "1" })
         );
         assert_eq!(env_get("KILN_PREFIX_CACHE_ENABLED"), Some("1")); // default true
-        assert_eq!(
-            env_get("KILN_SPEC_ENABLED"),
-            Some(if cfg!(target_os = "macos") { "1" } else { "0" })
-        );
-        assert_eq!(
-            env_get("KILN_SPEC_METHOD"),
-            Some(if cfg!(target_os = "macos") {
-                "mtp"
-            } else {
-                "off"
-            })
-        );
+        assert_eq!(env_get("KILN_SPECULATIVE_ENABLED"), Some("0"));
+        assert_eq!(env_get("KILN_SPECULATIVE_METHOD"), Some("off"));
+        assert_eq!(env_get("KILN_SPEC_ENABLED"), None);
+        assert_eq!(env_get("KILN_SPEC_METHOD"), None);
         assert_eq!(env_get("KILN_MODEL_PATH"), Some("/models/foo"));
         assert_eq!(env_get("KILN_ADAPTER_DIR"), Some("/adapters"));
         assert_eq!(env_get("KILN_SERVED_MODEL_ID"), Some("custom-id"));
@@ -1050,6 +1040,25 @@ mod tests {
         assert_eq!(cfg.host, "0.0.0.0");
         assert_eq!(cfg.port, 9000);
         assert!(!cfg.auto_restart);
+    }
+
+    #[test]
+    fn apply_ignores_persisted_speculative_enablement() {
+        let mut settings = Settings::default();
+        settings.speculative_decoding = true;
+        let mut cfg = SupervisorConfig::default();
+        apply_to_supervisor_config(&settings, &mut cfg);
+
+        let env_get = |key: &str| -> Option<&str> {
+            cfg.envs
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(env_get("KILN_SPECULATIVE_ENABLED"), Some("0"));
+        assert_eq!(env_get("KILN_SPECULATIVE_METHOD"), Some("off"));
+        assert_eq!(env_get("KILN_SPEC_ENABLED"), None);
+        assert_eq!(env_get("KILN_SPEC_METHOD"), None);
     }
 
     #[test]

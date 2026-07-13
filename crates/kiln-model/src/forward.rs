@@ -3654,12 +3654,14 @@ pub struct GpuWeights {
     /// so the RoPE hot path can reuse it instead of rebuilding a fresh `Vec<f32>` +
     /// HtoD upload on every layer's attention call (~8 × per token in prefill).
     pub rotary_inv_freq: Tensor,
-    /// Native MTP (Multi-Token Prediction) head tensors, when the checkpoint
-    /// shipped them and the loader surfaced a `ModelWeights.mtp`.
+    /// Native MTP (Multi-Token Prediction) head tensors, when a model-library
+    /// caller requests them and the checkpoint supplies `ModelWeights.mtp`.
     ///
-    /// The slot is lazy by default so desktop startup does not upload the MTP
-    /// tensors to Metal unless a request actually resolves to native MTP.
-    /// `None` still means the checkpoint does not support native MTP.
+    /// The serving binary defers MTP loading and rejects every enabled
+    /// speculative method at startup. A deferred checkpoint source therefore
+    /// still produces a lazy slot here; explicit offline qualification and
+    /// model-library callers may materialize it later. `None` means the
+    /// checkpoint does not expose an MTP source.
     pub mtp: Option<MtpGpuWeightsSlot>,
 }
 
@@ -3699,9 +3701,10 @@ pub struct MtpGpuWeights {
 
 /// Lazy GPU materialization for native MTP tensors.
 ///
-/// Routing only needs to know whether MTP exists; the first actual MTP forward
-/// pays the upload cost. This avoids blocking macOS desktop readiness on an
-/// MTP path that the server uses only for short greedy prompts.
+/// Explicit model-library and offline qualification callers pay the upload cost
+/// on their first MTP forward. Serving retains this latent slot but neither
+/// routes inference through it nor permits server SFT to train it while the MTP
+/// ownership and memory contracts remain unqualified.
 pub struct MtpGpuWeightsSlot {
     weights: OnceLock<MtpGpuWeights>,
     source: Option<MtpGpuSource>,
@@ -3826,8 +3829,9 @@ impl MtpGpuWeightsSlot {
                 loaded
             }
         };
-        // This upload is deliberately lazy and may run on the first MTP request.
-        // Cache misses must therefore remain read-only.
+        // Explicit model-library and qualification callers may trigger this
+        // lazy upload on their first MTP forward. Cache misses must remain
+        // read-only; serving does not route requests through this path.
         let projection_load_cache = ProjectionLoadCache::for_lazy_mtp_upload(&self.device)
             .context("mtp projection load cache")?;
         let upload_start = std::time::Instant::now();
@@ -3865,7 +3869,7 @@ fn upload_mtp_gpu_weights(
     // The MTP inner transformer layer. Loader guarantees this is a
     // full-attention layer (bails otherwise). Keep the upload local to MTP
     // rather than adding it to Marlin packing; native MTP uses one layer and
-    // is not on the long-prompt desktop route.
+    // is currently an explicit offline/model-library path, not a serving route.
     let mtp_layer = {
         let lw = &mtp_w.layer;
         let ctx = |name: &str| format!("mtp.layer {name}");
@@ -7820,10 +7824,11 @@ impl GpuWeights {
             }
         }
 
-        // Keep MTP routing support visible but do not upload native MTP tensors
-        // during model load. The macOS desktop default only uses native MTP for
-        // short greedy prompts; long prompts route to skip-layer, so eager MTP
-        // upload slows common startup/readiness without warming the hot path.
+        // Preserve native MTP tensors for explicit model-library and offline
+        // qualification callers without uploading them during model load. The
+        // serving binary defers MTP CPU loading and rejects enabled speculative
+        // methods at startup, so this latent slot is not evidence of a serving
+        // route or of already-resident MTP weights.
         let mtp = if let Some(mtp_w) = weights.mtp.as_ref() {
             Some(MtpGpuWeightsSlot::lazy(mtp_w.clone(), device))
         } else {

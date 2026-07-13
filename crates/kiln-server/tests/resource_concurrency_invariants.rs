@@ -1385,3 +1385,107 @@ fn hip_runtime_errors_are_cleared_at_wrapper_boundary() {
         );
     }
 }
+
+#[test]
+fn speculative_configuration_is_startup_only_and_fail_closed() {
+    let state = read("crates/kiln-server/src/state.rs");
+    let completions = read("crates/kiln-server/src/api/completions.rs");
+
+    assert!(
+        state.contains("pub speculative_config: crate::config::SpeculativeDecodingConfig"),
+        "AppState must retain the speculative policy resolved during startup"
+    );
+    assert!(
+        state.contains("pub speculative_runtime_policy: SpeculativeRuntimePolicy"),
+        "AppState must retain backend diagnostics without rebuilding them per request"
+    );
+    for forbidden in [
+        "ResolvedSpeculativeMode",
+        "resolve_speculative_mode",
+        "generate_paged_speculative_shared_tokens",
+        "speculative_decode_step",
+        "speculative_config",
+        "from_env",
+        "KILN_SPEC_",
+    ] {
+        assert!(
+            !completions.contains(forbidden),
+            "request dispatch must not contain an unqualified speculative serving path: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn speculative_nonstreaming_requests_remain_on_the_batching_actor() {
+    let completions = read("crates/kiln-server/src/api/completions.rs");
+    let ordinary_actor_dispatches = completions
+        .matches("let generation = if let Some(batching_engine) = batching_engine {")
+        .count();
+    assert_eq!(
+        ordinary_actor_dispatches, 2,
+        "both nonstreaming completion surfaces must select the batching actor whenever it exists"
+    );
+    assert!(
+        !completions.contains("requires_direct_generation"),
+        "no optional serving mode may bypass batching before accelerator qualification"
+    );
+}
+
+#[test]
+fn speculative_serving_is_rejected_before_model_loading() {
+    let main = read("crates/kiln-server/src/main.rs");
+    let config = read("crates/kiln-server/src/config.rs");
+    let cli = read("crates/kiln-server/src/cli.rs");
+    let validator = source_between(
+        &config,
+        "    pub fn validate_for_serving(&self) -> Result<()> {",
+        "    /// Resolve the effective speculative-decoding method.",
+    );
+
+    assert!(
+        main.contains(".validate_for_model(&model_config)"),
+        "startup must reject invalid model-dependent speculative geometry before loading weights"
+    );
+    assert!(
+        validator.contains("requested != SpecMethod::Off")
+            && validator.contains("owner-settlement")
+            && validator.contains("local accelerator qualification"),
+        "startup must reject every unqualified speculative serving method"
+    );
+    assert!(
+        cli.contains("config.speculative.validate_for_serving()?"),
+        "config check must reject the same unavailable serving methods as startup"
+    );
+    assert!(
+        main.contains("LoadModelOptions { load_mtp: false }"),
+        "serving must not materialize an unqualified native MTP path"
+    );
+    assert!(!main.contains("prewarm_speculative_decoding"));
+    let model_validation = main
+        .find(".validate_for_model(&model_config)")
+        .expect("model-dependent speculative validation");
+    let serving_validation = main
+        .find("config.speculative.validate_for_serving()?")
+        .expect("fail-closed speculative serving validation");
+    let model_branch = main
+        .find("let mut state = if let Some(mp) = model_path {")
+        .expect("real model branch");
+    assert!(
+        model_validation < serving_validation && serving_validation < model_branch,
+        "unqualified speculative serving must fail before model loading or accelerator allocation"
+    );
+}
+
+#[test]
+fn speculative_configuration_has_bounded_geometry() {
+    let config = read("crates/kiln-server/src/config.rs");
+    let speculative = read("crates/kiln-model/src/speculative.rs");
+
+    assert!(config.contains("pub const MAX_SPECULATIVE_DRAFT_TOKENS: usize"));
+    assert!(config.contains("kiln_model::speculative::MAX_SPECULATIVE_TOKENS"));
+    assert!(speculative.contains("pub const MAX_SPECULATIVE_TOKENS: usize = 4"));
+    assert!(speculative.contains("self.num_speculative_tokens <= MAX_SPECULATIVE_TOKENS"));
+    assert!(
+        config.contains("self.speculative.num_speculative_tokens > MAX_SPECULATIVE_DRAFT_TOKENS")
+    );
+}

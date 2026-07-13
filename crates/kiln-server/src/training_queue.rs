@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use kiln_train::trainer;
 use kiln_train::{
     self, DistillMergeRequest, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest,
-    GrpoRequest, LogitSource as _, OpdRequest, SftRequest, TrainingRuntimeContext, TrainingState,
+    GrpoRequest, LogitSource as _, OpdRequest, SftConfig, SftRequest, TrainingRuntimeContext,
+    TrainingState,
 };
 use serde::Serialize;
 
@@ -1393,6 +1394,31 @@ fn normalize_training_resume_checkpoint(
     Ok(())
 }
 
+const SERVER_SFT_MTP_ALIGNMENT_UNAVAILABLE: &str = "server SFT does not support train_mtp=true until the native MTP alignment phase has passed GPU-ownership, cancellation, settlement, and memory-reservation qualification; set train_mtp=false or omit it";
+
+/// Make the server's SFT policy explicit before a request enters the queue.
+///
+/// The standalone training crate retains its historical auto-on behavior for
+/// `None`. Server jobs must not inherit that behavior because the optional MTP
+/// alignment phase is not yet integrated with server GPU coordination.
+pub(crate) fn normalize_server_sft_mtp_policy(config: &mut SftConfig) -> Result<(), String> {
+    if config.train_mtp == Some(true) {
+        return Err(SERVER_SFT_MTP_ALIGNMENT_UNAVAILABLE.to_string());
+    }
+    config.train_mtp = Some(false);
+    Ok(())
+}
+
+fn require_normalized_server_sft_mtp_policy(config: &SftConfig) -> Result<(), String> {
+    if config.train_mtp == Some(false) {
+        Ok(())
+    } else {
+        Err(format!(
+            "queued server SFT job did not preserve the required train_mtp=false policy; {SERVER_SFT_MTP_ALIGNMENT_UNAVAILABLE}"
+        ))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_sft(
     native_route_enabled: bool,
@@ -1411,6 +1437,7 @@ fn run_sft(
     gpu_step_coordination: Option<trainer::GpuStepCoordination>,
     runtime: &TrainingRuntimeContext,
 ) -> std::result::Result<PathBuf, String> {
+    require_normalized_server_sft_mtp_policy(&req.config)?;
     let PreparedTrainingData::Sft(prepared) = prepared_data else {
         return Err("queued SFT job is missing its admitted corpus".to_string());
     };
@@ -5057,6 +5084,23 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::TEST_ENV_LOCK as ENV_LOCK;
+
+    #[test]
+    fn sft_worker_requires_explicit_fail_closed_mtp_policy() {
+        let implicit = SftConfig::default();
+        let explicit_true = SftConfig {
+            train_mtp: Some(true),
+            ..SftConfig::default()
+        };
+        let explicit_false = SftConfig {
+            train_mtp: Some(false),
+            ..SftConfig::default()
+        };
+
+        assert!(require_normalized_server_sft_mtp_policy(&implicit).is_err());
+        assert!(require_normalized_server_sft_mtp_policy(&explicit_true).is_err());
+        require_normalized_server_sft_mtp_policy(&explicit_false).unwrap();
+    }
 
     fn write_resume_checkpoint_fixture(
         root: &std::path::Path,

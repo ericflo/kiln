@@ -1856,11 +1856,13 @@ fn detached_chunked_prefill_support(name: &str) -> Support {
 
 fn mtp_speculative_generation_support(name: &str) -> Support {
     match name {
-        "cuda" => Support::NativeWithConstraints,
-        "metal" if kiln_core::env_flag::env_flag("KILN_ENABLE_METAL_NATIVE_MTP", false) => {
-            Support::NativeWithConstraints
-        }
-        "metal" => Support::DisabledByEnv,
+        // Native MTP still lacks the cancellation and external-yield
+        // settlement contract required by server request timeouts.
+        "cuda" => Support::Declined,
+        // Metal qualification found native MTP materially slower with no
+        // accepted drafts. Keep it declined until hardware evidence supports
+        // promotion; there is no hidden environment escape hatch.
+        "metal" => Support::Declined,
         _ => Support::Declined,
     }
 }

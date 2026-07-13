@@ -321,6 +321,23 @@ struct BenchArgs {
 }
 
 fn parse_args() -> Result<BenchArgs> {
+    fn value<'a>(args: &'a [String], index: &mut usize, name: &str) -> Result<&'a str> {
+        *index += 1;
+        args.get(*index)
+            .map(String::as_str)
+            .with_context(|| format!("{name} requires a value"))
+    }
+
+    fn number<T>(args: &[String], index: &mut usize, name: &str) -> Result<T>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        let raw = value(args, index, name)?;
+        raw.parse::<T>()
+            .map_err(|error| anyhow::anyhow!("{name} has invalid value {raw:?}: {error}"))
+    }
+
     let args: Vec<String> = std::env::args().collect();
     let mut model_path = String::new();
     let mut max_output_tokens = 128;
@@ -341,20 +358,16 @@ fn parse_args() -> Result<BenchArgs> {
     while i < args.len() {
         match args[i].as_str() {
             "--model-path" => {
-                i += 1;
-                model_path = args.get(i).cloned().unwrap_or_default();
+                model_path = value(&args, &mut i, "--model-path")?.to_string();
             }
             "--max-output-tokens" => {
-                i += 1;
-                max_output_tokens = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(128);
+                max_output_tokens = number(&args, &mut i, "--max-output-tokens")?;
             }
             "--prompt-tokens" => {
-                i += 1;
-                prompt_tokens = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(512);
+                prompt_tokens = number(&args, &mut i, "--prompt-tokens")?;
             }
             "--training-steps" => {
-                i += 1;
-                training_steps = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(10);
+                training_steps = number(&args, &mut i, "--training-steps")?;
             }
             "--skip-training" => {
                 skip_training = true;
@@ -366,19 +379,16 @@ fn parse_args() -> Result<BenchArgs> {
                 latency_only = true;
             }
             "--latency-warmup-runs" => {
-                i += 1;
-                latency_warmup_runs = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
+                latency_warmup_runs = number(&args, &mut i, "--latency-warmup-runs")?;
             }
             "--seed" => {
-                i += 1;
-                seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(42);
+                seed = number(&args, &mut i, "--seed")?;
             }
             "--chat-template" => {
                 chat_template = true;
             }
             "--prompt-subset" => {
-                i += 1;
-                let s = args.get(i).cloned().unwrap_or_default();
+                let s = value(&args, &mut i, "--prompt-subset")?;
                 prompt_subset = PromptSubset::parse(&s).ok_or_else(|| {
                     anyhow::anyhow!(
                         "invalid --prompt-subset value '{s}' (expected all|gsm8k|humaneval|c4)"
@@ -386,8 +396,7 @@ fn parse_args() -> Result<BenchArgs> {
                 })?;
             }
             "--temperature" => {
-                i += 1;
-                temperature = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                temperature = number(&args, &mut i, "--temperature")?;
             }
             "--verbose" | "-v" => {
                 verbose = verbose.saturating_add(1);
@@ -448,7 +457,7 @@ fn parse_args() -> Result<BenchArgs> {
                 eprintln!("  -q, --quiet               Drop tracing to warnings and errors only");
                 std::process::exit(0);
             }
-            _ => {}
+            unknown => anyhow::bail!("unknown argument {unknown:?}; run with --help for usage"),
         }
         i += 1;
     }
@@ -456,6 +465,18 @@ fn parse_args() -> Result<BenchArgs> {
     if model_path.is_empty() {
         anyhow::bail!("--model-path is required. Run with --help for usage.");
     }
+    anyhow::ensure!(
+        max_output_tokens > 0,
+        "--max-output-tokens must be greater than zero"
+    );
+    anyhow::ensure!(
+        prompt_tokens > 0,
+        "--prompt-tokens must be greater than zero"
+    );
+    anyhow::ensure!(
+        temperature.is_finite() && temperature >= 0.0,
+        "--temperature must be a finite non-negative number"
+    );
 
     Ok(BenchArgs {
         model_path,
@@ -1394,6 +1415,18 @@ fn read_spec_method_from_env() -> SpecMethod {
     }
 }
 
+fn require_speculative_qualification_harness(method: SpecMethod) -> Result<()> {
+    if method == SpecMethod::Off {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        std::env::var("KILN_QUALIFICATION").ok().as_deref() == Some("1")
+            && std::env::var_os("KILN_QUALIFICATION_CASE_RESULT").is_some(),
+        "speculative benchmark method {method:?} is restricted to the isolated qualification harness; run a declared workload through scripts/qualification/run.py"
+    );
+    Ok(())
+}
+
 fn bench_force_raw_mtp() -> bool {
     std::env::var("KILN_BENCH_FORCE_MTP")
         .ok()
@@ -1401,11 +1434,10 @@ fn bench_force_raw_mtp() -> bool {
         .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
-/// Resolve the benchmark arm the same way the server resolves desktop
-/// requests. Native MTP is only the short greedy no-LoRA path; medium prompts
-/// stay off because skip-layer regresses there on Apple Silicon, and only
-/// genuinely long greedy requests fall back to skip-layer instead of timing
-/// raw MTP.
+/// Resolve the benchmark-only comparison arm using the historical shape policy.
+/// This supports offline accelerator qualification and does not describe server
+/// request routing: serving currently rejects every enabled speculative method
+/// at startup.
 fn resolve_bench_spec_method(
     configured: SpecMethod,
     requested_prompt_tokens: usize,
@@ -1678,18 +1710,43 @@ mod tests {
     }
 }
 
+/// Resolve and validate the benchmark-only speculative controls before any
+/// cache-size arithmetic or accelerator allocation.
+fn benchmark_speculative_config(config: &ModelConfig) -> Result<SpeculativeConfig> {
+    fn parse(name: &str, default: usize) -> Result<usize> {
+        match std::env::var(name) {
+            Ok(raw) => raw.parse::<usize>().with_context(|| {
+                format!("{name} must be an unsigned decimal integer, got {raw:?}")
+            }),
+            Err(std::env::VarError::NotPresent) => Ok(default),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("{name} must contain valid Unicode")
+            }
+        }
+    }
+
+    let speculative = SpeculativeConfig {
+        num_speculative_tokens: parse(
+            "KILN_SPEC_NUM_TOKENS",
+            SpeculativeConfig::default().num_speculative_tokens,
+        )?,
+        draft_layers: parse("KILN_SPEC_DRAFT_LAYERS", 8)?,
+    };
+    speculative
+        .validate(config)
+        .context("invalid skip-layer benchmark configuration")?;
+    Ok(speculative)
+}
+
 /// Benchmark latency along the SKIP-LAYER speculative path.
 ///
 /// Uses the same flat `KvCache` + `model_forward` path as the existing
-/// `generate_from_tokens_speculative` in `kiln-model::generate` (skip-layer was
-/// never paged). Drives `speculative_decode_step` directly per iteration so
-/// each step's wall time is divided across the tokens emitted that step,
-/// giving a per-emitted-token ITL distribution comparable to the `Off` arm.
+/// `generate_from_tokens_speculative` in `kiln-model::generate`. Drives
+/// `speculative_decode_step` directly per iteration so each step's wall time
+/// is divided across the tokens emitted by that step.
 ///
-/// Reads `KILN_SPEC_NUM_TOKENS` (default 256) and `KILN_SPEC_DRAFT_LAYERS`
-/// (default 8). `temperature` defaults to 0 (greedy) for deterministic
-/// per-seed reproducibility; Phase C40b threads `--temperature` through to
-/// support sampled-decode α probes.
+/// Reads `KILN_SPEC_NUM_TOKENS` (default 4) and
+/// `KILN_SPEC_DRAFT_LAYERS` (default 8), both strictly validated before use.
 fn bench_latency_skiplayer(
     weights: &GpuWeights,
     config: &ModelConfig,
@@ -1701,14 +1758,9 @@ fn bench_latency_skiplayer(
 ) -> Result<LatencyResult> {
     use rand::SeedableRng;
 
-    let num_speculative_tokens = std::env::var("KILN_SPEC_NUM_TOKENS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(256usize);
-    let draft_layers = std::env::var("KILN_SPEC_DRAFT_LAYERS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(8usize);
+    let speculative = benchmark_speculative_config(config)?;
+    let num_speculative_tokens = speculative.num_speculative_tokens;
+    let draft_layers = speculative.draft_layers;
 
     let prompt = build_prompt(tokenizer, prompt_tokens, seed);
     let prompt_token_ids = tokenizer
@@ -1724,7 +1776,11 @@ fn bench_latency_skiplayer(
     // extend past the committed token budget before stale slots are overwritten
     // or ignored, so reserve headroom for the verify window.
     let max_spec_window = num_speculative_tokens.min(max_output_tokens.max(1));
-    let max_total = actual_prompt_tokens + max_output_tokens + max_spec_window + 1;
+    let max_total = actual_prompt_tokens
+        .checked_add(max_output_tokens)
+        .and_then(|tokens| tokens.checked_add(max_spec_window))
+        .and_then(|tokens| tokens.checked_add(1))
+        .context("skip-layer benchmark cache size overflowed")?;
     let mut kv_cache = KvCache::new_kt(
         config.num_full_attention_layers,
         config.num_kv_heads,
@@ -1894,9 +1950,9 @@ fn bench_latency_skiplayer(
 
 /// Benchmark latency along the PAGED SKIP-LAYER speculative path.
 ///
-/// This is benchmark-only scaffolding for the production-style paged
-/// self-speculative implementation. It keeps the paged prefill/cache/block-table
-/// setup in this harness and delegates each decode iteration to
+/// This is benchmark-only scaffolding for the paged self-speculative
+/// implementation. It keeps the paged prefill/cache/block-table setup in this
+/// harness and delegates each decode iteration to
 /// `speculative_decode_step_paged_greedy`, which is expected to verify against
 /// `PagedKvCacheKt` at the caller-provided `base_pos`.
 ///
@@ -1911,14 +1967,9 @@ fn bench_latency_paged_skiplayer(
     seed: u64,
     temperature: f32,
 ) -> Result<LatencyResult> {
-    let num_speculative_tokens = std::env::var("KILN_SPEC_NUM_TOKENS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(256usize);
-    let draft_layers = std::env::var("KILN_SPEC_DRAFT_LAYERS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(8usize);
+    let speculative = benchmark_speculative_config(config)?;
+    let num_speculative_tokens = speculative.num_speculative_tokens;
+    let draft_layers = speculative.draft_layers;
 
     let prompt = build_prompt(tokenizer, prompt_tokens, seed);
     let prompt_token_ids = tokenizer
@@ -1934,8 +1985,12 @@ fn bench_latency_paged_skiplayer(
     // run off the allocated paged cache before stale speculative slots are
     // overwritten by the next committed step.
     let max_spec_window = num_speculative_tokens.min(max_output_tokens.max(1));
-    let max_total = actual_prompt_tokens + max_output_tokens + max_spec_window + 1;
-    let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
+    let max_total = actual_prompt_tokens
+        .checked_add(max_output_tokens)
+        .and_then(|tokens| tokens.checked_add(max_spec_window))
+        .and_then(|tokens| tokens.checked_add(1))
+        .context("paged skip-layer benchmark cache size overflowed")?;
+    let num_blocks = max_total.div_ceil(PAGED_BLOCK_SIZE);
 
     // #1082 candle-drop: `PagedKvCache::new_kt(&device_kt, ...)` ->
     // `PagedKvCacheKt::new(..., device)` — pools on the runtime `Device`.
@@ -2142,16 +2197,6 @@ fn bench_latency_paged_skiplayer(
     })
 }
 
-/// Phase C35 H13 A/B — read `KILN_MTP_ARGMAX_FP32=1` once per process, cached
-/// via `OnceLock`. Matches the identically-named helper in kiln-model so both
-/// the speculative decode path and the bench prefill seed agree on whether to
-/// promote logits to FP32 before argmax.
-fn mtp_argmax_fp32_enabled() -> bool {
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<bool> = OnceLock::new();
-    *CACHE.get_or_init(|| std::env::var("KILN_MTP_ARGMAX_FP32").ok().as_deref() == Some("1"))
-}
-
 /// Benchmark latency along the NATIVE-MTP speculative path.
 ///
 /// Uses two `PagedKvCacheKt` instances (base + 1-layer MTP), threads `h_prev`
@@ -2208,8 +2253,11 @@ fn bench_latency_paged_mtp(
 
     // Reserve enough blocks to cover prompt + 2*max_output_tokens (each MTP
     // step writes up to 2 base-cache slots: [last_token, draft_token]).
-    let max_total_base = actual_prompt_tokens + 2 * max_output_tokens;
-    let num_blocks = (max_total_base + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
+    let max_total_base = max_output_tokens
+        .checked_mul(2)
+        .and_then(|output| actual_prompt_tokens.checked_add(output))
+        .context("MTP benchmark cache size overflowed")?;
+    let num_blocks = max_total_base.div_ceil(PAGED_BLOCK_SIZE);
 
     // #1082 candle-drop: `PagedKvCache::new_kt(&device_kt, ...)` ->
     // `PagedKvCacheKt::new(..., device)` for both base + MTP caches (pools
@@ -2301,16 +2349,7 @@ fn bench_latency_paged_mtp(
 
     // prefill_logits is already [1, 1, V] (kt). Squeeze the time dim.
     let prefill_last = prefill_logits.squeeze(1)?;
-    // Phase C35 H13 A/B — optionally cast logits to FP32 before argmax so the
-    // bench prefill matches vLLM's sampler contract (rejection_sampler.py
-    // casts `raw_target_logits` to float32 before greedy). BF16 argmax can
-    // flip top-1 under ties when two candidates share the same BF16 bucket.
-    let mut last_token = if mtp_argmax_fp32_enabled() {
-        let prefill_last_fp32 = prefill_last.to_dtype(kiln_tensor::DType::F32)?;
-        greedy_sample(&prefill_last_fp32)?
-    } else {
-        greedy_sample(&prefill_last)?
-    };
+    let mut last_token = greedy_sample(&prefill_last)?;
     let prefill_time = prefill_start.elapsed();
 
     eprintln!(
@@ -2901,6 +2940,7 @@ fn main() -> Result<()> {
     let load_start = Instant::now();
 
     let spec_method = read_spec_method_from_env();
+    require_speculative_qualification_harness(spec_method)?;
     let model_weights = kiln_model::load_model_with_options(
         model_path,
         &model_config,
@@ -2991,10 +3031,11 @@ fn main() -> Result<()> {
     }
 
     // Latency benchmark (uses model_forward directly — must run before runner takes ownership).
-    // Dispatch order:
-    //   * KILN_SPEC_METHOD=mtp        → short greedy prompts use native MTP;
-    //                                   long greedy prompts mirror desktop
-    //                                   serving and fall back to skip-layer
+    // This dispatch is benchmark-only; speculative serving fails closed and
+    // does not use these shape heuristics. Benchmark dispatch order:
+    //   * KILN_SPEC_METHOD=mtp        → qualified short greedy shapes use MTP;
+    //                                   qualifying long greedy shapes use
+    //                                   skip-layer, otherwise speculative is off
     //   * KILN_SPEC_METHOD=skip_layer → bench_latency_paged_skiplayer when
     //                                   --paged, else bench_latency_skiplayer
     //                                   (flat KV + skip-layer)

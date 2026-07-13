@@ -37,7 +37,7 @@ Fresh installs use `127.0.0.1:8420`, matching the server and CLI defaults in the
 - **System tray icon** with status states: stopped, starting, running, training-active, error.
 - **Right-click menu** — Open Dashboard, Settings, Start/Stop Server, View Logs, Quit.
 - **Dashboard window** — toolbar shows server state, model path, VRAM budget, active LoRA adapter, training status, and the OpenAI base URL with a one-click copy. The kiln server's built-in `/ui/` is embedded below via a webview iframe.
-- **Settings window** — model path, host, port, adapter directory, inference memory fraction, FP8 KV cache, CUDA graphs, prefix cache, speculative decoding, auto-start, auto-restart, launch-at-login. Persisted via `tauri-plugin-store`.
+- **Settings window** — model path, host, port, adapter directory, inference memory fraction, FP8 KV cache, CUDA graphs, prefix cache, auto-start, auto-restart, launch-at-login. Persisted via `tauri-plugin-store`.
 - **Log viewer** — tails captured stdout/stderr lines from the ring buffer with auto-scroll and clear-view.
 - **Health and training polling** — hits `/v1/health` and `/v1/train/status` and drives the tray icon state.
 - **Auto-start kiln on app launch** — configurable; default on.
@@ -62,6 +62,13 @@ See **[CHANGELOG.md](CHANGELOG.md)** for older versions and full release history
 ![Logs](../docs/desktop/logs.png)
 
 ## Architecture
+
+Desktop exposes no speculative-decoding control or request route. A legacy
+persisted `speculative_decoding` value is ignored and normalized to off when
+the child process is configured. This matches the server contract: every
+effective non-off speculative policy fails validation and startup before model
+loading, and production loading uses `load_mtp=false` pending local
+accelerator qualification.
 
 The app is a [Tauri v2](https://v2.tauri.app/) project (Rust backend, HTML/JS frontend) that spawns and supervises the `kiln` binary as a **child process**. Kiln is NOT embedded as a library — it is a heavyweight GPU server (CUDA or Vulkan on Linux, CUDA on Windows, Metal on macOS), and keeping it as a separate binary preserves headless usage and avoids dragging candle/CUDA/Vulkan/Metal into the Tauri build.
 

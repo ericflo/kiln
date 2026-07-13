@@ -23,41 +23,6 @@ async fn get_decode_stats(State(state): State<AppState>) -> Json<DecodeStatsSnap
     Json(snap)
 }
 
-/// Per-adapter MTP/speculative draft acceptance, fed by the serve path
-/// after each MTP generation. `acceptance = accepted / attempts` is the
-/// draft head's live alpha — the number MTP training exists to raise.
-#[derive(Debug, serde::Serialize)]
-struct MtpAcceptanceEntry {
-    adapter: String,
-    accepted: u64,
-    attempts: u64,
-    acceptance: f64,
-}
-
-async fn get_mtp_acceptance(State(state): State<AppState>) -> Json<Vec<MtpAcceptanceEntry>> {
-    let mut entries: Vec<MtpAcceptanceEntry> = state
-        .mtp_acceptance
-        .lock()
-        .map(|counters| {
-            counters
-                .iter()
-                .map(|(adapter, &(accepted, attempts))| MtpAcceptanceEntry {
-                    adapter: adapter.clone(),
-                    accepted,
-                    attempts,
-                    acceptance: if attempts > 0 {
-                        accepted as f64 / attempts as f64
-                    } else {
-                        0.0
-                    },
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    entries.sort_by(|a, b| a.adapter.cmp(&b.adapter));
-    Json(entries)
-}
-
 async fn get_recent_requests(State(state): State<AppState>) -> Json<Vec<RequestRecord>> {
     let snap = state
         .recent_requests
@@ -70,7 +35,6 @@ async fn get_recent_requests(State(state): State<AppState>) -> Json<Vec<RequestR
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/stats/decode", get(get_decode_stats))
-        .route("/v1/stats/mtp-acceptance", get(get_mtp_acceptance))
         .route("/v1/stats/recent-requests", get(get_recent_requests))
 }
 
@@ -244,37 +208,5 @@ mod tests {
             "tok_per_sec should be ~50, got {}",
             tok_per_sec
         );
-    }
-    #[tokio::test]
-    async fn mtp_acceptance_endpoint_reports_per_adapter_alpha() {
-        let state = make_test_state();
-        state
-            .mtp_acceptance
-            .lock()
-            .unwrap()
-            .insert("pi-coder-current".to_string(), (75, 100));
-        state
-            .mtp_acceptance
-            .lock()
-            .unwrap()
-            .insert("base".to_string(), (1, 4));
-        let app = routes().with_state(state);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/stats/mtp-acceptance")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let entries: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0]["adapter"], "base");
-        assert_eq!(entries[1]["adapter"], "pi-coder-current");
-        assert!((entries[1]["acceptance"].as_f64().unwrap() - 0.75).abs() < 1e-9);
-        assert_eq!(entries[1]["attempts"], 100);
     }
 }

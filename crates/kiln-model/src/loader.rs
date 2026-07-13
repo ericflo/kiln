@@ -67,9 +67,10 @@ type TensorMap<'a> = HashMap<String, TensorMapEntry<'a>>;
 pub struct LoadModelOptions {
     /// Load the checkpoint's native MTP head when present.
     ///
-    /// Startup-sensitive callers may set this to `false` and rely on the
-    /// deferred MTP path instead, which keeps routing support visible while
-    /// postponing the CPU load until the first actual native-MTP request.
+    /// Startup-sensitive callers may set this to `false` to retain only a
+    /// deferred source. An explicit later MTP consumer can still load those CPU
+    /// tensors and upload them to the accelerator, so this is a startup-latency
+    /// policy rather than a lifetime memory or routing guarantee.
     pub load_mtp: bool,
 }
 
@@ -1241,7 +1242,8 @@ fn detect_mtp_prefix(tensor_map: &TensorMap<'_>, base_prefix: &str) -> Option<St
 /// `Qwen/Qwen3.5-4B` actually publishes on the Hub). Similarly, the final
 /// RMSNorm key is `mtp.norm.weight` in the published checkpoint but older
 /// docs / vLLM references call it `mtp.final_layernorm.weight`. Detect
-/// both layouts so `KILN_SPEC_METHOD=mtp` works on the stock release.
+/// both layouts for training and isolated qualification workloads. Serving
+/// deliberately leaves the native MTP source deferred.
 ///
 /// Tensors loaded (Qwen3.5-4B layout):
 /// - `mtp.fc.weight` `[hidden, 2*hidden]`

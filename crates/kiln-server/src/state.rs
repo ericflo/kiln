@@ -18,7 +18,7 @@ use kiln_model::{
     BackendHealthHandle, DecodeBatcher, DecodeBatcherConfig, GpuAllocatorMemoryProbePolicy,
     GpuMemoryBudgetPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
     InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy, LinearAttentionState, ModelRunner,
-    PagedKvCacheKt, PagedPrefixNextToken, PagedPrefixRegistration,
+    PagedKvCacheKt, PagedPrefixNextToken, PagedPrefixRegistration, Support,
     TrainingAccelerationEnvFlagPolicy, TrainingAccelerationProfileLogMessage,
     TrainingAccelerationProfilePolicy,
 };
@@ -2294,6 +2294,25 @@ pub enum ModelBackend {
     },
 }
 
+/// Backend speculative capability facts captured once for diagnostics.
+/// Serving remains fail-closed, so this snapshot is not a routing authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeculativeRuntimePolicy {
+    pub mtp_support: Support,
+}
+
+impl SpeculativeRuntimePolicy {
+    pub const fn new(mtp_support: Support) -> Self {
+        Self { mtp_support }
+    }
+}
+
+impl Default for SpeculativeRuntimePolicy {
+    fn default() -> Self {
+        Self::new(Support::Unsupported)
+    }
+}
+
 /// Shared application state passed to all handlers.
 /// Durable status for the [agent] self_improve scheduler.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -2319,6 +2338,10 @@ pub struct AppState {
     /// Immutable deterministic and concurrent-decode policy, including the
     /// configured, backend-selected, and final effective values.
     pub decode_runtime_config: crate::config::DecodeRuntimeConfig,
+    /// Immutable speculative-decoding policy resolved once during startup.
+    pub speculative_config: crate::config::SpeculativeDecodingConfig,
+    /// Immutable backend capability snapshot used by diagnostics.
+    pub speculative_runtime_policy: SpeculativeRuntimePolicy,
     pub model_config: ModelConfig,
     /// Configured model directory path for real inference mode. `None` in mock mode.
     pub model_path: Option<PathBuf>,
@@ -2346,12 +2369,6 @@ pub struct AppState {
     /// This can differ from `active_adapter_name` during explicit per-request
     /// chat adapter overrides; missing `adapter` requests reload the default.
     pub loaded_adapter: Arc<std::sync::RwLock<Option<LoadedAdapterIdentity>>>,
-    /// Per-adapter MTP/speculative draft acceptance counters:
-    /// adapter name ("base" when none) → (accepted, attempts). Fed by the
-    /// serve path after each MTP generation; surfaced via /v1/stats so
-    /// the draft head's alpha is measurable per adapter without the
-    /// KILN_C1_ATTR_PATH CSV.
-    pub mtp_acceptance: Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, u64)>>>,
     /// [agent] self_improve scheduler status — None when the scheduler
     /// isn't armed. Persisted to `<adapter_dir>/.self_improve_scheduler.json`
     /// so the cadence survives restarts; surfaced via /health.
@@ -2947,9 +2964,12 @@ impl AppState {
             None,
             crate::config::BatchTokenBudget::default(),
         );
+        let speculative_config = crate::config::SpeculativeDecodingConfig::default();
         Self {
             serving_profile: crate::config::ServingProfileSetting::default(),
             decode_runtime_config,
+            speculative_config,
+            speculative_runtime_policy: SpeculativeRuntimePolicy::default(),
             model_config,
             model_path: None,
             base_teacher_identity: None,
@@ -2963,7 +2983,6 @@ impl AppState {
             adapter_dir: PathBuf::from("adapters"),
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             loaded_adapter: Arc::new(std::sync::RwLock::new(None)),
-            mtp_acceptance: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             self_improve_scheduler: Arc::new(std::sync::RwLock::new(None)),
             agent_runs: Arc::new(crate::agent_runs::AgentRunRegistry::new(PathBuf::from(
                 "adapters",
@@ -3098,12 +3117,15 @@ impl AppState {
         prefix_cache_cfg: &crate::config::PrefixCacheConfig,
         base_teacher_identity: Option<Arc<kiln_train::TeacherIdentityV1>>,
     ) -> anyhow::Result<Self> {
+        let backend_capabilities = runner.backend_capabilities();
         let decode_runtime_config = crate::batching_engine::resolve_decode_runtime_config(
             crate::config::DeterministicInference::default(),
             crate::config::MaxDecodeBatch::default(),
-            Some(runner.backend_capabilities().decode_batcher),
+            Some(backend_capabilities.decode_batcher),
             max_batch_tokens,
         );
+        let speculative_runtime_policy =
+            SpeculativeRuntimePolicy::new(backend_capabilities.decode.mtp_speculative_generation);
         Self::new_real_with_serving_profile(
             model_config,
             runner,
@@ -3113,6 +3135,8 @@ impl AppState {
             memory_cfg,
             response_delivery_policy,
             decode_runtime_config,
+            crate::config::SpeculativeDecodingConfig::default(),
+            speculative_runtime_policy,
             max_batch_tokens,
             crate::config::PrefillTokenBudget::default(),
             crate::config::PrefillLayerBudget::default(),
@@ -3137,6 +3161,8 @@ impl AppState {
         memory_cfg: &crate::config::MemoryConfig,
         response_delivery_policy: crate::batching_engine::ResponseDeliveryPolicy,
         decode_runtime_config: crate::config::DecodeRuntimeConfig,
+        speculative_config: crate::config::SpeculativeDecodingConfig,
+        speculative_runtime_policy: SpeculativeRuntimePolicy,
         max_batch_tokens: crate::config::BatchTokenBudget,
         max_prefill_tokens_per_cycle: crate::config::PrefillTokenBudget,
         max_prefill_layers_per_cycle: crate::config::PrefillLayerBudget,
@@ -3147,6 +3173,8 @@ impl AppState {
         serving_profile: crate::config::ServingProfileSetting,
         gradient_checkpoint_policy: kiln_train::GradientCheckpointPolicy,
     ) -> anyhow::Result<Self> {
+        speculative_config.validate_for_model(&model_config)?;
+        speculative_config.validate_for_serving()?;
         let vram_probe_selector = ensure_accelerator_memory_probe_identity(device_kt)?;
         let physical_vram = kiln_memory::vram::detect_vram_for(vram_probe_selector);
         let vram_capacity_resolution =
@@ -3883,6 +3911,8 @@ impl AppState {
         Ok(Self {
             serving_profile,
             decode_runtime_config,
+            speculative_config,
+            speculative_runtime_policy,
             model_config,
             model_path: None,
             base_teacher_identity,
@@ -3904,7 +3934,6 @@ impl AppState {
             adapter_dir,
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             loaded_adapter,
-            mtp_acceptance: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             self_improve_scheduler: Arc::new(std::sync::RwLock::new(None)),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
             adapter_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),

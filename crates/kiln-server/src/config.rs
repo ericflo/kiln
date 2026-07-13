@@ -1396,15 +1396,16 @@ pub struct PrefixCacheConfig {
     pub max_entries: Option<usize>,
 }
 
-/// Which speculative-decoding method to use when `enabled = true`.
+/// Configured speculative-decoding intent when `enabled = true`.
 ///
 /// - `Off` — no spec decoding, one token per step.
 /// - `SkipLayer` — self-speculative using the first `draft_layers` of the main
-///   model as a lightweight draft. Works on any checkpoint; kept as fallback
-///   and A/B baseline.
+///   model as a lightweight draft in isolated qualification.
 /// - `Mtp` — native Multi-Token Prediction using the model's pretrained MTP
-///   heads. Requires the checkpoint to contain `mtp.*` tensors (Qwen3.5-4B
-///   has one MTP layer, k=1).
+///   heads in isolated qualification (Qwen3.5-4B has one MTP layer, k=1).
+///
+/// Serving currently accepts only effective `Off`; every other value is
+/// rejected before model loading.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SpecMethod {
@@ -1412,6 +1413,13 @@ pub enum SpecMethod {
     SkipLayer,
     Mtp,
 }
+
+/// Largest verifier window accepted by configuration and low-level probes.
+///
+/// This remains aligned with the planned local qualification matrix. Raising it
+/// requires new accelerator evidence because verifier work and synchronization
+/// scale with K.
+pub const MAX_SPECULATIVE_DRAFT_TOKENS: usize = kiln_model::speculative::MAX_SPECULATIVE_TOKENS;
 
 impl Default for SpecMethod {
     fn default() -> Self {
@@ -1436,24 +1444,25 @@ impl SpecMethod {
 /// `KILN_SPECULATIVE_<FIELD>`; `KILN_SPEC_*` spellings are
 /// compatibility-only.
 ///
-/// Two implementations coexist:
+/// Two qualification implementations coexist:
 ///   * `SkipLayer` — the first `draft_layers` of the main model act as the
 ///     draft. Works on any checkpoint.
 ///   * `Mtp` — native MTP heads shipped with the checkpoint (Qwen3.5-4B k=1).
 ///     Requires `mtp.*` tensors in the weights.
 ///
-/// `method` selects which path is active when `enabled = true`. For backward
-/// compatibility, setting `enabled = true` with `method = Off` falls back to
-/// `SkipLayer`.
-#[derive(Debug, Deserialize, Serialize)]
+/// `method` records intended qualification behavior when `enabled = true`.
+/// For backward compatibility, `enabled = true` with `method = Off` resolves
+/// to `SkipLayer`. Serving rejects either implementation before model loading;
+/// the draft-window default and hard ceiling are both K=4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SpeculativeDecodingConfig {
-    /// Enable speculative decoding (default: false).
+    /// Request speculative decoding (default: false; serving rejects true).
     pub enabled: bool,
     /// Which speculative-decoding method to use. Default: `Off`.
     pub method: SpecMethod,
-    /// Number of tokens the draft proposes per step (default: 256).
-    /// Ignored by `Mtp` when the checkpoint has fewer MTP layers than this.
+    /// Number of tokens the draft proposes per step (default: 4).
+    /// Ignored by the k=1 `Mtp` research path.
     pub num_speculative_tokens: usize,
     /// Number of layers to use for the `SkipLayer` draft (default: 8).
     pub draft_layers: usize,
@@ -2318,57 +2327,43 @@ impl Default for SpeculativeDecodingConfig {
         Self {
             enabled: false,
             method: SpecMethod::Off,
-            num_speculative_tokens: 256,
+            num_speculative_tokens: MAX_SPECULATIVE_DRAFT_TOKENS,
             draft_layers: 8,
         }
     }
 }
 
 impl SpeculativeDecodingConfig {
-    /// Compatibility-only direct reader for historical `KILN_SPEC_*` names.
+    /// Validate model-dependent draft geometry before weights are loaded.
     ///
-    /// Production startup resolves canonical `KILN_SPECULATIVE_<FIELD>` names
-    /// through `KilnConfig`. Lower request dispatch temporarily calls this
-    /// method until it receives the loaded typed value directly.
-    pub fn from_env() -> Self {
-        let mut cfg = Self::default();
-        cfg.apply_env_overrides();
-        cfg
+    /// MTP still uses the skip-layer implementation as its long-prompt
+    /// fallback, so every enabled method must carry a valid draft depth.
+    pub fn validate_for_model(&self, model: &kiln_core::config::ModelConfig) -> Result<()> {
+        if self.effective_method() == SpecMethod::Off {
+            return Ok(());
+        }
+        if self.draft_layers >= model.num_layers {
+            anyhow::bail!(
+                "speculative.draft_layers must be less than the selected model's {} layers when speculative decoding is enabled, got {}",
+                model.num_layers,
+                self.draft_layers
+            );
+        }
+        Ok(())
     }
 
-    fn apply_env_overrides(&mut self) {
-        if let Ok(v) = std::env::var("KILN_SPEC_ENABLED") {
-            self.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+    /// Reject serving methods that have not passed the local accelerator gate.
+    ///
+    /// Keep this policy beside the typed setting so `serve`, `config check`,
+    /// and other product surfaces cannot disagree about availability.
+    pub fn validate_for_serving(&self) -> Result<()> {
+        let requested = self.effective_method();
+        if requested != SpecMethod::Off {
+            anyhow::bail!(
+                "speculative decoding method {requested:?} is not available for serving until its cancellation, owner-settlement, EOS, context-capacity, and burst-admission contracts pass local accelerator qualification; set speculative.enabled=false"
+            );
         }
-        if let Ok(v) = std::env::var("KILN_SPEC_METHOD") {
-            if let Some(m) = SpecMethod::parse_env(&v) {
-                self.method = m;
-                // Asking for a method IS asking for speculative decoding:
-                // `KILN_SPEC_METHOD=mtp` alone used to be a silent no-op
-                // (`effective_method()` returns Off unless `enabled`),
-                // which cost an operator-validation cycle to discover.
-                // An explicit KILN_SPEC_ENABLED still wins (it is read
-                // first above and re-checked here for ordering safety).
-                if !matches!(m, SpecMethod::Off) && std::env::var("KILN_SPEC_ENABLED").is_err() {
-                    self.enabled = true;
-                }
-            } else {
-                tracing::warn!(
-                    "ignoring unknown KILN_SPEC_METHOD='{}' (expected off|skip_layer|mtp)",
-                    v
-                );
-            }
-        }
-        if let Ok(v) = std::env::var("KILN_SPEC_NUM_TOKENS") {
-            if let Ok(n) = v.parse() {
-                self.num_speculative_tokens = n;
-            }
-        }
-        if let Ok(v) = std::env::var("KILN_SPEC_DRAFT_LAYERS") {
-            if let Ok(n) = v.parse() {
-                self.draft_layers = n;
-            }
-        }
+        Ok(())
     }
 
     /// Resolve the effective speculative-decoding method.
@@ -2710,13 +2705,19 @@ impl KilnConfig {
                 self.speculative.num_speculative_tokens
             );
         }
+        if self.speculative.num_speculative_tokens > MAX_SPECULATIVE_DRAFT_TOKENS {
+            anyhow::bail!(
+                "speculative.num_speculative_tokens must be <= {}, got {}",
+                MAX_SPECULATIVE_DRAFT_TOKENS,
+                self.speculative.num_speculative_tokens
+            );
+        }
         if self.speculative.draft_layers == 0 {
             anyhow::bail!(
                 "speculative.draft_layers must be > 0, got {}",
                 self.speculative.draft_layers
             );
         }
-
         if self.streaming_prefill.tile_tokens == 0 || self.streaming_prefill.tile_tokens % 64 != 0 {
             anyhow::bail!(
                 "streaming_prefill.tile_tokens must be a positive multiple of 64, got {}",
@@ -3216,7 +3217,10 @@ mod tests {
         assert!(config.prefix_cache.enabled);
         assert!(config.prefix_cache.max_blocks.is_none());
         assert!(!config.speculative.enabled);
-        assert_eq!(config.speculative.num_speculative_tokens, 256);
+        assert_eq!(
+            config.speculative.num_speculative_tokens,
+            MAX_SPECULATIVE_DRAFT_TOKENS
+        );
         assert_eq!(config.speculative.draft_layers, 8);
         assert!(!config.streaming_prefill.enabled);
         assert_eq!(config.streaming_prefill.tile_tokens, 8192);
@@ -3240,6 +3244,55 @@ mod tests {
     }
 
     #[test]
+    fn speculative_draft_geometry_is_validated_against_the_selected_model() {
+        let model = kiln_core::config::ModelConfig::qwen3_5_4b();
+        let disabled = SpeculativeDecodingConfig {
+            draft_layers: model.num_layers,
+            ..SpeculativeDecodingConfig::default()
+        };
+        assert!(disabled.validate_for_model(&model).is_ok());
+
+        for method in [SpecMethod::SkipLayer, SpecMethod::Mtp] {
+            let enabled = SpeculativeDecodingConfig {
+                enabled: true,
+                method,
+                draft_layers: model.num_layers,
+                ..SpeculativeDecodingConfig::default()
+            };
+            let error = enabled.validate_for_model(&model).unwrap_err().to_string();
+            assert!(error.contains("speculative.draft_layers"));
+            assert!(error.contains(&model.num_layers.to_string()));
+        }
+
+        let valid = SpeculativeDecodingConfig {
+            enabled: true,
+            method: SpecMethod::SkipLayer,
+            draft_layers: model.num_layers - 1,
+            ..SpeculativeDecodingConfig::default()
+        };
+        assert!(valid.validate_for_model(&model).is_ok());
+    }
+
+    #[test]
+    fn speculative_serving_fails_closed_until_accelerator_qualification() {
+        for method in [SpecMethod::SkipLayer, SpecMethod::Mtp] {
+            let speculative = SpeculativeDecodingConfig {
+                enabled: true,
+                method,
+                ..SpeculativeDecodingConfig::default()
+            };
+            let error = speculative.validate_for_serving().unwrap_err().to_string();
+            assert!(error.contains(&format!("{method:?}")));
+            assert!(error.contains("owner-settlement"));
+            assert!(error.contains("local accelerator qualification"));
+        }
+
+        SpeculativeDecodingConfig::default()
+            .validate_for_serving()
+            .unwrap();
+    }
+
+    #[test]
     fn public_env_registry_is_mechanical_complete_and_unique() {
         let mut names = PUBLIC_ENV_FIELDS
             .iter()
@@ -3254,7 +3307,7 @@ mod tests {
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 63);
+        assert_eq!(original_len, 62);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -3279,7 +3332,7 @@ mod tests {
             })
             .count();
         assert_eq!(canonical_only_aliases, 21);
-        assert_eq!(compatibility_aliases, 43);
+        assert_eq!(compatibility_aliases, 42);
 
         for field in PUBLIC_ENV_FIELDS {
             assert_eq!(
@@ -5408,6 +5461,11 @@ served_model_id = "from-toml"
                 "speculative.num_speculative_tokens",
                 "0",
                 "[speculative]\nnum_speculative_tokens = 0",
+            ),
+            (
+                "speculative.num_speculative_tokens",
+                "5",
+                "[speculative]\nnum_speculative_tokens = 5",
             ),
             (
                 "streaming_prefill.tile_tokens",

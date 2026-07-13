@@ -4594,29 +4594,28 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         generate_source.contains("paged_cache_device(self.backend.as_ref(),"),
         "native MTP paged-cache allocation call sites should pass the active backend"
     );
-    let server_mtp_resolver_section = source_between(
-        &server_completions_source,
-        "fn speculative_decode_policy_for_state(",
-        "fn resolve_skip_layer_config(",
-    );
     assert!(
-        server_mtp_resolver_section.contains("backend_capabilities()")
-            && server_mtp_resolver_section.contains("mtp_speculative_generation")
-            && server_mtp_resolver_section.contains(".is_native()")
-            && server_mtp_resolver_section.contains("speculative_policy"),
-        "server speculative request resolution should read DecodeCapabilities"
+        !server_completions_source.contains("ResolvedSpeculativeMode")
+            && !server_completions_source.contains("resolve_speculative_mode")
+            && !server_completions_source.contains("generate_paged_speculative_shared_tokens"),
+        "request dispatch must not contain speculative serving machinery before local accelerator qualification"
     );
     for forbidden in [
         "KILN_ENABLE_METAL_NATIVE_MTP",
-        "weights.device_kt()",
         "Device::Metal",
         "kiln_tensor::Device::Metal",
     ] {
         assert!(
-            !server_mtp_resolver_section.contains(forbidden),
-            "server speculative request resolution should not keep a local backend/env policy table: {forbidden}"
+            !server_completions_source.contains(forbidden),
+            "server request dispatch should not keep a local speculative backend/env policy table: {forbidden}"
         );
     }
+    assert!(
+        !capability_source.contains("KILN_ENABLE_METAL_NATIVE_MTP")
+            && capability_source.contains("\"cuda\" => Support::Declined")
+            && capability_source.contains("\"metal\" => Support::Declined"),
+        "native MTP must remain declined until cancel-aware external-yield settlement is qualified"
+    );
     let bench_mtp_resolver_section = source_between(
         &server_bench_source,
         "fn resolve_bench_spec_method(",

@@ -108,18 +108,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 13 top-level sections and 71 fixed leaf
+The accepted TOML surface contains 13 top-level sections and 70 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 71 fixed fields:
+credential. Of the 70 fixed fields:
 
-- 63 implement the canonical mechanical environment name;
-- 42 also retain one or more deprecated compatibility spellings (43 aliases
+- 62 implement the canonical mechanical environment name;
+- 41 also retain one or more deprecated compatibility spellings (42 aliases
   total);
 - 8 have no environment override;
-- the 43 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
+- the 42 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 71 fixed fields and both dynamic credential fields.
+The tables below cover all 70 fixed fields and both dynamic credential fields.
 
 ## `[server]`
 
@@ -263,24 +263,28 @@ Malformed or non-UTF-8 `RUST_LOG` is fatal.
 
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
 |---|---|---|---|---|
-| `speculative.enabled` | boolean; `false` | `KILN_SPECULATIVE_ENABLED` (implemented) | `KILN_SPEC_ENABLED` (deprecated compatibility) | If false, effective method is off. If true while `method = "off"`, backward compatibility selects `skip_layer`. Because of the lower runtime re-read described below, the deprecated alias must use exact `1` or `0` (or whitespace-free `true` or `false`) today. |
+| `speculative.enabled` | boolean; `false` | `KILN_SPECULATIVE_ENABLED` (implemented) | `KILN_SPEC_ENABLED` (deprecated compatibility) | `false` forces the effective method to `off`. For compatibility, `true` with `method = "off"` selects `skip_layer`; that effective method is then subject to the fail-closed startup gate below. |
 | `speculative.method` | string enum; `"off"` | `KILN_SPECULATIVE_METHOD` (implemented) | `KILN_SPEC_METHOD` (deprecated compatibility) | TOML accepts `off`, `skip_layer`, or `mtp`. The environment parser also accepts `none`, `0`, `false`; `skiplayer`, `skip-layer`, `self`; and `native_mtp`, `native-mtp`. The deprecated method alias also controls `enabled` when neither enabled spelling is present: non-off enables and off disables. The canonical method name has literal field semantics and does not implicitly enable. |
-| `speculative.num_speculative_tokens` | unsigned integer; `256` | `KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS` (implemented) | `KILN_SPEC_NUM_TOKENS` (deprecated compatibility) | Must be greater than zero. Draft proposal upper bound; MTP may have fewer native draft layers. Use an undecorated decimal value: the typed loader trims whitespace, but the lower runtime re-read does not. |
-| `speculative.draft_layers` | unsigned integer; `8` | `KILN_SPECULATIVE_DRAFT_LAYERS` (implemented) | `KILN_SPEC_DRAFT_LAYERS` (deprecated compatibility) | Must be greater than zero. The model-specific speculative validator additionally requires fewer than the model's transformer-layer count; an invalid skip-layer shape currently falls back to non-speculative generation at request dispatch. Use an undecorated decimal value because the lower runtime re-read does not trim whitespace. |
+| `speculative.num_speculative_tokens` | unsigned integer; `4` | `KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS` (implemented) | `KILN_SPEC_NUM_TOKENS` (deprecated compatibility) | Draft proposal bound K. Must be in `1..=4`; out-of-range values stop startup before accelerator allocation. This conservative ceiling matches the planned local K=1/2/4 qualification matrix and cannot be raised without new accelerator evidence. |
+| `speculative.draft_layers` | unsigned integer; `8` | `KILN_SPECULATIVE_DRAFT_LAYERS` (implemented) | `KILN_SPEC_DRAFT_LAYERS` (deprecated compatibility) | Must be greater than zero. When speculative decoding is enabled, model-dependent startup validation also requires this value to be less than the selected model's transformer-layer count. Invalid geometry stops startup; it does not fall back at request time. |
 
-**Known migration limitation:** direct real completion dispatch currently builds
-its speculative settings from `KILN_SPEC_*` again instead of consuming the
-loaded `[speculative]` object. Consequently, TOML and canonical
-`KILN_SPECULATIVE_*` values are authoritative in the typed startup object but
-not yet in direct request dispatch; only the deprecated `KILN_SPEC_*` spellings
-reach that lower reader. This also means `kiln config` and config hashes can
-describe a value that the direct request path does not use. The lower boolean
-reader recognizes only exact `1` or case-insensitive, whitespace-free `true`
-as true, so centralized-valid values such as `yes` and `on` can still result in
-runtime false. Speculative dispatch is currently relevant to direct
-non-streaming generation;
-batching-engine generation is non-speculative, and direct SSE generation
-settles through single-token decode.
+The loaded `SpeculativeDecodingConfig` is the sole serving authority. TOML,
+canonical environment overrides, and deprecated aliases are resolved and
+validated once during typed startup, then the immutable result is passed to
+serving state. Request dispatch does not re-read speculative environment
+variables. Restart the server to apply a change.
+
+**Current fail-closed status:** `off` is the only serving method available.
+Every enabled method, including `skip_layer` and `mtp`, stops startup until its
+cancellation, owner-settlement, EOS, context-capacity, and burst-admission
+contracts pass local accelerator qualification. The fields remain part of the
+typed configuration so their intended contract is explicit and can be qualified
+without introducing a second configuration path. `kiln config --file ...`
+applies the same availability gate as `serve`, native MTP weights remain
+deferred (`load_mtp=false`), request dispatch contains no speculative branch,
+and Desktop always launches with speculative serving off. Benchmark-only
+speculative paths require both `KILN_QUALIFICATION=1` and the qualification
+harness result-path contract before model loading.
 
 ## `[streaming_prefill]`
 
@@ -420,9 +424,17 @@ Kiln currently exposes several complementary, partial views:
 - `kiln config --file <path>` performs authoritative parsing and validation,
   then prints a human-oriented subset of resolved fields.
 - `GET /v1/config` reports runtime diagnostics for serving profile, effective
-  decode width, VRAM/KV state, native-training runtime/weight devices and
+  decode width, speculative configuration and availability, VRAM/KV state,
+  native-training runtime/weight devices and
   support reason, checkpoint segmentation, memory budgets, and generation
-  defaults. `training.native_training_supported=false` is accompanied by
+  defaults. Its `speculative` object distinguishes `configured_method` and
+  `configured_effective_method` from the actual `serving_effective_method`
+  (`off`), reports `serving_routable=false`, the stable
+  `serving_unavailable_reason`, the K ceiling, and immutable backend MTP
+  support facts. It does not expose live routing, admission, or weight-readiness
+  fields because those are not serving authorities. A running process cannot
+  have a non-off configured method through the supported startup path.
+  `training.native_training_supported=false` is accompanied by
   `training.native_training_unavailable_reason` and matches the admission
   error without scanning a corpus. When checkpoint execution is disabled,
   `training.checkpoint_segments` is `0`; an optional segment count retained in
@@ -458,15 +470,12 @@ account for the migration limitations below.
 
 These are current implementation facts, not recommended architecture:
 
-1. **Speculative decoding:** `[speculative]` is parsed and validated, but the
-   direct request path rebuilds defaults from `KILN_SPEC_*`. TOML-only values do
-   not control serving.
-2. **Streaming prefill:** `[streaming_prefill]` is parsed and validated, but
+1. **Streaming prefill:** `[streaming_prefill]` is parsed and validated, but
    lower model helpers read `KILN_STREAMING_*` and backend policy directly.
    TOML-only values do not control dispatch.
-3. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
+2. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
    typed object with provenance and backend-derived values.
-4. **Deprecated aliases:** 43 non-canonical spellings across 42 fields remain
+3. **Deprecated aliases:** 42 non-canonical spellings across 41 fields remain
    temporarily for compatibility, including `KILN_DEFAULT_NO_THINK`. Each use
    warns at startup; canonical and compatibility names cannot silently
    disagree.
