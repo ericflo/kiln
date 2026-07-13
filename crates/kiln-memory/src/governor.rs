@@ -1973,7 +1973,7 @@ mod tests {
 
     #[test]
     fn checked_cached_reservation_is_atomic_across_planners() {
-        let g = Box::leak(Box::new(gov(24 * GB, 6 * GB)));
+        let g: &'static MemoryGovernor = Box::leak(Box::new(gov(24 * GB, 6 * GB)));
         let mut workers = Vec::new();
         for _ in 0..8 {
             workers.push(std::thread::spawn(move || g.try_reserve_cached(GB)));
