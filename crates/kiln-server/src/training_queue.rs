@@ -4425,7 +4425,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
         ),
         QueuedJob::DistillSelf(req) => (req.config.optimizer, req.config.lora_rank),
     };
-    let prepared_data_is_valid = crate::api::training::enforce_training_optimizer_admission(
+    let prepared_data_is_valid = crate::api::enforce_training_optimizer_admission(
         &state,
         queued_optimizer,
         queued_lora_rank,

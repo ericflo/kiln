@@ -28,6 +28,8 @@ pub mod terminal;
 mod training;
 mod ui;
 
+pub(crate) use training::enforce_training_optimizer_admission;
+
 #[cfg(test)]
 pub(crate) fn test_tokenizer() -> kiln_core::tokenizer::KilnTokenizer {
     let json = br#"{
