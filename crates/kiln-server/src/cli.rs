@@ -1561,6 +1561,67 @@ authenticated reverse proxy or keep it on a private network (see README \"Securi
     })
 }
 
+fn format_checkpoint_boundary_config(
+    policy: kiln_train::CheckpointBoundaryPolicy,
+    diagnostics: crate::config::CheckpointBoundaryConfigDiagnostics,
+) -> String {
+    use std::fmt::Write as _;
+
+    let stride = policy
+        .anchor_stride()
+        .map(|value| {
+            format!(
+                "{value} (explicit; source: {})",
+                diagnostics.checkpoint_boundary_anchor_stride_source
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "auto (source: {})",
+                diagnostics.checkpoint_boundary_anchor_stride_source
+            )
+        });
+    let mut output = String::new();
+    let _ = writeln!(
+        output,
+        "  {} {} (source: {})",
+        style("Checkpoint boundary mode:").dim(),
+        policy.recompute_mode(),
+        diagnostics.recompute_checkpoint_boundaries_source
+    );
+    let _ = writeln!(
+        output,
+        "  {} {} tokens (source: {})",
+        style("Boundary recompute threshold:").dim(),
+        policy.recompute_threshold_tokens(),
+        diagnostics.recompute_boundary_threshold_tokens_source
+    );
+    let _ = writeln!(
+        output,
+        "  {} {stride}",
+        style("Boundary anchor stride:").dim()
+    );
+    let _ = writeln!(
+        output,
+        "  {} {} GiB / {} bytes (source: {})",
+        style("Boundary cache target:").dim(),
+        diagnostics.checkpoint_boundary_cache_gb,
+        policy.cache_target_bytes(),
+        diagnostics.checkpoint_boundary_cache_gb_source
+    );
+    let _ = writeln!(
+        output,
+        "  {} immutable after startup; restart required to change",
+        style("Boundary policy lifecycle:").dim()
+    );
+    let _ = writeln!(
+        output,
+        "  {} includes mode, threshold, stride, and cache target; changes reject exact resume",
+        style("Planning identity v3:").dim()
+    );
+    output
+}
+
 /// Run the `config check` CLI subcommand: validate config without starting.
 pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
     use crate::config::KilnConfig;
@@ -1570,9 +1631,10 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
             .speculative
             .validate_for_model(&kiln_core::config::ModelConfig::qwen3_5_4b())?;
         config.speculative.validate_for_serving()?;
-        Ok(config)
+        let checkpoint_boundary_policy = config.training.checkpoint_boundary_policy()?;
+        Ok((config, checkpoint_boundary_policy))
     }) {
-        Ok(config) => {
+        Ok((config, checkpoint_boundary_policy)) => {
             println!("{} Configuration is valid", style("✓").green().bold());
             println!();
             println!(
@@ -1666,6 +1728,13 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                     .configured()
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "auto".to_string())
+            );
+            print!(
+                "{}",
+                format_checkpoint_boundary_config(
+                    checkpoint_boundary_policy,
+                    config.training.checkpoint_boundary_diagnostics(),
+                )
             );
             println!(
                 "  {} {}",
@@ -3669,6 +3738,65 @@ mod tests {
             assert!(warning.contains(host));
             assert!(warning.contains("no built-in auth"));
             assert!(warning.contains("Security model"));
+        }
+    }
+
+    #[test]
+    fn checkpoint_boundary_config_output_reports_auto_defaults_and_resume_semantics() {
+        let config = crate::config::KilnConfig::default();
+        let policy = config.training.checkpoint_boundary_policy().unwrap();
+        let output = format_checkpoint_boundary_config(
+            policy,
+            config.training.checkpoint_boundary_diagnostics(),
+        );
+
+        for expected in [
+            "Checkpoint boundary mode:",
+            "auto (source: default)",
+            "8192 tokens (source: default)",
+            "Boundary anchor stride:",
+            "Boundary cache target:",
+            "6 GiB / 6442450944 bytes (source: default)",
+            "immutable after startup; restart required to change",
+            "Planning identity v3:",
+            "changes reject exact resume",
+        ] {
+            assert!(
+                output.contains(expected),
+                "missing {expected:?} in {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_boundary_config_output_reports_explicit_values_and_sources() {
+        let config: crate::config::KilnConfig = toml::from_str(
+            r#"
+[training]
+recompute_checkpoint_boundaries = "enabled"
+recompute_boundary_threshold_tokens = 4096
+checkpoint_boundary_anchor_stride = 3
+checkpoint_boundary_cache_gb = 2.5
+"#,
+        )
+        .unwrap();
+        let policy = config.training.checkpoint_boundary_policy().unwrap();
+        let output = format_checkpoint_boundary_config(
+            policy,
+            config.training.checkpoint_boundary_diagnostics(),
+        );
+
+        for expected in [
+            "enabled (source: config_file)",
+            "4096 tokens (source: config_file)",
+            "3 (explicit; source: config_file)",
+            "2.5 GiB / 2684354560 bytes (source: config_file)",
+            "includes mode, threshold, stride, and cache target",
+        ] {
+            assert!(
+                output.contains(expected),
+                "missing {expected:?} in {output:?}"
+            );
         }
     }
 
