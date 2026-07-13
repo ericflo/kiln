@@ -1679,7 +1679,7 @@ mod tests {
     fn streaming_gdn_long_context_fits_uma_budget_at_one_layer_segments() {
         let cfg = qwen_4b();
         let max_seq_len = 104_412;
-        let available = 29 * BYTES_PER_GB;
+        let available = 30 * BYTES_PER_GB;
         let options = EstimateOptions {
             max_supervised_tokens: Some(512),
             recompute_boundaries: true,
@@ -1699,8 +1699,12 @@ mod tests {
         );
         assert_eq!(segments, cfg.num_layers);
         assert!(
+            fit.total_bytes > 29 * BYTES_PER_GB,
+            "the complete Muon/LoRA working set must not retain the stale 29 GiB acceptance claim"
+        );
+        assert!(
             fit.total_bytes <= available,
-            "streaming GDN estimate should accept the 104k-token rank-8 repro at a 29 GiB live budget: estimate={} ({:.2} GiB), available={} ({:.2} GiB)",
+            "streaming GDN estimate should accept the 104k-token rank-8 repro at a 30 GiB live budget: estimate={} ({:.2} GiB), available={} ({:.2} GiB)",
             fit.total_bytes,
             fit.total_bytes as f64 / BYTES_PER_GB as f64,
             available,

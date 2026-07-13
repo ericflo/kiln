@@ -3568,10 +3568,9 @@ fn admit_training_jobs_with_summary(
         }
         Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
     };
-    // Own the single process admission permit, then reject full queues before
-    // reading or materializing any caller-controlled dataset. Final
-    // publication rechecks both caps atomically.
-    enforce_queue_capacity_for(state, pending.len())?;
+    // Own the single process admission permit, then validate immutable request
+    // metadata before checking whether this backend can train. Keep every
+    // caller-controlled dataset scan/materialization after the capacity check.
     for (info, entry) in &mut pending {
         if let QueuedJob::Sft(req) = &entry.job {
             validate_sft_config_at_submit(&req.config)?;
@@ -3592,6 +3591,10 @@ fn admit_training_jobs_with_summary(
         info.effective_seed = Some(effective_seed);
     }
     pin_registered_teachers(state, &mut pending)?;
+    // Reject full queues and unsupported mock-mode training before reading or
+    // materializing any caller-controlled dataset. Final publication rechecks
+    // both caps atomically.
+    enforce_queue_capacity_for(state, pending.len())?;
     for (info, entry) in &mut pending {
         prepare_training_entry_admission(state, info, entry)?;
         acquire_training_entry_prepared_data_permit(state, entry)?;
@@ -5815,6 +5818,7 @@ mod tests {
         short.messages = vec![ChatMessage::new("user", "a")];
         short.completions[0].text = "b".to_string();
         let mut long = grpo_group();
+        long.messages = vec![ChatMessage::new("user", "a")];
         long.completions[0].text = "ab".repeat(64);
         std::fs::write(
             &path,
