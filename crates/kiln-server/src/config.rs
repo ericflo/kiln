@@ -2672,6 +2672,306 @@ pub struct StreamingPrefillConfig {
     pub last_token_lm_head: StreamingPrefillLastTokenLmHead,
 }
 
+/// Final authority for a resolved streaming-prefill value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamingPrefillEffectiveSource {
+    BackendPolicy,
+    Default,
+    ConfigFile,
+    Environment,
+    InheritedFromTileTokensDefault,
+    InheritedFromTileTokensConfigFile,
+    InheritedFromTileTokensEnvironment,
+}
+
+impl fmt::Display for StreamingPrefillEffectiveSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::BackendPolicy => "backend_policy",
+            Self::Default => "default",
+            Self::ConfigFile => "config_file",
+            Self::Environment => "environment",
+            Self::InheritedFromTileTokensDefault => "inherited_from_tile_tokens_default",
+            Self::InheritedFromTileTokensConfigFile => "inherited_from_tile_tokens_config_file",
+            Self::InheritedFromTileTokensEnvironment => "inherited_from_tile_tokens_environment",
+        })
+    }
+}
+
+const fn streaming_prefill_explicit_source(
+    source: ConfigValueSource,
+) -> StreamingPrefillEffectiveSource {
+    match source {
+        ConfigValueSource::Default => StreamingPrefillEffectiveSource::Default,
+        ConfigValueSource::ConfigFile => StreamingPrefillEffectiveSource::ConfigFile,
+        ConfigValueSource::Environment => StreamingPrefillEffectiveSource::Environment,
+    }
+}
+
+const fn streaming_prefill_inherited_tile_source(
+    source: ConfigValueSource,
+) -> StreamingPrefillEffectiveSource {
+    match source {
+        ConfigValueSource::Default => {
+            StreamingPrefillEffectiveSource::InheritedFromTileTokensDefault
+        }
+        ConfigValueSource::ConfigFile => {
+            StreamingPrefillEffectiveSource::InheritedFromTileTokensConfigFile
+        }
+        ConfigValueSource::Environment => {
+            StreamingPrefillEffectiveSource::InheritedFromTileTokensEnvironment
+        }
+    }
+}
+
+/// Stable machine-readable dispatch rule for diagnostics and the website UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StreamingPrefillDispatchRuleDiagnostics {
+    pub policy: StreamingPrefillDispatchPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimum_prompt_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamingPrefillDispatchPolicy {
+    Never,
+    AllNonEmpty,
+    PromptTokensAtLeast,
+}
+
+impl StreamingPrefillDispatchRuleDiagnostics {
+    const fn from_auto_dispatch(dispatch: kiln_model::StreamingPrefillAutoDispatch) -> Self {
+        match dispatch {
+            kiln_model::StreamingPrefillAutoDispatch::Never => Self {
+                policy: StreamingPrefillDispatchPolicy::Never,
+                minimum_prompt_tokens: None,
+            },
+            kiln_model::StreamingPrefillAutoDispatch::PromptTokensAtLeast(tokens) => Self {
+                policy: StreamingPrefillDispatchPolicy::PromptTokensAtLeast,
+                minimum_prompt_tokens: Some(tokens),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StreamingPrefillDispatchDiagnostics {
+    pub configured_mode: StreamingPrefillMode,
+    pub configured_source: ConfigValueSource,
+    pub backend_policy: StreamingPrefillDispatchRuleDiagnostics,
+    pub effective: StreamingPrefillDispatchRuleDiagnostics,
+    pub effective_source: StreamingPrefillEffectiveSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StreamingPrefillThresholdDiagnostics {
+    pub configured: Option<usize>,
+    pub configured_source: ConfigValueSource,
+    pub backend_policy: Option<usize>,
+    pub effective_for_auto_mode: Option<usize>,
+    pub override_applied_to_backend_auto_policy: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StreamingPrefillTileDiagnostics {
+    pub configured: Option<usize>,
+    pub configured_source: ConfigValueSource,
+    pub backend_policy: usize,
+    pub effective: usize,
+    pub effective_source: StreamingPrefillEffectiveSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StreamingPrefillDerivedTileDiagnostics {
+    pub backend_policy: usize,
+    pub effective: usize,
+    pub effective_source: StreamingPrefillEffectiveSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StreamingPrefillToggleDiagnostics {
+    pub configured: bool,
+    pub configured_source: ConfigValueSource,
+    pub effective: bool,
+    pub effective_source: StreamingPrefillEffectiveSource,
+}
+
+/// Process-lifetime streaming-prefill policy resolved once after backend
+/// selection. The serialized fields are the complete operator-facing contract;
+/// the private execution value is the exact policy injected into model code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StreamingPrefillRuntimeConfig {
+    pub dispatch: StreamingPrefillDispatchDiagnostics,
+    pub threshold_tokens: StreamingPrefillThresholdDiagnostics,
+    pub tile_tokens: StreamingPrefillTileDiagnostics,
+    pub tape_tile_tokens: StreamingPrefillTileDiagnostics,
+    pub detached_full_attn_tile_tokens: StreamingPrefillTileDiagnostics,
+    pub detached_full_attn_boundary_tile_tokens: StreamingPrefillDerivedTileDiagnostics,
+    pub detached_full_attn_tape_replay_tile_tokens: StreamingPrefillDerivedTileDiagnostics,
+    pub last_token_lm_head: StreamingPrefillToggleDiagnostics,
+    pub immutable_after_startup: bool,
+    pub restart_required_to_change: bool,
+    #[serde(skip)]
+    execution_policy: kiln_model::StreamingPrefillExecutionPolicy,
+}
+
+impl StreamingPrefillRuntimeConfig {
+    pub const fn execution_policy(self) -> kiln_model::StreamingPrefillExecutionPolicy {
+        self.execution_policy
+    }
+}
+
+impl StreamingPrefillConfig {
+    /// Resolve typed operator intent over one selected backend's immutable
+    /// policy. No lower execution path needs to know how TOML or environment
+    /// compatibility aliases supplied the values.
+    pub fn resolve(
+        self,
+        backend: kiln_model::StreamingPrefillBackendPolicy,
+    ) -> StreamingPrefillRuntimeConfig {
+        let execution_mode = match self.mode.mode() {
+            StreamingPrefillMode::Auto => kiln_model::StreamingPrefillMode::Auto,
+            StreamingPrefillMode::Enabled => kiln_model::StreamingPrefillMode::Enabled,
+            StreamingPrefillMode::Disabled => kiln_model::StreamingPrefillMode::Disabled,
+        };
+        let execution_policy = kiln_model::StreamingPrefillExecutionPolicy::resolve(
+            backend,
+            execution_mode,
+            self.threshold_tokens.configured(),
+            self.tile_tokens.configured(),
+            self.tape_tile_tokens.configured(),
+            self.detached_full_attn_tile_tokens.configured(),
+            self.last_token_lm_head.enabled(),
+        );
+
+        let backend_dispatch =
+            StreamingPrefillDispatchRuleDiagnostics::from_auto_dispatch(backend.auto_dispatch);
+        let threshold_override_applied = self.threshold_tokens.configured().is_some()
+            && matches!(
+                backend.auto_dispatch,
+                kiln_model::StreamingPrefillAutoDispatch::PromptTokensAtLeast(_)
+            );
+        let effective_auto_threshold = execution_policy.threshold_tokens();
+        let (effective_dispatch, dispatch_source) = match self.mode.mode() {
+            StreamingPrefillMode::Enabled => (
+                StreamingPrefillDispatchRuleDiagnostics {
+                    policy: StreamingPrefillDispatchPolicy::AllNonEmpty,
+                    minimum_prompt_tokens: None,
+                },
+                streaming_prefill_explicit_source(self.mode.source()),
+            ),
+            StreamingPrefillMode::Disabled => (
+                StreamingPrefillDispatchRuleDiagnostics {
+                    policy: StreamingPrefillDispatchPolicy::Never,
+                    minimum_prompt_tokens: None,
+                },
+                streaming_prefill_explicit_source(self.mode.source()),
+            ),
+            StreamingPrefillMode::Auto => {
+                let source = if threshold_override_applied {
+                    streaming_prefill_explicit_source(self.threshold_tokens.source())
+                } else {
+                    StreamingPrefillEffectiveSource::BackendPolicy
+                };
+                (
+                    effective_auto_threshold.map_or(
+                        StreamingPrefillDispatchRuleDiagnostics {
+                            policy: StreamingPrefillDispatchPolicy::Never,
+                            minimum_prompt_tokens: None,
+                        },
+                        |tokens| StreamingPrefillDispatchRuleDiagnostics {
+                            policy: StreamingPrefillDispatchPolicy::PromptTokensAtLeast,
+                            minimum_prompt_tokens: Some(tokens),
+                        },
+                    ),
+                    source,
+                )
+            }
+        };
+
+        let base_configured = self.tile_tokens.configured();
+        let base_source = base_configured
+            .map_or(StreamingPrefillEffectiveSource::BackendPolicy, |_| {
+                streaming_prefill_explicit_source(self.tile_tokens.source())
+            });
+        let tape_source = if self.tape_tile_tokens.configured().is_some() {
+            streaming_prefill_explicit_source(self.tape_tile_tokens.source())
+        } else if base_configured.is_some() {
+            streaming_prefill_inherited_tile_source(self.tile_tokens.source())
+        } else {
+            StreamingPrefillEffectiveSource::BackendPolicy
+        };
+        let detached_source = if self.detached_full_attn_tile_tokens.configured().is_some() {
+            streaming_prefill_explicit_source(self.detached_full_attn_tile_tokens.source())
+        } else if base_configured.is_some() {
+            streaming_prefill_inherited_tile_source(self.tile_tokens.source())
+        } else {
+            StreamingPrefillEffectiveSource::BackendPolicy
+        };
+
+        StreamingPrefillRuntimeConfig {
+            dispatch: StreamingPrefillDispatchDiagnostics {
+                configured_mode: self.mode.mode(),
+                configured_source: self.mode.source(),
+                backend_policy: backend_dispatch,
+                effective: effective_dispatch,
+                effective_source: dispatch_source,
+            },
+            threshold_tokens: StreamingPrefillThresholdDiagnostics {
+                configured: self.threshold_tokens.configured(),
+                configured_source: self.threshold_tokens.source(),
+                backend_policy: backend.auto_dispatch.minimum_prompt_tokens(),
+                effective_for_auto_mode: effective_auto_threshold,
+                override_applied_to_backend_auto_policy: threshold_override_applied,
+            },
+            tile_tokens: StreamingPrefillTileDiagnostics {
+                configured: base_configured,
+                configured_source: self.tile_tokens.source(),
+                backend_policy: backend.base_tile_tokens,
+                effective: execution_policy.base_tile_tokens(),
+                effective_source: base_source,
+            },
+            tape_tile_tokens: StreamingPrefillTileDiagnostics {
+                configured: self.tape_tile_tokens.configured(),
+                configured_source: self.tape_tile_tokens.source(),
+                backend_policy: backend.tape_tile_tokens,
+                effective: execution_policy.tape_tile_tokens(),
+                effective_source: tape_source,
+            },
+            detached_full_attn_tile_tokens: StreamingPrefillTileDiagnostics {
+                configured: self.detached_full_attn_tile_tokens.configured(),
+                configured_source: self.detached_full_attn_tile_tokens.source(),
+                backend_policy: backend.detached_full_attn_tile_tokens,
+                effective: execution_policy.detached_full_attn_tile_tokens(),
+                effective_source: detached_source,
+            },
+            detached_full_attn_boundary_tile_tokens: StreamingPrefillDerivedTileDiagnostics {
+                backend_policy: backend.detached_full_attn_boundary_tile_tokens,
+                effective: execution_policy.detached_full_attn_boundary_tile_tokens(),
+                effective_source: detached_source,
+            },
+            detached_full_attn_tape_replay_tile_tokens: StreamingPrefillDerivedTileDiagnostics {
+                backend_policy: backend.detached_full_attn_tape_replay_tile_tokens,
+                effective: execution_policy.detached_full_attn_tape_replay_tile_tokens(),
+                effective_source: detached_source,
+            },
+            last_token_lm_head: StreamingPrefillToggleDiagnostics {
+                configured: self.last_token_lm_head.enabled(),
+                configured_source: self.last_token_lm_head.source(),
+                effective: execution_policy.last_token_lm_head(),
+                effective_source: streaming_prefill_explicit_source(
+                    self.last_token_lm_head.source(),
+                ),
+            },
+            immutable_after_startup: true,
+            restart_required_to_change: true,
+            execution_policy,
+        }
+    }
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawStreamingPrefillConfig {
@@ -7277,6 +7577,156 @@ detached_full_attn_tile_tokens = "auto"
                 "unexpected error for {document:?}: {error:#}"
             );
         }
+    }
+
+    #[test]
+    fn streaming_prefill_runtime_resolution_preserves_backend_policy_and_provenance() {
+        let config: KilnConfig = toml::from_str(
+            r#"
+[streaming_prefill]
+mode = "auto"
+threshold_tokens = 1024
+tile_tokens = 256
+last_token_lm_head = false
+"#,
+        )
+        .unwrap();
+        let backend = kiln_model::StreamingPrefillBackendPolicy::for_backend(
+            "cuda",
+            kiln_tensor::Device::Cuda(0),
+        );
+        let runtime = config.streaming_prefill.resolve(backend);
+
+        assert_eq!(runtime.dispatch.configured_mode, StreamingPrefillMode::Auto);
+        assert_eq!(
+            runtime.dispatch.backend_policy,
+            StreamingPrefillDispatchRuleDiagnostics {
+                policy: StreamingPrefillDispatchPolicy::PromptTokensAtLeast,
+                minimum_prompt_tokens: Some(2048),
+            }
+        );
+        assert_eq!(
+            runtime.dispatch.effective,
+            StreamingPrefillDispatchRuleDiagnostics {
+                policy: StreamingPrefillDispatchPolicy::PromptTokensAtLeast,
+                minimum_prompt_tokens: Some(1024),
+            }
+        );
+        assert_eq!(
+            runtime.dispatch.effective_source,
+            StreamingPrefillEffectiveSource::ConfigFile
+        );
+        assert!(
+            runtime
+                .threshold_tokens
+                .override_applied_to_backend_auto_policy
+        );
+        assert_eq!(runtime.tile_tokens.effective, 256);
+        assert_eq!(runtime.tape_tile_tokens.effective, 256);
+        assert_eq!(runtime.detached_full_attn_tile_tokens.effective, 256);
+        assert_eq!(
+            runtime.detached_full_attn_boundary_tile_tokens.effective,
+            256
+        );
+        assert_eq!(
+            runtime.detached_full_attn_tape_replay_tile_tokens.effective,
+            256
+        );
+        for source in [
+            runtime.tape_tile_tokens.effective_source,
+            runtime.detached_full_attn_tile_tokens.effective_source,
+            runtime
+                .detached_full_attn_boundary_tile_tokens
+                .effective_source,
+            runtime
+                .detached_full_attn_tape_replay_tile_tokens
+                .effective_source,
+        ] {
+            assert_eq!(
+                source,
+                StreamingPrefillEffectiveSource::InheritedFromTileTokensConfigFile
+            );
+        }
+        assert!(!runtime.last_token_lm_head.effective);
+        assert!(!runtime.execution_policy().enabled_for(1023));
+        assert!(runtime.execution_policy().enabled_for(1024));
+        assert!(runtime.immutable_after_startup);
+        assert!(runtime.restart_required_to_change);
+
+        let json = serde_json::to_value(runtime).unwrap();
+        assert_eq!(
+            json["dispatch"]["effective"]["policy"],
+            "prompt_tokens_at_least"
+        );
+        assert_eq!(
+            json["tape_tile_tokens"]["effective_source"],
+            "inherited_from_tile_tokens_config_file"
+        );
+        assert!(json.get("execution_policy").is_none());
+    }
+
+    #[test]
+    fn streaming_prefill_runtime_resolution_reports_ignored_auto_thresholds() {
+        let config: KilnConfig = toml::from_str(
+            r#"
+[streaming_prefill]
+threshold_tokens = 1
+"#,
+        )
+        .unwrap();
+        let runtime = config.streaming_prefill.resolve(
+            kiln_model::StreamingPrefillBackendPolicy::for_backend("cpu", kiln_tensor::Device::Cpu),
+        );
+
+        assert_eq!(
+            runtime.dispatch.effective.policy,
+            StreamingPrefillDispatchPolicy::Never
+        );
+        assert_eq!(
+            runtime.dispatch.effective_source,
+            StreamingPrefillEffectiveSource::BackendPolicy
+        );
+        assert_eq!(runtime.threshold_tokens.configured, Some(1));
+        assert_eq!(runtime.threshold_tokens.backend_policy, None);
+        assert_eq!(runtime.threshold_tokens.effective_for_auto_mode, None);
+        assert!(
+            !runtime
+                .threshold_tokens
+                .override_applied_to_backend_auto_policy
+        );
+        assert!(!runtime.execution_policy().enabled_for(usize::MAX));
+    }
+
+    #[test]
+    fn streaming_prefill_forced_mode_overrides_a_backend_never_rule() {
+        let config: KilnConfig = toml::from_str(
+            r#"
+[streaming_prefill]
+mode = "enabled"
+"#,
+        )
+        .unwrap();
+        let runtime = config.streaming_prefill.resolve(
+            kiln_model::StreamingPrefillBackendPolicy::for_backend(
+                "vulkan",
+                kiln_tensor::Device::Vulkan(0),
+            ),
+        );
+
+        assert_eq!(
+            runtime.dispatch.backend_policy.policy,
+            StreamingPrefillDispatchPolicy::Never
+        );
+        assert_eq!(
+            runtime.dispatch.effective.policy,
+            StreamingPrefillDispatchPolicy::AllNonEmpty
+        );
+        assert_eq!(
+            runtime.dispatch.effective_source,
+            StreamingPrefillEffectiveSource::ConfigFile
+        );
+        assert!(!runtime.execution_policy().enabled_for(0));
+        assert!(runtime.execution_policy().enabled_for(1));
     }
 
     #[test]
