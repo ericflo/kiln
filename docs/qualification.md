@@ -44,6 +44,32 @@ building. Configuration changes must be declared in a committed workload
 variant; inherited shell overrides are never silently ignored or accepted as
 source-bound evidence.
 
+Batching qualification must bind the complete typed startup policy, not only a
+legacy actor environment switch. A serving workload that exercises the actor
+declares `[batching]` values in its source-bound config, restarts the server,
+and attests these exact runtime targets before measurement:
+
+```text
+GET /v1/config -> .batching.configuration
+GET /v1/config -> .batching.actor_active
+GET /health -> .decode_runtime.batching_configuration
+GET /health -> .decode_runtime.batching_engine
+```
+
+The first and third objects must be equal. `actor_active` and the live health
+snapshot must agree about whether an actor exists. The attestation records mode
+intent, backend default, effective selection and source; rowwise and
+prefix-aware values and sources; admission quantum intent, backend default,
+effective clamp and source; and backend-owned burst admission. A malformed
+value, a canonical/deprecated-alias conflict, an unexpected source, or a
+missing actor in an actor-required variant fails before device work.
+
+Use only canonical mechanically derived names in new workload manifests:
+`KILN_BATCHING_MODE`, `KILN_BATCHING_ROWWISE_DECODE`,
+`KILN_BATCHING_PREFIX_AWARE_ADMISSION`, and
+`KILN_BATCHING_PREFILL_ADMISSION_QUANTUM`. The four historical spellings are
+compatibility inputs for existing deployments, not qualification vocabulary.
+
 ## Refresh The GRPO Reference Oracle
 
 The compact fixture at

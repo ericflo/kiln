@@ -1002,7 +1002,7 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | POST | `/v1/judgments/{name}/rows` | Append one A/B/Tie/Skip preference |
 | POST | `/v1/judgments/{name}/compile` | Compile judgments into an SFT dataset for a judge LoRA |
 | POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
-| GET | `/v1/config` | Current server configuration, source attribution, and effective serving/decode policy fields |
+| GET | `/v1/config` | Current server configuration, source attribution, typed batching intent/backend/effective policy plus actor activity, and effective serving/decode policy fields |
 
 ## Configuration
 
@@ -1017,6 +1017,10 @@ Key settings:
 | `server.serving_profile` | `KILN_SERVER_SERVING_PROFILE` | `stable` | Immutable GPU ownership policy: `stable`, `experimental`, or `maintenance` |
 | `server.max_batch_tokens` | `KILN_SERVER_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per actor cycle; lower values favor decode latency during long prefills, higher values favor prefill throughput |
 | `server.max_decode_batch` | `KILN_SERVER_MAX_DECODE_BATCH` | `auto` | Concurrent decode-row ceiling (`auto` or 1–65536); malformed values fail startup, and deterministic mode or `max_batch_tokens` may lower the reported effective value |
+| `batching.mode` | `KILN_BATCHING_MODE` | `auto` | Backend-qualified actor selection: enabled on CUDA, ROCm, Vulkan, and CPU; disabled on Metal. Use `enabled` or `disabled` only for an explicit comparison; restart after changing it |
+| `batching.rowwise_decode` | `KILN_BATCHING_ROWWISE_DECODE` | false | Emergency correctness comparison that replaces a true multi-row forward with one forward per row and normally lowers throughput |
+| `batching.prefix_aware_admission` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` | true | Lets a shorter active same-adapter prompt become a reusable strict prefix before admitting its queued descendant; unrelated rows still proceed |
+| `batching.prefill_admission_quantum` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` | `auto` | Prompt admissions per actor cycle (`auto` or 1–65536). Auto uses effective decode width on CUDA/Vulkan and 4 on ROCm/Metal/CPU, then clamps to the effective decode width |
 | `server.deterministic` | `KILN_SERVER_DETERMINISTIC` | false | Strict serving-repeatability mode; freezes the process-wide determinism selector and forces effective decode width 1. It does not make every accelerator kernel bitwise deterministic |
 | `server.default_thinking_budget_tokens` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default token budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
 | `server.default_thinking_budget_ms` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
@@ -1027,6 +1031,23 @@ Key settings:
 | `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
 | `request_log.enabled` | `KILN_REQUEST_LOG_ENABLED` | true | Durable JSONL log of every inference request/response (the mine→train corpus) |
 | `request_log.dir` | `KILN_REQUEST_LOG_DIR` | `<adapter_dir>/.requests` | Request log directory (size-rotated, gzipped, retention-capped) |
+
+All four batching values are immutable startup policy. Validate them with
+`kiln config --file kiln.toml`, restart the server, then inspect the resolved
+contract with:
+
+```bash
+curl -s http://localhost:8420/v1/config \
+  | jq '.batching'
+curl -s http://localhost:8420/health \
+  | jq '.decode_runtime.batching_configuration, .decode_runtime.batching_engine'
+```
+
+The `batching.configuration` response path preserves configured intent and source separately
+from backend policy and the effective result; `batching.actor_active` says
+whether the actor actually exists. The complete field grammar, deprecated
+aliases, backend matrix, quantum-clamp rules, and debug shape are in the
+[Configuration Reference](docs/CONFIGURATION.md).
 
 ## Running with Docker
 

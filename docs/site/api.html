@@ -325,20 +325,85 @@
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/decode</code> &mdash; live decode tokens/sec and inter-token latency stats used by the dashboard.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history with effective thinking-budget provenance and outcomes for the dashboard's request panel.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective training and KV-cache policy, memory-budget partitions, and generation defaults.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, typed batching intent/backend/effective policy and actor activity, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective training and KV-cache policy, memory-budget partitions, and generation defaults.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest and execution-provenance record.</div>
         </div>
         <div class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Check runtime configuration</h3>
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/config | python3 -m json.tool</code></pre>
           <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-            The response keeps startup capacity resolution, the current safe memory sample, and the
-            budget derived from effective capacity separate. Every <code>*_gib</code> value uses
+            The response keeps batching intent, backend policy, effective actor construction, startup
+            capacity resolution, the current safe memory sample, and the budget derived from effective
+            capacity separate. Every <code>*_gib</code> value uses
             1 GiB = 1,073,741,824 bytes and is paired with an exact <code>*_bytes</code> value where the
             response exposes both units. The Playground uses the same response to preview the resolved
             thinking token/time pair before send, marking each dimension as server- or request-owned.
           </p>
           <div class="grid gap-4 mt-4">
+            <section class="pt-4" style="border-top: 1px solid var(--line);">
+              <h4 class="font-semibold mb-2"><code>batching</code>: immutable scheduling policy and actor activity</h4>
+              <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
+  "batching": {
+    "configuration": {
+      "mode": {
+        "configured": "auto",
+        "configured_source": "default",
+        "backend_policy_enabled": true,
+        "effective_enabled": true,
+        "effective_source": "backend_policy"
+      },
+      "rowwise_decode": { "enabled": false, "source": "default" },
+      "prefix_aware_admission": { "enabled": true, "source": "default" },
+      "prefill_admission_quantum": {
+        "configured": null,
+        "configured_source": "default",
+        "backend_policy": 4,
+        "effective": 4,
+        "effective_source": "backend_policy"
+      },
+      "burst_prefill_admission": false
+    },
+    "actor_active": true
+  }
+}</code></pre>
+              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>mode.configured</code> is <code>auto</code>, <code>enabled</code>, or
+                <code>disabled</code>. Its configured source is <code>default</code>,
+                <code>config_file</code>, or <code>environment</code>;
+                <code>backend_policy_enabled</code> records what <code>auto</code> would select, and
+                <code>effective_enabled</code>/<code>effective_source</code> record the final decision.
+                Automatic actor selection is enabled on CUDA, ROCm, Vulkan, and CPU and disabled on
+                Metal. <code>actor_active</code> says whether the actor was actually constructed; never
+                infer that from configured intent alone.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>rowwise_decode=false</code> is true multi-row decode. Turning it on is an emergency
+                correctness comparison and normally loses throughput. Prefix-aware admission defers a
+                queued same-adapter strict descendant while its active shorter prompt can become a reusable
+                prefix; independent rows can still enter. Both values include their startup source.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                A null admission <code>configured</code> value means TOML <code>"auto"</code>. CUDA and
+                Vulkan then select the effective decode width; ROCm, Metal, and CPU select 4. The result is
+                always clamped to the effective decode width. <code>effective_source</code> is
+                <code>default</code>, <code>backend_policy</code>, <code>config_file</code>,
+                <code>environment</code>, or <code>effective_decode_width</code> when that clamp wins.
+                <code>default</code> is reachable only for an explicit programmatic value carrying default
+                provenance; normal built-in <code>auto</code> reports <code>backend_policy</code>. CUDA alone
+                currently reports <code>burst_prefill_admission=true</code>; this value is backend-owned and
+                has no operator field. Every batching setting is startup-only and requires restart.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>GET /health</code> repeats the same immutable object at
+                <code>decode_runtime.batching_configuration</code> beside the optional live
+                <code>batching_engine</code> snapshot. The gated trusted
+                debug response retains <code>batching_engine.enabled</code> for actual activity and adds
+                the object at <code>batching_engine.configuration</code>. Canonical startup overrides are
+                mechanically derived as <code>KILN_BATCHING_&lt;FIELD&gt;</code>; see the
+                <a href="docs/configuration/" class="link">complete Configuration Reference</a> for strict
+                grammar and the four deprecated aliases.
+              </p>
+            </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
               <h4 class="font-semibold mb-2"><code>vram</code>: device and startup capacity resolution</h4>
               <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">

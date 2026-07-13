@@ -857,6 +857,10 @@ Kiln uses a typed TOML config file. Environment overrides are resolved during st
 | `server.max_prefill_tokens_per_cycle` | `KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE` | 64 | Prompt-only ceiling inside the combined actor-cycle budget (1–65536). Decode reserves its rows first, then partial prefills advance round-robin by at most this many tokens before the next decode cohort. Lower values favor ITL; higher values favor prefill throughput. Invalid values stop startup; health/debug report the effective value and source |
 | `server.max_prefill_layers_per_cycle` | `KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE` | 4 | Transformer-layer ceiling for each retained prompt chunk (1–1024). A partial chunk yields to ready decode after this many layers and later resumes from its hidden state without replay. Lower values favor ITL; higher values reduce scheduling and synchronization overhead. Invalid values stop startup; health/debug report value and source |
 | `server.max_decode_batch` | `KILN_SERVER_MAX_DECODE_BATCH` | `auto` (backend policy) | Concurrent decode-row ceiling (`auto` or 1–65536). Invalid values stop startup. Deterministic mode and `max_batch_tokens` may lower it; startup, health, config, debug, and `kiln_batching_engine_max_decode_batch` report the final effective value |
+| `batching.mode` | `KILN_BATCHING_MODE` | `auto` (backend policy) | Select the production batching actor: `auto`, `enabled`, or `disabled`. Auto enables it on CUDA, ROCm, Vulkan, and CPU and disables it on Metal. Restart required |
+| `batching.rowwise_decode` | `KILN_BATCHING_ROWWISE_DECODE` | false | Emergency correctness comparison that issues one forward per ready row instead of one true batched forward. It normally reduces throughput. Restart required |
+| `batching.prefix_aware_admission` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` | true | Defer a queued same-adapter strict descendant while its active shorter prefix can become reusable; independent rows remain admissible. Restart required |
+| `batching.prefill_admission_quantum` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` | `auto` (backend policy) | Prompts admitted per actor cycle before returning to decode (`auto` or 1–65536). Auto uses effective decode width on CUDA/Vulkan and 4 on ROCm/Metal/CPU, then clamps to the effective decode width. Restart required |
 | `server.deterministic` | `KILN_SERVER_DETERMINISTIC` | false | Serving repeatability envelope. Strict boolean parsing rejects malformed values. True freezes the process-wide determinism selector and forces effective decode width 1 even when a wider batch is configured, preventing request-cohort changes from selecting different BF16 batched-GEMM shapes at close greedy-logit boundaries. This does not by itself make every accelerator kernel bitwise deterministic |
 | `server.default_thinking_enabled` | `KILN_SERVER_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
 | `server.default_thinking_budget_tokens` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block. The environment value must be a non-negative base-10 integer or `unlimited`; malformed values stop startup |
@@ -897,6 +901,17 @@ effective decode ceilings. The effective source is one of `backend_policy`,
 `config_file`, `environment`, `deterministic`, or `max_batch_tokens`. This makes
 an intentional reproducibility run distinguishable from an accidentally
 serialized throughput run without inspecting process environment.
+
+The batching actor has the same startup-only provenance contract. The
+`batching` object from `GET /v1/config` contains `configuration` plus
+`actor_active`; health
+repeats the configuration at `decode_runtime.batching_configuration`, and the
+trusted debug response places it at `batching_engine.configuration`. The
+configuration reports mode intent, backend default, effective actor selection,
+rowwise and prefix-aware toggles, configured/backend/effective admission
+quantum, every value source, and the backend-owned burst-admission decision.
+The four deprecated pre-consolidation aliases still parse strictly and warn,
+but new deployments should use the mechanically derived names in the table.
 
 The current deterministic serving contract is deliberately narrower than
 cross-backend bitwise determinism: it removes concurrent decode-shape variation

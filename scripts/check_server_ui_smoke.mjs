@@ -113,6 +113,22 @@ function checkRuntimeConfigSchemaContract(source) {
     'checkpoint_policy',
     'training_budget_bytes',
     'training_budget_gib',
+    'batching.actor_active',
+    'batchingMode.configured',
+    'batchingMode.configured_source',
+    'batchingMode.backend_policy_enabled',
+    'batchingMode.effective_enabled',
+    'batchingMode.effective_source',
+    'rowwiseDecode.enabled',
+    'rowwiseDecode.source',
+    'prefixAwareAdmission.enabled',
+    'prefixAwareAdmission.source',
+    'prefillAdmissionQuantum.configured',
+    'prefillAdmissionQuantum.configured_source',
+    'prefillAdmissionQuantum.backend_policy',
+    'prefillAdmissionQuantum.effective',
+    'prefillAdmissionQuantum.effective_source',
+    'batchingConfiguration.burst_prefill_admission',
   ]) {
     if (!renderer.includes(field)) fail(`Runtime-config renderer does not consume ${field}`);
   }
@@ -996,6 +1012,28 @@ async function startServer({
           },
         },
         kv_cache: { num_blocks: 1024, num_blocks_source: 'auto', fp8_enabled: true },
+        batching: {
+          configuration: {
+            mode: {
+              configured: 'auto',
+              configured_source: 'default',
+              backend_policy_enabled: true,
+              effective_enabled: true,
+              effective_source: 'backend_policy',
+            },
+            rowwise_decode: { enabled: false, source: 'default' },
+            prefix_aware_admission: { enabled: true, source: 'environment' },
+            prefill_admission_quantum: {
+              configured: 32,
+              configured_source: 'config_file',
+              backend_policy: 16,
+              effective: 16,
+              effective_source: 'effective_decode_width',
+            },
+            burst_prefill_admission: true,
+          },
+          actor_active: true,
+        },
         training: {
           runtime_device: 'vulkan:0',
           model_weight_device: 'cpu',
@@ -3199,6 +3237,13 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#runtime-config-body', /Reclaim[\s\S]*off[\s\S]*requested automatic/, 'Runtime config should distinguish effective reclaim from a profile-constrained request');
     await waitForPanelText(page, '#runtime-config-body', /1,024/, 'Runtime config should render the KV cache block count');
     await waitForPanelText(page, '#runtime-config-body', /FP8 cache/, 'Runtime config should render the fp8 cache mode');
+    await waitForPanelText(page, '#runtime-config-body', /Actor[\s\S]*active/, 'Runtime config should render batching actor activity');
+    await waitForPanelText(page, '#runtime-config-body', /Mode configured[\s\S]*auto[\s\S]*default/, 'Runtime config should render configured batching mode and source');
+    await waitForPanelText(page, '#runtime-config-body', /Mode effective[\s\S]*on[\s\S]*backend_policy/, 'Runtime config should render effective batching mode and source');
+    await waitForPanelText(page, '#runtime-config-body', /Prefix admission[\s\S]*on[\s\S]*environment/, 'Runtime config should render prefix-aware admission and source');
+    await waitForPanelText(page, '#runtime-config-body', /Prefill configured[\s\S]*32[\s\S]*config_file/, 'Runtime config should render configured prefill admission quantum and source');
+    await waitForPanelText(page, '#runtime-config-body', /Prefill effective[\s\S]*16[\s\S]*effective_decode_width/, 'Runtime config should render bounded effective prefill quantum and source');
+    await waitForPanelText(page, '#runtime-config-body', /Burst prefill[\s\S]*on/, 'Runtime config should render backend burst-prefill policy');
     await waitForPanelText(page, '#runtime-config-body', /Runtime device[\s\S]*vulkan:0/, 'Runtime config should render the native-training runtime device');
     await waitForPanelText(page, '#runtime-config-body', /Weight device[\s\S]*cpu/, 'Runtime config should render the frozen model-weight device');
     await waitForPanelText(page, '#runtime-config-body', /Native training[\s\S]*unavailable/, 'Runtime config should render fail-closed native-training support');

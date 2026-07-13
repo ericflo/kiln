@@ -46,6 +46,36 @@ the two measured request bodies different.
 Run Kiln first from a clean checkout. Use an explicit DRM path on machines with
 more than one GPU:
 
+Use a checked-in or receipt-bound TOML policy for serving. For CUDA, ROCm, and
+Vulkan throughput qualification, start with true batched decode and preserve
+the backend-qualified admission cadence:
+
+```toml
+[batching]
+mode = "enabled"
+rowwise_decode = false
+prefix_aware_admission = true
+prefill_admission_quantum = "auto"
+```
+
+After every restart, capture the exact target before sending measured traffic:
+
+```bash
+curl -fsS http://127.0.0.1:8420/v1/config \
+  | jq '{batching, decode_runtime}'
+```
+
+For an ordinary throughput receipt, require
+`batching.actor_active=true`,
+`batching.configuration.mode.effective_enabled=true`, and
+`batching.configuration.rowwise_decode.enabled=false`. Record the full
+`batching.configuration` object, including the admission quantum's configured,
+backend-policy, effective, and source values. Do not compare only the TOML
+request: deterministic mode, the combined token budget, or a narrower decode
+ceiling can lower the width and admission quantum. A deliberate actor-off,
+rowwise, prefix-aware, or explicit-quantum A/B must use a distinct run ID and
+state that intervention in the receipt notes.
+
 ```bash
 RUN_ID=qwen35-4b-greedy-short-20260710
 python3 scripts/bench-concurrent-batch.py \
@@ -92,10 +122,14 @@ never writes the credential or environment-variable name into a receipt.
 
 Treat exact output comparison as a reproducibility gate, not an unstated
 property of the throughput configuration. Start Kiln with
-`server.deterministic = true` (or `KILN_DETERMINISTIC=1`) and verify that
+`server.deterministic = true` (or canonical
+`KILN_SERVER_DETERMINISTIC=true`) and verify that
 `/health` reports `decode_runtime.configuration.deterministic.enabled = true`,
 `decode_runtime.configuration.max_decode_batch.effective_source` as
-`"deterministic"`, and `decode_runtime.batching_engine.max_decode_batch = 1`;
+`"deterministic"`,
+`decode_runtime.batching_configuration.prefill_admission_quantum.effective = 1`,
+its `effective_source` as `"effective_decode_width"`,
+and `decode_runtime.batching_engine.max_decode_batch = 1`;
 configure the reference
 engine for the same single-row deterministic execution. Default multi-row BF16
 serving may select different valid GEMM shapes as cohorts form, and a close
@@ -104,6 +138,15 @@ failed exact-comparison receipt as evidence; never relabel it as output parity.
 Run performance and deterministic correctness as separate receipts so the
 reproducibility guarantee does not silently disable the batching being
 measured.
+
+When investigating a pause, first separate scheduler time from device or
+memory time. Request `include_performance=true` and compare `actor_queue_ms`,
+`actor_admission_ms`, and `actor_prefill_wall_ms` with the batching actor's live
+phase counters and the memory-governor/allocator diagnostics. A long actor
+queue or admission/prefill phase is not evidence of a VRAM rebalance; a reclaim,
+resize, or synchronization claim requires the corresponding structured event
+or metric. Preserve a counterexample receipt before changing one batching field
+at a time and restarting.
 
 Commit detailed serving receipts under
 `benchmarks/receipts/<backend>/<host-id>/`. They intentionally do not belong

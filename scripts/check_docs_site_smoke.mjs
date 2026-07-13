@@ -97,7 +97,20 @@ const generatedDocsPages = [
     path: publishedPath('docs/configuration/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/configuration/',
     h1: 'Configuration Reference',
-    terms: ['KILN_<SECTION>_<FIELD>', 'Strict failure behavior', 'KILN_SERVER_HOST'],
+    terms: [
+      'KILN_<SECTION>_<FIELD>',
+      'Strict failure behavior',
+      '14 top-level sections and 75 fixed leaf fields',
+      '67 implement the canonical mechanical environment name',
+      '47 aliases total',
+      '8 are config-file-only',
+      'KILN_BATCHING_MODE',
+      'KILN_BATCHING_ROWWISE_DECODE',
+      'KILN_BATCHING_PREFIX_AWARE_ADMISSION',
+      'KILN_BATCHING_PREFILL_ADMISSION_QUANTUM',
+      'effective_decode_width',
+      'decode_runtime.batching_configuration',
+    ],
   },
 ];
 
@@ -223,6 +236,7 @@ const expectedAdapterListSemantics = [
 
 const expectedApiSections = [
   { label: 'server status', terms: ['server status'] },
+  { label: 'typed batching diagnostics', terms: ['batching', 'actor_active', 'configured_source', 'backend_policy_enabled', 'prefill_admission_quantum', 'effective_decode_width', 'burst_prefill_admission', 'decode_runtime.batching_configuration', 'batching_engine.configuration'] },
   { label: 'copy-paste first requests', terms: ['copy-paste first requests'] },
   { label: 'power-user requests', terms: ['power-user requests'] },
   { label: 'OpenAI-compatible generation', terms: ['openai-compatible generation'] },
@@ -239,6 +253,7 @@ const expectedApiSections = [
 ];
 
 const expectedApiCodeExamples = [
+  { label: 'batching configuration shape', terms: ['"batching"', '"configuration"', '"configured_source"', '"actor_active"'] },
   { label: 'first chat', terms: ['/v1/chat/completions', 'messages', 'max_tokens'] },
   { label: 'first SFT', terms: ['/v1/train/sft', 'examples', 'config', 'epochs'] },
   { label: 'first GRPO', terms: ['/v1/train/grpo', 'groups', 'completions', 'reward'] },
@@ -267,6 +282,7 @@ const expectedCliSections = [
   { label: 'request-lineage integrity', terms: ['kiln-replay verify', 'recomputes request-lineage hashes only', 'does not load a model', 'prove reproducibility', '.kiln-checkpoint'] },
   { label: 'adapter lifecycle path', terms: ['manage lora adapters', 'kiln adapters list', 'kiln adapters load', 'kiln adapters unload'] },
   { label: 'config validation path', terms: ['validate config', 'kiln config --file'] },
+  { label: 'typed batching policy', terms: ['resolve scheduler controls at startup', 'batching', 'rowwise_decode', 'prefix_aware_admission', 'prefill_admission_quantum', 'actor_active'] },
   { label: 'help and verbosity flags', terms: ['--help', '--verbose', '--quiet', '-vv'] },
   { label: 'UI handoff', terms: ['http://127.0.0.1:8420/ui', '/ui'] },
   { label: 'related docs', terms: ['related docs', 'quickstart', 'api reference', 'grpo guide', 'troubleshooting', 'architecture'] },
@@ -283,6 +299,8 @@ const expectedCliCodeExamples = [
   { label: 'training status command', terms: ['kiln train status'] },
   { label: 'adapter commands', terms: ['kiln adapters list', 'kiln adapters load support-bot', 'kiln adapters unload'] },
   { label: 'config validation commands', terms: ['kiln config --file kiln.toml', 'kiln serve --config kiln.toml'] },
+  { label: 'batching policy config', terms: ['[batching]', 'mode = "auto"', 'rowwise_decode = false', 'prefill_admission_quantum = "auto"'] },
+  { label: 'batching policy verification', terms: ['kiln config --file kiln.toml', 'kiln serve --config kiln.toml', "jq '.batching'"] },
   { label: 'verbosity commands', terms: ['kiln -v serve', 'kiln -vv serve', 'kiln -q health'] },
 ];
 
@@ -318,6 +336,7 @@ const expectedCliModelSetupCue = {
 const expectedArchitectureSections = [
   { label: 'single-process server', terms: ['single process', 'rust binary', 'axum http api'] },
   { label: 'request path and batching', terms: ['request path and batching', 'iteration-level scheduler', 'continuous batching'] },
+  { label: 'immutable batching authority', terms: ['BatchingRuntimeConfig', 'None of those paths rereads', 'actor_active', 'decode_runtime.batching_configuration'] },
   { label: 'Gated DeltaNet/GDN hybrid', terms: ['gated deltanet', 'gdn', 'hybrid'] },
   { label: 'paged KV/block manager', terms: ['paged kv', 'block manager'] },
   { label: 'Qwen3.5-4B', terms: ['Qwen3.5-4B'] },
@@ -349,6 +368,7 @@ const expectedTroubleshootingSections = [
   { label: 'three probes', terms: ['start with three probes'] },
   { label: 'Desktop App first launch', terms: ['desktop app first launch'] },
   { label: 'wrong binary/GPU path', terms: ['wrong binary or gpu path'] },
+  { label: 'batching pause diagnosis', terms: ['inference pauses or throughput collapses at concurrency', 'actor_queue_ms', 'rowwise_decode', 'do not label a scheduling pause as vram rebalancing'] },
   { label: 'model weights not found', terms: ['model weights are not found'] },
   { label: 'health not green', terms: ['/health', 'not green'] },
   { label: 'remote server not reachable', terms: ['remote server is not reachable'] },
@@ -361,6 +381,7 @@ const expectedTroubleshootingProbeExamples = [
   { label: 'health probe', terms: ['/health'] },
   { label: 'models probe', terms: ['/v1/models'] },
   { label: 'minimal chat probe', terms: ['/v1/chat/completions', 'messages', 'max_tokens'] },
+  { label: 'batching policy probe', terms: ['/v1/config', "jq '.batching, .decode_runtime.max_decode_batch'"] },
 ];
 
 const expectedTroubleshootingLinks = [

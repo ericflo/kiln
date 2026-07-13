@@ -206,6 +206,28 @@
         },
       },
       kv_cache: { num_blocks: 528, num_blocks_source: 'auto', fp8_enabled: true },
+      batching: {
+        configuration: {
+          mode: {
+            configured: 'auto',
+            configured_source: 'default',
+            backend_policy_enabled: true,
+            effective_enabled: true,
+            effective_source: 'backend_policy',
+          },
+          rowwise_decode: { enabled: false, source: 'default' },
+          prefix_aware_admission: { enabled: true, source: 'default' },
+          prefill_admission_quantum: {
+            configured: null,
+            configured_source: 'default',
+            backend_policy: 16,
+            effective: 16,
+            effective_source: 'backend_policy',
+          },
+          burst_prefill_admission: true,
+        },
+        actor_active: true,
+      },
       training: {
         runtime_device: 'cuda:0',
         model_weight_device: 'cuda:0',

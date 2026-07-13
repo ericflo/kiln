@@ -406,6 +406,41 @@ curl -s http://localhost:8420/metrics | grep -E 'kiln_gpu_memory_(probe_failed|s
       </article>
 
       <article class="card p-6">
+        <h2 id="batching-pauses-or-throughput" class="text-xl font-semibold mb-4">Inference pauses or throughput collapses at concurrency</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>Streaming appears to pause between tokens, time to first token grows with queued prompts, or a wide CUDA/ROCm/Vulkan run stops scaling even though requests eventually complete.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li>Inspect <code>GET /v1/config</code> at <code>batching</code>: require an active actor, effective mode enabled, and <code>rowwise_decode.enabled=false</code> for ordinary throughput.</li>
+              <li>Compare the configured, backend-policy, effective, and source values for decode width and <code>prefill_admission_quantum</code>. Deterministic mode or token budget can clamp both.</li>
+              <li>Request <code>include_performance=true</code> and compare <code>actor_queue_ms</code>, <code>actor_admission_ms</code>, and <code>actor_prefill_wall_ms</code> with live actor, allocator, reclaim, and KV-resize metrics.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix</div>
+            <p>Put the four controls in <code>[batching]</code>, restart, capture the resolved object, and change one field per A/B. Restore <code>rowwise_decode=false</code> for throughput. A smaller admission quantum can isolate prompt-admission delay but may reduce batch fill; actor-disabled mode is an isolation comparison, not a performance fix.</p>
+          </div>
+        </div>
+        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
+  | jq '.batching, .decode_runtime.max_decode_batch'
+curl -s http://localhost:8420/health \
+  | jq '.decode_runtime.batching_configuration, .decode_runtime.batching_engine, .decode_runtime.memory_governor'
+curl -s http://localhost:8420/metrics \
+  | grep -E 'kiln_batching_engine_|kiln_gpu_memory_|kiln_kv_'</code></pre>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Do not label a scheduling pause as VRAM rebalancing without a matching reclaim, physical resize,
+          synchronization, or memory-pressure event. A long actor queue/admission/prefill phase and a
+          device-memory operation are different hypotheses and require different evidence. CUDA/Vulkan
+          automatically admit up to effective decode width; ROCm/Metal/CPU default to 4, clamped to that
+          width. Every batching change is process-lifetime policy and requires restart.
+        </p>
+      </article>
+
+      <article class="card p-6">
         <h2 id="model-weights-not-found" class="text-xl font-semibold mb-4">Model weights are not found</h2>
         <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
           <div>

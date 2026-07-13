@@ -12,26 +12,51 @@ Run it on a RunPod Kiln pod, not on a shared local worker.
 
 ## Server Setup
 
-Start Kiln with the batching engine and prefix cache enabled. They are on by
-default, but the explicit environment makes benchmark artifacts easier to read:
+Start Kiln with a typed, receipt-bound batching and prefix-cache policy. The
+explicit values make benchmark artifacts readable without relying on ambient
+process environment:
 
-```bash
-export KILN_BATCHING_ENGINE=1
-export KILN_BATCH_PREFIX_AWARE_ADMISSION=1
-export KILN_PREFIX_CACHE_ENABLED=1
-export KILN_MAX_DECODE_BATCH=16
-export KILN_ADAPTER_DIR=/workspace/kiln-adapters
-export KILN_W4A16=1
-export KILN_CUDA_GRAPHS=true
+```toml
+# trajectory-benchmark.toml
+[server]
+max_decode_batch = 16
 
-./target/release/kiln serve --host 0.0.0.0 --port 8420
+[batching]
+mode = "enabled"
+rowwise_decode = false
+prefix_aware_admission = true
+prefill_admission_quantum = "auto"
+
+[prefix_cache]
+enabled = true
+
+[model]
+path = "/workspace/Qwen3.5-4B"
+adapter_dir = "/workspace/kiln-adapters"
+
+[memory]
+cuda_graphs = true
 ```
 
-`KILN_BATCH_PREFIX_AWARE_ADMISSION=1` makes the batching actor hold a queued
+```bash
+./target/release/kiln serve --config trajectory-benchmark.toml
+curl -fsS http://127.0.0.1:8420/v1/config \
+  | jq '{batching, decode_runtime}' \
+  > /workspace/bench/trajectory-batching-config.json
+```
+
+`batching.prefix_aware_admission = true` makes the batching actor hold a queued
 request when an active same-adapter request is a strict token prefix that can be
 reused by the real prefix cache. This avoids duplicate long-prefill work for
 consecutive turns from the same trajectory while still admitting unrelated rows
 that can fill the decode batch.
+
+Verify `batching.actor_active=true`, effective mode enabled, rowwise decode
+false, and prefix-aware admission true in the captured JSON. The automatic
+admission quantum is backend-owned: it is the effective decode width on CUDA
+and Vulkan, and 4 on ROCm, Metal, and CPU, always clamped to that effective
+width. The response records the exact backend, configured, effective, clamp,
+and source values so two runs cannot silently compare different policies.
 
 ## Benchmark
 
@@ -72,6 +97,10 @@ did not produce queued prompts whose complete rendered prompt was a strict token
 prefix of a later queued prompt. In that case this admission policy is correctly
 idle, and the run is still useful as a long-context batching smoke.
 
-For an A/B run, execute the same command once with
-`KILN_BATCH_PREFIX_AWARE_ADMISSION=0` and once with it enabled, using the same
-turn selection, adapter, `max_tokens`, and batch settings.
+For an A/B run, create a second TOML file whose only change is
+`batching.prefix_aware_admission = false`, restart Kiln, and execute the same
+command using the same turn selection, adapter, `max_tokens`, and batch
+settings. Capture `/v1/config.batching` after each restart and keep it with the
+corresponding report. Do not toggle the deprecated
+`KILN_BATCH_PREFIX_AWARE_ADMISSION` alias between live requests; batching
+configuration is immutable for the process lifetime.

@@ -108,18 +108,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 13 top-level sections and 71 fixed leaf
+The accepted TOML surface contains 14 top-level sections and 75 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 71 fixed fields:
+credential. Of the 75 fixed fields:
 
-- 63 implement the canonical mechanical environment name;
-- 42 also retain one or more deprecated compatibility spellings (43 aliases
+- 67 implement the canonical mechanical environment name;
+- 46 also retain one or more deprecated compatibility spellings (47 aliases
   total);
-- 8 have no environment override;
-- the 43 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
+- 8 are config-file-only and have no environment override;
+- the 47 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 71 fixed fields and both dynamic credential fields.
+The tables below cover all 75 fixed fields and both dynamic credential fields.
 
 ## `[server]`
 
@@ -160,6 +160,90 @@ override it.
 `memory.cuda_graphs = true` does not override the profile: the default `stable`
 profile selects eager-only model-runner options because live graph capture is
 disabled.
+
+## `[batching]`
+
+These values are resolved once, after backend selection and after
+`server.deterministic`, `server.max_decode_batch`, and
+`server.max_batch_tokens` determine the effective decode width. Every change
+requires a process restart; none is a live tuning control.
+
+| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+|---|---|---|---|---|
+| `batching.mode` | string enum; `"auto"` | `KILN_BATCHING_MODE` (implemented) | `KILN_BATCHING_ENGINE` (deprecated compatibility) | TOML accepts `auto`, `enabled`, or `disabled`, case-insensitively. Environment input also accepts the strict boolean spellings, mapping true to `enabled` and false to `disabled`. `auto` delegates actor selection to the immutable backend policy; an explicit value wins. Restart required. |
+| `batching.rowwise_decode` | boolean; `false` | `KILN_BATCHING_ROWWISE_DECODE` (implemented) | `KILN_BATCH_DECODE_ROWWISE` (deprecated compatibility) | `false` sends each ready cohort through one true batched forward. `true` issues one forward per row while retaining actor ownership; it is an emergency correctness comparison, normally reduces throughput, and does not increase the effective decode width. Restart required. |
+| `batching.prefix_aware_admission` | boolean; `true` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` (implemented) | `KILN_BATCH_PREFIX_AWARE_ADMISSION` (deprecated compatibility) | When true, a queued same-adapter strict descendant waits while its active shorter prefix can become reusable; independent rows may still be admitted. Disable only for a controlled admission A/B. Restart required. |
+| `batching.prefill_admission_quantum` | `"auto"` or unsigned integer; `"auto"` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` (implemented) | `KILN_BATCH_PREFILL_ADMISSION_QUANTUM` (deprecated compatibility) | An integer must be `1..=65536` and caps how many queued prompts the actor admits in one cycle before returning to decode. `auto` is case-insensitive and uses the backend policy below. The selected value is then clamped to `1..=effective max_decode_batch`; the diagnostics name `effective_decode_width` as final authority when it performs that clamp. Restart required. |
+
+### Backend-owned `auto` policy
+
+`auto` preserves backend qualification rather than imposing one cross-device
+default. The matrix is evaluated against the final effective decode width, not
+the unconstrained backend maximum.
+
+| Backend | `batching.mode = "auto"` | Backend decode width before server constraints | `prefill_admission_quantum = "auto"` | `burst_prefill_admission` diagnostic |
+|---|---:|---:|---:|---:|
+| CUDA | enabled | 8 | effective decode width | true |
+| ROCm | enabled | 8 | 4, clamped to effective width | false |
+| Vulkan | enabled | 64 | effective decode width | false |
+| Metal | disabled | 8 | 4, clamped to effective width | false |
+| CPU/other | enabled | 8 | 4, clamped to effective width | false |
+
+`burst_prefill_admission` is backend-owned and intentionally has no TOML or
+public environment field. On CUDA it lets admission refill the decode width in
+one actor turn. It is reported with the four operator settings so an observed
+CUDA/Vulkan/ROCm difference is not mistaken for a hidden runtime override.
+
+### Effective policy and provenance
+
+`GET /v1/config` reports the exact startup result at
+`batching.configuration` and whether an actor was actually constructed at
+`batching.actor_active`. A typical ROCm default is:
+
+```json
+{
+  "batching": {
+    "configuration": {
+      "mode": {
+        "configured": "auto",
+        "configured_source": "default",
+        "backend_policy_enabled": true,
+        "effective_enabled": true,
+        "effective_source": "backend_policy"
+      },
+      "rowwise_decode": { "enabled": false, "source": "default" },
+      "prefix_aware_admission": { "enabled": true, "source": "default" },
+      "prefill_admission_quantum": {
+        "configured": null,
+        "configured_source": "default",
+        "backend_policy": 4,
+        "effective": 4,
+        "effective_source": "backend_policy"
+      },
+      "burst_prefill_admission": false
+    },
+    "actor_active": true
+  }
+}
+```
+
+For explicit values, the configured source is `config_file` or `environment`.
+The complete effective-source enum is `default`, `backend_policy`,
+`config_file`, `environment`, or `effective_decode_width`. The mode normally
+uses the middle three; `default` is reachable only for an explicit
+programmatic value carrying default provenance, not for ordinary built-in
+`auto`, which resolves through `backend_policy`. The admission quantum uses
+`effective_decode_width` when the final decode width lowers the selected value.
+A configured quantum is retained even when clamped, so intent and execution
+cannot be confused.
+
+`GET /health` repeats the same immutable object at
+`decode_runtime.batching_configuration` beside the optional live
+`decode_runtime.batching_engine` snapshot. The trusted debug response keeps
+the existing `batching_engine.enabled` actor-activity flag and adds the same
+object at `batching_engine.configuration`. Actor activity can be false even
+when configured intent is visible, so clients must not infer execution from
+`mode.configured` alone.
 
 ## `[model]`
 
@@ -453,9 +537,10 @@ Kiln currently exposes several complementary, partial views:
 
 Explicit source tracking (`default`, `config_file`, or `environment`) currently
 exists for `server.serving_profile`, `server.deterministic`,
-`server.stream_stall_grace_ms`, the three batching/prefill budgets, and
-`server.max_decode_batch`, and `memory.reclaim_mode`. Other fields have resolved
-values but do not yet carry per-field source metadata.
+`server.stream_stall_grace_ms`, the three server batching/prefill budgets,
+`server.max_decode_batch`, all four `[batching]` fields, and
+`memory.reclaim_mode`. Other fields have resolved values but do not yet carry
+per-field source metadata.
 
 The `kiln_env_config_hash` binds the serialized effective typed configuration
 and the process's complete `KILN_*` environment map. It is an identity digest,
@@ -475,7 +560,7 @@ These are current implementation facts, not recommended architecture:
    TOML-only values do not control dispatch.
 2. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
    typed object with provenance and backend-derived values.
-3. **Deprecated aliases:** 43 non-canonical spellings across 42 fields remain
+3. **Deprecated aliases:** 47 non-canonical spellings across 46 fields remain
    temporarily for compatibility, including `KILN_DEFAULT_NO_THINK`. Each use
    warns at startup; canonical and compatibility names cannot silently
    disagree.

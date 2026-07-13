@@ -314,6 +314,20 @@ kiln serve --served-model-id Qwen3.5-4B-local</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">Use <code>kiln config</code> to validate built-in defaults plus <code>KILN_*</code> environment overrides, or <code>kiln config --file</code> / <code>kiln config -f</code> to validate a TOML file before starting the server.</p>
       </div>
       <div class="card p-6 lg:col-span-2">
+        <p class="label mb-2">Batching policy</p>
+        <h2 class="text-2xl font-semibold tracking-tight mb-4">Resolve scheduler controls at startup</h2>
+        <p class="mb-4" style="color: var(--fg-dim);">Put production scheduling controls in typed TOML. The canonical environment rule is mechanically derived as <code>KILN_BATCHING_&lt;FIELD&gt;</code>, but files are easier to review and bind into benchmark evidence. Every change requires a server restart.</p>
+<pre class="text-sm"><code>[batching]
+mode = "auto"
+rowwise_decode = false
+prefix_aware_admission = true
+prefill_admission_quantum = "auto"</code></pre>
+<pre class="text-sm mt-4"><code>kiln config --file kiln.toml
+kiln serve --config kiln.toml
+curl -s http://localhost:8420/v1/config | jq '.batching'</code></pre>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>auto</code> keeps backend-qualified actor and admission defaults. The response reports configured source, backend policy, effective selection, decode-width clamping, and <code>actor_active</code>. Use rowwise or actor-disabled modes only as deliberate A/B diagnostics.</p>
+      </div>
+      <div class="card p-6 lg:col-span-2">
         <p class="label mb-2">Logging</p>
         <h2 class="text-2xl font-semibold tracking-tight mb-4">Tune startup output</h2>
         <p class="mb-4" style="color: var(--fg-dim);">Kiln uses the configured log level by default. Add global <code>-v</code> / <code>--verbose</code> for debug startup detail, repeat it as <code>-vv</code> for trace-level kernel and scheduler detail, or use <code>-q</code> / <code>--quiet</code> when you only want warnings and errors. Add <code>--help</code> when you want the exact flags from the installed binary; the examples below stay focused on copy-paste startup and health commands.</p>

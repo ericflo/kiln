@@ -326,6 +326,30 @@ training request
             <p>The paged KV block manager tracks the full-attention layers. Qwen3.5-4B&rsquo;s Gated DeltaNet layers do not need KV cache.</p>
           </div>
         </div>
+        <p class="mt-5 leading-relaxed" style="color: var(--fg-dim);">
+          Startup resolves one immutable <code>BatchingRuntimeConfig</code> after backend selection and
+          effective decode-width resolution. The state boundary applies actor selection, the decode-forward
+          boundary applies true batched versus rowwise decode, and the actor receives only its projected
+          strict-prefix and prompt-admission policy. None of those paths rereads public batching environment
+          variables. <code>auto</code> preserves
+          backend qualification: CUDA, ROCm, Vulkan, and CPU enable the actor while Metal disables it;
+          CUDA/Vulkan fill effective decode width before decode, while ROCm/Metal/CPU use a latency-oriented
+          quantum of 4, clamped to that width. CUDA alone carries backend-owned burst admission.
+        </p>
+        <pre class="mt-5"><code>typed TOML / canonical startup override
+  -> strict parse + source attribution
+  -> backend policy + effective max decode batch
+  -> immutable BatchingRuntimeConfig
+  -> optional batching actor
+  -> live snapshot + request performance metadata</code></pre>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          <code>GET /v1/config</code> returns the configuration plus <code>actor_active</code> under
+          <code>batching</code>;
+          health repeats it at <code>decode_runtime.batching_configuration</code>, and trusted debug adds it
+          at <code>batching_engine.configuration</code>. Configured intent, backend default, effective value,
+          clamp authority, and actual actor construction remain distinct so performance evidence cannot
+          silently inherit an old shell override.
+        </p>
       </article>
 
       <article class="card p-6">

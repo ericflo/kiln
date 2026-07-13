@@ -808,6 +808,12 @@ port = 8420
 request_timeout_secs = 300
 shutdown_timeout_secs = 30
 
+[batching]
+mode = "auto"                         # backend-owned actor selection
+rowwise_decode = false                # one true batched forward per cohort
+prefix_aware_admission = true         # retain strict-prefix reuse opportunity
+prefill_admission_quantum = "auto"    # backend-owned prompt-admission cadence
+
 [model]
 path = "/models/Qwen3.5-4B"        # omit for mock mode
 model_id = "Qwen/Qwen3.5-4B"       # HuggingFace model ID; served as "Qwen3.5-4B" by default
@@ -851,6 +857,10 @@ tool-call rendering.
 | Variable | Description |
 |----------|-------------|
 | `KILN_CONFIG` | Path to config file (default: `kiln.toml`) |
+| `KILN_BATCHING_MODE` | `auto`, `enabled`, or `disabled` actor selection |
+| `KILN_BATCHING_ROWWISE_DECODE` | Strict boolean emergency rowwise comparison |
+| `KILN_BATCHING_PREFIX_AWARE_ADMISSION` | Strict boolean strict-prefix admission policy |
+| `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` | `auto` or 1–65536 prompt admissions per actor cycle |
 | `KILN_MEMORY_GPU_MEMORY_GB` | Override GPU VRAM detection |
 | `KILN_MEMORY_NUM_BLOCKS` | Override KV cache block count |
 | `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS` | Override gradient checkpoint segments |
@@ -858,7 +868,24 @@ tool-call rendering.
 | `KILN_LOGGING_LEVEL` | Override log level |
 | `KILN_LOGGING_FORMAT` | Override log format (`json` or `pretty`) |
 
-See `crates/kiln-server/src/config.rs` for the full configuration schema and validation.
+The canonical startup override rule is mechanical:
+`KILN_<SECTION>_<FIELD>`. The four older batching-actor spellings are deprecated
+compatibility aliases, warn at startup, and cannot disagree with their
+canonical counterpart. Startup resolves one immutable
+`BatchingRuntimeConfig`. The state boundary uses its mode to construct the
+actor, the decode-forward boundary applies its rowwise selector, and the actor
+receives only the projected admission policy it owns. None of those production
+paths rereads the process variables. `auto` enables the actor on CUDA, ROCm,
+Vulkan, and CPU but disables it on Metal. CUDA/Vulkan use effective decode
+width as the automatic admission quantum; ROCm/Metal/CPU use 4, clamped to that
+effective width. CUDA alone uses backend-owned burst admission.
+
+Runtime observability preserves intent separately from execution:
+`GET /v1/config` returns `configuration` and `actor_active` under `batching`,
+health returns the same policy at `decode_runtime.batching_configuration`, and
+trusted debug adds it at `batching_engine.configuration`. See
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for the complete schema,
+validation, provenance, restart, and compatibility contract.
 
 ## Key Data Structures
 

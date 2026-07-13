@@ -915,13 +915,21 @@ Current audit findings and migration order (2026-07-12):
   process environment. Model, tensor, kernel, scheduler, training, eval, UI,
   and request code receive immutable typed policy. Qualification-only controls
   use one explicit internal namespace/profile and are included in provenance.
-- The startup loader now owns one declarative registry for all 63 public fixed
+- The startup loader now owns one declarative registry for all 67 public fixed
   typed leaves. Canonical names derive mechanically from section and field,
   compatibility aliases parse strictly and warn without values, every present
   alias must agree with a canonical value, and typed CLI overrides no longer
   mutate process environment. Eight structured eval/agent leaves remain
   explicitly config-file-only. Lower runtime rereads remain migration work,
   not alternate public configuration.
+- The production batching actor is the first high-risk scheduler subsystem to
+  cross that boundary completely. `[batching]` owns actor selection, true
+  batched versus rowwise decode, strict-prefix-aware admission, and prompt
+  admission quantum. The values resolve once against backend policy and the
+  effective decode width, retain configured/backend/effective provenance, are
+  reported identically by config/health/debug, and require restart. Four old
+  actor spellings remain strict warning aliases; production actor construction
+  no longer reads them directly.
 - The process-wide memory policy now has an explicit device/probe identity,
   detected-and-capped capacity, cached observations, and atomic reservations.
   Direct inference and training library consumers have typed initialization

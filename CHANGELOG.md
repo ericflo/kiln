@@ -30,6 +30,21 @@
   `KILN_DEFAULT_THINKING_BUDGET_MS` set inheritable defaults. Both default to
   unlimited; request `null` opts out of a configured dimension and `0` closes
   thinking immediately.
+- typed batching configuration: `[batching]` now owns actor selection, true
+  batched versus rowwise decode, strict-prefix-aware admission, and the prompt
+  admission quantum. Canonical overrides derive mechanically as
+  `KILN_BATCHING_<FIELD>`; the four older actor spellings remain strict,
+  warning compatibility aliases. Values resolve once after backend and
+  effective decode-width selection, require restart, and are injected into the
+  actor without production runtime environment rereads.
+- batching diagnostics: `/v1/config.batching` separates immutable configured
+  intent, value provenance, backend defaults, effective actor selection,
+  decode-width quantum clamping, and `actor_active`. Health repeats the same
+  policy at `decode_runtime.batching_configuration`, and trusted debug adds it
+  at `batching_engine.configuration`. CUDA/Vulkan preserve width-filling
+  automatic admission, ROCm/Metal/CPU preserve the latency-oriented quantum of
+  four, CUDA preserves backend-owned burst admission, and all are constrained
+  by the final effective decode width.
 - speculative serving: all speculative request and Desktop routes are now
   fail-closed pending local accelerator qualification. `kiln config` and
   startup reject every effective non-off policy before model loading,

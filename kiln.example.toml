@@ -109,6 +109,29 @@ max_decode_batch = "auto"                # Concurrent decode-row ceiling. "auto"
                                       # reasoning_content into content. Requests can override
                                       # this with fold_reasoning_into_content.
 
+[batching]
+mode = "auto"                         # auto | enabled | disabled. Auto preserves the active
+                                      # backend's immutable actor-selection policy: enabled on
+                                      # CUDA, ROCm, Vulkan, and CPU; disabled on Metal. Override
+                                      # strictly with KILN_BATCHING_MODE. The deprecated
+                                      # KILN_BATCHING_ENGINE alias warns at startup.
+rowwise_decode = false                # False issues one true batched forward per ready cohort.
+                                      # True is an emergency correctness comparison that normally
+                                      # reduces throughput. Override with the mechanically derived
+                                      # KILN_BATCHING_ROWWISE_DECODE; restart is required.
+prefix_aware_admission = true         # Defer queued same-adapter strict descendants while their
+                                      # active shorter prefix can become reusable, without blocking
+                                      # independent rows. Override with
+                                      # KILN_BATCHING_PREFIX_AWARE_ADMISSION; restart is required.
+prefill_admission_quantum = "auto"    # Number of queued prompts admitted per actor cycle before
+                                      # returning to decode. Auto uses effective decode width on
+                                      # CUDA/Vulkan and 4 on ROCm/Metal/CPU, then clamps to the
+                                      # effective max_decode_batch. An explicit value must be
+                                      # 1..=65536. Override strictly with
+                                      # KILN_BATCHING_PREFILL_ADMISSION_QUANTUM.
+                                      # /v1/config batching.configuration reports configured,
+                                      # backend-policy, effective, source, and actor-active state.
+
 [model]
 # path = "/path/to/model"            # Required for real inference (omit for mock mode)
 model_id = "Qwen/Qwen3.5-4B"

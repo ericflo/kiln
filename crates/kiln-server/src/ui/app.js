@@ -1844,8 +1844,8 @@ function renderServerStatus(h) {
 
 /* =====================================================================
    Runtime config expander — GET /v1/config (device-scoped capacity,
-   live usable memory, governor policy, KV geometry, training policy, and
-   exact memory-budget partitions).
+   live usable memory, governor policy, batching resolution, KV geometry,
+   training policy, and exact memory-budget partitions).
    The <details> shell is static in index.html as a SIBLING of the keyed
    #server-status region: renderServerStatus innerHTML-swaps that element
    whenever its content key changes (and pollHealth's failure path
@@ -1899,9 +1899,16 @@ function renderRuntimeConfigBody(cfg) {
   const train = cfg.training || {};
   const b = cfg.memory_budget || {};
   const generation = cfg.generation || {};
+  const batching = cfg.batching || {};
+  const batchingConfiguration = batching.configuration || {};
+  const batchingMode = batchingConfiguration.mode || {};
+  const rowwiseDecode = batchingConfiguration.rowwise_decode || {};
+  const prefixAwareAdmission = batchingConfiguration.prefix_aware_admission || {};
+  const prefillAdmissionQuantum = batchingConfiguration.prefill_admission_quantum || {};
   const srcChip = s => s == null ? '' : ` <span class="rc-source" title="Where this value came from">${escapeHtml(String(s))}</span>`;
   const flagChip = (label, title) => ` <span class="rc-source"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(label)}</span>`;
   const onOff = v => v ? 'on' : 'off';
+  const enabledState = v => v === true ? 'on' : v === false ? 'off' : '—';
   const num = v => (typeof v === 'number' && isFinite(v)) ? v.toLocaleString() : '—';
   const gib = v => (typeof v === 'number' && isFinite(v)) ? v.toFixed(2) + ' GiB' : '—';
   const memory = (gibValue, bytesValue) => {
@@ -1935,6 +1942,12 @@ function renderRuntimeConfigBody(cfg) {
           : 'The effective reclaim behavior differs from the requested configuration.',
       )
     : '';
+  const batchingConfiguredMode = batchingMode.configured == null
+    ? '—'
+    : String(batchingMode.configured);
+  const configuredPrefillQuantum = Object.prototype.hasOwnProperty.call(prefillAdmissionQuantum, 'configured')
+    ? prefillAdmissionQuantum.configured == null ? 'auto' : num(prefillAdmissionQuantum.configured)
+    : '—';
   return `
     <div class="rc-groups">
       <div class="rc-group">
@@ -1963,6 +1976,19 @@ function renderRuntimeConfigBody(cfg) {
         <div class="rc-group-title">KV cache</div>
         ${runtimeConfigRow('Blocks', `<strong>${num(kv.num_blocks)}</strong>${srcChip(kv.num_blocks_source)}`, 'Paged-attention blocks allocated by the running backend, either automatically sized or explicitly configured.')}
         ${runtimeConfigRow('FP8 cache', `<strong>${onOff(kv.fp8_enabled)}</strong>`, 'Whether the KV cache stores keys/values in FP8 (halves cache memory per token).')}
+      </div>
+      <div class="rc-group">
+        <div class="rc-group-title">Batching</div>
+        ${runtimeConfigRow('Actor', `<strong>${batching.actor_active === true ? 'active' : batching.actor_active === false ? 'inactive' : '—'}</strong>`, 'Whether the batching actor is active in the current model state.')}
+        ${runtimeConfigRow('Mode configured', `<strong>${escapeHtml(batchingConfiguredMode)}</strong>${srcChip(batchingMode.configured_source)}`, 'The typed batching mode selected at startup.')}
+        ${runtimeConfigRow('Backend policy', `<strong>${enabledState(batchingMode.backend_policy_enabled)}</strong>`, 'The backend default used when batching mode is auto.')}
+        ${runtimeConfigRow('Mode effective', `<strong>${enabledState(batchingMode.effective_enabled)}</strong>${srcChip(batchingMode.effective_source)}`, 'The immutable batching mode after resolving the configured mode against backend policy.')}
+        ${runtimeConfigRow('Rowwise decode', `<strong>${enabledState(rowwiseDecode.enabled)}</strong>${srcChip(rowwiseDecode.source)}`, 'Whether batched decode executes one row at a time.')}
+        ${runtimeConfigRow('Prefix admission', `<strong>${enabledState(prefixAwareAdmission.enabled)}</strong>${srcChip(prefixAwareAdmission.source)}`, 'Whether admission accounts for reusable prompt prefixes.')}
+        ${runtimeConfigRow('Prefill configured', `<strong>${configuredPrefillQuantum}</strong>${srcChip(prefillAdmissionQuantum.configured_source)}`, 'Configured prompt-admission quantum; auto delegates to backend policy.')}
+        ${runtimeConfigRow('Prefill policy', `<strong>${num(prefillAdmissionQuantum.backend_policy)}</strong>`, 'Backend-selected prompt-admission quantum before an explicit value or decode-width bound is applied.')}
+        ${runtimeConfigRow('Prefill effective', `<strong>${num(prefillAdmissionQuantum.effective)}</strong>${srcChip(prefillAdmissionQuantum.effective_source)}`, 'Prompt-admission quantum used by the batching actor.')}
+        ${runtimeConfigRow('Burst prefill', `<strong>${enabledState(batchingConfiguration.burst_prefill_admission)}</strong>`, 'Whether the backend admits a burst of prefill work between decode steps.')}
       </div>
       <div class="rc-group">
         <div class="rc-group-title">Training</div>
