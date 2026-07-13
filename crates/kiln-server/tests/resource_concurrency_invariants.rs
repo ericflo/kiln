@@ -567,30 +567,35 @@ fn prefix_cache_ownership_is_request_scoped_through_stream_cleanup() {
 }
 
 #[test]
-fn rocm_graph_state_is_decode_row_owned() {
+fn rocm_graph_state_uses_bounded_reusable_slots() {
     let rocm_graph = read("crates/kiln-model/src/rocm_graph.rs");
     let generate = read("crates/kiln-model/src/generate.rs");
 
     for required in [
         "enum RocmGraphOwner",
-        "DecodeRow(u64)",
+        "Slot(u64)",
         "struct RocmGraphCacheKey",
+        "struct RocmGraphSlotState",
         "owner: RocmGraphOwner",
         "captured: HashMap<RocmGraphCacheKey, CapturedDecodeGraphRocm>",
+        "graph_slots: HashMap<RocmGraphOwner, RocmGraphSlotState>",
+        "decode_row_slots: HashMap<u64, RocmGraphOwner>",
         "decode_timelines: HashMap<RocmGraphOwner, RocmGraphOwnerTimeline>",
+        "fn bind_decode_row_to_slot",
+        "refresh_batched_state_from_rows_in_place",
         "fn prepare_owner_decode",
-        "remove_graphs_owned_by(&mut self.captured, owner)",
         "RocmGraphCacheKey::new(owner, requested_key.clone())",
         "RocmGraphCacheKey::new(owner, key)",
     ] {
         assert!(
             rocm_graph.contains(required),
-            "ROCm HIP graph decode state must be keyed by decode-row owner: {required}"
+            "ROCm HIP graph decode state must use bounded reusable slots: {required}"
         );
     }
 
     for forbidden in [
         "captured: HashMap<RocmGraphKey, CapturedDecodeGraphRocm>",
+        "DecodeRow(u64)",
         "last_decode_seq_len: None",
         "last_decode_block0: None",
         "Anonymous",
@@ -599,7 +604,7 @@ fn rocm_graph_state_is_decode_row_owned() {
     ] {
         assert!(
             !rocm_graph.contains(forbidden),
-            "ROCm HIP graph runner must not keep a runner-wide decode timeline: {forbidden}"
+            "ROCm HIP graph runner must not regress to row-owned native graphs: {forbidden}"
         );
     }
 
@@ -718,12 +723,13 @@ fn rocm_graph_decode_row_state_is_released_before_finish_work() {
 
     for required in [
         "pub fn release_decode_row(&mut self, row_id: u64)",
-        "remove_graphs_owned_by(&mut self.captured, owner)",
+        "self.decode_row_slots.remove(&row_id)",
         "self.decode_timelines.remove(&owner)",
+        "slot.assigned_row = None",
     ] {
         assert!(
             rocm_graph.contains(required),
-            "ROCm graph request cleanup must release captured graphs and timelines: {required}"
+            "ROCm graph request cleanup must return slots and release row timelines: {required}"
         );
     }
 
@@ -897,6 +903,11 @@ fn rocm_graph_owner_lifecycle_is_bounded_and_observable() {
     for field in [
         "decode_owner_release_count",
         "decode_owner_graph_release_count",
+        "graph_slot_create_count",
+        "graph_slot_reuse_count",
+        "graph_slot_count",
+        "active_graph_slot_count",
+        "idle_graph_slot_count",
         "tracked_decode_owner_count",
     ] {
         assert!(
@@ -914,12 +925,13 @@ fn rocm_graph_owner_lifecycle_is_bounded_and_observable() {
         "fn prepare_owner_decode",
     );
     for field in [
-        "record_decode_owner_release(evicted_graphs)",
+        "self.decode_row_slots.remove(&row_id)",
+        "record_decode_owner_release(0)",
         "event = \"rocm_graph_decode_owner_released\"",
         "row_id",
-        "evicted_graphs",
+        "retained_graphs",
         "removed_timeline",
-        "tracked_decode_owner_count = self.decode_timelines.len()",
+        "active_graph_slot_count = self.decode_row_slots.len()",
     ] {
         assert!(
             release.contains(field),
@@ -934,7 +946,8 @@ fn rocm_graph_owner_lifecycle_is_bounded_and_observable() {
     );
     for field in [
         "event = \"rocm_graph_decode_owner_started\"",
-        "row_id = owner.row_id()",
+        "row_id",
+        "graph_slot_id = owner.slot_id()",
         "seq_len",
         "block0 = block0.unwrap_or_default()",
         "block0_present = block0.is_some()",
@@ -946,6 +959,38 @@ fn rocm_graph_owner_lifecycle_is_bounded_and_observable() {
     }
     assert!(generate.contains("event = \"direct_decode_receiver_dropped\""));
     assert!(generate.contains("row_id = rocm_owner.row_id()"));
+}
+
+#[test]
+fn decode_batcher_is_joined_before_accelerator_teardown() {
+    let generate = read("crates/kiln-model/src/generate.rs");
+    let main = read("crates/kiln-server/src/main.rs");
+
+    for required in [
+        "sender: Mutex<Option<mpsc::Sender<DecodeBatchJob>>>",
+        "worker: Mutex<Option<std::thread::JoinHandle<()>>>",
+        "pub fn shutdown(&self) -> Result<()>",
+        "impl Drop for DecodeBatcher",
+    ] {
+        assert!(
+            generate.contains(required),
+            "decode batcher must own and join its worker: {required}"
+        );
+    }
+    let batcher_shutdown = source_between(
+        &generate,
+        "pub fn shutdown(&self) -> Result<()>",
+        "fn decode_next_token_greedy",
+    );
+    assert!(batcher_shutdown.contains(".join()"));
+    let shutdown = source_between(
+        &main,
+        "if let Some(decode_batcher) = decode_batcher_for_shutdown",
+        "if let Some(cleanup) = model_snapshot_cleanup",
+    );
+    assert!(shutdown.contains("decode_batcher"));
+    assert!(shutdown.contains(".shutdown()"));
+    assert!(shutdown.contains("before accelerator teardown"));
 }
 
 #[test]

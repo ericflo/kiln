@@ -328,8 +328,18 @@ GRAPH_MONOTONIC_FIELDS = (
     "replay_successes",
     "replay_failures",
     "failures",
+    "decode_owner_release_count",
+    "decode_owner_graph_release_count",
+    "graph_slot_create_count",
+    "graph_slot_reuse_count",
 )
-GRAPH_GAUGE_FIELDS = ("captured_graph_count",)
+GRAPH_GAUGE_FIELDS = (
+    "captured_graph_count",
+    "graph_slot_count",
+    "active_graph_slot_count",
+    "idle_graph_slot_count",
+    "tracked_decode_owner_count",
+)
 GRAPH_FALLBACK_REASON_FIELDS = (
     "warmup_forward_failure",
     "cold_cache_host_round_trip",
@@ -2087,6 +2097,12 @@ def graph_snapshot(health: dict[str, Any]) -> dict[str, int]:
         snapshot["capture_failures"] + snapshot["replay_failures"]
     ):
         raise QualificationError("ROCm graph aggregate failure counter is inconsistent")
+    if snapshot["graph_slot_count"] != (
+        snapshot["active_graph_slot_count"] + snapshot["idle_graph_slot_count"]
+    ):
+        raise QualificationError("ROCm graph active and idle slots do not sum to total")
+    if snapshot["tracked_decode_owner_count"] > snapshot["active_graph_slot_count"]:
+        raise QualificationError("ROCm graph timelines exceed active graph slots")
     fallbacks = graph.get("fallbacks")
     if not isinstance(fallbacks, dict):
         raise QualificationError("health.decode_runtime.rocm_graphs.fallbacks is missing")

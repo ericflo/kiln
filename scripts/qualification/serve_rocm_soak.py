@@ -32,6 +32,7 @@ CANCELLATION_MAX_TOKENS = 512
 CANCELLATION_PROMPT_WORDS = 48
 QUALIFICATION_DURATION_SECONDS = 1800.0
 MAX_STEADY_STATE_WARMUP_WAVES = 16
+GRAPH_CACHE_MAX = 12
 MIN_STABILIZATION_CYCLES = 4
 MAX_STABILIZATION_CYCLES = 8
 REQUIRED_STABLE_CYCLES = 2
@@ -53,8 +54,16 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "graph_capture_failure_count": ("count", "sum", True),
     "graph_capture_success_count": ("count", "sum", False),
     "graph_fallback_count": ("count", "sum", True),
+    "graph_retained_count_end": ("graphs", "exact", False),
+    "graph_retained_count_start": ("graphs", "exact", False),
     "graph_replay_failure_count": ("count", "sum", True),
     "graph_replay_success_count": ("count", "sum", False),
+    "graph_slot_active_count_end": ("slots", "exact", True),
+    "graph_slot_count_end": ("slots", "exact", False),
+    "graph_slot_count_start": ("slots", "exact", False),
+    "graph_slot_create_count": ("count", "sum", True),
+    "graph_slot_idle_count_end": ("slots", "exact", False),
+    "graph_slot_reuse_count": ("count", "sum", False),
     "gpu_memory_baseline_bytes": ("bytes", "exact", True),
     "gpu_memory_end_bytes": ("bytes", "exact", True),
     "gpu_memory_growth_bytes": ("bytes", "exact", True),
@@ -127,6 +136,7 @@ def effective_config(
             "cancellation_prompt_words": CANCELLATION_PROMPT_WORDS,
             "cancel_every_waves": CANCEL_EVERY_WAVES,
             "max_tokens": MAX_TOKENS,
+            "rocm_graph_cache_max": GRAPH_CACHE_MAX,
             "memory_growth_limit_bytes": memory_growth_limit_bytes,
             "minimum_duration_seconds": minimum_duration_seconds,
             "outlier_absolute_ms": int(mixed.OUTLIER_ABSOLUTE_MS),
@@ -374,6 +384,7 @@ def execute(
     environment = mixed.server_environment(
         RUNTIME_VARIANT, model_path, port, adapter_dir, snapshot_dir
     )
+    environment["KILN_ROCM_GRAPH_CACHE_MAX"] = str(GRAPH_CACHE_MAX)
     process = subprocess.Popen(
         [str(binary), "--config", "/dev/null", "serve", "--served-model-id", mixed.MODEL_ID],
         cwd=ROOT,
@@ -560,10 +571,18 @@ def execute(
                     cycle_failures.append(
                         "graph failure or fallback occurred during stabilization"
                     )
-                if graph_stable["captured_graph_count"] != 0:
+                if (
+                    graph_stable["active_graph_slot_count"] != 0
+                    or graph_stable["tracked_decode_owner_count"] != 0
+                ):
                     cycle_failures.append(
-                        "stabilization retained a live captured graph"
+                        "stabilization retained an active graph slot or timeline"
                     )
+                if (
+                    graph_stable["captured_graph_count"] > GRAPH_CACHE_MAX
+                    or graph_stable["graph_slot_count"] > GRAPH_CACHE_MAX
+                ):
+                    cycle_failures.append("stabilization exceeded the graph cache bound")
                 if unaccounted_blocks(batching_stable, prefix_stable) != 0:
                     cycle_failures.append(
                         "stabilization retained blocks outside the prefix cache"
@@ -692,10 +711,18 @@ def execute(
             prefix = prefix_cache_snapshot(health)
             if graph["failures"] != graph_start["failures"]:
                 wave_failures.append(f"graph failure counter changed in wave {wave}")
-            if graph["captured_graph_count"] != 0:
+            if (
+                graph["active_graph_slot_count"] != 0
+                or graph["tracked_decode_owner_count"] != 0
+            ):
                 wave_failures.append(
-                    f"wave {wave} retained {graph['captured_graph_count']} graphs"
+                    f"wave {wave} retained an active graph slot or timeline"
                 )
+            if (
+                graph["captured_graph_count"] > GRAPH_CACHE_MAX
+                or graph["graph_slot_count"] > GRAPH_CACHE_MAX
+            ):
+                wave_failures.append(f"wave {wave} exceeded the graph cache bound")
             leaked_blocks = unaccounted_blocks(batching, prefix)
             if leaked_blocks != 0:
                 wave_failures.append(
@@ -805,11 +832,23 @@ def execute(
                 graph_start, graph_end, "capture_successes"
             ),
             "graph_fallback_count": fallback_delta,
+            "graph_retained_count_end": graph_end["captured_graph_count"],
+            "graph_retained_count_start": graph_start["captured_graph_count"],
             "graph_replay_failure_count": mixed.counter_delta(
                 graph_start, graph_end, "replay_failures"
             ),
             "graph_replay_success_count": mixed.counter_delta(
                 graph_start, graph_end, "replay_successes"
+            ),
+            "graph_slot_active_count_end": graph_end["active_graph_slot_count"],
+            "graph_slot_count_end": graph_end["graph_slot_count"],
+            "graph_slot_count_start": graph_start["graph_slot_count"],
+            "graph_slot_create_count": mixed.counter_delta(
+                graph_start, graph_end, "graph_slot_create_count"
+            ),
+            "graph_slot_idle_count_end": graph_end["idle_graph_slot_count"],
+            "graph_slot_reuse_count": mixed.counter_delta(
+                graph_start, graph_end, "graph_slot_reuse_count"
             ),
             "gpu_memory_baseline_bytes": gpu_start,
             "gpu_memory_end_bytes": gpu_end,
@@ -892,6 +931,7 @@ def execute(
             "graph_capture_failure_count",
             "graph_replay_failure_count",
             "graph_fallback_count",
+            "graph_slot_active_count_end",
             "external_yield_sync_failure_count",
             "external_yield_sync_slow_count",
             "batching_error_count",
@@ -905,6 +945,14 @@ def execute(
                 failures.append(f"{name}={values[name]}, expected 0")
         if values["graph_replay_success_count"] < 1:
             failures.append("soak completed without a measured graph replay")
+        if values["graph_slot_reuse_count"] < 1:
+            failures.append("soak completed without measured graph-slot reuse")
+        if values["graph_retained_count_end"] > GRAPH_CACHE_MAX:
+            failures.append("retained graph residency exceeded the graph cache bound")
+        if values["graph_slot_count_end"] > GRAPH_CACHE_MAX:
+            failures.append("graph-slot residency exceeded the graph cache bound")
+        if values["graph_slot_idle_count_end"] != values["graph_slot_count_end"]:
+            failures.append("not every retained graph slot was idle at final drain")
         if values["prefix_cache_lookup_hit_count"] < 1:
             failures.append("soak completed without a measured prefix-cache hit")
         if values["prefix_cache_hit_blocks"] < 1:

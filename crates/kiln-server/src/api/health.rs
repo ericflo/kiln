@@ -362,7 +362,12 @@ struct RocmGraphInfo {
     failures: Option<u64>,
     decode_owner_release_count: Option<u64>,
     decode_owner_graph_release_count: Option<u64>,
+    graph_slot_create_count: Option<u64>,
+    graph_slot_reuse_count: Option<u64>,
     captured_graph_count: Option<usize>,
+    graph_slot_count: Option<usize>,
+    active_graph_slot_count: Option<usize>,
+    idle_graph_slot_count: Option<usize>,
     tracked_decode_owner_count: Option<usize>,
     fallbacks: Option<kiln_model::RocmGraphFallbackStats>,
 }
@@ -390,7 +395,12 @@ fn rocm_graph_info(stats: Option<kiln_model::RocmGraphStats>) -> RocmGraphInfo {
         decode_owner_release_count: stats.map(|snapshot| snapshot.decode_owner_release_count),
         decode_owner_graph_release_count: stats
             .map(|snapshot| snapshot.decode_owner_graph_release_count),
+        graph_slot_create_count: stats.map(|snapshot| snapshot.graph_slot_create_count),
+        graph_slot_reuse_count: stats.map(|snapshot| snapshot.graph_slot_reuse_count),
         captured_graph_count: stats.map(|snapshot| snapshot.captured_graph_count),
+        graph_slot_count: stats.map(|snapshot| snapshot.graph_slot_count),
+        active_graph_slot_count: stats.map(|snapshot| snapshot.active_graph_slot_count),
+        idle_graph_slot_count: stats.map(|snapshot| snapshot.idle_graph_slot_count),
         tracked_decode_owner_count: stats.map(|snapshot| snapshot.tracked_decode_owner_count),
         fallbacks: stats.map(|snapshot| snapshot.fallbacks),
     }
@@ -1116,7 +1126,12 @@ mod tests {
             failures: 2,
             decode_owner_release_count: 3,
             decode_owner_graph_release_count: 4,
-            captured_graph_count: 0,
+            graph_slot_create_count: 2,
+            graph_slot_reuse_count: 7,
+            captured_graph_count: 2,
+            graph_slot_count: 2,
+            active_graph_slot_count: 1,
+            idle_graph_slot_count: 1,
             tracked_decode_owner_count: 1,
             fallbacks: kiln_model::RocmGraphFallbackStats {
                 total: 8,
@@ -1150,7 +1165,12 @@ mod tests {
         assert_eq!(json["failures"], 2);
         assert_eq!(json["decode_owner_release_count"], 3);
         assert_eq!(json["decode_owner_graph_release_count"], 4);
-        assert_eq!(json["captured_graph_count"], 0);
+        assert_eq!(json["graph_slot_create_count"], 2);
+        assert_eq!(json["graph_slot_reuse_count"], 7);
+        assert_eq!(json["captured_graph_count"], 2);
+        assert_eq!(json["graph_slot_count"], 2);
+        assert_eq!(json["active_graph_slot_count"], 1);
+        assert_eq!(json["idle_graph_slot_count"], 1);
         assert_eq!(json["tracked_decode_owner_count"], 1);
         assert_eq!(json["fallbacks"]["total"], 8);
         assert_eq!(json["fallbacks"]["shape_dependent_attention"], 1);
@@ -1419,7 +1439,12 @@ mod tests {
             "failures",
             "decode_owner_release_count",
             "decode_owner_graph_release_count",
+            "graph_slot_create_count",
+            "graph_slot_reuse_count",
             "captured_graph_count",
+            "graph_slot_count",
+            "active_graph_slot_count",
+            "idle_graph_slot_count",
             "tracked_decode_owner_count",
         ] {
             assert_eq!(rocm_graphs[counter], 0, "unexpected {counter}");

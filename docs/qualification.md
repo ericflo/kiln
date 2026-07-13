@@ -161,6 +161,12 @@ reason, every fallback lasting at least 100 ms, and every failed eager fallback
 also emits `event=rocm_graph_fallback` with attempt, eager, and total duration.
 Qualification validates the health invariants and attributes these events to
 the exact ITL window; unknown reason strings do not receive graph attribution.
+The same health object exposes retained graph and reusable-slot gauges plus
+lifetime slot-create/reuse counters. A logical decode row borrows one slot;
+request drain removes its continuity timeline and returns the slot to an idle
+pool without destroying native graphs or their graph-stable recurrent buffers.
+Adapter invalidation destroys native graphs before their buffers. Graceful
+server shutdown closes and joins the decode worker before accelerator teardown.
 
 The stable serving run also attests the default 64-token prompt-work ceiling
 (`server.max_prefill_tokens_per_cycle`), the default four-layer yield ceiling
@@ -229,9 +235,10 @@ python3 scripts/qualification/run.py \
   qualification/workloads/serving-rocm-development-soak-v1.json
 ```
 
-The driver builds once, starts one server process, warms ROCm graphs, and fills
-the bounded prefix cache to its declared entry/state capacity before recording
-the post-warmup memory baseline or starting the 30-minute measurement clock.
+The driver builds once, starts one server process with a 12-graph residency
+limit, warms ROCm graphs, and fills the bounded prefix cache to its declared
+entry/state capacity before recording the post-warmup memory baseline or
+starting the 30-minute measurement clock.
 It then exercises complete fixed-prompt concurrency cycles, including periodic
 cancellation, until GPU-used and server-RSS deltas remain within 64 MiB and 16
 MiB respectively for two consecutive cycles. This convergence requires at
@@ -246,8 +253,11 @@ buckets. Every fifth wave also cancels a longer request using a unique marker.
 Slot prompts repeat across waves so prefix hits and cached-block reuse are
 measured. After each wave, the driver requires the engine to drain, every used
 KV block to be owned by the prefix cache, zero active cache leases or pending
-releases, stable cache residency, no graph to remain live, the process to
-remain alive, and runtime/debug policy attestations to remain consistent.
+releases, stable cache residency, zero active graph slots or row timelines,
+at most 12 retained graphs and slots, the process to remain alive, and
+runtime/debug policy attestations to remain consistent. Idle slots and their
+native graphs remain resident for reuse. The final drain requires every
+retained slot to be idle, and the measured phase must exercise slot reuse.
 
 The result fails on any request or cancellation error, graph capture/replay
 failure, typed eager fallback, backend synchronization failure or 100 ms slow
@@ -257,8 +267,10 @@ unaccounted block, active cache lease, pending release, dirty shutdown,
 snapshot residue, or GPU/RSS peak more than 512 MiB above the post-warmup
 baseline. Attributed outliers remain counted for review. The receipt also
 records p50/p99/p99.9 TTFT and ITL, graph activity, prefix-cache reuse,
-external-yield synchronization, memory baselines/peaks, request/token counts,
-and cancellation count.
+graph/slot residency and reuse, external-yield synchronization, memory
+baselines/peaks, request/token counts, and cancellation count. Shutdown must
+return zero without force after the decode worker is joined, and snapshot
+cleanup must leave no residue.
 
 This `kind: soak` workload is intentionally a non-comparative pass/fail gate,
 so its `comparison_policy` is null. Do not use it to claim relative throughput

@@ -1249,12 +1249,15 @@ async fn main() -> Result<()> {
     // Snapshot the batching engine handle so the signal handler can
     // proactively stop it. The handle is cheap to clone (just an mpsc
     // sender + a snapshot atomic).
-    let engine_for_shutdown = match app_state_for_shutdown.backend.as_ref() {
-        ModelBackend::Real {
-            batching_engine, ..
-        } => batching_engine.clone(),
-        ModelBackend::Mock { .. } => None,
-    };
+    let (engine_for_shutdown, decode_batcher_for_shutdown) =
+        match app_state_for_shutdown.backend.as_ref() {
+            ModelBackend::Real {
+                batching_engine,
+                decode_batcher,
+                ..
+            } => (batching_engine.clone(), decode_batcher.clone()),
+            ModelBackend::Mock { .. } => (None, None),
+        };
 
     // Serve until the shutdown signal triggers + axum drains. The drain
     // is bounded by a watchdog set up *inside* `shutdown_signal` once
@@ -1268,6 +1271,13 @@ async fn main() -> Result<()> {
             shutdown_timeout_secs,
         ))
         .await?;
+
+    if let Some(decode_batcher) = decode_batcher_for_shutdown {
+        decode_batcher
+            .shutdown()
+            .context("stop and join decode batcher before accelerator teardown")?;
+        tracing::debug!("decode batcher stopped and joined");
+    }
 
     if let Some(cleanup) = model_snapshot_cleanup {
         cleanup

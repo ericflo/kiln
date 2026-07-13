@@ -1312,7 +1312,8 @@ fn decode_hot_path_fallback_disabled_context(
 /// single-token job to this worker; the worker groups same-position jobs and
 /// calls `ModelRunner::decode_next_tokens_paged_contiguous_batch_greedy`.
 pub struct DecodeBatcher {
-    sender: mpsc::Sender<DecodeBatchJob>,
+    sender: Mutex<Option<mpsc::Sender<DecodeBatchJob>>>,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     counters: Arc<DecodeBatcherCounters>,
 }
 
@@ -1413,7 +1414,7 @@ impl DecodeBatcher {
             failed_jobs: AtomicUsize::new(0),
         });
         let counters_for_worker = counters.clone();
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("kiln-decode-batcher".to_string())
             .spawn(move || {
                 run_decode_batcher_worker(
@@ -1427,7 +1428,11 @@ impl DecodeBatcher {
             })
             .map_err(|e| anyhow::anyhow!("failed to spawn decode batcher worker: {e}"))?;
 
-        Ok(Arc::new(Self { sender, counters }))
+        Ok(Arc::new(Self {
+            sender: Mutex::new(Some(sender)),
+            worker: Mutex::new(Some(worker)),
+            counters,
+        }))
     }
 
     pub fn max_observed_batch(&self) -> usize {
@@ -1450,6 +1455,32 @@ impl DecodeBatcher {
         }
     }
 
+    /// Close the rendezvous queue and join its worker before accelerator
+    /// runtime teardown. The worker owns a model-runner reference, so leaving
+    /// it detached can race graph-buffer destruction with HIP/CUDA finalizers.
+    pub fn shutdown(&self) -> Result<()> {
+        self.sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let Some(worker) = worker else {
+            return Ok(());
+        };
+        anyhow::ensure!(
+            worker.thread().id() != std::thread::current().id(),
+            "decode batcher cannot join itself"
+        );
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("decode batcher worker panicked during shutdown"))?;
+        Ok(())
+    }
+
     fn decode_next_token_greedy(
         &self,
         input_token: TokenId,
@@ -1468,10 +1499,19 @@ impl DecodeBatcher {
             skip_gdn_state_readback,
             response: response_tx,
         };
-        if let Err(err) = self.sender.send(job) {
+        let sender_guard = self
+            .sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(sender) = sender_guard.as_ref() else {
+            *linear_state = job.linear_state;
+            anyhow::bail!("decode batcher worker is shutting down");
+        };
+        if let Err(err) = sender.send(job) {
             *linear_state = err.0.linear_state;
             anyhow::bail!("decode batcher worker is not running");
         }
+        drop(sender_guard);
         self.counters.submitted_jobs.fetch_add(1, Ordering::Relaxed);
 
         match response_rx.recv() {
@@ -1496,6 +1536,18 @@ impl DecodeBatcher {
                 anyhow::bail!("{error}");
             }
             Err(err) => anyhow::bail!("decode batcher worker disconnected before reply: {err}"),
+        }
+    }
+}
+
+impl Drop for DecodeBatcher {
+    fn drop(&mut self) {
+        if let Err(error) = self.shutdown() {
+            tracing::error!(
+                event = "decode_batcher_shutdown_failed",
+                error = %error,
+                "decode batcher failed to join during drop"
+            );
         }
     }
 }

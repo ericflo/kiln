@@ -59,7 +59,15 @@ def health_fixture(
         "replay_successes": 0,
         "replay_failures": 0,
         "failures": 0,
+        "decode_owner_release_count": 0,
+        "decode_owner_graph_release_count": 0,
+        "graph_slot_create_count": 0,
+        "graph_slot_reuse_count": 0,
         "captured_graph_count": 0,
+        "graph_slot_count": 0,
+        "active_graph_slot_count": 0,
+        "idle_graph_slot_count": 0,
+        "tracked_decode_owner_count": 0,
         "fallbacks": {
             "total": 0,
             "warmup_forward_failure": 0,
@@ -1263,6 +1271,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "replay_attempts": 1,
                 "replay_successes": 1,
                 "captured_graph_count": 1,
+                "graph_slot_create_count": 1,
+                "graph_slot_count": 1,
+                "idle_graph_slot_count": 1,
             }
         )
         after = json.loads(json.dumps(warmup))
@@ -1581,6 +1592,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "replay_attempts": 8,
                 "replay_successes": 8,
                 "captured_graph_count": 1,
+                "graph_slot_create_count": 1,
+                "graph_slot_count": 1,
+                "idle_graph_slot_count": 1,
             }
         )
         end_batching = end["decode_runtime"]["batching_engine"]

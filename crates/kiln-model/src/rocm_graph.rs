@@ -213,14 +213,14 @@ impl RocmGraphKey {
 #[cfg(feature = "rocm")]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum RocmGraphOwner {
-    DecodeRow(u64),
+    Slot(u64),
 }
 
 #[cfg(feature = "rocm")]
 impl RocmGraphOwner {
-    fn row_id(self) -> u64 {
+    fn slot_id(self) -> u64 {
         match self {
-            Self::DecodeRow(row_id) => row_id,
+            Self::Slot(slot_id) => slot_id,
         }
     }
 }
@@ -240,20 +240,16 @@ impl RocmGraphCacheKey {
 }
 
 #[cfg(feature = "rocm")]
-fn remove_graphs_owned_by<T>(
-    captured: &mut HashMap<RocmGraphCacheKey, T>,
-    owner: RocmGraphOwner,
-) -> usize {
-    let before = captured.len();
-    captured.retain(|key, _| key.owner != owner);
-    before - captured.len()
-}
-
-#[cfg(feature = "rocm")]
 #[derive(Default)]
 struct RocmGraphOwnerTimeline {
     last_decode_seq_len: Option<usize>,
     last_decode_block0: Option<u32>,
+}
+
+#[cfg(feature = "rocm")]
+struct RocmGraphSlotState {
+    assigned_row: Option<u64>,
+    linear_state: LinearAttentionState,
 }
 
 /// A captured HIP graph ready for replay, plus every graph-stable buffer whose
@@ -386,6 +382,8 @@ struct RocmGraphCounters {
     replay_failures: u64,
     decode_owner_release_count: u64,
     decode_owner_graph_release_count: u64,
+    graph_slot_create_count: u64,
+    graph_slot_reuse_count: u64,
     fallbacks: RocmGraphFallbackStats,
 }
 
@@ -501,6 +499,14 @@ impl RocmGraphCounters {
             .saturating_add(released_graphs as u64);
     }
 
+    fn record_graph_slot_create(&mut self) {
+        self.graph_slot_create_count = self.graph_slot_create_count.saturating_add(1);
+    }
+
+    fn record_graph_slot_reuse(&mut self) {
+        self.graph_slot_reuse_count = self.graph_slot_reuse_count.saturating_add(1);
+    }
+
     fn record_fallback(
         &mut self,
         reason: RocmGraphFallbackReason,
@@ -548,8 +554,18 @@ pub struct RocmGraphStats {
     pub decode_owner_release_count: u64,
     /// Captured graphs evicted by finished-owner cleanup.
     pub decode_owner_graph_release_count: u64,
+    /// Persistent graph slots created over the runner lifetime.
+    pub graph_slot_create_count: u64,
+    /// Finished slots rebound to a later logical decode row.
+    pub graph_slot_reuse_count: u64,
     /// Graphs currently retained in the live cache.
     pub captured_graph_count: usize,
+    /// Persistent recurrent-state slots currently retained.
+    pub graph_slot_count: usize,
+    /// Retained slots currently assigned to live logical decode rows.
+    pub active_graph_slot_count: usize,
+    /// Retained slots available for a later logical decode row.
+    pub idle_graph_slot_count: usize,
     /// Decode owners whose continuity timeline is currently retained.
     pub tracked_decode_owner_count: usize,
     /// Closed-reason eager fallback counts and latency.
@@ -567,6 +583,15 @@ pub struct RocmGraphRunner {
     warmup_done: bool,
     #[cfg(feature = "rocm")]
     captured: HashMap<RocmGraphCacheKey, CapturedDecodeGraphRocm>,
+    /// Stable recurrent/conv buffers captured by each graph slot. This field is
+    /// declared after `captured` so native graphs are destroyed before their
+    /// state buffers when the runner is dropped or invalidated.
+    #[cfg(feature = "rocm")]
+    graph_slots: HashMap<RocmGraphOwner, RocmGraphSlotState>,
+    #[cfg(feature = "rocm")]
+    decode_row_slots: HashMap<u64, RocmGraphOwner>,
+    #[cfg(feature = "rocm")]
+    next_graph_slot_id: u64,
     /// Geometries whose decode forward is not capture-safe and the typed eager
     /// fallback reason to reuse on subsequent steps. This includes persistent
     /// host round-trips and attention paths whose tensor shapes depend on the
@@ -622,6 +647,12 @@ impl RocmGraphRunner {
             #[cfg(feature = "rocm")]
             captured: HashMap::new(),
             #[cfg(feature = "rocm")]
+            graph_slots: HashMap::new(),
+            #[cfg(feature = "rocm")]
+            decode_row_slots: HashMap::new(),
+            #[cfg(feature = "rocm")]
+            next_graph_slot_id: 1,
+            #[cfg(feature = "rocm")]
             non_capture_safe: std::collections::HashMap::new(),
             #[cfg(feature = "rocm")]
             capture_retry: std::collections::HashMap::new(),
@@ -656,6 +687,18 @@ impl RocmGraphRunner {
         let tracked_decode_owner_count = self.decode_timelines.len();
         #[cfg(not(feature = "rocm"))]
         let tracked_decode_owner_count = 0;
+        #[cfg(feature = "rocm")]
+        let graph_slot_count = self.graph_slots.len();
+        #[cfg(not(feature = "rocm"))]
+        let graph_slot_count = 0;
+        #[cfg(feature = "rocm")]
+        let active_graph_slot_count = self
+            .graph_slots
+            .values()
+            .filter(|slot| slot.assigned_row.is_some())
+            .count();
+        #[cfg(not(feature = "rocm"))]
+        let active_graph_slot_count = 0;
 
         RocmGraphStats {
             requested: self.requested,
@@ -675,7 +718,12 @@ impl RocmGraphRunner {
                 .saturating_add(self.counters.replay_failures),
             decode_owner_release_count: self.counters.decode_owner_release_count,
             decode_owner_graph_release_count: self.counters.decode_owner_graph_release_count,
+            graph_slot_create_count: self.counters.graph_slot_create_count,
+            graph_slot_reuse_count: self.counters.graph_slot_reuse_count,
             captured_graph_count,
+            graph_slot_count,
+            active_graph_slot_count,
+            idle_graph_slot_count: graph_slot_count.saturating_sub(active_graph_slot_count),
             tracked_decode_owner_count,
             fallbacks: self.counters.fallbacks,
         }
@@ -689,6 +737,8 @@ impl RocmGraphRunner {
         #[cfg(feature = "rocm")]
         {
             self.captured.clear();
+            self.graph_slots.clear();
+            self.decode_row_slots.clear();
             self.non_capture_safe.clear();
             self.capture_retry.clear();
             self.cache_full_warned = false;
@@ -696,32 +746,38 @@ impl RocmGraphRunner {
         }
     }
 
-    /// Release graph state owned by a finished logical decode row.
-    ///
-    /// Batching-engine rows and direct generations share one process-wide id
-    /// namespace. Retaining their graphs or continuity timelines after request
-    /// completion would permanently fill the bounded graph cache and grow the
-    /// timeline map.
+    /// Return a finished logical decode row's graph slot to the bounded reuse
+    /// pool. Native graphs and the exact recurrent-state buffers they captured
+    /// remain resident until explicit runner invalidation; a graphless slot is
+    /// discarded immediately.
     pub fn release_decode_row(&mut self, row_id: u64) {
         #[cfg(feature = "rocm")]
         {
-            let owner = RocmGraphOwner::DecodeRow(row_id);
-            let evicted_graphs = remove_graphs_owned_by(&mut self.captured, owner);
+            let Some(owner) = self.decode_row_slots.remove(&row_id) else {
+                return;
+            };
             let removed_timeline = self.decode_timelines.remove(&owner).is_some();
-            if evicted_graphs > 0 {
-                self.cache_full_warned = false;
+            let retained_graphs = self
+                .captured
+                .keys()
+                .filter(|key| key.owner == owner)
+                .count();
+            if retained_graphs == 0 {
+                self.graph_slots.remove(&owner);
+            } else if let Some(slot) = self.graph_slots.get_mut(&owner) {
+                slot.assigned_row = None;
             }
-            if evicted_graphs > 0 || removed_timeline {
-                self.counters.record_decode_owner_release(evicted_graphs);
-                tracing::debug!(
-                    event = "rocm_graph_decode_owner_released",
-                    row_id,
-                    evicted_graphs,
-                    removed_timeline,
-                    tracked_decode_owner_count = self.decode_timelines.len(),
-                    "rocm_graph_decode_owner_released"
-                );
-            }
+            self.counters.record_decode_owner_release(0);
+            tracing::debug!(
+                event = "rocm_graph_decode_owner_released",
+                row_id,
+                graph_slot_id = owner.slot_id(),
+                retained_graphs,
+                removed_timeline,
+                graph_slot_count = self.graph_slots.len(),
+                active_graph_slot_count = self.decode_row_slots.len(),
+                "rocm_graph_decode_owner_released"
+            );
         }
         #[cfg(not(feature = "rocm"))]
         let _ = row_id;
@@ -731,6 +787,7 @@ impl RocmGraphRunner {
     fn prepare_owner_decode(
         &mut self,
         owner: RocmGraphOwner,
+        row_id: u64,
         block_table: &BlockTable,
         seq_len: usize,
     ) -> bool {
@@ -739,7 +796,8 @@ impl RocmGraphRunner {
         if owner_started {
             tracing::debug!(
                 event = "rocm_graph_decode_owner_started",
-                row_id = owner.row_id(),
+                row_id,
+                graph_slot_id = owner.slot_id(),
                 seq_len,
                 block0 = block0.unwrap_or_default(),
                 block0_present = block0.is_some(),
@@ -750,19 +808,113 @@ impl RocmGraphRunner {
         let continues = block0.is_some()
             && timeline.last_decode_seq_len == Some(seq_len.wrapping_sub(1))
             && timeline.last_decode_block0 == block0;
-        if !continues {
-            let evicted_graphs = remove_graphs_owned_by(&mut self.captured, owner);
-            if evicted_graphs > 0 {
-                tracing::debug!(
-                    seq_len,
-                    ?owner,
-                    "ROCm graph: owner boundary — evicting captured bs=1 graph"
-                );
-            }
-        }
         timeline.last_decode_seq_len = Some(seq_len);
         timeline.last_decode_block0 = block0;
         continues
+    }
+
+    #[cfg(feature = "rocm")]
+    fn clone_linear_state_handles(state: &LinearAttentionState) -> LinearAttentionState {
+        LinearAttentionState {
+            recurrent_states: state.recurrent_states.clone(),
+            conv_states: state.conv_states.clone(),
+        }
+    }
+
+    #[cfg(feature = "rocm")]
+    fn linear_state_handles_match(
+        left: &LinearAttentionState,
+        right: &LinearAttentionState,
+    ) -> bool {
+        left.recurrent_states.len() == right.recurrent_states.len()
+            && left.conv_states.len() == right.conv_states.len()
+            && left
+                .recurrent_states
+                .iter()
+                .zip(&right.recurrent_states)
+                .all(|(left, right)| left.id() == right.id())
+            && left
+                .conv_states
+                .iter()
+                .zip(&right.conv_states)
+                .all(|(left, right)| left.id() == right.id())
+    }
+
+    #[cfg(feature = "rocm")]
+    fn bind_decode_row_to_slot(
+        &mut self,
+        row_id: u64,
+        requested_key: &RocmGraphKey,
+        linear_state: &mut LinearAttentionState,
+    ) -> Result<RocmGraphOwner> {
+        let existing = self.decode_row_slots.get(&row_id).copied();
+        let owner = if let Some(owner) = existing {
+            owner
+        } else {
+            let preferred = self
+                .graph_slots
+                .iter()
+                .filter(|(_, slot)| slot.assigned_row.is_none())
+                .map(|(owner, _)| *owner)
+                .filter(|owner| {
+                    self.captured
+                        .contains_key(&RocmGraphCacheKey::new(*owner, requested_key.clone()))
+                })
+                .min_by_key(|owner| owner.slot_id());
+            let idle = preferred.or_else(|| {
+                self.graph_slots
+                    .iter()
+                    .filter(|(_, slot)| slot.assigned_row.is_none())
+                    .map(|(owner, _)| *owner)
+                    .min_by_key(|owner| owner.slot_id())
+            });
+            let owner = if let Some(owner) = idle {
+                self.counters.record_graph_slot_reuse();
+                owner
+            } else {
+                let owner = RocmGraphOwner::Slot(self.next_graph_slot_id);
+                self.next_graph_slot_id = self.next_graph_slot_id.saturating_add(1);
+                self.graph_slots.insert(
+                    owner,
+                    RocmGraphSlotState {
+                        assigned_row: None,
+                        linear_state: Self::clone_linear_state_handles(linear_state),
+                    },
+                );
+                self.counters.record_graph_slot_create();
+                owner
+            };
+            self.decode_row_slots.insert(row_id, owner);
+            self.decode_timelines.remove(&owner);
+            self.graph_slots
+                .get_mut(&owner)
+                .expect("new or idle ROCm graph slot must exist")
+                .assigned_row = Some(row_id);
+            owner
+        };
+
+        let slot = self
+            .graph_slots
+            .get_mut(&owner)
+            .context("ROCm graph row points to a missing persistent slot")?;
+        anyhow::ensure!(
+            slot.assigned_row == Some(row_id),
+            "ROCm graph slot {} is assigned to {:?}, not row {row_id}",
+            owner.slot_id(),
+            slot.assigned_row
+        );
+        if !Self::linear_state_handles_match(&slot.linear_state, linear_state) {
+            slot.linear_state
+                .refresh_batched_state_from_rows_in_place(&[linear_state])
+                .context("refresh reusable ROCm graph slot state")?;
+            linear_state
+                .recurrent_states
+                .clone_from(&slot.linear_state.recurrent_states);
+            linear_state
+                .conv_states
+                .clone_from(&slot.linear_state.conv_states);
+        }
+        Ok(owner)
     }
 
     #[cfg(feature = "rocm")]
@@ -885,9 +1037,6 @@ impl RocmGraphRunner {
             // host round-trip is still caught by the warm-pass htod check below
             // (graceful eager), so no explicit FP8 guard is needed here.
 
-            let owner = RocmGraphOwner::DecodeRow(graph_row_id);
-            self.prepare_owner_decode(owner, block_table, seq_len);
-
             // Warmup: first decode step runs eagerly (graph-shaped position
             // buffer) to prime the allocator pools before the first capture.
             if !self.warmup_done {
@@ -949,7 +1098,10 @@ impl RocmGraphRunner {
                 );
             }
 
+            Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
             let requested_key = RocmGraphKey::new(block_table, paged_cache, seq_len);
+            let owner = self.bind_decode_row_to_slot(graph_row_id, &requested_key, linear_state)?;
+            self.prepare_owner_decode(owner, graph_row_id, block_table, seq_len);
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
 
             // Geometry previously found non-capture-safe: skip the warm pass +
@@ -1171,9 +1323,6 @@ impl RocmGraphRunner {
 
         #[cfg(feature = "rocm")]
         {
-            let owner = RocmGraphOwner::DecodeRow(graph_row_id);
-            self.prepare_owner_decode(owner, block_table, seq_len);
-
             if !self.warmup_done {
                 self.warmup_done = true;
                 tracing::info!("ROCm graph runner: warmup decode step (KILN_ROCM_GRAPHS active)");
@@ -1230,7 +1379,10 @@ impl RocmGraphRunner {
                 );
             }
 
+            Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
             let requested_key = RocmGraphKey::new(block_table, paged_cache, seq_len);
+            let owner = self.bind_decode_row_to_slot(graph_row_id, &requested_key, linear_state)?;
+            self.prepare_owner_decode(owner, graph_row_id, block_table, seq_len);
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
 
             if let Some(reason) = self.non_capture_safe.get(&requested_key).copied() {
@@ -1460,9 +1612,6 @@ impl RocmGraphRunner {
 
         #[cfg(feature = "rocm")]
         {
-            let owner = RocmGraphOwner::DecodeRow(graph_row_id);
-            self.prepare_owner_decode(owner, block_table, seq_len);
-
             if !self.warmup_done {
                 self.warmup_done = true;
                 tracing::info!("ROCm graph runner: warmup decode step (KILN_ROCM_GRAPHS active)");
@@ -1519,7 +1668,10 @@ impl RocmGraphRunner {
                 );
             }
 
+            Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
             let requested_key = RocmGraphKey::new(block_table, paged_cache, seq_len);
+            let owner = self.bind_decode_row_to_slot(graph_row_id, &requested_key, linear_state)?;
+            self.prepare_owner_decode(owner, graph_row_id, block_table, seq_len);
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
 
             if let Some(reason) = self.non_capture_safe.get(&requested_key).copied() {
@@ -2997,36 +3149,24 @@ mod tests {
 
     #[cfg(feature = "rocm")]
     #[test]
-    fn release_decode_row_removes_only_the_finished_owner() {
-        fn graph_key(seq_len: usize) -> RocmGraphKey {
-            RocmGraphKey {
-                stable_metadata: false,
-                seq_len,
-                block_table: vec![seq_len as u32],
-                max_seqlen_k: 512,
-                max_blocks_per_seq: 8,
-            }
-        }
-
-        let target = RocmGraphOwner::DecodeRow(7);
-        let survivor = RocmGraphOwner::DecodeRow(8);
-        let second_survivor = RocmGraphOwner::DecodeRow(9);
-        let mut captured = HashMap::from([
-            (RocmGraphCacheKey::new(target, graph_key(1)), "target-a"),
-            (RocmGraphCacheKey::new(target, graph_key(2)), "target-b"),
-            (RocmGraphCacheKey::new(survivor, graph_key(1)), "survivor"),
-            (
-                RocmGraphCacheKey::new(second_survivor, graph_key(1)),
-                "second-survivor",
-            ),
-        ]);
-        assert_eq!(remove_graphs_owned_by(&mut captured, target), 2);
-        assert_eq!(captured.len(), 2);
-        assert!(captured.keys().all(|key| key.owner != target));
-        assert!(captured.keys().any(|key| key.owner == survivor));
-        assert!(captured.keys().any(|key| key.owner == second_survivor));
-
+    fn release_decode_row_discards_only_the_finished_graphless_slot() {
+        let target = RocmGraphOwner::Slot(7);
+        let survivor = RocmGraphOwner::Slot(8);
+        let second_survivor = RocmGraphOwner::Slot(9);
         let mut runner = RocmGraphRunner::new(&Device::Cpu, true);
+        for (owner, row_id) in [(target, 7), (survivor, 8), (second_survivor, 9)] {
+            runner.graph_slots.insert(
+                owner,
+                RocmGraphSlotState {
+                    assigned_row: Some(row_id),
+                    linear_state: LinearAttentionState {
+                        recurrent_states: Vec::new(),
+                        conv_states: Vec::new(),
+                    },
+                },
+            );
+            runner.decode_row_slots.insert(row_id, owner);
+        }
         runner.decode_timelines.insert(target, Default::default());
         runner.decode_timelines.insert(survivor, Default::default());
         runner
@@ -3035,11 +3175,16 @@ mod tests {
         assert_eq!(runner.stats().tracked_decode_owner_count, 3);
         runner.release_decode_row(7);
 
+        assert!(!runner.graph_slots.contains_key(&target));
+        assert!(runner.graph_slots.contains_key(&survivor));
+        assert!(runner.graph_slots.contains_key(&second_survivor));
         assert!(!runner.decode_timelines.contains_key(&target));
         assert!(runner.decode_timelines.contains_key(&survivor));
         assert!(runner.decode_timelines.contains_key(&second_survivor));
         let stats = runner.stats();
         assert_eq!(stats.tracked_decode_owner_count, 2);
+        assert_eq!(stats.graph_slot_count, 2);
+        assert_eq!(stats.active_graph_slot_count, 2);
         assert_eq!(stats.decode_owner_release_count, 1);
         assert_eq!(stats.decode_owner_graph_release_count, 0);
 
@@ -3052,22 +3197,74 @@ mod tests {
 
     #[cfg(feature = "rocm")]
     #[test]
-    fn recycled_block_continuity_never_crosses_decode_owners() {
+    fn recycled_block_continuity_never_crosses_graph_slots() {
         let mut runner = RocmGraphRunner::new(&Device::Cpu, true);
         let recycled_table = BlockTable { blocks: vec![11] };
-        let first = RocmGraphOwner::DecodeRow(41);
-        let second = RocmGraphOwner::DecodeRow(42);
+        let first = RocmGraphOwner::Slot(41);
+        let second = RocmGraphOwner::Slot(42);
 
-        assert!(!runner.prepare_owner_decode(first, &recycled_table, 63));
-        assert!(runner.prepare_owner_decode(first, &recycled_table, 64));
+        assert!(!runner.prepare_owner_decode(first, 401, &recycled_table, 63));
+        assert!(runner.prepare_owner_decode(first, 401, &recycled_table, 64));
 
         // Even though both block zero and sequence continuity match the prior
         // call, a different generation must start a fresh recurrent timeline.
-        assert!(!runner.prepare_owner_decode(second, &recycled_table, 65));
-        assert!(runner.prepare_owner_decode(second, &recycled_table, 66));
+        assert!(!runner.prepare_owner_decode(second, 402, &recycled_table, 65));
+        assert!(runner.prepare_owner_decode(second, 402, &recycled_table, 66));
 
-        runner.release_decode_row(42);
-        assert!(!runner.prepare_owner_decode(second, &recycled_table, 67));
+        runner.decode_timelines.remove(&second);
+        assert!(!runner.prepare_owner_decode(second, 403, &recycled_table, 67));
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn idle_graph_slot_refreshes_and_adopts_a_new_rows_state() {
+        fn state(recurrent: [f32; 2], conv: [f32; 2]) -> LinearAttentionState {
+            LinearAttentionState {
+                recurrent_states: vec![
+                    Tensor::from_vec(recurrent.to_vec(), (1, 2)).expect("recurrent state"),
+                ],
+                conv_states: vec![Tensor::from_vec(conv.to_vec(), (1, 2)).expect("conv state")],
+            }
+        }
+
+        let key = RocmGraphKey {
+            stable_metadata: true,
+            seq_len: 0,
+            block_table: Vec::new(),
+            max_seqlen_k: 512,
+            max_blocks_per_seq: 8,
+        };
+        let mut runner = RocmGraphRunner::new(&Device::Cpu, true);
+        let mut first = state([1.0, 2.0], [3.0, 4.0]);
+        let owner = runner
+            .bind_decode_row_to_slot(1001, &key, &mut first)
+            .expect("bind first row");
+        assert!(RocmGraphRunner::linear_state_handles_match(
+            &runner.graph_slots[&owner].linear_state,
+            &first
+        ));
+
+        runner.decode_row_slots.remove(&1001);
+        runner.graph_slots.get_mut(&owner).unwrap().assigned_row = None;
+        let mut second = state([11.0, 12.0], [13.0, 14.0]);
+        let rebound = runner
+            .bind_decode_row_to_slot(1002, &key, &mut second)
+            .expect("reuse slot for second row");
+        assert_eq!(rebound, owner);
+        assert!(RocmGraphRunner::linear_state_handles_match(
+            &runner.graph_slots[&owner].linear_state,
+            &second
+        ));
+        assert_eq!(
+            second.recurrent_states[0].to_vec::<f32>().unwrap(),
+            vec![11.0, 12.0]
+        );
+        assert_eq!(
+            second.conv_states[0].to_vec::<f32>().unwrap(),
+            vec![13.0, 14.0]
+        );
+        assert_eq!(runner.stats().graph_slot_create_count, 1);
+        assert_eq!(runner.stats().graph_slot_reuse_count, 1);
     }
 
     /// A decode geometry that cannot use graph-stable native attention must
@@ -3257,13 +3454,60 @@ mod tests {
         assert!(before_cancel.replay_successes > 0);
         assert!(before_cancel.captured_graph_count >= 2);
 
-        // Cancellation releases the first owner's graphs. A new row then
-        // starts from already-populated KV pages, matching prefix-cache reuse.
+        // Cancellation returns the first owner's graph slot to the bounded
+        // reuse pool. A new row then starts from already-populated KV pages,
+        // matching prefix-cache reuse without native graph churn.
         graph_runner.release_decode_row(FIRST_OWNER);
         let after_cancel = graph_runner.stats();
-        assert_eq!(after_cancel.captured_graph_count, 0);
+        assert_eq!(
+            after_cancel.captured_graph_count,
+            before_cancel.captured_graph_count
+        );
+        assert_eq!(after_cancel.active_graph_slot_count, 0);
+        assert_eq!(after_cancel.idle_graph_slot_count, 1);
         assert_eq!(after_cancel.decode_owner_release_count, 1);
-        assert!(after_cancel.decode_owner_graph_release_count >= 2);
+        assert_eq!(after_cancel.decode_owner_graph_release_count, 0);
+
+        // Rebind the idle native graph to an unrelated request with fresh GDN
+        // state and disjoint KV pages. This exercises the real ROCm in-place
+        // state refresh before replay rather than only continuing a prefix.
+        const FRESH_OWNER: u64 = 903;
+        let mut fresh_graph_state =
+            LinearAttentionState::new_for_inference(&config, &device).expect("fresh graph state");
+        let mut fresh_eager_state =
+            LinearAttentionState::new_for_inference(&config, &device).expect("fresh eager state");
+        let fresh_table = BlockTable { blocks: vec![8] };
+        for seq_len in 1..=4 {
+            let token_id = ((seq_len + 17) % config.vocab_size) as u32;
+            let graph_hidden = graph_runner
+                .decode_step_paged_hidden(
+                    backend.as_ref(),
+                    token_id,
+                    &weights,
+                    &config,
+                    &graph_cache,
+                    &fresh_table,
+                    seq_len,
+                    &mut fresh_graph_state,
+                    None,
+                    FRESH_OWNER,
+                )
+                .expect("fresh graph hidden");
+            let eager_hidden = RocmGraphRunner::eager_forward_hidden(
+                backend.as_ref(),
+                token_id,
+                &weights,
+                &config,
+                &eager_cache,
+                &fresh_table,
+                seq_len,
+                &mut fresh_eager_state,
+                None,
+            )
+            .expect("fresh eager hidden");
+            assert_eq!(hidden_f32(&graph_hidden), hidden_f32(&eager_hidden));
+        }
+        graph_runner.release_decode_row(FRESH_OWNER);
 
         const PREFIX_OWNER: u64 = 902;
         for seq_len in 64..=72 {
@@ -3271,6 +3515,7 @@ mod tests {
         }
         let before_adapter_boundary = graph_runner.stats();
         assert!(before_adapter_boundary.captured_graph_count > 0);
+        assert!(before_adapter_boundary.graph_slot_reuse_count >= 2);
         let captures_before_adapter_boundary = before_adapter_boundary.capture_successes;
 
         // Adapter swaps invalidate pointer-bearing graph state before the next
