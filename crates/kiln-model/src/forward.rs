@@ -45,7 +45,8 @@ use crate::lora_loader::{
 // it) and now comes from the `kiln_core::block` import below.
 use crate::PagedKvCacheKt as PagedKvCache;
 use crate::transposed_weight_cache::{
-    CachedTransposedWeightBytes, transposed_weight_bytes_2d_cached_bytes,
+    CachedTransposedWeightBytes, TransposedWeightCacheMissPolicy,
+    transposed_weight_bytes_2d_cached_bytes,
 };
 use crate::weights::{DeferredMtpSource, ModelWeights, MtpWeights, TensorDType, WeightTensor};
 
@@ -3825,8 +3826,10 @@ impl MtpGpuWeightsSlot {
                 loaded
             }
         };
-        let projection_load_cache =
-            ProjectionLoadCache::new(&self.device).context("mtp projection load cache")?;
+        // This upload is deliberately lazy and may run on the first MTP request.
+        // Cache misses must therefore remain read-only.
+        let projection_load_cache = ProjectionLoadCache::for_lazy_mtp_upload(&self.device)
+            .context("mtp projection load cache")?;
         let upload_start = std::time::Instant::now();
         let uploaded = upload_mtp_gpu_weights(&mtp_weights, &self.device, &projection_load_cache)
             .context("lazy native MTP GPU upload")?;
@@ -5415,8 +5418,12 @@ pub(crate) fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [
 /// [`weight_to_tensor`], on the projection-weight loader entry). Metal/CPU use
 /// the same kt-native raw byte path.
 #[cfg(feature = "cuda")]
-fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<Tensor> {
-    let data = transposed_weight_bytes_2d_cached_bytes(w)?;
+fn weight_to_transposed_tensor_2d(
+    w: &WeightTensor,
+    device: &Device,
+    cache_miss_policy: TransposedWeightCacheMissPolicy,
+) -> Result<Tensor> {
+    let data = transposed_weight_bytes_2d_cached_bytes(w, cache_miss_policy)?;
     Tensor::from_raw_bytes_on(
         *device,
         weight_dtype(w),
@@ -5428,8 +5435,12 @@ fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<T
 
 /// Non-CUDA sibling: upload the cached transposed bytes directly through kt.
 #[cfg(not(feature = "cuda"))]
-fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<Tensor> {
-    let data = transposed_weight_bytes_2d_cached_bytes(w)?;
+fn weight_to_transposed_tensor_2d(
+    w: &WeightTensor,
+    device: &Device,
+    cache_miss_policy: TransposedWeightCacheMissPolicy,
+) -> Result<Tensor> {
+    let data = transposed_weight_bytes_2d_cached_bytes(w, cache_miss_policy)?;
     Tensor::from_raw_bytes_on(
         *device,
         weight_dtype(w),
@@ -5443,11 +5454,12 @@ fn cached_transpose_for_weight(
     w: &WeightTensor,
     materialized: &Tensor,
     device: &Device,
+    cache_miss_policy: TransposedWeightCacheMissPolicy,
 ) -> Result<Tensor> {
     if ProjectionLoadPolicy::for_model_loader_device(*device)
         .direct_transposed_upload_for_cached_weights
     {
-        weight_to_transposed_tensor_2d(w, device)
+        weight_to_transposed_tensor_2d(w, device, cache_miss_policy)
     } else {
         cached_transpose(materialized)
     }
@@ -5467,17 +5479,33 @@ fn dropped_weight_stub(w: &WeightTensor, device: &Device) -> Result<Tensor> {
 #[derive(Clone)]
 struct ProjectionLoadCache {
     policy: ProjectionLoadPolicy,
+    transposed_cache_miss_policy: TransposedWeightCacheMissPolicy,
     bf16_stub: Option<Tensor>,
     f16_stub: Option<Tensor>,
     f32_stub: Option<Tensor>,
 }
 
 impl ProjectionLoadCache {
-    fn new(device: &Device) -> Result<Self> {
+    fn for_base_model_load(device: &Device) -> Result<Self> {
+        Self::new(
+            device,
+            TransposedWeightCacheMissPolicy::PersistBeforeReadiness,
+        )
+    }
+
+    fn for_lazy_mtp_upload(device: &Device) -> Result<Self> {
+        Self::new(device, TransposedWeightCacheMissPolicy::ReadOnly)
+    }
+
+    fn new(
+        device: &Device,
+        transposed_cache_miss_policy: TransposedWeightCacheMissPolicy,
+    ) -> Result<Self> {
         let policy = ProjectionLoadPolicy::for_model_loader_device(*device);
         if policy.drop_projection_originals || policy.drop_projection_transposes {
             Ok(Self {
                 policy,
+                transposed_cache_miss_policy,
                 bf16_stub: Some(Tensor::zeros(
                     vec![1usize],
                     DType::BF16,
@@ -5497,6 +5525,7 @@ impl ProjectionLoadCache {
         } else {
             Ok(Self {
                 policy,
+                transposed_cache_miss_policy,
                 bf16_stub: None,
                 f16_stub: None,
                 f32_stub: None,
@@ -5536,7 +5565,8 @@ fn projection_tensors_for_load(
     cache: &ProjectionLoadCache,
 ) -> Result<(Tensor, Tensor)> {
     if cache.drops_projection_originals() {
-        let transposed = weight_to_transposed_tensor_2d(w, device)?;
+        let transposed =
+            weight_to_transposed_tensor_2d(w, device, cache.transposed_cache_miss_policy)?;
         let original_stub = match cache.stub_for(weight_dtype(w)) {
             Some(stub) => stub,
             None => dropped_weight_stub(w, device)?,
@@ -5568,10 +5598,11 @@ fn projection_tensors_for_load_batch(
     if cache.parallel_transposed_projection_upload() {
         use rayon::prelude::*;
 
+        let cache_miss_policy = cache.transposed_cache_miss_policy;
         let transposed: Result<Vec<CachedTransposedWeightBytes>> = weights
             .par_iter()
             .map(|(name, w)| {
-                transposed_weight_bytes_2d_cached_bytes(w)
+                transposed_weight_bytes_2d_cached_bytes(w, cache_miss_policy)
                     .with_context(|| format!("{name} transposed projection bytes"))
             })
             .collect();
@@ -7251,23 +7282,29 @@ impl GpuWeights {
         // a duplicate embedding table that the Vulkan side has already
         // mirrored to its own buffer cache.
         let projection_load_policy = ProjectionLoadPolicy::for_model_loader_device(*device);
-        let (embed_tokens, embed_tokens_t) = if projection_load_policy
-            .stub_embedding_table_after_transposed_upload
-        {
-            let embed_tokens_t =
-                weight_to_transposed_tensor_2d(&weights.embedding.embed_tokens, device)
-                    .context("embed_tokens transposed upload")?;
-            let embed_tokens = dropped_weight_stub(&weights.embedding.embed_tokens, device)
-                .context("embed_tokens stub")?;
-            (embed_tokens, embed_tokens_t)
-        } else {
-            let embed_tokens = weight_to_tensor(&weights.embedding.embed_tokens, device)
-                .context("embed_tokens")?;
-            let embed_tokens_t =
-                cached_transpose_for_weight(&weights.embedding.embed_tokens, &embed_tokens, device)
-                    .context("embed_tokens cached transpose")?;
-            (embed_tokens, embed_tokens_t)
-        };
+        let (embed_tokens, embed_tokens_t) =
+            if projection_load_policy.stub_embedding_table_after_transposed_upload {
+                let embed_tokens_t = weight_to_transposed_tensor_2d(
+                    &weights.embedding.embed_tokens,
+                    device,
+                    TransposedWeightCacheMissPolicy::PersistBeforeReadiness,
+                )
+                .context("embed_tokens transposed upload")?;
+                let embed_tokens = dropped_weight_stub(&weights.embedding.embed_tokens, device)
+                    .context("embed_tokens stub")?;
+                (embed_tokens, embed_tokens_t)
+            } else {
+                let embed_tokens = weight_to_tensor(&weights.embedding.embed_tokens, device)
+                    .context("embed_tokens")?;
+                let embed_tokens_t = cached_transpose_for_weight(
+                    &weights.embedding.embed_tokens,
+                    &embed_tokens,
+                    device,
+                    TransposedWeightCacheMissPolicy::PersistBeforeReadiness,
+                )
+                .context("embed_tokens cached transpose")?;
+                (embed_tokens, embed_tokens_t)
+            };
         let lm_head_w8 = {
             #[cfg(feature = "rocm")]
             {
@@ -7287,8 +7324,10 @@ impl GpuWeights {
         let rotary_inv_freq =
             compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
                 .context("rotary_inv_freq")?;
+        // Base weights are uploaded before the server declares readiness, so
+        // already-computed cache misses may be persisted synchronously here.
         let projection_load_cache =
-            ProjectionLoadCache::new(device).context("projection load cache")?;
+            ProjectionLoadCache::for_base_model_load(device).context("projection load cache")?;
         if projection_load_cache.drops_projection_originals() {
             tracing::info!("projection original tensors are dropped after transposed upload");
         } else if projection_load_cache.drops_projection_transposes() {
@@ -36556,6 +36595,24 @@ mod tests {
     }
 
     #[test]
+    fn projection_cache_lifecycle_policy_is_explicit() -> Result<()> {
+        let device = Device::Cpu;
+
+        let base = ProjectionLoadCache::for_base_model_load(&device)?;
+        let lazy_mtp = ProjectionLoadCache::for_lazy_mtp_upload(&device)?;
+
+        assert_eq!(
+            base.transposed_cache_miss_policy,
+            TransposedWeightCacheMissPolicy::PersistBeforeReadiness
+        );
+        assert_eq!(
+            lazy_mtp.transposed_cache_miss_policy,
+            TransposedWeightCacheMissPolicy::ReadOnly
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_weight_to_transposed_tensor_2d_f32_matches_cached_transpose() -> Result<()> {
         let device = Device::Cpu;
         let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -36567,7 +36624,11 @@ mod tests {
             source: None,
         };
 
-        let direct = weight_to_transposed_tensor_2d(&wt, &device)?;
+        let direct = weight_to_transposed_tensor_2d(
+            &wt,
+            &device,
+            TransposedWeightCacheMissPolicy::ReadOnly,
+        )?;
         let baseline = cached_transpose(&weight_to_tensor(&wt, &device)?)?;
 
         assert!(direct.is_contiguous());
@@ -36645,7 +36706,12 @@ mod tests {
             source: None,
         };
 
-        let direct = weight_to_transposed_tensor_2d(&wt, &device)?.to_device(cpu)?;
+        let direct = weight_to_transposed_tensor_2d(
+            &wt,
+            &device,
+            TransposedWeightCacheMissPolicy::ReadOnly,
+        )?
+        .to_device(cpu)?;
         let baseline = cached_transpose(&weight_to_tensor(&wt, &cpu)?)?;
 
         assert!(direct.is_contiguous());

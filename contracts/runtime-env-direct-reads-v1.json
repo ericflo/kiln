@@ -1233,50 +1233,6 @@
       "surface": "source"
     },
     {
-      "api": "remove_var",
-      "argument": "CACHE_WRITE_INITIAL_DELAY_ENV",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/transposed_weight_cache.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "remove_var",
-      "argument": "CACHE_WRITE_SPACING_ENV",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/transposed_weight_cache.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "CACHE_WRITE_INITIAL_DELAY_ENV",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/transposed_weight_cache.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "set_var",
-      "argument": "CACHE_WRITE_SPACING_ENV",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/transposed_weight_cache.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "set_var",
       "argument": "KILN_USE_TAPE_FLASH_ATTN",
       "argument_kind": "literal",
@@ -7648,17 +7604,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "var",
-      "argument_kind": "expression",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/transposed_weight_cache.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var_os",
       "argument": "HOME",
       "argument_kind": "literal",
@@ -11368,9 +11313,9 @@
   ],
   "source_root": "crates",
   "summary": {
-    "process_mutation_call_sites": 676,
-    "process_mutation_entries": 327,
-    "read_call_sites": 1035,
-    "read_entries": 705
+    "process_mutation_call_sites": 672,
+    "process_mutation_entries": 323,
+    "read_call_sites": 1034,
+    "read_entries": 704
   }
 }

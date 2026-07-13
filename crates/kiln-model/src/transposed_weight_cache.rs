@@ -6,10 +6,7 @@ use std::io::Write;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, OnceLock};
-use std::thread;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
@@ -20,15 +17,11 @@ use crate::weights::WeightTensor;
 const CACHE_VERSION: u32 = 2;
 const CACHE_MAGIC: &[u8; 8] = b"KILNTRP1";
 const CACHE_PAYLOAD_ALIGN: usize = 8;
-const CACHE_WRITE_INITIAL_DELAY_MS: u64 = 120_000;
-const CACHE_WRITE_SPACING_MS: u64 = 50;
-const CACHE_WRITE_INITIAL_DELAY_ENV: &str = "KILN_TRANSPOSED_CACHE_WRITE_DELAY_MS";
-const CACHE_WRITE_SPACING_ENV: &str = "KILN_TRANSPOSED_CACHE_WRITE_SPACING_MS";
 
-static CACHE_WRITE_ENQUEUED: AtomicU64 = AtomicU64::new(0);
-static CACHE_WRITE_DISCONNECTED: AtomicU64 = AtomicU64::new(0);
-static CACHE_WRITE_COMPLETED: AtomicU64 = AtomicU64::new(0);
+static CACHE_WRITE_SUCCEEDED: AtomicU64 = AtomicU64::new(0);
 static CACHE_WRITE_FAILED: AtomicU64 = AtomicU64::new(0);
+static CACHE_READ_FAILED: AtomicU64 = AtomicU64::new(0);
+static CACHE_ENTRY_INVALID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 struct CacheKey {
@@ -41,6 +34,14 @@ struct CacheKey {
 pub(crate) struct CachedTransposedWeightBytes {
     storage: CachedTransposedWeightStorage,
     shape: [usize; 2],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransposedWeightCacheMissPolicy {
+    /// The caller is still loading the base model and has not declared readiness.
+    PersistBeforeReadiness,
+    /// Existing entries may be read, but a miss has no disk-side effects.
+    ReadOnly,
 }
 
 enum CachedTransposedWeightStorage {
@@ -63,6 +64,7 @@ impl CachedTransposedWeightBytes {
 
 pub(crate) fn transposed_weight_bytes_2d_cached_bytes(
     weight: &WeightTensor,
+    miss_policy: TransposedWeightCacheMissPolicy,
 ) -> Result<CachedTransposedWeightBytes> {
     let Some(cache_key) = cache_key(weight) else {
         let (bytes, shape) = transposed_weight_bytes_2d(weight)?;
@@ -72,7 +74,7 @@ pub(crate) fn transposed_weight_bytes_2d_cached_bytes(
         });
     };
 
-    if let Some(bytes) = try_mmap_cached(&cache_key)? {
+    if let Some(bytes) = try_mmap_cached(&cache_key, miss_policy) {
         tracing::debug!(
             tensor = %weight
                 .source
@@ -90,12 +92,20 @@ pub(crate) fn transposed_weight_bytes_2d_cached_bytes(
     }
 
     let (bytes, shape) = transposed_weight_bytes_2d(weight)?;
-    let bytes = Arc::<[u8]>::from(bytes);
-    let _ = queue_cache_write(cache_key, weight.clone());
-    Ok(CachedTransposedWeightBytes {
-        storage: CachedTransposedWeightStorage::Owned(bytes),
+    Ok(finish_cache_miss(cache_key, miss_policy, bytes, shape))
+}
+
+fn finish_cache_miss(
+    cache_key: CacheKey,
+    miss_policy: TransposedWeightCacheMissPolicy,
+    bytes: Vec<u8>,
+    shape: [usize; 2],
+) -> CachedTransposedWeightBytes {
+    let _ = handle_cache_miss(miss_policy, &cache_key, &bytes);
+    CachedTransposedWeightBytes {
+        storage: CachedTransposedWeightStorage::Owned(Arc::from(bytes)),
         shape,
-    })
+    }
 }
 
 fn cache_key(weight: &WeightTensor) -> Option<CacheKey> {
@@ -125,164 +135,111 @@ fn cache_key(weight: &WeightTensor) -> Option<CacheKey> {
     })
 }
 
-fn try_mmap_cached(cache_key: &CacheKey) -> Result<Option<CachedTransposedWeightBytes>> {
+fn try_mmap_cached(
+    cache_key: &CacheKey,
+    miss_policy: TransposedWeightCacheMissPolicy,
+) -> Option<CachedTransposedWeightBytes> {
     let file = match fs::File::open(&cache_key.file_path) {
         Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
         Err(err) => {
-            return Err(err).with_context(|| {
-                format!(
-                    "opening transposed weight cache {}",
-                    cache_key.file_path.display()
-                )
-            });
+            record_cache_read_failure(cache_key, "open", &err);
+            return None;
         }
     };
 
     // SAFETY: Cache files are immutable after an atomic rename into place.
-    let mmap = unsafe { Mmap::map(&file) }.with_context(|| {
-        format!(
-            "mapping transposed weight cache {}",
-            cache_key.file_path.display()
-        )
-    })?;
+    let mmap = match unsafe { Mmap::map(&file) } {
+        Ok(mmap) => mmap,
+        Err(err) => {
+            record_cache_read_failure(cache_key, "mmap", &err);
+            return None;
+        }
+    };
 
     match cached_payload_range(cache_key, &mmap[..]) {
-        Ok(payload) => Ok(Some(CachedTransposedWeightBytes {
+        Ok(payload) => Some(CachedTransposedWeightBytes {
             storage: CachedTransposedWeightStorage::Mapped { mmap, payload },
             shape: cache_key.shape,
-        })),
+        }),
         Err(err) => {
+            let invalid_entries = increment_counter(&CACHE_ENTRY_INVALID);
             tracing::debug!(
                 path = %cache_key.file_path.display(),
                 error = %err,
+                invalid_entries,
                 "ignoring invalid transposed weight cache entry"
             );
-            let _ = fs::remove_file(&cache_key.file_path);
-            Ok(None)
-        }
-    }
-}
-
-struct CacheWrite {
-    cache_key: CacheKey,
-    weight: WeightTensor,
-}
-
-fn queue_cache_write(cache_key: CacheKey, weight: WeightTensor) -> bool {
-    let Some(sender) = cache_write_sender() else {
-        return false;
-    };
-
-    match sender.send(CacheWrite { cache_key, weight }) {
-        Ok(()) => {
-            CACHE_WRITE_ENQUEUED.fetch_add(1, Ordering::Relaxed);
-            true
-        }
-        Err(_) => {
-            CACHE_WRITE_DISCONNECTED.fetch_add(1, Ordering::Relaxed);
-            tracing::debug!("transposed weight cache writer disconnected; skipping cache write");
-            false
-        }
-    }
-}
-
-fn cache_write_sender() -> Option<&'static Sender<CacheWrite>> {
-    static CACHE_WRITE_SENDER: OnceLock<Option<Sender<CacheWrite>>> = OnceLock::new();
-    CACHE_WRITE_SENDER
-        .get_or_init(|| {
-            let (sender, receiver) = mpsc::channel();
-            match thread::Builder::new()
-                .name("kiln-transposed-weight-cache-writer".to_string())
-                .spawn(move || cache_writer_loop(receiver))
-            {
-                Ok(_) => Some(sender),
-                Err(err) => {
-                    tracing::debug!(
-                        error = %err,
-                        "failed to spawn transposed weight cache writer; cache writes disabled"
-                    );
-                    None
-                }
+            if miss_policy == TransposedWeightCacheMissPolicy::PersistBeforeReadiness {
+                let _ = fs::remove_file(&cache_key.file_path);
             }
-        })
-        .as_ref()
-}
-
-fn cache_writer_loop(receiver: Receiver<CacheWrite>) {
-    // Re-read the delays at every iteration so test code that sets
-    // the env vars after the writer thread spawned still takes
-    // effect. Production cost: two `env::var` lookups per cache
-    // entry write, which is negligible relative to the disk I/O
-    // those writes do.
-    let initial_delay = cache_write_initial_delay();
-    if !initial_delay.is_zero() {
-        tracing::debug!(
-            delay_ms = initial_delay.as_millis() as u64,
-            "deferring transposed weight cache background writes"
-        );
-        // Use recv_timeout so a fresh message wakes us early —
-        // important for tests that don't want to wait the production
-        // 120 s default, and harmless in production where the queue
-        // is normally empty during the initial delay window.
-        match receiver.recv_timeout(initial_delay) {
-            Ok(first) => {
-                process_cache_write(first);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Initial deferral elapsed with no work pending —
-                // fall through to the normal recv loop.
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
-        }
-    }
-
-    for write in receiver {
-        process_cache_write(write);
-        let spacing = cache_write_spacing();
-        if !spacing.is_zero() {
-            thread::sleep(spacing);
+            None
         }
     }
 }
 
-/// One cache-entry write. Extracted so `cache_writer_loop` can call
-/// it from both the initial-delay-with-recv-timeout path and the
-/// steady-state for-loop path.
-fn process_cache_write(write: CacheWrite) {
-    let CacheWrite { cache_key, weight } = write;
+fn record_cache_read_failure(cache_key: &CacheKey, stage: &'static str, err: &std::io::Error) {
+    let read_failures = increment_counter(&CACHE_READ_FAILED);
+    tracing::debug!(
+        path = %cache_key.file_path.display(),
+        error = %err,
+        stage,
+        read_failures,
+        "failed to read optional transposed weight cache entry; using canonical weight"
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CachePersistence {
+    SkippedReadOnly,
+    AlreadyPresent,
+    Persisted,
+    Failed,
+}
+
+fn handle_cache_miss(
+    miss_policy: TransposedWeightCacheMissPolicy,
+    cache_key: &CacheKey,
+    data: &[u8],
+) -> CachePersistence {
+    if miss_policy == TransposedWeightCacheMissPolicy::ReadOnly {
+        return CachePersistence::SkippedReadOnly;
+    }
+
     if cache_key.file_path.exists() {
-        return;
+        return CachePersistence::AlreadyPresent;
     }
-    let result = transposed_weight_bytes_2d(&weight)
-        .and_then(|(data, _shape)| try_write_cached(&cache_key, &data));
-    match result {
+
+    match try_write_cached(cache_key, data) {
         Ok(()) => {
-            CACHE_WRITE_COMPLETED.fetch_add(1, Ordering::Relaxed);
+            let write_successes = increment_counter(&CACHE_WRITE_SUCCEEDED);
+            tracing::debug!(
+                path = %cache_key.file_path.display(),
+                write_successes,
+                "persisted transposed weight cache entry"
+            );
+            CachePersistence::Persisted
         }
         Err(err) => {
-            CACHE_WRITE_FAILED.fetch_add(1, Ordering::Relaxed);
-            tracing::debug!(error = %err, "failed to write transposed weight cache entry");
+            let write_failures = increment_counter(&CACHE_WRITE_FAILED);
+            tracing::debug!(
+                path = %cache_key.file_path.display(),
+                error = %err,
+                write_failures,
+                "failed to persist transposed weight cache entry; continuing with computed weight"
+            );
+            CachePersistence::Failed
         }
     }
 }
 
-fn cache_write_initial_delay() -> Duration {
-    Duration::from_millis(env_u64(
-        CACHE_WRITE_INITIAL_DELAY_ENV,
-        CACHE_WRITE_INITIAL_DELAY_MS,
-    ))
-}
-
-fn cache_write_spacing() -> Duration {
-    Duration::from_millis(env_u64(CACHE_WRITE_SPACING_ENV, CACHE_WRITE_SPACING_MS))
-}
-
-fn env_u64(var: &str, default: u64) -> u64 {
-    env::var(var)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(default)
+fn increment_counter(counter: &AtomicU64) -> u64 {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_add(1))
+        })
+        .unwrap_or_else(|current| current)
+        .saturating_add(1)
 }
 
 #[cfg(test)]
@@ -586,10 +543,8 @@ fn unique_nanos() -> u128 {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
-    use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::weights::{TensorDType, WeightData};
 
     fn test_cache_key(expected_len: usize) -> CacheKey {
         CacheKey {
@@ -613,15 +568,6 @@ mod tests {
         bytes
     }
 
-    fn passthrough_test_weight(payload: Vec<u8>) -> WeightTensor {
-        WeightTensor {
-            data: WeightData::owned(payload),
-            shape: vec![2, 1],
-            dtype: TensorDType::F16,
-            source: None,
-        }
-    }
-
     #[test]
     fn read_cached_payload_returns_payload_without_trailing_bytes() -> Result<()> {
         let cache_key = test_cache_key(4);
@@ -643,7 +589,8 @@ mod tests {
         let payload = [1u8, 2, 3, 4];
         std::fs::write(&cache_key.file_path, cache_entry(&cache_key, &payload))?;
 
-        let got = try_mmap_cached(&cache_key)?.context("expected cache hit")?;
+        let got = try_mmap_cached(&cache_key, TransposedWeightCacheMissPolicy::ReadOnly)
+            .context("expected cache hit")?;
 
         assert_eq!(got.as_bytes(), payload);
         assert_eq!(got.as_bytes().as_ptr() as usize % CACHE_PAYLOAD_ALIGN, 0);
@@ -652,43 +599,121 @@ mod tests {
     }
 
     #[test]
-    fn queue_cache_write_persists_payload_on_background_writer() -> Result<()> {
-        // The writer thread is process-global behind a OnceLock and
-        // may already have spawned with the production-default
-        // initial delay (120 s) by the time this test runs under
-        // `cargo test`. The writer's `recv_timeout(initial_delay)`
-        // path fixes the race: any queued message wakes the writer
-        // even if it's mid-sleep. See `cache_writer_loop`.
-        unsafe {
-            std::env::set_var(CACHE_WRITE_INITIAL_DELAY_ENV, "0");
-            std::env::set_var(CACHE_WRITE_SPACING_ENV, "0");
+    fn read_only_policy_leaves_invalid_cache_entry_untouched() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut cache_key = test_cache_key(4);
+        cache_key.file_path = dir.path().join("entry.bin");
+        let invalid_entry = b"invalid cache entry";
+        std::fs::write(&cache_key.file_path, invalid_entry)?;
+
+        let got = try_mmap_cached(&cache_key, TransposedWeightCacheMissPolicy::ReadOnly);
+
+        assert!(got.is_none());
+        assert_eq!(std::fs::read(&cache_key.file_path)?, invalid_entry);
+        Ok(())
+    }
+
+    #[test]
+    fn persist_before_readiness_removes_structurally_invalid_entry() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut cache_key = test_cache_key(4);
+        cache_key.file_path = dir.path().join("entry.bin");
+        std::fs::write(&cache_key.file_path, b"invalid cache entry")?;
+
+        let got = try_mmap_cached(
+            &cache_key,
+            TransposedWeightCacheMissPolicy::PersistBeforeReadiness,
+        );
+
+        assert!(got.is_none());
+        assert!(!cache_key.file_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn transient_cache_read_failure_is_nonfatal_and_never_removes_path() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut cache_key = test_cache_key(4);
+        cache_key.file_path = dir.path().join("entry.bin");
+        std::fs::create_dir(&cache_key.file_path)?;
+
+        for miss_policy in [
+            TransposedWeightCacheMissPolicy::ReadOnly,
+            TransposedWeightCacheMissPolicy::PersistBeforeReadiness,
+        ] {
+            assert!(try_mmap_cached(&cache_key, miss_policy).is_none());
+            assert!(cache_key.file_path.is_dir());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn persist_policy_writes_payload_synchronously() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let mut cache_key = test_cache_key(4);
         cache_key.file_path = dir.path().join("entry.bin");
         let payload = vec![1u8, 2, 3, 4];
 
-        anyhow::ensure!(
-            queue_cache_write(cache_key.clone(), passthrough_test_weight(payload.clone())),
-            "expected background cache write to enqueue"
+        assert_eq!(
+            handle_cache_miss(
+                TransposedWeightCacheMissPolicy::PersistBeforeReadiness,
+                &cache_key,
+                &payload,
+            ),
+            CachePersistence::Persisted
         );
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !cache_key.file_path.exists() {
-            anyhow::ensure!(
-                Instant::now() < deadline,
-                "timed out waiting for background cache write"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
 
         let mut file = std::fs::File::open(&cache_key.file_path)?;
         let got = read_cached_payload(&cache_key, &mut file)?;
         assert_eq!(got, payload.as_slice());
-        unsafe {
-            std::env::remove_var(CACHE_WRITE_INITIAL_DELAY_ENV);
-            std::env::remove_var(CACHE_WRITE_SPACING_ENV);
-        }
+        assert_eq!(
+            handle_cache_miss(
+                TransposedWeightCacheMissPolicy::PersistBeforeReadiness,
+                &cache_key,
+                &payload,
+            ),
+            CachePersistence::AlreadyPresent
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_policy_skips_cache_persistence() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut cache_key = test_cache_key(4);
+        cache_key.file_path = dir.path().join("entry.bin");
+        let computed = finish_cache_miss(
+            cache_key.clone(),
+            TransposedWeightCacheMissPolicy::ReadOnly,
+            vec![1u8, 2, 3, 4],
+            [2, 2],
+        );
+
+        assert_eq!(computed.as_bytes(), [1, 2, 3, 4]);
+        assert_eq!(computed.shape(), [2, 2]);
+        assert!(!cache_key.file_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn persist_policy_keeps_write_failure_nonfatal() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let parent_is_file = dir.path().join("not-a-directory");
+        std::fs::write(&parent_is_file, b"block cache directory creation")?;
+        let mut cache_key = test_cache_key(4);
+        cache_key.file_path = parent_is_file.join("entry.bin");
+        let payload = vec![1u8, 2, 3, 4];
+
+        let computed = finish_cache_miss(
+            cache_key.clone(),
+            TransposedWeightCacheMissPolicy::PersistBeforeReadiness,
+            payload,
+            [2, 2],
+        );
+
+        assert_eq!(computed.as_bytes(), [1, 2, 3, 4]);
+        assert_eq!(computed.shape(), [2, 2]);
+        assert!(!cache_key.file_path.exists());
         Ok(())
     }
 
