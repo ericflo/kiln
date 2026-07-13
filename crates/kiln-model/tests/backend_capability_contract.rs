@@ -5293,10 +5293,9 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "SFT/GRPO tape eligibility should consume backend precision policy"
     );
     assert!(
-        trainer_source.contains("fn backend_supports_tape_forward_backward(")
-            && trainer_source
-                .contains("TrainingLossBackend::runtime_tape_forward_backward_route(backend)")
-            && trainer_source.contains("backend_supports_tape_forward_backward(backend)"),
+        tape_support_guard
+            .contains("TrainingLossBackend::runtime_tape_forward_backward_route(backend)")
+            && tape_support_guard.contains("TrainingTapeRoute::KtTapeAuthoritative"),
         "SFT/GRPO tape eligibility should consume backend tape-forward/backward capability"
     );
     assert!(
