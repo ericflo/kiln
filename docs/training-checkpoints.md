@@ -53,15 +53,98 @@ identity, and every named RNG stream. Objective-specific reference, EMA,
 reward-normalization, and sampler state is carried either in a checksummed
 state file or in the manifest's versioned auxiliary state.
 
+## Admission and compatibility ordering
+
+Checkpoint resume is not an escape hatch around the running server's training
+contract. Every dedicated SFT/GRPO/OPD endpoint, the intent-tagged `/v1/train`
+front door, recipes, judge/self-improve, the distinct DistillRefresh route, and
+OPD-backed distillation first run the cheap workload and resident
+optimizer-tuple guards. These checks happen
+before checkpoint loading or corpus scanning. Cheap teacher-alias validation
+and metadata pinning may happen first to preserve established request errors;
+remote/local teacher materialization, checkpoint checksumming, memory preflight,
+and GPU reservation happen only after the workload guard. The queue worker
+repeats the same static
+guards before loading the checkpoint again, memory reservation, and device
+residency.
+
+The static workload gate requires a real readable runner, serving-profile
+training GPU ownership, configured/resident weight-device agreement, a runtime
+that resolves those weights, exact native backend/device identity, no
+Marlin-packed projection, and the authoritative `kt_tape_authoritative`
+forward/backward route. SFT additionally rejects multi-segment checkpointing on
+the `full_logits` route. OPD additionally requires its loss and phase-B
+backward routes. A CPU portable-reference optimizer tuple or raw Vulkan native
+hook does not satisfy those workload requirements.
+
+DistillRefresh has no exact-resume contract yet and is not admitted as OPD. Its
+`distill_refresh` workload row always fails closed with
+`distill_refresh is unavailable until admission pins separate exact SFT and OPD
+phase plans, prepares the exact SFT rows, and reserves the maximum sequential
+working set`. A correct future admission record must bind the SFT knowledge
+phase and OPD behavior-recovery phase separately, include the exact phase-one
+rows, and reserve the maximum of the two sequential phase peaks. Until then,
+the endpoint and every recipe containing that step reject, after any cheap
+teacher-alias validation/pinning, before checkpoint loading, remote/local
+teacher materialization, corpus scanning, memory preflight, or GPU reservation.
+
+After those checks, exact resume compares the checkpoint's backend/device,
+base-weight manifest, base and resolved LoRA dtypes, optimizer kind and complete
+state, rank, round-to-nearest mode, execution provenance, data identity,
+checkpoint plan, and objective-specific tape/loss/backward route. Any mismatch
+fails closed before GPU ownership; Kiln never changes optimizer, lowers rank,
+falls back to a host update, or reinterprets a checkpoint through another
+route. Live-memory admission remains dynamic and can still reject an otherwise
+compatible workload/tuple.
+
+The running snapshot is visible under `GET /v1/config` field
+`training.optimizer_support`, schema
+`{"id":"kiln.training-optimizer-support","version":1}`. Raw
+`backend_implementation`, resident `optimizer_tuple`, and per-workload
+`allowed_optimizer_kinds` are deliberately separate. `GET /v1/recipes`
+provides `admission {supported, unavailable_reason}` for each built-in recipe,
+but this static preview is not a checkpoint validation or memory reservation.
+
+The tuple's `lora_rank.maximum` is the effective static minimum of
+`backend_maximum` and model-derived `model_maximum`. A null backend maximum is
+not unbounded resume authority: the concrete model maximum still applies, and
+live memory can impose a lower admission ceiling. Exact resume compares the
+recorded rank and model/backend envelope rather than clamping it into the
+current range.
+
+## Queued resume revalidation
+
+Resume admission runs the full strict checkpoint loader, including every
+declared artifact size and SHA-256. The queue retains only a compact identity:
+the checkpoint ID and a digest of that fully validated manifest, whose artifact
+entries cover the validated file hashes. It separately retains the admitted
+effective seed. This keeps queue state bounded without weakening the admitted
+identity.
+
+At dequeue, before memory reservation, Kiln fully reloads the checkpoint,
+revalidates all declared artifacts, recomputes the compact manifest identity,
+and derives the effective seed again. The worker requires both identity and
+seed to equal the admitted values. A replaced manifest, changed artifact hash,
+different checkpoint ID, or changed seed rejects the queued job instead of
+continuing from different state.
+
+This invariant is revalidation, not a filesystem snapshot. The queue does not
+copy or pin externally mutable checkpoint files, and the comparison cannot
+eliminate a mutation race after the dequeue reload. Operators must keep exact
+checkpoint directories immutable and access-controlled for their entire use;
+later strict loaders remain authoritative for any bytes they open.
+
 ## Effective seed admission contract
 
-Every public SFT, GRPO, OPD, and OPD-backed distillation path resolves one
+Every admitted SFT, GRPO, OPD, and OPD-backed distillation path resolves one
 effective seed before publishing either its tracking record or queue entry.
 This includes the dedicated endpoints, `/v1/train`, recipe steps, judge
 distillation, scheduled or manual self-improvement, and the distill
-refresh/merge/pump/self endpoints. A request-provided `config.seed` wins for a
-fresh run; otherwise the server draws one value exactly once and writes it back
-into the queued effective configuration.
+merge/pump/self endpoints. DistillRefresh is a separate workload and currently
+fails its static guard before an effective seed or queue entry exists. For an
+admitted fresh run, a request-provided `config.seed` wins; otherwise the server
+draws one value exactly once and writes it back into the queued effective
+configuration.
 
 The one-job submission response contains `effective_seed`. Status, queue, job
 detail, and on-disk training history retain the same value. JSON-facing fields
@@ -124,6 +207,22 @@ Resume validates both records before GPU ownership and requires their canonical
 activation, gradient, and stochastic-rounding policy used by the trainer.
 Changing either the execution envelope or those concrete dtypes is not an exact
 continuation.
+
+Current server training records `{"mode":"round_to_nearest"}` and admits only
+that policy. Stochastic rounding remains an explicit optimizer-library option,
+not a server/config/environment option. Therefore a legacy exact checkpoint
+whose precision policy records `{"mode":"stochastic","seed":...}` fails
+closed during precision comparison before GPU ownership; Kiln does not discard
+the recorded seed, silently convert the optimizer state, or resume under a
+different rounding rule. `KILN_BF16_STOCHASTIC_ROUND` has been removed and
+cannot be used to make such a checkpoint resumable. The removed
+`KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK` and
+`KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK`,
+`KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK`,
+`KILN_METAL_TRAINING_OPTIMIZER_FALLBACK`, and
+`KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK` likewise have no configuration fields
+or compatibility aliases. Use the artifact as a non-resumable record or start
+a new round-to-nearest run.
 
 Legacy exact checkpoints that contain only `backend_runtime`, package version,
 or other partial runtime strings fail closed because they cannot prove the
@@ -271,8 +370,9 @@ replacement for the checksummed planning identity used by resume.
 
 The native parameter codec validates the complete tensor set, shape, dtype,
 finite values, and optimizer step before mutation. It restores both
-resident-device and host-fallback state so a later optimizer route cannot
-silently reset momentum. CPU and ROCm continuation tests cover byte-identical
+resident-device state and the portable F32 checkpoint representation so a
+resume cannot silently reset momentum or change optimizer route. Direct-library
+CPU portable-reference tests and ROCm continuation tests cover byte-identical
 next-step state. Real ROCm BF16 and Vulkan F32 qualification compares two fresh
 runs and an uninterrupted run with its cancelled-and-resumed counterpart
 through final adapter, optimizer, receipt, manifest, and loop-state artifacts.

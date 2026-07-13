@@ -15,5 +15,5 @@ steps:
       domain: math_reasoning
     config:
       top_k: 32
-      lora_rank: 64
+      lora_rank: 32
       samples_per_prompt: 4

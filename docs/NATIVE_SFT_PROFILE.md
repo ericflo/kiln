@@ -146,24 +146,142 @@ this SFT route is not their loss-routing authority.
 
 ## Optimizers and learning rate
 
-The profile supports Muon, AdamW, and plain SGD. Muon is the default. If
-`learning_rate` is omitted, native SFT resolves these constants:
+`config.optimizer` is a tagged object. Omission selects Muon with its defaults,
+and kind-only AdamW or Muon objects also select their defaults. The expanded
+forms below show every optional field; unknown fields are rejected:
 
-| Optimizer | SFT learning rate |
-| --- | ---: |
-| Muon | `1e-3` |
-| AdamW | `1e-4` |
-| SGD | `1e-4` |
+```json
+{"kind":"sgd"}
+{"kind":"adam_w","beta1":0.9,"beta2":0.999,"eps":1e-8,"weight_decay":0.0}
+{"kind":"muon","momentum":0.95,"nesterov":true,"ns_iters":5,"weight_decay":0.0}
+```
 
-Explicit learning rates must remain finite and greater than zero after the
-optimizer's F32 conversion. LoRA alpha must be finite and positive. AdamW beta
-values must be in `[0, 1)`, epsilon must be positive, and weight decay must be
-non-negative. Muon momentum must be in `[0, 1)`, Newton-Schulz iterations must
-be in `1..=20`, and weight decay must be non-negative.
+Thus `{"kind":"adam_w"}` and `{"kind":"muon"}` are valid shorthand for
+the displayed defaults. SGD has no optimizer-specific fields.
+
+AdamW `beta1` and `beta2` must be finite and in `[0, 1)`, `eps` must be
+finite and greater than zero, and `weight_decay` must be finite and
+non-negative. Muon `momentum` must be finite and in `[0, 1)`, `ns_iters` must
+be in `1..=20`, and `weight_decay` must be finite and non-negative.
+`learning_rate`, when supplied, must be finite,
+positive, and remain positive and finite after F32 conversion.
+
+If `learning_rate` is omitted, native training resolves these constants:
+
+| Optimizer | SFT | GRPO / OPD |
+| --- | ---: | ---: |
+| Muon | `1e-3` | `2e-3` |
+| AdamW | `1e-4` | `1e-5` |
+| SGD | `1e-4` | `1e-5` |
+
+LoRA rank must be positive and remains subject to model-shape and live-memory
+admission. Native Muon additionally requires rank `2..=48` on CUDA and ROCm and
+`2..=32` on Metal and Vulkan; rank 1 would skip orthogonalization, while higher
+ranks exceed those kernels' qualified shared-memory envelope. CPU reference
+Muon requires rank 2+ but adds no backend-specific maximum. AdamW and SGD also
+add no backend-specific rank ceiling. Their `backend_maximum` is therefore
+null, while their effective `maximum` remains bounded by the resident model and
+live-memory admission.
+Metal does not implement a native SGD update and rejects it. The server checks
+the cheap per-workload substrate and optimizer tuple before checkpoint or
+corpus materialization, repeats both checks at dequeue before memory
+reservation, and repeats the tuple before device residency. This ordering
+applies to dedicated SFT/GRPO/OPD endpoints, the intent-tagged training front
+door, recipes, judge/self-improve, the distinct DistillRefresh workload, and
+every OPD-backed distillation route.
+Invalid optimizer kind, rank, or hyperparameters return HTTP 400 with
+structured `training_invalid_request`. An unsupported base dtype, mismatched
+backend/device identity, or unavailable workload substrate returns
+`training_backend_unsupported`.
 
 ## Precision and optimizer state
 
-For the canonical BF16 Qwen3.5-4B weights, the runtime contract is:
+Kiln deliberately represents optimizer support at three static layers and one
+dynamic layer:
+
+1. The backend implementation says whether an update hook exists for a kind,
+   which parameter dtypes it accepts, and whether its route is
+   `native_device_hook` or `portable_reference`. CPU never claims a native
+   device hook.
+2. The resident optimizer tuple adds the exact backend/device identity,
+   base-weight dtype, resolved LoRA dtype, fixed round-to-nearest policy, kind,
+   and static LoRA-rank range.
+3. Per-workload admission adds the complete SFT, GRPO, OPD, or DistillRefresh
+   execution substrate. Only a supported workload's `allowed_optimizer_kinds`
+   is a server-training promise.
+4. Live-memory admission evaluates the concrete request after those cheap
+   checks. It may reject a supported workload/tuple, but never lowers rank,
+   substitutes an optimizer, or switches to a host route.
+
+For canonical Qwen3.5-4B, whose smallest trained projection gives a
+`model_maximum` of 1024, the resident optimizer-tuple matrix is:
+
+| Backend | Supported base dtype | Resolved LoRA dtype | SGD | AdamW | Muon |
+| --- | --- | --- | --- | --- | --- |
+| CPU portable reference | F32 | F32 | rank 1..=1024 (backend unbounded) | rank 1..=1024 (backend unbounded) | rank 2..=1024 (backend unbounded) |
+| CUDA | F32 / BF16 | same as base | rank 1..=1024 (backend unbounded) | rank 1..=1024 (backend unbounded) | rank 2..=48 |
+| ROCm | F32 / BF16 | same as base | rank 1..=1024 (backend unbounded) | rank 1..=1024 (backend unbounded) | rank 2..=48 |
+| Metal | BF16 | BF16 | unsupported | rank 1..=1024 (backend unbounded) | rank 2..=32 |
+| Vulkan tuple | F32 / BF16 | F32 | rank 1..=1024 (backend unbounded) | rank 1..=1024 (backend unbounded) | rank 2..=32 |
+
+This is not an executable-workload matrix. Current CPU server workloads remain
+unsupported even though the portable F32 optimizer tuples are exposed for
+diagnostics and direct-library testing. The normal hybrid Vulkan server has
+CPU-host model weights and is rejected before data admission even though raw
+Vulkan hooks and tuples can exist. A future Vulkan-resident tuple may likewise
+remain unusable for one workload when its tape or loss route fails that
+workload's gate. F16 remains inference-only on CUDA and ROCm.
+
+`GET /v1/config -> training.optimizer_support` reports schema
+`{"id":"kiln.training-optimizer-support","version":1}` plus the resident
+`backend`, `device`, `base_weight_dtype`,
+`resolved_lora_parameter_dtype`, `immutable_after_startup`, product
+`rounding_modes`, and `backend_implementation_rounding_modes`. The object is
+`null` for a mock runner. `optimizer_tuple_kinds` summarizes the resident tuple
+kinds. Each `optimizers[]` member contains `kind`, `backend_implementation`, and
+`optimizer_tuple {supported, unavailable_reason, lora_rank}`. Every rank object
+has `minimum`, effective `maximum`, optional `backend_maximum`, concrete
+`model_maximum`, and `live_memory_admission_required=true`. `maximum` is the
+minimum of the backend and model ceilings. A null `backend_maximum` means only
+that the optimizer backend is unbounded; `maximum` remains the model ceiling.
+The model ceiling is the smallest input/output dimension across Kiln's uniformly
+ranked trained projections, so a higher rank would no longer be a low-rank
+update. Live memory can reject a lower rank without changing the static fields.
+
+The `workloads` array contains exactly `sft`, `grpo`, `opd`, and
+`distill_refresh`, each with
+`supported`, `unavailable_reason`, and `allowed_optimizer_kinds`. Static
+workload admission requires a real readable runner, a serving profile that
+grants training GPU ownership, agreement between configured and resident
+weight devices, a runtime that resolves those weights, exact native
+backend/device identity, no Marlin-packed projection, and authoritative
+`kt_tape_authoritative` forward/backward. SFT additionally rejects a
+multi-segment checkpoint plan on the `full_logits` loss route. OPD additionally
+requires its loss and phase-B backward routes. A failed workload has an empty
+allowed-kind list even when `optimizer_tuple_kinds` is non-empty.
+
+`distill_refresh` is deliberately unsupported on every backend today. It is a
+distinct sequential workload, not an OPD alias: phase one applies SFT to new
+knowledge and phase two uses OPD to restore behavior. Its stable
+`unavailable_reason` is `distill_refresh is unavailable until admission pins
+separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves
+the maximum sequential working set`. The route cannot become supported until
+admission binds separate exact plans for both phases, materializes the precise
+SFT rows as part of that plan, and reserves the larger phase peak for the
+sequential execution. An OPD-only plan, a lazy SFT-row load, or the sum of two
+non-overlapping phase estimates does not satisfy that contract.
+
+`GET /v1/recipes` also returns
+`admission {supported, unavailable_reason}` for each built-in recipe after
+checking every step's workload and exact optimizer/rank tuple. This is a static
+preview, not a live-memory reservation; recipe submission preflights every step
+again before it loads any checkpoint, materializes a remote/local teacher,
+scans a corpus, runs memory preflight, or reserves GPU capacity. Cheap teacher
+alias validation and metadata pinning may happen first to preserve request-error
+ordering. Any recipe with a DistillRefresh step therefore reports unsupported
+with the same stable reason.
+
+For canonical BF16 Qwen3.5-4B weights, concrete runtime storage is:
 
 | Backend | LoRA parameters | Activations | Gradients | Resident optimizer state | Loss accumulation |
 | --- | --- | --- | --- | --- | --- |
@@ -180,10 +298,14 @@ optimizer arrays as F32 safetensors plus per-parameter step counters, then
 restore them into the declared runtime dtype. That portable serialization is
 not an F32 master copy used by ordinary updates.
 
-Round-to-nearest is the default BF16 write policy. The legacy
-`KILN_BF16_STOCHASTIC_ROUND` environment switch is not a portable profile knob:
-it selects the host reference behavior and the Metal fallback behavior, but
-callers must not assume identical support on every native optimizer kernel.
+Product training is fixed to round-to-nearest for every supported optimizer
+tuple. Stochastic rounding remains an explicit programmatic optimizer-library
+policy for experiments; it is not selectable by server config, a request, or
+the environment. `KILN_BF16_STOCHASTIC_ROUND` and the backend/debug optimizer
+fallback variables have been removed, have no compatibility aliases, and must
+be deleted from service definitions. A legacy exact checkpoint that records
+stochastic rounding cannot resume into the round-to-nearest product policy;
+precision-policy comparison fails closed before GPU ownership.
 The concrete parameter, optimizer-state, activation, gradient, and rounding
 record for a completed run is stored under
 `train_receipt.json -> runtime.training_precision` and copied to the adapter
@@ -254,6 +376,15 @@ Exact `.kiln-checkpoint` manifests additionally bind the fixed scheduler state,
 optimizer state, data order/cursor, RNG state, admitted-corpus identity, model
 artifacts, tokenizer/template, execution provenance, and the SFT v4 planning
 identity that contains the pinned loss route.
+
+Resume first passes the current cheap SFT workload and resident optimizer-tuple
+gates, then validates the checkpoint before GPU ownership. The checkpoint's
+backend/device, base and LoRA dtypes, optimizer kind and state, rank, immutable
+rounding mode, execution provenance, and loss/checkpoint route must remain
+compatible. A legacy stochastic checkpoint, a changed native identity, a newly
+Marlin-packed projection, or an unavailable authoritative tape/loss route fails
+closed; Kiln does not reinterpret the artifact through another optimizer or
+backend.
 
 An ordinary PEFT adapter is a serving artifact, not an exact training
 checkpoint. See [Exact Training Checkpoints](training-checkpoints.md) and

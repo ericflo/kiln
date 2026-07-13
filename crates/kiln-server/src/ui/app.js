@@ -1189,13 +1189,19 @@ function markCorrState(c) {
 function updateCorrFoot() {
   const ready = correctionsBasket.filter(corrTrainable).length;
   const todo = correctionsBasket.length - ready;
+  const admission = trainingOptimizerAdmissionState('sft', 'muon', 8);
   setText('corr-train-n', String(ready));
   const note = document.getElementById('corr-foot-note');
   if (note) note.textContent = todo > 0
     ? `${todo} still need${todo === 1 ? 's' : ''} an answer · only edited items train`
     : (ready > 0 ? 'These become one SFT job — the new adapter hot-swaps in when done' : '');
   const btn = document.getElementById('corr-train');
-  if (btn) btn.disabled = ready === 0;
+  if (btn) {
+    btn.disabled = ready === 0 || !admission.ready;
+    btn.title = admission.ready ? '' : admission.reason || 'Training capability unavailable';
+  }
+  const support = document.getElementById('corr-optimizer-support');
+  if (support) support.textContent = optimizerSupportStatus('sft', 'muon', 8);
 }
 // The client-side corrections→SFT transform, used by "Build a dataset from
 // your corrections" on the Evals Datasets tab. The Corrections card's Train
@@ -1229,6 +1235,12 @@ async function corrFlushToServer(rows) {
 async function trainFromCorrections() {
   const trainable = correctionsBasket.filter(corrTrainable);
   if (!trainable.length) { toast('Write at least one ideal answer (different from pi’s) before training', 'err'); return; }
+  try {
+    requireTrainingOptimizerAdmission('sft', 'muon', 8, 'Corrections SFT');
+  } catch (error) {
+    toast(error.message, 'err');
+    return;
+  }
   const nameInput = document.getElementById('corr-adapter-name');
   const name = ((nameInput && nameInput.value) || '').trim() || 'codebase-corrections';
   if (!/^[A-Za-z0-9._-]+$/.test(name)) { toast('Adapter name: letters, digits, . _ - only', 'err'); nameInput && nameInput.focus(); return; }
@@ -1243,7 +1255,7 @@ async function trainFromCorrections() {
     await corrFlushToServer(trainable);
     // learning_rate omitted on purpose: the server resolves the
     // per-optimizer default (Muon and AdamW want very different bands).
-    const body = { dataset: 'corrections:active', config: { output_name: name, auto_load: true, epochs: 3, lora_rank: 8, lora_alpha: loraAlphaFor(8) } };
+    const body = { dataset: 'corrections:active', config: { output_name: name, auto_load: true, epochs: 3, lora_rank: 8, lora_alpha: loraAlphaFor(8), optimizer: { kind: 'muon' } } };
     const res = await api('/v1/train/sft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     toastTrainingSubmission(res, `Training ${name} from ${trainable.length} correction${trainable.length === 1 ? '' : 's'} — it will hot-swap in when done`);
     // Clear the submitted rows from the LOCAL view only. The durable rows
@@ -1259,7 +1271,7 @@ async function trainFromCorrections() {
     saveCorrections(); renderCorrections();
     if (typeof pollTraining === 'function') pollTraining();
   } catch (e) { toast(e.message || 'Could not submit training', 'err'); }
-  finally { if (btn) btn.disabled = correctionsBasket.filter(corrTrainable).length === 0; }
+  finally { updateCorrFoot(); }
 }
 // Resolve an in-flight corrections-train receipt against the queue poll.
 // Failed → flip the receipt to its error state and pull the (never-marked)
@@ -1872,8 +1884,20 @@ function fetchRuntimeConfig(force = false) {
       if (seq === runtimeConfigRequestSeq) {
         runtimeConfigSnapshot = cfg;
         updatePlaygroundThinkingBudgetDefaults(cfg);
+        updateTrainingOptimizerSupport(cfg);
       }
       return cfg;
+    })
+    .catch(error => {
+      if (seq === runtimeConfigRequestSeq) {
+        runtimeConfigSnapshot = null;
+        runtimeConfigLoaded = false;
+        markTrainingOptimizerSupportFetchFailed(error);
+        const details = document.getElementById('runtime-config');
+        const body = document.getElementById('runtime-config-body');
+        if (details?.open && body) body.innerHTML = runtimeConfigFailureHtml(error);
+      }
+      throw error;
     })
     .finally(() => {
       if (runtimeConfigRequest === request) runtimeConfigRequest = null;
@@ -1887,6 +1911,11 @@ function runtimeConfigRow(label, valueHtml, title) {
     <span class="rc-label">${escapeHtml(label)}</span>
     <span class="rc-value">${valueHtml}</span>
   </div>`;
+}
+
+function runtimeConfigFailureHtml(error) {
+  return `<div class="hint">Couldn't load /v1/config — ${escapeHtml(error?.message || 'request failed')}</div>
+    <div class="rc-actions"><button class="btn btn-sm" type="button" data-rc-refresh>Retry</button></div>`;
 }
 
 // Renders the operational subset of /v1/config (shape: api/config.rs
@@ -2018,6 +2047,53 @@ function renderRuntimeConfigBody(cfg) {
     && checkpointBoundaryPolicy.cache_target_bytes >= 0
     ? gib(checkpointBoundaryPolicy.cache_target_bytes / (1024 ** 3))
     : '—';
+  const optimizerSupport = train.optimizer_support;
+  const optimizerEntries = Array.isArray(optimizerSupport?.optimizers) ? optimizerSupport.optimizers : [];
+  const optimizerName = kind => kind === 'adam_w' ? 'AdamW' : kind === 'sgd' ? 'SGD' : kind === 'muon' ? 'Muon' : String(kind || 'unknown');
+  const optimizerWorkloadName = workload => workload === 'distill_refresh'
+    ? 'Distill refresh'
+    : String(workload || 'unknown').toUpperCase();
+  const optimizerTupleKinds = Array.isArray(optimizerSupport?.optimizer_tuple_kinds)
+    ? optimizerSupport.optimizer_tuple_kinds.map(kind => optimizerName(kind)).join(', ') || 'none'
+    : 'unavailable';
+  const optimizerWorkloads = Array.isArray(optimizerSupport?.workloads) ? optimizerSupport.workloads : [];
+  const workloadSummary = workload => {
+    const workloadLabel = optimizerWorkloadName(workload);
+    const entry = optimizerWorkloads.find(candidate => candidate?.workload === workload);
+    if (!entry) return { value: 'unavailable', detail: `The ${workloadLabel} workload descriptor is missing.` };
+    const allowed = Array.isArray(entry.allowed_optimizer_kinds)
+      ? entry.allowed_optimizer_kinds.map(kind => optimizerName(kind)).join(', ') || 'none'
+      : 'invalid allowlist';
+    return {
+      value: entry.supported === true ? allowed : 'unavailable',
+      detail: entry.supported === true
+        ? `Optimizer kinds admitted for ${workloadLabel}. Exact rank admission remains tuple-specific.`
+        : entry.unavailable_reason || `${workloadLabel} is unsupported by the resident server path.`,
+    };
+  };
+  const backendOptimizerImplementations = optimizerEntries
+    .filter(entry => entry?.backend_implementation?.supported === true)
+    .map(entry => optimizerName(entry.kind))
+    .join(', ') || (optimizerSupport ? 'none' : 'unavailable');
+  const nativeHookOptimizers = optimizerEntries
+    .filter(entry => entry?.backend_implementation?.native_device_hook === true)
+    .map(entry => optimizerName(entry.kind))
+    .join(', ') || (optimizerSupport ? 'none' : 'unavailable');
+  const muonSupport = optimizerEntries.find(entry => entry?.kind === 'muon');
+  const muonRank = muonSupport?.optimizer_tuple?.lora_rank;
+  const muonRankLabel = muonRank && Number.isInteger(muonRank.minimum)
+    ? `${muonRank.minimum}${Number.isInteger(muonRank.maximum) ? `..${muonRank.maximum}` : '+'}`
+    : 'unavailable';
+  const muonBackendMaximum = Number.isInteger(muonRank?.backend_maximum)
+    ? num(muonRank.backend_maximum)
+    : 'none';
+  const muonModelMaximum = Number.isInteger(muonRank?.model_maximum)
+    ? num(muonRank.model_maximum)
+    : 'unavailable';
+  const sftWorkload = workloadSummary('sft');
+  const grpoWorkload = workloadSummary('grpo');
+  const opdWorkload = workloadSummary('opd');
+  const distillRefreshWorkload = workloadSummary('distill_refresh');
   const reclaimRequested = governor.reclaim_mode_requested;
   const reclaimEffective = governor.reclaim_mode_effective;
   const reclaimDisabledByProfile = governor.reclaim_disabled_by_serving_profile === true;
@@ -2145,6 +2221,19 @@ function renderRuntimeConfigBody(cfg) {
         ${runtimeConfigRow('Runtime device', `<strong>${escapeHtml(train.runtime_device == null ? '—' : String(train.runtime_device))}</strong>`, 'Immutable execution device bound to native training.')}
         ${runtimeConfigRow('Weight device', `<strong>${escapeHtml(train.model_weight_device == null ? '—' : String(train.model_weight_device))}</strong>`, 'Device representation of the frozen model weights.')}
         ${runtimeConfigRow('Native training', `<strong>${train.native_training_supported === true ? 'available' : 'unavailable'}</strong>`, train.native_training_supported === true ? 'The bound runtime and model-weight representation can execute native training.' : (train.native_training_unavailable_reason || 'Native training is unavailable on this backend.'))}
+        ${runtimeConfigRow('Optimizer contract', `<strong>${escapeHtml(optimizerSupport?.schema?.id || 'unavailable')}</strong>${optimizerSupport?.schema?.version == null ? '' : flagChip(`v${optimizerSupport.schema.version}`, 'Optimizer support response schema version.')}`, 'Versioned product optimizer support derived from the resident runner.')}
+        ${runtimeConfigRow('Optimizer backend', `<strong>${escapeHtml(optimizerSupport?.backend || '—')} · ${escapeHtml(optimizerSupport?.device || '—')}</strong>`, 'Backend and device identity used for optimizer admission.')}
+        ${runtimeConfigRow('Base / LoRA dtype', `<strong>${escapeHtml(optimizerSupport?.base_weight_dtype || '—')} / ${escapeHtml(optimizerSupport?.resolved_lora_parameter_dtype || '—')}</strong>`, 'Resident base-weight dtype and the LoRA parameter dtype resolved by the training precision policy.')}
+        ${runtimeConfigRow('Optimizer tuples', `<strong>${escapeHtml(optimizerTupleKinds)}</strong>`, 'Optimizer kinds whose immutable backend, dtype, rounding, and rank tuple is admitted for the resident weights. Workload admission is reported separately.')}
+        ${runtimeConfigRow('SFT workload', `<strong>${escapeHtml(sftWorkload.value)}</strong>`, sftWorkload.detail)}
+        ${runtimeConfigRow('GRPO workload', `<strong>${escapeHtml(grpoWorkload.value)}</strong>`, grpoWorkload.detail)}
+        ${runtimeConfigRow('OPD workload', `<strong>${escapeHtml(opdWorkload.value)}</strong>`, opdWorkload.detail)}
+        ${runtimeConfigRow('Distill refresh workload', `<strong>${escapeHtml(distillRefreshWorkload.value)}</strong>`, distillRefreshWorkload.detail)}
+        ${runtimeConfigRow('Optimizer implementations', `<strong>${escapeHtml(backendOptimizerImplementations)}</strong>`, 'Backend optimizer implementations, including the CPU portable reference route. These facts do not by themselves make server training available.')}
+        ${runtimeConfigRow('Native device hooks', `<strong>${escapeHtml(nativeHookOptimizers)}</strong>`, 'Accelerator-native optimizer hooks only; the CPU reference route is deliberately excluded.')}
+        ${runtimeConfigRow('Optimizer rounding', `<strong>${escapeHtml((optimizerSupport?.rounding_modes || []).join(', ') || 'unavailable')}</strong>${optimizerSupport?.immutable_after_startup === true ? flagChip('immutable', 'Product optimizer rounding is fixed for the process lifetime.') : ''}`, 'Product training uses only the reported rounding policy; backend-implementation modes are retained separately in raw JSON.')}
+        ${runtimeConfigRow('Muon rank', `<strong>${escapeHtml(muonRankLabel)}</strong>${muonRank?.live_memory_admission_required === true ? flagChip('admission required', 'Live memory admission revalidates this tuple and rejects the request if it does not fit.') : ''}`, 'Effective resident-model/backend Muon rank range. Live memory admission is a separate request-time rejection gate; it does not change this range or the requested rank.')}
+        ${runtimeConfigRow('Muon rank ceilings', `<strong>backend ${escapeHtml(muonBackendMaximum)} · model ${escapeHtml(muonModelMaximum)}</strong>`, 'The effective maximum above is the model ceiling bounded by the optional backend ceiling. Backend none means the model ceiling is effective.')}
         ${runtimeConfigRow('Checkpoint policy', `<strong>${checkpointPolicyLabel}</strong>${retainedSegments}`, 'Immutable typed checkpoint policy for native training runs.')}
         ${runtimeConfigRow('Execution', `<strong>${onOff(train.checkpointing_enabled)}</strong>`, 'Gradient checkpointing trades recompute for activation memory during LoRA training.')}
         ${runtimeConfigRow('Effective segments', `<strong>${num(train.checkpoint_segments)}</strong>${srcChip(train.checkpoint_segments_source)}`, 'Resolved segment count and whether it was measured, conservatively selected, explicitly configured, or disabled.')}
@@ -2180,7 +2269,7 @@ function renderRuntimeConfigBody(cfg) {
 async function loadRuntimeConfig(force = false) {
   const body = document.getElementById('runtime-config-body');
   if (!body) return;
-  if (runtimeConfigLoaded && !force) return;
+  if (runtimeConfigLoaded && runtimeConfigSnapshot && !force) return;
   const seq = ++runtimeConfigRenderSeq;
   body.innerHTML = '<div class="hint">Loading GET /v1/config…</div>';
   try {
@@ -2191,8 +2280,7 @@ async function loadRuntimeConfig(force = false) {
   } catch (e) {
     if (seq !== runtimeConfigRenderSeq) return;
     runtimeConfigLoaded = false; // the next open retries automatically
-    body.innerHTML = `<div class="hint">Couldn't load /v1/config — ${escapeHtml((e && e.message) || 'request failed')}</div>
-      <div class="rc-actions"><button class="btn btn-sm" type="button" data-rc-refresh>Retry</button></div>`;
+    body.innerHTML = runtimeConfigFailureHtml(e);
   }
 }
 
@@ -4147,16 +4235,285 @@ const checkpointSummary = kind => {
   return `${interval ? `checkpoint every ${interval}` : 'checkpoints off'} · ${resume ? 'resume selected' : 'fresh run'}`;
 };
 const optimizerLabel = id => {
-  const value = document.getElementById(id)?.value || 'muon';
-  if (value === 'adam_w') return 'AdamW';
-  if (value === 'sgd') return 'SGD';
-  return 'Muon';
+  const value = document.getElementById(id)?.value;
+  return optimizerLabelForKind(value);
 };
+function optimizerLabelForKind(kind) {
+  if (kind === 'adam_w') return 'AdamW';
+  if (kind === 'sgd') return 'SGD';
+  if (kind === 'muon') return 'Muon';
+  return String(kind || 'unknown');
+}
+
+function trainingWorkloadLabel(workload) {
+  if (workload === 'distill_refresh') return 'Distill refresh';
+  return String(workload || 'unknown').toUpperCase();
+}
+
+let trainingOptimizerSupportSnapshot = null;
+let trainingOptimizerSupportUnavailableReason = 'Optimizer capability details are still loading';
+
+function optimizerSupportEntry(kind) {
+  const entries = trainingOptimizerSupportSnapshot?.optimizers;
+  return Array.isArray(entries) ? entries.find(entry => entry?.kind === kind) || null : null;
+}
+
+function optimizerWorkloadEntry(workload) {
+  const workloads = trainingOptimizerSupportSnapshot?.workloads;
+  return Array.isArray(workloads)
+    ? workloads.find(entry => entry?.workload === workload) || null
+    : null;
+}
+
+function rememberGeneralRankBounds(input) {
+  if (!input) return;
+  if (!input.dataset.optimizerGeneralMin) input.dataset.optimizerGeneralMin = input.min || '1';
+  if (!input.dataset.optimizerGeneralMax) input.dataset.optimizerGeneralMax = input.max || '';
+}
+
+function applyOptimizerRankBounds(input, entry) {
+  if (!input) return;
+  rememberGeneralRankBounds(input);
+  const generalMin = Number.parseInt(input.dataset.optimizerGeneralMin, 10) || 1;
+  const generalMax = Number.parseInt(input.dataset.optimizerGeneralMax, 10);
+  const rank = entry?.optimizer_tuple?.lora_rank;
+  const minimum = Number.isInteger(rank?.minimum) ? rank.minimum : generalMin;
+  const maximum = rank && Object.prototype.hasOwnProperty.call(rank, 'maximum')
+    ? rank.maximum
+    : generalMax;
+  input.min = String(minimum);
+  if (Number.isInteger(maximum)) input.max = String(maximum);
+  else input.removeAttribute('max');
+}
+
+function optimizerRankRangeLabel(rank) {
+  if (!Number.isInteger(rank?.minimum)) return 'unavailable';
+  return Number.isInteger(rank.maximum)
+    ? `${rank.minimum}–${rank.maximum}`
+    : `${rank.minimum}+`;
+}
+
+function trainingOptimizerKindState(workload, kind) {
+  const support = trainingOptimizerSupportSnapshot;
+  if (!support) return { ready: false, reason: trainingOptimizerSupportUnavailableReason, entry: null };
+  const workloadEntry = optimizerWorkloadEntry(workload);
+  const workloadLabel = trainingWorkloadLabel(workload);
+  if (!workloadEntry) {
+    return { ready: false, reason: `The optimizer capability contract does not describe the ${workloadLabel} workload`, entry: null };
+  }
+  if (workloadEntry.supported !== true) {
+    return {
+      ready: false,
+      reason: `${workloadLabel} is unavailable: ${workloadEntry.unavailable_reason || 'the resident server path is unsupported'}`,
+      entry: null,
+    };
+  }
+  const entry = optimizerSupportEntry(kind);
+  if (!Array.isArray(workloadEntry.allowed_optimizer_kinds)) {
+    return { ready: false, reason: `${workloadLabel} is missing its optimizer allowlist`, entry };
+  }
+  if (!workloadEntry.allowed_optimizer_kinds.includes(kind)) {
+    return { ready: false, reason: `${optimizerLabelForKind(kind)} is not allowed for ${workloadLabel}`, entry };
+  }
+  if (!support.optimizer_tuple_kinds.includes(kind)) {
+    return { ready: false, reason: `${optimizerLabelForKind(kind)} is absent from the admitted optimizer tuples`, entry };
+  }
+  if (!entry) {
+    return { ready: false, reason: `${optimizerLabelForKind(kind)} is absent from the optimizer capability contract`, entry: null };
+  }
+  const tuple = entry.optimizer_tuple;
+  if (tuple?.supported !== true) {
+    return {
+      ready: false,
+      reason: `${optimizerLabelForKind(kind)} optimizer tuple is unavailable: ${tuple?.unavailable_reason || 'the resident weights do not admit it'}`,
+      entry,
+    };
+  }
+  return { ready: true, reason: null, entry };
+}
+
+function trainingOptimizerAdmissionState(workload, kind, rawRank) {
+  const kindState = trainingOptimizerKindState(workload, kind);
+  if (!kindState.ready) return kindState;
+  const rank = typeof rawRank === 'number' ? rawRank : Number(rawRank);
+  if (!Number.isSafeInteger(rank) || rank < 1) {
+    return { ...kindState, ready: false, reason: `${optimizerLabelForKind(kind)} LoRA rank must be a positive whole number` };
+  }
+  const rankSupport = kindState.entry?.optimizer_tuple?.lora_rank;
+  if (!Number.isInteger(rankSupport?.minimum)) {
+    return { ...kindState, ready: false, reason: `${optimizerLabelForKind(kind)} is missing its LoRA rank contract` };
+  }
+  if (rank < rankSupport.minimum || (Number.isInteger(rankSupport.maximum) && rank > rankSupport.maximum)) {
+    return {
+      ...kindState,
+      ready: false,
+      reason: `${optimizerLabelForKind(kind)} LoRA rank ${rank} is outside supported ranks ${optimizerRankRangeLabel(rankSupport)}`,
+    };
+  }
+  return { ...kindState, rank };
+}
+
+function optimizerSupportStatusFromState(state, kind) {
+  if (!state.ready) return `${state.reason}. Training remains disabled.`;
+  const rank = state.entry.optimizer_tuple.lora_rank;
+  const liveAdmission = rank.live_memory_admission_required === true
+    ? '; live memory admission can still reject a request that does not fit'
+    : '';
+  return `${optimizerLabelForKind(kind)} · ${trainingOptimizerSupportSnapshot.resolved_lora_parameter_dtype || 'resolved'} LoRA · round-to-nearest · rank ${state.rank} (supported ${optimizerRankRangeLabel(rank)})${liveAdmission}.`;
+}
+
+function optimizerSupportStatus(workload, kind, rawRank) {
+  return optimizerSupportStatusFromState(
+    trainingOptimizerAdmissionState(workload, kind, rawRank),
+    kind,
+  );
+}
+
+function requireTrainingOptimizerAdmission(workload, kind, rank, modeLabel) {
+  const state = trainingOptimizerAdmissionState(workload, kind, rank);
+  if (!state.ready) throw new Error(`${modeLabel} cannot submit: ${state.reason}.`);
+  return state;
+}
+
+function applyTrainingOptimizerForm(kind) {
+  const select = document.getElementById(kind + '-optimizer');
+  const rankInput = document.getElementById(kind + '-rank');
+  const status = document.getElementById(kind + '-optimizer-support');
+  if (!select) return;
+  rememberGeneralRankBounds(rankInput);
+  const support = trainingOptimizerSupportSnapshot;
+  for (const option of select.options) {
+    const optionState = trainingOptimizerKindState(kind, option.value);
+    option.disabled = !optionState.ready;
+    option.title = option.disabled
+      ? optionState.reason || 'Unsupported by the complete server training path'
+      : '';
+  }
+  const entry = optimizerSupportEntry(select.value);
+  const kindState = trainingOptimizerKindState(kind, select.value);
+  select.disabled = !support || !Array.from(select.options).some(option => !option.disabled);
+  if (rankInput) rankInput.disabled = !kindState.ready;
+  applyOptimizerRankBounds(rankInput, entry);
+  if (status) status.textContent = optimizerSupportStatus(kind, select.value, rankInput?.value);
+  if (kind === 'sft') updateSftSubmitState();
+  if (kind === 'grpo') updateGrpoSubmitState();
+}
+
+function applyOpdOptimizerSupport() {
+  const rankInput = document.getElementById('opd-rank');
+  const status = document.getElementById('opd-optimizer-support');
+  const entry = optimizerSupportEntry('muon');
+  applyOptimizerRankBounds(rankInput, entry);
+  const kindState = trainingOptimizerKindState('opd', 'muon');
+  if (rankInput) rankInput.disabled = !kindState.ready;
+  if (status) status.textContent = `OPD uses Muon. ${optimizerSupportStatus('opd', 'muon', rankInput?.value)}`;
+  updateOpdSubmitState();
+}
+
+function applyFixedTrainingSurface(formId, statusId, rank, workload = 'opd') {
+  const form = document.getElementById(formId);
+  const status = document.getElementById(statusId);
+  const state = trainingOptimizerAdmissionState(workload, 'muon', rank);
+  const submit = form?.querySelector('button[type="submit"]');
+  if (submit) {
+    submit.disabled = !state.ready;
+    submit.title = state.ready ? '' : state.reason || 'Training capability unavailable';
+  }
+  if (status) status.textContent = optimizerSupportStatus(workload, 'muon', rank);
+}
+
+function updateFixedTrainingSurfaceStates() {
+  const pumpRank = document.getElementById('pump-rank');
+  const pumpEntry = optimizerSupportEntry('muon');
+  applyOptimizerRankBounds(pumpRank, pumpEntry);
+  const pumpKindState = trainingOptimizerKindState('opd', 'muon');
+  if (pumpRank) pumpRank.disabled = !pumpKindState.ready;
+  applyFixedTrainingSurface('distill-pump-form', 'pump-optimizer-support', pumpRank?.value);
+  applyFixedTrainingSurface('distill-refresh-form', 'refresh-optimizer-support', 16, 'distill_refresh');
+  applyFixedTrainingSurface('distill-merge-form', 'merge-optimizer-support', 16);
+  applyFixedTrainingSurface('distill-self-form', 'self-optimizer-support', 16);
+}
+
+function applyTrainingOptimizerSupportState() {
+  applyTrainingOptimizerForm('sft');
+  applyTrainingOptimizerForm('grpo');
+  applyOpdOptimizerSupport();
+  updateFixedTrainingSurfaceStates();
+  updateCorrFoot();
+  applyRecipeAdmissionButtons();
+}
+
+function validOptimizerRankContract(rank) {
+  const positiveSafeInteger = value => Number.isSafeInteger(value) && value > 0;
+  if (!positiveSafeInteger(rank?.minimum)
+    || !positiveSafeInteger(rank?.maximum)
+    || !positiveSafeInteger(rank?.model_maximum)
+    || rank.live_memory_admission_required !== true
+    || rank.minimum > rank.maximum
+    || rank.maximum > rank.model_maximum) {
+    return false;
+  }
+  if (rank.backend_maximum !== null && !positiveSafeInteger(rank.backend_maximum)) return false;
+  const effectiveMaximum = Math.min(
+    rank.model_maximum,
+    rank.backend_maximum ?? rank.model_maximum,
+  );
+  return rank.maximum === effectiveMaximum;
+}
+
+function updateTrainingOptimizerSupport(cfg) {
+  const candidate = cfg?.training?.optimizer_support;
+  const nonEmptyIdentity = value => typeof value === 'string' && value.trim().length > 0;
+  const supportedSchema = candidate?.schema?.id === 'kiln.training-optimizer-support'
+    && candidate?.schema?.version === 1
+    && candidate.immutable_after_startup === true
+    && Array.isArray(candidate.rounding_modes)
+    && candidate.rounding_modes.length === 1
+    && candidate.rounding_modes[0] === 'round_to_nearest'
+    && nonEmptyIdentity(candidate.backend)
+    && nonEmptyIdentity(candidate.device)
+    && nonEmptyIdentity(candidate.base_weight_dtype)
+    && nonEmptyIdentity(candidate.resolved_lora_parameter_dtype)
+    && Array.isArray(candidate.optimizer_tuple_kinds)
+    && Array.isArray(candidate.workloads)
+    && Array.isArray(candidate.optimizers)
+    && candidate.optimizers.length > 0
+    && candidate.optimizers.every(entry => validOptimizerRankContract(entry?.optimizer_tuple?.lora_rank));
+  trainingOptimizerSupportSnapshot = supportedSchema ? candidate : null;
+  trainingOptimizerSupportUnavailableReason = supportedSchema
+    ? null
+    : candidate
+      ? 'The server returned an unsupported optimizer capability contract'
+      : cfg?.training?.native_training_unavailable_reason
+        || 'Optimizer capability details are unavailable';
+  applyTrainingOptimizerSupportState();
+}
+
+function markTrainingOptimizerSupportFetchFailed(error) {
+  trainingOptimizerSupportSnapshot = null;
+  trainingOptimizerSupportUnavailableReason = `Optimizer capability lookup failed: ${error?.message || 'request failed'}`;
+  applyTrainingOptimizerSupportState();
+}
+
+for (const kind of ['sft', 'grpo']) {
+  document.getElementById(kind + '-optimizer')?.addEventListener('change', () => {
+    applyTrainingOptimizerForm(kind);
+  });
+  document.getElementById(kind + '-rank')?.addEventListener('input', () => {
+    applyTrainingOptimizerForm(kind);
+  });
+}
+document.getElementById('opd-rank')?.addEventListener('input', applyOpdOptimizerSupport);
+document.getElementById('pump-rank')?.addEventListener('input', updateFixedTrainingSurfaceStates);
+rememberGeneralRankBounds(document.getElementById('opd-rank'));
+rememberGeneralRankBounds(document.getElementById('pump-rank'));
+
 function readTrainingOptimizer(kind) {
-  const value = document.getElementById(kind + '-optimizer')?.value || 'muon';
-  if (value === 'adam_w') return { kind: 'adam_w' };
-  if (value === 'sgd') return { kind: 'sgd' };
-  return { kind: 'muon' };
+  const value = document.getElementById(kind + '-optimizer')?.value;
+  if (!['muon', 'adam_w', 'sgd'].includes(value)) {
+    throw new Error(`${kind.toUpperCase()} optimizer selection is missing or invalid.`);
+  }
+  return { kind: value };
 }
 wireAdvanced('sft', () => {
   const v = id => document.getElementById(id)?.value || '?';
@@ -4442,6 +4799,9 @@ function trainingPayloadReadinessState(textareaId, label, dataKind) {
 function updateTrainingSubmitState(options) {
   const outputState = trainingOutputNameReadinessState(options.formId, options.outputLabel);
   const payloadState = trainingPayloadReadinessState(options.payloadId, options.payloadLabel, options.dataKind);
+  const optimizerKind = typeof options.optimizerKind === 'function' ? options.optimizerKind() : null;
+  const optimizerRank = typeof options.optimizerRank === 'function' ? options.optimizerRank() : null;
+  const optimizerState = trainingOptimizerAdmissionState(options.workload, optimizerKind, optimizerRank);
   const outputHelper = document.getElementById(options.outputStateId);
   const payloadHelper = document.getElementById(options.payloadStateId);
   if (outputHelper) outputHelper.textContent = outputState.message;
@@ -4449,9 +4809,18 @@ function updateTrainingSubmitState(options) {
   const form = document.getElementById(options.formId);
   const submitButton = form ? form.querySelector('button[type="submit"]') : null;
   if (submitButton) {
-    submitButton.disabled = form?.dataset.trainingBusy === 'true' || !outputState.ready || !payloadState.ready;
+    submitButton.disabled = form?.dataset.trainingBusy === 'true'
+      || !outputState.ready
+      || !payloadState.ready
+      || !optimizerState.ready;
+    submitButton.title = optimizerState.ready ? '' : optimizerState.reason || 'Optimizer unavailable';
   }
-  return { ready: outputState.ready && payloadState.ready, outputState, payloadState };
+  return {
+    ready: outputState.ready && payloadState.ready && optimizerState.ready,
+    outputState,
+    payloadState,
+    optimizerState,
+  };
 }
 
 // Cross-check epochs against how much data is actually loaded — many passes
@@ -4480,6 +4849,9 @@ function updateSftSubmitState() {
     payloadStateId: 'sft-examples-state',
     payloadLabel: 'examples',
     dataKind: 'sft',
+    workload: 'sft',
+    optimizerKind: () => document.getElementById('sft-optimizer')?.value,
+    optimizerRank: () => document.getElementById('sft-rank')?.value,
   });
 }
 
@@ -4492,7 +4864,23 @@ function updateGrpoSubmitState() {
     payloadStateId: 'grpo-groups-state',
     payloadLabel: 'groups',
     dataKind: 'grpo',
+    workload: 'grpo',
+    optimizerKind: () => document.getElementById('grpo-optimizer')?.value,
+    optimizerRank: () => document.getElementById('grpo-rank')?.value,
   });
+}
+
+function updateOpdSubmitState() {
+  const form = document.getElementById('opd-form');
+  const submitButton = form?.querySelector('button[type="submit"]');
+  if (!submitButton) return;
+  const optimizerState = trainingOptimizerAdmissionState(
+    'opd',
+    'muon',
+    document.getElementById('opd-rank')?.value,
+  );
+  submitButton.disabled = form.dataset.trainingBusy === 'true' || !optimizerState.ready;
+  submitButton.title = optimizerState.ready ? '' : optimizerState.reason || 'Muon unavailable';
 }
 
 function updateSftOutputNameState() {
@@ -4525,6 +4913,7 @@ function setTrainingSubmitBusy(form, busy, pendingLabel) {
   if (!busy) {
     if (form.id === 'sft-form') updateSftSubmitState();
     if (form.id === 'grpo-form') updateGrpoSubmitState();
+    if (form.id === 'opd-form') updateOpdSubmitState();
   }
 }
 
@@ -4539,6 +4928,7 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target;
   try {
+    requireTrainingOptimizerAdmission('sft', form.optimizer.value, form.rank.value, 'SFT');
     const outputName = parsePathSafeAdapterNameField(form.output_name, updateSftOutputNameState);
     const learningRate = parseOptionalFiniteNumberField(form.learning_rate.value, 'SFT learning rate');
     const epochs = parsePositiveIntegerField(form.epochs.value, 'SFT epochs');
@@ -4597,6 +4987,7 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target;
   try {
+    requireTrainingOptimizerAdmission('grpo', form.optimizer.value, form.rank.value, 'GRPO');
     const outputName = parsePathSafeAdapterNameField(form.output_name, updateGrpoOutputNameState);
     const learningRate = parseOptionalFiniteNumberField(form.learning_rate.value, 'GRPO learning rate');
     const klCoeff = parseFiniteNumberField(form.kl_coeff.value, 'GRPO KL coefficient');
@@ -5317,13 +5708,16 @@ function renderMarkdown(raw) {
   // 1) Escape, but extract fenced code blocks first so their contents
   //    don't get interpreted as inline markdown.
   const fenced = [];
+  let fenceSentinel = '__KILN_FENCE__';
+  while (raw.includes(fenceSentinel)) fenceSentinel += '_';
   const fenceRe = /```([a-zA-Z0-9_+\-.]*)\n([\s\S]*?)```|~~~([a-zA-Z0-9_+\-.]*)\n([\s\S]*?)~~~/g;
   const withPlaceholders = raw.replace(fenceRe, (_m, lang1, body1, lang2, body2) => {
     const lang = (lang1 || lang2 || '').trim();
     const body = body1 != null ? body1 : body2;
     const idx = fenced.length;
-    fenced.push({ lang, body });
-    return ` FENCE${idx} `;
+    const placeholder = `${fenceSentinel}${idx}${fenceSentinel}`;
+    fenced.push({ lang, body, placeholder });
+    return placeholder;
   });
   const escaped = escapeHtml(withPlaceholders);
 
@@ -5334,9 +5728,9 @@ function renderMarkdown(raw) {
     if (!block.trim()) return '';
 
     // Fenced-code placeholder: emit verbatim, no inline processing.
-    const fenceMatch = block.match(/^ FENCE(\d+) $/);
-    if (fenceMatch) {
-      const { lang, body } = fenced[Number(fenceMatch[1])];
+    const fencedBlock = fenced.find(item => item.placeholder === block);
+    if (fencedBlock) {
+      const { lang, body } = fencedBlock;
       const escBody = escapeHtml(body.replace(/\n$/, ''));
       const langAttr = lang ? ` data-lang="${escapeHtml(lang)}"` : '';
       return `<pre class="md-code"${langAttr}><code>${escBody}</code></pre>`;
@@ -6355,6 +6749,7 @@ document.getElementById('grpo-output-name').addEventListener('input', updateGrpo
 document.getElementById('grpo-groups').addEventListener('input', (e) => { if (e.target.value.trim()) clearTrainingData('grpo'); updateGrpoSubmitState(); });
 updateSftSubmitState();
 updateGrpoSubmitState();
+updateOpdSubmitState();
 document.getElementById('merge-output-name').addEventListener('input', updateMergeButtonState);
 document.getElementById('merge-mode').addEventListener('change', updateMergeButtonState);
 document.getElementById('merge-density').addEventListener('input', updateMergeButtonState);
@@ -10930,24 +11325,65 @@ document.getElementById('teacher-form')?.addEventListener('submit', async (e) =>
 });
 
 // --- Recipes (/v1/recipes + /v1/recipes/run) ------------------------
+function recipeRunAdmissionState(button) {
+  if (!trainingOptimizerSupportSnapshot) {
+    return { ready: false, reason: trainingOptimizerSupportUnavailableReason };
+  }
+  if (button?.dataset.recipeAdmissionSupported !== 'true') {
+    return {
+      ready: false,
+      reason: button?.dataset.recipeAdmissionReason || 'The recipe response is missing a supported admission descriptor',
+    };
+  }
+  return { ready: true, reason: null };
+}
+
+function applyRecipeAdmissionButtons() {
+  document.querySelectorAll('[data-recipe-run]').forEach(button => {
+    const state = recipeRunAdmissionState(button);
+    const busy = button.dataset.recipeBusy === 'true';
+    button.disabled = busy || !state.ready;
+    button.title = state.ready ? '' : state.reason;
+    const statusId = button.getAttribute('aria-describedby');
+    const status = statusId ? document.getElementById(statusId) : null;
+    if (status) {
+      status.textContent = state.ready
+        ? 'Available for the resident training path.'
+        : `${state.reason}. Recipe execution remains disabled.`;
+    }
+  });
+}
+
 async function refreshRecipesList() {
   const node = document.getElementById('recipes-list');
   if (!node) return;
   try {
     const res = await api('/v1/recipes');
-    const recipes = res.recipes || [];
+    const recipes = Array.isArray(res?.recipes) ? res.recipes : [];
     if (recipes.length === 0) {
       node.innerHTML = '<div class="empty">No bundled recipes.</div>';
       return;
     }
-    node.innerHTML = recipes.map(r => `<div class="adapter-card" style="display:flex; align-items:center; gap:var(--space-3); margin-bottom:var(--space-2);">
+    node.innerHTML = recipes.map((r, index) => {
+      const hasName = typeof r?.name === 'string' && r.name.trim().length > 0;
+      const admissionSupported = hasName && r?.admission?.supported === true;
+      const admissionReason = admissionSupported
+        ? ''
+        : !hasName
+          ? 'The server returned a recipe without a valid name'
+          : r?.admission?.unavailable_reason || 'The server did not provide a supported recipe admission descriptor';
+      const statusId = `recipe-admission-${index}`;
+      return `<div class="adapter-card" style="display:flex; align-items:center; gap:var(--space-3); margin-bottom:var(--space-2);">
       <div style="flex:1; min-width:0;">
-        <div style="font-weight:600;">${escapeHtml(r.name)}</div>
+        <div style="font-weight:600;">${escapeHtml(hasName ? r.name : 'Invalid recipe')}</div>
         <div style="font-size:var(--text-xs); color:var(--text-muted);">${escapeHtml(r.description || '')}</div>
         <div style="font-size:var(--text-2xs); color:var(--text-muted); margin-top:var(--space-1);">${r.num_steps || 0} step${(r.num_steps || 0) === 1 ? '' : 's'}</div>
+        <div class="form-help" id="${statusId}" role="status" aria-live="polite"></div>
       </div>
-      <button class="btn btn-sm" data-recipe-run="${escapeHtml(r.name)}">Run</button>
-    </div>`).join('');
+      <button class="btn btn-sm" data-recipe-run="${escapeHtml(hasName ? r.name : '')}" data-recipe-admission-supported="${admissionSupported}" data-recipe-admission-reason="${escapeHtml(admissionReason)}" aria-describedby="${statusId}" disabled>Run</button>
+    </div>`;
+    }).join('');
+    applyRecipeAdmissionButtons();
   } catch (e) {
     node.innerHTML = `<div class="empty">Failed: ${escapeHtml(e.message)}</div>`;
   }
@@ -10958,13 +11394,23 @@ document.addEventListener('click', async (ev) => {
   if (!btn) return;
   const name = btn.getAttribute('data-recipe-run');
   if (!name) return;
+  const admission = recipeRunAdmissionState(btn);
+  if (!admission.ready) {
+    toast(`Recipe ${name} cannot run: ${admission.reason}.`, 'err');
+    return;
+  }
   try {
+    btn.dataset.recipeBusy = 'true';
     btn.disabled = true; btn.textContent = 'Queuing…';
     const res = await api('/v1/recipes/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ recipe: name }) });
     const seedCount = Object.keys(res.effective_seeds || {}).length;
     toast(`${res.message || `Queued recipe ${name}`}${seedCount ? ` · ${seedCount} effective seed${seedCount === 1 ? '' : 's'} recorded` : ''}`, 'ok');
   } catch (e) { toast('Run failed: ' + e.message, 'err'); }
-  finally { btn.disabled = false; btn.textContent = 'Run'; }
+  finally {
+    btn.dataset.recipeBusy = 'false';
+    btn.textContent = 'Run';
+    applyRecipeAdmissionButtons();
+  }
 });
 
 // --- Submit OPD (/v1/train/opd) -------------------------------------
@@ -10986,6 +11432,8 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target;
   try {
+    requireTrainingOptimizerAdmission('opd', 'muon', form.lora_rank.value, 'OPD');
+    const opdRank = parsePositiveIntegerField(form.lora_rank.value, 'OPD LoRA rank');
     const outputName = parsePathSafeAdapterNameField(form.output_name);
     const promptsText = document.getElementById('opd-prompts').value.trim();
     const prompts = promptsText ? JSON.parse(promptsText) : [];
@@ -11023,7 +11471,9 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
         loss: document.getElementById('opd-loss').value,
         top_k: parseInt(document.getElementById('opd-top-k').value, 10),
         samples_per_prompt: parseInt(document.getElementById('opd-samples').value, 10),
-        lora_rank: parseInt(document.getElementById('opd-rank').value, 10),
+        lora_rank: opdRank,
+        lora_alpha: loraAlphaFor(opdRank),
+        optimizer: { kind: 'muon' },
         max_tokens: parseInt(document.getElementById('opd-max-tokens').value, 10),
         temperature: parseFloat(document.getElementById('opd-temperature').value),
         top_p: parseFloat(document.getElementById('opd-top-p').value),
@@ -11054,6 +11504,7 @@ document.getElementById('distill-refresh-form')?.addEventListener('submit', asyn
   e.preventDefault();
   const form = e.target;
   try {
+    requireTrainingOptimizerAdmission('distill_refresh', 'muon', 16, 'Distill refresh');
     const examplesText = document.getElementById('refresh-new-data').value.trim();
     const examples = examplesText ? JSON.parse(examplesText) : [];
     if (!Array.isArray(examples) || examples.length === 0) {
@@ -11066,6 +11517,7 @@ document.getElementById('distill-refresh-form')?.addEventListener('submit', asyn
       background_chat: form.background_chat.value.trim() || 'tulu3',
       require_if_eval_recovery: parseFloat(form.require_if_eval_recovery.value),
       require_internal_qa_gain: parseFloat(form.require_internal_qa_gain.value),
+      config: { optimizer: { kind: 'muon' }, lora_rank: 16, lora_alpha: 32 },
     };
     if (form.if_eval_suite.value.trim()) body.if_eval_suite = form.if_eval_suite.value.trim();
     if (form.new_knowledge_eval_suite.value.trim()) body.new_knowledge_eval_suite = form.new_knowledge_eval_suite.value.trim();
@@ -11091,6 +11543,8 @@ document.getElementById('distill-pump-form')?.addEventListener('submit', async (
   e.preventDefault();
   const form = e.target;
   try {
+    requireTrainingOptimizerAdmission('opd', 'muon', form.rank.value, 'Boost');
+    const rank = parsePositiveIntegerField(form.rank.value, 'Boost LoRA rank');
     const mode = form.mode.value;
     let modeBody;
     if (mode === 'domain') modeBody = { domain: form.domain.value.trim() };
@@ -11105,9 +11559,10 @@ document.getElementById('distill-pump-form')?.addEventListener('submit', async (
       name: form.name.value.trim(),
       teacher: form.teacher.value,
       mode: modeBody,
-      rank: parseInt(form.rank.value, 10),
+      rank,
       rollout_budget: parseInt(form.rollout_budget.value, 10),
       use_cache: form.use_cache.checked,
+      config: { optimizer: { kind: 'muon' }, lora_rank: rank, lora_alpha: loraAlphaFor(rank) },
     };
     const res = await api('/v1/distill/pump', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toastTrainingSubmission(res, 'Boost job queued');
@@ -11120,6 +11575,7 @@ document.getElementById('distill-merge-form')?.addEventListener('submit', async 
   e.preventDefault();
   const form = e.target;
   try {
+    requireTrainingOptimizerAdmission('opd', 'muon', 16, 'Distill merge');
     const sources = JSON.parse(form.sources.value);
     if (!Array.isArray(sources) || sources.length === 0) throw new Error('sources must be a non-empty JSON array');
     const body = {
@@ -11127,7 +11583,7 @@ document.getElementById('distill-merge-form')?.addEventListener('submit', async 
       sources,
       student: form.student.value.trim() || 'base',
       rollout_budget: parseInt(form.rollout_budget.value, 10),
-      config: { training_mode: 'off_policy' },
+      config: { training_mode: 'off_policy', optimizer: { kind: 'muon' }, lora_rank: 16, lora_alpha: 32 },
     };
     const res = await api('/v1/adapters/distill_merge', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toastTrainingSubmission(res, 'Merge queued');
@@ -11163,10 +11619,11 @@ document.getElementById('distill-self-form')?.addEventListener('submit', async (
   e.preventDefault();
   const form = e.target;
   try {
+    requireTrainingOptimizerAdmission('opd', 'muon', 16, 'Self-improvement');
     const body = {
       name: form.name.value.trim(),
       mode: form.mode.value,
-      config: { training_mode: 'off_policy' },
+      config: { training_mode: 'off_policy', optimizer: { kind: 'muon' }, lora_rank: 16, lora_alpha: 32 },
     };
     const prompts = JSON.parse(form.prompts.value);
     if (!Array.isArray(prompts) || prompts.length === 0) throw new Error('Prompts must be a non-empty JSON array');

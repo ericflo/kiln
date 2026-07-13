@@ -326,7 +326,7 @@
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/decode</code> &mdash; live decode tokens/sec and inter-token latency stats used by the dashboard.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history with effective thinking-budget provenance and outcomes for the dashboard's request panel.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, typed batching and streaming-prefill intent/backend/effective policy, actor activity, direct-rendezvous worker/route status, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective gradient and SFT boundary-checkpoint policy, memory-budget partitions, and generation defaults.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, typed batching and streaming-prefill intent/backend/effective policy, actor activity, direct-rendezvous worker/route status, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective gradient and SFT boundary-checkpoint policy, the resident optimizer implementation/tuple/per-workload admission contract, memory-budget partitions, and generation defaults.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest, execution-provenance record, and immutable checkpoint-boundary policy under <code>training.checkpoint_boundary_policy</code>.</div>
         </div>
         <div class="endpoint mt-4">
@@ -712,12 +712,12 @@
               </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
-              <h4 class="font-semibold mb-2"><code>training</code>: execution support, checkpoint policy, and provenance</h4>
+              <h4 class="font-semibold mb-2"><code>training</code>: execution and optimizer support, checkpoint policy, and provenance</h4>
               <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
                 <code>runtime_device</code> names the immutable native-training execution binding and
                 <code>model_weight_device</code> names the frozen weight representation.
-                <code>native_training_supported</code> is true only when the running backend and those
-                identities can execute native training; when false,
+                <code>native_training_supported</code> is a coarse process summary; the workload array below
+                is authoritative when SFT, GRPO, OPD, and DistillRefresh differ. When every workload is unavailable,
                 <code>native_training_unavailable_reason</code> carries the same fail-closed reason returned
                 by training submission before corpus admission. This makes Vulkan&rsquo;s hybrid CPU-host
                 weight limitation visible without attempting a job.
@@ -732,6 +732,179 @@
                 <code>checkpoint_segments_source</code> is <code>auto</code>,
                 <code>conservative_fallback</code>, <code>configured</code>, or <code>disabled</code>, so
                 an operator can distinguish a measured automatic choice from a fail-closed fallback.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>optimizer_support</code> is <code>null</code> for a mock runner. A real runner returns
+                schema <code>{"id":"kiln.training-optimizer-support","version":1}</code> with the resident
+                <code>backend</code>, <code>device</code>, <code>base_weight_dtype</code>, and
+                <code>resolved_lora_parameter_dtype</code>. <code>immutable_after_startup=true</code>
+                identifies a process-lifetime capability snapshot. Product
+                <code>rounding_modes</code> and
+                <code>backend_implementation_rounding_modes</code> remain distinct so an implementation
+                capability cannot silently become server policy; product training is fixed to
+                <code>round_to_nearest</code>. A null
+                <code>resolved_lora_parameter_dtype</code> means the resident base dtype cannot be
+                resolved by the backend precision policy; per-kind tuple reasons carry the failure.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Read support in layers. <code>backend_implementation</code> reports the raw update
+                implementation, route, native-hook identity, and accepted parameter dtypes. Accelerator paths
+                use <code>native_device_hook</code>; CPU uses <code>portable_reference</code> with
+                <code>native_device_hook=false</code>. An unavailable raw implementation reports
+                <code>supported=false</code>, route <code>unavailable</code>, and no native hook.
+                <code>optimizer_tuple</code> then adds the exact resident
+                backend/device, base and resolved LoRA dtypes, product rounding, kind, and static rank range;
+                <code>optimizer_tuple_kinds</code> summarizes the successful resident tuples. Finally, each
+                <code>workloads</code> member independently reports <code>sft</code>, <code>grpo</code>,
+                <code>opd</code>, or <code>distill_refresh</code> execution with <code>supported</code>,
+                <code>unavailable_reason</code>, and the intersection in
+                <code>allowed_optimizer_kinds</code>. Consumers must use that workload entry, not infer server
+                execution from a hook or tuple.
+              </p>
+              <div class="code-block mt-3"><pre><code>{
+  "training": {
+    "optimizer_support": {
+      "schema": {"id": "kiln.training-optimizer-support", "version": 1},
+      "backend": "rocm",
+      "device": "rocm:0",
+      "base_weight_dtype": "bf16",
+      "resolved_lora_parameter_dtype": "bf16",
+      "immutable_after_startup": true,
+      "rounding_modes": ["round_to_nearest"],
+      "backend_implementation_rounding_modes": ["round_to_nearest"],
+      "optimizer_tuple_kinds": ["muon", "adam_w", "sgd"],
+      "workloads": [
+        {
+          "workload": "sft",
+          "supported": true,
+          "unavailable_reason": null,
+          "allowed_optimizer_kinds": ["muon", "adam_w", "sgd"]
+        },
+        {
+          "workload": "grpo",
+          "supported": true,
+          "unavailable_reason": null,
+          "allowed_optimizer_kinds": ["muon", "adam_w", "sgd"]
+        },
+        {
+          "workload": "opd",
+          "supported": true,
+          "unavailable_reason": null,
+          "allowed_optimizer_kinds": ["muon", "adam_w", "sgd"]
+        },
+        {
+          "workload": "distill_refresh",
+          "supported": false,
+          "unavailable_reason": "distill_refresh is unavailable until admission pins separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves the maximum sequential working set",
+          "allowed_optimizer_kinds": []
+        }
+      ],
+      "optimizers": [
+        {
+          "kind": "muon",
+          "backend_implementation": {
+            "supported": true,
+            "route": "native_device_hook",
+            "native_device_hook": true,
+            "parameter_dtypes": ["f32", "bf16"]
+          },
+          "optimizer_tuple": {
+            "supported": true,
+            "unavailable_reason": null,
+            "lora_rank": {"minimum": 2, "maximum": 48, "backend_maximum": 48, "model_maximum": 1024, "live_memory_admission_required": true}
+          }
+        },
+        {
+          "kind": "adam_w",
+          "backend_implementation": {
+            "supported": true,
+            "route": "native_device_hook",
+            "native_device_hook": true,
+            "parameter_dtypes": ["f32", "bf16"]
+          },
+          "optimizer_tuple": {
+            "supported": true,
+            "unavailable_reason": null,
+            "lora_rank": {"minimum": 1, "maximum": 1024, "backend_maximum": null, "model_maximum": 1024, "live_memory_admission_required": true}
+          }
+        },
+        {
+          "kind": "sgd",
+          "backend_implementation": {
+            "supported": true,
+            "route": "native_device_hook",
+            "native_device_hook": true,
+            "parameter_dtypes": ["f32", "bf16"]
+          },
+          "optimizer_tuple": {
+            "supported": true,
+            "unavailable_reason": null,
+            "lora_rank": {"minimum": 1, "maximum": 1024, "backend_maximum": null, "model_maximum": 1024, "live_memory_admission_required": true}
+          }
+        }
+      ]
+    }
+  }
+}</code></pre></div>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                For canonical Qwen3.5-4B, <code>model_maximum</code> is 1024, derived from the
+                smallest trained projection. The table below is the resident optimizer-tuple matrix
+                before per-workload and live-memory admission. It is not a server-execution matrix.
+              </p>
+              <div class="overflow-x-auto mt-3">
+                <table class="w-full text-sm">
+                  <thead><tr><th>Backend</th><th>Base &rarr; LoRA dtype</th><th>SGD</th><th>AdamW</th><th>Muon</th></tr></thead>
+                  <tbody>
+                    <tr><td>CPU portable reference</td><td>F32 &rarr; F32</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 2..=1024 (backend unbounded)</td></tr>
+                    <tr><td>CUDA</td><td>F32 &rarr; F32; BF16 &rarr; BF16</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 2..=48</td></tr>
+                    <tr><td>ROCm</td><td>F32 &rarr; F32; BF16 &rarr; BF16</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 2..=48</td></tr>
+                    <tr><td>Metal</td><td>BF16 &rarr; BF16</td><td>unsupported</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 2..=32</td></tr>
+                    <tr><td>Vulkan tuple</td><td>F32/BF16 &rarr; F32</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 2..=32</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                F16 is inference-only on CUDA/ROCm. Each rank object exposes the optimizer
+                <code>backend_maximum</code>, the trained-projection <code>model_maximum</code>, and
+                their effective minimum as <code>maximum</code>. A null
+                <code>backend_maximum</code> means the backend adds no ceiling; effective
+                <code>maximum</code> remains the concrete model ceiling.
+                <code>live_memory_admission_required=true</code> means the exact tuple is revalidated
+                against live capacity and rejected if it does not fit; admission does not lower the
+                requested rank, substitute an optimizer, or alter the backend range. CPU can expose
+                portable F32 tuples while all four server workloads remain unsupported. Hybrid Vulkan
+                can expose raw native hooks or tuples while CPU-host weights or a workload route make
+                <code>workloads[].supported=false</code>. Product rounding is immutable round-to-nearest.
+                Stochastic rounding is an
+                explicit optimizer-library policy, not a server config, request, or environment mode.
+                <code>KILN_BF16_STOCHASTIC_ROUND</code>,
+                <code>KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK</code>,
+                <code>KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK</code>,
+                <code>KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK</code>,
+                <code>KILN_METAL_TRAINING_OPTIMIZER_FALLBACK</code>, and
+                <code>KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK</code> were removed without aliases;
+                delete them rather than translating them to new settings.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Every static workload requires a real readable runner, serving-profile training GPU
+                ownership, configured/resident weight-device agreement, a runtime that resolves those
+                weights, exact native backend/device identity, no Marlin-packed projection, and the
+                authoritative <code>kt_tape_authoritative</code> forward/backward route. SFT also rejects
+                multi-segment checkpointing with <code>full_logits</code>; OPD also requires its loss and
+                phase-B backward routes. The first failed condition is preserved in
+                <code>workloads[].unavailable_reason</code> and its allowed-kind list is empty.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                DistillRefresh is a separate sequential workload, not an OPD alias. Its SFT knowledge
+                phase and OPD behavior-recovery phase need separate exact phase plans; admission must
+                prepare the precise SFT rows and reserve the larger of the two sequential working sets.
+                Until one admission record pins all three facts, <code>distill_refresh</code> is always
+                unsupported with reason <code>distill_refresh is unavailable until admission pins separate
+                exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves the maximum
+                sequential working set</code>. Cheap teacher-alias validation and metadata pinning retain
+                their established request-error ordering. Rejection still happens before seed derivation,
+                checkpoint loading, remote/local teacher materialization, corpus scanning, memory preflight,
+                or GPU reservation.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 <code>checkpoint_boundary_policy</code> is the process-lifetime SFT boundary policy:
@@ -1158,7 +1331,9 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/agentic</code> &mdash; canonical alias of <code>/v1/train/grpo</code> for multi-turn trajectory rollouts (ECHO applies automatically).</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/opd</code> &mdash; submit on-policy or off-policy distillation prompts against a registered, identity-bound teacher and return the exact effective seed.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train</code> &mdash; intent-tagged SFT, GRPO, OPD, or distillation front door with the same effective-seed contract.</div>
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/distill/refresh</code>, <code>/v1/distill/pump</code>, <code>/v1/distill/self</code>, <code>/v1/adapters/distill_merge</code> &mdash; OPD-backed distillation jobs with exact effective seeds.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/distill/refresh</code> &mdash; distinct fail-closed DistillRefresh workload; no job or seed is created until admission pins separate exact SFT and OPD phase plans, exact SFT rows, and the maximum sequential working set.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/distill/pump</code>, <code>/v1/distill/self</code>, <code>/v1/adapters/distill_merge</code> &mdash; OPD-backed distillation jobs with exact effective seeds.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/recipes</code> &mdash; list built-in recipe descriptors with static <code>admission {supported, unavailable_reason}</code> derived from every step&rsquo;s workload and optimizer/rank tuple.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/recipes/run</code> &mdash; queue a typed multi-step recipe and return <code>effective_seeds</code> keyed by job ID.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/agent/judge_distill</code>, <code>/v1/agent/self_improve</code> &mdash; queue agent-training phases and return their exact seed or per-job seed map.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status</code> &mdash; summarize training queue, job state, and effective seeds.</div>
@@ -1169,7 +1344,7 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/train/queue/{job_id}</code> &mdash; cancel a job: queued jobs leave the queue; running jobs stop at the next step boundary.</div>
         </div>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          Every SFT, GRPO, OPD, and distillation entry point resolves one seed before queue publication. Set <code>config.seed</code> for a fresh run or omit it and record the decimal-string <code>effective_seed</code> returned by submission and status. Recipe and self-improvement responses return <code>effective_seeds</code> keyed by job ID. Resume inherits <code>rng_states["lora-init"].seed</code> from the exact checkpoint and rejects a conflicting request seed. This value is an initial condition, not a cross-build or cross-backend byte-replay promise; weights, data, tokenizer/template, build, runtime, device, precision, kernels, and effective environment remain part of the deterministic envelope.
+          Every admitted SFT, GRPO, OPD, and OPD-backed distillation entry point resolves one seed before queue publication. Set <code>config.seed</code> for a fresh run or omit it and record the decimal-string <code>effective_seed</code> returned by submission and status. Recipe and self-improvement responses return <code>effective_seeds</code> keyed by job ID. DistillRefresh is distinct and currently rejects before a seed or job exists. Resume inherits <code>rng_states["lora-init"].seed</code> from the exact checkpoint and rejects a conflicting request seed. This value is an initial condition, not a cross-build or cross-backend byte-replay promise; weights, data, tokenizer/template, build, runtime, device, precision, kernels, and effective environment remain part of the deterministic envelope.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           Native SFT renders TRL&rsquo;s prefix-preserving Qwen3.5 training template with <code>add_generation_prompt=false</code>. Loss covers the thinking/answer/tool-call body, <code>&lt;|im_end|&gt;</code>, and trailing newline; assistant role headers plus system, user, and tool-response turns use the <code>-100</code> ignore label. Exact rendered text, token IDs, and labels are checked against source-pinned Hugging Face and TRL sources for plain, thinking, tool-call, tool-response, and multi-turn examples. See <a href="https://github.com/ericflo/kiln/blob/main/docs/sft-tokenization.md">SFT Tokenization and Assistant-Only Loss</a> for the normative contract and reproduction command.
@@ -1178,10 +1353,58 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           Native SFT accepts one fixed profile: <code>native_online_lora_v1</code>. One conversation is one optimizer update at a constant learning rate; accumulation is 1, with no warmup, decay, or gradient clipping. Unknown profile names and general-trainer fields return structured <code>training_invalid_request</code> errors. Server SFT always normalizes omitted <code>train_mtp</code> to false and rejects explicit true before queue publication; the deferred MTP alignment phase remains offline-only until it participates in server GPU coordination, memory admission, cancellation, and settlement. A hybrid Vulkan server deliberately returns <code>training_backend_unsupported</code> before dataset admission: its serving weights use CPU-host handles, while the multi-GiB full-model resident Vulkan training path has not passed the production qualification gates. There is no environment bypass; use HF/TRL export/import until that substrate is proven. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/NATIVE_SFT_PROFILE.md">Native SFT Profile</a> for update, precision, optimizer-state, checkpoint, and MTP semantics. Use the HF/TRL route for broader training: SFT and recorded-GRPO exports snapshot their canonical corpus, exact model/tokenizer/template provenance, optional split, and optional adapter into one private immutable registry, embed the task-aware pinned runner, and revalidate every byte before download. GRPO accepts exactly one provenance-complete inline group array or server-local canonical JSONL path. <code>kiln train hf export-sft</code> and <code>export-grpo</code> wrap creation, redirect-free streamed download, strict single-root archive validation, manifest verification, atomic no-clobber local publication, and default server cleanup; <code>list</code> and <code>delete</code> manage retained exports. <code>kiln train hf import-peft</code> verifies the completed local bundle before connecting, streams its deterministic corpus-free envelope through bounded memory, and accepts success only when HTTP 201, JSON, strong ETag, import digest, PEFT content revision, installed byte count, six-file count, task, and source identities match values derived locally; it retains the source bundle on every outcome. The raw PEFT import API accepts only the derived ten-file envelope, caps compressed/expanded/metadata resources, compares the complete current resident identity, validates every LoRA A/B shape, shares the adapter mutation barrier and strict disk quota, and stores a self-verifying <code>kiln.hf-trl-import.v1</code> receipt before kernel-enforced no-replace publication. The versioned identity model, 256 MiB inline-body ceiling, 256-export registry cap, 2 GiB import-body ceiling, and lifecycle are documented in the <a href="https://github.com/ericflo/kiln/blob/main/docs/HF_TRL_INTEROP.md">HF/TRL Interoperability Contract</a>.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          <code>config.optimizer</code> is tagged by kind; omission selects Muon, and
+          <code>{"kind":"adam_w"}</code> or <code>{"kind":"muon"}</code> selects that
+          optimizer's defaults. Expanded forms may set
+          <code>beta1</code>, <code>beta2</code>, <code>eps</code>, and
+          <code>weight_decay</code> for AdamW or <code>momentum</code>,
+          <code>nesterov</code>, <code>ns_iters</code>, and <code>weight_decay</code>
+          for Muon. SGD accepts only <code>{"kind":"sgd"}</code>, and unknown fields
+          are rejected. AdamW betas and Muon momentum must be finite in
+          <code>[0,1)</code>; epsilon must be finite and positive; both weight-decay values
+          must be finite and non-negative; and Muon iterations must be in <code>1..=20</code>.
+          An explicit learning rate must remain finite and positive after F32 conversion.
+          Omitted SFT rates resolve to <code>1e-3</code> for Muon and <code>1e-4</code> for
+          AdamW/SGD; GRPO/OPD resolve <code>2e-3</code> and <code>1e-5</code>, respectively.
+          The cheap per-workload gate and resident optimizer tuple are checked before checkpoint or
+          corpus materialization, at dequeue before memory reservation, and before device residency.
+          This applies to direct training, the intent front door, every recipe step, judge/self-improve,
+          DistillRefresh, and OPD-backed distillation. Cheap teacher-alias validation and metadata pinning
+          may occur first; checkpoint loading, remote/local teacher materialization, corpus scanning,
+          memory preflight, and GPU reservation occur only after the static workload check. Invalid optimizer kind, rank, or
+          hyperparameters return structured <code>training_invalid_request</code>; unsupported base dtype,
+          backend/device identity, Marlin-packed weights, serving-profile ownership, or authoritative
+          tape/loss substrate return <code>training_backend_unsupported</code>. Neither changes route
+          mid-run. A recipe descriptor is a static preview rather than a memory reservation; run
+          submission preflights every step again before preparing any of them.
+        </p>
+        <div class="code-block mt-4"><pre><code>{
+  "recipes": [{
+    "name": "frontier-pump",
+    "description": "Distill a frontier teacher into a local adapter",
+    "num_steps": 1,
+    "admission": {
+      "supported": false,
+      "unavailable_reason": "step 1 (opd) is unavailable: serving profile `stable` prohibits training GPU ownership"
+    }
+  }]
+}</code></pre></div>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          <code>description</code> may be null. <code>unavailable_reason</code> is null exactly when
+          the descriptor is supported; a false descriptor reports the first failing step. The
+          descriptor is advisory process-lifetime admission, so clients must still handle a run-time
+          rejection caused by changed lock health or live memory.
+          Any descriptor containing a DistillRefresh step is currently unsupported with the stable
+          two-phase planning reason above.
+        </p>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           Every SFT source uses one row-admission contract. <code>config.invalid_row_policy</code> is <code>fail</code> by default; explicit <code>skip</code> queues only valid rows and records ordered kept/rejected SHA-256 identities under <code>train_receipt.json</code> &rarr; <code>data.sft_ingestion</code>. Server-local JSONL is revalidated against its submit-time manifest before GPU ownership. See <a href="https://github.com/ericflo/kiln/blob/main/docs/sft-ingestion.md">SFT Ingestion, Invalid Rows, and Row Identity</a>.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          New exact checkpoints, <code>train_receipt.json</code>, and <code>adapter_manifest.json</code> persist the full validated base-weight shard manifest and <code>kiln.execution-provenance.v1</code> process/runtime envelope. Exact resume compares shard byte content and the canonical execution digest before GPU ownership; it separately validates concrete parameter, optimizer-state, activation, gradient, and stochastic-rounding precision. Legacy aggregate-only checkpoints and partial-runtime checkpoints are not exact-resumable because they cannot prove their constituent artifacts and execution environment.
+          New exact checkpoints, <code>train_receipt.json</code>, and <code>adapter_manifest.json</code> persist the full validated base-weight shard manifest and <code>kiln.execution-provenance.v1</code> process/runtime envelope. Exact resume first passes the current workload and resident tuple gates, then compares shard bytes and the canonical execution digest before GPU ownership. It separately validates the backend/device, optimizer kind and state, rank, concrete parameter/activation/gradient dtypes, immutable rounding mode, and checkpoint/tape/loss routes. Server training records only <code>{"mode":"round_to_nearest"}</code>. A legacy checkpoint recording stochastic rounding fails closed on precision mismatch before GPU ownership; Kiln does not discard its seed or continue under a different update rule. A changed native identity, newly Marlin-packed weight, unavailable authoritative route, aggregate-only checkpoint, or partial-runtime checkpoint is likewise not exact-resumable.
+        </p>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          Queued resume admission fully validates the checkpoint manifest plus every declared artifact size and SHA-256, then retains only the checkpoint ID, a digest of that validated manifest (whose entries cover the artifact hashes), and the effective seed. Before memory reservation at dequeue, the worker fully reloads the checkpoint and requires both the recomputed identity and effective seed to match. This is revalidation, not a filesystem snapshot: the queue does not copy or pin checkpoint files, and it cannot eliminate a mutation race after the reload. Keep an exact checkpoint directory immutable for its entire use.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           Native SFT checkpoint-boundary replay is also startup-authoritative. <code>[training].recompute_checkpoint_boundaries</code> defaults to <code>auto</code>, whose inclusive sequence threshold defaults to 8,192 tokens. <code>checkpoint_boundary_anchor_stride</code> defaults to <code>auto</code> and derives one positive stride from the admitted shape and the default 6 GiB <code>checkpoint_boundary_cache_gb</code> target; explicit positive strides bypass only that shape calculation. Canonical environment names derive mechanically as <code>KILN_TRAINING_&lt;FIELD&gt;</code>; the four historical unsectioned names are deprecated, parsed strictly, and must agree with a present canonical value. The same pure policy functions drive admission and execution, and no runtime path re-reads those names. Exact SFT checkpoints additionally bind the admitted backend loss route as <code>sft_loss_route</code> under <code>kiln.training-checkpoint-planning.v4</code>; prior SFT v3 checkpoints fail closed as planning drift. GRPO and OPD continue to retain every segment boundary and remain under <code>kiln.training-checkpoint-planning.v3</code>. A v2 checkpoint or any applicable policy change is planning drift and cannot resume exactly; the outer checkpoint envelope remains schema v1. Restart the server to change startup policy. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/CONFIGURATION.md#sft-checkpoint-boundary-policy">configuration contract</a> and <a href="https://github.com/ericflo/kiln/blob/main/docs/training-checkpoints.md#checkpoint-planning-identity">checkpoint identity contract</a>.

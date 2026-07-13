@@ -9,8 +9,8 @@
 //!   One-time investment.
 //!
 //! - `POST /v1/agent/self_improve` — §10.6.2. The perpetual loop.
-//!   Score the week's rollouts with the local judge LoRA, run GRPO
-//!   with judge-derived advantages, optional CRISP terseness pass
+//!   Run on-policy distillation over the week's tasks with the local judge
+//!   as teacher, followed by an optional CRISP terseness pass
 //!   on top of successful trajectories (§10.6.4). Stable-OPD
 //!   safeguards active.
 //!
@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
 use crate::error::ApiError;
-use crate::state::{AppState, TrainingJobInfo, TrainingJobType};
+use crate::state::{AppState, TrainingJobInfo, TrainingJobType, TrainingWorkload};
 use crate::training_queue::{QueueEntry, QueuedJob};
 use kiln_train::TrainingState;
 
@@ -104,16 +104,22 @@ async fn judge_distill(
             req.teacher
         ),
     )?;
+    super::training::validate_post_eval_suite(&state, req.post_eval.as_ref())?;
+    super::training::enforce_queue_caps(&state)?;
+    super::training::ensure_training_backend_admission(&state)?;
+    super::training::enforce_training_workload_admission(&state, TrainingWorkload::Opd)?;
+    super::training::enforce_training_optimizer_admission(
+        &state,
+        req.config.optimizer,
+        req.config.lora_rank,
+    )?;
+
     // §10.6.1: the judge corpus is (turn, context) pairs from the user's
-    // OWN indexed pi sessions — resolved here, at submission (and before
-    // the queue/mock gates, so data problems surface with their
-    // remediation first). Before this, the corpus silently fell through
-    // to generic seed prompts and reported success.
+    // own indexed pi sessions. Static admission has passed, so resolution
+    // cannot spend corpus work for a full queue or unsupported substrate.
     let (pump_req, num_pairs) = build_judge_pump_request(&state.adapter_dir, &req)?;
     let mut queued = QueuedJob::DistillPump(pump_req);
     let top_k_adjustment = super::training::normalize_queued_opd_top_k(&state, &mut queued)?;
-    super::training::validate_post_eval_suite(&state, req.post_eval.as_ref())?;
-    super::training::enforce_queue_caps(&state)?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
     super::training::admit_training_jobs(
@@ -227,12 +233,20 @@ pub fn submit_self_improve(
             req.judge
         ),
     )?;
-    // Resolve the week's tasks from the §10.3 trace index NOW — an empty
-    // or stale index fails here with the remediation, not at worker
-    // dequeue hours later, and before the queue/mock gates so data
-    // problems surface first. (The worker re-resolves the same selector
-    // at run time so sessions captured between submission and dequeue
-    // are included.)
+    super::training::validate_post_eval_suite(state, req.post_eval.as_ref())?;
+    let additional_jobs = 1 + usize::from(req.crisp);
+    super::training::enforce_queue_capacity_for(state, additional_jobs)?;
+    super::training::ensure_training_backend_admission(state)?;
+    super::training::enforce_training_workload_admission(state, TrainingWorkload::Opd)?;
+    super::training::enforce_training_optimizer_admission(
+        state,
+        req.config.optimizer,
+        req.config.lora_rank,
+    )?;
+
+    // Resolve the week's tasks from the §10.3 trace index now. The admitted
+    // prompt snapshot is what the worker consumes after dequeue; sessions
+    // arriving later belong to the next round.
     let (opd_phase, crisp_pump, num_tasks) = build_self_improve_jobs(&state.adapter_dir, &req)?;
     let mut opd_phase = QueuedJob::Opd(opd_phase);
     let opd_top_k_adjustment = super::training::normalize_queued_opd_top_k(state, &mut opd_phase)?;
@@ -241,12 +255,10 @@ pub fn submit_self_improve(
         Some(job) => super::training::normalize_queued_opd_top_k(state, job)?,
         None => None,
     };
-    let additional_jobs = 1 + usize::from(crisp_pump.is_some());
-    super::training::enforce_queue_capacity_for(state, additional_jobs)?;
+    debug_assert_eq!(additional_jobs, 1 + usize::from(crisp_pump.is_some()));
 
-    // §10.6.2: score with judge → GRPO → CRISP pass. Each phase
-    // queues independently. The trainer body (#31) wires the
-    // judge-scored advantages into the GRPO step.
+    // §10.6.2: judge-teacher OPD followed by the optional CRISP pass. Each
+    // phase queues independently.
     let mut job_ids = Vec::new();
     let mut pending = Vec::with_capacity(additional_jobs);
 
@@ -287,7 +299,7 @@ pub fn submit_self_improve(
         state: TrainingState::Queued,
         message: format!(
             "§10.6.2 self_improve queued on {num_tasks} task(s) from this week's pi \
-             sessions: agent={}, judge={}, crisp={}. Phase 1 = judge-scored GRPO; \
+             sessions: agent={}, judge={}, crisp={}. Phase 1 = judge-teacher OPD; \
              Phase 2 = CRISP terseness pass.{top_k_note}",
             req.agent, req.judge, req.crisp,
         ),
@@ -388,10 +400,9 @@ fn build_judge_pump_request(
     Ok((pump_req, num_pairs))
 }
 
-/// §10.6.2 phase construction: the weekly on-policy OPD phase (validated
-/// here, re-resolved by the worker at dequeue) and the optional §10.6.4
-/// CRISP pump on resolved conciseness prompts. Returns the task count for
-/// the response message.
+/// §10.6.2 phase construction: the weekly on-policy OPD phase and optional
+/// §10.6.4 CRISP pump. Admission resolves both selectors into immutable prompt
+/// snapshots before queue publication. Returns the task count for the response.
 #[allow(clippy::type_complexity)]
 fn build_self_improve_jobs(
     adapter_dir: &std::path::Path,
@@ -440,8 +451,8 @@ fn build_self_improve_jobs(
     };
 
     // Phase 1: the student re-rolls the week's pi tasks on-policy with
-    // the judge as the scoring teacher. The selector resolves in the
-    // worker via the same path that just validated it above.
+    // the judge as the scoring teacher. Queue admission resolves this selector
+    // into the exact prompt snapshot consumed by the worker.
     let mut opd_config = req.config.clone();
     opd_config.base_adapter = warm_start_base(&req.config);
     let opd_phase = OpdRequest {
@@ -521,6 +532,7 @@ fn prepare_agent_job(
             job_id: job_id.to_string(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            admitted_resume_checkpoint: None,
             prepared_data: Default::default(),
             prepared_data_permit: Default::default(),
             job,

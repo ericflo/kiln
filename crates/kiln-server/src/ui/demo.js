@@ -93,9 +93,10 @@
   });
   const recipes = () => ({
     recipes: [
-      { name: 'cold-start-distill', description: 'OPD warm-up then GRPO refinement for a new domain', num_steps: 3 },
-      { name: 'review-quality-loop', description: 'SFT on review pairs, judge LoRA, then GRPO against the judge', num_steps: 4 },
-      { name: 'tool-call-bootstrap', description: 'Synthesize tool-call eval, OPD distill, gate on eval recovery', num_steps: 3 },
+      { name: 'cold-start-distill', description: 'OPD warm-up then GRPO refinement for a new domain', num_steps: 3, admission: { supported: true, unavailable_reason: null } },
+      { name: 'review-quality-loop', description: 'SFT on review pairs, judge LoRA, then GRPO against the judge', num_steps: 4, admission: { supported: true, unavailable_reason: null } },
+      { name: 'tool-call-bootstrap', description: 'Synthesize tool-call eval, OPD distill, gate on eval recovery', num_steps: 3, admission: { supported: true, unavailable_reason: null } },
+      { name: 'continual-refresh', description: 'Refresh an adapter on newly collected examples', num_steps: 2, admission: { supported: false, unavailable_reason: 'distill_refresh is unavailable until admission pins separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves the maximum sequential working set' } },
     ],
   });
   const library = () => ({
@@ -324,6 +325,48 @@
         runtime_device: 'cuda:0',
         model_weight_device: 'cuda:0',
         native_training_supported: true,
+        optimizer_support: {
+          schema: { id: 'kiln.training-optimizer-support', version: 1 },
+          backend: 'cuda',
+          device: 'cuda:0',
+          base_weight_dtype: 'bf16',
+          resolved_lora_parameter_dtype: 'bf16',
+          immutable_after_startup: true,
+          rounding_modes: ['round_to_nearest'],
+          backend_implementation_rounding_modes: ['round_to_nearest'],
+          optimizer_tuple_kinds: ['muon', 'adam_w', 'sgd'],
+          workloads: [
+            ...['sft', 'grpo', 'opd'].map(workload => ({
+              workload,
+              supported: true,
+              unavailable_reason: null,
+              allowed_optimizer_kinds: ['muon', 'adam_w', 'sgd'],
+            })),
+            {
+              workload: 'distill_refresh',
+              supported: false,
+              unavailable_reason: 'distill_refresh is unavailable until admission pins separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves the maximum sequential working set',
+              allowed_optimizer_kinds: [],
+            },
+          ],
+          optimizers: [
+            {
+              kind: 'muon',
+              backend_implementation: { supported: true, route: 'native_device_hook', native_device_hook: true, parameter_dtypes: ['f32', 'bf16'] },
+              optimizer_tuple: { supported: true, unavailable_reason: null, lora_rank: { minimum: 2, maximum: 48, backend_maximum: 48, model_maximum: 1024, live_memory_admission_required: true } },
+            },
+            {
+              kind: 'adam_w',
+              backend_implementation: { supported: true, route: 'native_device_hook', native_device_hook: true, parameter_dtypes: ['f32', 'bf16'] },
+              optimizer_tuple: { supported: true, unavailable_reason: null, lora_rank: { minimum: 1, maximum: 1024, backend_maximum: null, model_maximum: 1024, live_memory_admission_required: true } },
+            },
+            {
+              kind: 'sgd',
+              backend_implementation: { supported: true, route: 'native_device_hook', native_device_hook: true, parameter_dtypes: ['f32', 'bf16'] },
+              optimizer_tuple: { supported: true, unavailable_reason: null, lora_rank: { minimum: 1, maximum: 1024, backend_maximum: null, model_maximum: 1024, live_memory_admission_required: true } },
+            },
+          ],
+        },
         checkpoint_policy: { mode: 'auto' },
         checkpoint_boundary_policy: {
           recompute_mode: 'auto',

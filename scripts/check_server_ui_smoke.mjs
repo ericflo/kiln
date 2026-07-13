@@ -110,6 +110,23 @@ function checkRuntimeConfigSchemaContract(source) {
     'model_weight_device',
     'native_training_supported',
     'native_training_unavailable_reason',
+    'train.optimizer_support',
+    'optimizerSupport?.schema',
+    'optimizerSupport?.backend',
+    'optimizerSupport?.device',
+    'optimizerSupport?.base_weight_dtype',
+    'optimizerSupport?.resolved_lora_parameter_dtype',
+    'optimizerSupport?.rounding_modes',
+    'optimizerSupport?.immutable_after_startup',
+    'optimizerSupport?.optimizer_tuple_kinds',
+    'optimizerSupport?.workloads',
+    "workloadSummary('distill_refresh')",
+    'entry.allowed_optimizer_kinds',
+    'entry?.backend_implementation?.supported',
+    'entry?.backend_implementation?.native_device_hook',
+    'muonSupport?.optimizer_tuple?.lora_rank',
+    'muonRank?.backend_maximum',
+    'muonRank?.model_maximum',
     'checkpoint_policy',
     'train.checkpoint_boundary_policy',
     'checkpointBoundaryPolicy.recompute_mode',
@@ -288,6 +305,26 @@ function checkRuntimeConfigSchemaContract(source) {
         },
       },
     }],
+    ['legacy null effective Muon maximum', {
+      training: {
+        optimizer_support: {
+          schema: { id: 'kiln.training-optimizer-support', version: 1 },
+          backend: 'cpu',
+          device: 'cpu',
+          base_weight_dtype: 'f32',
+          resolved_lora_parameter_dtype: 'f32',
+          immutable_after_startup: true,
+          rounding_modes: ['round_to_nearest'],
+          optimizer_tuple_kinds: [],
+          workloads: [{ workload: 'sft', supported: false, unavailable_reason: 'CPU tape unavailable', allowed_optimizer_kinds: [] }],
+          optimizers: [{
+            kind: 'muon',
+            backend_implementation: { supported: true, route: 'portable_reference', native_device_hook: false, parameter_dtypes: ['f32'] },
+            optimizer_tuple: { supported: false, unavailable_reason: 'legacy response omitted effective maximum', lora_rank: { minimum: 2, maximum: null, backend_maximum: null, model_maximum: 256, live_memory_admission_required: true } },
+          }],
+        },
+      },
+    }],
   ]) {
     let html;
     try {
@@ -310,6 +347,183 @@ function checkRuntimeConfigSchemaContract(source) {
         fail('Runtime-config renderer should display the backend unavailable reason');
       }
     }
+    if (label === 'legacy null effective Muon maximum') {
+      if (!/Muon rank:<strong>2\+<\/strong>/.test(html)
+        || !/Muon rank ceilings:<strong>backend none · model 256<\/strong>/.test(html)
+        || /dynamic/.test(html)) {
+        fail(`Runtime-config renderer should display a null legacy effective maximum as 2+ while preserving the backend/model ceilings, got ${html}`);
+      }
+    }
+  }
+}
+
+function checkTrainingOptimizerSupportContract(appSource, indexSource, demoSource) {
+  for (const term of [
+    'kiln.training-optimizer-support',
+    'function updateTrainingOptimizerSupport(cfg)',
+    'entry.optimizer_tuple',
+    'candidate.optimizer_tuple_kinds',
+    'candidate.workloads',
+    'candidate.immutable_after_startup === true',
+    'candidate.rounding_modes.length === 1',
+    "candidate.rounding_modes[0] === 'round_to_nearest'",
+    'nonEmptyIdentity(candidate.backend)',
+    'nonEmptyIdentity(candidate.device)',
+    'nonEmptyIdentity(candidate.base_weight_dtype)',
+    'nonEmptyIdentity(candidate.resolved_lora_parameter_dtype)',
+    'function validOptimizerRankContract(rank)',
+    'Number.isSafeInteger(value) && value > 0',
+    'rank.maximum === effectiveMaximum',
+    'candidate.optimizers.every(entry => validOptimizerRankContract',
+    'option.disabled',
+    'function applyOptimizerRankBounds(input, entry)',
+    'function trainingOptimizerAdmissionState(workload, kind, rawRank)',
+    'function requireTrainingOptimizerAdmission(workload, kind, rank, modeLabel)',
+    "if (!['muon', 'adam_w', 'sgd'].includes(value))",
+    'Optimizer capability details are still loading',
+    'function markTrainingOptimizerSupportFetchFailed(error)',
+    'trainingOptimizerSupportSnapshot = null',
+    'runtimeConfigLoaded = false',
+    'if (runtimeConfigLoaded && runtimeConfigSnapshot && !force) return;',
+    'function runtimeConfigFailureHtml(error)',
+    'function updateOpdSubmitState()',
+    '|| !optimizerState.ready',
+    'live_memory_admission_required',
+    "optimizerSupportEntry('muon')",
+    'round-to-nearest',
+    "requireTrainingOptimizerAdmission('sft', 'muon', 8, 'Corrections SFT')",
+    "requireTrainingOptimizerAdmission('distill_refresh', 'muon', 16, 'Distill refresh')",
+    "requireTrainingOptimizerAdmission('opd', 'muon', form.rank.value, 'Boost')",
+    "requireTrainingOptimizerAdmission('opd', 'muon', 16, 'Distill merge')",
+    "requireTrainingOptimizerAdmission('opd', 'muon', 16, 'Self-improvement')",
+    'function recipeRunAdmissionState(button)',
+    "button?.dataset.recipeAdmissionSupported !== 'true'",
+  ]) {
+    if (!appSource.includes(term)) fail(`Training optimizer product support is missing ${term}`);
+  }
+  for (const forbidden of [
+    'server_execution',
+    'select.value = replacement',
+    'input.value = String(minimum)',
+    'input.value = String(maximum)',
+    "form.optimizer.value || 'muon'",
+    "document.getElementById('sft-optimizer')?.value || 'muon'",
+    "document.getElementById('grpo-optimizer')?.value || 'muon'",
+  ]) {
+    if (appSource.includes(forbidden)) fail(`Training optimizer UI must not retain ${forbidden}`);
+  }
+  const assertGuardBefore = (label, startMarker, endMarker, guardMarker, sideEffectMarker) => {
+    const start = appSource.indexOf(startMarker);
+    const end = appSource.indexOf(endMarker, start + startMarker.length);
+    if (start < 0 || end < 0) fail(`${label} training handler is missing`);
+    const handler = appSource.slice(start, end);
+    const guard = handler.indexOf(guardMarker);
+    const sideEffect = handler.indexOf(sideEffectMarker);
+    if (guard < 0 || sideEffect < 0 || guard >= sideEffect) {
+      fail(`${label} must enforce optimizer admission before ${sideEffectMarker}`);
+    }
+  };
+  assertGuardBefore('Corrections', 'async function trainFromCorrections()', '// Resolve an in-flight corrections-train receipt', "requireTrainingOptimizerAdmission('sft', 'muon', 8", 'corrFlushToServer(trainable)');
+  assertGuardBefore('SFT', "document.getElementById('sft-form').addEventListener('submit'", '// --- GRPO Form ---', "requireTrainingOptimizerAdmission('sft'", "api('/v1/train/sft'");
+  assertGuardBefore('GRPO', "document.getElementById('grpo-form').addEventListener('submit'", '// --- Chat ---', "requireTrainingOptimizerAdmission('grpo'", "api('/v1/train/grpo'");
+  assertGuardBefore('OPD', "document.getElementById('opd-form')?.addEventListener('submit'", '// --- Distill / Refresh', "requireTrainingOptimizerAdmission('opd'", "api('/v1/train/opd'");
+  assertGuardBefore('Refresh', "document.getElementById('distill-refresh-form')?.addEventListener('submit'", '// --- Distill / Pump', "requireTrainingOptimizerAdmission('distill_refresh'", "api('/v1/distill/refresh'");
+  assertGuardBefore('Pump', "document.getElementById('distill-pump-form')?.addEventListener('submit'", '// --- Distill / Merge', "requireTrainingOptimizerAdmission('opd'", "api('/v1/distill/pump'");
+  assertGuardBefore('Merge', "document.getElementById('distill-merge-form')?.addEventListener('submit'", '// --- Distill / Self', "requireTrainingOptimizerAdmission('opd'", "api('/v1/adapters/distill_merge'");
+  assertGuardBefore('Self', "document.getElementById('distill-self-form')?.addEventListener('submit'", '// --- Cache', "requireTrainingOptimizerAdmission('opd'", "api('/v1/distill/self'");
+  assertGuardBefore('Recipe', "document.addEventListener('click', async (ev) => {\n  const btn = ev.target.closest('[data-recipe-run]')", '// --- Submit OPD', 'recipeRunAdmissionState(btn)', "btn.dataset.recipeBusy = 'true'");
+  for (const id of [
+    'corr-optimizer-support',
+    'sft-optimizer-support',
+    'grpo-optimizer-support',
+    'opd-optimizer-support',
+    'refresh-optimizer-support',
+    'pump-optimizer-support',
+    'merge-optimizer-support',
+    'self-optimizer-support',
+  ]) {
+    if (!indexSource.includes(`id="${id}"`)) fail(`Training optimizer status node #${id} is missing`);
+  }
+  for (const describedBy of [
+    'aria-describedby="corr-optimizer-support"',
+    'aria-describedby="sft-optimizer-support"',
+    'aria-describedby="grpo-optimizer-support"',
+    'aria-describedby="opd-optimizer-support"',
+    'aria-describedby="refresh-optimizer-support"',
+    'aria-describedby="pump-optimizer-support"',
+    'aria-describedby="merge-optimizer-support"',
+    'aria-describedby="self-optimizer-support"',
+  ]) {
+    if (!indexSource.includes(describedBy)) fail(`Training optimizer controls are missing ${describedBy}`);
+  }
+  const loadingStatusCount = (indexSource.match(/Optimizer capability details are still loading\. Training remains disabled\./g) || []).length;
+  if (loadingStatusCount < 8) {
+    fail(`Every training-producing surface must start with visible loading/disabled optimizer copy; found ${loadingStatusCount}`);
+  }
+  for (const formId of [
+    'sft-form',
+    'grpo-form',
+    'opd-form',
+    'distill-refresh-form',
+    'distill-pump-form',
+    'distill-merge-form',
+    'distill-self-form',
+  ]) {
+    const start = indexSource.indexOf(`<form id="${formId}"`);
+    const end = indexSource.indexOf('</form>', start);
+    const form = start >= 0 && end >= 0 ? indexSource.slice(start, end) : '';
+    if (!/<button[^>]+type="submit"[^>]+disabled/.test(form)) {
+      fail(`#${formId} must be disabled in static HTML until optimizer capabilities load`);
+    }
+  }
+  for (const controlId of ['corr-train', 'sft-optimizer', 'sft-rank', 'grpo-optimizer', 'grpo-rank', 'opd-rank', 'pump-rank']) {
+    const control = indexSource.match(new RegExp(`<[^>]+id="${controlId}"[^>]*>`))?.[0] || '';
+    if (!/\sdisabled(?:\s|>)/.test(control)) fail(`#${controlId} must start disabled in static HTML`);
+  }
+  for (const term of [
+    "id: 'kiln.training-optimizer-support'",
+    "optimizer_tuple_kinds: ['muon', 'adam_w', 'sgd']",
+    "workload: 'distill_refresh'",
+    'optimizer_tuple:',
+    'resolved_lora_parameter_dtype',
+    'backend_implementation_rounding_modes',
+    'live_memory_admission_required: true',
+    'backend_maximum:',
+    'model_maximum:',
+    'admission: { supported: true, unavailable_reason: null }',
+    "admission: { supported: false, unavailable_reason: 'distill_refresh is unavailable until admission pins separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves the maximum sequential working set' }",
+  ]) {
+    if (!demoSource.includes(term)) fail(`Demo optimizer support fixture is missing ${term}`);
+  }
+}
+
+function checkTrainingOptimizerRankValidator(appSource) {
+  const validatorStart = appSource.indexOf('function validOptimizerRankContract(rank)');
+  const validatorEnd = appSource.indexOf('function updateTrainingOptimizerSupport(cfg)', validatorStart);
+  if (validatorStart < 0 || validatorEnd < 0) fail('Training optimizer rank validator is missing');
+  const context = vm.createContext({});
+  vm.runInContext(`${appSource.slice(validatorStart, validatorEnd)}\nthis.validate = validOptimizerRankContract;`, context);
+
+  const valid = [
+    { minimum: 2, maximum: 48, backend_maximum: 48, model_maximum: 1024, live_memory_admission_required: true },
+    { minimum: 1, maximum: 1024, backend_maximum: null, model_maximum: 1024, live_memory_admission_required: true },
+    { minimum: 2, maximum: 32, backend_maximum: 64, model_maximum: 32, live_memory_admission_required: true },
+  ];
+  for (const rank of valid) {
+    if (!context.validate(rank)) fail(`Valid optimizer rank contract was rejected: ${JSON.stringify(rank)}`);
+  }
+
+  const invalid = [
+    { minimum: 2, maximum: null, backend_maximum: 48, model_maximum: 1024, live_memory_admission_required: true },
+    { minimum: 2, maximum: 49, backend_maximum: 48, model_maximum: 1024, live_memory_admission_required: true },
+    { minimum: 2, maximum: 48, backend_maximum: 64, model_maximum: 1024, live_memory_admission_required: true },
+    { minimum: 49, maximum: 48, backend_maximum: 48, model_maximum: 1024, live_memory_admission_required: true },
+    { minimum: 2, maximum: Number.MAX_SAFE_INTEGER + 1, backend_maximum: null, model_maximum: Number.MAX_SAFE_INTEGER + 1, live_memory_admission_required: true },
+    { minimum: 2, maximum: 48, backend_maximum: 48, model_maximum: 1024, live_memory_admission_required: false },
+    { minimum: 2, maximum: 48, backend_maximum: 48, model_maximum: 1024 },
+  ];
+  for (const rank of invalid) {
+    if (context.validate(rank)) fail(`Malformed optimizer rank contract was accepted: ${JSON.stringify(rank)}`);
   }
 }
 
@@ -406,6 +620,7 @@ function validateSftPayload(body) {
   if (body?.config?.epochs !== 3) return 'SFT epochs should be numeric and nested under config';
   if (body?.config?.lora_rank !== 8) return 'SFT lora_rank should be numeric and nested under config';
   if (body?.config?.lora_alpha !== 16) return 'SFT lora_alpha should pair with rank (2×rank, capped at 32) so the trainer scale gate passes';
+  if (body?.config?.optimizer?.kind !== 'muon') return 'SFT should submit the exact selected Muon optimizer tuple';
   if (body?.config?.checkpoint_interval !== 2) return 'SFT checkpoint_interval should be a positive integer nested under config';
   if ('resume_checkpoint' in (body?.config || {})) return 'Fresh SFT submission should omit resume_checkpoint when the field is blank';
   if ('output_name' in body || 'adapter_name' in body || 'num_epochs' in body) return 'SFT payload should not use stale top-level training config fields';
@@ -424,6 +639,7 @@ function validateGrpoPayload(body) {
   if (!isFiniteNumber(body?.config?.kl_coeff) || body.config.kl_coeff !== 0.1) return 'GRPO kl_coeff should be numeric';
   if (body?.config?.lora_rank !== 8) return 'GRPO lora_rank should be numeric and nested under config';
   if (body?.config?.lora_alpha !== 16) return 'GRPO lora_alpha should pair with rank (2×rank, capped at 32) so the trainer scale gate passes';
+  if (body?.config?.optimizer?.kind !== 'muon') return 'GRPO should submit the exact selected Muon optimizer tuple';
   if (body?.config?.checkpoint_interval !== 3) return 'GRPO checkpoint_interval should be a positive integer nested under config';
   if ('resume_checkpoint' in (body?.config || {})) return 'Fresh GRPO submission should omit resume_checkpoint when the field is blank';
   if ('epochs' in (body?.config || {}) || 'output_name' in body || 'adapter_name' in body || 'num_epochs' in body) return 'GRPO payload should not use stale SFT/top-level training config fields';
@@ -437,6 +653,7 @@ function validateOpdPayload(body) {
   if (body?.config?.output_name !== 'opd-adapter') return 'OPD output_name should be nested under config';
   if (body?.config?.training_mode !== 'on_policy') return 'OPD browser form should submit the on-policy mode it presents';
   if (body?.config?.lora_rank !== 32) return 'OPD lora_rank should be numeric and nested under config';
+  if (body?.config?.optimizer?.kind !== 'muon') return 'OPD should submit the exact gated Muon optimizer tuple';
   if (body?.config?.checkpoint_interval !== 25) return 'OPD checkpoint_interval should preserve the exact-resume default';
   if ('resume_checkpoint' in (body?.config || {})) return 'Fresh OPD submission should omit resume_checkpoint when the field is blank';
   if (body?.config?.auto_load !== true) return 'OPD auto_load should be true by default';
@@ -524,7 +741,7 @@ function validateExistingAdapterName(name, availableAdapters, action) {
 function parseAdapterRoute(pathname) {
   const match = /^\/v1\/adapters\/([^/]+)(?:\/(download|detail|receipt))?$/.exec(pathname);
   if (!match) return null;
-  if (['load', 'unload', 'upload', 'merge'].includes(match[1])) return null;
+  if (['load', 'unload', 'upload', 'merge', 'distill_merge'].includes(match[1])) return null;
   return { name: decodeURIComponent(match[1]), action: match[2] || null };
 }
 
@@ -767,6 +984,130 @@ function smokeThinkingBudgetOutcome(metadata) {
   };
 }
 
+function smokeTrainingRuntimeConfig(available) {
+  const unavailableReason = 'native Vulkan training is unavailable for CPU-host serving weights';
+  const common = {
+    checkpoint_policy: { mode: 'explicit_segments', segments: 4 },
+    checkpoint_boundary_policy: {
+      recompute_mode: 'enabled',
+      recompute_threshold_tokens: 4_096,
+      anchor_stride: 3,
+      cache_target_bytes: 6 * GIB,
+    },
+    checkpoint_segments: 4,
+    checkpoint_segments_source: 'configured',
+    checkpointing_enabled: true,
+  };
+  const schema = { id: 'kiln.training-optimizer-support', version: 1 };
+  if (available === 'missing') {
+    return {
+      runtime_device: 'vulkan:0',
+      model_weight_device: 'cpu',
+      native_training_supported: false,
+      native_training_unavailable_reason: 'Optimizer capability details are unavailable',
+      ...common,
+    };
+  }
+  if (!available) {
+    return {
+      runtime_device: 'vulkan:0',
+      model_weight_device: 'cpu',
+      native_training_supported: false,
+      native_training_unavailable_reason: unavailableReason,
+      optimizer_support: {
+        schema,
+        backend: 'vulkan',
+        device: 'vulkan:0',
+        base_weight_dtype: 'bf16',
+        resolved_lora_parameter_dtype: 'f32',
+        immutable_after_startup: true,
+        rounding_modes: ['round_to_nearest'],
+        backend_implementation_rounding_modes: ['round_to_nearest'],
+        optimizer_tuple_kinds: ['muon', 'adam_w', 'sgd'],
+        workloads: ['sft', 'grpo', 'opd', 'distill_refresh'].map(workload => ({
+          workload,
+          supported: false,
+          unavailable_reason: unavailableReason,
+          allowed_optimizer_kinds: [],
+        })),
+        optimizers: ['muon', 'adam_w', 'sgd'].map(kind => ({
+          kind,
+          backend_implementation: { supported: true, route: 'native_device_hook', native_device_hook: true, parameter_dtypes: ['f32', 'bf16'] },
+          optimizer_tuple: {
+            supported: true,
+            unavailable_reason: null,
+            lora_rank: kind === 'muon'
+              ? { minimum: 2, maximum: 32, backend_maximum: 32, model_maximum: 256, live_memory_admission_required: true }
+              : { minimum: 1, maximum: 256, backend_maximum: null, model_maximum: 256, live_memory_admission_required: true },
+          },
+        })),
+      },
+      ...common,
+    };
+  }
+  const supported = {
+    runtime_device: 'metal:0',
+    model_weight_device: 'metal:0',
+    native_training_supported: true,
+    optimizer_support: {
+      schema,
+      backend: 'metal',
+      device: 'metal:0',
+      base_weight_dtype: 'bf16',
+      resolved_lora_parameter_dtype: 'bf16',
+      immutable_after_startup: true,
+      rounding_modes: ['round_to_nearest'],
+      backend_implementation_rounding_modes: ['round_to_nearest'],
+      optimizer_tuple_kinds: ['muon', 'adam_w'],
+      workloads: [
+        ...['sft', 'grpo', 'opd'].map(workload => ({
+          workload,
+          supported: true,
+          unavailable_reason: null,
+          allowed_optimizer_kinds: ['muon', 'adam_w'],
+        })),
+        {
+          workload: 'distill_refresh',
+          supported: false,
+          unavailable_reason: 'distill_refresh is unavailable until admission pins separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves the maximum sequential working set',
+          allowed_optimizer_kinds: [],
+        },
+      ],
+      optimizers: [
+        {
+          kind: 'muon',
+          backend_implementation: { supported: true, route: 'native_device_hook', native_device_hook: true, parameter_dtypes: ['f32', 'bf16'] },
+          optimizer_tuple: { supported: true, unavailable_reason: null, lora_rank: { minimum: 2, maximum: 32, backend_maximum: 32, model_maximum: 256, live_memory_admission_required: true } },
+        },
+        {
+          kind: 'adam_w',
+          backend_implementation: { supported: true, route: 'native_device_hook', native_device_hook: true, parameter_dtypes: ['f32', 'bf16'] },
+          optimizer_tuple: { supported: true, unavailable_reason: null, lora_rank: { minimum: 1, maximum: 256, backend_maximum: null, model_maximum: 256, live_memory_admission_required: true } },
+        },
+        {
+          kind: 'sgd',
+          backend_implementation: { supported: false, route: 'unavailable', native_device_hook: false, parameter_dtypes: [] },
+          optimizer_tuple: { supported: false, unavailable_reason: 'Metal has no native SGD optimizer hook', lora_rank: { minimum: 1, maximum: 256, backend_maximum: null, model_maximum: 256, live_memory_admission_required: true } },
+        },
+      ],
+    },
+    ...common,
+  };
+  if (available === 'unsupported-schema') supported.optimizer_support.schema.version = 2;
+  if (available === 'mutable-policy') supported.optimizer_support.immutable_after_startup = false;
+  if (available === 'wrong-rounding') supported.optimizer_support.rounding_modes = ['stochastic'];
+  if (available === 'invalid-rank-contract') {
+    supported.optimizer_support.optimizers[0].optimizer_tuple.lora_rank.maximum = null;
+  }
+  if (available === 'missing-tuple-identity') {
+    supported.optimizer_support.backend = '';
+    supported.optimizer_support.device = '';
+    supported.optimizer_support.base_weight_dtype = '';
+    supported.optimizer_support.resolved_lora_parameter_dtype = '';
+  }
+  return supported;
+}
+
 async function startServer({
   failDashboardApis = false,
   availableAdapters = defaultAvailableAdapters,
@@ -778,7 +1119,15 @@ async function startServer({
 } = {}) {
   // Mutable so the failure scenario can heal/re-break the APIs mid-run and
   // assert the dashboard recovers (Retry buttons + dedupe-key invalidation).
-  const apiState = { failDashboardApis, modelsCold, recentRequests: [], modelsRequests: 0 };
+  const apiState = {
+    failDashboardApis,
+    failRuntimeConfig: false,
+    modelsCold,
+    recentRequests: [],
+    modelsRequests: 0,
+    trainingOptimizerAvailable: false,
+    trainingSubmitRequests: { sft: 0, grpo: 0, opd: 0, refresh: 0, pump: 0, merge: 0, self: 0, recipe: 0 },
+  };
   const uiHtml = await readFile(uiIndexPath, 'utf8');
   const uiStyles = await readFile(uiStylesPath, 'utf8');
   const uiDemoJs = await readFile(uiDemoJsPath, 'utf8');
@@ -1102,6 +1451,10 @@ async function startServer({
         return;
       }
     }
+    if (apiState.failRuntimeConfig && url.pathname === '/v1/config') {
+      apiFailure(res, 'Runtime config', url.pathname);
+      return;
+    }
     if (url.pathname === '/health') {
       // blocks_used cycles so renderServerStatus's content key changes on
       // every poll — each 2s tick genuinely innerHTML-swaps #server-status,
@@ -1295,22 +1648,7 @@ async function startServer({
           immutable_after_startup: true,
           restart_required_to_change: true,
         },
-        training: {
-          runtime_device: 'vulkan:0',
-          model_weight_device: 'cpu',
-          native_training_supported: false,
-          native_training_unavailable_reason: 'native Vulkan training is unavailable for CPU-host serving weights',
-          checkpoint_policy: { mode: 'explicit_segments', segments: 4 },
-          checkpoint_boundary_policy: {
-            recompute_mode: 'enabled',
-            recompute_threshold_tokens: 4_096,
-            anchor_stride: 3,
-            cache_target_bytes: 6 * GIB,
-          },
-          checkpoint_segments: 4,
-          checkpoint_segments_source: 'configured',
-          checkpointing_enabled: true,
-        },
+        training: smokeTrainingRuntimeConfig(apiState.trainingOptimizerAvailable),
         memory_budget: {
           total_vram_bytes: 24 * GIB,
           total_vram_gib: 24.0,
@@ -1494,6 +1832,53 @@ async function startServer({
       json(res, { teachers: smokeTeachers });
       return;
     }
+    if (url.pathname === '/v1/recipes' && req.method === 'GET') {
+      const supported = apiState.trainingOptimizerAvailable === true;
+      json(res, { recipes: [
+        {
+          name: 'smoke-supported-recipe',
+          description: 'Exercises an admitted single-workload recipe in the dashboard',
+          num_steps: 2,
+          admission: {
+            supported,
+            unavailable_reason: supported ? null : 'recipe optimizer tuple is unavailable',
+          },
+        },
+        {
+          name: 'smoke-refresh-recipe',
+          description: 'Exercises fail-closed distill-refresh recipe admission',
+          num_steps: 2,
+          admission: {
+            supported: false,
+            unavailable_reason: 'distill_refresh is unavailable until admission pins separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves the maximum sequential working set',
+          },
+        },
+        {
+          name: 'smoke-missing-admission',
+          description: 'Deliberately omits admission for fail-closed coverage',
+          num_steps: 1,
+        },
+      ] });
+      return;
+    }
+    if (url.pathname === '/v1/recipes/run' && req.method === 'POST') {
+      apiState.trainingSubmitRequests.recipe += 1;
+      json(res, { message: 'Recipe queued', effective_seeds: {} });
+      return;
+    }
+    const directTrainingRoutes = {
+      '/v1/distill/refresh': ['refresh', 'Refresh queued'],
+      '/v1/distill/pump': ['pump', 'Boost job queued'],
+      '/v1/adapters/distill_merge': ['merge', 'Merge queued'],
+      '/v1/distill/self': ['self', 'Self-improvement job queued'],
+    };
+    if (req.method === 'POST' && directTrainingRoutes[url.pathname]) {
+      const [counter, message] = directTrainingRoutes[url.pathname];
+      apiState.trainingSubmitRequests[counter] += 1;
+      await readJsonBody(req);
+      json(res, { message, job_id: `smoke-${counter}` });
+      return;
+    }
     if (url.pathname === '/v1/train/queue' || url.pathname === '/v1/train/status') {
       json(res, { running: runningTrainingJob, queued: [], completed: completedTrainingJobs });
       return;
@@ -1548,6 +1933,7 @@ async function startServer({
         res.end(JSON.stringify({ detail: 'Use POST for SFT training' }));
         return;
       }
+      apiState.trainingSubmitRequests.sft += 1;
       const body = await readJsonBody(req);
       const validationError = validateSftPayload(body);
       if (validationError) {
@@ -1586,6 +1972,7 @@ async function startServer({
         res.end(JSON.stringify({ detail: 'Use POST for GRPO training' }));
         return;
       }
+      apiState.trainingSubmitRequests.grpo += 1;
       const body = await readJsonBody(req);
       const validationError = validateGrpoPayload(body);
       if (validationError) {
@@ -1650,6 +2037,7 @@ async function startServer({
         res.end(JSON.stringify({ detail: 'Use POST for OPD training' }));
         return;
       }
+      apiState.trainingSubmitRequests.opd += 1;
       const body = await readJsonBody(req);
       const validationError = validateOpdPayload(body);
       if (validationError) {
@@ -2020,8 +2408,11 @@ async function startServer({
     server,
     baseUrl: `http://127.0.0.1:${address.port}`,
     setFailDashboardApis: (value) => { apiState.failDashboardApis = value; },
+    setFailRuntimeConfig: (value) => { apiState.failRuntimeConfig = value; },
     setRecentRequests: (rows) => { apiState.recentRequests = rows; },
     setModelsCold: (value) => { apiState.modelsCold = value; },
+    setTrainingOptimizerAvailable: (value) => { apiState.trainingOptimizerAvailable = value; },
+    getTrainingSubmitRequests: () => ({ ...apiState.trainingSubmitRequests }),
     getModelsRequests: () => apiState.modelsRequests,
   };
 }
@@ -2851,7 +3242,15 @@ async function runModelColdStartSmoke(baseUrl, { setModelsCold, getModelsRequest
   }
 }
 
-async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapters = false, setFailDashboardApis = null, setRecentRequests = null } = {}) {
+async function runSmoke(baseUrl, {
+  expectFailureStates = false,
+  expectEmptyAdapters = false,
+  setFailDashboardApis = null,
+  setFailRuntimeConfig = null,
+  setRecentRequests = null,
+  setTrainingOptimizerAvailable = null,
+  getTrainingSubmitRequests = null,
+} = {}) {
   const puppeteer = await loadPuppeteer();
   const browser = await puppeteer.launch({
     executablePath: chromiumPath(),
@@ -2860,13 +3259,15 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
   });
 
   const pageErrors = [];
+  let expectedRuntimeConfigFailure = false;
   try {
     const page = await browser.newPage();
     page.on('pageerror', (error) => pageErrors.push(error.message));
     page.on('console', (entry) => {
       if (entry.type() !== 'error') return;
       const text = entry.text();
-      if (expectFailureStates && /Failed to load resource: the server responded with a status of 503/.test(text)) return;
+      if ((expectFailureStates || expectedRuntimeConfigFailure)
+        && /Failed to load resource: the server responded with a status of 503/.test(text)) return;
       pageErrors.push(text);
     });
     page.on('requestfailed', (request) => {
@@ -3656,6 +4057,278 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#runtime-config-body', /Runtime device[\s\S]*vulkan:0/, 'Runtime config should render the native-training runtime device');
     await waitForPanelText(page, '#runtime-config-body', /Weight device[\s\S]*cpu/, 'Runtime config should render the frozen model-weight device');
     await waitForPanelText(page, '#runtime-config-body', /Native training[\s\S]*unavailable/, 'Runtime config should render fail-closed native-training support');
+    await waitForPanelText(page, '#runtime-config-body', /Optimizer contract[\s\S]*kiln\.training-optimizer-support[\s\S]*v1/, 'Runtime config should render the optimizer schema identity');
+    await waitForPanelText(page, '#runtime-config-body', /Optimizer backend[\s\S]*vulkan · vulkan:0/, 'Runtime config should render the optimizer backend and device');
+    await waitForPanelText(page, '#runtime-config-body', /Base \/ LoRA dtype[\s\S]*bf16 \/ f32/, 'Runtime config should render base and resolved LoRA dtypes');
+    await waitForPanelText(page, '#runtime-config-body', /Optimizer tuples[\s\S]*Muon, AdamW, SGD/, 'Runtime config should preserve optimizer tuple facts when the workload path is unavailable');
+    await waitForPanelText(page, '#runtime-config-body', /SFT workload[\s\S]*unavailable/, 'Runtime config should report SFT workload admission separately from optimizer tuples');
+    await waitForPanelText(page, '#runtime-config-body', /GRPO workload[\s\S]*unavailable/, 'Runtime config should report GRPO workload admission separately from optimizer tuples');
+    await waitForPanelText(page, '#runtime-config-body', /OPD workload[\s\S]*unavailable/, 'Runtime config should report OPD workload admission separately from optimizer tuples');
+    await waitForPanelText(page, '#runtime-config-body', /Distill refresh workload[\s\S]*unavailable/, 'Runtime config should report joint refresh admission separately from its SFT and OPD phases');
+    await waitForPanelText(page, '#runtime-config-body', /Optimizer implementations[\s\S]*Muon, AdamW, SGD/, 'Runtime config should render backend optimizer implementations');
+    await waitForPanelText(page, '#runtime-config-body', /Native device hooks[\s\S]*Muon, AdamW, SGD/, 'Runtime config should distinguish native device hooks from server execution');
+    await waitForPanelText(page, '#runtime-config-body', /Optimizer rounding[\s\S]*round_to_nearest[\s\S]*immutable/, 'Runtime config should render immutable round-to-nearest product policy');
+    await waitForPanelText(page, '#runtime-config-body', /Muon rank[\s\S]*2\.\.32[\s\S]*admission required/, 'Runtime config should render the effective Muon rank constraint and separate live-memory rejection gate');
+    await waitForPanelText(page, '#runtime-config-body', /Muon rank ceilings[\s\S]*backend 32 · model 256/, 'Runtime config should distinguish the backend ceiling from the resident-model ceiling');
+    const unavailableOptimizerControls = await page.evaluate(() => ({
+      sftSelectDisabled: document.getElementById('sft-optimizer')?.disabled,
+      grpoSelectDisabled: document.getElementById('grpo-optimizer')?.disabled,
+      opdSubmitDisabled: document.querySelector('#opd-form button[type="submit"]')?.disabled,
+      refreshSubmitDisabled: document.querySelector('#distill-refresh-form button[type="submit"]')?.disabled,
+      pumpSubmitDisabled: document.querySelector('#distill-pump-form button[type="submit"]')?.disabled,
+      mergeSubmitDisabled: document.querySelector('#distill-merge-form button[type="submit"]')?.disabled,
+      selfSubmitDisabled: document.querySelector('#distill-self-form button[type="submit"]')?.disabled,
+      sftSubmitTitle: document.querySelector('#sft-form button[type="submit"]')?.title,
+      opdSubmitTitle: document.querySelector('#opd-form button[type="submit"]')?.title,
+      refreshStatus: document.getElementById('refresh-optimizer-support')?.textContent,
+    }));
+    if (!unavailableOptimizerControls.sftSelectDisabled
+      || !unavailableOptimizerControls.grpoSelectDisabled
+      || !unavailableOptimizerControls.opdSubmitDisabled
+      || !unavailableOptimizerControls.refreshSubmitDisabled
+      || !unavailableOptimizerControls.pumpSubmitDisabled
+      || !unavailableOptimizerControls.mergeSubmitDisabled
+      || !unavailableOptimizerControls.selfSubmitDisabled
+      || !/CPU-host serving weights/.test(unavailableOptimizerControls.sftSubmitTitle || '')
+      || !/CPU-host serving weights/.test(unavailableOptimizerControls.opdSubmitTitle || '')
+      || !/Distill refresh is unavailable/.test(unavailableOptimizerControls.refreshStatus || '')) {
+      fail(`Unavailable optimizer support did not gate every training form: ${JSON.stringify(unavailableOptimizerControls)}`);
+    }
+    if (getTrainingSubmitRequests) {
+      const before = getTrainingSubmitRequests();
+      await page.$eval('#sft-form', form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+      await expectTrainingToast(page, 'SFT cannot submit: SFT is unavailable: native Vulkan training is unavailable for CPU-host serving weights.');
+      await page.$eval('#grpo-form', form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+      await expectTrainingToast(page, 'GRPO cannot submit: GRPO is unavailable: native Vulkan training is unavailable for CPU-host serving weights.');
+      await page.$eval('#opd-form', form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+      await expectTrainingToast(page, 'OPD cannot submit: OPD is unavailable: native Vulkan training is unavailable for CPU-host serving weights.');
+      for (const formId of ['distill-refresh-form', 'distill-pump-form', 'distill-merge-form', 'distill-self-form']) {
+        await page.$eval(`#${formId}`, form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+      }
+      await page.evaluate(() => {
+        window.addCorrectionFromRequest({
+          id: 'optimizer-capability-correction',
+          prompt_full: 'Correct this response.',
+          completion_full: 'Wrong response.',
+          timestamp_unix_ms: Date.now(),
+        });
+        const ideal = document.querySelector('[data-corr-ideal="optimizer-capability-correction"]');
+        ideal.value = 'Correct response.';
+        ideal.dispatchEvent(new Event('input', { bubbles: true }));
+        document.getElementById('corr-train').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      });
+      await goToPrimaryTab(page, 'distill');
+      await clickAndWait(page, '#distill-tab-recipes', 'Could not open Recipes for fail-closed admission coverage');
+      await page.waitForSelector('[data-recipe-run="smoke-supported-recipe"]', { timeout: 5000 })
+        .catch(() => fail('Recipes did not render their admission descriptors'));
+      await expectDisabled(page, '[data-recipe-run="smoke-supported-recipe"]', true, 'An unavailable recipe descriptor should disable Run');
+      await expectDisabled(page, '[data-recipe-run="smoke-refresh-recipe"]', true, 'A refresh recipe without joint phase admission should disable Run');
+      await expectDisabled(page, '[data-recipe-run="smoke-missing-admission"]', true, 'A missing recipe admission descriptor should fail closed');
+      await page.$eval('[data-recipe-run="smoke-missing-admission"]', button => button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })));
+      await page.$eval('[data-corr-remove="optimizer-capability-correction"]', button => button.click());
+      await goToPrimaryTab(page, 'overview');
+      const after = getTrainingSubmitRequests();
+      if (JSON.stringify(after) !== JSON.stringify(before)) {
+        fail(`Unsupported programmatic training submit reached an API: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+      }
+    }
+    if (!setTrainingOptimizerAvailable) fail('Optimizer smoke requires a runtime capability transition setter');
+
+    for (const [mode, reason] of [
+      ['missing', /Optimizer capability details are unavailable/],
+      ['unsupported-schema', /unsupported optimizer capability contract/],
+      ['mutable-policy', /unsupported optimizer capability contract/],
+      ['wrong-rounding', /unsupported optimizer capability contract/],
+      ['invalid-rank-contract', /unsupported optimizer capability contract/],
+      ['missing-tuple-identity', /unsupported optimizer capability contract/],
+    ]) {
+      setTrainingOptimizerAvailable(mode);
+      const invalidConfigResponse = page.waitForResponse(
+        response => response.url().endsWith('/v1/config') && response.status() === 200,
+        { timeout: 5000 },
+      );
+      await clickAndWait(page, '#runtime-config [data-rc-refresh]', `Could not refresh the ${mode} optimizer schema fixture`);
+      await invalidConfigResponse.catch(() => fail(`The ${mode} optimizer schema refresh did not fetch /v1/config`));
+      await waitForPanelText(page, '#sft-optimizer-support', reason, `The ${mode} optimizer schema must fail closed with a visible reason`);
+      await expectDisabled(page, '#sft-form button[type="submit"]', true, `The ${mode} optimizer schema must disable SFT submit`);
+    }
+
+    await page.evaluate(() => {
+      const optimizer = document.getElementById('sft-optimizer');
+      const rank = document.getElementById('sft-rank');
+      optimizer.value = 'sgd';
+      rank.value = '99';
+    });
+    setTrainingOptimizerAvailable(true);
+    const refreshedConfig = page.waitForResponse(
+      response => response.url().endsWith('/v1/config') && response.status() === 200,
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#runtime-config [data-rc-refresh]', 'Could not refresh runtime optimizer support');
+    await refreshedConfig.catch(() => fail('Runtime optimizer refresh did not fetch /v1/config'));
+    await waitForPanelText(page, '#runtime-config-body', /Optimizer backend[\s\S]*metal · metal:0/, 'Runtime config refresh should apply the new resident optimizer capability');
+    await waitForPanelText(page, '#runtime-config-body', /Optimizer tuples[\s\S]*Muon, AdamW/, 'Runtime config refresh should show only Metal optimizer tuples');
+    await waitForPanelText(page, '#runtime-config-body', /SFT workload[\s\S]*Muon, AdamW/, 'Runtime config refresh should show the Metal SFT workload allowlist');
+    await waitForPanelText(page, '#runtime-config-body', /Distill refresh workload[\s\S]*unavailable/, 'Runtime config refresh must preserve the distinct fail-closed joint refresh workload');
+    const supportedOptimizerControls = await page.evaluate(() => ({
+      sftSelectDisabled: document.getElementById('sft-optimizer')?.disabled,
+      grpoSelectDisabled: document.getElementById('grpo-optimizer')?.disabled,
+      selectedKind: document.getElementById('sft-optimizer')?.value,
+      sgdDisabled: document.querySelector('#sft-optimizer option[value="sgd"]')?.disabled,
+      muonDisabled: document.querySelector('#sft-optimizer option[value="muon"]')?.disabled,
+      opdSubmitDisabled: document.querySelector('#opd-form button[type="submit"]')?.disabled,
+      rankValue: document.getElementById('sft-rank')?.value,
+      rankMin: document.getElementById('sft-rank')?.min,
+      rankMax: document.getElementById('sft-rank')?.max,
+      sftStatus: document.getElementById('sft-optimizer-support')?.textContent,
+    }));
+    if (supportedOptimizerControls.sftSelectDisabled
+      || supportedOptimizerControls.grpoSelectDisabled
+      || supportedOptimizerControls.selectedKind !== 'sgd'
+      || !supportedOptimizerControls.sgdDisabled
+      || supportedOptimizerControls.muonDisabled
+      || supportedOptimizerControls.opdSubmitDisabled
+      || supportedOptimizerControls.rankValue !== '99'
+      || !/SGD is not allowed for SFT/.test(supportedOptimizerControls.sftStatus || '')) {
+      fail(`Supported Metal optimizer controls rewrote or hid an unsupported selection: ${JSON.stringify(supportedOptimizerControls)}`);
+    }
+    if (getTrainingSubmitRequests) {
+      const before = getTrainingSubmitRequests();
+      await page.$eval('#sft-form', form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+      const after = getTrainingSubmitRequests();
+      if (JSON.stringify(after) !== JSON.stringify(before)) fail('A programmatic submit with selected unsupported SGD reached the API');
+    }
+    await page.select('#sft-optimizer', 'adam_w');
+    const adamwRankBounds = await page.$eval('#sft-rank', input => ({
+      min: input.min,
+      max: input.max,
+      value: input.value,
+      describedBy: input.getAttribute('aria-describedby'),
+      status: document.getElementById('sft-optimizer-support')?.textContent,
+    }));
+    if (adamwRankBounds.min !== '1'
+      || adamwRankBounds.max !== '256'
+      || adamwRankBounds.value !== '99'
+      || adamwRankBounds.describedBy !== 'sft-optimizer-support'
+      || !/supported 1–256/.test(adamwRankBounds.status || '')) {
+      fail(`Effective AdamW model rank support should preserve the value and render 1–256 accessibly: ${JSON.stringify(adamwRankBounds)}`);
+    }
+    await page.select('#sft-optimizer', 'muon');
+    const muonRankBounds = await page.$eval('#sft-rank', input => ({ min: input.min, max: input.max, value: input.value }));
+    if (muonRankBounds.min !== '2' || muonRankBounds.max !== '32' || muonRankBounds.value !== '99') {
+      fail(`Switching back to Muon should set constraints without clamping the entered rank: ${JSON.stringify(muonRankBounds)}`);
+    }
+    await waitForPanelText(page, '#sft-optimizer-support', /rank 99 is outside supported ranks 2–32/, 'Out-of-range Muon rank should remain visible with its rejection reason');
+    await expectDisabled(page, '#sft-form button[type="submit"]', true, 'Out-of-range Muon rank should disable SFT submit');
+    if (getTrainingSubmitRequests) {
+      const before = getTrainingSubmitRequests();
+      await page.$eval('#sft-form', form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+      const after = getTrainingSubmitRequests();
+      if (JSON.stringify(after) !== JSON.stringify(before)) fail('A programmatic submit with out-of-range Muon rank reached the API');
+    }
+    await page.$eval('#sft-rank', input => {
+      input.value = '8';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const fixedSurfaceState = await page.evaluate(() => ({
+      correction: document.getElementById('corr-train')?.disabled,
+      opd: document.querySelector('#opd-form button[type="submit"]')?.disabled,
+      refresh: document.querySelector('#distill-refresh-form button[type="submit"]')?.disabled,
+      pump: document.querySelector('#distill-pump-form button[type="submit"]')?.disabled,
+      merge: document.querySelector('#distill-merge-form button[type="submit"]')?.disabled,
+      self: document.querySelector('#distill-self-form button[type="submit"]')?.disabled,
+      pumpRank: document.getElementById('pump-rank')?.value,
+      pumpMin: document.getElementById('pump-rank')?.min,
+      pumpMax: document.getElementById('pump-rank')?.max,
+      refreshStatus: document.getElementById('refresh-optimizer-support')?.textContent,
+      refreshTitle: document.querySelector('#distill-refresh-form button[type="submit"]')?.title,
+    }));
+    if (fixedSurfaceState.opd
+      || !fixedSurfaceState.refresh
+      || fixedSurfaceState.pump
+      || fixedSurfaceState.merge
+      || fixedSurfaceState.self
+      || fixedSurfaceState.pumpRank !== '32'
+      || fixedSurfaceState.pumpMin !== '2'
+      || fixedSurfaceState.pumpMax !== '32'
+      || !/pins separate exact SFT and OPD phase plans, prepares the exact SFT rows/.test(fixedSurfaceState.refreshStatus || '')
+      || !/pins separate exact SFT and OPD phase plans, prepares the exact SFT rows/.test(fixedSurfaceState.refreshTitle || '')) {
+      fail(`Fixed training surfaces did not reflect their exact workload and Muon tuple admissions: ${JSON.stringify(fixedSurfaceState)}`);
+    }
+    // Corrections remains disabled because its basket is empty, independently
+    // of the now-supported optimizer tuple.
+    if (!fixedSurfaceState.correction) fail('An empty corrections basket should remain disabled after optimizer admission succeeds');
+    if (getTrainingSubmitRequests) {
+      const before = getTrainingSubmitRequests();
+      await page.$eval('#distill-refresh-form', form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+      const after = getTrainingSubmitRequests();
+      if (after.refresh !== before.refresh) {
+        fail(`A programmatic refresh submit bypassed distinct joint-workload admission: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+      }
+    }
+
+    await goToPrimaryTab(page, 'distill');
+    await clickAndWait(page, '#distill-tab-recipes', 'Could not refresh recipe descriptors after optimizer support became available');
+    await page.waitForFunction(
+      () => document.querySelector('[data-recipe-run="smoke-supported-recipe"]')?.dataset.recipeAdmissionSupported === 'true',
+      { timeout: 5000 },
+    ).catch(() => fail('Supported recipe descriptor did not refresh'));
+    await expectDisabled(page, '[data-recipe-run="smoke-supported-recipe"]', false, 'A supported recipe descriptor should enable Run');
+    await expectDisabled(page, '[data-recipe-run="smoke-refresh-recipe"]', true, 'A refresh recipe must remain disabled without a supported joint phase descriptor');
+    const refreshRecipeAdmission = await page.$eval('[data-recipe-run="smoke-refresh-recipe"]', button => ({
+      title: button.title,
+      status: document.getElementById(button.getAttribute('aria-describedby'))?.textContent,
+    }));
+    if (!/pins separate exact SFT and OPD phase plans, prepares the exact SFT rows/.test(refreshRecipeAdmission.title || '')
+      || !/Recipe execution remains disabled/.test(refreshRecipeAdmission.status || '')) {
+      fail(`Refresh recipe admission reason was not exposed accessibly: ${JSON.stringify(refreshRecipeAdmission)}`);
+    }
+    await expectDisabled(page, '[data-recipe-run="smoke-missing-admission"]', true, 'A missing recipe admission descriptor must stay disabled');
+    if (getTrainingSubmitRequests) {
+      const before = getTrainingSubmitRequests();
+      await clickAndWait(page, '[data-recipe-run="smoke-supported-recipe"]', 'Could not run a recipe with an admitted descriptor');
+      await expectTrainingToast(page, 'Recipe queued');
+      const after = getTrainingSubmitRequests();
+      if (after.recipe !== before.recipe + 1) {
+        fail(`An admitted recipe should issue exactly one run request: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+      }
+    }
+    await goToPrimaryTab(page, 'overview');
+
+    if (setFailRuntimeConfig) {
+      await clickAndWait(page, '#runtime-config > summary', 'Could not close Runtime Config before the cross-surface failure check');
+      const configClosed = await page.$eval('#runtime-config', details => !details.open);
+      if (!configClosed) fail('Runtime Config should be closed before the Playground-triggered refresh failure');
+      await goToPrimaryTab(page, 'playground');
+      expectedRuntimeConfigFailure = true;
+      setFailRuntimeConfig(true);
+      const failedConfigResponse = page.waitForResponse(
+        response => response.url().endsWith('/v1/config') && response.status() === 503,
+        { timeout: 5000 },
+      );
+      await page.$eval('#chat-thinking-budget-refresh', button => button.click());
+      await failedConfigResponse.catch(() => fail('Playground-triggered optimizer capability refresh did not receive the expected failure'));
+      await page.waitForFunction(
+        () => document.getElementById('chat-thinking-budget-preview')?.dataset.state === 'defaults unavailable',
+        { timeout: 5000 },
+      ).catch(() => fail('Playground must expose its config refresh failure and reveal Retry'));
+      await waitForPanelText(page, '#sft-optimizer-support', /Optimizer capability lookup failed/, 'A refresh failure must clear the previously valid optimizer snapshot');
+      await expectDisabled(page, '#sft-form button[type="submit"]', true, 'A refresh failure must fail closed instead of retaining stale optimizer support');
+      await expectDisabled(page, '[data-recipe-run="smoke-supported-recipe"]', true, 'A refresh failure must disable a recipe even when its last descriptor was supported');
+      setFailRuntimeConfig(false);
+      await goToPrimaryTab(page, 'overview');
+      const recoveredConfigResponse = page.waitForResponse(
+        response => response.url().endsWith('/v1/config') && response.status() === 200,
+        { timeout: 5000 },
+      );
+      await clickAndWait(page, '#runtime-config > summary', 'Could not reopen Runtime Config after the Playground-triggered failure');
+      await recoveredConfigResponse.catch(() => fail('Reopening Runtime Config reused stale loaded HTML instead of refetching after the shared failure'));
+      await waitForPanelText(page, '#runtime-config-body', /Optimizer backend[\s\S]*metal · metal:0/, 'Runtime Config did not repaint after recovering from the Playground-triggered failure');
+      await waitForPanelText(page, '#sft-optimizer-support', /Muon · bf16 LoRA/, 'Recovered optimizer capability should re-enable the selected supported tuple');
+      await expectDisabled(page, '[data-recipe-run="smoke-supported-recipe"]', false, 'A recovered capability should reapply the still-current supported recipe descriptor');
+      expectedRuntimeConfigFailure = false;
+    }
     await waitForPanelText(page, '#runtime-config-body', /Checkpoint policy[\s\S]*explicit segments/, 'Runtime config should render the typed checkpoint policy');
     await waitForPanelText(page, '#runtime-config-body', /Training budget/, 'Runtime config should render the memory budget rows');
     await waitForPanelText(page, '#runtime-config-body', /8,858,370,048 B/, 'Runtime config should render exact partition bytes alongside GiB');
@@ -3720,6 +4393,19 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 
     await clickAndWait(page, '#training-tab-sft', 'Could not open SFT tab');
     await waitForVisiblePanel(page, '#tab-sft', 'SFT tab did not activate');
+    await waitForPanelText(page, '#sft-optimizer-support', /Muon · bf16 LoRA · round-to-nearest · rank 8 \(supported 2–32\)/, 'SFT should render the selected executable optimizer tuple');
+    const sftOptimizerCapability = await page.evaluate(() => ({
+      selectDisabled: document.getElementById('sft-optimizer')?.disabled,
+      disabledKinds: Array.from(document.querySelectorAll('#sft-optimizer option:disabled')).map(option => option.value),
+      rankMin: document.getElementById('sft-rank')?.min,
+      rankMax: document.getElementById('sft-rank')?.max,
+    }));
+    if (sftOptimizerCapability.selectDisabled
+      || sftOptimizerCapability.disabledKinds.join(',') !== 'sgd'
+      || sftOptimizerCapability.rankMin !== '2'
+      || sftOptimizerCapability.rankMax !== '32') {
+      fail(`SFT optimizer controls did not preserve Metal capability constraints: ${JSON.stringify(sftOptimizerCapability)}`);
+    }
     await expectDisabled(page, '#sft-form button[type="submit"]', true, 'SFT submit should start disabled until examples are provided');
     await clickAndWait(page, '#use-sft-sample', 'Could not click SFT sample payload button');
     await expectDisabled(page, '#sft-form button[type="submit"]', false, 'SFT submit should enable after sample payload is clicked');
@@ -3826,6 +4512,8 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 
     await clickAndWait(page, '#training-tab-grpo', 'Could not open GRPO tab');
     await waitForVisiblePanel(page, '#tab-grpo', 'GRPO tab did not activate');
+    await waitForPanelText(page, '#grpo-optimizer-support', /Muon · bf16 LoRA · round-to-nearest · rank 8 \(supported 2–32\)/, 'GRPO should render the selected executable optimizer tuple');
+    await waitForPanelText(page, '#opd-optimizer-support', /OPD uses Muon\.[\s\S]*Muon · bf16 LoRA · round-to-nearest · rank 32 \(supported 2–32\)/, 'OPD should surface its fixed executable Muon tuple');
     await expectDisabled(page, '#grpo-form button[type="submit"]', true, 'GRPO submit should start disabled until groups are provided');
     await clickAndWait(page, '#use-grpo-sample', 'Could not click GRPO sample payload button');
     await expectDisabled(page, '#grpo-form button[type="submit"]', false, 'GRPO submit should enable after sample payload is clicked');
@@ -4785,8 +5473,17 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 }
 
 const uiAppSource = await readFile(uiAppJsPath, 'utf8');
+const uiIndexSource = await readFile(uiIndexPath, 'utf8');
+const uiDemoSource = await readFile(uiDemoJsPath, 'utf8');
 checkThinkingBudgetParserContract(uiAppSource);
 checkRuntimeConfigSchemaContract(uiAppSource);
+checkTrainingOptimizerSupportContract(uiAppSource, uiIndexSource, uiDemoSource);
+checkTrainingOptimizerRankValidator(uiAppSource);
+
+if (process.argv.includes('--static-only')) {
+  console.log('server UI static smoke check passed');
+  process.exit(0);
+}
 
 const emptyAdapterScenario = await startServer({ availableAdapters: [] });
 try {
@@ -4794,16 +5491,30 @@ try {
   await runSmoke(emptyAdapterScenario.baseUrl, {
     expectEmptyAdapters: true,
     setRecentRequests: emptyAdapterScenario.setRecentRequests,
+    setTrainingOptimizerAvailable: emptyAdapterScenario.setTrainingOptimizerAvailable,
+    getTrainingSubmitRequests: emptyAdapterScenario.getTrainingSubmitRequests,
   });
   console.log('[smoke] empty adapter scenario passed');
 } finally {
   await new Promise((accept) => emptyAdapterScenario.server.close(accept));
 }
 
-const { server, baseUrl, setRecentRequests } = await startServer();
+const {
+  server,
+  baseUrl,
+  setFailRuntimeConfig,
+  setRecentRequests,
+  setTrainingOptimizerAvailable,
+  getTrainingSubmitRequests,
+} = await startServer();
 try {
   console.log('[smoke] default scenario desktop start');
-  await runSmoke(baseUrl, { setRecentRequests });
+  await runSmoke(baseUrl, {
+    setFailRuntimeConfig,
+    setRecentRequests,
+    setTrainingOptimizerAvailable,
+    getTrainingSubmitRequests,
+  });
   console.log('[smoke] default scenario desktop passed; mobile start');
   await runMobileOnboardingSmoke(baseUrl);
   console.log('[smoke] default scenario mobile passed');
@@ -4829,6 +5540,8 @@ try {
   await runSmoke(failureScenario.baseUrl, {
     expectFailureStates: true,
     setFailDashboardApis: failureScenario.setFailDashboardApis,
+    setTrainingOptimizerAvailable: failureScenario.setTrainingOptimizerAvailable,
+    getTrainingSubmitRequests: failureScenario.getTrainingSubmitRequests,
   });
   console.log('[smoke] failure scenario passed');
 } finally {

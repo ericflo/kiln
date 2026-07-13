@@ -403,6 +403,266 @@ typed PCI-address or UUID identity.
 Training GPU work is also governed by `server.serving_profile`; the default
 `stable` profile does not grant training GPU ownership.
 
+### Optimizer support is a resident capability, not configuration
+
+There is intentionally no startup or request switch for optimizer fallback or
+rounding. Product SFT, GRPO, OPD, the distinct DistillRefresh workload, and
+OPD-backed distillation use immutable round-to-nearest. Stochastic rounding
+remains available only to explicit Rust optimizer-library callers; it is not a
+server product mode. Consequently, the
+mechanical `KILN_<SECTION>_<FIELD>` rule produces no optimizer-policy
+environment variable.
+
+The following old process-global inputs were removed without aliases:
+
+- `KILN_BF16_STOCHASTIC_ROUND`
+- `KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK`
+- `KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK`
+- `KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK`
+- `KILN_METAL_TRAINING_OPTIMIZER_FALLBACK`
+- `KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK`
+
+Delete them from service definitions. There is no replacement field: silent
+host fallback during product training would change performance, precision,
+residency, and checkpoint identity. Unknown environment variables are not a
+supported way to select behavior.
+
+`GET /v1/config` exposes the resident contract at
+`training.optimizer_support`. A real runner returns schema ID
+`kiln.training-optimizer-support` and version `1`; a mock runner or a runner
+whose snapshot cannot be read returns `null`. `immutable_after_startup=true`
+means this is a process-lifetime capability snapshot, not mutable
+configuration. The object has this complete shape (the arrays always enumerate
+all four workloads and all three optimizer kinds):
+
+```json
+{
+  "schema": {"id": "kiln.training-optimizer-support", "version": 1},
+  "backend": "rocm",
+  "device": "rocm:0",
+  "base_weight_dtype": "bf16",
+  "resolved_lora_parameter_dtype": "bf16",
+  "immutable_after_startup": true,
+  "rounding_modes": ["round_to_nearest"],
+  "backend_implementation_rounding_modes": ["round_to_nearest"],
+  "optimizer_tuple_kinds": ["muon", "adam_w", "sgd"],
+  "workloads": [
+    {
+      "workload": "sft",
+      "supported": true,
+      "unavailable_reason": null,
+      "allowed_optimizer_kinds": ["muon", "adam_w", "sgd"]
+    },
+    {
+      "workload": "grpo",
+      "supported": true,
+      "unavailable_reason": null,
+      "allowed_optimizer_kinds": ["muon", "adam_w", "sgd"]
+    },
+    {
+      "workload": "opd",
+      "supported": true,
+      "unavailable_reason": null,
+      "allowed_optimizer_kinds": ["muon", "adam_w", "sgd"]
+    },
+    {
+      "workload": "distill_refresh",
+      "supported": false,
+      "unavailable_reason": "distill_refresh is unavailable until admission pins separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves the maximum sequential working set",
+      "allowed_optimizer_kinds": []
+    }
+  ],
+  "optimizers": [
+    {
+      "kind": "muon",
+      "backend_implementation": {
+        "supported": true,
+        "route": "native_device_hook",
+        "native_device_hook": true,
+        "parameter_dtypes": ["f32", "bf16"]
+      },
+      "optimizer_tuple": {
+        "supported": true,
+        "unavailable_reason": null,
+        "lora_rank": {
+          "minimum": 2,
+          "maximum": 48,
+          "backend_maximum": 48,
+          "model_maximum": 1024,
+          "live_memory_admission_required": true
+        }
+      }
+    },
+    {
+      "kind": "adam_w",
+      "backend_implementation": {
+        "supported": true,
+        "route": "native_device_hook",
+        "native_device_hook": true,
+        "parameter_dtypes": ["f32", "bf16"]
+      },
+      "optimizer_tuple": {
+        "supported": true,
+        "unavailable_reason": null,
+        "lora_rank": {
+          "minimum": 1,
+          "maximum": 1024,
+          "backend_maximum": null,
+          "model_maximum": 1024,
+          "live_memory_admission_required": true
+        }
+      }
+    },
+    {
+      "kind": "sgd",
+      "backend_implementation": {
+        "supported": true,
+        "route": "native_device_hook",
+        "native_device_hook": true,
+        "parameter_dtypes": ["f32", "bf16"]
+      },
+      "optimizer_tuple": {
+        "supported": true,
+        "unavailable_reason": null,
+        "lora_rank": {
+          "minimum": 1,
+          "maximum": 1024,
+          "backend_maximum": null,
+          "model_maximum": 1024,
+          "live_memory_admission_required": true
+        }
+      }
+    }
+  ]
+}
+```
+
+Read the response as four distinct gates:
+
+1. `backend_implementation` reports whether the optimizer library contains a
+   raw executable update implementation, its `portable_reference` or
+   `native_device_hook` route, whether that route is an accelerator-native
+   hook, and its parameter dtypes. It does not claim that resident server
+   weights can execute a training workload. CPU therefore reports
+   `portable_reference` with `native_device_hook=false`. An unavailable raw
+   implementation reports `supported=false`, route `unavailable`, and
+   `native_device_hook=false`; `parameter_dtypes` remains the backend's
+   advertised kind-specific dtype set.
+2. `optimizer_tuple` combines that implementation with the exact resident
+   backend/device identity, base-weight dtype, resolved LoRA dtype, immutable
+   product rounding rule, optimizer kind, and static LoRA-rank range. Within
+   `lora_rank`, `backend_maximum` is the optimizer backend's optional ceiling,
+   `model_maximum` is derived from the smallest dimension among every trained
+   projection, and `maximum` is their effective minimum. A null
+   `backend_maximum` means the backend adds no ceiling; it never makes the
+   effective `maximum` null because the resident model still supplies one.
+   `optimizer_tuple_kinds` is the summary of kinds whose resident tuple is
+   supported. A supported tuple has `unavailable_reason: null`; an unsupported
+   tuple retains its concrete reason next to the kind.
+3. Each member of `workloads` independently reports whether the complete
+   server substrate for `sft`, `grpo`, `opd`, or `distill_refresh` is
+   executable. Its
+   `allowed_optimizer_kinds` is the intersection of that workload gate and
+   `optimizer_tuple_kinds`; it is empty whenever the workload is unavailable,
+   and that entry carries a concrete `unavailable_reason`.
+   This per-workload array, not a raw hook or tuple, is the static HTTP and
+   dashboard admission authority.
+4. `live_memory_admission_required=true` is deliberately outside the static
+   promise. A supported tuple and workload can still be rejected when the
+   exact request shape does not fit the current memory budget. Admission
+   rejects the request; it never lowers rank, changes optimizer, or switches
+   execution route.
+
+`rounding_modes` is the server-product policy and currently contains only
+`round_to_nearest`. `backend_implementation_rounding_modes` describes what the
+resident backend optimizer implementation reports. Those fields are separate
+so a future implementation capability cannot silently become a product mode.
+`resolved_lora_parameter_dtype: null` means the resident base dtype cannot be
+resolved under the backend precision policy; the per-kind tuple reasons carry
+the failure rather than treating the dtype as unknown.
+
+The sibling `training.native_training_supported` and
+`native_training_unavailable_reason` fields are a coarse compatibility summary.
+They do not replace `workloads`: a true summary does not promise that all four
+workloads are available, and clients selecting SFT, GRPO, OPD, or
+DistillRefresh must inspect the matching workload member.
+
+For canonical Qwen3.5-4B, whose trained-projection model ceiling is 1024, the
+resident optimizer-tuple matrix before workload and live-memory admission is:
+
+| Backend | Base -> LoRA dtype | SGD | AdamW | Muon |
+|---|---|---|---|---|
+| CPU portable reference | F32 -> F32 | rank 1..=1024 (backend unbounded) | rank 1..=1024 (backend unbounded) | rank 2..=1024 (backend unbounded) |
+| CUDA | F32 -> F32; BF16 -> BF16 | rank 1..=1024 (backend unbounded) | rank 1..=1024 (backend unbounded) | rank 2..=48 |
+| ROCm | F32 -> F32; BF16 -> BF16 | rank 1..=1024 (backend unbounded) | rank 1..=1024 (backend unbounded) | rank 2..=48 |
+| Metal | BF16 -> BF16 | unsupported | rank 1..=1024 (backend unbounded) | rank 2..=32 |
+| Vulkan tuple | F32/BF16 -> F32 | rank 1..=1024 (backend unbounded) | rank 1..=1024 (backend unbounded) | rank 2..=32 |
+
+This table is not a server-execution matrix. Current CPU processes expose the
+portable F32 optimizer tuples for diagnostics and direct library testing, while
+their `sft`, `grpo`, `opd`, and `distill_refresh` workload entries remain
+unsupported. A Vulkan
+process can likewise expose native hooks and resident optimizer tuples while a
+workload fails closed. In the usual hybrid Vulkan server, model weights are
+CPU-hosted, so exact native backend/device identity and resident-weight checks
+reject every workload even though raw Vulkan hooks exist.
+
+Static workload admission requires all of the following: a real readable
+runner; a serving profile that grants training GPU ownership; agreement between
+configured and resident weight devices; a training runtime that resolves those
+weights; exact native backend and device identity; no Marlin-packed model
+projection; and the authoritative `kt_tape_authoritative` forward/backward
+route. SFT additionally rejects effective multi-segment checkpointing with a
+`full_logits` loss route. OPD additionally requires both its loss route and
+phase-B backward route. GRPO uses the common authoritative-tape gate. The
+specific failed condition appears in `workloads[].unavailable_reason`.
+
+DistillRefresh is not an OPD alias for admission. It is a sequential composite
+with an SFT knowledge phase and an OPD behavior-recovery phase. The
+`distill_refresh` row is unconditionally fail-closed with this stable reason:
+`distill_refresh is unavailable until admission pins separate exact SFT and OPD
+phase plans, prepares the exact SFT rows, and reserves the maximum sequential
+working set`. Enabling it requires one admission artifact that binds both exact
+phase plans, the precise SFT rows that phase one will consume, and a reservation
+for the larger of the two sequential working sets. Adding the phases' estimates
+or admitting only the OPD-shaped request is not equivalent.
+
+F16 is inference-only on CUDA/ROCm. `maximum` is the effective static ceiling,
+computed as `min(backend_maximum, model_maximum)` while treating a null backend
+maximum as unbounded. Live memory may impose a lower request-time ceiling but
+does not rewrite these static fields. The server validates
+the cheap workload gate, optimizer kind, hyperparameters, base/LoRA dtype,
+rounding, and rank before checkpoint loading or corpus scanning across dedicated
+training endpoints, the intent-tagged front door, recipes, judge/self-improve,
+DistillRefresh, and OPD-backed distillation. Checkpoint loading and corpus
+preparation happen only after those checks. The worker
+revalidates the checkpoint and the workload/tuple before memory reservation and
+residency.
+Invalid kind, rank, or hyperparameters use structured
+`training_invalid_request`; an unsupported base dtype, backend/device identity,
+or workload substrate uses `training_backend_unsupported`.
+
+Cheap teacher-alias validation and metadata pinning retain their established
+request-error ordering and may precede the workload guard. Remote/local teacher
+materialization, checkpoint loading, corpus scanning, memory preflight, and GPU
+reservation do not.
+
+For a queued resume, admission fully validates the manifest and every declared
+artifact hash, then retains a compact checkpoint-ID/manifest-digest identity
+plus the effective seed. The manifest digest covers its artifact hash entries.
+Before memory reservation at dequeue, the worker fully reloads the checkpoint
+and requires both the recomputed identity and effective seed to match. This is
+not an external-file snapshot: Kiln does not copy or pin checkpoint files in
+the queue, and a mutation after the reload remains a filesystem race. Keep the
+checkpoint directory immutable for its entire use.
+
+`GET /v1/recipes` applies the same static checks to every built-in recipe step
+and returns `admission: {supported, unavailable_reason}` on each descriptor. A
+false descriptor identifies the first unsupported workload or optimizer/rank
+tuple. A true descriptor is not a memory reservation: recipe submission repeats
+the full preflight before any step is prepared, and live-memory admission still
+occurs for each queued job.
+
 ### Backend-owned SFT loss route is not configuration
 
 There is intentionally no `[training]` field for the native SFT loss route.
@@ -769,7 +1029,8 @@ Kiln currently exposes several complementary, partial views:
 - `GET /v1/config` reports runtime diagnostics for serving profile, effective
   decode width, speculative configuration and availability, VRAM/KV state,
   native-training runtime/weight devices and
-  support reason, gradient-checkpoint segmentation, the immutable SFT
+  support reason, the versioned implementation/resident-tuple/per-workload
+  optimizer contract, gradient-checkpoint segmentation, the immutable SFT
   checkpoint-boundary policy, memory budgets, and generation defaults. Its
   `training.checkpoint_boundary_policy` object reports resolved recompute mode,
   inclusive automatic threshold, optional explicit stride, and integral cache
@@ -782,7 +1043,12 @@ Kiln currently exposes several complementary, partial views:
   have a non-off configured method through the supported startup path.
   `training.native_training_supported=false` is accompanied by
   `training.native_training_unavailable_reason` and matches the admission
-  error without scanning a corpus. When checkpoint execution is disabled,
+  error without scanning a corpus. `training.optimizer_support` separately
+  exposes backend implementations, exact resident optimizer tuples, and
+  per-workload executable kinds. Consumers must use `workloads[].supported` and
+  `workloads[].allowed_optimizer_kinds`, not infer product support from
+  `backend_implementation` or `optimizer_tuple_kinds`. When
+  checkpoint execution is disabled,
   `training.checkpoint_segments` is `0`; an optional segment count retained in
   `training.checkpoint_policy` is provenance, not an active execution plan. The
   endpoint is not a serialization of all accepted TOML.

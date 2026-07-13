@@ -267,6 +267,73 @@ pub enum TrainingJobType {
     Opd,
 }
 
+/// Native training workload whose immutable server substrate is being queried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrainingWorkload {
+    Sft,
+    Grpo,
+    Opd,
+    DistillRefresh,
+}
+
+pub(crate) const DISTILL_REFRESH_COMPOSITE_ADMISSION_UNAVAILABLE: &str = "distill_refresh is unavailable until admission pins separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves the maximum sequential working set";
+
+impl TrainingWorkload {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Sft => "sft",
+            Self::Grpo => "grpo",
+            Self::Opd => "opd",
+            Self::DistillRefresh => "distill_refresh",
+        }
+    }
+}
+
+fn training_workload_route_unavailable_reason(
+    workload: TrainingWorkload,
+    capabilities: kiln_model::backend::TrainingCapabilities,
+    checkpoint: kiln_train::CheckpointConfig,
+) -> Option<String> {
+    use kiln_model::backend::{
+        OpdLossRoute, OpdPhaseBBackwardRoute, SftFlceLossRoute, TrainingTapeRoute,
+    };
+
+    if workload == TrainingWorkload::DistillRefresh {
+        return Some(DISTILL_REFRESH_COMPOSITE_ADMISSION_UNAVAILABLE.to_string());
+    }
+
+    if capabilities.tape_forward_backward_route != TrainingTapeRoute::KtTapeAuthoritative {
+        return Some(format!(
+            "{} training requires tape route `kt_tape_authoritative`, but backend route is `{}`",
+            workload.label(),
+            capabilities.tape_forward_backward_route.as_str(),
+        ));
+    }
+
+    match workload {
+        TrainingWorkload::Sft
+            if checkpoint.enabled
+                && checkpoint.num_segments > 1
+                && capabilities.sft_flce_loss_route == SftFlceLossRoute::FullLogits =>
+        {
+            Some(format!(
+                "sft training cannot combine effective checkpointing ({} segments) with backend loss route `full_logits`",
+                checkpoint.num_segments,
+            ))
+        }
+        TrainingWorkload::Opd if capabilities.opd_loss_route == OpdLossRoute::Unsupported => {
+            Some("opd training backend loss route is `unsupported`".to_string())
+        }
+        TrainingWorkload::Opd
+            if capabilities.opd_phase_b_backward_route == OpdPhaseBBackwardRoute::Unsupported =>
+        {
+            Some("opd training backend phase-B backward route is `unsupported`".to_string())
+        }
+        TrainingWorkload::Sft | TrainingWorkload::Grpo | TrainingWorkload::Opd => None,
+        TrainingWorkload::DistillRefresh => unreachable!("handled above"),
+    }
+}
+
 fn now_instant_default() -> std::time::Instant {
     std::time::Instant::now()
 }
@@ -2686,6 +2753,98 @@ pub fn ensure_accelerator_memory_floor(
 }
 
 impl AppState {
+    /// Return why this process cannot execute `workload` on its immutable
+    /// native-training substrate, or `None` when static admission may proceed.
+    ///
+    /// This deliberately excludes request shape and live-memory admission.
+    /// Every fact inspected here is fixed at startup except runner-lock health,
+    /// which fails closed rather than recovering a potentially inconsistent
+    /// model/backend view.
+    pub(crate) fn training_workload_unavailable_reason(
+        &self,
+        workload: TrainingWorkload,
+    ) -> Option<String> {
+        if workload == TrainingWorkload::DistillRefresh {
+            return Some(DISTILL_REFRESH_COMPOSITE_ADMISSION_UNAVAILABLE.to_string());
+        }
+
+        let ModelBackend::Real { runner, .. } = self.backend.as_ref() else {
+            return Some(format!(
+                "mock backend does not execute {} training",
+                workload.label()
+            ));
+        };
+
+        if !self.serving_profile.runtime_policy().training_gpu_ownership {
+            return Some(format!(
+                "serving profile `{}` prohibits training GPU ownership",
+                self.serving_profile.profile()
+            ));
+        }
+
+        let runner = match runner.read() {
+            Ok(runner) => runner,
+            Err(_) => {
+                return Some(format!(
+                    "model runner lock poisoned while resolving {} workload support",
+                    workload.label()
+                ));
+            }
+        };
+        let resident_weight_device = runner.weights.device_kt();
+        if resident_weight_device != self.model_weight_device {
+            return Some(format!(
+                "configured model weight device {} does not match runner weight device {}",
+                self.model_weight_device.short_name(),
+                resident_weight_device.short_name(),
+            ));
+        }
+        let runtime_device = match self
+            .training_runtime
+            .resolve_device_for_weights(resident_weight_device)
+        {
+            Ok(device) => device,
+            Err(error) => {
+                return Some(format!(
+                    "{} training runtime cannot execute resident weights: {error:#}",
+                    workload.label()
+                ));
+            }
+        };
+
+        let backend_capabilities = runner.backend_capabilities();
+        if !kiln_model::backend::native_backend_identity_matches(
+            runtime_device,
+            backend_capabilities.backend,
+            backend_capabilities.device,
+        ) {
+            return Some(format!(
+                "{} training requires an exact native backend for {}, but runner reports `{}` on {}",
+                workload.label(),
+                runtime_device.short_name(),
+                backend_capabilities.backend,
+                backend_capabilities.device.short_name(),
+            ));
+        }
+
+        if runner.weights.has_any_marlin_packed_projection() {
+            return Some(format!(
+                "{} training is unavailable while any model projection is Marlin-packed",
+                workload.label()
+            ));
+        }
+
+        let checkpoint = kiln_train::CheckpointConfig::from_runtime(
+            self.model_config.num_layers,
+            &self.training_runtime,
+        );
+        training_workload_route_unavailable_reason(
+            workload,
+            backend_capabilities.training.hooks,
+            checkpoint,
+        )
+    }
+
     /// Report actual direct-rendezvous process state, distinct from configured
     /// intent stored in [`Self::batching_runtime_config`].
     pub fn direct_decode_rendezvous_runtime_state(&self) -> DirectDecodeRendezvousRuntimeState {
@@ -5109,6 +5268,105 @@ mod tests {
     use super::*;
 
     #[test]
+    fn training_workload_labels_are_wire_stable() {
+        assert_eq!(TrainingWorkload::Sft.label(), "sft");
+        assert_eq!(TrainingWorkload::Grpo.label(), "grpo");
+        assert_eq!(TrainingWorkload::Opd.label(), "opd");
+        assert_eq!(TrainingWorkload::DistillRefresh.label(), "distill_refresh");
+    }
+
+    #[test]
+    fn training_workload_routes_fail_closed_by_workload() {
+        use kiln_model::backend::{
+            OpdLossRoute, OpdPhaseBBackwardRoute, TrainingCapabilities, TrainingTapeRoute,
+        };
+
+        let checkpointed = kiln_train::CheckpointConfig {
+            num_segments: 4,
+            enabled: true,
+            auto_configured: false,
+        };
+        let uncheckpointed = kiln_train::CheckpointConfig {
+            num_segments: 1,
+            enabled: false,
+            auto_configured: false,
+        };
+        let mut capabilities = TrainingCapabilities::portable();
+
+        assert_eq!(
+            training_workload_route_unavailable_reason(
+                TrainingWorkload::DistillRefresh,
+                capabilities,
+                uncheckpointed,
+            )
+            .as_deref(),
+            Some(DISTILL_REFRESH_COMPOSITE_ADMISSION_UNAVAILABLE),
+            "the composite refresh worker must remain fail-closed until both phase plans are admitted"
+        );
+
+        let reason = training_workload_route_unavailable_reason(
+            TrainingWorkload::Grpo,
+            capabilities,
+            checkpointed,
+        )
+        .expect("non-authoritative tape route must reject GRPO");
+        assert!(reason.contains("backend route is `unsupported`"));
+
+        capabilities.tape_forward_backward_route = TrainingTapeRoute::KtTapeAuthoritative;
+        assert!(
+            training_workload_route_unavailable_reason(
+                TrainingWorkload::Grpo,
+                capabilities,
+                checkpointed,
+            )
+            .is_none(),
+            "authoritative tape is the complete static GRPO route contract"
+        );
+
+        let reason = training_workload_route_unavailable_reason(
+            TrainingWorkload::Sft,
+            capabilities,
+            checkpointed,
+        )
+        .expect("checkpointed full-logits SFT must fail closed");
+        assert!(reason.contains("loss route `full_logits`"));
+        assert!(
+            training_workload_route_unavailable_reason(
+                TrainingWorkload::Sft,
+                capabilities,
+                uncheckpointed,
+            )
+            .is_none(),
+            "full-logits SFT remains valid when checkpointing is ineffective"
+        );
+
+        let reason = training_workload_route_unavailable_reason(
+            TrainingWorkload::Opd,
+            capabilities,
+            uncheckpointed,
+        )
+        .expect("unsupported OPD loss route must fail closed");
+        assert!(reason.contains("loss route is `unsupported`"));
+        capabilities.opd_loss_route = OpdLossRoute::KtTapePhaseB;
+        let reason = training_workload_route_unavailable_reason(
+            TrainingWorkload::Opd,
+            capabilities,
+            uncheckpointed,
+        )
+        .expect("unsupported OPD backward route must fail closed");
+        assert!(reason.contains("phase-B backward route is `unsupported`"));
+        capabilities.opd_phase_b_backward_route = OpdPhaseBBackwardRoute::KtComposite;
+        assert!(
+            training_workload_route_unavailable_reason(
+                TrainingWorkload::Opd,
+                capabilities,
+                uncheckpointed,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn mock_state_shares_one_cpu_streaming_prefill_policy() {
         let model_config = ModelConfig::qwen3_5_4b();
         let scheduler = Scheduler::new(kiln_scheduler::SchedulerConfig::default(), 256);
@@ -5132,6 +5390,15 @@ mod tests {
                 .backend_policy
                 .policy,
             crate::config::StreamingPrefillDispatchPolicy::Never
+        );
+        assert_eq!(
+            state.training_workload_unavailable_reason(TrainingWorkload::Sft),
+            Some("mock backend does not execute sft training".to_string())
+        );
+        assert_eq!(
+            state.training_workload_unavailable_reason(TrainingWorkload::DistillRefresh),
+            Some(DISTILL_REFRESH_COMPOSITE_ADMISSION_UNAVAILABLE.to_string()),
+            "the composite refresh reason must remain stable across shared substrate failures"
         );
     }
 

@@ -84,7 +84,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **Judgment flywheel** — A/B-judge two adapters in `/ui/`, save your picks into a judgment dataset, compile to SFT, train a *local* judge LoRA, validate it on a held-out slice. The dashboard ships a streaming side-by-side viewer with `A`/`B`/`Tie`/`Skip` keyboard shortcuts.
 - **Post-training auto-eval** — in `experimental`, attach `post_eval` to any SFT/GRPO/OPD request and the produced adapter is graded immediately, with results back-linked to the training job.
 - **Adapter smoke tests** — pass `--adapter-smoke-test` on SFT/GRPO CLI submissions to record base-vs-adapter canary metrics in `train_receipt.json` before a full eval.
-- **Muon optimizer (default)** — momentum-orthogonalized SGD with fused on-device Newton-Schulz kernels for every backend (CUDA, ROCm, Vulkan, Metal). Muon keeps one momentum buffer per parameter; AdamW keeps first and second moments. AdamW and SGD remain selectable per request via `{"optimizer": {"kind": "adam_w"}}` / `{"kind": "sgd"}`. Omit `learning_rate` and native SFT resolves `1e-3` for Muon or `1e-4` for AdamW/SGD.
+- **Capability-bound optimizers** — Muon is the default, with AdamW and SGD selectable only when the exact resident optimizer tuple and requested workload support them. Product updates are fixed to round-to-nearest; Muon ranks are 2+ on CPU, 2..=48 on CUDA/ROCm, and 2..=32 on Metal/Vulkan, and Metal SGD is rejected. `GET /v1/config` field `training.optimizer_support` separates raw implementation, resident tuple, per-workload admission, and dynamic memory checks so portable CPU tuples and Vulkan hooks never overclaim server training.
 - **Atomic LoRA transitions** — `experimental` supports live hot-swap; `maintenance` supports drained activation; `stable` rejects real weight transitions before GPU ownership changes.
 - **Continuous batching** with token-budgeted prefill — long prompts yield after every bounded quantum so ready decode rows keep advancing.
 - **Typed tiled-prefill policy** — backend dispatch, inference tiles, tape-training tiles, detached full-attention tiles, and last-token LM-head behavior resolve once at startup with provenance and no mid-request environment rereads.
@@ -408,8 +408,66 @@ Native SFT is deliberately the fixed
 [`native_online_lora_v1` microtrainer profile](docs/NATIVE_SFT_PROFILE.md): one
 conversation and one optimizer update at a time, constant learning rate, no
 gradient accumulation, warmup, decay, or clipping. Unsupported general-trainer
-fields fail closed. For broader training, create a portable bundle containing
-the pinned HF/TRL/PEFT correctness runner:
+fields fail closed.
+
+Optimizer requests are tagged objects: `{"kind":"sgd"}`,
+`{"kind":"adam_w","beta1":0.9,"beta2":0.999,"eps":1e-8,"weight_decay":0.0}`,
+or `{"kind":"muon","momentum":0.95,"nesterov":true,"ns_iters":5,"weight_decay":0.0}`.
+Omission selects Muon. CUDA/ROCm accept F32 or BF16 base weights and preserve
+that dtype for LoRA; Metal accepts BF16 and rejects SGD; resident Vulkan accepts
+F32/BF16 base weights but uses F32 LoRA; CPU exposes portable F32 optimizer
+tuples, but current CPU server workloads remain unsupported. F16 is
+inference-only. Muon requires rank 2+ on CPU. The server validates the requested
+SFT/GRPO/OPD/DistillRefresh substrate plus kind, hyperparameters, exact
+backend/device,
+base/LoRA dtype, fixed round-to-nearest policy, and rank before checkpoint or
+corpus materialization and revalidates before memory reservation and residency.
+Static workload gates include serving-profile training ownership, resident
+weight identity, no Marlin-packed projection, and authoritative tape/loss
+routes. Invalid kind, rank, or hyperparameters return
+`training_invalid_request`; unsupported base dtype, backend identity, or
+complete training substrate return `training_backend_unsupported`. See the
+[native profile matrix](docs/NATIVE_SFT_PROFILE.md#precision-and-optimizer-state)
+and inspect the running contract with:
+
+```bash
+curl -s http://localhost:8420/v1/config \
+  | jq '.training.native_training_supported, .training.optimizer_support'
+```
+
+In schema `kiln.training-optimizer-support` v1,
+`backend_implementation` is only the raw update hook,
+`optimizer_tuple_kinds` and `optimizers[].optimizer_tuple` describe the exact
+resident tuples, and `workloads[]` is the server-execution authority with
+`supported`, `unavailable_reason`, and `allowed_optimizer_kinds` for SFT, GRPO,
+OPD, and the distinct DistillRefresh workload.
+`live_memory_admission_required=true` means a statically supported request can
+still fail current capacity; Kiln never lowers rank or substitutes an
+optimizer. `GET /v1/recipes` reports the same static decision as
+`admission {supported, unavailable_reason}` for every built-in recipe.
+
+Every `optimizers[].optimizer_tuple.lora_rank` reports `minimum`, the effective
+static `maximum`, the optional optimizer `backend_maximum`, and the resident
+`model_maximum`. Effective `maximum` is the smaller ceiling. A null
+`backend_maximum` means the backend itself is unbounded, not that the request is:
+for canonical Qwen3.5-4B, `model_maximum` and therefore AdamW/SGD `maximum` are
+1024, while Muon's backend ceiling lowers its effective maximum to 48 on
+CUDA/ROCm and 32 on Metal/Vulkan. Live memory can reject a lower rank without
+rewriting this static contract.
+
+DistillRefresh currently fails closed on every backend. It is a sequential SFT
+knowledge phase followed by an OPD behavior-recovery phase, not an OPD alias.
+Its stable reason is `distill_refresh is unavailable until admission pins
+separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves
+the maximum sequential working set`. The route remains unavailable until one
+admission record binds both plans and the precise SFT rows and reserves the
+larger phase peak. Cheap teacher-alias validation and metadata pinning retain
+their established request-error ordering; the workload rejection still occurs
+before checkpoint loading, remote/local teacher materialization, corpus
+scanning, memory preflight, or GPU reservation.
+
+For broader training, create a portable bundle containing the pinned
+HF/TRL/PEFT correctness runner:
 
 ```bash
 kiln train hf export-sft \
@@ -550,7 +608,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET | `/v1/train/queue` | List queued training jobs |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a job (queued: dequeued; running: stops at the next step boundary) |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
-| POST | `/v1/distill/refresh` | Continual-learning distillation refresh job with an exact effective seed |
+| POST | `/v1/distill/refresh` | Fail-closed DistillRefresh submission pending exact SFT+OPD phase plans, exact SFT rows, and maximum sequential working-set reservation |
 | POST | `/v1/distill/pump` | Continual-learning distillation pump job with an exact effective seed |
 | GET / POST | `/v1/corrections` | Durable corrections store — the basket survives the browser; pi can file corrections |
 | DELETE | `/v1/corrections/{request_id}` | Remove a correction |
@@ -579,6 +637,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET  | `/v1/adapters/{name}/download` | Stream adapter as tar.gz (export) |
 | POST | `/v1/adapters/merge` | Stage and atomically publish an adapter merge (weighted_average, TIES, or concatenation modes) |
 | POST | `/v1/adapters/distill_merge` | Behaviour-space adapter merge with an exact effective seed |
+| GET | `/v1/recipes` | List built-in recipes with per-recipe static workload/optimizer admission and an unavailable reason |
 | POST | `/v1/recipes/run` | Queue a typed training recipe and return effective seeds keyed by job ID |
 | GET / POST | `/v1/eval/suites` | List or register eval suites (body = `EvalSuite`) |
 | GET / DELETE | `/v1/eval/suites/{name}` | Fetch / delete one suite |
@@ -600,7 +659,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
 | POST | `/v1/judgments/render_prompt` | Render the canonical pairwise judging prompt (debug aid) |
 | GET | `/v1/models` | List available models |
-| GET | `/v1/config` | Current server configuration, serving-profile source, typed batching, streaming-prefill, and SFT checkpoint-boundary runtime policies, and every effective profile policy |
+| GET | `/v1/config` | Current server configuration, including serving-profile source, typed batching/streaming-prefill policy, SFT checkpoint boundaries, and the versioned optimizer implementation/native-device-hook versus server-execution contract |
 | GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of the complete base-weight shard manifest and execution-provenance record, active model/adapters, config hashes, env flags, batching, thinking defaults, SFT checkpoint-boundary policy, and cache counts; enabled only with `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
 | GET | `/ui/` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
@@ -695,6 +754,19 @@ manifests persist it, together with the trainer's concrete parameter,
 optimizer-state, activation, gradient, and stochastic-rounding precision
 contract. Legacy serving artifacts remain readable, but a partial legacy
 runtime string is not accepted as evidence for exact continuation.
+
+Server training now admits only round-to-nearest. A legacy exact checkpoint
+that records stochastic rounding fails precision comparison before GPU
+ownership; it is not silently resumed under a different update rule. The old
+`KILN_BF16_STOCHASTIC_ROUND` and optimizer fallback environment switches have
+no replacements and should be removed from service definitions.
+
+Resume also re-applies the current per-workload and resident optimizer-tuple
+gates before materializing the checkpoint or corpus. Exact backend/device,
+base/LoRA precision, optimizer kind/state, rank, serving-profile ownership,
+non-Marlin resident weights, and authoritative tape/loss/checkpoint routes must
+still agree. A raw CPU reference or Vulkan optimizer hook is not a compatibility
+escape hatch.
 
 The response is additionally capped at 65,536 candidate entries. Real scoring
 uses the runner's resident backend and inference recurrent-state policy, omits

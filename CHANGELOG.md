@@ -2,6 +2,58 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
+- workload and optimizer admission: SFT, GRPO, OPD, DistillRefresh, recipes,
+  judge/self-improve, and OPD-backed distillation now run cheap static workload
+  and optimizer-tuple guards after request/teacher-alias validation and metadata
+  pinning but before checkpoint loading, remote/local teacher materialization,
+  corpus scanning, memory preflight, or GPU reservation; repeat them
+  before queue memory reservation; and revalidate the tuple before residency.
+  Workload guards bind serving-profile training ownership, resident weight and
+  exact native backend/device identity, non-Marlin weights, authoritative tape,
+  and workload-specific loss/backward routes. CUDA/ROCm Muon is bounded to
+  ranks 2..=48, Metal/Vulkan to 2..=32, Metal SGD is rejected, and CUDA/ROCm
+  F16 remains inference-only. CPU portable-reference Muon requires rank 2+, but
+  current CPU server workloads remain unsupported. Invalid kind, rank, or
+  hyperparameters return `training_invalid_request`; an unavailable resident
+  tuple or workload returns `training_backend_unsupported` without changing
+  optimizer, rank, or execution route.
+- DistillRefresh admission: refresh is now a distinct `distill_refresh`
+  workload instead of being admitted as OPD. After cheap teacher-alias
+  validation and metadata pinning, it fails closed before checkpoint loading,
+  remote/local teacher materialization, corpus scanning, memory preflight, or
+  GPU reservation with
+  `distill_refresh is unavailable until admission pins separate exact SFT and
+  OPD phase plans, prepares the exact SFT rows, and reserves the maximum
+  sequential working set`. Re-enabling the sequential SFT knowledge phase and
+  OPD behavior-recovery phase requires one admission record that binds both
+  exact plans and the phase-one rows and reserves the larger phase peak.
+- optimizer diagnostics and ergonomics: additive `GET /v1/config` field
+  `training.optimizer_support` uses schema
+  `{"id":"kiln.training-optimizer-support","version":1}`. It separates raw
+  `backend_implementation`, exact resident `optimizer_tuple` and
+  `optimizer_tuple_kinds`, per-workload `supported`, `unavailable_reason`, and
+  `allowed_optimizer_kinds` for `sft`, `grpo`, `opd`, and `distill_refresh`,
+  plus request-time live-memory admission. This keeps
+  CPU portable-reference tuples and hybrid Vulkan hooks visible without
+  claiming server execution. The dashboard reads the workload authority,
+  disables unsupported training surfaces, preserves entered optimizer/rank
+  instead of silently clamping or substituting them, and exposes the failed
+  gate. `GET /v1/recipes` now gives every built-in descriptor
+  `admission {supported, unavailable_reason}` after evaluating every step; run
+  submission repeats the preflight before preparing any step.
+- optimizer rank diagnostics: every `lora_rank` now separates
+  `backend_maximum`, model-derived `model_maximum`, and effective `maximum`,
+  which is their minimum. An unbounded backend reports
+  `backend_maximum: null` while `maximum` remains the concrete model ceiling;
+  canonical Qwen3.5-4B reports 1024. Live memory remains a later admission gate
+  and never rewrites the static range.
+- optimizer configuration cleanup: product training is now unconditionally
+  round-to-nearest. Removed `KILN_BF16_STOCHASTIC_ROUND`,
+  `KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK`, and all four backend
+  `KILN_*_TRAINING_OPTIMIZER_FALLBACK` switches without aliases. Stochastic
+  rounding remains an explicit optimizer-library policy; legacy stochastic
+  exact checkpoints fail closed on precision mismatch rather than changing
+  their update rule during resume.
 - training durability: native SFT, inline and streamed-JSONL GRPO, and OPD
   publish immutable exact checkpoints at a configured cadence and on
   cooperative cancellation. Resume restores policy/adapter, optimizer,

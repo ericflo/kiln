@@ -964,6 +964,10 @@ pub struct QueueEntry {
     /// worker requires exactly one matching snapshot for teacher-backed jobs
     /// and refuses to run if the alias was deleted or replaced while queued.
     pub teacher_bindings: Vec<crate::api::teachers::TeacherSpec>,
+    /// Compact identity of the fully validated resume manifest captured by
+    /// admission. The digest covers every manifest field, including artifact
+    /// hashes, without retaining a caller-sized manifest in queue memory.
+    pub admitted_resume_checkpoint: Option<ResumeCheckpointIdentity>,
     /// Data materialized by the authoritative admission boundary. Callers must
     /// initialize this to `None`; `admit_training_jobs` fills it before queue
     /// publication.
@@ -973,6 +977,22 @@ pub struct QueueEntry {
     /// popped entry executes.
     pub prepared_data_permit: PreparedTrainingDataPermit,
     pub job: QueuedJob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeCheckpointIdentity {
+    checkpoint_id: String,
+    manifest_sha256: String,
+}
+
+pub(crate) struct MaterializedTrainingResume {
+    pub(crate) effective_seed: u64,
+    pub(crate) checkpoint: Option<ResumeCheckpointIdentity>,
+}
+
+struct NormalizedTrainingResume {
+    checkpoint_seed: u64,
+    identity: ResumeCheckpointIdentity,
 }
 
 fn resolve_pinned_teacher_for_job(
@@ -1202,7 +1222,7 @@ fn normalize_sft_resume_checkpoint(
     config: &mut kiln_train::SftConfig,
     adapter_dir: &std::path::Path,
     adapter_name: &str,
-) -> Result<(), String> {
+) -> Result<Option<NormalizedTrainingResume>, String> {
     normalize_training_resume_checkpoint(
         &mut config.resume_checkpoint,
         kiln_train::checkpoint::TrainingKind::Sft,
@@ -1216,7 +1236,7 @@ fn normalize_grpo_resume_checkpoint(
     config: &mut kiln_train::GrpoConfig,
     adapter_dir: &std::path::Path,
     adapter_name: &str,
-) -> Result<(), String> {
+) -> Result<Option<NormalizedTrainingResume>, String> {
     normalize_training_resume_checkpoint(
         &mut config.resume_checkpoint,
         kiln_train::checkpoint::TrainingKind::Grpo,
@@ -1230,7 +1250,7 @@ fn normalize_opd_resume_checkpoint(
     config: &mut kiln_train::OpdConfig,
     adapter_dir: &std::path::Path,
     adapter_name: &str,
-) -> Result<(), String> {
+) -> Result<Option<NormalizedTrainingResume>, String> {
     normalize_training_resume_checkpoint(
         &mut config.resume_checkpoint,
         kiln_train::checkpoint::TrainingKind::Opd,
@@ -1245,12 +1265,8 @@ pub(crate) fn materialize_sft_effective_seed(
     adapter_dir: &std::path::Path,
     adapter_name: &str,
 ) -> Result<u64, String> {
-    normalize_sft_resume_checkpoint(config, adapter_dir, adapter_name)?;
-    materialize_training_effective_seed(
-        &mut config.seed,
-        config.resume_checkpoint.as_deref(),
-        "SFT",
-    )
+    materialize_sft_training_resume(config, adapter_dir, adapter_name)
+        .map(|admission| admission.effective_seed)
 }
 
 pub(crate) fn materialize_grpo_effective_seed(
@@ -1258,12 +1274,8 @@ pub(crate) fn materialize_grpo_effective_seed(
     adapter_dir: &std::path::Path,
     adapter_name: &str,
 ) -> Result<u64, String> {
-    normalize_grpo_resume_checkpoint(config, adapter_dir, adapter_name)?;
-    materialize_training_effective_seed(
-        &mut config.seed,
-        config.resume_checkpoint.as_deref(),
-        "GRPO",
-    )
+    materialize_grpo_training_resume(config, adapter_dir, adapter_name)
+        .map(|admission| admission.effective_seed)
 }
 
 pub(crate) fn materialize_opd_effective_seed(
@@ -1271,34 +1283,44 @@ pub(crate) fn materialize_opd_effective_seed(
     adapter_dir: &std::path::Path,
     adapter_name: &str,
 ) -> Result<u64, String> {
-    normalize_opd_resume_checkpoint(config, adapter_dir, adapter_name)?;
-    materialize_training_effective_seed(
-        &mut config.seed,
-        config.resume_checkpoint.as_deref(),
-        "OPD",
-    )
+    materialize_opd_training_resume(config, adapter_dir, adapter_name)
+        .map(|admission| admission.effective_seed)
 }
 
-fn materialize_training_effective_seed(
+fn materialize_sft_training_resume(
+    config: &mut kiln_train::SftConfig,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+) -> Result<MaterializedTrainingResume, String> {
+    let resume = normalize_sft_resume_checkpoint(config, adapter_dir, adapter_name)?;
+    materialize_training_resume(&mut config.seed, resume, "SFT")
+}
+
+fn materialize_grpo_training_resume(
+    config: &mut kiln_train::GrpoConfig,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+) -> Result<MaterializedTrainingResume, String> {
+    let resume = normalize_grpo_resume_checkpoint(config, adapter_dir, adapter_name)?;
+    materialize_training_resume(&mut config.seed, resume, "GRPO")
+}
+
+fn materialize_opd_training_resume(
+    config: &mut kiln_train::OpdConfig,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+) -> Result<MaterializedTrainingResume, String> {
+    let resume = normalize_opd_resume_checkpoint(config, adapter_dir, adapter_name)?;
+    materialize_training_resume(&mut config.seed, resume, "OPD")
+}
+
+fn materialize_training_resume(
     requested_seed: &mut Option<u64>,
-    resume_checkpoint: Option<&str>,
+    resume: Option<NormalizedTrainingResume>,
     training_label: &str,
-) -> Result<u64, String> {
-    let effective_seed = if let Some(path) = resume_checkpoint {
-        let checkpoint = kiln_train::checkpoint::load_training_checkpoint(std::path::Path::new(
-            path,
-        ))
-        .map_err(|error| format!("read {training_label} resume seed from checkpoint: {error:#}"))?;
-        let checkpoint_seed = checkpoint
-            .manifest
-            .rng_states
-            .get("lora-init")
-            .ok_or_else(|| {
-                format!(
-                    "{training_label} resume checkpoint is missing the authoritative lora-init RNG state"
-                )
-            })?
-            .seed;
+) -> Result<MaterializedTrainingResume, String> {
+    let effective_seed = if let Some(resume) = resume.as_ref() {
+        let checkpoint_seed = resume.checkpoint_seed;
         if let Some(requested_seed) = *requested_seed
             && requested_seed != checkpoint_seed
         {
@@ -1311,20 +1333,23 @@ fn materialize_training_effective_seed(
         requested_seed.unwrap_or_else(rand::random)
     };
     *requested_seed = Some(effective_seed);
-    Ok(effective_seed)
+    Ok(MaterializedTrainingResume {
+        effective_seed,
+        checkpoint: resume.map(|resume| resume.identity),
+    })
 }
 
 pub(crate) fn materialize_queued_job_effective_seed(
     job: &mut QueuedJob,
     adapter_dir: &std::path::Path,
     adapter_name: &str,
-) -> Result<u64, String> {
+) -> Result<MaterializedTrainingResume, String> {
     match job {
         QueuedJob::Sft(request) => {
-            materialize_sft_effective_seed(&mut request.config, adapter_dir, adapter_name)
+            materialize_sft_training_resume(&mut request.config, adapter_dir, adapter_name)
         }
         QueuedJob::Grpo(request) => {
-            materialize_grpo_effective_seed(&mut request.config, adapter_dir, adapter_name)
+            materialize_grpo_training_resume(&mut request.config, adapter_dir, adapter_name)
         }
         QueuedJob::Opd(kiln_train::OpdRequest {
             config: request, ..
@@ -1340,8 +1365,21 @@ pub(crate) fn materialize_queued_job_effective_seed(
         })
         | QueuedJob::DistillSelf(kiln_train::DistillSelfRequest {
             config: request, ..
-        }) => materialize_opd_effective_seed(request, adapter_dir, adapter_name),
+        }) => materialize_opd_training_resume(request, adapter_dir, adapter_name),
     }
+}
+
+fn ensure_admitted_resume_checkpoint_unchanged(
+    admitted: Option<&ResumeCheckpointIdentity>,
+    reloaded: Option<&ResumeCheckpointIdentity>,
+) -> Result<(), String> {
+    if admitted == reloaded {
+        return Ok(());
+    }
+    Err(
+        "resume checkpoint identity changed after admission; the worker requires the exact admitted manifest and artifact hashes"
+            .to_string(),
+    )
 }
 
 fn normalize_training_resume_checkpoint(
@@ -1350,9 +1388,9 @@ fn normalize_training_resume_checkpoint(
     training_label: &str,
     adapter_dir: &std::path::Path,
     adapter_name: &str,
-) -> Result<(), String> {
+) -> Result<Option<NormalizedTrainingResume>, String> {
     let Some(raw) = resume_checkpoint.as_deref() else {
-        return Ok(());
+        return Ok(None);
     };
     if raw.trim().is_empty() {
         return Err(format!(
@@ -1406,8 +1444,27 @@ fn normalize_training_resume_checkpoint(
             checkpoint.manifest.adapter_name, adapter_name
         ));
     }
+    let checkpoint_seed = checkpoint
+        .manifest
+        .rng_states
+        .get("lora-init")
+        .ok_or_else(|| {
+            format!(
+                "{training_label} resume checkpoint is missing the authoritative lora-init RNG state"
+            )
+        })?
+        .seed;
+    let manifest_sha256 = kiln_train::train_receipt::sha256_json_serializable(&checkpoint.manifest)
+        .ok_or_else(|| format!("hash validated {training_label} resume checkpoint manifest"))?;
+    let identity = ResumeCheckpointIdentity {
+        checkpoint_id: checkpoint.manifest.checkpoint_id.clone(),
+        manifest_sha256,
+    };
     *resume_checkpoint = Some(candidate.display().to_string());
-    Ok(())
+    Ok(Some(NormalizedTrainingResume {
+        checkpoint_seed,
+        identity,
+    }))
 }
 
 const SERVER_SFT_MTP_ALIGNMENT_UNAVAILABLE: &str = "server SFT does not support train_mtp=true until the native MTP alignment phase has passed GPU-ownership, cancellation, settlement, and memory-reservation qualification; set train_mtp=false or omit it";
@@ -4315,15 +4372,49 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
         }
     };
 
-    // Get auto_load, adapter_name, and job_type from the job info
-    let (auto_load, adapter_name, job_type) = {
+    // Get immutable publication and seed facts from the admitted job info.
+    let (auto_load, adapter_name, job_type, admitted_effective_seed) = {
         let jobs = state.training_jobs.read().unwrap();
         let job = jobs.get(&job_id).unwrap();
-        (job.auto_load, job.adapter_name.clone(), job.job_type)
+        (
+            job.auto_load,
+            job.adapter_name.clone(),
+            job.job_type,
+            job.effective_seed,
+        )
     };
-    let resume_admission =
-        materialize_queued_job_effective_seed(&mut entry.job, &state.adapter_dir, &adapter_name)
-            .map(|_| ());
+    let static_admission =
+        crate::api::enforce_queued_training_workload_admission(&state, &entry.job).and_then(|()| {
+            crate::api::enforce_queued_training_optimizer_admission(&state, &entry.job)
+        });
+    if let Err(error) = static_admission {
+        reject_queued_training_job(
+            &state,
+            &job_id,
+            format!("queued training substrate is not admissible: {error}"),
+            "training_admission",
+        );
+        return;
+    }
+    let resume_admission = materialize_queued_job_effective_seed(
+        &mut entry.job,
+        &state.adapter_dir,
+        &adapter_name,
+    )
+    .and_then(|reloaded| {
+        ensure_admitted_resume_checkpoint_unchanged(
+            entry.admitted_resume_checkpoint.as_ref(),
+            reloaded.checkpoint.as_ref(),
+        )?;
+        match admitted_effective_seed {
+            Some(seed) if seed == reloaded.effective_seed => Ok(()),
+            Some(seed) => Err(format!(
+                "queued training seed changed after admission: admitted {seed}, reloaded {}",
+                reloaded.effective_seed
+            )),
+            None => Err("queued training job is missing its admitted effective seed".to_string()),
+        }
+    });
     if let Err(error) = resume_admission {
         reject_queued_training_job(&state, &job_id, error, "invalid_resume_checkpoint");
         return;
@@ -4413,38 +4504,20 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
     // identities and require every dynamic source to have its submit-time
     // materialization before any governor reservation, KV resize, or pooled
     // allocator reclamation.
-    let (queued_optimizer, queued_lora_rank) = match &entry.job {
-        QueuedJob::Sft(req) => (req.config.optimizer, req.config.lora_rank),
-        QueuedJob::Grpo(req) => (req.config.optimizer, req.config.lora_rank),
-        QueuedJob::Opd(req) => (req.config.optimizer, req.config.lora_rank),
-        QueuedJob::DistillRefresh(req) => (req.config.optimizer, req.config.lora_rank),
-        QueuedJob::DistillMerge(req) => (req.config.optimizer, req.config.lora_rank),
-        QueuedJob::DistillPump(req) => (
-            req.config.optimizer,
-            req.rank.unwrap_or(req.config.lora_rank),
-        ),
-        QueuedJob::DistillSelf(req) => (req.config.optimizer, req.config.lora_rank),
-    };
-    let prepared_data_is_valid = crate::api::enforce_training_optimizer_admission(
-        &state,
-        queued_optimizer,
-        queued_lora_rank,
-    )
-    .map_err(|error| format!("queued training optimizer capability changed: {error}"))
-    .and_then(|()| verify_prepared_training_data(&entry.job, &entry.prepared_data))
-    .and_then(|()| match (&entry.job, &entry.prepared_data) {
-        (QueuedJob::Sft(_), PreparedTrainingData::Sft(prepared)) => {
-            let execution_route = runner_arc
-                .read()
-                .map_err(|_| {
-                    "model runner lock poisoned while revalidating admitted SFT loss route"
-                        .to_string()
-                })?
-                .sft_flce_loss_route();
-            ensure_sft_loss_route_unchanged(prepared.loss_route, execution_route)
-        }
-        _ => Ok(()),
-    });
+    let prepared_data_is_valid = verify_prepared_training_data(&entry.job, &entry.prepared_data)
+        .and_then(|()| match (&entry.job, &entry.prepared_data) {
+            (QueuedJob::Sft(_), PreparedTrainingData::Sft(prepared)) => {
+                let execution_route = runner_arc
+                    .read()
+                    .map_err(|_| {
+                        "model runner lock poisoned while revalidating admitted SFT loss route"
+                            .to_string()
+                    })?
+                    .sft_flce_loss_route();
+                ensure_sft_loss_route_unchanged(prepared.loss_route, execution_route)
+            }
+            _ => Ok(()),
+        });
 
     // Resolve only the immutable submit-time binding. Registry deletion or
     // replacement while this job waited in the FIFO is a terminal failure,
@@ -5393,6 +5466,43 @@ mod tests {
             materialize_grpo_effective_seed(&mut mismatched, temp.path(), "target").unwrap_err();
         assert!(
             error.contains("does not match resume checkpoint seed 73"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn queued_resume_identity_rejects_self_consistent_manifest_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let name = "target-checkpoint-step-00000001.kiln-checkpoint";
+        write_resume_checkpoint_fixture(temp.path(), name, "target", TrainingKind::Sft);
+        let mut config = kiln_train::SftConfig {
+            resume_checkpoint: Some(name.into()),
+            ..Default::default()
+        };
+        let admitted = materialize_sft_training_resume(&mut config, temp.path(), "target").unwrap();
+
+        let manifest_path = temp
+            .path()
+            .join(name)
+            .join(kiln_train::checkpoint::TRAINING_CHECKPOINT_MANIFEST_FILENAME);
+        let mut replacement: TrainingCheckpointManifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        replacement.checkpoint_id = "step-2".to_string();
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&replacement).unwrap(),
+        )
+        .unwrap();
+
+        let reloaded = materialize_sft_training_resume(&mut config, temp.path(), "target").unwrap();
+        assert_eq!(admitted.effective_seed, reloaded.effective_seed);
+        let error = ensure_admitted_resume_checkpoint_unchanged(
+            admitted.checkpoint.as_ref(),
+            reloaded.checkpoint.as_ref(),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("identity changed after admission"),
             "{error}"
         );
     }
@@ -6756,6 +6866,7 @@ mod tests {
             job_id: "job-1".into(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            admitted_resume_checkpoint: None,
             prepared_data: Default::default(),
             prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {
@@ -6771,6 +6882,7 @@ mod tests {
             job_id: "job-2".into(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            admitted_resume_checkpoint: None,
             prepared_data: Default::default(),
             prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {
@@ -6786,6 +6898,7 @@ mod tests {
             job_id: "job-3".into(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            admitted_resume_checkpoint: None,
             prepared_data: Default::default(),
             prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {
@@ -6812,6 +6925,7 @@ mod tests {
             job_id: "job-1".into(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            admitted_resume_checkpoint: None,
             prepared_data: Default::default(),
             prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {
@@ -6827,6 +6941,7 @@ mod tests {
             job_id: "job-2".into(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            admitted_resume_checkpoint: None,
             prepared_data: Default::default(),
             prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {
@@ -6842,6 +6957,7 @@ mod tests {
             job_id: "job-3".into(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            admitted_resume_checkpoint: None,
             prepared_data: Default::default(),
             prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {

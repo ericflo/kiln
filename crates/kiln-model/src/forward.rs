@@ -7191,6 +7191,25 @@ impl GpuWeights {
         self.mtp.is_some()
     }
 
+    /// Whether any base-model projection is backed by Marlin-packed weights.
+    ///
+    /// Marlin inference can apply LoRA deltas over its packed forward path,
+    /// but the server training tape is not authoritative for that mixed
+    /// representation. Training admission uses this process-lifetime layout
+    /// fact to reject before allocating LoRA or optimizer state.
+    pub fn has_any_marlin_packed_projection(&self) -> bool {
+        self.layers.iter().any(|layer| {
+            let attention_is_packed = match &layer.attention {
+                GpuAttentionWeights::Full(attention) => attention.q_proj_marlin.is_some(),
+                GpuAttentionWeights::Linear(attention) => attention.out_proj_marlin.is_some(),
+            };
+            attention_is_packed
+                || layer.mlp.gate_proj_marlin.is_some()
+                || layer.mlp.up_proj_marlin.is_some()
+                || layer.mlp.down_proj_marlin.is_some()
+        })
+    }
+
     /// Deep-copy every tensor onto `device` — the training-session
     /// residency primitive. On the Vulkan hybrid substrate the serving
     /// weights are kt CPU-storage (with VulkanBuffer caches managed

@@ -370,7 +370,8 @@
           <input type="text" id="corr-adapter-name" value="codebase-corrections" placeholder="codebase-corrections" spellcheck="false" autocapitalize="off" autocomplete="off">
         </div>
         <span class="corr-foot-note" id="corr-foot-note"></span>
-        <button type="button" class="btn btn-primary" id="corr-train" disabled>
+        <span class="form-help" id="corr-optimizer-support" role="status" aria-live="polite">Optimizer capability details are still loading. Training remains disabled.</span>
+        <button type="button" class="btn btn-primary" id="corr-train" aria-describedby="corr-optimizer-support" disabled>
           <svg class="icn icn-sm" aria-hidden="true"><use href="#i-flask"></use></svg> Train adapter from <span id="corr-train-n">0</span> corrections
         </button>
       </div>
@@ -595,12 +596,11 @@
               </div>
               <div class="form-group">
                 <label for="sft-optimizer">Optimizer</label>
-                <select id="sft-optimizer" name="optimizer">
+                <select id="sft-optimizer" name="optimizer" aria-describedby="sft-optimizer-support" disabled>
                   <option value="muon" selected>Muon</option>
                   <option value="adam_w">AdamW</option>
                   <option value="sgd">SGD</option>
                 </select>
-                <div class="form-help">Muon is the fast default; AdamW is the conservative baseline.</div>
               </div>
               <div class="form-group">
                 <label for="sft-learning-rate">Learning rate</label>
@@ -609,7 +609,7 @@
               </div>
               <div class="form-group">
                 <label for="sft-rank">LoRA rank</label>
-                <input type="number" id="sft-rank" name="rank" value="8" min="1" max="128">
+                <input type="number" id="sft-rank" name="rank" value="8" min="1" max="128" aria-describedby="sft-optimizer-support" disabled>
                 <div class="form-help">Adapter capacity. 8 is plenty for corrections.</div>
               </div>
               <div class="form-group">
@@ -632,12 +632,13 @@
               </div>
             </div>
           </div>
+          <div class="form-help" id="sft-optimizer-support" role="status" aria-live="polite">Optimizer capability details are still loading. Training remains disabled.</div>
           <div style="display: flex; gap: var(--space-3); align-items: center; padding-top: var(--space-3); border-top: 1px solid var(--border);">
             <label for="sft-auto-load" style="font-size: var(--text-xs); display: flex; align-items: center; gap: var(--space-2); color: var(--text-muted); text-transform: none; letter-spacing: 0; font-weight: 400;">
               <input type="checkbox" id="sft-auto-load" name="auto_load" checked> Load it for pi the moment it finishes
             </label>
             <span class="train-next-hint" id="sft-next-hint">Trains a LoRA from your examples, then hot-swaps it in.</span>
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Train adapter</button>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;" aria-describedby="sft-optimizer-support" disabled>Train adapter</button>
           </div>
         </form>
       </div>
@@ -697,12 +698,11 @@
               </div>
               <div class="form-group">
                 <label for="grpo-optimizer">Optimizer</label>
-                <select id="grpo-optimizer" name="optimizer">
+                <select id="grpo-optimizer" name="optimizer" aria-describedby="grpo-optimizer-support" disabled>
                   <option value="muon" selected>Muon</option>
                   <option value="adam_w">AdamW</option>
                   <option value="sgd">SGD</option>
                 </select>
-                <div class="form-help">Muon is the fast default; AdamW is the conservative baseline.</div>
               </div>
               <div class="form-group">
                 <label for="grpo-learning-rate">Learning rate</label>
@@ -711,7 +711,7 @@
               </div>
               <div class="form-group">
                 <label for="grpo-rank">LoRA rank</label>
-                <input type="number" id="grpo-rank" name="rank" value="8" min="1" max="128">
+                <input type="number" id="grpo-rank" name="rank" value="8" min="1" max="128" aria-describedby="grpo-optimizer-support" disabled>
                 <div class="form-help">Adapter capacity. 8 is plenty to start.</div>
               </div>
               <div class="form-group">
@@ -726,12 +726,13 @@
               </div>
             </div>
           </div>
+          <div class="form-help" id="grpo-optimizer-support" role="status" aria-live="polite">Optimizer capability details are still loading. Training remains disabled.</div>
           <div style="display: flex; gap: var(--space-3); align-items: center; padding-top: var(--space-3); border-top: 1px solid var(--border);">
             <label for="grpo-auto-load" style="font-size: var(--text-xs); display: flex; align-items: center; gap: var(--space-2); color: var(--text-muted); text-transform: none; letter-spacing: 0; font-weight: 400;">
               <input type="checkbox" id="grpo-auto-load" name="auto_load" checked> Load it for pi the moment it finishes
             </label>
             <span class="train-next-hint" id="grpo-next-hint">Trains a LoRA against your reward scores, then hot-swaps it in.</span>
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Train adapter</button>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;" aria-describedby="grpo-optimizer-support" disabled>Train adapter</button>
           </div>
         </form>
       </div>
@@ -1301,7 +1302,8 @@
             </div>
             <div class="form-group">
               <label for="opd-rank">LoRA rank</label>
-              <input type="number" id="opd-rank" name="lora_rank" value="32" min="1" max="256">
+              <input type="number" id="opd-rank" name="lora_rank" value="32" min="1" max="256" aria-describedby="opd-optimizer-support" disabled>
+              <div class="form-help" id="opd-optimizer-support" role="status" aria-live="polite">OPD uses Muon. Optimizer capability details are still loading. Training remains disabled.</div>
             </div>
             <div class="form-group">
               <label for="opd-max-tokens">Max tokens</label>
@@ -1344,7 +1346,7 @@
             <label style="font-size: var(--text-xs); display: flex; align-items: center; gap: var(--space-2); color: var(--text-muted); text-transform: none; letter-spacing: 0; font-weight: 400;">
               <input type="checkbox" id="opd-auto-load" name="auto_load" checked> Auto-load adapter after training
             </label>
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Queue distillation job</button>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;" aria-describedby="opd-optimizer-support" disabled>Queue distillation job</button>
           </div>
         </form>
       </div>
@@ -1469,7 +1471,8 @@
             <div class="form-help">Each entry is one <code>{messages:[...]}</code> prompt object.</div>
           </div>
           <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Queue refresh</button>
+            <span class="form-help" id="refresh-optimizer-support" role="status" aria-live="polite">Optimizer capability details are still loading. Training remains disabled.</span>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;" aria-describedby="refresh-optimizer-support" disabled>Queue refresh</button>
           </div>
         </form>
       </div>
@@ -1507,7 +1510,8 @@
             </div>
             <div class="form-group">
               <label for="pump-rank">LoRA rank</label>
-              <input type="number" id="pump-rank" name="rank" value="64" min="1" max="256">
+              <input type="number" id="pump-rank" name="rank" value="32" min="1" max="256" aria-describedby="pump-optimizer-support" disabled>
+              <div class="form-help" id="pump-optimizer-support" role="status" aria-live="polite">Optimizer capability details are still loading. Training remains disabled.</div>
             </div>
           </div>
           <div class="form-row">
@@ -1526,7 +1530,7 @@
             <textarea id="pump-examples" name="examples" rows="6" placeholder='[{"messages":[{"role":"user","content":"..."}]}]'></textarea>
           </div>
           <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Queue boost job</button>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;" aria-describedby="pump-optimizer-support" disabled>Queue boost job</button>
           </div>
         </form>
       </div>
@@ -1557,7 +1561,8 @@
             <div class="form-help">Each <code>{adapter, weight}</code> — the multi-tenant merge loads each source LoRA and uses it as the per-prompt teacher.</div>
           </div>
           <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Queue merge</button>
+            <span class="form-help" id="merge-optimizer-support" role="status" aria-live="polite">Optimizer capability details are still loading. Training remains disabled.</span>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;" aria-describedby="merge-optimizer-support" disabled>Queue merge</button>
           </div>
         </form>
       </div>
@@ -1598,7 +1603,8 @@
             <div class="form-help">Exactly one non-empty document context for each prompt, in the same order.</div>
           </div>
           <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Queue self-improvement job</button>
+            <span class="form-help" id="self-optimizer-support" role="status" aria-live="polite">Optimizer capability details are still loading. Training remains disabled.</span>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;" aria-describedby="self-optimizer-support" disabled>Queue self-improvement job</button>
           </div>
         </form>
       </div>

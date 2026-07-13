@@ -180,20 +180,17 @@ async fn submit_front_door(
     super::adapters::validate_adapter_name(&adapter_name)?;
     super::training::validate_lora_scale_at_submit(lora_scale.0, lora_scale.1, lora_scale.2)?;
     let top_k_adjustment = super::training::normalize_queued_opd_top_k(&state, &mut queued)?;
-    let effective_seed = crate::training_queue::materialize_queued_job_effective_seed(
-        &mut queued,
-        &state.adapter_dir,
-        &adapter_name,
-    )
-    .map_err(ApiError::training_invalid_request)?;
     super::training::enforce_queue_caps(&state)?;
+    super::training::ensure_training_backend_admission(&state)?;
+    super::training::enforce_queued_training_workload_admission(&state, &queued)?;
+    super::training::enforce_queued_training_optimizer_admission(&state, &queued)?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let info = TrainingJobInfo {
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
         job_type,
-        effective_seed: Some(effective_seed),
+        effective_seed: None,
         state: kiln_train::TrainingState::Queued,
         progress: 0.0,
         loss: None,
@@ -220,19 +217,24 @@ async fn submit_front_door(
                 job_id: job_id.clone(),
                 reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                admitted_resume_checkpoint: None,
                 prepared_data: Default::default(),
                 prepared_data_permit: Default::default(),
                 job: queued,
             },
         )],
     )?;
+    let effective_seed =
+        super::training::admitted_training_seeds(&state, std::slice::from_ref(&job_id))?
+            .remove(&job_id)
+            .expect("admission seed helper returned the requested front-door job");
 
     Ok(Json(FrontDoorResponse {
         picked: pipeline,
         training: TrainingResponse {
             job_id,
             state: kiln_train::TrainingState::Queued,
-            effective_seed: effective_seed.to_string(),
+            effective_seed,
             message: format!(
                 "§8.2 front-door dispatched to {pipeline}.{}",
                 top_k_adjustment.map_or_else(String::new, |(requested, effective)| {

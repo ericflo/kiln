@@ -24,7 +24,7 @@ use kiln_train::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
-use crate::state::AppState;
+use crate::state::{AppState, TrainingWorkload};
 
 /// One step in a recipe. The trainer runs steps in order and threads
 /// adapter outputs through subsequent steps.
@@ -180,6 +180,13 @@ pub struct RecipeDescriptor {
     pub name: String,
     pub description: Option<String>,
     pub num_steps: usize,
+    pub admission: RecipeAdmissionDescriptor,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecipeAdmissionDescriptor {
+    pub supported: bool,
+    pub unavailable_reason: Option<String>,
 }
 
 // Six day-one recipes baked into the binary (§3.7) + four agentic
@@ -229,7 +236,40 @@ pub fn builtin_recipes() -> Vec<(String, &'static str)> {
     ]
 }
 
-async fn list_recipes(State(_state): State<AppState>) -> Json<RecipesListResponse> {
+fn recipe_admission(state: &AppState, recipe: &Recipe) -> RecipeAdmissionDescriptor {
+    for (step_index, step) in recipe.steps.iter().enumerate() {
+        if let Some(workload) = recipe_step_workload(step)
+            && let Some(reason) = state.training_workload_unavailable_reason(workload)
+        {
+            return RecipeAdmissionDescriptor {
+                supported: false,
+                unavailable_reason: Some(format!(
+                    "step {} ({}) is unavailable: {reason}",
+                    step_index + 1,
+                    workload.label(),
+                )),
+            };
+        }
+        if let Some((optimizer, rank)) = recipe_step_optimizer_request(step)
+            && let Err(error) =
+                super::training::enforce_training_optimizer_admission(state, optimizer, rank)
+        {
+            return RecipeAdmissionDescriptor {
+                supported: false,
+                unavailable_reason: Some(format!(
+                    "step {} optimizer tuple is unavailable: {error}",
+                    step_index + 1,
+                )),
+            };
+        }
+    }
+    RecipeAdmissionDescriptor {
+        supported: true,
+        unavailable_reason: None,
+    }
+}
+
+async fn list_recipes(State(state): State<AppState>) -> Json<RecipesListResponse> {
     let mut out = Vec::new();
     for (name, yaml) in builtin_recipes() {
         // Best-effort parse; if the bundled YAML is malformed the
@@ -240,11 +280,16 @@ async fn list_recipes(State(_state): State<AppState>) -> Json<RecipesListRespons
                 name: r.name.clone(),
                 description: r.description.clone(),
                 num_steps: r.steps.len(),
+                admission: recipe_admission(&state, &r),
             },
             Err(_) => RecipeDescriptor {
                 name,
                 description: Some("(failed to parse YAML)".into()),
                 num_steps: 0,
+                admission: RecipeAdmissionDescriptor {
+                    supported: false,
+                    unavailable_reason: Some("bundled recipe YAML failed to parse".to_string()),
+                },
             },
         };
         out.push(descriptor);
@@ -260,6 +305,30 @@ fn training_step_name(step: &RecipeStep) -> Option<&str> {
         | RecipeStep::DistillPump { name, .. }
         | RecipeStep::DistillRefresh { name, .. }
         | RecipeStep::DistillSelf { name, .. } => Some(name),
+        RecipeStep::PostEval { .. } => None,
+    }
+}
+
+fn recipe_step_optimizer_request(step: &RecipeStep) -> Option<(kiln_train::Optimizer, usize)> {
+    match step {
+        RecipeStep::Sft { config, .. } => Some((config.optimizer, config.lora_rank)),
+        RecipeStep::Opd { config, .. }
+        | RecipeStep::DistillMerge { config, .. }
+        | RecipeStep::DistillPump { config, .. }
+        | RecipeStep::DistillRefresh { config, .. }
+        | RecipeStep::DistillSelf { config, .. } => Some((config.optimizer, config.lora_rank)),
+        RecipeStep::PostEval { .. } => None,
+    }
+}
+
+fn recipe_step_workload(step: &RecipeStep) -> Option<TrainingWorkload> {
+    match step {
+        RecipeStep::Sft { .. } => Some(TrainingWorkload::Sft),
+        RecipeStep::DistillRefresh { .. } => Some(TrainingWorkload::DistillRefresh),
+        RecipeStep::Opd { .. }
+        | RecipeStep::DistillMerge { .. }
+        | RecipeStep::DistillPump { .. }
+        | RecipeStep::DistillSelf { .. } => Some(TrainingWorkload::Opd),
         RecipeStep::PostEval { .. } => None,
     }
 }
@@ -332,6 +401,15 @@ async fn run_recipe(
     // on a later step still rejects the entire recipe atomically.
     let training_steps = validate_recipe_structure_and_names(&recipe_name, &recipe)?;
     super::training::enforce_queue_capacity_for(&state, training_steps)?;
+    super::training::ensure_training_backend_admission(&state)?;
+    for step in &recipe.steps {
+        if let Some(workload) = recipe_step_workload(step) {
+            super::training::enforce_training_workload_admission(&state, workload)?;
+        }
+        if let Some((optimizer, rank)) = recipe_step_optimizer_request(step) {
+            super::training::enforce_training_optimizer_admission(&state, optimizer, rank)?;
+        }
+    }
 
     // Enqueue each step independently. Steps run in FIFO order via the
     // global training queue, so by the time step N+1 starts its base
@@ -654,6 +732,7 @@ fn prepare_step_job(
             job_id: job_id.to_string(),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            admitted_resume_checkpoint: None,
             prepared_data: Default::default(),
             prepared_data_permit: Default::default(),
             job: queued,
@@ -686,6 +765,70 @@ mod tests {
                 recipe.name, name
             );
             assert!(!recipe.steps.is_empty(), "recipe {name} has no steps");
+        }
+    }
+
+    #[test]
+    fn builtin_recipe_optimizer_defaults_fit_every_accelerator_contract() {
+        use kiln_model::backend::TrainingPrecisionPolicy;
+        use kiln_model::{TrainingOptimizerRounding, TrainingOptimizerSupport};
+
+        let backends = [
+            (
+                "cuda",
+                kiln_tensor::Device::Cuda(0),
+                TrainingPrecisionPolicy::cuda(),
+            ),
+            (
+                "rocm",
+                kiln_tensor::Device::Rocm(0),
+                TrainingPrecisionPolicy::rocm(),
+            ),
+            (
+                "metal",
+                kiln_tensor::Device::Metal(0),
+                TrainingPrecisionPolicy::metal(),
+            ),
+            (
+                "vulkan",
+                kiln_tensor::Device::Vulkan(0),
+                TrainingPrecisionPolicy::vulkan(),
+            ),
+        ];
+
+        for (recipe_name, yaml) in builtin_recipes() {
+            let recipe: Recipe = serde_yaml::from_str(yaml).unwrap();
+            for (step_index, step) in recipe.steps.iter().enumerate() {
+                let config = match step {
+                    RecipeStep::Sft { config, .. } => Some((config.optimizer, config.lora_rank)),
+                    RecipeStep::Opd { config, .. }
+                    | RecipeStep::DistillMerge { config, .. }
+                    | RecipeStep::DistillPump { config, .. }
+                    | RecipeStep::DistillRefresh { config, .. }
+                    | RecipeStep::DistillSelf { config, .. } => {
+                        Some((config.optimizer, config.lora_rank))
+                    }
+                    RecipeStep::PostEval { .. } => None,
+                };
+                let Some((optimizer, rank)) = config else {
+                    continue;
+                };
+                for (backend, device, precision) in backends {
+                    TrainingOptimizerSupport::for_backend(backend, device)
+                        .resolve_optimizer_request(
+                            precision,
+                            optimizer.kind(),
+                            kiln_tensor::DType::BF16,
+                            TrainingOptimizerRounding::RoundToNearest,
+                            rank,
+                        )
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "recipe {recipe_name} step {step_index} optimizer tuple is unsupported on {backend}: {error}"
+                            )
+                        });
+                }
+            }
         }
     }
 

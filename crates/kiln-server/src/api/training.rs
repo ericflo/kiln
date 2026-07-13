@@ -23,6 +23,7 @@ use std::{
 
 use crate::error::ApiError;
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
+use crate::state::TrainingWorkload;
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_preflight::{
     self, EstimateOptions, LoraResidency, SftEstimateOptions, WeightResidency,
@@ -70,6 +71,17 @@ struct SftSubmissionStats {
 struct TrainingAdmissionResult {
     queue_position: usize,
     sft_summaries: std::collections::HashMap<String, SftSubmissionStats>,
+    effective_seeds: std::collections::HashMap<String, u64>,
+}
+
+impl TrainingAdmissionResult {
+    fn effective_seed(&self, job_id: &str) -> Result<u64, ApiError> {
+        self.effective_seeds.get(job_id).copied().ok_or_else(|| {
+            ApiError::internal(format!(
+                "training admission completed without an effective seed for job {job_id}"
+            ))
+        })
+    }
 }
 
 fn retained_correction_ids(
@@ -250,6 +262,16 @@ fn training_optimizer_support_api_error(
     }
 }
 
+fn enforce_model_lora_rank_admission(state: &AppState, lora_rank: usize) -> Result<(), ApiError> {
+    let model_rank_ceiling = training_preflight::model_lora_rank_ceiling(&state.model_config);
+    if lora_rank == 0 || lora_rank > model_rank_ceiling {
+        return Err(ApiError::training_invalid_request(format!(
+            "LoRA rank {lora_rank} is invalid for this model; supported range is 1..={model_rank_ceiling}"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn enforce_training_optimizer_admission(
     state: &AppState,
     optimizer: kiln_train::Optimizer,
@@ -258,6 +280,7 @@ pub(crate) fn enforce_training_optimizer_admission(
     optimizer.validate_hyperparameters().map_err(|error| {
         ApiError::training_invalid_request(format!("invalid optimizer configuration: {error:#}"))
     })?;
+    enforce_model_lora_rank_admission(state, lora_rank)?;
     let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
         return Ok(());
     };
@@ -283,6 +306,19 @@ pub(crate) fn enforce_training_optimizer_admission(
         )
         .map(|_| ())
         .map_err(|error| training_optimizer_support_api_error(capabilities.backend, error))
+}
+
+pub(crate) fn enforce_training_workload_admission(
+    state: &AppState,
+    workload: TrainingWorkload,
+) -> Result<(), ApiError> {
+    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
+        return Err(ApiError::mock_mode_no_training());
+    }
+    if let Some(reason) = state.training_workload_unavailable_reason(workload) {
+        return Err(ApiError::training_backend_unsupported(reason));
+    }
+    Ok(())
 }
 
 fn effective_checkpoint_segments(config: kiln_train::CheckpointConfig) -> usize {
@@ -779,12 +815,7 @@ fn enforce_training_preflight(
     lora_rank: usize,
     vk_native_recompute: bool,
 ) -> Result<PreflightAdmission, ApiError> {
-    let model_rank_ceiling = training_preflight::model_lora_rank_ceiling(&state.model_config);
-    if lora_rank == 0 || lora_rank > model_rank_ceiling {
-        return Err(ApiError::training_invalid_request(format!(
-            "LoRA rank {lora_rank} is invalid for this model; supported range is 1..={model_rank_ceiling}"
-        )));
-    }
+    enforce_model_lora_rank_admission(state, lora_rank)?;
     // Vulkan's registry owns mirror buffers even on a dGPU; ROCm aliases
     // storage even on an APU. Runtime backend identity is the only safe key.
     options.lora_residency = match state.backend.as_ref() {
@@ -1597,19 +1628,6 @@ pub(crate) async fn admit_sft_request(
         .clone()
         .unwrap_or_else(|| format!("sft-{}", &job_id[..8]));
     let auto_load = req.config.auto_load;
-    let effective_seed = crate::training_queue::materialize_sft_effective_seed(
-        &mut req.config,
-        &state.adapter_dir,
-        &adapter_name,
-    )
-    .map_err(ApiError::training_invalid_request)?;
-
-    // Preserve the public admission order: static request errors and capacity
-    // limits are reported first, then mock mode refuses training without
-    // attempting tokenizer-dependent row admission.
-    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
-        return Err(ApiError::mock_mode_no_training());
-    }
 
     let invalid_row_policy = req.config.invalid_row_policy;
     let training_profile = req.config.training_profile;
@@ -1619,7 +1637,7 @@ pub(crate) async fn admit_sft_request(
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
         job_type: TrainingJobType::Sft,
-        effective_seed: Some(effective_seed),
+        effective_seed: None,
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,
@@ -1647,6 +1665,7 @@ pub(crate) async fn admit_sft_request(
                 job_id: job_id.clone(),
                 reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                admitted_resume_checkpoint: None,
                 prepared_data: Default::default(),
                 prepared_data_permit: Default::default(),
                 job: QueuedJob::Sft(req),
@@ -1656,6 +1675,7 @@ pub(crate) async fn admit_sft_request(
     let stats = admission.sft_summaries.remove(&job_id).ok_or_else(|| {
         ApiError::internal("SFT admission completed without an exact corpus summary")
     })?;
+    let effective_seed = admission.effective_seed(&job_id)?;
     let queue_position = admission.queue_position;
     let num_examples = stats.num_examples;
 
@@ -1789,12 +1809,6 @@ async fn submit_grpo(
         .clone()
         .unwrap_or_else(|| format!("grpo-{}", &job_id[..8]));
     let auto_load = req.config.auto_load;
-    let effective_seed = crate::training_queue::materialize_grpo_effective_seed(
-        &mut req.config,
-        &state.adapter_dir,
-        &adapter_name,
-    )
-    .map_err(ApiError::training_invalid_request)?;
 
     if stats.streaming_dataset {
         tracing::info!(
@@ -1813,17 +1827,12 @@ async fn submit_grpo(
         );
     }
 
-    // Verify we have real model weights
-    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
-        return Err(ApiError::mock_mode_no_training());
-    }
-
     // Register the job in the tracking map
     let info = TrainingJobInfo {
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
         job_type: TrainingJobType::Grpo,
-        effective_seed: Some(effective_seed),
+        effective_seed: None,
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,
@@ -1843,7 +1852,7 @@ async fn submit_grpo(
         cancel_requested: Default::default(),
     };
     // Enqueue and publish the tracking record under one admission lock pair.
-    let queue_position = admit_training_jobs(
+    let admission = admit_training_jobs_with_summary(
         &state,
         vec![(
             info,
@@ -1853,12 +1862,15 @@ async fn submit_grpo(
                 // job source and overwrites this estimate before publication.
                 reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                admitted_resume_checkpoint: None,
                 prepared_data: Default::default(),
                 prepared_data_permit: Default::default(),
                 job: QueuedJob::Grpo(req),
             },
         )],
     )?;
+    let queue_position = admission.queue_position;
+    let effective_seed = admission.effective_seed(&job_id)?;
 
     Ok(Json(TrainingResponse {
         job_id,
@@ -2010,12 +2022,6 @@ async fn submit_opd(
         .clone()
         .unwrap_or_else(|| format!("opd-{}", &job_id[..8]));
     let auto_load = req.config.auto_load;
-    let effective_seed = crate::training_queue::materialize_opd_effective_seed(
-        &mut req.config,
-        &state.adapter_dir,
-        &adapter_name,
-    )
-    .map_err(ApiError::training_invalid_request)?;
 
     tracing::info!(
         num_prompts = req.prompts.len(),
@@ -2029,15 +2035,11 @@ async fn submit_opd(
         "OPD training request queued"
     );
 
-    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
-        return Err(ApiError::mock_mode_no_training());
-    }
-
     let info = TrainingJobInfo {
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
         job_type: TrainingJobType::Opd,
-        effective_seed: Some(effective_seed),
+        effective_seed: None,
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,
@@ -2056,7 +2058,7 @@ async fn submit_opd(
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
-    let queue_position = admit_training_jobs(
+    let admission = admit_training_jobs_with_summary(
         &state,
         vec![(
             info,
@@ -2064,12 +2066,15 @@ async fn submit_opd(
                 job_id: job_id.clone(),
                 reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                admitted_resume_checkpoint: None,
                 prepared_data: Default::default(),
                 prepared_data_permit: Default::default(),
                 job: QueuedJob::Opd(req),
             },
         )],
     )?;
+    let queue_position = admission.queue_position;
+    let effective_seed = admission.effective_seed(&job_id)?;
 
     Ok(Json(TrainingResponse {
         job_id,
@@ -2089,7 +2094,8 @@ async fn submit_opd(
 /// `new_data` then OPD-recovers against the prior-self
 /// `behavioural_teacher`, gated on dual eval (IF-eval recovery +
 /// new-knowledge gain). Same queue / receipt / auto-load semantics
-/// as `/v1/train/opd`.
+/// as `/v1/train/opd`. The route currently fails closed after cheap request
+/// and teacher validation until exact two-phase admission is implemented.
 async fn submit_distill_refresh(
     State(state): State<AppState>,
     payload: Result<Json<DistillRefreshRequest>, JsonRejection>,
@@ -2145,16 +2151,11 @@ async fn submit_distill_refresh(
             "require_if_eval_recovery must be in [0.0, 1.0]".to_string(),
         ));
     }
+    enforce_training_workload_admission(&state, TrainingWorkload::DistillRefresh)?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = format!("{}@refresh-{}", req.name, &job_id[..8]);
     let auto_load = req.config.auto_load;
-    let effective_seed = crate::training_queue::materialize_opd_effective_seed(
-        &mut req.config,
-        &state.adapter_dir,
-        &adapter_name,
-    )
-    .map_err(ApiError::training_invalid_request)?;
 
     tracing::info!(
         name = %req.name,
@@ -2167,17 +2168,13 @@ async fn submit_distill_refresh(
         "distill/refresh request queued"
     );
 
-    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
-        return Err(ApiError::mock_mode_no_training());
-    }
-
     let info = TrainingJobInfo {
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
         // Reuse the Opd job type — refresh is structurally an OPD run
         // with extra orchestration. Dashboards group both as OPD-class.
         job_type: TrainingJobType::Opd,
-        effective_seed: Some(effective_seed),
+        effective_seed: None,
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,
@@ -2196,7 +2193,7 @@ async fn submit_distill_refresh(
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
-    let queue_position = admit_training_jobs(
+    let admission = admit_training_jobs_with_summary(
         &state,
         vec![(
             info,
@@ -2204,12 +2201,15 @@ async fn submit_distill_refresh(
                 job_id: job_id.clone(),
                 reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                admitted_resume_checkpoint: None,
                 prepared_data: Default::default(),
                 prepared_data_permit: Default::default(),
                 job: QueuedJob::DistillRefresh(req),
             },
         )],
     )?;
+    let queue_position = admission.queue_position;
+    let effective_seed = admission.effective_seed(&job_id)?;
 
     Ok(Json(TrainingResponse {
         job_id,
@@ -2268,18 +2268,11 @@ async fn submit_distill_merge(
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
     let auto_load = req.config.auto_load;
-    let effective_seed = crate::training_queue::materialize_opd_effective_seed(
-        &mut req.config,
-        &state.adapter_dir,
-        &adapter_name,
-    )
-    .map_err(ApiError::training_invalid_request)?;
-    register_and_enqueue_distill(
+    let effective_seed = register_and_enqueue_distill(
         &state,
         &job_id,
         &adapter_name,
         auto_load,
-        effective_seed,
         QueuedJob::DistillMerge(req),
     )?;
     Ok(Json(TrainingResponse {
@@ -2336,18 +2329,11 @@ async fn submit_distill_pump(
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
     let auto_load = req.config.auto_load;
-    let effective_seed = crate::training_queue::materialize_opd_effective_seed(
-        &mut req.config,
-        &state.adapter_dir,
-        &adapter_name,
-    )
-    .map_err(ApiError::training_invalid_request)?;
-    register_and_enqueue_distill(
+    let effective_seed = register_and_enqueue_distill(
         &state,
         &job_id,
         &adapter_name,
         auto_load,
-        effective_seed,
         QueuedJob::DistillPump(req),
     )?;
     Ok(Json(TrainingResponse {
@@ -2395,18 +2381,11 @@ async fn submit_distill_self(
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
     let auto_load = req.config.auto_load;
-    let effective_seed = crate::training_queue::materialize_opd_effective_seed(
-        &mut req.config,
-        &state.adapter_dir,
-        &adapter_name,
-    )
-    .map_err(ApiError::training_invalid_request)?;
-    register_and_enqueue_distill(
+    let effective_seed = register_and_enqueue_distill(
         &state,
         &job_id,
         &adapter_name,
         auto_load,
-        effective_seed,
         QueuedJob::DistillSelf(req),
     )?;
     Ok(Json(TrainingResponse {
@@ -2617,7 +2596,7 @@ fn pin_registered_teachers(
     Ok(())
 }
 
-fn ensure_training_backend_admission(state: &AppState) -> Result<(), ApiError> {
+pub(crate) fn ensure_training_backend_admission(state: &AppState) -> Result<(), ApiError> {
     state
         .ensure_backend_healthy()
         .map_err(ApiError::backend_quarantined)?;
@@ -3181,16 +3160,8 @@ fn prepare_off_policy_opd_admission(
     })
 }
 
-fn prepare_training_entry_admission(
-    state: &AppState,
-    info: &mut TrainingJobInfo,
-    entry: &mut QueueEntry,
-) -> Result<(), ApiError> {
-    use crate::training_queue::{
-        PreparedDistillMergeSource, PreparedSftAdmission, PreparedTrainingData, QueuedJob,
-    };
-
-    let (optimizer, lora_rank) = match &entry.job {
+fn queued_training_optimizer_request(job: &QueuedJob) -> (kiln_train::Optimizer, usize) {
+    let (optimizer, lora_rank) = match job {
         QueuedJob::Sft(req) => (req.config.optimizer, req.config.lora_rank),
         QueuedJob::Grpo(req) => (req.config.optimizer, req.config.lora_rank),
         QueuedJob::Opd(req) => (req.config.optimizer, req.config.lora_rank),
@@ -3202,7 +3173,48 @@ fn prepare_training_entry_admission(
         ),
         QueuedJob::DistillSelf(req) => (req.config.optimizer, req.config.lora_rank),
     };
+    (optimizer, lora_rank)
+}
+
+fn queued_training_workload(job: &QueuedJob) -> TrainingWorkload {
+    match job {
+        QueuedJob::Sft(_) => TrainingWorkload::Sft,
+        QueuedJob::Grpo(_) => TrainingWorkload::Grpo,
+        QueuedJob::DistillRefresh(_) => TrainingWorkload::DistillRefresh,
+        QueuedJob::Opd(_)
+        | QueuedJob::DistillMerge(_)
+        | QueuedJob::DistillPump(_)
+        | QueuedJob::DistillSelf(_) => TrainingWorkload::Opd,
+    }
+}
+
+pub(crate) fn enforce_queued_training_optimizer_admission(
+    state: &AppState,
+    job: &QueuedJob,
+) -> Result<(), ApiError> {
+    let (optimizer, lora_rank) = queued_training_optimizer_request(job);
     enforce_training_optimizer_admission(state, optimizer, lora_rank)?;
+    Ok(())
+}
+
+pub(crate) fn enforce_queued_training_workload_admission(
+    state: &AppState,
+    job: &QueuedJob,
+) -> Result<(), ApiError> {
+    enforce_training_workload_admission(state, queued_training_workload(job))
+}
+
+fn prepare_training_entry_admission(
+    state: &AppState,
+    info: &mut TrainingJobInfo,
+    entry: &mut QueueEntry,
+) -> Result<(), ApiError> {
+    use crate::training_queue::{
+        PreparedDistillMergeSource, PreparedSftAdmission, PreparedTrainingData, QueuedJob,
+    };
+
+    enforce_queued_training_workload_admission(state, &entry.job)?;
+    enforce_queued_training_optimizer_admission(state, &entry.job)?;
 
     match &mut entry.job {
         QueuedJob::Sft(req) => {
@@ -3671,33 +3683,41 @@ fn admit_training_jobs_with_summary(
         }
         Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
     };
-    // Own the single process admission permit, then validate immutable request
-    // metadata before checking whether this backend can train. Keep every
-    // caller-controlled dataset scan/materialization after the capacity check.
-    for (info, entry) in &mut pending {
+    // Own the single process admission permit and normalize cheap immutable
+    // metadata first. Capacity and optimizer support must reject before any
+    // resume checkpoint is loaded or caller-controlled corpus is scanned.
+    for (_, entry) in &mut pending {
         if let QueuedJob::Sft(req) = &mut entry.job {
             normalize_sft_config_at_submit(&mut req.config)?;
         }
-        let effective_seed = crate::training_queue::materialize_queued_job_effective_seed(
+    }
+    enforce_queue_capacity_for(state, pending.len())?;
+    pin_registered_teachers(state, &mut pending)?;
+    for (info, entry) in &mut pending {
+        enforce_queued_training_workload_admission(state, &entry.job)?;
+        enforce_queued_training_optimizer_admission(state, &entry.job)?;
+        if entry.admitted_resume_checkpoint.is_some() {
+            return Err(ApiError::training_invalid_request(
+                "training queue entry carried a caller-supplied resume checkpoint identity",
+            ));
+        }
+        let resume_admission = crate::training_queue::materialize_queued_job_effective_seed(
             &mut entry.job,
             &state.adapter_dir,
             &info.adapter_name,
         )
         .map_err(ApiError::training_invalid_request)?;
         if let Some(recorded) = info.effective_seed
-            && recorded != effective_seed
+            && recorded != resume_admission.effective_seed
         {
             return Err(ApiError::training_invalid_request(format!(
-                "training job seed {recorded} does not match materialized request seed {effective_seed}"
+                "training job seed {recorded} does not match materialized request seed {}",
+                resume_admission.effective_seed
             )));
         }
-        info.effective_seed = Some(effective_seed);
+        info.effective_seed = Some(resume_admission.effective_seed);
+        entry.admitted_resume_checkpoint = resume_admission.checkpoint;
     }
-    pin_registered_teachers(state, &mut pending)?;
-    // Reject full queues and unsupported mock-mode training before reading or
-    // materializing any caller-controlled dataset. Final publication rechecks
-    // both caps atomically.
-    enforce_queue_capacity_for(state, pending.len())?;
     for (info, entry) in &mut pending {
         prepare_training_entry_admission(state, info, entry)?;
         acquire_training_entry_prepared_data_permit(state, entry)?;
@@ -3725,6 +3745,19 @@ fn admit_training_jobs_with_summary(
             ))
         })
         .collect();
+    let effective_seeds = pending
+        .iter()
+        .map(|(info, _)| {
+            info.effective_seed
+                .map(|seed| (info.job_id.clone(), seed))
+                .ok_or_else(|| {
+                    ApiError::internal(format!(
+                        "training job {} is missing its materialized effective seed",
+                        info.job_id
+                    ))
+                })
+        })
+        .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
     let queue_position = admit_training_jobs_into(
         &state.training_jobs,
         &state.training_queue,
@@ -3736,6 +3769,7 @@ fn admit_training_jobs_with_summary(
     Ok(TrainingAdmissionResult {
         queue_position,
         sft_summaries,
+        effective_seeds,
     })
 }
 
@@ -3778,14 +3812,13 @@ fn register_and_enqueue_distill(
     job_id: &str,
     adapter_name: &str,
     auto_load: bool,
-    effective_seed: u64,
     job: QueuedJob,
-) -> Result<usize, ApiError> {
+) -> Result<u64, ApiError> {
     let info = TrainingJobInfo {
         job_id: job_id.to_string(),
         adapter_name: adapter_name.to_string(),
         job_type: TrainingJobType::Opd,
-        effective_seed: Some(effective_seed),
+        effective_seed: None,
         state: TrainingState::Queued,
         progress: 0.0,
         loss: None,
@@ -3804,7 +3837,7 @@ fn register_and_enqueue_distill(
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
-    admit_training_jobs(
+    let admission = admit_training_jobs_with_summary(
         state,
         vec![(
             info,
@@ -3812,12 +3845,14 @@ fn register_and_enqueue_distill(
                 job_id: job_id.to_string(),
                 reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                admitted_resume_checkpoint: None,
                 prepared_data: Default::default(),
                 prepared_data_permit: Default::default(),
                 job,
             },
         )],
-    )
+    )?;
+    admission.effective_seed(job_id)
 }
 
 fn training_status_from_info(j: &crate::state::TrainingJobInfo) -> TrainingStatus {
@@ -5029,6 +5064,7 @@ mod tests {
                 job_id,
                 reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
+                admitted_resume_checkpoint: None,
                 prepared_data: Default::default(),
                 prepared_data_permit: Default::default(),
                 job: QueuedJob::Sft(request),

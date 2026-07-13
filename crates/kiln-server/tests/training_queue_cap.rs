@@ -75,6 +75,7 @@ fn fill_queue(state: &AppState, n: usize) {
             job_id: format!("placeholder-{i}"),
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
+            admitted_resume_checkpoint: None,
             prepared_data: Default::default(),
             prepared_data_permit: Default::default(),
             job: QueuedJob::Sft(SftRequest {

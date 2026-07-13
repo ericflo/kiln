@@ -6,7 +6,7 @@ use crate::config::{
     SpecMethod, StreamingPrefillRuntimeConfig,
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
-use crate::state::{AppState, DirectDecodeRendezvousRuntimeState, ModelBackend};
+use crate::state::{AppState, DirectDecodeRendezvousRuntimeState, ModelBackend, TrainingWorkload};
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 const SPECULATIVE_SERVING_UNAVAILABLE_REASON: &str =
@@ -136,11 +136,72 @@ struct TrainingConfig {
     native_training_supported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     native_training_unavailable_reason: Option<String>,
+    optimizer_support: Option<TrainingOptimizerSupportConfig>,
     checkpoint_policy: kiln_train::GradientCheckpointPolicy,
     checkpoint_boundary_policy: kiln_train::CheckpointBoundaryPolicy,
     checkpoint_segments: usize,
     checkpoint_segments_source: &'static str,
     checkpointing_enabled: bool,
+}
+
+#[derive(Serialize)]
+struct TrainingOptimizerSupportConfig {
+    schema: TrainingOptimizerSupportSchema,
+    backend: String,
+    device: String,
+    base_weight_dtype: String,
+    resolved_lora_parameter_dtype: Option<String>,
+    immutable_after_startup: bool,
+    rounding_modes: Vec<&'static str>,
+    backend_implementation_rounding_modes: Vec<&'static str>,
+    optimizer_tuple_kinds: Vec<&'static str>,
+    workloads: Vec<TrainingWorkloadSupportConfig>,
+    optimizers: Vec<TrainingOptimizerKindConfig>,
+}
+
+#[derive(Serialize)]
+struct TrainingOptimizerSupportSchema {
+    id: &'static str,
+    version: u32,
+}
+
+#[derive(Serialize)]
+struct TrainingOptimizerKindConfig {
+    kind: &'static str,
+    backend_implementation: TrainingOptimizerImplementationConfig,
+    optimizer_tuple: TrainingOptimizerTupleConfig,
+}
+
+#[derive(Serialize)]
+struct TrainingOptimizerImplementationConfig {
+    supported: bool,
+    route: &'static str,
+    native_device_hook: bool,
+    parameter_dtypes: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+struct TrainingOptimizerTupleConfig {
+    supported: bool,
+    unavailable_reason: Option<String>,
+    lora_rank: TrainingOptimizerRankConfig,
+}
+
+#[derive(Serialize)]
+struct TrainingWorkloadSupportConfig {
+    workload: &'static str,
+    supported: bool,
+    unavailable_reason: Option<String>,
+    allowed_optimizer_kinds: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+struct TrainingOptimizerRankConfig {
+    minimum: usize,
+    maximum: Option<usize>,
+    backend_maximum: Option<usize>,
+    model_maximum: usize,
+    live_memory_admission_required: bool,
 }
 
 #[derive(Serialize)]
@@ -220,15 +281,43 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         kiln_train::GradientCheckpointPolicy::ExplicitSegments { .. } => "configured",
         kiln_train::GradientCheckpointPolicy::Disabled { .. } => "disabled",
     };
+    // Resolve workload gates before taking the config runner lock. Re-entering
+    // the same RwLock while a writer is queued is not guaranteed to make
+    // progress on every platform.
+    let workload_reasons = [
+        TrainingWorkload::Sft,
+        TrainingWorkload::Grpo,
+        TrainingWorkload::Opd,
+        TrainingWorkload::DistillRefresh,
+    ]
+    .map(|workload| {
+        (
+            workload,
+            state.training_workload_unavailable_reason(workload),
+        )
+    });
+    let optimizer_support = build_training_optimizer_support(&state, &workload_reasons);
     let native_training_unavailable_reason =
         if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
             Some("mock backend does not execute native training".to_string())
+        } else if workload_reasons.iter().all(|(_, reason)| reason.is_some()) {
+            workload_reasons
+                .iter()
+                .find_map(|(_, reason)| reason.clone())
+        } else if let Some(support) = optimizer_support.as_ref() {
+            if support.optimizer_tuple_kinds.is_empty() {
+                support
+                    .optimizers
+                    .iter()
+                    .find_map(|optimizer| optimizer.optimizer_tuple.unavailable_reason.clone())
+                    .or_else(|| {
+                        Some("no optimizer tuple is admitted for the resident weights".to_string())
+                    })
+            } else {
+                None
+            }
         } else {
-            state
-                .training_runtime
-                .resolve_device_for_weights(state.model_weight_device)
-                .err()
-                .map(|error| error.to_string())
+            Some("optimizer support is unavailable for the resident runner".to_string())
         };
 
     let b = &state.memory_budget;
@@ -266,6 +355,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             model_weight_device: state.model_weight_device.short_name().to_string(),
             native_training_supported: native_training_unavailable_reason.is_none(),
             native_training_unavailable_reason,
+            optimizer_support,
             checkpoint_policy: state.training_runtime.gradient_checkpoint_policy(),
             checkpoint_boundary_policy: state.training_runtime.checkpoint_boundary_policy(),
             checkpoint_segments: if ckpt.enabled { ckpt.num_segments } else { 0 },
@@ -290,6 +380,181 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             fold_reasoning_into_content: state.fold_reasoning_into_content,
         },
     })
+}
+
+fn build_training_optimizer_support(
+    state: &AppState,
+    workload_reasons: &[(TrainingWorkload, Option<String>); 4],
+) -> Option<TrainingOptimizerSupportConfig> {
+    let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
+        return None;
+    };
+    let runner = runner.read().ok()?;
+    let capabilities = runner.backend_capabilities();
+    let training = capabilities.training;
+    let base_weight_device = runner.weights.embed_tokens.device();
+    let base_weight_dtype = runner.weights.embed_tokens.dtype();
+    let backend_identity_reason = (capabilities.device != base_weight_device).then(|| {
+        format!(
+            "backend `{}` reports device {} but resident weights are on {}",
+            capabilities.backend, capabilities.device, base_weight_device
+        )
+    });
+    let model_lora_rank_ceiling =
+        crate::training_preflight::model_lora_rank_ceiling(&state.model_config);
+    Some(build_training_optimizer_support_from_capabilities(
+        capabilities.backend,
+        capabilities.device,
+        base_weight_dtype,
+        training,
+        model_lora_rank_ceiling,
+        backend_identity_reason.as_deref(),
+        workload_reasons,
+    ))
+}
+
+fn build_training_optimizer_support_from_capabilities(
+    backend: &str,
+    device: kiln_tensor::Device,
+    base_weight_dtype: kiln_tensor::DType,
+    training: kiln_model::BackendTrainingCapabilities,
+    model_lora_rank_ceiling: usize,
+    optimizer_tuple_unavailable_reason: Option<&str>,
+    workload_reasons: &[(TrainingWorkload, Option<String>); 4],
+) -> TrainingOptimizerSupportConfig {
+    use kiln_model::{TrainingOptimizerKind, TrainingOptimizerRounding};
+
+    const PRODUCT_ROUNDING: TrainingOptimizerRounding = TrainingOptimizerRounding::RoundToNearest;
+    let base_weight_dtype_supported = training
+        .precision
+        .base_weight_dtypes
+        .contains(&base_weight_dtype);
+    let resolved_lora_parameter_dtype = base_weight_dtype_supported.then(|| {
+        training
+            .precision
+            .lora_parameter_dtype_for_base_weight(base_weight_dtype)
+            .short_name()
+            .to_string()
+    });
+    let backend_implementation_rounding_modes = training
+        .optimizer
+        .rounding_modes
+        .iter()
+        .map(|rounding| rounding.label())
+        .collect();
+    let mut optimizer_tuple_kinds = Vec::new();
+    let mut optimizers = Vec::new();
+
+    for kind in [
+        TrainingOptimizerKind::Muon,
+        TrainingOptimizerKind::AdamW,
+        TrainingOptimizerKind::Sgd,
+    ] {
+        let parameter_dtypes = training
+            .optimizer
+            .parameter_dtypes(kind)
+            .iter()
+            .map(|dtype| dtype.short_name())
+            .collect::<Vec<_>>();
+        let implementation_supported =
+            !parameter_dtypes.is_empty() && !training.optimizer.rounding_modes.is_empty();
+        let implementation_route = if !implementation_supported {
+            "unavailable"
+        } else if backend == "cpu" && matches!(device, kiln_tensor::Device::Cpu) {
+            "portable_reference"
+        } else {
+            "native_device_hook"
+        };
+        let minimum = if matches!(kind, TrainingOptimizerKind::Muon) {
+            training.optimizer.muon_min_lora_rank.unwrap_or(1).max(1)
+        } else {
+            1
+        };
+        let backend_maximum = if matches!(kind, TrainingOptimizerKind::Muon) {
+            training.optimizer.muon_max_lora_rank
+        } else {
+            None
+        };
+        let maximum = Some(
+            backend_maximum
+                .map(|maximum| maximum.min(model_lora_rank_ceiling))
+                .unwrap_or(model_lora_rank_ceiling),
+        );
+        let rank_range_is_valid = maximum.is_some_and(|maximum| minimum <= maximum);
+        let resolution = if let Some(reason) = optimizer_tuple_unavailable_reason {
+            Err(reason.to_string())
+        } else if !rank_range_is_valid {
+            Err(format!(
+                "resident model and backend report no common LoRA rank range: minimum {minimum}, model maximum {model_lora_rank_ceiling}, backend maximum {backend_maximum:?}"
+            ))
+        } else {
+            training
+                .resolve_optimizer_request(kind, base_weight_dtype, PRODUCT_ROUNDING, minimum)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        };
+        let optimizer_tuple_supported = resolution.is_ok();
+        if optimizer_tuple_supported {
+            optimizer_tuple_kinds.push(kind.label());
+        }
+        optimizers.push(TrainingOptimizerKindConfig {
+            kind: kind.label(),
+            backend_implementation: TrainingOptimizerImplementationConfig {
+                supported: implementation_supported,
+                route: implementation_route,
+                native_device_hook: implementation_route == "native_device_hook",
+                parameter_dtypes,
+            },
+            optimizer_tuple: TrainingOptimizerTupleConfig {
+                supported: optimizer_tuple_supported,
+                unavailable_reason: resolution.err(),
+                lora_rank: TrainingOptimizerRankConfig {
+                    minimum,
+                    maximum,
+                    backend_maximum,
+                    model_maximum: model_lora_rank_ceiling,
+                    live_memory_admission_required: true,
+                },
+            },
+        });
+    }
+
+    let workloads = workload_reasons
+        .iter()
+        .map(
+            |(workload, unavailable_reason)| TrainingWorkloadSupportConfig {
+                workload: workload.label(),
+                supported: unavailable_reason.is_none() && !optimizer_tuple_kinds.is_empty(),
+                unavailable_reason: unavailable_reason.clone().or_else(|| {
+                    optimizer_tuple_kinds.is_empty().then(|| {
+                        "no optimizer tuple is admitted for the resident weights".to_string()
+                    })
+                }),
+                allowed_optimizer_kinds: if unavailable_reason.is_none() {
+                    optimizer_tuple_kinds.clone()
+                } else {
+                    Vec::new()
+                },
+            },
+        )
+        .collect();
+
+    TrainingOptimizerSupportConfig {
+        schema: TrainingOptimizerSupportSchema {
+            id: "kiln.training-optimizer-support",
+            version: 1,
+        },
+        backend: backend.to_string(),
+        device: device.short_name().to_string(),
+        base_weight_dtype: base_weight_dtype.short_name().to_string(),
+        resolved_lora_parameter_dtype,
+        immutable_after_startup: true,
+        rounding_modes: vec![PRODUCT_ROUNDING.label()],
+        backend_implementation_rounding_modes,
+        optimizer_tuple_kinds,
+        workloads,
+        optimizers,
+    }
 }
 
 fn build_speculative_config(state: &AppState) -> SpeculativeConfig {
@@ -681,12 +946,289 @@ mod tests {
             json["training"]["native_training_unavailable_reason"],
             "mock backend does not execute native training"
         );
+        assert!(json["training"]["optimizer_support"].is_null());
         assert_eq!(json["training"]["checkpoint_policy"]["mode"], "auto");
         assert_eq!(
             json["training"]["checkpoint_boundary_policy"],
             expected_checkpoint_boundary_policy
         );
         assert!(json["vram"]["live"]["raw_observations"]["driver_total_bytes"].is_null());
+    }
+
+    fn training_capabilities_for(
+        backend: &str,
+        device: kiln_tensor::Device,
+        precision: kiln_model::backend::TrainingPrecisionPolicy,
+    ) -> kiln_model::BackendTrainingCapabilities {
+        kiln_model::BackendTrainingCapabilities {
+            hooks: kiln_model::backend::TrainingCapabilities::portable(),
+            precision,
+            optimizer: kiln_model::TrainingOptimizerSupport::for_backend(backend, device),
+            server_dispatch: kiln_model::ServerTrainingDispatchPolicy::for_backend(backend, device),
+            acceleration_profile: kiln_model::TrainingAccelerationProfilePolicy::for_backend(
+                backend, device,
+            ),
+        }
+    }
+
+    fn supported_workloads() -> [(TrainingWorkload, Option<String>); 4] {
+        [
+            (TrainingWorkload::Sft, None),
+            (TrainingWorkload::Grpo, None),
+            (TrainingWorkload::Opd, None),
+            (
+                TrainingWorkload::DistillRefresh,
+                Some(crate::state::DISTILL_REFRESH_COMPOSITE_ADMISSION_UNAVAILABLE.to_string()),
+            ),
+        ]
+    }
+
+    fn unavailable_workloads(reason: &str) -> [(TrainingWorkload, Option<String>); 4] {
+        [
+            (TrainingWorkload::Sft, Some(reason.to_string())),
+            (TrainingWorkload::Grpo, Some(reason.to_string())),
+            (TrainingWorkload::Opd, Some(reason.to_string())),
+            (TrainingWorkload::DistillRefresh, Some(reason.to_string())),
+        ]
+    }
+
+    #[test]
+    fn optimizer_support_separates_implementation_tuple_and_workload_admission() {
+        let device = kiln_tensor::Device::Metal(0);
+        let workloads = supported_workloads();
+        let support = build_training_optimizer_support_from_capabilities(
+            "metal",
+            device,
+            kiln_tensor::DType::BF16,
+            training_capabilities_for(
+                "metal",
+                device,
+                kiln_model::backend::TrainingPrecisionPolicy::metal(),
+            ),
+            64,
+            None,
+            &workloads,
+        );
+        let json = serde_json::to_value(support).unwrap();
+
+        assert_eq!(json["schema"]["id"], "kiln.training-optimizer-support");
+        assert_eq!(json["schema"]["version"], 1);
+        assert_eq!(json["backend"], "metal");
+        assert_eq!(json["device"], "metal:0");
+        assert_eq!(json["base_weight_dtype"], "bf16");
+        assert_eq!(json["resolved_lora_parameter_dtype"], "bf16");
+        assert_eq!(json["immutable_after_startup"], true);
+        assert_eq!(
+            json["rounding_modes"],
+            serde_json::json!(["round_to_nearest"])
+        );
+        assert_eq!(
+            json["optimizer_tuple_kinds"],
+            serde_json::json!(["muon", "adam_w"])
+        );
+        assert_eq!(json["workloads"][0]["workload"], "sft");
+        assert_eq!(json["workloads"][0]["supported"], true);
+        assert_eq!(
+            json["workloads"][0]["allowed_optimizer_kinds"],
+            serde_json::json!(["muon", "adam_w"])
+        );
+        assert_eq!(json["workloads"][3]["workload"], "distill_refresh");
+        assert_eq!(json["workloads"][3]["supported"], false);
+        assert_eq!(
+            json["workloads"][3]["unavailable_reason"],
+            crate::state::DISTILL_REFRESH_COMPOSITE_ADMISSION_UNAVAILABLE
+        );
+        assert_eq!(
+            json["workloads"][3]["allowed_optimizer_kinds"],
+            serde_json::json!([])
+        );
+
+        let optimizers = json["optimizers"].as_array().unwrap();
+        let muon = optimizers
+            .iter()
+            .find(|item| item["kind"] == "muon")
+            .unwrap();
+        assert_eq!(muon["backend_implementation"]["supported"], true);
+        assert_eq!(
+            muon["backend_implementation"]["route"],
+            "native_device_hook"
+        );
+        assert_eq!(muon["backend_implementation"]["native_device_hook"], true);
+        assert_eq!(muon["optimizer_tuple"]["supported"], true);
+        assert_eq!(muon["optimizer_tuple"]["lora_rank"]["minimum"], 2);
+        assert_eq!(muon["optimizer_tuple"]["lora_rank"]["maximum"], 32);
+        assert_eq!(muon["optimizer_tuple"]["lora_rank"]["backend_maximum"], 32);
+        assert_eq!(muon["optimizer_tuple"]["lora_rank"]["model_maximum"], 64);
+        assert_eq!(
+            muon["optimizer_tuple"]["lora_rank"]["live_memory_admission_required"],
+            true
+        );
+        let sgd = optimizers
+            .iter()
+            .find(|item| item["kind"] == "sgd")
+            .unwrap();
+        assert_eq!(sgd["backend_implementation"]["supported"], false);
+        assert_eq!(sgd["backend_implementation"]["route"], "unavailable");
+        assert_eq!(
+            sgd["backend_implementation"]["parameter_dtypes"],
+            serde_json::json!([])
+        );
+        assert_eq!(sgd["optimizer_tuple"]["supported"], false);
+        assert!(sgd["optimizer_tuple"]["unavailable_reason"].is_string());
+        let adamw = optimizers
+            .iter()
+            .find(|item| item["kind"] == "adam_w")
+            .unwrap();
+        assert_eq!(adamw["optimizer_tuple"]["lora_rank"]["maximum"], 64);
+        assert!(adamw["optimizer_tuple"]["lora_rank"]["backend_maximum"].is_null());
+        assert_eq!(adamw["optimizer_tuple"]["lora_rank"]["model_maximum"], 64);
+    }
+
+    #[test]
+    fn optimizer_implementation_does_not_inherit_product_rounding_policy() {
+        static STOCHASTIC_ONLY: &[kiln_model::TrainingOptimizerRounding] =
+            &[kiln_model::TrainingOptimizerRounding::Stochastic];
+
+        let device = kiln_tensor::Device::Metal(0);
+        let workloads = supported_workloads();
+        let mut capabilities = training_capabilities_for(
+            "metal",
+            device,
+            kiln_model::backend::TrainingPrecisionPolicy::metal(),
+        );
+        capabilities.optimizer.rounding_modes = STOCHASTIC_ONLY;
+        let json = serde_json::to_value(build_training_optimizer_support_from_capabilities(
+            "metal",
+            device,
+            kiln_tensor::DType::BF16,
+            capabilities,
+            64,
+            None,
+            &workloads,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            json["rounding_modes"],
+            serde_json::json!(["round_to_nearest"])
+        );
+        assert_eq!(
+            json["backend_implementation_rounding_modes"],
+            serde_json::json!(["stochastic"])
+        );
+        for optimizer in json["optimizers"].as_array().unwrap() {
+            if optimizer["kind"] == "sgd" {
+                assert_eq!(optimizer["backend_implementation"]["supported"], false);
+            } else {
+                assert_eq!(optimizer["backend_implementation"]["supported"], true);
+            }
+            assert_eq!(optimizer["optimizer_tuple"]["supported"], false);
+        }
+        for workload in json["workloads"].as_array().unwrap() {
+            assert_eq!(workload["supported"], false);
+            assert!(
+                workload["allowed_optimizer_kinds"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn optimizer_support_keeps_implementation_facts_when_server_training_is_unavailable() {
+        let device = kiln_tensor::Device::Vulkan(0);
+        let workloads = unavailable_workloads("resident model weights are CPU-hosted");
+        let support = build_training_optimizer_support_from_capabilities(
+            "vulkan",
+            device,
+            kiln_tensor::DType::BF16,
+            training_capabilities_for(
+                "vulkan",
+                device,
+                kiln_model::backend::TrainingPrecisionPolicy::vulkan(),
+            ),
+            64,
+            None,
+            &workloads,
+        );
+        let json = serde_json::to_value(support).unwrap();
+
+        assert_eq!(json["resolved_lora_parameter_dtype"], "f32");
+        assert_eq!(
+            json["optimizer_tuple_kinds"],
+            serde_json::json!(["muon", "adam_w", "sgd"])
+        );
+        for workload in json["workloads"].as_array().unwrap() {
+            assert_eq!(workload["supported"], false);
+            assert_eq!(workload["allowed_optimizer_kinds"], serde_json::json!([]));
+            assert_eq!(
+                workload["unavailable_reason"],
+                "resident model weights are CPU-hosted"
+            );
+        }
+        for optimizer in json["optimizers"].as_array().unwrap() {
+            assert_eq!(optimizer["backend_implementation"]["supported"], true);
+            assert_eq!(
+                optimizer["backend_implementation"]["native_device_hook"],
+                true
+            );
+            assert_eq!(optimizer["optimizer_tuple"]["supported"], true);
+        }
+    }
+
+    #[test]
+    fn cpu_optimizer_execution_is_labeled_as_portable_not_native() {
+        let device = kiln_tensor::Device::Cpu;
+        let workloads = unavailable_workloads("cpu tape training is unavailable");
+        let support = build_training_optimizer_support_from_capabilities(
+            "cpu",
+            device,
+            kiln_tensor::DType::F32,
+            training_capabilities_for(
+                "cpu",
+                device,
+                kiln_model::backend::TrainingPrecisionPolicy::portable(),
+            ),
+            64,
+            None,
+            &workloads,
+        );
+        let json = serde_json::to_value(support).unwrap();
+
+        assert_eq!(
+            json["optimizer_tuple_kinds"],
+            serde_json::json!(["muon", "adam_w", "sgd"])
+        );
+        for workload in json["workloads"].as_array().unwrap() {
+            assert_eq!(workload["supported"], false);
+            assert_eq!(workload["allowed_optimizer_kinds"], serde_json::json!([]));
+        }
+        for optimizer in json["optimizers"].as_array().unwrap() {
+            assert_eq!(optimizer["backend_implementation"]["supported"], true);
+            assert_eq!(
+                optimizer["backend_implementation"]["route"],
+                "portable_reference"
+            );
+            assert_eq!(
+                optimizer["backend_implementation"]["native_device_hook"],
+                false
+            );
+            assert_eq!(optimizer["optimizer_tuple"]["supported"], true);
+        }
+        let optimizers = json["optimizers"].as_array().unwrap();
+        let muon = optimizers
+            .iter()
+            .find(|item| item["kind"] == "muon")
+            .unwrap();
+        assert_eq!(muon["optimizer_tuple"]["lora_rank"]["minimum"], 2);
+        assert_eq!(muon["optimizer_tuple"]["lora_rank"]["maximum"], 64);
+        assert!(muon["optimizer_tuple"]["lora_rank"]["backend_maximum"].is_null());
+        for kind in ["adam_w", "sgd"] {
+            let optimizer = optimizers.iter().find(|item| item["kind"] == kind).unwrap();
+            assert_eq!(optimizer["optimizer_tuple"]["lora_rank"]["minimum"], 1);
+            assert_eq!(optimizer["optimizer_tuple"]["lora_rank"]["maximum"], 64);
+        }
     }
 
     #[test]

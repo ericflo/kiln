@@ -5970,6 +5970,7 @@ fn training_optimizer_capability_is_bound_before_admission_and_allocation() {
         "optimizer.kind()",
         "optimizer.validate_hyperparameters()",
         "TrainingOptimizerRounding::RoundToNearest",
+        "enforce_model_lora_rank_admission(state, lora_rank)?",
         "lora_rank",
     ] {
         assert!(
@@ -5995,20 +5996,36 @@ fn training_optimizer_capability_is_bound_before_admission_and_allocation() {
         "match &mut entry.job {",
     );
     assert!(
-        admission_entry
-            .contains("enforce_training_optimizer_admission(state, optimizer, lora_rank)?"),
-        "all native job variants must reject unsupported optimizers before data preparation and preflight"
+        admission_entry.contains("enforce_queued_training_workload_admission(state, &entry.job)?")
+            && admission_entry
+                .contains("enforce_queued_training_optimizer_admission(state, &entry.job)?"),
+        "all native job variants must reject unsupported workloads and optimizer tuples before data preparation and preflight"
     );
 
     let queue_revalidation = queue
-        .find("enforce_training_optimizer_admission(")
+        .find("enforce_queued_training_workload_admission(")
+        .expect("queue should revalidate workload capability");
+    let queue_optimizer_revalidation = queue
+        .find("enforce_queued_training_optimizer_admission(")
         .expect("queue should revalidate optimizer capability");
+    let resume_materialization = queue_revalidation
+        + queue[queue_revalidation..]
+            .find("materialize_queued_job_effective_seed(")
+            .expect("queue should revalidate resume identity");
     let reservation = queue
         .find("let _mem_reservation =")
         .expect("queue should own a governor reservation boundary");
     assert!(
-        queue_revalidation < reservation,
-        "queued optimizer capability drift must fail before governor reservation"
+        queue_revalidation < queue_optimizer_revalidation
+            && queue_optimizer_revalidation < resume_materialization
+            && resume_materialization < reservation,
+        "queued workload and optimizer capability drift must fail before checkpoint hashing and governor reservation"
+    );
+    assert!(
+        queue[resume_materialization..reservation]
+            .contains("ensure_admitted_resume_checkpoint_unchanged(")
+            && queue[resume_materialization..reservation].contains("admitted_effective_seed"),
+        "the worker must compare the fully validated checkpoint identity and effective seed before governor reservation"
     );
     let teacher_resolution = queue_revalidation
         + queue[queue_revalidation..]
@@ -6019,6 +6036,31 @@ fn training_optimizer_capability_is_bound_before_admission_and_allocation() {
             && queue[queue_revalidation..teacher_resolution]
                 .contains("prepared_data_is_valid.is_ok()"),
         "queued optimizer/data/route revalidation must gate teacher resolution"
+    );
+
+    let common_admission = source_between(
+        &api,
+        "fn admit_training_jobs_with_summary(",
+        "let sft_summaries =",
+    );
+    let common_workload_guard = common_admission
+        .find("enforce_queued_training_workload_admission(state, &entry.job)?")
+        .expect("common admission should guard workload support");
+    let common_optimizer_guard = common_admission
+        .find("enforce_queued_training_optimizer_admission(state, &entry.job)?")
+        .expect("common admission should guard optimizer support");
+    let common_resume_materialization = common_admission
+        .find("materialize_queued_job_effective_seed(")
+        .expect("common admission should materialize resume identity");
+    assert!(
+        common_workload_guard < common_optimizer_guard
+            && common_optimizer_guard < common_resume_materialization,
+        "submit-time workload and optimizer guards must precede checkpoint hashing and corpus preparation"
+    );
+    assert!(
+        common_admission[common_resume_materialization..]
+            .contains("entry.admitted_resume_checkpoint = resume_admission.checkpoint"),
+        "common admission must retain the compact fully validated checkpoint identity for dequeue revalidation"
     );
 
     let trainer_guard = source_between(

@@ -28,7 +28,10 @@ pub mod terminal;
 mod training;
 mod ui;
 
-pub(crate) use training::enforce_training_optimizer_admission;
+pub(crate) use training::{
+    enforce_queued_training_optimizer_admission, enforce_queued_training_workload_admission,
+    enforce_training_optimizer_admission,
+};
 
 #[cfg(test)]
 pub(crate) fn test_tokenizer() -> kiln_core::tokenizer::KilnTokenizer {
