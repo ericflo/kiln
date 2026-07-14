@@ -1,10 +1,10 @@
-//! End-to-end test: queue an eval job, run the worker loop directly, and
-//! verify the tracked job ends `Completed` with the expected metrics.
+//! Mock eval worker-pipeline test: construct tracked state, run one inline
+//! suite with a canned generator, and verify the completion transition.
 //!
 //! This test doesn't go through axum at all — it constructs an `AppState`
 //! with a tweaked queue, runs `run_one_eval_for_test`, and asserts. The
-//! goal is to catch worker-side bugs (state-machine transitions, callback
-//! plumbing, error swallowing) that the unit tests don't reach.
+//! goal is to catch worker-side bugs (state-machine transitions and callback
+//! plumbing). It does not load a model or exercise a serving backend.
 
 use std::sync::Arc;
 

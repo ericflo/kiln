@@ -1,4 +1,4 @@
-//! End-to-end smoke test for the built-in qwen3.5-agentic-core suite.
+//! Mock-executor tests for the built-in qwen3.5-agentic-core suite.
 //!
 //! Runs the suite through the live executor against a custom mock
 //! generator that emits canonical Qwen3.5 XML replies — verifying:
@@ -119,11 +119,11 @@ async fn builtin_qwen3_agentic_core_validates_and_lists_tools() {
 
 /// Construct a tiny synthetic agentic suite mirroring the production
 /// shape (mixed tool calls + no-tool answers + thinking), then run it
-/// end-to-end through the executor. This avoids the brittleness of
+/// through the executor with canned replies. This avoids the brittleness of
 /// "score every example in the built-in suite" while exercising the same
 /// machinery.
 #[tokio::test]
-async fn executor_e2e_with_realistic_qwen3_xml_replies() {
+async fn mock_executor_scores_canonical_qwen3_xml_replies() {
     // Use a custom suite so we can control the order of replies exactly.
     use kiln_eval::EvalExample;
     use kiln_eval::scorers::{ArgsScoring, NameMatch, Scorer};
