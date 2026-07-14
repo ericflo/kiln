@@ -243,6 +243,82 @@ test('validate-only checks Markdown without writing output', async () => {
   assert.equal(result.documentCount, 2);
 });
 
+test('JSON Schema documents render fields, constraints, definitions, and search text', async () => {
+  const fixture = await createFixture();
+  const manifest = fixtureManifest();
+  manifest.documents.push({
+    source: 'contracts/receipt.schema.json',
+    kind: 'json_schema',
+    slug: 'receipt-schema',
+    title: 'Receipt Schema',
+    section: 'start',
+    description: 'Generated receipt contract.',
+  });
+  await write(fixture.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  await write(
+    resolve(fixture.root, 'contracts/receipt.schema.json'),
+    `${JSON.stringify({
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      $id: 'https://example.test/receipt.schema.json',
+      description: 'Canonical receipt envelope.',
+      type: 'object',
+      additionalProperties: false,
+      required: ['schema_version', 'result'],
+      properties: {
+        schema_version: { type: 'integer', const: 1, description: 'Envelope version.' },
+        result: { $ref: '#/$defs/result', description: 'One result.' },
+      },
+      allOf: [
+        {
+          if: { properties: { schema_version: { const: 1 } } },
+          then: { required: ['result'] },
+        },
+      ],
+      $defs: {
+        result: {
+          description: 'Closed result record.',
+          type: 'object',
+          additionalProperties: false,
+          required: ['status'],
+          properties: {
+            status: { type: 'string', enum: ['passed', 'failed'], description: 'Final status.' },
+            duration_ms: { type: 'number', minimum: 0, default: 0 },
+          },
+        },
+      },
+    }, null, 2)}\n`,
+  );
+
+  const output = resolve(fixture.root, '.schema-output');
+  await buildDocsSite({
+    repoRoot: fixture.root,
+    siteSourceDir: fixture.site,
+    manifestPath: fixture.manifestPath,
+    outDir: output,
+  });
+  const html = await readFile(resolve(output, 'docs/receipt-schema/index.html'), 'utf8');
+  assert.match(html, /Schema identity/);
+  assert.match(html, /Root fields/);
+  assert.match(html, /<code>schema_version<\/code>/);
+  assert.match(html, /const 1/);
+  assert.match(html, /Definitions/);
+  assert.match(html, /id="result"/);
+  assert.match(html, /enum &quot;passed&quot;, &quot;failed&quot;/);
+  assert.match(html, /Composition and conditional rules/);
+  assert.match(html, /&quot;then&quot;: \{/);
+
+  const index = JSON.parse(await readFile(resolve(output, 'docs/search-index.json'), 'utf8'));
+  const entry = index.find((item) => item.slug === 'receipt-schema');
+  assert.match(entry.content, /Canonical receipt envelope/);
+  assert.match(entry.content, /Envelope version/);
+
+  await write(resolve(fixture.root, 'contracts/receipt.schema.json'), '{invalid');
+  await assert.rejects(
+    loadAndValidateManifest({ repoRoot: fixture.root, manifestPath: fixture.manifestPath }),
+    (error) => error instanceof DocsBuildError && /not valid JSON/.test(error.message),
+  );
+});
+
 test('broken Markdown anchors fail before publication', async () => {
   const fixture = await createFixture();
   await write(

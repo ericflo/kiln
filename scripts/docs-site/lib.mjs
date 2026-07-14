@@ -39,6 +39,7 @@ const IMAGE_EXTENSIONS = new Set([
   '.webp',
 ]);
 const OUTPUT_MARKER = '.kiln-docs-site-output';
+const DOCUMENT_KINDS = new Set(['markdown', 'json_schema']);
 
 export class DocsBuildError extends Error {
   constructor(messages) {
@@ -203,6 +204,145 @@ function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() !== '';
 }
 
+function documentKind(document) {
+  return document.kind ?? 'markdown';
+}
+
+function markdownTableCell(value) {
+  return String(value ?? '')
+    .replaceAll('\\', '\\\\')
+    .replaceAll('|', '\\|')
+    .replace(/\s+/g, ' ')
+    .trim() || '-';
+}
+
+function schemaType(schema) {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return 'unknown';
+  if (nonEmptyString(schema.$ref)) return schema.$ref.split('/').at(-1);
+  if (Array.isArray(schema.type)) return schema.type.join(' | ');
+  if (nonEmptyString(schema.type)) {
+    if (schema.type === 'array' && schema.items) return `array<${schemaType(schema.items)}>`;
+    return schema.type;
+  }
+  for (const keyword of ['oneOf', 'anyOf', 'allOf']) {
+    if (Array.isArray(schema[keyword])) {
+      return schema[keyword].map(schemaType).join(keyword === 'allOf' ? ' & ' : ' | ');
+    }
+  }
+  if (schema.properties) return 'object';
+  return 'any';
+}
+
+function compactJson(value) {
+  return JSON.stringify(value).replaceAll('|', '\\u007c');
+}
+
+function schemaConstraints(schema) {
+  const constraints = [];
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return constraints;
+  if (Object.hasOwn(schema, 'const')) constraints.push(`const ${compactJson(schema.const)}`);
+  if (Array.isArray(schema.enum)) constraints.push(`enum ${schema.enum.map(compactJson).join(', ')}`);
+  if (Object.hasOwn(schema, 'default')) constraints.push(`default ${compactJson(schema.default)}`);
+  for (const [keyword, label] of [
+    ['minimum', 'minimum'],
+    ['exclusiveMinimum', 'exclusive minimum'],
+    ['maximum', 'maximum'],
+    ['exclusiveMaximum', 'exclusive maximum'],
+    ['minLength', 'minimum length'],
+    ['maxLength', 'maximum length'],
+    ['minItems', 'minimum items'],
+    ['maxItems', 'maximum items'],
+    ['minProperties', 'minimum properties'],
+    ['maxProperties', 'maximum properties'],
+  ]) {
+    if (Object.hasOwn(schema, keyword)) constraints.push(`${label} ${schema[keyword]}`);
+  }
+  if (nonEmptyString(schema.pattern)) constraints.push(`pattern ${schema.pattern}`);
+  if (nonEmptyString(schema.format)) constraints.push(`format ${schema.format}`);
+  if (schema.uniqueItems === true) constraints.push('unique items');
+  if (schema.additionalProperties === false) constraints.push('closed object');
+  return constraints;
+}
+
+function schemaFieldTable(schema) {
+  const properties = schema?.properties;
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
+    return '_This schema node has no named object fields._\n';
+  }
+  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  const rows = Object.entries(properties).map(([name, field]) => {
+    const description = field?.description ?? field?.title ?? '';
+    return `| \`${markdownTableCell(name)}\` | ${required.has(name) ? 'yes' : 'no'} | \`${markdownTableCell(schemaType(field))}\` | ${markdownTableCell(schemaConstraints(field).join('; '))} | ${markdownTableCell(description)} |`;
+  });
+  return [
+    '| Field | Required | Type | Constraints and default | Description |',
+    '| --- | --- | --- | --- | --- |',
+    ...rows,
+    '',
+  ].join('\n');
+}
+
+function schemaStructuralRules(schema) {
+  const rules = {};
+  for (const keyword of [
+    'allOf',
+    'anyOf',
+    'oneOf',
+    'not',
+    'if',
+    'then',
+    'else',
+    'dependentRequired',
+    'dependentSchemas',
+    'propertyNames',
+    'patternProperties',
+    'contains',
+  ]) {
+    if (Object.hasOwn(schema ?? {}, keyword)) rules[keyword] = schema[keyword];
+  }
+  if (schema?.additionalProperties && typeof schema.additionalProperties === 'object') {
+    rules.additionalProperties = schema.additionalProperties;
+  }
+  return rules;
+}
+
+function schemaStructuralMarkdown(schema, headingLevel) {
+  const rules = schemaStructuralRules(schema);
+  if (Object.keys(rules).length === 0) return '';
+  const heading = '#'.repeat(headingLevel);
+  return `${heading} Composition and conditional rules\n\nThe following JSON is copied exactly from this schema node.\n\n\`\`\`json\n${JSON.stringify(rules, null, 2)}\n\`\`\`\n`;
+}
+
+function renderJsonSchemaMarkdown(schema, document) {
+  const lines = [`# ${document.title}`, ''];
+  if (nonEmptyString(schema.description)) lines.push(schema.description.trim(), '');
+  lines.push('## Schema identity', '');
+  lines.push('| Property | Value |', '| --- | --- |');
+  if (nonEmptyString(schema.$id)) lines.push(`| \`$id\` | \`${markdownTableCell(schema.$id)}\` |`);
+  if (nonEmptyString(schema.$schema)) lines.push(`| Dialect | \`${markdownTableCell(schema.$schema)}\` |`);
+  lines.push(`| Root type | \`${markdownTableCell(schemaType(schema))}\` |`);
+  lines.push(`| Root object | ${schema.additionalProperties === false ? 'closed' : 'open or unspecified'} |`, '');
+  lines.push('## Root fields', '', schemaFieldTable(schema));
+  const rootRules = schemaStructuralMarkdown(schema, 3);
+  if (rootRules) lines.push(rootRules);
+
+  const definitions = schema.$defs ?? schema.definitions ?? {};
+  if (definitions && typeof definitions === 'object' && !Array.isArray(definitions)) {
+    const entries = Object.entries(definitions);
+    if (entries.length > 0) lines.push('## Definitions', '');
+    for (const [name, definition] of entries) {
+      lines.push(`### ${name}`, '');
+      if (nonEmptyString(definition?.description)) lines.push(definition.description.trim(), '');
+      const constraints = schemaConstraints(definition);
+      lines.push(`Type: \`${schemaType(definition)}\`${constraints.length ? `. Constraints: ${constraints.join('; ')}.` : '.'}`, '');
+      if (definition?.properties) lines.push(schemaFieldTable(definition));
+      const definitionRules = schemaStructuralMarkdown(definition, 4);
+      if (definitionRules) lines.push(definitionRules);
+    }
+  }
+  return `${lines.join('\n').trim()}\n`;
+}
+
 async function pathIsFile(path) {
   try {
     return (await lstat(path)).isFile();
@@ -290,8 +430,16 @@ export async function loadAndValidateManifest({ repoRoot, manifestPath }) {
     if (segments.some((segment) => EXCLUDED_SOURCE_SEGMENTS.has(segment))) {
       errors.push(`${label}.source points at an excluded internal documentation tree: ${document.source}`);
     }
-    if (extname(document.source).toLowerCase() !== '.md') {
-      errors.push(`${label}.source must be a Markdown file`);
+    const kind = documentKind(document);
+    if (!DOCUMENT_KINDS.has(kind)) {
+      errors.push(`${label}.kind must be one of ${[...DOCUMENT_KINDS].join(', ')}`);
+    }
+    const extension = extname(document.source).toLowerCase();
+    if (kind === 'markdown' && extension !== '.md') {
+      errors.push(`${label}.source must be a Markdown file for kind markdown`);
+    }
+    if (kind === 'json_schema' && extension !== '.json') {
+      errors.push(`${label}.source must be a JSON file for kind json_schema`);
     }
     if (sources.has(document.source)) {
       errors.push(`duplicate document source ${document.source}`);
@@ -316,6 +464,17 @@ export async function loadAndValidateManifest({ repoRoot, manifestPath }) {
       errors.push(`${label}.source escapes the repository: ${document.source}`);
     } else if (!(await pathIsFile(absoluteSource))) {
       errors.push(`${label}.source does not exist or is not a file: ${document.source}`);
+    } else if (kind === 'json_schema') {
+      try {
+        const schema = JSON.parse(await readFile(absoluteSource, 'utf8'));
+        if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+          errors.push(`${label}.source must contain a JSON Schema object`);
+        } else if (!nonEmptyString(schema.$schema)) {
+          errors.push(`${label}.source must declare a non-empty $schema dialect`);
+        }
+      } catch (error) {
+        errors.push(`${label}.source is not valid JSON: ${error.message}`);
+      }
     }
   }
   if (!hasConfiguration) {
@@ -699,7 +858,18 @@ export async function buildDocsSite({
   async function analyze(source) {
     if (analysisCache.has(source)) return analysisCache.get(source);
     const sourcePath = resolve(resolvedRepoRoot, source);
-    const raw = await readFile(sourcePath, 'utf8');
+    const sourceRaw = await readFile(sourcePath, 'utf8');
+    const document = documentBySource.get(source);
+    let raw = sourceRaw;
+    if (documentKind(document ?? {}) === 'json_schema') {
+      let schema;
+      try {
+        schema = JSON.parse(sourceRaw);
+      } catch (error) {
+        throw new DocsBuildError(`${source}: cannot render JSON Schema: ${error.message}`);
+      }
+      raw = renderJsonSchemaMarkdown(schema, document);
+    }
     const tokens = markdown.parse(raw, {});
     const headingData = decorateHeadings(tokens, raw);
     const analysis = {

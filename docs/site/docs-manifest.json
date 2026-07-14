@@ -105,6 +105,14 @@
       "description": "Token and wall-clock reasoning limits across APIs, streaming, and clients."
     },
     {
+      "source": "contracts/thinking-budget-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "thinking-budget-schema",
+      "title": "Thinking Budget Schema",
+      "section": "serving",
+      "description": "Generated field-level reference for the canonical thinking-budget request, resolution, streaming, and provenance contract."
+    },
+    {
       "source": "docs/NATIVE_SFT_PROFILE.md",
       "slug": "native-sft-profile",
       "title": "Native SFT Profile",
@@ -208,6 +216,30 @@
       "title": "Training Receipt Schema",
       "section": "integrity",
       "description": "Versioned training receipt fields, evidence, and compatibility rules."
+    },
+    {
+      "source": "qualification/schema/workload-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "qualification-workload-schema",
+      "title": "Qualification Workload Schema",
+      "section": "integrity",
+      "description": "Generated field-level reference for source-bound local hardware workload manifests."
+    },
+    {
+      "source": "qualification/schema/case-result-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "qualification-case-result-schema",
+      "title": "Qualification Case Result Schema",
+      "section": "integrity",
+      "description": "Generated field-level reference for structured local qualification case results."
+    },
+    {
+      "source": "qualification/schema/receipt-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "qualification-receipt-schema",
+      "title": "Qualification Receipt Schema",
+      "section": "integrity",
+      "description": "Generated field-level reference for compact source-bound local hardware evidence."
     },
     {
       "source": "docs/qualification.md",
