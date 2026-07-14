@@ -380,13 +380,20 @@ def execute(
     run_dir = ROOT / ".qualification/serving" / f"soak-{os.getpid()}"
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
+    config_path = run_dir / "kiln.toml"
     adapter_dir.mkdir(parents=True, exist_ok=False)
-    environment = mixed.server_environment(
-        RUNTIME_VARIANT, model_path, port, adapter_dir, snapshot_dir
+    mixed.write_server_config(
+        config_path,
+        RUNTIME_VARIANT,
+        model_path,
+        port,
+        adapter_dir,
+        snapshot_dir,
+        rocm_graph_cache_entries=GRAPH_CACHE_MAX,
     )
-    environment[mixed.ROCM_GRAPH_CACHE_ENTRIES_ENV] = str(GRAPH_CACHE_MAX)
+    environment = mixed.server_environment(RUNTIME_VARIANT)
     process = subprocess.Popen(
-        [str(binary), "--config", "/dev/null", "serve", "--served-model-id", mixed.MODEL_ID],
+        [str(binary), "--config", str(config_path), "serve"],
         cwd=ROOT,
         env=environment,
         stdout=subprocess.PIPE,

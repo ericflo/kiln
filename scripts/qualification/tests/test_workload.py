@@ -97,6 +97,8 @@ class WorkloadTests(unittest.TestCase):
             "prefill-scheduling-v1.json",
             "serving-mixed-rocm-v1.json",
             "serving-rocm-graph-correctness-v1.json",
+            "serving-rocm-graph-failure-containment-v1.json",
+            "serving-rocm-graph-resilience-v1.json",
             "serving-rocm-development-soak-v1.json",
             "serving-rocm-memory-pressure-v1.json",
             "serving-rocm-sync-ab-v1.json",

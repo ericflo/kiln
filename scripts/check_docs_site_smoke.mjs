@@ -457,6 +457,27 @@ const generatedDocsPages = [
       'runtime.sft_loss_route',
     ],
   },
+  {
+    label: 'Local Hardware Qualification',
+    path: publishedPath('docs/hardware-qualification/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/hardware-qualification/',
+    h1: 'Local Hardware Qualification',
+    terms: [
+      'private TOML file',
+      'KILN_DEBUG_ENDPOINTS=1',
+      'KILN_KV_AUTOSCALE=0',
+      'serving-rocm-graph-resilience-v1.json',
+      'headroom-vs-tight-budget',
+      'concurrency 1, 8, 16, 32, and 64',
+      '121 measured requests per arm',
+      'zero attributed or unexplained ITL outliers',
+      'serving-rocm-graph-failure-containment-v1.json',
+      'real-rocm-graph-fault-corpus',
+      'shape-dependent attention geometry',
+      'poisons only a live graph',
+      'Missing devices and skipped tests are failures',
+    ],
+  },
 ];
 
 const expectedQuickstartSections = [

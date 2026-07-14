@@ -380,18 +380,21 @@ def run_mode(
     run_dir = ROOT / ".qualification/serving" / f"graph-correctness-{mode}-{os.getpid()}"
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
+    config_path = run_dir / "kiln.toml"
     adapter_dir.mkdir(parents=True, exist_ok=False)
-    environment = mixed.server_environment(
-        mode, model_path, port, adapter_dir, snapshot_dir
+    mixed.write_server_config(
+        config_path,
+        mode,
+        model_path,
+        port,
+        adapter_dir,
+        snapshot_dir,
+        deterministic=True,
+        rocm_graph_cache_entries=GRAPH_CACHE_MAX,
     )
-    environment.update(
-        {
-            "KILN_DETERMINISTIC": "1",
-            mixed.ROCM_GRAPH_CACHE_ENTRIES_ENV: str(GRAPH_CACHE_MAX),
-        }
-    )
+    environment = mixed.server_environment(mode)
     process = subprocess.Popen(
-        [str(binary), "--config", "/dev/null", "serve", "--served-model-id", mixed.MODEL_ID],
+        [str(binary), "--config", str(config_path), "serve"],
         cwd=ROOT,
         env=environment,
         stdout=subprocess.PIPE,

@@ -601,13 +601,15 @@ def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str | No
     run_dir = ROOT / ".qualification/serving-pressure" / str(os.getpid())
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
+    config_path = run_dir / "kiln.toml"
     adapter_dir.mkdir(parents=True, exist_ok=False)
-    environment = mixed.server_environment(
-        VARIANT_ID, model_path, port, adapter_dir, snapshot_dir
+    mixed.write_server_config(
+        config_path, VARIANT_ID, model_path, port, adapter_dir, snapshot_dir
     )
+    environment = mixed.server_environment(VARIANT_ID)
     observed_since = time.monotonic()
     server = subprocess.Popen(
-        [str(binary), "--config", "/dev/null", "serve", "--served-model-id", mixed.MODEL_ID],
+        [str(binary), "--config", str(config_path), "serve"],
         cwd=ROOT,
         env=environment,
         stdout=subprocess.PIPE,

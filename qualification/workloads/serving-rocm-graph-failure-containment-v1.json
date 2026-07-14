@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "kind": "correctness",
+  "workload_id": "serving-rocm-graph-failure-containment-v1",
+  "description": "Run the explicit real-ROCm graph fallback, lifecycle-parity, and stale-generation containment corpus through the bounded source build path.",
+  "determinism": {
+    "seed": 20260713,
+    "seed_delivery": "fixed_fixture",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "comparison_policy": {
+    "mode": "self_contained_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": []
+  },
+  "variants": [
+    {
+      "id": "real-rocm-graph-fault-corpus",
+      "description": "Compile the current kiln-model ROCm library tests and require all three ignored hardware cases to execute rather than skip.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "cargo_jobs": 1,
+          "cargo_memory_scope": "systemd_user_memory_max_no_swap",
+          "cargo_min_available_gib": 15,
+          "cargo_wrapper": "scripts/cargo-bounded.sh",
+          "features": "rocm",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-model",
+          "rocm_archs": "gfx1151",
+          "rocm_path": "/opt/rocm",
+          "test_threads": 1
+        },
+        "runtime": {
+          "qualification_opt_in": true,
+          "required_backend": "rocm",
+          "required_device": "gfx1151"
+        },
+        "workload": {
+          "expected_test_count": 3,
+          "tests": {
+            "test_0": "shape_dependent_attention_is_cached_as_typed_eager_fallback",
+            "test_1": "graph_parity_across_buckets_prefix_cancellation_and_adapter_boundary",
+            "test_2": "stale_pool_generation_refuses_native_replay_and_falls_back_eager"
+          }
+        }
+      },
+      "cases": [
+        {
+          "id": "rocm-graph-failure-containment",
+          "description": "Require typed eager fallback for unsupported graph geometry, exact lifecycle parity across prefix/cancellation/adapter boundaries, and eager recovery before native launch for a poisoned retained generation.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_rocm_graph_failure_containment.py"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 1500,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*rocm)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "failed_test_count",
+              "graph_lifecycle_parity_test_count",
+              "passed_test_count",
+              "shape_dependent_fallback_test_count",
+              "stale_generation_containment_test_count"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

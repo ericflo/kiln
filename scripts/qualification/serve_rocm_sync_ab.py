@@ -249,26 +249,26 @@ def expected_policy(mode: str) -> dict[str, Any]:
         "schema_id": "kiln.accelerator-runtime-policy.v2",
         "version": 2,
         "serving_profile": "experimental",
-        "serving_profile_source": "environment",
+        "serving_profile_source": "file",
         "rocm_synchronization_mode": {
             "configured": mode,
             "effective": mode,
-            "source": "environment",
+            "source": "file",
         },
         "rocm_graph_mode": {
             "configured": "disabled",
             "effective": "disabled",
-            "source": "environment",
+            "source": "file",
         },
         "rocm_graph_cache_entries": {
             "configured": 8,
             "effective": 8,
-            "source": "default",
+            "source": "file",
         },
         "rocm_graph_cache_max_bytes": {
             "configured": 1 << 30,
             "effective": 1 << 30,
-            "source": "default",
+            "source": "file",
         },
     }
 
@@ -551,14 +551,21 @@ def run_arm(
     run_dir = ROOT / ".qualification/serving" / f"sync-ab-{mode}-{os.getpid()}"
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
+    config_path = run_dir / "kiln.toml"
     adapter_dir.mkdir(parents=True, exist_ok=False)
-    environment = mixed.server_environment(
-        mode, model_path, port, adapter_dir, snapshot_dir
+    mixed.write_server_config(
+        config_path,
+        mode,
+        model_path,
+        port,
+        adapter_dir,
+        snapshot_dir,
+        rocm_synchronization_mode=mode,
+        rocm_graph_mode="disabled",
     )
-    environment[mixed.ROCM_SYNCHRONIZATION_MODE_ENV] = mode
-    environment[mixed.ROCM_GRAPH_MODE_ENV] = "disabled"
+    environment = mixed.server_environment(mode)
     process = subprocess.Popen(
-        [str(binary), "--config", "/dev/null", "serve", "--served-model-id", mixed.MODEL_ID],
+        [str(binary), "--config", str(config_path), "serve"],
         cwd=ROOT,
         env=environment,
         stdout=subprocess.PIPE,

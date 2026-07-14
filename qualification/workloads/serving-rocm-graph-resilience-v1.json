@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "kind": "correctness",
+  "workload_id": "serving-rocm-graph-resilience-v1",
+  "description": "Compare exact full-model ROCm streaming output under 1 GiB and 64 MiB graph-byte budgets while progressing through concurrency 1, 8, 16, 32, and 64.",
+  "determinism": {
+    "seed": 20260713,
+    "seed_delivery": "argv",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "comparison_policy": {
+    "mode": "self_contained_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": []
+  },
+  "variants": [
+    {
+      "id": "headroom-vs-tight-budget",
+      "description": "Run the same source-bound binary, seed, prompt corpus, and concurrency ladder against headroom and minimum supported graph-byte budgets on required gfx1151 ROCm.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "cargo_jobs": 1,
+          "cargo_memory_scope": "systemd_user_memory_max_no_swap",
+          "cargo_min_available_gib": 15,
+          "cargo_wrapper": "scripts/cargo-bounded.sh",
+          "features": "rocm",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "rocm_archs": "gfx1151",
+          "rocm_path": "/opt/rocm"
+        },
+        "runtime": {
+          "kv_autoscale_enabled": false,
+          "kv_autoscale_requested": false,
+          "memory_reclaim_mode": "off",
+          "memory_reclaim_requested_mode": "off",
+          "rocm_graph_cache_entries": 64,
+          "rocm_graph_cache_max_bytes_by_arm": {
+            "headroom": 1073741824,
+            "tight": 67108864
+          },
+          "rocm_graph_mode": "lazy_capture_replay",
+          "rocm_graphs_enabled": true,
+          "rocm_graphs_requested": true,
+          "serving_profile": "experimental"
+        },
+        "server": {
+          "chat_performance_metadata_enabled": true,
+          "debug_endpoints_enabled": true,
+          "default_thinking_enabled": false,
+          "http_send_buffer_bytes": 4096,
+          "log_format": "json",
+          "max_active_requests": 12,
+          "max_decode_batch": 8,
+          "max_prefill_layers_per_cycle": 4,
+          "max_prefill_staging_priority_burst": 4,
+          "max_prefill_staging_slots": 4,
+          "max_prefill_tokens_per_cycle": 64,
+          "request_timeout_seconds": 180,
+          "stream_stall_grace_ms": 2000
+        },
+        "workload": {
+          "arm_order": {
+            "arm_0": "headroom",
+            "arm_1": "tight"
+          },
+          "build_reuse": "one_source_bound_binary_for_both_arms",
+          "concurrency_levels": {
+            "level_0": 1,
+            "level_1": 8,
+            "level_2": 16,
+            "level_3": 32,
+            "level_4": 64
+          },
+          "graph_cache_entries": 64,
+          "headroom_budget_bytes": 1073741824,
+          "max_tokens": 8,
+          "output_comparison": "exact_canonical_streamed_semantic_deltas",
+          "pause_policy": "zero_attributed_or_unexplained_itl_outliers",
+          "prompt_word_buckets": {
+            "bucket_0": 16,
+            "bucket_1": 32,
+            "bucket_2": 64,
+            "bucket_3": 128,
+            "bucket_4": 256,
+            "bucket_5": 384,
+            "bucket_6": 512,
+            "bucket_7": 768
+          },
+          "request_count_per_arm": 121,
+          "request_timeout_seconds": 120,
+          "tight_budget_bytes": 67108864,
+          "warmup_max_tokens": 16
+        }
+      },
+      "cases": [
+        {
+          "id": "rocm-graph-budget-concurrency",
+          "description": "Build current source once; require exact A/B streamed output, bounded graph memory, an observed tight-budget decision, clean graph lifecycle, zero device faults, and zero attributed or unexplained ITL outliers through concurrency 64.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_rocm_graph_resilience.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*rocm)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "attributed_itl_outlier_count",
+              "concurrency_16_e2e_ms_p99",
+              "concurrency_16_itl_ms_p99",
+              "concurrency_16_request_count",
+              "concurrency_16_ttft_ms_p99",
+              "concurrency_1_e2e_ms_p99",
+              "concurrency_1_itl_ms_p99",
+              "concurrency_1_request_count",
+              "concurrency_1_ttft_ms_p99",
+              "concurrency_32_e2e_ms_p99",
+              "concurrency_32_itl_ms_p99",
+              "concurrency_32_request_count",
+              "concurrency_32_ttft_ms_p99",
+              "concurrency_64_e2e_ms_p99",
+              "concurrency_64_itl_ms_p99",
+              "concurrency_64_request_count",
+              "concurrency_64_ttft_ms_p99",
+              "concurrency_8_e2e_ms_p99",
+              "concurrency_8_itl_ms_p99",
+              "concurrency_8_request_count",
+              "concurrency_8_ttft_ms_p99",
+              "graph_budget_event_count",
+              "headroom_graph_capture_count",
+              "headroom_graph_failure_count",
+              "headroom_graph_peak_retained_bytes",
+              "headroom_graph_replay_count",
+              "headroom_peak_gpu_memory_used_bytes",
+              "max_completed_concurrency",
+              "output_mismatch_count",
+              "request_failure_count",
+              "tight_graph_budget_eviction_count",
+              "tight_graph_byte_budget_rejection_count",
+              "tight_graph_capture_count",
+              "tight_graph_failure_count",
+              "tight_graph_peak_retained_bytes",
+              "tight_graph_pre_capture_byte_budget_skip_count",
+              "tight_graph_replay_count",
+              "tight_peak_gpu_memory_used_bytes",
+              "unexplained_itl_outlier_count"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

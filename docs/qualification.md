@@ -234,6 +234,20 @@ model directory and `--model-id` with its public identity. Select each declared
 A/B arm explicitly; the manifest, not an ambient environment variable, owns
 the effective configuration recorded in the receipt.
 
+The ROCm serving drivers materialize that declared policy as a private TOML
+file inside the ignored run directory and start `kiln serve --config <file>`.
+Server profile, bind address, model/snapshot/adapter paths, thinking default,
+transport bounds, scheduling ceilings, logging, memory reclaim, synchronization,
+graph mode, graph entry capacity, and graph byte capacity therefore travel
+through the same typed parser and source diagnostics as an operator config.
+The process environment is scrubbed of ambient `KILN_*` controls before build
+and launch. Two narrow exceptions remain visible rather than hidden:
+`KILN_DEBUG_ENDPOINTS=1` is the internal qualification capability that grants
+the trusted debug readback, and the legacy `KILN_KV_AUTOSCALE=0` switch remains
+only on arms that disable the not-yet-typed autoscaler. Moving that final switch
+under `[memory]` is still configuration-migration work; qualification rejects
+any other ambient runtime control.
+
 For the supported Strix Halo ROCm serving contract, run the `stable` arm. It
 deliberately requests autoscaling, automatic allocator reclaim, and ROCm graphs,
 then requires the stable profile to suppress all three while mixed SSE load,
@@ -299,6 +313,63 @@ request drain removes its continuity timeline and returns the slot to an idle
 pool without destroying native graphs or their graph-stable recurrent buffers.
 Adapter invalidation destroys native graphs before their buffers. Graceful
 server shutdown closes and joins the decode worker before accelerator teardown.
+
+Run the graph-memory and concurrency gate after the exact source has compiled
+successfully on the Strix Halo host:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" ROCM_PATH=/opt/rocm \
+python3 scripts/qualification/run.py \
+  --variant headroom-vs-tight-budget \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen3.5-4B \
+  qualification/workloads/serving-rocm-graph-resilience-v1.json
+```
+
+This is one source-bound server binary and two sequential server processes. The
+headroom arm permits 64 entries and 1 GiB of retained graph allocations; the
+tight arm keeps the same entry limit but uses the minimum supported 64 MiB byte
+budget. Each arm warms a real graph outcome, then runs mixed prompt buckets at
+client concurrency 1, 8, 16, 32, and 64, for 121 measured requests per arm.
+Every request is fixed to eight output tokens and the driver compares canonical
+streamed semantic deltas exactly across arms, excluding only dynamic response
+envelope fields such as request ID and creation time.
+
+The gate fails on an HTTP/request error, output mismatch, non-length finish,
+missing token timing, device fault, graph capture/replay failure, retained bytes
+above the configured ceiling, entries above capacity, active owner/slot residue,
+dirty model snapshot, forced/nonzero shutdown, or any ITL gap above
+`max(250 ms, 5 * rolling p50 ITL)`. Both attributed gaps, including graph setup
+and synchronization, and unexplained gaps are failures; attribution is retained
+to diagnose the source, not to waive a pause. The headroom arm must capture and
+replay. The tight arm must make at least one typed byte-budget decision through
+pre-capture skip, post-capture rejection, deterministic budget eviction, or the
+closed `graph_cache_byte_budget` eager fallback. The receipt publishes p99 TTFT,
+ITL, and E2E latency at every concurrency plus graph and peak-memory counters.
+A passing receipt therefore has zero attributed or unexplained ITL outliers.
+
+Run the destructive-identity and fallback-containment corpus separately. It
+uses the bounded Cargo wrapper, one compile job, the unchanged 15 GiB host-memory
+floor, offline dependencies, one test thread, and a required real ROCm device:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" ROCM_PATH=/opt/rocm \
+python3 scripts/qualification/run.py \
+  --variant real-rocm-graph-fault-corpus \
+  --host-id strix-halo \
+  qualification/workloads/serving-rocm-graph-failure-containment-v1.json
+```
+
+All three ignored hardware tests must actually execute. The first proves that a
+shape-dependent attention geometry is cached as a typed eager fallback rather
+than captured. The second crosses sequence buckets and block tables, reuses a
+released slot after cancellation/prefix activity, invalidates at an adapter
+boundary, and requires exact eager parity. The third poisons only a live graph's
+retained pool generation while leaving the physical allocation valid; the
+guard must prevent native launch, count one replay failure, clear and disable
+graphs, preserve the cache identity, and return exact same-cache eager output.
+Missing devices and skipped tests are failures, not successful no-ops.
 
 A native capture failure is eligible for the `capture_failure` eager fallback
 only when `capture_rollback` first settles physical work with execution

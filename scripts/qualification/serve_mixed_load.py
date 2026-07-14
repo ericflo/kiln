@@ -31,10 +31,8 @@ CASE_ID = "mixed-load"
 RESULT_ENV = "KILN_QUALIFICATION_CASE_RESULT"
 VARIANT_ENV = "KILN_QUALIFICATION_VARIANT_ID"
 RUNNER_OWNED_KILN_ENVIRONMENT = frozenset({RESULT_ENV, VARIANT_ENV})
-ROCM_GRAPH_MODE_ENV = "KILN_ACCELERATOR_ROCM_GRAPH_MODE"
-ROCM_GRAPH_CACHE_ENTRIES_ENV = "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES"
-ROCM_SYNCHRONIZATION_MODE_ENV = "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE"
 MODEL_ID = "Qwen3.5-4B"
+MODEL_SOURCE_ID = "Qwen/Qwen3.5-4B"
 BUILD_PACKAGE = "kiln-server"
 BUILD_BINARY = "kiln"
 BUILD_PROFILE = "release"
@@ -701,6 +699,7 @@ class StreamResult:
     actor_queue_ms: float | None = None
     actor_admission_ms: float | None = None
     actor_prefill_wall_ms: float | None = None
+    semantic_deltas: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -908,6 +907,7 @@ def run_stream(
     if absolute_deadline is not None:
         deadline = min(deadline, absolute_deadline)
     semantic_times: list[float] = []
+    semantic_deltas: list[dict[str, Any]] = []
     token_ready_times: list[float] = []
     token_queue_delays_ms: list[float] = []
     previous_ready_ms: float | None = None
@@ -993,6 +993,7 @@ def run_stream(
                     continue
                 if semantic_delta(value):
                     semantic_times.append(observed)
+                    semantic_deltas.append(value)
                     if first_token_event is not None:
                         first_token_event.set()
                     if cancel_after is not None and len(semantic_times) >= cancel_after:
@@ -1004,20 +1005,21 @@ def run_stream(
                                 struct.pack("ii", 1, 0),
                             )
                         return StreamResult(
-                            name,
-                            marker,
-                            started,
-                            time.monotonic(),
-                            semantic_times,
-                            token_ready_times,
-                            token_queue_delays_ms,
-                            0,
-                            0,
-                            0,
-                            None,
-                            False,
-                            True,
-                            None,
+                            name=name,
+                            marker=marker,
+                            started=started,
+                            finished=time.monotonic(),
+                            semantic_times=semantic_times,
+                            token_ready_times=token_ready_times,
+                            token_queue_delays_ms=token_queue_delays_ms,
+                            prompt_tokens=0,
+                            completion_tokens=0,
+                            usage_records=0,
+                            finish_reason=None,
+                            done=False,
+                            cancelled=True,
+                            error=None,
+                            semantic_deltas=semantic_deltas,
                         )
                 reasons.extend(finish_reasons(value))
                 if "usage" in value:
@@ -1083,6 +1085,7 @@ def run_stream(
         actor_queue_ms=actor_queue_ms,
         actor_admission_ms=actor_admission_ms,
         actor_prefill_wall_ms=actor_prefill_wall_ms,
+        semantic_deltas=semantic_deltas,
     )
 
 
@@ -1643,46 +1646,16 @@ def build_binary(absolute_deadline: float) -> tuple[Path, str, float]:
 
 def server_environment(
     variant: str,
-    model_path: Path,
-    port: int,
-    adapter_dir: Path,
-    snapshot_dir: Path,
 ) -> dict[str, str]:
     config = VARIANT_CONFIGS[variant]
     environment = sanitized_environment(dict(os.environ))
     environment.update(
         {
-            "KILN_ADAPTER_DIR": str(adapter_dir),
-            ROCM_GRAPH_MODE_ENV: (
-                "profile"
-                if config["runtime"]["rocm_graphs_requested"]
-                else "disabled"
-            ),
-            "KILN_CHAT_PERFORMANCE_METADATA": (
-                "true" if config["server"]["chat_performance_metadata_enabled"] else "false"
-            ),
+            # Debug endpoint access is an internal qualification capability,
+            # not a public server setting. All public controls are written to
+            # the source-bound TOML file by write_server_config().
             "KILN_DEBUG_ENDPOINTS": (
                 "1" if config["server"]["debug_endpoints_enabled"] else "0"
-            ),
-            "KILN_DEFAULT_THINKING_ENABLED": "false",
-            "KILN_HOST": "127.0.0.1",
-            "KILN_HTTP_SEND_BUFFER_BYTES": str(
-                config["server"]["http_send_buffer_bytes"]
-            ),
-            "KILN_LOG_FORMAT": config["server"]["log_format"],
-            "KILN_MEMORY_RECLAIM_MODE": config["runtime"][
-                "memory_reclaim_requested_mode"
-            ],
-            "KILN_MODEL_PATH": str(model_path),
-            "KILN_MODEL_SNAPSHOT_DIR": str(snapshot_dir),
-            "KILN_PORT": str(port),
-            "KILN_REQUEST_TIMEOUT_SECS": str(
-                config["server"]["request_timeout_seconds"]
-            ),
-            "KILN_SERVED_MODEL_ID": MODEL_ID,
-            "KILN_SERVING_PROFILE": config["runtime"]["serving_profile"],
-            "KILN_STREAM_STALL_GRACE_MS": str(
-                config["server"]["stream_stall_grace_ms"]
             ),
             "RUST_LOG": "kiln=info,kiln_server=info,kiln_model=info,kiln_memory=info,tower_http=warn",
         }
@@ -1690,6 +1663,79 @@ def server_environment(
     if not config["runtime"]["kv_autoscale_requested"]:
         environment["KILN_KV_AUTOSCALE"] = "0"
     return environment
+
+
+def _toml_string(value: str) -> str:
+    """Render a JSON string literal, which is also a valid TOML basic string."""
+    return json.dumps(value, ensure_ascii=True)
+
+
+def write_server_config(
+    path: Path,
+    variant: str,
+    model_path: Path,
+    port: int,
+    adapter_dir: Path,
+    snapshot_dir: Path,
+    *,
+    deterministic: bool | None = None,
+    rocm_synchronization_mode: str | None = None,
+    rocm_graph_mode: str | None = None,
+    rocm_graph_cache_entries: int = 8,
+    rocm_graph_cache_max_bytes: int = 1 << 30,
+) -> None:
+    """Write the complete public qualification launch policy as typed TOML."""
+    config = VARIANT_CONFIGS[variant]
+    runtime = config["runtime"]
+    server = config["server"]
+    if deterministic is None:
+        deterministic = bool(server.get("deterministic", False))
+    if rocm_synchronization_mode is None:
+        rocm_synchronization_mode = runtime.get(
+            "rocm_synchronization_mode", "legacy_host_barriers"
+        )
+    if rocm_graph_mode is None:
+        rocm_graph_mode = runtime.get(
+            "rocm_graph_mode",
+            "profile" if runtime["rocm_graphs_requested"] else "disabled",
+        )
+
+    lines = [
+        "[server]",
+        f"serving_profile = {_toml_string(runtime['serving_profile'])}",
+        f"deterministic = {'true' if deterministic else 'false'}",
+        'host = "127.0.0.1"',
+        f"port = {port}",
+        f"request_timeout_secs = {server['request_timeout_seconds']}",
+        f"http_send_buffer_bytes = {server['http_send_buffer_bytes']}",
+        f"stream_stall_grace_ms = {server['stream_stall_grace_ms']}",
+        f"max_prefill_tokens_per_cycle = {server['max_prefill_tokens_per_cycle']}",
+        f"max_prefill_layers_per_cycle = {server['max_prefill_layers_per_cycle']}",
+        f"max_decode_batch = {server['max_decode_batch']}",
+        "default_thinking_enabled = false",
+        "chat_performance_metadata = true",
+        "",
+        "[accelerator]",
+        f"rocm_synchronization_mode = {_toml_string(rocm_synchronization_mode)}",
+        f"rocm_graph_mode = {_toml_string(rocm_graph_mode)}",
+        f"rocm_graph_cache_entries = {rocm_graph_cache_entries}",
+        f"rocm_graph_cache_max_bytes = {rocm_graph_cache_max_bytes}",
+        "",
+        "[model]",
+        f"path = {_toml_string(str(model_path))}",
+        f"model_id = {_toml_string(MODEL_SOURCE_ID)}",
+        f"adapter_dir = {_toml_string(str(adapter_dir))}",
+        f"snapshot_dir = {_toml_string(str(snapshot_dir))}",
+        f"served_model_id = {_toml_string(MODEL_ID)}",
+        "",
+        "[memory]",
+        f"reclaim_mode = {_toml_string(runtime['memory_reclaim_requested_mode'])}",
+        "",
+        "[logging]",
+        'format = "json"',
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def terminate_process(process: subprocess.Popen[str]) -> ShutdownOutcome:
@@ -1867,40 +1913,40 @@ def accelerator_policy_attestation_failures(
     serving_profile: str,
     graphs_requested: bool,
     graphs_enabled: bool,
+    graph_mode: str | None = None,
     synchronization_mode: str = "legacy_host_barriers",
     graph_cache_entries: int = 8,
     graph_cache_max_bytes: int = 1 << 30,
 ) -> list[str]:
     if not isinstance(value, dict):
         return [f"{label}.accelerator_runtime is missing"]
+    configured_graph_mode = graph_mode or (
+        "profile" if graphs_requested else "disabled"
+    )
     expected = {
         "schema_id": "kiln.accelerator-runtime-policy.v2",
         "version": 2,
         "serving_profile": serving_profile,
-        "serving_profile_source": "environment",
+        "serving_profile_source": "file",
         "rocm_synchronization_mode": {
             "configured": synchronization_mode,
             "effective": synchronization_mode,
-            "source": (
-                "environment"
-                if synchronization_mode != "legacy_host_barriers"
-                else "default"
-            ),
+            "source": "file",
         },
         "rocm_graph_mode": {
-            "configured": "profile" if graphs_requested else "disabled",
+            "configured": configured_graph_mode,
             "effective": "lazy_capture_replay" if graphs_enabled else "disabled",
-            "source": "environment",
+            "source": "file",
         },
         "rocm_graph_cache_entries": {
             "configured": graph_cache_entries,
             "effective": graph_cache_entries,
-            "source": "environment" if graph_cache_entries != 8 else "default",
+            "source": "file",
         },
         "rocm_graph_cache_max_bytes": {
             "configured": graph_cache_max_bytes,
             "effective": graph_cache_max_bytes,
-            "source": "environment" if graph_cache_max_bytes != 1 << 30 else "default",
+            "source": "file",
         },
     }
     return [
@@ -1931,7 +1977,7 @@ def attest_runtime(
     else:
         expected_profile_fields = {
             "profile": expected_profile,
-            "source": "environment",
+            "source": "file",
             "immutable_after_startup": True,
             "request_overrides_allowed": False,
             "effective_policy_source": "serving_profile",
@@ -1975,6 +2021,7 @@ def attest_runtime(
             serving_profile=expected_profile,
             graphs_requested=expected["rocm_graphs_requested"],
             graphs_enabled=expected["rocm_graphs_enabled"],
+            graph_mode=expected.get("rocm_graph_mode"),
             graph_cache_entries=rocm_graph_cache_entries,
             graph_cache_max_bytes=rocm_graph_cache_max_bytes,
         )
@@ -1986,6 +2033,7 @@ def attest_runtime(
             serving_profile=expected_profile,
             graphs_requested=expected["rocm_graphs_requested"],
             graphs_enabled=expected["rocm_graphs_enabled"],
+            graph_mode=expected.get("rocm_graph_mode"),
             graph_cache_entries=rocm_graph_cache_entries,
             graph_cache_max_bytes=rocm_graph_cache_max_bytes,
         )
@@ -2134,8 +2182,8 @@ def attest_runtime(
             failures.append(
                 "memory governor automatic monitor state does not match effective mode"
             )
-        if governor.get("source") != "environment":
-            failures.append("memory reclaim mode was not sourced from the isolated environment")
+        if governor.get("source") != "file":
+            failures.append("memory reclaim mode was not sourced from the launch file")
         if governor.get("disabled_by_serving_profile") != (
             expected_profile == "stable"
         ):
@@ -2149,8 +2197,8 @@ def attest_runtime(
         ]
         if batching.get("stream_stall_grace_ms") != expected_stall_grace:
             failures.append("health batching stream-stall grace does not match config")
-        if batching.get("stream_stall_grace_source") != "environment":
-            failures.append("health batching stream-stall grace source is not environment")
+        if batching.get("stream_stall_grace_source") != "file":
+            failures.append("health batching stream-stall grace source is not file")
         expected_active_policy = {
             "max_decode_batch": VARIANT_CONFIGS[variant]["server"]["max_decode_batch"],
             "max_prefill_staging_slots": VARIANT_CONFIGS[variant]["server"][
@@ -2174,8 +2222,8 @@ def attest_runtime(
         ]
         if batching.get("max_prefill_tokens_per_cycle") != expected_prefill_ceiling:
             failures.append("health batching prefill-token ceiling does not match config")
-        if batching.get("max_prefill_tokens_per_cycle_source") != "default":
-            failures.append("health batching prefill-token ceiling source is not default")
+        if batching.get("max_prefill_tokens_per_cycle_source") != "file":
+            failures.append("health batching prefill-token ceiling source is not file")
         expected_prefill_layer_ceiling = VARIANT_CONFIGS[variant]["server"][
             "max_prefill_layers_per_cycle"
         ]
@@ -2184,8 +2232,8 @@ def attest_runtime(
             != expected_prefill_layer_ceiling
         ):
             failures.append("health batching prefill-layer ceiling does not match config")
-        if batching.get("max_prefill_layers_per_cycle_source") != "default":
-            failures.append("health batching prefill-layer ceiling source is not default")
+        if batching.get("max_prefill_layers_per_cycle_source") != "file":
+            failures.append("health batching prefill-layer ceiling source is not file")
 
         debug_batching = debug.get("batching_engine")
         debug_snapshot = (
@@ -2198,9 +2246,9 @@ def attest_runtime(
         else:
             if (
                 debug_snapshot.get("stream_stall_grace_ms") != expected_stall_grace
-                or debug_snapshot.get("stream_stall_grace_source") != "environment"
+                or debug_snapshot.get("stream_stall_grace_source") != "file"
             ):
-                failures.append("debug batching stream-stall policy does not match environment")
+                failures.append("debug batching stream-stall policy does not match file")
             for field, expected_value in expected_active_policy.items():
                 if debug_snapshot.get(field) != expected_value:
                     failures.append(
@@ -2210,15 +2258,15 @@ def attest_runtime(
             if (
                 debug_snapshot.get("max_prefill_tokens_per_cycle")
                 != expected_prefill_ceiling
-                or debug_snapshot.get("max_prefill_tokens_per_cycle_source") != "default"
+                or debug_snapshot.get("max_prefill_tokens_per_cycle_source") != "file"
             ):
-                failures.append("debug batching prefill-token ceiling does not match default")
+                failures.append("debug batching prefill-token ceiling does not match file")
             if (
                 debug_snapshot.get("max_prefill_layers_per_cycle")
                 != expected_prefill_layer_ceiling
-                or debug_snapshot.get("max_prefill_layers_per_cycle_source") != "default"
+                or debug_snapshot.get("max_prefill_layers_per_cycle_source") != "file"
             ):
-                failures.append("debug batching prefill-layer ceiling does not match default")
+                failures.append("debug batching prefill-layer ceiling does not match file")
 
     flags = debug.get("env_flags")
     if not isinstance(flags, dict):
@@ -2234,40 +2282,32 @@ def attest_runtime(
             failures.append(f"default-on flag {name} must remain absent")
         elif not enabled and (state.get("present") is not True or state.get("value") != "0"):
             failures.append(f"disabled flag {name} must be present with value 0")
-    memory_flag = flags.get("KILN_MEMORY_RECLAIM_MODE")
-    if not isinstance(memory_flag, dict) or memory_flag.get("value") != expected[
-        "memory_reclaim_requested_mode"
-    ]:
-        failures.append("memory reclaim debug flag does not match requested mode")
-    send_buffer_flag = flags.get("KILN_HTTP_SEND_BUFFER_BYTES")
-    if (
-        not isinstance(send_buffer_flag, dict)
-        or send_buffer_flag.get("present") is not True
-        or send_buffer_flag.get("value") != str(expected_send_buffer)
+    for name, label in (
+        ("KILN_MEMORY_RECLAIM_MODE", "memory reclaim"),
+        ("KILN_HTTP_SEND_BUFFER_BYTES", "HTTP send-buffer"),
+        ("KILN_STREAM_STALL_GRACE_MS", "stream-stall grace"),
     ):
-        failures.append("HTTP send-buffer debug flag does not match effective mode")
-    stall_grace_flag = flags.get("KILN_STREAM_STALL_GRACE_MS")
-    if (
-        not isinstance(stall_grace_flag, dict)
-        or stall_grace_flag.get("present") is not True
-        or stall_grace_flag.get("value")
-        != str(VARIANT_CONFIGS[variant]["server"]["stream_stall_grace_ms"])
-    ):
-        failures.append("stream-stall grace debug flag does not match effective policy")
+        state = flags.get(name)
+        if (
+            not isinstance(state, dict)
+            or state.get("present") is not False
+            or state.get("value") is not None
+        ):
+            failures.append(f"{label} compatibility environment flag must remain absent")
     prefill_ceiling_flag = flags.get("KILN_MAX_PREFILL_TOKENS_PER_CYCLE")
     if (
         not isinstance(prefill_ceiling_flag, dict)
         or prefill_ceiling_flag.get("present") is not False
         or prefill_ceiling_flag.get("value") is not None
     ):
-        failures.append("prefill-token ceiling debug flag does not prove the default source")
+        failures.append("prefill-token ceiling compatibility environment flag is present")
     prefill_layer_ceiling_flag = flags.get("KILN_MAX_PREFILL_LAYERS_PER_CYCLE")
     if (
         not isinstance(prefill_layer_ceiling_flag, dict)
         or prefill_layer_ceiling_flag.get("present") is not False
         or prefill_layer_ceiling_flag.get("value") is not None
     ):
-        failures.append("prefill-layer ceiling debug flag does not prove the default source")
+        failures.append("prefill-layer ceiling compatibility environment flag is present")
     return failures
 
 
@@ -3186,13 +3226,15 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
     run_dir = ROOT / ".qualification/serving" / f"{variant}-{os.getpid()}"
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
+    config_path = run_dir / "kiln.toml"
     adapter_dir.mkdir(parents=True, exist_ok=False)
-    environment = server_environment(
-        variant, model_path, port, adapter_dir, snapshot_dir
+    write_server_config(
+        config_path, variant, model_path, port, adapter_dir, snapshot_dir
     )
+    environment = server_environment(variant)
     policy_events_started = time.monotonic()
     process = subprocess.Popen(
-        [str(binary), "--config", "/dev/null", "serve", "--served-model-id", MODEL_ID],
+        [str(binary), "--config", str(config_path), "serve"],
         cwd=ROOT,
         env=environment,
         stdout=subprocess.PIPE,

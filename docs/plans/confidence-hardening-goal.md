@@ -423,8 +423,23 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
     The receipt passed strict local-artifact and known-commit validation.
 - [ ] Run mixed prompt lengths and concurrency 1, 8, 16, 32, and 64 where the
   supported profile permits them.
+  - Source contract ready, hardware result pending: the required-device
+    `serving-rocm-graph-resilience-v1` workload builds one exact binary and
+    runs the same 121-request mixed-bucket ladder at concurrency 1, 8, 16, 32,
+    and 64 under both 1 GiB and 64 MiB graph-byte budgets. It compares canonical
+    streamed semantic deltas exactly, requires a typed tight-budget action,
+    reconciles bounded graph memory and lifecycle state, and fails on either
+    attributed or unexplained ITL outliers. The checkbox remains open until a
+    clean source-bound Strix Halo receipt is checked in.
 - [ ] Exercise prefix reuse, cancellation, slow consumers, adapter load/unload,
   memory pressure, and maintenance-mode resize.
+  - The existing mixed-load, pressure, correctness, and soak gates cover prefix,
+    cancellation, slow-consumer, pressure, and graph invalidation behavior in
+    separate receipts. The new `serving-rocm-graph-failure-containment-v1`
+    workload makes the three real-device shape fallback, prefix/cancellation/
+    adapter lifecycle, and poisoned-generation cases source-bound and
+    non-skippable. Public adapter load/unload and maintenance resize still need
+    one combined current-source receipt, so this item remains open.
 - [x] Run a 30-minute development soak after each material serving change.
   - The source-bound `serving-rocm-development-soak-v1` gate now holds one
     graph-on, fixed-capacity server process under mixed bucket/concurrency waves
@@ -965,6 +980,13 @@ Current audit findings and migration order (2026-07-12):
   server TOML authoritative; inject memory, graph,
   ROCm matmul/attention, Vulkan, and training-execution policies; then delete or
   namespace the remaining tuning/debug flags and remove test env mutation.
+- The source-bound ROCm serving qualification drivers now exercise that target
+  boundary themselves: declared public launch policy is written to a private
+  TOML file and health/debug must report `source=file`. Ambient `KILN_*` values
+  are rejected. `KILN_DEBUG_ENDPOINTS` is the explicit internal qualification
+  capability; `KILN_KV_AUTOSCALE=0` is the one visible legacy exception on
+  autoscaler-off arms and remains migration work rather than being disguised as
+  typed configuration.
 
 - [ ] Inventory every direct `KILN_*` read and classify it as public stable,
   experimental/debug, build-time, or test-only.
@@ -1219,8 +1241,17 @@ ownership across FFI, so a resize cannot retire a submitted pointer.
 concurrency 1, 2, and 4, reconciles all 23 wait reasons, fails on 250 ms stalls
 or 2 second pauses, samples memory, and requires clean teardown.
 `serving-mixed-rocm-v1` validates the retained-byte, eviction, admission,
-fallback, live-phase, and typed-unavailability contracts. Portable source and
-qualification checks are the evidence for this checkpoint. Bounded Cargo
+fallback, live-phase, and typed-unavailability contracts.
+`serving-rocm-graph-resilience-v1` now defines the one-binary 1 GiB/64 MiB
+graph-budget A/B and exact concurrency 1/8/16/32/64 corpus, while
+`serving-rocm-graph-failure-containment-v1` turns the three ignored real-device
+graph fallback/lifecycle/poison cases into a bounded non-skippable receipt.
+All six ROCm serving drivers now materialize their declared public policy as a
+private typed TOML file instead of a handwritten public `KILN_*` launch map;
+only the internal trusted-debug gate and the still-untyped KV autoscaler-off
+compatibility switch remain in their scrubbed process environment. Portable
+source and 370 qualification-tooling checks are the evidence for this
+checkpoint. Bounded Cargo
 correctly refused to start below the unchanged 15 GiB available-memory floor,
 and GPU execution was not attempted under the current host pressure, so this
 makes no new compile, ROCm execution, parity, pause, memory, or throughput
@@ -1686,6 +1717,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-13 | Phase 1.3/8.1 ROCm execution-policy and fail-closed ownership | `sha256:065d8a0ae8675315cb636a1e85a0af21016d94add702df6b573c6392560d4ded` | `59d36171c` | portable static + Strix Halo qualification contract; ROCm execution pending | 98 focused qualification tests; exact runtime-environment contract at 925 reads/376 process mutations; thinking-budget contract; 8/8 docs-builder tests and generated static smoke; Python/Bash/JavaScript syntax; Rust 2024 formatting and diff hygiene; independent crash/correctness re-audit; bounded Cargo refusal below the unchanged 15 GiB floor | passed static checkpoint | Typed startup policy owns ROCm synchronization and graph modes; 22 reasoned wait classes are observable across product surfaces; stream, graph, allocation, capture rollback, and workspace ownership fail closed under sticky per-device quarantine. Review found and repaired first-launch state double advance, warmup retry after partial state, and concurrent hipBLASLt workspace retirement. The source-bound legacy/stream A/B contract is ready, but no compile, GPU, parity, pause, memory, or throughput claim is made. Retained-byte graph budgeting and linearizable quarantine/FFI admission are the next checkpoint. |
 | 2026-07-12 | Phase 1.3/1.5/1.6/8.1 ROCm retained-memory, quarantine, and live-phase checkpoint | `sha256:7503eddda785dca76bed000e070e62c9814764d41072c26f366fe0b87ab4025f` | `f806bdc67` | portable source/static + Strix Halo qualification contract; compile and accelerator execution pending | 59 focused qualification tests; exact runtime-environment contract at 925 reads/376 process mutations; 8/8 docs-builder tests; 30-document/5-asset build and generated static smoke; server UI static smoke; thinking-budget, release, runtime-default, Python/JavaScript/JSON syntax, direct Rust formatting, diff-hygiene, installed-HIP-header/symbol, and independent implementation/server/truth audits; bounded Cargo refusal at 8 GiB available under the unchanged 15 GiB floor | passed static checkpoint | Typed policy now adds an independent retained-byte ceiling. Exact queryable allocation identity, owner-aware LRU, pre/post capture admission, matching-device governor reservation, pressure transitions, suppression lifetimes, active graphless-slot accounting, thirteen fallback reasons, five live phases, and typed missing-data reasons span config, health, debug, Prometheus, dashboard, qualification, and the complete website. A linearizable per-device STOP gate, explicit `capture_rollback`, fail-closed FFI submissions, owned host-copy settlement, pageable raw replay H2D contract, and retained uncertain cleanup close the reviewed lifetime gaps; gfx11 capability-query failures now cross FFI as execution errors. This deliberately advances the stall/corruption and bounded typed-config work before later evaluation/performance phases because it is prerequisite to trustworthy local ROCm qualification. Cargo did not start and no ROCm, Vulkan, parity, pause, memory, or throughput claim is made. Next: compile this exact tree when host admission recovers, then run ROCm A/B/byte-pressure/failure/concurrency and the Vulkan baseline before CUDA handoff. |
 | 2026-07-12 | ROCm graph checkpoint hosted regression repair | `sha256:cc3e80493e66210a5ca54df36b0f8318f0f80eca6a9e0febb8293060f5d3f142` | `cd5e81014` | portable CPU CI; accelerator jobs skipped by manual-only policy | CI `29303211231`; qualification contract `29303211233`; formatting, cargo-deny, default build/tests, substrate tests, anomaly envelope, CUDA dependency-tree assertion, and qualification tooling/receipt validation | passed | The first hosted run `29302966646` compiled the default tree but exposed one stale exact-spelling assertion in `rocm_graph_state_uses_bounded_reusable_slots`; Pages `29302966717`, UI smoke `29302966639`, release drift `29302966649`, and qualification `29302966626` were green. The repair now checks the actual invariant: every decode/capture path binds geometry to a reusable owner, and the same pre-native `cache_key` reaches final admission. The complete cheap lane is green on the superseding source hash. ROCm/Vulkan builds and hardware behavior remain unclaimed. |
+
+| 2026-07-13 | Source-bound ROCm graph resilience and containment qualification | `sha256:0a0782b7acc4e5f5209040ae901efc5ebe8cc2bc2c14c3876e83419419a83a06` | this commit | portable qualification and documentation contract; Strix Halo ROCm execution pending | 370 qualification-tooling tests; exact runtime-environment contract at 925 reads/376 process mutations; Python compilation; 8/8 docs-builder tests; 30-document/5-asset website build and generated static smoke; diff hygiene | passed static checkpoint | All six ROCm serving drivers now write private typed TOML and require `source=file` attestation instead of constructing public `KILN_*` launch maps. The only launch-environment exceptions are internal debug authorization, `RUST_LOG`, and the still-untyped legacy KV-autoscaler disable flag. The new two-arm resilience workload runs the same deterministic corpus at concurrency 1/8/16/32/64 against one exact release artifact, requires canonical streamed semantic parity, proves headroom capture/replay, forces a typed 64 MiB graph-byte-budget action, bounds graph residency, rejects device faults, dirty teardown, and attributed or unexplained ITL stalls, and emits per-concurrency latency and memory evidence. The companion real-device harness requires all three ignored graph geometry/lifecycle/stale-generation tests to execute and pass under the bounded Cargo wrapper. No compile or accelerator process started below the unchanged 15 GiB host-memory floor, so ROCm correctness, resilience, pause, memory, and throughput gates remain open until clean pushed-source receipts exist. |
 
 ## Known Starting Defects
 
