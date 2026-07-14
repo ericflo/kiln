@@ -289,6 +289,7 @@ struct EvalRunResponse {
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 struct EvalResultPayload {
+    schema_version: u32,
     job_id: String,
     state: String,
     #[serde(default)]
@@ -308,6 +309,13 @@ struct EvalResultPayload {
 
 impl EvalResultPayload {
     fn validate_provenance(&self) -> Result<()> {
+        if self.schema_version != kiln_eval::EVAL_RESULT_SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported eval result schema_version {}; expected {}",
+                self.schema_version,
+                kiln_eval::EVAL_RESULT_SCHEMA_VERSION
+            );
+        }
         if let Some(manifest) = self.base_weight_shard_manifest.as_ref() {
             manifest
                 .validate()
@@ -366,14 +374,36 @@ async fn cmd_list(client: &reqwest::Client, server: &str) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<32}  {:<10}  {:<18}  description",
-        "name", "examples", "scorer"
+        "{:<32}  {:<10}  {:<12}  {:<18}  description",
+        "name", "examples", "aggregate", "scorer"
     );
     for s in suites {
+        let aggregation = s
+            .get("aggregation")
+            .and_then(|value| value.as_object())
+            .map(|value| {
+                let kind = value
+                    .get("kind")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("?");
+                let stem = match kind {
+                    "mean_at_k" => "mean",
+                    "pass_at_k" => "pass",
+                    "majority_at_k" => "majority",
+                    other => other,
+                };
+                value
+                    .get("k")
+                    .and_then(|value| value.as_u64())
+                    .map(|k| format!("{stem}@{k}"))
+                    .unwrap_or_else(|| stem.to_string())
+            })
+            .unwrap_or_else(|| "?".to_string());
         println!(
-            "{:<32}  {:<10}  {:<18}  {}",
+            "{:<32}  {:<10}  {:<12}  {:<18}  {}",
             s.get("name").and_then(|v| v.as_str()).unwrap_or(""),
             s.get("num_examples").and_then(|v| v.as_u64()).unwrap_or(0),
+            aggregation,
             s.get("default_scorer_kind")
                 .and_then(|v| v.as_str())
                 .unwrap_or(""),
@@ -780,6 +810,7 @@ fn build_panel_suite(
         )),
         default_scorer: source.default_scorer.clone(),
         generation: source.generation.clone(),
+        aggregation: source.aggregation,
         system_prompt: source.system_prompt.clone(),
         examples: panel_examples,
         schema_version: source.schema_version,
@@ -1254,6 +1285,7 @@ async fn cmd_probe(client: &reqwest::Client, server: &str, args: ProbeArgs) -> R
             thinking_budget_ms: eval_budget_override(args.thinking_budget_ms),
             ..Default::default()
         },
+        aggregation: kiln_eval::EvalAggregation::Single,
         system_prompt: None,
         examples: vec![EvalExample {
             id: Some("probe".into()),
@@ -1262,7 +1294,7 @@ async fn cmd_probe(client: &reqwest::Client, server: &str, args: ProbeArgs) -> R
             tags: vec!["probe".into()],
             ..Default::default()
         }],
-        schema_version: 1,
+        schema_version: kiln_eval::SUITE_SCHEMA_VERSION,
         tools: None,
     };
     let body = serde_json::json!({
@@ -1378,7 +1410,12 @@ fn print_human(result: &EvalResultPayload) {
             .unwrap_or_else(|| "<base>".to_string());
         println!();
         println!("Suite: {} | Adapter: {}", r.suite_name, adapter_label);
-        println!("  job: {}  hash: {}", result.job_id, r.suite_hash);
+        println!(
+            "  job: {}  hash: {}  aggregate: {}",
+            result.job_id,
+            r.suite_hash,
+            r.aggregation.label()
+        );
         println!(
             "  accuracy: {:>5.1}% {}  |  mean: {:.3}  |  weighted: {:.3}",
             r.metrics.accuracy * 100.0,
@@ -1387,12 +1424,13 @@ fn print_human(result: &EvalResultPayload) {
             r.metrics.weighted_mean_score
         );
         println!(
-            "  pass:{}  fail:{}  invalid:{}  error:{}  (n={})",
+            "  pass:{}  fail:{}  invalid:{}  error:{}  (examples={}, completions={})",
             r.metrics.num_pass,
             r.metrics.num_fail,
             r.metrics.num_invalid,
             r.metrics.num_error,
-            r.metrics.num_examples
+            r.metrics.num_examples,
+            r.metrics.num_completions
         );
         if !r.metrics.latency.p50_ms.is_nan() && r.metrics.latency.mean_ms > 0.0 {
             println!(
@@ -1627,6 +1665,7 @@ fn compute_flip_diff(result: &EvalResultPayload) -> Option<kiln_eval::FlipDiff> 
     // EvalResult type via a JSON round-trip. Cheap (the payload is
     // typically a few KB) and avoids keeping two implementations in sync.
     let synthetic = kiln_eval::EvalResult {
+        schema_version: kiln_eval::EVAL_RESULT_SCHEMA_VERSION,
         job_id: result.job_id.clone(),
         state: kiln_eval::EvalJobState::Completed,
         base_weight_shard_manifest: result.base_weight_shard_manifest.clone(),
@@ -1717,6 +1756,7 @@ mod tests {
         ])
         .unwrap();
         let result: EvalResultPayload = serde_json::from_value(serde_json::json!({
+            "schema_version": kiln_eval::EVAL_RESULT_SCHEMA_VERSION,
             "job_id": "eval-1",
             "state": "completed",
             "base_weight_shard_manifest": manifest,
@@ -1738,6 +1778,7 @@ mod tests {
     fn eval_execution_line_reports_and_validates_exact_runtime_identity() {
         let provenance = execution_provenance();
         let mut result: EvalResultPayload = serde_json::from_value(serde_json::json!({
+            "schema_version": kiln_eval::EVAL_RESULT_SCHEMA_VERSION,
             "job_id": "eval-1",
             "state": "completed",
             "execution_provenance": provenance,

@@ -170,6 +170,7 @@ mod tests {
                 strip_whitespace: true,
             },
             generation: EvalGenerationParams::default(),
+            aggregation: kiln_eval::EvalAggregation::Single,
             system_prompt: None,
             examples: vec![EvalExample {
                 id: Some("e1".into()),

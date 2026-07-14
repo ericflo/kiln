@@ -111,6 +111,9 @@ pub struct PostEvalGate {
 /// with one code path. Stored under `state.eval_jobs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalJobInfo {
+    /// Version of the persisted/public eval result contract. Archive loading
+    /// rejects missing or older versions before inspecting nested runs.
+    pub schema_version: u32,
     pub job_id: String,
     pub suite_name: String,
     pub adapters: Vec<Option<String>>,
@@ -174,6 +177,7 @@ impl EvalJobInfo {
         effective_seed: u64,
     ) -> Self {
         Self {
+            schema_version: kiln_eval::EVAL_RESULT_SCHEMA_VERSION,
             job_id,
             suite_name,
             adapters,
@@ -201,6 +205,7 @@ impl EvalJobInfo {
     /// by `GET /v1/eval/jobs/:id`.
     pub fn to_result(&self) -> EvalResult {
         EvalResult {
+            schema_version: kiln_eval::EVAL_RESULT_SCHEMA_VERSION,
             job_id: self.job_id.clone(),
             state: self.state,
             base_weight_shard_manifest: self.base_weight_shard_manifest.clone(),
@@ -275,6 +280,7 @@ mod tests {
                 strip_whitespace: true,
             },
             generation: EvalGenerationParams::default(),
+            aggregation: kiln_eval::EvalAggregation::Single,
             system_prompt: None,
             examples: vec![EvalExample {
                 messages: vec![EvalChatMessage::new("user", "x")],

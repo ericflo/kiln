@@ -1264,8 +1264,8 @@ def validate_eval_schema(
     if not isinstance(definitions, dict):
         errors.append("eval schema $defs must be an object")
         return errors
-    if len(definitions) != 74:
-        errors.append(f"eval schema must contain 74 definitions, got {len(definitions)}")
+    if len(definitions) != 76:
+        errors.append(f"eval schema must contain 76 definitions, got {len(definitions)}")
     if list(definitions) != sorted(definitions):
         errors.append("eval schema definitions must be sorted")
 

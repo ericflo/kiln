@@ -73,6 +73,43 @@ fn default_n() -> usize {
     1
 }
 
+/// How a suite reduces the completions for one example into one independent
+/// statistic. Headline metrics, slices, comparisons, and promotion decisions
+/// consume the reduced record rather than treating completions as examples.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EvalAggregation {
+    /// Exactly one completion per example.
+    #[default]
+    Single,
+    /// Average the `k` scorer values. The reduced example passes when the mean
+    /// is at least 0.5.
+    MeanAtK { k: usize },
+    /// Pass when any of the `k` independently seeded completions passes.
+    PassAtK { k: usize },
+    /// Pass when strictly more than half of the `k` completions pass. `k` must
+    /// be odd so a tie cannot be hidden behind an implementation policy.
+    MajorityAtK { k: usize },
+}
+
+impl EvalAggregation {
+    pub fn k(self) -> usize {
+        match self {
+            Self::Single => 1,
+            Self::MeanAtK { k } | Self::PassAtK { k } | Self::MajorityAtK { k } => k,
+        }
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            Self::Single => "single".to_string(),
+            Self::MeanAtK { k } => format!("mean@{k}"),
+            Self::PassAtK { k } => format!("pass@{k}"),
+            Self::MajorityAtK { k } => format!("majority@{k}"),
+        }
+    }
+}
+
 impl Default for EvalGenerationParams {
     fn default() -> Self {
         Self {
@@ -216,6 +253,10 @@ pub struct EvalSuite {
     /// Suite-wide generation defaults. Per-example overrides win.
     #[serde(default)]
     pub generation: EvalGenerationParams,
+    /// Canonical per-example reduction. Schema-v1 suites may omit this only
+    /// when every effective generation has `n=1`.
+    #[serde(default)]
+    pub aggregation: EvalAggregation,
     /// Optional system message prepended to every example's messages, if the
     /// example doesn't already start with one. Lets the suite author lock in
     /// task framing without duplicating it per example.
@@ -312,12 +353,35 @@ impl EvalSuite {
             name: self.name.clone(),
             description: self.description.clone(),
             num_examples: self.examples.len(),
+            completions_per_example: self.aggregation.k(),
+            aggregation: self.aggregation,
+            schema_version: self.schema_version,
             default_scorer_kind: self.default_scorer.kind_label(),
             tags,
         }
     }
 
     pub fn validate(&self) -> Result<(), SuiteLoadError> {
+        if !matches!(self.schema_version, 1 | crate::SUITE_SCHEMA_VERSION) {
+            return Err(SuiteLoadError::Parse(format!(
+                "unsupported suite schema_version {}; supported versions are 1 and {}",
+                self.schema_version,
+                crate::SUITE_SCHEMA_VERSION
+            )));
+        }
+        let k = self.aggregation.k();
+        if k == 0 || k > 128 {
+            return Err(SuiteLoadError::Parse(format!(
+                "aggregation {} requires k in 1..=128",
+                self.aggregation.label()
+            )));
+        }
+        if matches!(self.aggregation, EvalAggregation::MajorityAtK { .. }) && k % 2 == 0 {
+            return Err(SuiteLoadError::Parse(format!(
+                "aggregation {} requires an odd k so ties are impossible",
+                self.aggregation.label()
+            )));
+        }
         if self.name.trim().is_empty() {
             return Err(SuiteLoadError::Parse(
                 "suite name must be non-empty".to_string(),
@@ -357,6 +421,28 @@ impl EvalSuite {
                 return Err(SuiteLoadError::Parse(format!(
                     "example {idx} weight {} must be finite and non-negative",
                     ex.weight
+                )));
+            }
+            let n = ex
+                .generation
+                .as_ref()
+                .map(|generation| generation.n)
+                .unwrap_or(self.generation.n);
+            if n == 0 || n > 128 {
+                return Err(SuiteLoadError::Parse(format!(
+                    "example {idx} generation.n {n} must be in 1..=128"
+                )));
+            }
+            if self.schema_version == 1 && (n != 1 || self.aggregation != EvalAggregation::Single) {
+                return Err(SuiteLoadError::Parse(format!(
+                    "schema-v1 multi-completion results are ambiguous; migrate the suite to schema_version {} and choose an explicit aggregation",
+                    crate::SUITE_SCHEMA_VERSION
+                )));
+            }
+            if n != k {
+                return Err(SuiteLoadError::Parse(format!(
+                    "example {idx} generation.n {n} does not match aggregation {} (k={k})",
+                    self.aggregation.label()
                 )));
             }
             validate_tools_schema(ex.tools.as_deref(), &format!("example {idx} tools"))?;
@@ -423,6 +509,9 @@ pub struct EvalSuiteSummary {
     pub name: String,
     pub description: Option<String>,
     pub num_examples: usize,
+    pub completions_per_example: usize,
+    pub aggregation: EvalAggregation,
+    pub schema_version: u32,
     pub default_scorer_kind: &'static str,
     /// Tag → count map (sorted).
     pub tags: BTreeMap<String, u32>,
@@ -487,11 +576,69 @@ mod tests {
             description: None,
             default_scorer: scorer,
             generation: EvalGenerationParams::default(),
+            aggregation: EvalAggregation::Single,
             system_prompt: None,
             examples,
             schema_version: 1,
             tools: None,
         }
+    }
+
+    #[test]
+    fn multi_completion_suites_require_v2_and_explicit_matching_aggregation() {
+        let mut suite = mk_suite(
+            "multi",
+            Scorer::ExactMatch {
+                case_sensitive: true,
+                strip_whitespace: false,
+            },
+            vec![ex("user", "q", "a")],
+        );
+        suite.generation.n = 3;
+        let error = suite.validate().unwrap_err().to_string();
+        assert!(error.contains("schema-v1 multi-completion results are ambiguous"));
+
+        suite.schema_version = crate::SUITE_SCHEMA_VERSION;
+        suite.aggregation = EvalAggregation::PassAtK { k: 3 };
+        suite.validate().unwrap();
+
+        suite.aggregation = EvalAggregation::MeanAtK { k: 2 };
+        assert!(
+            suite
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("does not match aggregation mean@2")
+        );
+
+        suite.aggregation = EvalAggregation::MajorityAtK { k: 2 };
+        assert!(
+            suite
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("requires an odd k")
+        );
+    }
+
+    #[test]
+    fn unsupported_suite_schema_versions_fail_closed() {
+        let mut suite = mk_suite(
+            "future",
+            Scorer::ExactMatch {
+                case_sensitive: true,
+                strip_whitespace: false,
+            },
+            vec![ex("user", "q", "a")],
+        );
+        suite.schema_version = crate::SUITE_SCHEMA_VERSION + 1;
+        assert!(
+            suite
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported suite schema_version")
+        );
     }
 
     #[test]

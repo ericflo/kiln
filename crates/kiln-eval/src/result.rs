@@ -8,6 +8,10 @@ pub use kiln_core::thinking_budget::ThinkingBudgetRecord as EvalThinkingBudget;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::suite::EvalAggregation;
+
+pub const EVAL_RESULT_SCHEMA_VERSION: u32 = 2;
+
 /// Serde adapter for exact `u64` values on JSON-facing provenance fields.
 /// JavaScript cannot represent every `u64` as a number, so new result fields
 /// serialize as decimal strings while deserialization accepts either form.
@@ -193,6 +197,223 @@ pub struct ExampleOutcome {
     pub unclosed_thinking: bool,
 }
 
+/// One independent example statistic reduced from its raw completions.
+/// Aggregate metrics and all decisions consume this shape; `ExampleOutcome`
+/// remains the replay/audit record for each generated completion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AggregatedExampleOutcome {
+    pub example_id: String,
+    pub kind: EvalOutcomeKind,
+    pub score: f32,
+    pub completion_indices: Vec<usize>,
+    pub representative_completion_index: usize,
+    pub num_pass: u32,
+    pub num_fail: u32,
+    pub num_invalid: u32,
+    pub num_error: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum EvalAggregationError {
+    #[error("invalid aggregation definition: {0}")]
+    InvalidDefinition(String),
+    #[error(
+        "example {example_id:?} has {actual} completions; aggregation {aggregation} requires exactly {expected}"
+    )]
+    CompletionCount {
+        example_id: String,
+        aggregation: String,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("example {example_id:?} has completion indices {actual:?}; expected {expected:?}")]
+    CompletionIndices {
+        example_id: String,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    #[error("example {example_id:?} completion {completion_index} has invalid score {score}")]
+    InvalidScore {
+        example_id: String,
+        completion_index: usize,
+        score: String,
+    },
+    #[error("example {example_id:?} completions disagree on tags or metadata")]
+    InconsistentExampleMetadata { example_id: String },
+}
+
+/// Reduce every complete group of raw completions to one example statistic.
+/// Input order is preserved by first appearance, while completion order is
+/// canonicalized and validated as the exact sequence `0..k`.
+pub fn aggregate_example_outcomes(
+    outcomes: &[ExampleOutcome],
+    aggregation: EvalAggregation,
+) -> Result<Vec<AggregatedExampleOutcome>, EvalAggregationError> {
+    let k = aggregation.k();
+    if k == 0 || k > 128 {
+        return Err(EvalAggregationError::InvalidDefinition(format!(
+            "{} requires k in 1..=128",
+            aggregation.label()
+        )));
+    }
+    if matches!(aggregation, EvalAggregation::MajorityAtK { .. }) && k % 2 == 0 {
+        return Err(EvalAggregationError::InvalidDefinition(format!(
+            "{} requires an odd k so ties are impossible",
+            aggregation.label()
+        )));
+    }
+
+    let mut order = Vec::new();
+    let mut groups: BTreeMap<String, Vec<&ExampleOutcome>> = BTreeMap::new();
+    for outcome in outcomes {
+        if !groups.contains_key(&outcome.example_id) {
+            order.push(outcome.example_id.clone());
+        }
+        groups
+            .entry(outcome.example_id.clone())
+            .or_default()
+            .push(outcome);
+    }
+
+    let expected_indices: Vec<usize> = (0..k).collect();
+    let mut reduced = Vec::with_capacity(groups.len());
+    for example_id in order {
+        let mut group = groups.remove(&example_id).unwrap_or_default();
+        if group.len() != k {
+            return Err(EvalAggregationError::CompletionCount {
+                example_id,
+                aggregation: aggregation.label(),
+                expected: k,
+                actual: group.len(),
+            });
+        }
+        group.sort_by_key(|outcome| outcome.completion_index);
+        let actual_indices: Vec<usize> = group
+            .iter()
+            .map(|outcome| outcome.completion_index)
+            .collect();
+        if actual_indices != expected_indices {
+            return Err(EvalAggregationError::CompletionIndices {
+                example_id,
+                expected: expected_indices.clone(),
+                actual: actual_indices,
+            });
+        }
+
+        let first = group[0];
+        if group
+            .iter()
+            .any(|outcome| outcome.tags != first.tags || outcome.metadata != first.metadata)
+        {
+            return Err(EvalAggregationError::InconsistentExampleMetadata { example_id });
+        }
+        for outcome in &group {
+            if !outcome.score.is_finite() || !(0.0..=1.0).contains(&outcome.score) {
+                return Err(EvalAggregationError::InvalidScore {
+                    example_id,
+                    completion_index: outcome.completion_index,
+                    score: outcome.score.to_string(),
+                });
+            }
+        }
+
+        let num_pass = group
+            .iter()
+            .filter(|outcome| outcome.kind == EvalOutcomeKind::Pass)
+            .count() as u32;
+        let num_fail = group
+            .iter()
+            .filter(|outcome| outcome.kind == EvalOutcomeKind::Fail)
+            .count() as u32;
+        let num_invalid = group
+            .iter()
+            .filter(|outcome| outcome.kind == EvalOutcomeKind::Invalid)
+            .count() as u32;
+        let num_error = group
+            .iter()
+            .filter(|outcome| outcome.kind == EvalOutcomeKind::Error)
+            .count() as u32;
+        let fallback_kind = if num_fail > 0 {
+            EvalOutcomeKind::Fail
+        } else if num_invalid > 0 {
+            EvalOutcomeKind::Invalid
+        } else {
+            EvalOutcomeKind::Error
+        };
+
+        let (kind, score, representative_completion_index) = match aggregation {
+            EvalAggregation::Single => (first.kind, first.score, 0),
+            EvalAggregation::MeanAtK { .. } => {
+                let score = group.iter().map(|outcome| outcome.score).sum::<f32>() / k as f32;
+                let kind = if num_pass + num_fail == 0 {
+                    fallback_kind
+                } else if score >= 0.5 {
+                    EvalOutcomeKind::Pass
+                } else {
+                    EvalOutcomeKind::Fail
+                };
+                let representative = group
+                    .iter()
+                    .min_by(|left, right| {
+                        (left.score - score)
+                            .abs()
+                            .total_cmp(&(right.score - score).abs())
+                            .then_with(|| left.completion_index.cmp(&right.completion_index))
+                    })
+                    .map(|outcome| outcome.completion_index)
+                    .unwrap_or(0);
+                (kind, score, representative)
+            }
+            EvalAggregation::PassAtK { .. } => {
+                if let Some(passing) = group
+                    .iter()
+                    .find(|outcome| outcome.kind == EvalOutcomeKind::Pass)
+                {
+                    (EvalOutcomeKind::Pass, 1.0, passing.completion_index)
+                } else {
+                    (fallback_kind, 0.0, 0)
+                }
+            }
+            EvalAggregation::MajorityAtK { .. } => {
+                if num_pass as usize > k / 2 {
+                    let representative = group
+                        .iter()
+                        .find(|outcome| outcome.kind == EvalOutcomeKind::Pass)
+                        .map(|outcome| outcome.completion_index)
+                        .unwrap_or(0);
+                    (EvalOutcomeKind::Pass, 1.0, representative)
+                } else {
+                    let representative = group
+                        .iter()
+                        .find(|outcome| outcome.kind != EvalOutcomeKind::Pass)
+                        .map(|outcome| outcome.completion_index)
+                        .unwrap_or(0);
+                    (fallback_kind, 0.0, representative)
+                }
+            }
+        };
+
+        reduced.push(AggregatedExampleOutcome {
+            example_id,
+            kind,
+            score,
+            completion_indices: expected_indices.clone(),
+            representative_completion_index,
+            num_pass,
+            num_fail,
+            num_invalid,
+            num_error,
+            tags: first.tags.clone(),
+            metadata: first.metadata.clone(),
+        });
+    }
+    Ok(reduced)
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -257,7 +478,11 @@ pub struct PassRateConfidenceInterval {
 /// Aggregate metrics over a single suite run against a single adapter.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AggregateMetrics {
+    /// Independent examples after the suite's declared reduction.
     pub num_examples: u32,
+    /// Raw generated completions retained for audit and cost accounting.
+    #[serde(default)]
+    pub num_completions: u32,
     pub num_pass: u32,
     pub num_fail: u32,
     pub num_invalid: u32,
@@ -364,6 +589,7 @@ impl AggregateMetrics {
     /// executor). When present, the result includes a per-tool pass-rate
     /// breakdown — invaluable for agentic-suite dashboards.
     pub fn compute(
+        aggregated_outcomes: &[AggregatedExampleOutcome],
         outcomes: &[ExampleOutcome],
         weights: &BTreeMap<String, f32>,
         tags_by_example: &BTreeMap<String, Vec<String>>,
@@ -371,6 +597,7 @@ impl AggregateMetrics {
         elapsed_secs: f64,
     ) -> Self {
         Self::compute_with_tools(
+            aggregated_outcomes,
             outcomes,
             weights,
             tags_by_example,
@@ -391,6 +618,7 @@ impl AggregateMetrics {
     /// per outcome — those are populated by the executor only when the
     /// suite declared a `tools` catalogue.
     pub fn compute_with_tools(
+        aggregated_outcomes: &[AggregatedExampleOutcome],
         outcomes: &[ExampleOutcome],
         weights: &BTreeMap<String, f32>,
         tags_by_example: &BTreeMap<String, Vec<String>>,
@@ -400,6 +628,7 @@ impl AggregateMetrics {
         elapsed_secs: f64,
     ) -> Self {
         Self::compute_with_tools_full(
+            aggregated_outcomes,
             outcomes,
             weights,
             tags_by_example,
@@ -415,6 +644,7 @@ impl AggregateMetrics {
     /// counts in addition to the basic per-tool maps. Keyed the same way
     /// as `predicted_tool_by_outcome`.
     pub fn compute_with_tools_full(
+        aggregated_outcomes: &[AggregatedExampleOutcome],
         outcomes: &[ExampleOutcome],
         weights: &BTreeMap<String, f32>,
         tags_by_example: &BTreeMap<String, Vec<String>>,
@@ -452,7 +682,7 @@ impl AggregateMetrics {
         let mut num_schema_missing_required = 0u32;
         let mut num_schema_extra_unknown = 0u32;
 
-        for out in outcomes {
+        for out in aggregated_outcomes {
             match out.kind {
                 EvalOutcomeKind::Pass => num_pass += 1,
                 EvalOutcomeKind::Fail => num_fail += 1,
@@ -463,69 +693,30 @@ impl AggregateMetrics {
             let weight = weights.get(&out.example_id).copied().unwrap_or(1.0);
             sum_weighted += out.score * weight;
             sum_weights += weight;
-            if let Some(lat) = out.latency_ms {
-                latencies.push(lat);
-            }
-            if let Some(p) = out.prompt_tokens {
-                prompt_tokens = prompt_tokens.saturating_add(p as u64);
-            }
-            if let Some(c) = out.completion_tokens {
-                completion_tokens = completion_tokens.saturating_add(c as u64);
-            }
-            // tag pass-rate uses the FIRST completion per example to avoid
-            // double-counting under n>1. We mark the first occurrence by
-            // tracking example_id seen.
-            if out.completion_index == 0 {
-                if let Some(tags) = tags_by_example.get(&out.example_id) {
-                    for tag in tags {
-                        let entry = tag_pass.entry(tag.clone()).or_insert((0, 0));
-                        entry.0 += 1;
-                        if matches!(out.kind, EvalOutcomeKind::Pass) {
-                            entry.1 += 1;
-                        }
-                    }
-                }
-                if let Some(tool) = target_tool_by_example.get(&out.example_id) {
-                    let entry = tool_pass.entry(tool.clone()).or_insert((0, 0));
+            if let Some(tags) = tags_by_example.get(&out.example_id) {
+                for tag in tags {
+                    let entry = tag_pass.entry(tag.clone()).or_insert((0, 0));
                     entry.0 += 1;
                     if matches!(out.kind, EvalOutcomeKind::Pass) {
                         entry.1 += 1;
                     }
-                    let predicted = predicted_tool_by_outcome
-                        .get(&(out.example_id.clone(), out.completion_index))
-                        .cloned()
-                        .unwrap_or_else(|| "<none>".to_string());
-                    *confusion
-                        .entry(tool.clone())
-                        .or_default()
-                        .entry(predicted)
-                        .or_insert(0) += 1;
                 }
             }
-            if out.unclosed_thinking {
-                num_unclosed_thinking += 1;
-            }
-            if let Some(text) = out.reasoning_text.as_deref() {
-                reasoning_lens.push(text.chars().count() as u32);
-            }
-            // Scorer detail of the form "... formats=[json,...]" marks a
-            // non-Qwen3.5-XML emission. Cheap textual check — the canonical
-            // alternative is to plumb a typed format flag through the
-            // outcome but the textual check is good enough for an
-            // aggregate stat.
-            if let Some(detail) = out.detail.as_deref() {
-                if detail.contains("formats=")
-                    && !detail.contains("formats=[xml")
-                    && !detail.contains("formats=[xml,")
-                {
-                    num_non_xml_tool_calls += 1;
+            if let Some(tool) = target_tool_by_example.get(&out.example_id) {
+                let entry = tool_pass.entry(tool.clone()).or_insert((0, 0));
+                entry.0 += 1;
+                if matches!(out.kind, EvalOutcomeKind::Pass) {
+                    entry.1 += 1;
                 }
-            }
-            if let Some((missing, extra)) =
-                schema_violations_by_outcome.get(&(out.example_id.clone(), out.completion_index))
-            {
-                num_schema_missing_required += missing;
-                num_schema_extra_unknown += extra;
+                let predicted = predicted_tool_by_outcome
+                    .get(&(out.example_id.clone(), out.representative_completion_index))
+                    .cloned()
+                    .unwrap_or_else(|| "<none>".to_string());
+                *confusion
+                    .entry(tool.clone())
+                    .or_default()
+                    .entry(predicted)
+                    .or_insert(0) += 1;
             }
             if let Some(kind) = scorer_kind_by_example.get(&out.example_id) {
                 let entry = scorer_acc.entry(*kind).or_insert((0, 0.0, 0));
@@ -537,7 +728,41 @@ impl AggregateMetrics {
             }
         }
 
-        let num_examples = outcomes.len() as u32;
+        // Raw completions remain the source for cost, latency, reasoning, and
+        // schema diagnostics. They never contribute independent samples to
+        // accuracy, slices, confidence intervals, or scorer breakdowns.
+        for out in outcomes {
+            if let Some(lat) = out.latency_ms {
+                latencies.push(lat);
+            }
+            if let Some(p) = out.prompt_tokens {
+                prompt_tokens = prompt_tokens.saturating_add(p as u64);
+            }
+            if let Some(c) = out.completion_tokens {
+                completion_tokens = completion_tokens.saturating_add(c as u64);
+            }
+            if out.unclosed_thinking {
+                num_unclosed_thinking += 1;
+            }
+            if let Some(text) = out.reasoning_text.as_deref() {
+                reasoning_lens.push(text.chars().count() as u32);
+            }
+            if let Some(detail) = out.detail.as_deref()
+                && detail.contains("formats=")
+                && !detail.contains("formats=[xml")
+                && !detail.contains("formats=[xml,")
+            {
+                num_non_xml_tool_calls += 1;
+            }
+            if let Some((missing, extra)) =
+                schema_violations_by_outcome.get(&(out.example_id.clone(), out.completion_index))
+            {
+                num_schema_missing_required += missing;
+                num_schema_extra_unknown += extra;
+            }
+        }
+
+        let num_examples = aggregated_outcomes.len() as u32;
         let accuracy = if num_examples > 0 {
             num_pass as f32 / num_examples as f32
         } else {
@@ -604,6 +829,7 @@ impl AggregateMetrics {
 
         Self {
             num_examples,
+            num_completions: outcomes.len() as u32,
             num_pass,
             num_fail,
             num_invalid,
@@ -688,8 +914,13 @@ pub struct SuiteResult {
     pub suite_name: String,
     /// Adapter the model was running under. `None` means base model.
     pub adapter: Option<String>,
+    pub aggregation: EvalAggregation,
     pub metrics: AggregateMetrics,
+    /// Raw completion records used for audit and deterministic replay.
     pub outcomes: Vec<ExampleOutcome>,
+    /// Exactly one decision/statistic per example. Metrics and promotion
+    /// consume this collection exclusively.
+    pub aggregated_outcomes: Vec<AggregatedExampleOutcome>,
     /// ISO-8601 timestamps.
     pub started_at: String,
     pub finished_at: String,
@@ -707,6 +938,11 @@ pub struct SuiteResult {
 /// adapter when compare-mode is used).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalResult {
+    #[serde(
+        serialize_with = "serialize_result_schema_version",
+        deserialize_with = "deserialize_result_schema_version"
+    )]
+    pub schema_version: u32,
     pub job_id: String,
     pub state: EvalJobState,
     /// Exact base-weight artifacts resident when the job was admitted. Absent
@@ -744,9 +980,8 @@ impl EvalResult {
     /// when there are fewer than two runs (single-adapter result).
     ///
     /// The diff is computed against `runs[0]` as baseline and `runs[1]`
-    /// as candidate. Each entry in the returned diff is keyed by
-    /// `example_id` (using the *first* completion only — pass@k metrics
-    /// pre-aggregate before this point). Useful for surfacing "training
+    /// as candidate. Each entry in the returned diff is keyed by the suite's
+    /// canonical per-example reduction. Useful for surfacing "training
     /// improved 12 examples and regressed 3" at a glance.
     pub fn flip_diff(&self) -> Option<FlipDiff> {
         if self.runs.len() < 2 {
@@ -755,16 +990,14 @@ impl EvalResult {
         let baseline = &self.runs[0];
         let candidate = &self.runs[1];
         let mut bmap: BTreeMap<String, EvalOutcomeKind> = BTreeMap::new();
-        for o in &baseline.outcomes {
-            if o.completion_index == 0 {
-                bmap.insert(o.example_id.clone(), o.kind);
-            }
+        if baseline.aggregation != candidate.aggregation {
+            return None;
+        }
+        for o in &baseline.aggregated_outcomes {
+            bmap.insert(o.example_id.clone(), o.kind);
         }
         let mut diff = FlipDiff::default();
-        for o in &candidate.outcomes {
-            if o.completion_index != 0 {
-                continue;
-            }
+        for o in &candidate.aggregated_outcomes {
             let prior = match bmap.get(&o.example_id) {
                 Some(k) => *k,
                 None => continue,
@@ -786,6 +1019,31 @@ impl EvalResult {
             .unwrap_or_else(|| "<base>".to_string());
         Some(diff)
     }
+}
+
+fn deserialize_result_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version != EVAL_RESULT_SCHEMA_VERSION {
+        return Err(serde::de::Error::custom(format!(
+            "unsupported eval result schema_version {version}; expected {EVAL_RESULT_SCHEMA_VERSION}; legacy multi-completion results are ambiguous and must be rerun"
+        )));
+    }
+    Ok(version)
+}
+
+fn serialize_result_schema_version<S>(version: &u32, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if *version != EVAL_RESULT_SCHEMA_VERSION {
+        return Err(serde::ser::Error::custom(format!(
+            "cannot serialize eval result schema_version {version}; expected {EVAL_RESULT_SCHEMA_VERSION}"
+        )));
+    }
+    serializer.serialize_u32(*version)
 }
 
 /// Paired sign test over a [`FlipDiff`]'s discordant examples. The
@@ -913,12 +1171,155 @@ mod tests {
         );
     }
 
+    #[test]
+    fn aggregation_known_answers_cover_all_reducers() {
+        let raw = vec![
+            mk("x", 0, EvalOutcomeKind::Pass, 1.0, 1.0),
+            mk("x", 1, EvalOutcomeKind::Fail, 0.0, 1.0),
+            mk("x", 2, EvalOutcomeKind::Pass, 0.8, 1.0),
+        ];
+
+        let mean = aggregate_example_outcomes(&raw, EvalAggregation::MeanAtK { k: 3 }).unwrap();
+        assert_eq!(mean.len(), 1);
+        assert!((mean[0].score - 0.6).abs() < 1e-6);
+        assert_eq!(mean[0].kind, EvalOutcomeKind::Pass);
+        assert_eq!(mean[0].representative_completion_index, 2);
+
+        let pass = aggregate_example_outcomes(&raw, EvalAggregation::PassAtK { k: 3 }).unwrap();
+        assert_eq!(pass[0].score, 1.0);
+        assert_eq!(pass[0].kind, EvalOutcomeKind::Pass);
+        assert_eq!(pass[0].representative_completion_index, 0);
+
+        let majority =
+            aggregate_example_outcomes(&raw, EvalAggregation::MajorityAtK { k: 3 }).unwrap();
+        assert_eq!(majority[0].score, 1.0);
+        assert_eq!(majority[0].kind, EvalOutcomeKind::Pass);
+        assert_eq!(majority[0].num_pass, 2);
+        assert_eq!(majority[0].num_fail, 1);
+    }
+
+    #[test]
+    fn aggregation_truth_table_matches_definitions() {
+        for k in 1..=9 {
+            for mask in 0usize..(1usize << k) {
+                let pass_count = mask.count_ones() as usize;
+                let raw: Vec<_> = (0..k)
+                    .map(|index| {
+                        let pass = mask & (1 << index) != 0;
+                        mk(
+                            "x",
+                            index,
+                            if pass {
+                                EvalOutcomeKind::Pass
+                            } else {
+                                EvalOutcomeKind::Fail
+                            },
+                            if pass { 1.0 } else { 0.0 },
+                            1.0,
+                        )
+                    })
+                    .collect();
+
+                let mean =
+                    aggregate_example_outcomes(&raw, EvalAggregation::MeanAtK { k }).unwrap();
+                assert!((mean[0].score - pass_count as f32 / k as f32).abs() < 1e-6);
+                assert_eq!(mean[0].kind == EvalOutcomeKind::Pass, pass_count * 2 >= k);
+
+                let pass =
+                    aggregate_example_outcomes(&raw, EvalAggregation::PassAtK { k }).unwrap();
+                assert_eq!(pass[0].kind == EvalOutcomeKind::Pass, pass_count > 0);
+
+                if k % 2 == 1 {
+                    let majority =
+                        aggregate_example_outcomes(&raw, EvalAggregation::MajorityAtK { k })
+                            .unwrap();
+                    assert_eq!(
+                        majority[0].kind == EvalOutcomeKind::Pass,
+                        pass_count > k / 2
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aggregation_rejects_incomplete_duplicate_and_nonfinite_groups() {
+        assert!(matches!(
+            aggregate_example_outcomes(&[], EvalAggregation::PassAtK { k: 0 }),
+            Err(EvalAggregationError::InvalidDefinition(_))
+        ));
+        assert!(matches!(
+            aggregate_example_outcomes(&[], EvalAggregation::MajorityAtK { k: 2 }),
+            Err(EvalAggregationError::InvalidDefinition(_))
+        ));
+
+        let incomplete = vec![mk("x", 0, EvalOutcomeKind::Pass, 1.0, 1.0)];
+        assert!(matches!(
+            aggregate_example_outcomes(&incomplete, EvalAggregation::PassAtK { k: 2 }),
+            Err(EvalAggregationError::CompletionCount { .. })
+        ));
+
+        let duplicate = vec![
+            mk("x", 0, EvalOutcomeKind::Pass, 1.0, 1.0),
+            mk("x", 0, EvalOutcomeKind::Fail, 0.0, 1.0),
+        ];
+        assert!(matches!(
+            aggregate_example_outcomes(&duplicate, EvalAggregation::PassAtK { k: 2 }),
+            Err(EvalAggregationError::CompletionIndices { .. })
+        ));
+
+        let nonfinite = vec![mk("x", 0, EvalOutcomeKind::Pass, f32::NAN, 1.0)];
+        assert!(matches!(
+            aggregate_example_outcomes(&nonfinite, EvalAggregation::Single),
+            Err(EvalAggregationError::InvalidScore { .. })
+        ));
+    }
+
+    #[test]
+    fn eval_result_rejects_missing_and_legacy_schema_versions() {
+        let missing = serde_json::json!({
+            "job_id": "legacy",
+            "state": "completed",
+            "runs": []
+        });
+        assert!(serde_json::from_value::<EvalResult>(missing).is_err());
+
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "job_id": "legacy",
+            "state": "completed",
+            "runs": []
+        });
+        let error = serde_json::from_value::<EvalResult>(legacy)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("legacy multi-completion results are ambiguous"));
+
+        let invalid_for_write = EvalResult {
+            schema_version: 1,
+            job_id: "legacy".into(),
+            state: EvalJobState::Completed,
+            base_weight_shard_manifest: None,
+            execution_provenance: None,
+            effective_seed: None,
+            seed_derivation: None,
+            runs: Vec::new(),
+            progress: None,
+            error: None,
+        };
+        assert!(serde_json::to_value(invalid_for_write).is_err());
+    }
+
     fn mk_run(adapter: &str, outcomes: Vec<ExampleOutcome>) -> SuiteResult {
+        let aggregated_outcomes =
+            aggregate_example_outcomes(&outcomes, EvalAggregation::Single).unwrap();
         SuiteResult {
             suite_name: "test".into(),
             adapter: Some(adapter.into()),
+            aggregation: EvalAggregation::Single,
             metrics: AggregateMetrics::default(),
             outcomes,
+            aggregated_outcomes,
             started_at: "2026-05-14T00:00:00Z".into(),
             finished_at: "2026-05-14T00:00:01Z".into(),
             suite_hash: "deadbeef".into(),
@@ -1027,6 +1428,7 @@ mod tests {
             ],
         );
         let result = EvalResult {
+            schema_version: EVAL_RESULT_SCHEMA_VERSION,
             job_id: "j1".into(),
             state: EvalJobState::Completed,
             base_weight_shard_manifest: None,
@@ -1049,6 +1451,7 @@ mod tests {
     #[test]
     fn flip_diff_returns_none_for_single_run() {
         let result = EvalResult {
+            schema_version: EVAL_RESULT_SCHEMA_VERSION,
             job_id: "j2".into(),
             state: EvalJobState::Completed,
             base_weight_shard_manifest: None,
@@ -1076,9 +1479,17 @@ mod tests {
         weights.insert("a".into(), 2.0);
         weights.insert("b".into(), 1.0);
         weights.insert("c".into(), 1.0);
-        let metrics =
-            AggregateMetrics::compute(&outcomes, &weights, &BTreeMap::new(), &BTreeMap::new(), 1.5);
+        let aggregated = aggregate_example_outcomes(&outcomes, EvalAggregation::Single).unwrap();
+        let metrics = AggregateMetrics::compute(
+            &aggregated,
+            &outcomes,
+            &weights,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            1.5,
+        );
         assert_eq!(metrics.num_examples, 3);
+        assert_eq!(metrics.num_completions, 3);
         assert_eq!(metrics.num_pass, 1);
         assert_eq!(metrics.num_fail, 1);
         assert_eq!(metrics.num_invalid, 1);
@@ -1092,17 +1503,26 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_tag_passrates_use_first_completion() {
+    fn aggregate_tag_passrates_use_declared_example_reduction() {
         let outcomes = vec![
             mk("a", 0, EvalOutcomeKind::Pass, 1.0, 1.0),
             mk("a", 1, EvalOutcomeKind::Fail, 0.0, 1.0),
             mk("b", 0, EvalOutcomeKind::Fail, 0.0, 1.0),
+            mk("b", 1, EvalOutcomeKind::Fail, 0.0, 1.0),
         ];
         let mut tags = BTreeMap::new();
         tags.insert("a".to_string(), vec!["easy".to_string()]);
         tags.insert("b".to_string(), vec!["easy".to_string()]);
-        let m =
-            AggregateMetrics::compute(&outcomes, &BTreeMap::new(), &tags, &BTreeMap::new(), 1.0);
+        let aggregated =
+            aggregate_example_outcomes(&outcomes, EvalAggregation::PassAtK { k: 2 }).unwrap();
+        let m = AggregateMetrics::compute(
+            &aggregated,
+            &outcomes,
+            &BTreeMap::new(),
+            &tags,
+            &BTreeMap::new(),
+            1.0,
+        );
         assert_eq!(m.pass_rate_by_tag.get("easy").copied(), Some(0.5));
         let easy = m.tag_breakdown.get("easy").unwrap();
         assert_eq!(easy.num_examples, 2);
@@ -1121,7 +1541,9 @@ mod tests {
         let mut target_tools = BTreeMap::new();
         target_tools.insert("a".to_string(), "Bash".to_string());
         target_tools.insert("b".to_string(), "Bash".to_string());
+        let aggregated = aggregate_example_outcomes(&outcomes, EvalAggregation::Single).unwrap();
         let m = AggregateMetrics::compute_with_tools(
+            &aggregated,
             &outcomes,
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -1144,7 +1566,9 @@ mod tests {
             mk("a", 0, EvalOutcomeKind::Pass, 1.0, 1.0),
             mk("b", 0, EvalOutcomeKind::Fail, 0.0, 1.0),
         ];
+        let aggregated = aggregate_example_outcomes(&outcomes, EvalAggregation::Single).unwrap();
         let m = AggregateMetrics::compute(
+            &aggregated,
             &outcomes,
             &BTreeMap::new(),
             &BTreeMap::new(),

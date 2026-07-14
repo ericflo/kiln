@@ -8,7 +8,7 @@ use std::time::Instant;
 use kiln_eval::scorers::{JudgeRunner, NoopJudgeRunner, score_completion};
 use kiln_eval::{
     AggregateMetrics, EvalGenerationParams, EvalOutcomeKind, EvalProgress, EvalSuite,
-    EvalThinkingBudget, ExampleOutcome, SuiteResult,
+    EvalThinkingBudget, ExampleOutcome, SuiteResult, aggregate_example_outcomes,
 };
 use sha2::{Digest, Sha256};
 
@@ -20,6 +20,8 @@ pub enum EvalExecutionError {
     Generation(String),
     #[error("scorer error: {0}")]
     Scorer(String),
+    #[error("aggregation failed: {0}")]
+    Aggregation(String),
 }
 
 /// Callback fired after every example completes. Used by the worker loop to
@@ -41,6 +43,10 @@ pub async fn run_suite_against_adapter(
     cancelled: Arc<std::sync::atomic::AtomicBool>,
     judge_runner: Arc<dyn JudgeRunner>,
 ) -> Result<SuiteResult, EvalExecutionError> {
+    suite
+        .validate()
+        .map_err(|error| EvalExecutionError::Aggregation(error.to_string()))?;
+    validate_effective_aggregation(suite, generation_override)?;
     // Resolve inherited server defaults and reject invalid close-token/stop/
     // max-token combinations before loading an adapter or generating any
     // examples. Cache duplicate generation objects so suite-wide defaults are
@@ -129,24 +135,9 @@ async fn run_suite_inner(
     let mut target_tool_by_example: BTreeMap<String, String> = BTreeMap::new();
     let mut predicted_tool_by_outcome: BTreeMap<(String, usize), String> = BTreeMap::new();
     let mut schema_violations_by_outcome: BTreeMap<(String, usize), (u32, u32)> = BTreeMap::new();
-    let mut running_pass: u32 = 0;
-    let mut running_score: f32 = 0.0;
-    let mut completions_seen: u32 = 0;
     let mut deferred_judge: Vec<DeferredJudgeScore> = Vec::new();
 
-    let total_completions: u32 = suite
-        .examples
-        .iter()
-        .map(|ex| {
-            ex.generation
-                .as_ref()
-                .or(generation_override)
-                .map(|g| g.n)
-                .unwrap_or(suite.generation.n) as u32
-        })
-        .sum();
-
-    for (outcomes_example_index, example) in suite.examples.iter().enumerate() {
+    'examples: for (outcomes_example_index, example) in suite.examples.iter().enumerate() {
         if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
@@ -167,8 +158,11 @@ async fn run_suite_inner(
         }
         let (gen_params, _) = effective_generation(example, suite, generation_override);
         let gen_params = gen_params.clone();
+        let n = gen_params.n;
         let example_seed = gen_params.seed.unwrap_or(effective_seed);
         let resolved_budget = &resolved_budgets[outcomes_example_index];
+        let outcome_start = outcomes.len();
+        let deferred_start = deferred_judge.len();
 
         // Prompts were rendered before the adapter swap so all active budget
         // configurations could be validated before any decode. Preserve the
@@ -177,38 +171,42 @@ async fn run_suite_inner(
         let prepared = match &prepared_examples[outcomes_example_index] {
             Ok(prepared) => prepared.clone(),
             Err(err) => {
-                let outcome = ExampleOutcome {
-                    example_id: example_id.clone(),
-                    completion_index: 0,
-                    generation_seed: Some(kiln_eval::derive_eval_completion_seed(
-                        example_seed,
-                        &example_id,
-                        0,
-                    )),
-                    completion_text: String::new(),
-                    raw_completion_text: None,
-                    thinking_budget: None,
-                    kind: EvalOutcomeKind::Error,
-                    score: 0.0,
-                    detail: Some(format!("prepare failed: {err}")),
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    latency_ms: None,
-                    tags: example.tags.clone(),
-                    metadata: example.metadata.clone(),
-                    reasoning_text: None,
-                    unclosed_thinking: false,
-                };
-                completions_seen += 1;
-                outcomes.push(outcome);
+                for completion_index in 0..n {
+                    outcomes.push(ExampleOutcome {
+                        example_id: example_id.clone(),
+                        completion_index,
+                        generation_seed: Some(kiln_eval::derive_eval_completion_seed(
+                            example_seed,
+                            &example_id,
+                            completion_index,
+                        )),
+                        completion_text: String::new(),
+                        raw_completion_text: None,
+                        thinking_budget: None,
+                        kind: EvalOutcomeKind::Error,
+                        score: 0.0,
+                        detail: Some(format!("prepare failed: {err}")),
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        latency_ms: None,
+                        tags: example.tags.clone(),
+                        metadata: example.metadata.clone(),
+                        reasoning_text: None,
+                        unclosed_thinking: false,
+                    });
+                }
+                publish_reduced_progress(&outcomes, suite, progress.as_ref(), suite.examples.len());
                 continue;
             }
         };
 
-        let n = gen_params.n.max(1);
         for completion_idx in 0..n {
             if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                break;
+                outcomes.truncate(outcome_start);
+                deferred_judge.truncate(deferred_start);
+                predicted_tool_by_outcome.retain(|(id, _), _| id != &example_id);
+                schema_violations_by_outcome.retain(|(id, _), _| id != &example_id);
+                break 'examples;
             }
             let generation_seed =
                 kiln_eval::derive_eval_completion_seed(example_seed, &example_id, completion_idx);
@@ -376,31 +374,9 @@ async fn run_suite_inner(
                     unclosed_thinking: false,
                 },
             };
-            if matches!(outcome.kind, EvalOutcomeKind::Pass) {
-                running_pass += 1;
-            }
-            running_score += outcome.score;
-            completions_seen += 1;
             outcomes.push(outcome);
-
-            if let Some(cb) = progress.as_ref() {
-                let progress_snap = EvalProgress {
-                    examples_completed: completions_seen,
-                    examples_total: total_completions,
-                    running_accuracy: if completions_seen > 0 {
-                        running_pass as f32 / completions_seen as f32
-                    } else {
-                        0.0
-                    },
-                    running_mean_score: if completions_seen > 0 {
-                        running_score / completions_seen as f32
-                    } else {
-                        0.0
-                    },
-                };
-                cb(progress_snap);
-            }
         }
+        publish_reduced_progress(&outcomes, suite, progress.as_ref(), suite.examples.len());
     }
 
     // ── Pass 2: deferred judge scoring ──────────────────────────────
@@ -427,9 +403,11 @@ async fn run_suite_inner(
             }
             if let Err(e) = generator.set_adapter(judge_adapter.as_deref()).await {
                 for item in items {
+                    outcomes[item.outcome_index].kind = EvalOutcomeKind::Error;
                     outcomes[item.outcome_index].detail =
                         Some(format!("judge adapter swap failed: {e}"));
                 }
+                publish_reduced_progress(&outcomes, suite, progress.as_ref(), suite.examples.len());
                 continue;
             }
             let batch: Vec<(
@@ -487,10 +465,6 @@ async fn run_suite_inner(
                                     note.trim_start_matches(" || ").to_string()
                                 }));
                         }
-                        if matches!(o.kind, EvalOutcomeKind::Pass) {
-                            running_pass += 1;
-                        }
-                        running_score += o.score;
                         *slot = o;
                     }
                     Err(e) => {
@@ -499,27 +473,15 @@ async fn run_suite_inner(
                     }
                 }
             }
-            if let Some(cb) = progress.as_ref() {
-                cb(EvalProgress {
-                    examples_completed: completions_seen,
-                    examples_total: total_completions,
-                    running_accuracy: if completions_seen > 0 {
-                        running_pass as f32 / completions_seen as f32
-                    } else {
-                        0.0
-                    },
-                    running_mean_score: if completions_seen > 0 {
-                        running_score / completions_seen as f32
-                    } else {
-                        0.0
-                    },
-                });
-            }
+            publish_reduced_progress(&outcomes, suite, progress.as_ref(), suite.examples.len());
         }
     }
 
     let elapsed = start_instant.elapsed().as_secs_f64();
+    let aggregated_outcomes = aggregate_example_outcomes(&outcomes, suite.aggregation)
+        .map_err(|error| EvalExecutionError::Aggregation(error.to_string()))?;
     let metrics = AggregateMetrics::compute_with_tools_full(
+        &aggregated_outcomes,
         &outcomes,
         &weights,
         &tags_by_example,
@@ -535,8 +497,10 @@ async fn run_suite_inner(
     Ok(SuiteResult {
         suite_name: suite.name.clone(),
         adapter: adapter.map(str::to_string),
+        aggregation: suite.aggregation,
         metrics,
         outcomes,
+        aggregated_outcomes,
         started_at: started_at.to_rfc3339(),
         finished_at: finished_at.to_rfc3339(),
         suite_hash,
@@ -556,6 +520,69 @@ fn effective_generation<'a>(
     } else {
         (&suite.generation, EvalGenerationSource::Suite)
     }
+}
+
+fn publish_reduced_progress(
+    outcomes: &[ExampleOutcome],
+    suite: &EvalSuite,
+    callback: Option<&ProgressCallback>,
+    total_examples: usize,
+) {
+    let Some(callback) = callback else {
+        return;
+    };
+    let pending: std::collections::BTreeSet<&str> = outcomes
+        .iter()
+        .filter(|outcome| outcome.detail.as_deref() == Some("awaiting judge pass"))
+        .map(|outcome| outcome.example_id.as_str())
+        .collect();
+    let finalized: Vec<ExampleOutcome> = outcomes
+        .iter()
+        .filter(|outcome| !pending.contains(outcome.example_id.as_str()))
+        .cloned()
+        .collect();
+    let Ok(reduced) = aggregate_example_outcomes(&finalized, suite.aggregation) else {
+        return;
+    };
+    let completed = reduced.len() as u32;
+    let pass = reduced
+        .iter()
+        .filter(|outcome| outcome.kind == EvalOutcomeKind::Pass)
+        .count() as u32;
+    let score = reduced.iter().map(|outcome| outcome.score).sum::<f32>();
+    callback(EvalProgress {
+        examples_completed: completed,
+        examples_total: total_examples as u32,
+        running_accuracy: if completed > 0 {
+            pass as f32 / completed as f32
+        } else {
+            0.0
+        },
+        running_mean_score: if completed > 0 {
+            score / completed as f32
+        } else {
+            0.0
+        },
+    });
+}
+
+fn validate_effective_aggregation(
+    suite: &EvalSuite,
+    generation_override: Option<&EvalGenerationParams>,
+) -> Result<(), EvalExecutionError> {
+    let k = suite.aggregation.k();
+    for example in &suite.examples {
+        let (params, _) = effective_generation(example, suite, generation_override);
+        if params.n != k {
+            return Err(EvalExecutionError::Aggregation(format!(
+                "example {:?} generation.n {} does not match aggregation {} (k={k})",
+                example.resolved_id(),
+                params.n,
+                suite.aggregation.label()
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn prepare_and_preflight_examples(
@@ -675,6 +702,7 @@ mod tests {
                 integer_only: true,
             }),
             generation: EvalGenerationParams::default(),
+            aggregation: kiln_eval::EvalAggregation::Single,
             system_prompt: None,
             examples: vec![mk("e1", "1+1?", "2"), mk("e2", "5+5?", "10")],
             schema_version: 1,
@@ -855,6 +883,8 @@ mod tests {
     async fn job_seed_derives_stable_distinct_per_example_completion_seeds() {
         let mut suite = suite_with_numeric_answer();
         suite.generation.n = 2;
+        suite.aggregation = kiln_eval::EvalAggregation::PassAtK { k: 2 };
+        suite.schema_version = kiln_eval::SUITE_SCHEMA_VERSION;
         let probe = Arc::new(PreflightProbeGenerator {
             starts_in_reasoning: false,
             preflight_calls: AtomicUsize::new(0),
@@ -922,6 +952,164 @@ mod tests {
             expected,
             "paired adapter runs must consume identical decoder seeds"
         );
+    }
+
+    struct IndexedReplyGenerator {
+        pass_indices: std::collections::BTreeSet<usize>,
+        run_calls: AtomicUsize,
+    }
+
+    impl EvalGenerator for IndexedReplyGenerator {
+        fn set_adapter(
+            &self,
+            _adapter: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + '_>,
+        > {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn prepare(
+            &self,
+            _messages: &[EvalChatMessage],
+            _system_prompt: Option<&str>,
+            _tools: Option<&[serde_json::Value]>,
+            _params: &EvalGenerationParams,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<PreparedPrompt, String>> + Send + '_>,
+        > {
+            Box::pin(async {
+                Ok(PreparedPrompt {
+                    tokens: vec![1],
+                    starts_in_reasoning: false,
+                })
+            })
+        }
+
+        fn run(
+            &self,
+            _prepared: &PreparedPrompt,
+            _params: &EvalGenerationParams,
+            thinking_budget: &EvalThinkingBudget,
+            completion_index: usize,
+            _adapter_label: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<crate::eval::generator::EvalCompletion, String>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            self.run_calls.fetch_add(1, Ordering::Relaxed);
+            let text = if self.pass_indices.contains(&completion_index) {
+                "yes"
+            } else {
+                "no"
+            }
+            .to_string();
+            let thinking_budget = thinking_budget.clone();
+            Box::pin(async move {
+                Ok(crate::eval::generator::EvalCompletion {
+                    raw_text: text.clone(),
+                    text,
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    latency_ms: 1.0,
+                    adapter: None,
+                    thinking_budget,
+                })
+            })
+        }
+    }
+
+    fn multi_sample_suite(aggregation: kiln_eval::EvalAggregation) -> EvalSuite {
+        let mut generation = EvalGenerationParams::default();
+        generation.n = aggregation.k();
+        EvalSuite {
+            name: "multi-sample".into(),
+            description: None,
+            default_scorer: Scorer::ExactMatch {
+                case_sensitive: true,
+                strip_whitespace: true,
+            },
+            generation,
+            aggregation,
+            system_prompt: None,
+            examples: vec![EvalExample {
+                id: Some("e1".into()),
+                messages: vec![EvalChatMessage::new("user", "answer yes")],
+                target: Some("yes".into()),
+                ..Default::default()
+            }],
+            schema_version: kiln_eval::SUITE_SCHEMA_VERSION,
+            tools: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_reduces_multi_sample_runs_before_metrics() {
+        for aggregation in [
+            kiln_eval::EvalAggregation::MeanAtK { k: 3 },
+            kiln_eval::EvalAggregation::PassAtK { k: 3 },
+            kiln_eval::EvalAggregation::MajorityAtK { k: 3 },
+        ] {
+            let generator = Arc::new(IndexedReplyGenerator {
+                pass_indices: [0, 2].into_iter().collect(),
+                run_calls: AtomicUsize::new(0),
+            });
+            let result = run_suite_against_adapter(
+                &multi_sample_suite(aggregation),
+                None,
+                None,
+                17,
+                generator.clone(),
+                None,
+                Arc::new(AtomicBool::new(false)),
+                noop_judge_runner(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(generator.run_calls.load(Ordering::Relaxed), 3);
+            assert_eq!(result.outcomes.len(), 3);
+            assert_eq!(result.aggregated_outcomes.len(), 1);
+            assert_eq!(result.aggregated_outcomes[0].num_pass, 2);
+            assert_eq!(result.aggregated_outcomes[0].num_fail, 1);
+            assert_eq!(result.metrics.num_examples, 1);
+            assert_eq!(result.metrics.num_completions, 3);
+            assert_eq!(result.metrics.num_pass, 1);
+            assert_eq!(result.metrics.accuracy, 1.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn generation_override_must_preserve_suite_aggregation_cardinality() {
+        let generator = Arc::new(IndexedReplyGenerator {
+            pass_indices: [0].into_iter().collect(),
+            run_calls: AtomicUsize::new(0),
+        });
+        let mut generation_override = EvalGenerationParams::default();
+        generation_override.n = 2;
+        let error = run_suite_against_adapter(
+            &multi_sample_suite(kiln_eval::EvalAggregation::PassAtK { k: 3 }),
+            None,
+            Some(&generation_override),
+            17,
+            generator.clone(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            noop_judge_runner(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not match aggregation pass@3")
+        );
+        assert_eq!(generator.run_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -1045,6 +1233,7 @@ mod tests {
                 score_regex: kiln_eval::scorers::llm_judge::default_judge_regex(),
             },
             generation: EvalGenerationParams::default(),
+            aggregation: kiln_eval::EvalAggregation::Single,
             system_prompt: None,
             examples: vec![mk("j1"), mk("j2")],
             schema_version: 1,

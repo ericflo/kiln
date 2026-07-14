@@ -51,8 +51,10 @@ documented here.
    {
      "name": "math-smoke",
      "description": "Three arithmetic problems",
+     "schema_version": 2,
      "default_scorer": { "kind": "numeric_tolerance", "integer_only": true },
-     "generation": { "temperature": 0.0, "max_tokens": 32 },
+     "generation": { "temperature": 0.0, "max_tokens": 32, "n": 1 },
+     "aggregation": { "kind": "single" },
      "examples": [
        { "messages": [{"role": "user", "content": "47 + 138?"}], "target": "185" },
        { "messages": [{"role": "user", "content": "23 * 17?"}],  "target": "391" },
@@ -86,8 +88,9 @@ documented here.
    ```
    Effective seed: 42 (kiln.eval-seed.v1)
    Suite: math-smoke | Adapter: my-trained-adapter
+     job: ...  hash: ...  aggregate: single
      accuracy:  66.7%  |  mean: 0.667  |  weighted: 0.667
-     pass:2  fail:1  invalid:0  error:0  (n=3)
+     pass:2  fail:1  invalid:0  error:0  (examples=3, completions=3)
      latency ms: p50=412  p90=601  p99=601  mean=478
    ```
 
@@ -127,6 +130,127 @@ Most users never hand-author a suite. The canonical flow is:
 
 3. **Stash + re-run.** Suites live in `<adapter_dir>/.eval/suites/<name>/`
    on disk. Re-run the same suite against any adapter in 1 click.
+
+## Multi-completion evaluation
+
+### The unit of evidence
+
+An eval example is one independent observation. Asking the model for `k`
+completions does not turn that example into `k` independent observations: the
+completions share the same prompt, target, tags, weight, and usually much of
+the same failure mode. Kiln therefore stores two result layers:
+
+- `outcomes` contains every raw `ExampleOutcome`, keyed by `example_id` and
+  `completion_index`. Latency, token counts, exact generation seed, raw text,
+  reasoning, and thinking-budget evidence live here.
+- `aggregated_outcomes` contains exactly one `AggregatedExampleOutcome` per
+  example. Headline accuracy, mean score, Wilson confidence intervals,
+  weights, scorer/tag/tool slices, paired comparisons, regression detection,
+  failure reruns, and promotion gates consume this layer.
+
+`metrics.num_examples` is the number of reduced examples and
+`metrics.num_completions` is the number of raw generations. Token, latency,
+reasoning-length, thinking-closure, and schema-diagnostic totals use raw
+completions because they measure runtime work rather than statistical sample
+size.
+
+### Reducers
+
+Every schema-v2 suite declares one `aggregation`. Its cardinality `k` must be
+between 1 and 128, and every effective `generation.n` (suite default, run
+override, or per-example override) must equal that `k`.
+
+| Wire value | Reduced score and verdict | Representative raw completion |
+| --- | --- | --- |
+| `{"kind":"single"}` | Requires `n=1`; preserves completion 0's score and kind. | Completion 0. |
+| `{"kind":"mean_at_k","k":K}` | Arithmetic mean of all K scorer values. Passes at a mean of at least `0.5`; an all-Invalid/Error group preserves that non-verdict instead. | Score closest to the mean, then lowest index. |
+| `{"kind":"pass_at_k","k":K}` | Score 1 and Pass when any completion is Pass; otherwise score 0. This is observed any-success, not an estimator over a larger sample. | First passing completion, otherwise completion 0. |
+| `{"kind":"majority_at_k","k":K}` | Score 1 and Pass only when more than half of the completions are Pass; otherwise score 0. K must be odd. | First completion on the winning side. |
+
+When no completion passes, the reduced non-pass kind is selected in the order
+Fail, Invalid, Error according to which raw kinds are present. This keeps
+ordinary wrong answers distinct from format rejection and generation failure.
+The aggregate also records `completion_indices`,
+`representative_completion_index`, and exact `num_pass`, `num_fail`,
+`num_invalid`, and `num_error` counts.
+
+`mean_at_k` preserves continuous scorer information and is normally the right
+choice for judge, similarity, and partial-credit scorers. `pass_at_k` answers
+"did any of these K attempts solve it?" and should not be compared as if it
+were single-attempt accuracy. `majority_at_k` measures consistency under
+sampling. Use an odd K so a tie cannot be hidden behind policy. For stochastic
+multi-completion suites, choose a nonzero temperature; the dashboard defaults
+new multi-completion synthesis to `0.7` but keeps it editable.
+
+### Authoring and running
+
+This suite samples five attempts and treats any successful attempt as the
+example verdict:
+
+```json
+{
+  "name": "code-pass-at-5",
+  "schema_version": 2,
+  "default_scorer": {
+    "kind": "code",
+    "language": "python",
+    "style": {"kind": "token_similarity", "min_jaccard": 0.8}
+  },
+  "generation": {
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "max_tokens": 512,
+    "n": 5
+  },
+  "aggregation": {"kind": "pass_at_k", "k": 5},
+  "examples": [
+    {
+      "id": "sum-even",
+      "messages": [{"role": "user", "content": "Write sum_even(values)."}],
+      "target": "def sum_even(values):\n    return sum(x for x in values if x % 2 == 0)"
+    }
+  ]
+}
+```
+
+The suite registry validates this contract on save and load. The executor
+validates it again before prompt preparation, including an API-level
+`generation` override. A mismatched `n`, zero or excessive K, even
+`majority_at_k`, incomplete completion group, duplicate/missing completion
+index, non-finite score, or inconsistent tags/metadata fails closed instead of
+silently changing the denominator.
+
+The Evals dashboard exposes reducer, K, and temperature when synthesizing a
+suite. Suite rows show the saved reducer. Result drill-down filters and counts
+one row per reduced example, opens the reducer-selected representative output,
+and shows the raw kind counts. The JSONL download retains every raw completion
+and embeds its matching `aggregated_example_outcome` and `aggregation` so an
+offline audit can reconstruct both views.
+
+Failure reruns select reduced non-passing example IDs, then rerun the complete
+example with the original reducer. Compare and promotion paths require both
+runs to use the same reducer and example set; pairing is by stable
+`example_id`, never result order or completion zero.
+
+### Result schema v2 and migration
+
+New result documents require top-level `schema_version: 2`. Every
+`SuiteResult` requires `aggregation`, `aggregated_outcomes`, raw `outcomes`,
+and both example/completion counts in its metrics. Result v1 and unversioned
+results are rejected because their `n > 1` headline metrics cannot be
+unambiguously reconstructed: older producers sometimes counted completions as
+examples while slices and promotion used completion zero. Terminal job
+archives carry the same version and are skipped at startup with an explicit
+rerun-required diagnostic when the version is missing or older.
+
+Suite schema v1 remains readable only for the unambiguous `single`, `n=1`
+case. To migrate a suite, set `schema_version` to `2`, add an explicit
+`aggregation`, and make every suite/per-example `generation.n` equal its K.
+Do not relabel an old multi-completion result as v2; rerun the suite so Kiln
+can persist the raw group and canonical reduction. The generated contract file
+keeps its `kiln-evals-v1.schema.json` name because that is the stable HTTP
+contract family; payload-level `schema_version` records this result-format
+break.
 
 ## Production trace tool-call evals
 

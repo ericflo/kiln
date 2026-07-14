@@ -32,7 +32,9 @@ use rand_core::Rng as _;
 use serde::{Deserialize, Serialize};
 
 use crate::scorers::{NumericTolerance, Scorer, contains::ContainsMode};
-use crate::suite::{EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite};
+use crate::suite::{
+    EvalAggregation, EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite,
+};
 
 /// Canonical core chat message, re-exported under the synthesis-facing name.
 /// This keeps SFT dataset conversion byte-compatible while sharing the exact
@@ -183,6 +185,9 @@ pub struct SynthesisConfig {
     /// Generation params on the resulting suite. Defaults to greedy.
     #[serde(default)]
     pub generation: EvalGenerationParams,
+    /// Per-example completion reduction for the generated suite.
+    #[serde(default)]
+    pub aggregation: EvalAggregation,
     /// Sampling/filtering knobs.
     #[serde(default)]
     pub sampling: Sampling,
@@ -213,6 +218,7 @@ impl SynthesisConfig {
             strategy: SynthesisStrategy::default(),
             scorer: ScorerChoice::default(),
             generation: EvalGenerationParams::default(),
+            aggregation: EvalAggregation::Single,
             sampling: Sampling::default(),
             system_prompt: None,
             strip_system_prompt: false,
@@ -616,9 +622,10 @@ where
         description: config.description.clone(),
         default_scorer,
         generation: config.generation.clone(),
+        aggregation: config.aggregation,
         system_prompt: config.system_prompt.clone(),
         examples: reservoir,
-        schema_version: 1,
+        schema_version: crate::SUITE_SCHEMA_VERSION,
         tools: suite_tools,
     };
     Ok((suite, stats))

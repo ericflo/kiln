@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use kiln_eval::synthesis::{SynthesisConfig, SynthesisError, SynthesisStats, synthesize_suite};
-use kiln_eval::{EvalExample, EvalSuiteSummary};
+use kiln_eval::{EvalAggregation, EvalExample, EvalSuiteSummary};
 use serde::Serialize;
 
 use crate::eval::datasets::{DatasetError, DatasetRegistry};
@@ -40,6 +40,9 @@ pub struct SynthesisPreview {
     /// Snapshot of the default scorer that *would* be persisted on commit.
     /// Useful for the UI to show "we'd grade these as `numeric_tolerance`".
     pub default_scorer_kind: &'static str,
+    /// Completion reduction and cardinality that will be persisted.
+    pub aggregation: EvalAggregation,
+    pub completions_per_example: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,6 +62,8 @@ pub fn preview_synthesis(
     // Truncate examples for preview UI — the SUIte file itself is
     // already small at this stage but the front-end only renders 5.
     let preview = SynthesisPreview {
+        aggregation: suite.aggregation,
+        completions_per_example: suite.aggregation.k(),
         examples: suite.examples.into_iter().take(10).collect(),
         stats,
         suite_name: config.suite_name.clone(),
@@ -126,6 +131,7 @@ mod tests {
             strategy: SynthesisStrategy::FinalAssistant,
             scorer: kiln_eval::synthesis::ScorerChoice::AutoDetect,
             generation: Default::default(),
+            aggregation: kiln_eval::EvalAggregation::Single,
             sampling: Sampling {
                 max_examples: Some(10),
                 max_prompt_chars: 1_000_000,

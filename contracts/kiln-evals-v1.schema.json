@@ -138,6 +138,7 @@
       "additionalProperties": false,
       "required": [
         "num_examples",
+        "num_completions",
         "num_pass",
         "num_fail",
         "num_invalid",
@@ -160,6 +161,9 @@
       ],
       "properties": {
         "num_examples": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_completions": {
           "$ref": "#/$defs/NonNegativeInteger"
         },
         "num_pass": {
@@ -249,6 +253,72 @@
       },
       "description": "Complete aggregate metrics for one suite/adapter run.",
       "x-kiln-rust-type": "kiln_eval::AggregateMetrics",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AggregatedExampleOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "example_id",
+        "kind",
+        "score",
+        "completion_indices",
+        "representative_completion_index",
+        "num_pass",
+        "num_fail",
+        "num_invalid",
+        "num_error"
+      ],
+      "properties": {
+        "example_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "kind": {
+          "$ref": "#/$defs/EvalOutcomeKind"
+        },
+        "score": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "completion_indices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonNegativeInteger"
+          },
+          "minItems": 1,
+          "maxItems": 128
+        },
+        "representative_completion_index": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_pass": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_fail": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_invalid": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_error": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "metadata": {
+          "$ref": "#/$defs/AnyJson"
+        }
+      },
+      "x-kiln-semantic-constraints": [
+        "completion_indices are exactly 0..k",
+        "raw kind counts sum to k",
+        "representative_completion_index is a member of completion_indices"
+      ],
+      "description": "One independent example statistic reduced from its complete raw completion group.",
+      "x-kiln-rust-type": "kiln_eval::AggregatedExampleOutcome",
       "x-kiln-field-schema-status": "complete"
     },
     "AnyJson": {
@@ -929,6 +999,82 @@
       "x-kiln-rust-type": "DeleteSuiteResponse",
       "x-kiln-field-schema-status": "complete"
     },
+    "EvalAggregation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "single"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "k"
+          ],
+          "properties": {
+            "kind": {
+              "const": "mean_at_k"
+            },
+            "k": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 128
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "k"
+          ],
+          "properties": {
+            "kind": {
+              "const": "pass_at_k"
+            },
+            "k": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 128
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "k"
+          ],
+          "properties": {
+            "kind": {
+              "const": "majority_at_k"
+            },
+            "k": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 128
+            }
+          }
+        }
+      ],
+      "x-kiln-semantic-constraints": [
+        "majority_at_k requires odd k"
+      ],
+      "description": "Explicit reduction from k raw completions to one independent example statistic.",
+      "x-kiln-rust-type": "kiln_eval::EvalAggregation",
+      "x-kiln-field-schema-status": "complete"
+    },
     "EvalChatMessage": {
       "type": "object",
       "additionalProperties": true,
@@ -1100,7 +1246,9 @@
           "$ref": "#/$defs/NonNegativeInteger"
         },
         "n": {
-          "$ref": "#/$defs/NonNegativeInteger"
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
         },
         "stop": {
           "type": "array",
@@ -1155,6 +1303,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "schema_version",
         "job_id",
         "suite_name",
         "adapters",
@@ -1170,6 +1319,9 @@
         "finished_at_iso"
       ],
       "properties": {
+        "schema_version": {
+          "const": 2
+        },
         "job_id": {
           "$ref": "#/$defs/NonEmptyString"
         },
@@ -1356,11 +1508,15 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "schema_version",
         "job_id",
         "state",
         "runs"
       ],
       "properties": {
+        "schema_version": {
+          "const": 2
+        },
         "job_id": {
           "$ref": "#/$defs/NonEmptyString"
         },
@@ -1517,6 +1673,9 @@
         "generation": {
           "$ref": "#/$defs/EvalGenerationParams"
         },
+        "aggregation": {
+          "$ref": "#/$defs/EvalAggregation"
+        },
         "system_prompt": {
           "anyOf": [
             {
@@ -1535,7 +1694,11 @@
           "minItems": 1
         },
         "schema_version": {
-          "$ref": "#/$defs/NonNegativeInteger"
+          "type": "integer",
+          "enum": [
+            1,
+            2
+          ]
         },
         "tools": {
           "type": "array",
@@ -1548,7 +1711,9 @@
       "x-kiln-semantic-constraints": [
         "resolved example IDs are unique",
         "weights are finite and non-negative",
-        "tool entries have a non-empty function.name or name"
+        "tool entries have a non-empty function.name or name",
+        "every effective generation.n equals aggregation.k",
+        "schema version 1 permits only single aggregation and n=1"
       ],
       "description": "A validated evaluation suite. Defaulted fields may be omitted on input and are materialized when serialized.",
       "x-kiln-rust-type": "EvalSuite",
@@ -1561,6 +1726,9 @@
         "name",
         "description",
         "num_examples",
+        "completions_per_example",
+        "aggregation",
+        "schema_version",
         "default_scorer_kind",
         "tags"
       ],
@@ -1580,6 +1748,21 @@
         },
         "num_examples": {
           "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "completions_per_example": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "aggregation": {
+          "$ref": "#/$defs/EvalAggregation"
+        },
+        "schema_version": {
+          "type": "integer",
+          "enum": [
+            1,
+            2
+          ]
         },
         "default_scorer_kind": {
           "$ref": "#/$defs/NonEmptyString"
@@ -2463,7 +2646,9 @@
       "required": [
         "suite_name",
         "adapter",
+        "aggregation",
         "metrics",
+        "aggregated_outcomes",
         "outcomes",
         "started_at",
         "finished_at",
@@ -2483,8 +2668,17 @@
             }
           ]
         },
+        "aggregation": {
+          "$ref": "#/$defs/EvalAggregation"
+        },
         "metrics": {
           "$ref": "#/$defs/AggregateMetrics"
+        },
+        "aggregated_outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AggregatedExampleOutcome"
+          }
         },
         "outcomes": {
           "type": "array",
@@ -2505,7 +2699,7 @@
           "$ref": "#/$defs/NonEmptyString"
         }
       },
-      "description": "Complete result for one suite and adapter.",
+      "description": "Complete result for one suite and adapter, retaining both independent example reductions and raw completions.",
       "x-kiln-rust-type": "kiln_eval::SuiteResult",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2542,7 +2736,9 @@
         "examples",
         "stats",
         "suite_name",
-        "default_scorer_kind"
+        "default_scorer_kind",
+        "aggregation",
+        "completions_per_example"
       ],
       "properties": {
         "examples": {
@@ -2559,9 +2755,17 @@
         },
         "default_scorer_kind": {
           "$ref": "#/$defs/NonEmptyString"
+        },
+        "aggregation": {
+          "$ref": "#/$defs/EvalAggregation"
+        },
+        "completions_per_example": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
         }
       },
-      "description": "Non-persisted synthesis preview.",
+      "description": "Non-persisted synthesis preview including the completion reduction that would be persisted.",
       "x-kiln-rust-type": "SynthesisPreview",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2593,6 +2797,9 @@
         },
         "generation": {
           "$ref": "#/$defs/EvalGenerationParams"
+        },
+        "aggregation": {
+          "$ref": "#/$defs/EvalAggregation"
         },
         "sampling": {
           "$ref": "#/$defs/Sampling"
@@ -2725,6 +2932,9 @@
         },
         "generation": {
           "$ref": "#/$defs/EvalGenerationParams"
+        },
+        "aggregation": {
+          "$ref": "#/$defs/EvalAggregation"
         },
         "sampling": {
           "$ref": "#/$defs/Sampling"
@@ -3096,6 +3306,7 @@
       {
         "jobs": [
           {
+            "schema_version": 2,
             "job_id": "eval-1",
             "suite_name": "math-smoke",
             "adapters": [
@@ -3114,8 +3325,12 @@
               {
                 "suite_name": "math-smoke",
                 "adapter": null,
+                "aggregation": {
+                  "kind": "single"
+                },
                 "metrics": {
                   "num_examples": 1,
+                  "num_completions": 1,
                   "num_pass": 1,
                   "num_fail": 0,
                   "num_invalid": 0,
@@ -3173,6 +3388,24 @@
                   "num_schema_missing_required": 0,
                   "num_schema_extra_unknown": 0
                 },
+                "aggregated_outcomes": [
+                  {
+                    "example_id": "two-plus-two",
+                    "kind": "pass",
+                    "score": 1.0,
+                    "completion_indices": [
+                      0
+                    ],
+                    "representative_completion_index": 0,
+                    "num_pass": 1,
+                    "num_fail": 0,
+                    "num_invalid": 0,
+                    "num_error": 0,
+                    "tags": [
+                      "math"
+                    ]
+                  }
+                ],
                 "outcomes": [
                   {
                     "example_id": "two-plus-two",
@@ -3203,6 +3436,7 @@
     ],
     "EvalResult": [
       {
+        "schema_version": 2,
         "job_id": "eval-1",
         "state": "completed",
         "effective_seed": "42",
@@ -3211,8 +3445,12 @@
           {
             "suite_name": "math-smoke",
             "adapter": null,
+            "aggregation": {
+              "kind": "single"
+            },
             "metrics": {
               "num_examples": 1,
+              "num_completions": 1,
               "num_pass": 1,
               "num_fail": 0,
               "num_invalid": 0,
@@ -3270,6 +3508,24 @@
               "num_schema_missing_required": 0,
               "num_schema_extra_unknown": 0
             },
+            "aggregated_outcomes": [
+              {
+                "example_id": "two-plus-two",
+                "kind": "pass",
+                "score": 1.0,
+                "completion_indices": [
+                  0
+                ],
+                "representative_completion_index": 0,
+                "num_pass": 1,
+                "num_fail": 0,
+                "num_invalid": 0,
+                "num_error": 0,
+                "tags": [
+                  "math"
+                ]
+              }
+            ],
             "outcomes": [
               {
                 "example_id": "two-plus-two",
@@ -3323,6 +3579,9 @@
           "stop": [],
           "seed": null
         },
+        "aggregation": {
+          "kind": "single"
+        },
         "examples": [
           {
             "id": "two-plus-two",
@@ -3336,7 +3595,7 @@
             "weight": 1.0
           }
         ],
-        "schema_version": 1
+        "schema_version": 2
       }
     ],
     "JudgmentListResponse": [
@@ -3397,6 +3656,11 @@
             "name": "math-smoke",
             "description": "One deterministic arithmetic case",
             "num_examples": 1,
+            "completions_per_example": 1,
+            "aggregation": {
+              "kind": "single"
+            },
+            "schema_version": 2,
             "default_scorer_kind": "exact_match",
             "tags": {
               "math": 1
@@ -3443,7 +3707,11 @@
           }
         },
         "suite_name": "math-smoke",
-        "default_scorer_kind": "exact_match"
+        "default_scorer_kind": "exact_match",
+        "aggregation": {
+          "kind": "single"
+        },
+        "completions_per_example": 1
       }
     ],
     "SynthesisPreviewBody": [
@@ -3455,6 +3723,9 @@
           "scorer": {
             "kind": "exact_match"
           }
+        },
+        "aggregation": {
+          "kind": "single"
         },
         "sampling": {
           "max_examples": 100,
@@ -3473,6 +3744,9 @@
             "kind": "exact_match"
           }
         },
+        "aggregation": {
+          "kind": "single"
+        },
         "sampling": {
           "max_examples": 100,
           "seed": 42
@@ -3489,6 +3763,11 @@
           "name": "math-smoke",
           "description": "One deterministic arithmetic case",
           "num_examples": 1,
+          "completions_per_example": 1,
+          "aggregation": {
+            "kind": "single"
+          },
+          "schema_version": 2,
           "default_scorer_kind": "exact_match",
           "tags": {
             "math": 1

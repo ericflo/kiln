@@ -138,6 +138,7 @@ async fn mock_executor_scores_canonical_qwen3_xml_replies() {
             require_xml_format: false,
         },
         generation: EvalGenerationParams::default(),
+        aggregation: kiln_eval::EvalAggregation::Single,
         system_prompt: None,
         examples: vec![
             EvalExample {
@@ -285,6 +286,7 @@ async fn executor_runs_schema_validation_when_tools_declared() {
             require_xml_format: false,
         },
         generation: EvalGenerationParams::default(),
+        aggregation: kiln_eval::EvalAggregation::Single,
         system_prompt: None,
         examples: vec![EvalExample {
             id: Some("weather".into()),
@@ -347,6 +349,7 @@ async fn executor_flags_non_xml_tool_call_in_metrics() {
             require_xml_format: false,
         },
         generation: EvalGenerationParams::default(),
+        aggregation: kiln_eval::EvalAggregation::Single,
         system_prompt: None,
         examples: vec![EvalExample {
             id: Some("json-output".into()),
@@ -392,6 +395,7 @@ async fn executor_marks_unclosed_thinking_as_invalid() {
             strip_whitespace: true,
         },
         generation: EvalGenerationParams::default(),
+        aggregation: kiln_eval::EvalAggregation::Single,
         system_prompt: None,
         examples: vec![EvalExample {
             id: Some("ran-out-of-budget".into()),

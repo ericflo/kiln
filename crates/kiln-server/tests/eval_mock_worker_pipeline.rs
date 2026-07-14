@@ -31,6 +31,7 @@ fn mk_suite() -> EvalSuite {
             strip_whitespace: true,
         },
         generation: EvalGenerationParams::default(),
+        aggregation: kiln_eval::EvalAggregation::Single,
         system_prompt: None,
         examples: vec![mk("e1", "ping", "pong"), mk("e2", "other", "never")],
         schema_version: 1,
@@ -85,6 +86,7 @@ async fn worker_runs_inline_suite_with_mock_generator() {
     state.eval_jobs.write().unwrap().insert(
         job_id.clone(),
         EvalJobInfo {
+            schema_version: kiln_eval::EVAL_RESULT_SCHEMA_VERSION,
             job_id: job_id.clone(),
             suite_name: suite.name.clone(),
             adapters: vec![None],

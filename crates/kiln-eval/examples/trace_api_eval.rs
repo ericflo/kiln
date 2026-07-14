@@ -24,8 +24,9 @@ use futures::stream::{self, StreamExt};
 use kiln_eval::qwen3::{extract_first_tool_call, validate_against_schema};
 use kiln_eval::scorers::{NoopJudgeRunner, Scorer, score_completion};
 use kiln_eval::{
-    AggregateMetrics, EvalGenerationParams, EvalJobState, EvalOutcomeKind, EvalResult, EvalSuite,
-    EvalThinkingBudget, EvalThinkingBudgetOutcome, ExampleOutcome, SuiteResult,
+    AggregateMetrics, EVAL_RESULT_SCHEMA_VERSION, EvalGenerationParams, EvalJobState,
+    EvalOutcomeKind, EvalResult, EvalSuite, EvalThinkingBudget, EvalThinkingBudgetOutcome,
+    ExampleOutcome, SuiteResult, aggregate_example_outcomes,
 };
 use serde_json::{Value, json};
 
@@ -133,6 +134,7 @@ async fn main() -> Result<()> {
     }
 
     let result = EvalResult {
+        schema_version: EVAL_RESULT_SCHEMA_VERSION,
         job_id: format!("trace-api-{}", uuid::Uuid::new_v4()),
         state: EvalJobState::Completed,
         base_weight_shard_manifest: None,
@@ -257,7 +259,10 @@ async fn run_model(
     outcomes.extend(outcome_records.into_iter().map(|(_, outcome)| outcome));
 
     let elapsed_secs = run_clock.elapsed().as_secs_f64();
+    let aggregated_outcomes = aggregate_example_outcomes(&outcomes, suite.aggregation)
+        .context("reducing eval completions")?;
     let metrics = AggregateMetrics::compute_with_tools_full(
+        &aggregated_outcomes,
         &outcomes,
         &weights,
         &tags_by_example,
@@ -270,8 +275,10 @@ async fn run_model(
     Ok(SuiteResult {
         suite_name: suite.name.clone(),
         adapter: Some(model.to_string()),
+        aggregation: suite.aggregation,
         metrics,
         outcomes,
+        aggregated_outcomes,
         started_at: run_started.to_rfc3339(),
         finished_at: chrono::Utc::now().to_rfc3339(),
         suite_hash: suite_hash(suite)?,
@@ -684,6 +691,7 @@ mod tests {
             description: None,
             default_scorer: scorer,
             generation: EvalGenerationParams::default(),
+            aggregation: kiln_eval::EvalAggregation::Single,
             system_prompt: None,
             examples: vec![EvalExample {
                 messages: vec![kiln_eval::EvalChatMessage::new("user", "run pwd")],

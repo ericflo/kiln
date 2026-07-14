@@ -7097,6 +7097,22 @@ function recommendStrategy(stats) {
   return 'final_assistant';
 }
 
+function evalAggregationLabel(aggregation) {
+  const kind = aggregation?.kind || 'single';
+  if (kind === 'single') return 'single';
+  const stem = { mean_at_k: 'mean', pass_at_k: 'pass', majority_at_k: 'majority' }[kind] || kind;
+  const k = Number(aggregation?.k);
+  return `${stem}@${Number.isInteger(k) && k > 0 ? k : '?'}`;
+}
+
+function updateSynthAggregationControls() {
+  const kind = document.getElementById('synth-aggregation')?.value || 'single';
+  const group = document.getElementById('synth-k-group');
+  if (group) group.hidden = kind === 'single';
+  const temperature = document.getElementById('synth-temperature');
+  if (temperature && kind !== 'single' && Number(temperature.value) === 0) temperature.value = '0.7';
+}
+
 function openSynthPanel(name) {
   activeSynthDataset = name;
   document.getElementById('synth-dataset-name').textContent = name;
@@ -7110,6 +7126,7 @@ document.getElementById('synth-close')?.addEventListener('click', () => {
   document.getElementById('synthesize-panel').hidden = true;
   activeSynthDataset = null;
 });
+document.getElementById('synth-aggregation')?.addEventListener('change', updateSynthAggregationControls);
 
 // The judge scorer needs to know WHICH adapter judges — typically the
 // judge LoRA trained from A/B picks. Reveal + populate the picker only
@@ -7151,6 +7168,26 @@ function readSynthConfig() {
   else if (scorerChoice === 'tool_call')   scorer = { kind: 'fixed', scorer: { kind: 'tool_call' } };
   else if (scorerChoice === 'code')        scorer = { kind: 'fixed', scorer: { kind: 'code', style: { kind: 'token_similarity', min_jaccard: 0.6 } } };
   const max_examples = parseInt(document.getElementById('synth-max-examples').value, 10);
+  const aggregationKind = document.getElementById('synth-aggregation')?.value || 'single';
+  const k = aggregationKind === 'single'
+    ? 1
+    : parseInt(document.getElementById('synth-k')?.value || '', 10);
+  if (!Number.isInteger(k) || k < 1 || k > 128) {
+    toast('Completions (k) must be an integer from 1 to 128', 'err');
+    return null;
+  }
+  if (aggregationKind === 'majority_at_k' && k % 2 === 0) {
+    toast('Majority @ k requires an odd number of completions', 'err');
+    return null;
+  }
+  const temperature = Number(document.getElementById('synth-temperature')?.value || 0);
+  if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
+    toast('Temperature must be between 0 and 2', 'err');
+    return null;
+  }
+  const aggregation = aggregationKind === 'single'
+    ? { kind: 'single' }
+    : { kind: aggregationKind, k };
   const seedVal = document.getElementById('synth-seed').value;
   const sampling = {
     max_examples: isFinite(max_examples) && max_examples > 0 ? max_examples : null,
@@ -7163,7 +7200,8 @@ function readSynthConfig() {
     suite_name,
     strategy,
     scorer,
-    generation: { temperature: 0.0, top_p: 1.0, top_k: 0, max_tokens: 256, n: 1, stop: [], seed: null },
+    generation: { temperature, top_p: 1.0, top_k: 0, max_tokens: 256, n: k, stop: [], seed: null },
+    aggregation,
     sampling,
     strip_system_prompt: document.getElementById('synth-strip-system').checked,
   };
@@ -7220,6 +7258,10 @@ function renderSynthPreview(container, preview) {
       <div style="flex:1; min-width:200px;">
         <div class="hint" style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">auto-detected scorers</div>
         <div>${histStr || '<span class="hint">n/a</span>'}</div>
+      </div>
+      <div>
+        <div class="hint" style="font-size:11px; color:var(--text-muted);">completion reduction</div>
+        <div style="font-size:13px; font-weight:600;">${escapeHtml(evalAggregationLabel(preview.aggregation))}</div>
       </div>
     </div>
     <div class="hint" style="margin-bottom:8px; font-size:11px;">Skipped: empty target=${s.skipped_no_target || 0} · prompt-too-long=${s.skipped_prompt_too_long || 0} · target-too-long=${s.skipped_target_too_long || 0} · duplicate=${s.skipped_duplicate || 0}</div>
@@ -7484,7 +7526,7 @@ async function refreshSuites() {
     // A/B disabled state embed it).
     const listKey = 'list:' + JSON.stringify([
       evalActiveAdapter,
-      suites.map(s => [s.name, s.description, s.num_examples, s.default_scorer_kind]),
+      suites.map(s => [s.name, s.description, s.num_examples, s.default_scorer_kind, s.aggregation, s.completions_per_example, s.schema_version]),
       completedOldestFirst.map(j => [j.suite_name, j.headline_accuracy]),
     ]);
     const listHtml = suites.map(s => {
@@ -7499,7 +7541,7 @@ async function refreshSuites() {
           <div class="row-title">${escapeHtml(s.name)}</div>
           <div class="row-sub">${escapeHtml(truncate(s.description || 'No description', 120))}</div>
         </div>
-        <div class="tabular-nums">${s.num_examples.toLocaleString()} examples · <span class="scorer-badge">${escapeHtml(s.default_scorer_kind)}</span></div>
+        <div class="tabular-nums">${s.num_examples.toLocaleString()} examples · <span class="scorer-badge">${escapeHtml(s.default_scorer_kind)}</span> · <span class="scorer-badge">${escapeHtml(evalAggregationLabel(s.aggregation))}</span></div>
         <div style="display:flex; gap:6px; align-items:center;">${recentBadge} ${sparkline}</div>
         <div class="row-actions">
           <button type="button" class="btn btn-primary btn-sm" data-suite="${escapeHtml(s.name)}" data-action="run" ${evalActiveAdapter ? `title="Score ${escapeHtml(evalActiveAdapter)} (the active adapter) on this suite"` : 'title="Score the base model on this suite"'}>Run</button>
@@ -7954,6 +7996,32 @@ let drillPollHandle = null;
 let drillExamplesById = new Map();
 let drillSuiteCacheKey = null;
 
+// Join each independent example reduction to the raw completion selected by
+// the reducer. The UI makes decisions and filters on these rows while the
+// complete raw completion set remains available in the result and export.
+function drillExampleRows(run) {
+  const raw = run?.outcomes || [];
+  const aggregated = run?.aggregated_outcomes || [];
+  if (!aggregated.length) return raw;
+  return aggregated.map(outcome => {
+    const representative = raw.find(item =>
+      item.example_id === outcome.example_id
+      && item.completion_index === outcome.representative_completion_index) || {};
+    return {
+      ...representative,
+      raw_kind: representative.kind,
+      raw_score: representative.score,
+      example_id: outcome.example_id,
+      completion_index: outcome.representative_completion_index,
+      kind: outcome.kind,
+      score: outcome.score,
+      tags: outcome.tags || representative.tags || [],
+      metadata: outcome.metadata ?? representative.metadata,
+      aggregation_outcome: outcome,
+    };
+  });
+}
+
 async function openDrillModal(jobId) {
   evalDrillJobId = jobId;
   modalHashOnOpen('eval', '#evals/jobs/' + encodeURIComponent(jobId));
@@ -8094,7 +8162,7 @@ function renderDrillModal(preserveSelection) {
   const rerunBtn = document.getElementById('drill-rerun');
   if (rerunBtn) {
     const failingInAnyRun = (j.runs || []).some(r =>
-      (r.outcomes || []).some(o => o.kind !== 'pass'));
+      drillExampleRows(r).some(o => o.kind !== 'pass'));
     rerunBtn.hidden = isActive || !failingInAnyRun;
   }
   // Download outcomes (.jsonl): live across every run of the job (compare
@@ -8105,7 +8173,7 @@ function renderDrillModal(preserveSelection) {
     const outcomeCount = (j.runs || []).reduce((n, r) => n + (r.outcomes || []).length, 0);
     exportBtn.disabled = outcomeCount === 0;
     exportBtn.title = outcomeCount
-      ? `Download all ${outcomeCount} per-example outcomes across ${(j.runs || []).length} run(s) as JSON Lines`
+      ? `Download all ${outcomeCount} raw completions with their example reductions across ${(j.runs || []).length} run(s) as JSON Lines`
       : 'No outcomes yet — the download unlocks as examples finish';
   }
 
@@ -8139,6 +8207,7 @@ function renderDrillModal(preserveSelection) {
     ${ringHtml(m.accuracy, 'large')}
     <div style="flex:1; min-width:0;">
       <div style="font-size:14px; font-weight:600; margin-bottom:6px;">Adapter: <span style="color:var(--text);">${escapeHtml(adapter)}</span></div>
+      <div class="hint" style="font-size:11px; margin-bottom:6px;">${escapeHtml(evalAggregationLabel(run.aggregation))} · ${(m.num_examples || 0).toLocaleString()} independent examples · ${(m.num_completions || 0).toLocaleString()} raw completions</div>
       <div class="drill-counts">
         <div class="count-cell"><span class="count-num" style="color:var(--success-fg);">${m.num_pass || 0}</span><span class="count-label">pass</span></div>
         <div class="count-cell"><span class="count-num" style="color:var(--danger-fg);">${m.num_fail || 0}</span><span class="count-label">fail</span></div>
@@ -8209,12 +8278,13 @@ function renderDrillModal(preserveSelection) {
   renderDrillOutcomes();
   if (!preserveSelection || drillSelectedOutcome === null) {
     // Default: show first failure if any, else first outcome
-    const first = (run.outcomes || []).find(o => o.kind !== 'pass') || (run.outcomes || [])[0];
+    const exampleRows = drillExampleRows(run);
+    const first = exampleRows.find(o => o.kind !== 'pass') || exampleRows[0];
     if (first) selectDrillOutcome(first);
     else document.getElementById('drill-detail').innerHTML = '<div class="detail-empty">No outcomes for this run.</div>';
   } else {
     // Re-find the selected outcome by id (it may have changed kind on a re-poll)
-    const found = (run.outcomes || []).find(o => o.example_id === drillSelectedOutcome.example_id && o.completion_index === drillSelectedOutcome.completion_index);
+    const found = drillExampleRows(run).find(o => o.example_id === drillSelectedOutcome.example_id);
     if (found) selectDrillOutcome(found);
   }
 }
@@ -8223,7 +8293,7 @@ function renderDrillOutcomes() {
   const j = drillJob;
   if (!j || !j.runs) return;
   const run = j.runs[Math.min(drillSelectedRun, j.runs.length - 1)];
-  const all = run.outcomes || [];
+  const all = drillExampleRows(run);
   // Counts always reflect the whole run (so the filter pills are stable)
   const counts = { all: all.length, pass: 0, fail: 0, invalid: 0, error: 0 };
   for (const o of all) counts[o.kind] = (counts[o.kind] || 0) + 1;
@@ -8248,11 +8318,16 @@ function renderDrillOutcomes() {
     const isSel = drillSelectedOutcome
       && drillSelectedOutcome.example_id === o.example_id
       && drillSelectedOutcome.completion_index === o.completion_index;
+    const aggregate = o.aggregation_outcome;
+    const completionSummary = aggregate && aggregate.completion_indices?.length > 1
+      ? `<span class="hint">${aggregate.num_pass}/${aggregate.completion_indices.length} raw pass · rep #${aggregate.representative_completion_index}</span>`
+      : '';
     return `<div class="outcome-item ${isSel ? 'selected' : ''}" data-example-id="${escapeHtml(o.example_id)}" data-completion-index="${o.completion_index}">
       <span class="outcome-badge ${o.kind}">${o.kind}</span>
       <div class="outcome-preview" title="${escapeHtml(o.completion_text || '')}">${escapeHtml(truncate(o.completion_text || '(empty)', 110))}</div>
       <div class="outcome-meta">
         ${o.latency_ms != null ? `<span class="hint">${o.latency_ms.toFixed(0)}ms</span>` : ''}
+        ${completionSummary}
         ${tags}
       </div>
     </div>`;
@@ -8288,6 +8363,10 @@ function renderOutcomeDetail(o) {
   const tags = (o.tags || []).map(t => `<span class="tag-chip">${escapeHtml(t)}</span>`).join('');
   const detail = document.getElementById('drill-detail');
   const example = drillExamplesById.get(o.example_id);
+  const aggregate = o.aggregation_outcome;
+  const aggregateSummary = aggregate && aggregate.completion_indices?.length > 1
+    ? `<span class="tabular-nums hint" style="font-size:11px;">raw: ${aggregate.num_pass} pass · ${aggregate.num_fail} fail · ${aggregate.num_invalid} invalid · ${aggregate.num_error} error</span>`
+    : '';
   // Prompt section: the chat history the model actually saw. When we have
   // it (suite was loadable + example_id matched), render each message as a
   // role-coded bubble; otherwise show a hint that the suite isn't available.
@@ -8333,7 +8412,8 @@ function renderOutcomeDetail(o) {
     <h4>Scorer</h4>
     <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
       ${scorerKind ? `<span class="scorer-badge">${escapeHtml(scorerKind)}</span>` : ''}
-      <span class="tabular-nums hint">score ${(o.score).toFixed(3)}</span>
+      <span class="tabular-nums hint">${aggregate && aggregate.completion_indices?.length > 1 ? 'aggregate' : ''} score ${(o.score).toFixed(3)}</span>
+      ${aggregate && aggregate.completion_indices?.length > 1 && o.raw_score != null ? `<span class="tabular-nums hint">representative ${escapeHtml(o.raw_kind || '')} ${(o.raw_score).toFixed(3)}</span>` : ''}
     </div>
     ${o.detail ? `<div style="font-family:var(--font-mono); font-size:12px; padding:10px; background:var(--surface); border:1px solid var(--border); border-radius:6px;">${escapeHtml(o.detail)}</div>` : '<div class="hint" style="font-size:11px;">No scorer commentary.</div>'}
   </div>`;
@@ -8365,6 +8445,7 @@ function renderOutcomeDetail(o) {
         ${o.latency_ms != null ? `<span class="tabular-nums hint" style="font-size:11px;">${o.latency_ms.toFixed(0)}ms</span>` : ''}
         ${o.prompt_tokens != null ? `<span class="tabular-nums hint" style="font-size:11px;">${o.prompt_tokens}→${o.completion_tokens || 0} tok</span>` : ''}
         ${o.generation_seed == null ? '' : `<span class="tabular-nums hint" style="font-size:11px;" title="Derived per-completion decoder seed">seed ${escapeHtml(String(o.generation_seed))}</span>`}
+        ${aggregateSummary}
       </div>
       ${actionsHtml}
       <div>${tags}</div>
@@ -8440,13 +8521,15 @@ function downloadBlobAsFile(filename, blob) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
-/// One JSON line per outcome, across every finished run of the job. Each
+/// One JSON line per raw completion, across every finished run of the job. Each
 /// line is standalone: suite/job/adapter context first, then the outcome's
-/// verdict and (when present) its optional diagnostics, completion last.
+/// verdict, its independent example reduction, optional diagnostics, and the
+/// completion last.
 function buildDrillOutcomesJsonl(j) {
   const lines = [];
   for (const run of (j.runs || [])) {
     (run.outcomes || []).forEach((o, i) => {
+      const aggregate = (run.aggregated_outcomes || []).find(a => a.example_id === o.example_id);
       const line = {
         suite: run.suite_name || j.suite_name || 'eval',
         job_id: j.job_id,
@@ -8456,7 +8539,9 @@ function buildDrillOutcomesJsonl(j) {
         completion_index: o.completion_index,
         kind: o.kind,
         score: o.score,
+        aggregation: run.aggregation || { kind: 'single' },
       };
+      if (aggregate) line.aggregated_example_outcome = aggregate;
       if (j.effective_seed != null) line.effective_seed = String(j.effective_seed);
       if (j.seed_derivation != null) line.seed_derivation = j.seed_derivation;
       if (j.base_weight_shard_manifest != null) line.base_weight_shard_manifest = j.base_weight_shard_manifest;
@@ -8516,7 +8601,8 @@ document.getElementById('drill-cancel')?.addEventListener('click', async () => {
 
 document.getElementById('drill-rerun')?.addEventListener('click', async () => {
   if (!drillJob) return;
-  const failing = (drillJob.runs?.[Math.min(drillSelectedRun, (drillJob.runs?.length || 1) - 1)]?.outcomes || [])
+  const selectedRun = drillJob.runs?.[Math.min(drillSelectedRun, (drillJob.runs?.length || 1) - 1)];
+  const failing = drillExampleRows(selectedRun)
     .filter(o => o.kind !== 'pass').length;
   if (!failing) {
     toast('No non-passing examples to re-run', 'ok');
@@ -9564,13 +9650,12 @@ function signTestP(improved, regressed) {
   const tail = lnTerms.reduce((acc, t) => acc + Math.exp(t - max), 0) * Math.exp(max);
   return Math.min(2 * tail, 1.0);
 }
-// First-completion pass/fail flips between a base run and an adapter run.
+// Paired pass/fail flips over independent examples after the suite's declared
+// completion reduction.
 function compareFlips(baseRun, adapterRun) {
   const verdictOf = (run) => {
     const m = new Map();
-    for (const o of run.outcomes || []) {
-      if ((o.completion_index || 0) === 0) m.set(o.example_id, o.kind === 'pass');
-    }
+    for (const o of run.aggregated_outcomes || []) m.set(o.example_id, o.kind === 'pass');
     return m;
   };
   const b = verdictOf(baseRun), a = verdictOf(adapterRun);

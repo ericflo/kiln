@@ -255,6 +255,21 @@ def build_scorers() -> None:
 
 
 def build_suite_types() -> None:
+    aggregation_k = {"type": "integer", "minimum": 1, "maximum": 128}
+    add_definition(
+        "EvalAggregation",
+        "kiln_eval::EvalAggregation",
+        {
+            "oneOf": [
+                object_schema({"kind": {"const": "single"}}),
+                object_schema({"kind": {"const": "mean_at_k"}, "k": aggregation_k}),
+                object_schema({"kind": {"const": "pass_at_k"}, "k": aggregation_k}),
+                object_schema({"kind": {"const": "majority_at_k"}, "k": aggregation_k}),
+            ],
+            "x-kiln-semantic-constraints": ["majority_at_k requires odd k"],
+        },
+        "Explicit reduction from k raw completions to one independent example statistic.",
+    )
     add_object(
         "EvalChatMessage",
         "kiln_core::tokenizer::ChatMessage",
@@ -277,7 +292,7 @@ def build_suite_types() -> None:
             "top_p": ref("FiniteNumber"),
             "top_k": ref("NonNegativeInteger"),
             "max_tokens": ref("NonNegativeInteger"),
-            "n": ref("NonNegativeInteger"),
+            "n": {"type": "integer", "minimum": 1, "maximum": 128},
             "stop": array(ref("String")),
             "seed": nullable(ref("NonNegativeInteger")),
             "thinking_budget_tokens": nullable(ref("NonNegativeInteger")),
@@ -316,20 +331,21 @@ def build_suite_types() -> None:
             "description": nullable(ref("String")),
             "default_scorer": ref("Scorer"),
             "generation": ref("EvalGenerationParams"),
+            "aggregation": ref("EvalAggregation"),
             "system_prompt": nullable(ref("String")),
             "examples": array(ref("EvalExample"), min_items=1),
-            "schema_version": ref("NonNegativeInteger"),
+            "schema_version": {"type": "integer", "enum": [1, 2]},
             "tools": array(ref("AnyJson")),
         },
         "A validated evaluation suite. Defaulted fields may be omitted on input and are materialized when serialized.",
-        optional=("description", "generation", "system_prompt", "schema_version", "tools"),
+        optional=("description", "generation", "aggregation", "system_prompt", "schema_version", "tools"),
         open_input=True,
-        extra={"x-kiln-semantic-constraints": ["resolved example IDs are unique", "weights are finite and non-negative", "tool entries have a non-empty function.name or name"]},
+        extra={"x-kiln-semantic-constraints": ["resolved example IDs are unique", "weights are finite and non-negative", "tool entries have a non-empty function.name or name", "every effective generation.n equals aggregation.k", "schema version 1 permits only single aggregation and n=1"]},
     )
     add_object(
         "EvalSuiteSummary",
         "kiln_eval::EvalSuiteSummary",
-        {"name": ref("EvalResourceName"), "description": nullable(ref("String")), "num_examples": ref("NonNegativeInteger"), "default_scorer_kind": ref("NonEmptyString"), "tags": mapping(ref("NonNegativeInteger"))},
+        {"name": ref("EvalResourceName"), "description": nullable(ref("String")), "num_examples": ref("NonNegativeInteger"), "completions_per_example": {"type": "integer", "minimum": 1, "maximum": 128}, "aggregation": ref("EvalAggregation"), "schema_version": {"type": "integer", "enum": [1, 2]}, "default_scorer_kind": ref("NonEmptyString"), "tags": mapping(ref("NonNegativeInteger"))},
         "List-view projection of a registered suite.",
     )
     add_object("SuiteListResponse", "SuiteListResponse", {"suites": array(ref("EvalSuiteSummary"))}, "All registered evaluation suites.")
@@ -375,6 +391,21 @@ def build_suite_types() -> None:
 
 def build_result_types() -> None:
     add_object(
+        "AggregatedExampleOutcome",
+        "kiln_eval::AggregatedExampleOutcome",
+        {
+            "example_id": ref("NonEmptyString"), "kind": ref("EvalOutcomeKind"), "score": ref("UnitInterval"),
+            "completion_indices": array(ref("NonNegativeInteger"), min_items=1, max_items=128),
+            "representative_completion_index": ref("NonNegativeInteger"),
+            "num_pass": ref("NonNegativeInteger"), "num_fail": ref("NonNegativeInteger"),
+            "num_invalid": ref("NonNegativeInteger"), "num_error": ref("NonNegativeInteger"),
+            "tags": array(ref("String")), "metadata": ref("AnyJson"),
+        },
+        "One independent example statistic reduced from its complete raw completion group.",
+        optional=("tags", "metadata"),
+        extra={"x-kiln-semantic-constraints": ["completion_indices are exactly 0..k", "raw kind counts sum to k", "representative_completion_index is a member of completion_indices"]},
+    )
+    add_object(
         "ExampleOutcome",
         "kiln_eval::ExampleOutcome",
         {
@@ -398,7 +429,7 @@ def build_result_types() -> None:
         "AggregateMetrics",
         "kiln_eval::AggregateMetrics",
         {
-            "num_examples": ref("NonNegativeInteger"), "num_pass": ref("NonNegativeInteger"), "num_fail": ref("NonNegativeInteger"),
+            "num_examples": ref("NonNegativeInteger"), "num_completions": ref("NonNegativeInteger"), "num_pass": ref("NonNegativeInteger"), "num_fail": ref("NonNegativeInteger"),
             "num_invalid": ref("NonNegativeInteger"), "num_error": ref("NonNegativeInteger"), "accuracy": ref("UnitInterval"),
             "accuracy_confidence_interval": ref("PassRateConfidenceInterval"), "mean_score": ref("UnitInterval"),
             "weighted_mean_score": ref("UnitInterval"), "latency": ref("LatencyStats"), "total_prompt_tokens": ref("NonNegativeInteger"),
@@ -415,12 +446,12 @@ def build_result_types() -> None:
     add_object("EvalProgress", "kiln_eval::EvalProgress", {"examples_completed": ref("NonNegativeInteger"), "examples_total": ref("NonNegativeInteger"), "running_accuracy": ref("UnitInterval"), "running_mean_score": ref("UnitInterval")}, "Live progress for the active adapter run.")
     add_object(
         "SuiteResult", "kiln_eval::SuiteResult",
-        {"suite_name": ref("EvalResourceName"), "adapter": nullable(ref("String")), "metrics": ref("AggregateMetrics"), "outcomes": array(ref("ExampleOutcome")), "started_at": ref("Rfc3339Timestamp"), "finished_at": ref("Rfc3339Timestamp"), "suite_hash": ref("NonEmptyString"), "effective_generation_hash": ref("NonEmptyString")},
-        "Complete result for one suite and adapter.", optional=("effective_generation_hash",),
+        {"suite_name": ref("EvalResourceName"), "adapter": nullable(ref("String")), "aggregation": ref("EvalAggregation"), "metrics": ref("AggregateMetrics"), "aggregated_outcomes": array(ref("AggregatedExampleOutcome")), "outcomes": array(ref("ExampleOutcome")), "started_at": ref("Rfc3339Timestamp"), "finished_at": ref("Rfc3339Timestamp"), "suite_hash": ref("NonEmptyString"), "effective_generation_hash": ref("NonEmptyString")},
+        "Complete result for one suite and adapter, retaining both independent example reductions and raw completions.", optional=("effective_generation_hash",),
     )
     add_object(
         "EvalResult", "EvalResult",
-        {"job_id": ref("NonEmptyString"), "state": ref("EvalJobState"), "base_weight_shard_manifest": external_ref(OBSERVABILITY_SCHEMA, "BaseWeightShardManifest"), "execution_provenance": external_ref(OBSERVABILITY_SCHEMA, "ExecutionProvenanceV1"), "effective_seed": ref("DecimalU64"), "seed_derivation": ref("String"), "runs": array(ref("SuiteResult")), "progress": ref("EvalProgress"), "error": ref("String")},
+        {"schema_version": {"const": 2}, "job_id": ref("NonEmptyString"), "state": ref("EvalJobState"), "base_weight_shard_manifest": external_ref(OBSERVABILITY_SCHEMA, "BaseWeightShardManifest"), "execution_provenance": external_ref(OBSERVABILITY_SCHEMA, "ExecutionProvenanceV1"), "effective_seed": ref("DecimalU64"), "seed_derivation": ref("String"), "runs": array(ref("SuiteResult")), "progress": ref("EvalProgress"), "error": ref("String")},
         "Top-level retained result for a single- or multi-adapter eval job.",
         optional=("base_weight_shard_manifest", "execution_provenance", "effective_seed", "seed_derivation", "progress", "error"),
     )
@@ -431,7 +462,7 @@ def build_result_types() -> None:
     )
     add_object(
         "EvalJobInfo", "EvalJobInfo",
-        {"job_id": ref("NonEmptyString"), "suite_name": ref("EvalResourceName"), "adapters": array(nullable(ref("String"))), "submission_kind": ref("EvalSubmissionKind"), "base_weight_shard_manifest": external_ref(OBSERVABILITY_SCHEMA, "BaseWeightShardManifest"), "execution_provenance": external_ref(OBSERVABILITY_SCHEMA, "ExecutionProvenanceV1"), "effective_seed": ref("DecimalU64"), "state": ref("EvalJobState"), "progress": ref("EvalProgress"), "finished_runs": array(ref("SuiteResult")), "headline_accuracy": nullable(ref("FiniteNumber")), "error": nullable(ref("String")), "source_training_job_id": nullable(ref("String")), "submitted_at_iso": ref("Rfc3339Timestamp"), "started_at_iso": nullable(ref("Rfc3339Timestamp")), "finished_at_iso": nullable(ref("Rfc3339Timestamp")), "post_eval_gate": ref("PostEvalGate")},
+        {"schema_version": {"const": 2}, "job_id": ref("NonEmptyString"), "suite_name": ref("EvalResourceName"), "adapters": array(nullable(ref("String"))), "submission_kind": ref("EvalSubmissionKind"), "base_weight_shard_manifest": external_ref(OBSERVABILITY_SCHEMA, "BaseWeightShardManifest"), "execution_provenance": external_ref(OBSERVABILITY_SCHEMA, "ExecutionProvenanceV1"), "effective_seed": ref("DecimalU64"), "state": ref("EvalJobState"), "progress": ref("EvalProgress"), "finished_runs": array(ref("SuiteResult")), "headline_accuracy": nullable(ref("FiniteNumber")), "error": nullable(ref("String")), "source_training_job_id": nullable(ref("String")), "submitted_at_iso": ref("Rfc3339Timestamp"), "started_at_iso": nullable(ref("Rfc3339Timestamp")), "finished_at_iso": nullable(ref("Rfc3339Timestamp")), "post_eval_gate": ref("PostEvalGate")},
         "Tracked eval-job list record; runtime-only Instants and cancellation handles are never serialized.",
         optional=("base_weight_shard_manifest", "execution_provenance", "effective_seed", "post_eval_gate"),
     )
@@ -447,7 +478,7 @@ def build_result_types() -> None:
 def synthesis_fields() -> dict[str, dict[str, Any]]:
     return {
         "suite_name": ref("EvalResourceName"), "description": nullable(ref("String")), "strategy": ref("SynthesisStrategy"),
-        "scorer": ref("ScorerChoice"), "generation": ref("EvalGenerationParams"), "sampling": ref("Sampling"),
+        "scorer": ref("ScorerChoice"), "generation": ref("EvalGenerationParams"), "aggregation": ref("EvalAggregation"), "sampling": ref("Sampling"),
         "system_prompt": nullable(ref("String")), "strip_system_prompt": ref("Boolean"), "suite_tools": array(ref("AnyJson")),
     }
 
@@ -469,7 +500,7 @@ def build_dataset_and_synthesis_types() -> None:
     synth_optional = tuple(field for field in synthesis_fields() if field != "suite_name") + ("force", "run_against")
     add_object("SynthesizeBody", "SynthesizeBody", {**synthesis_fields(), "force": ref("Boolean"), "run_against": nullable(array(ref("String")))}, "Persist a synthesized suite and optionally queue it against adapters.", optional=synth_optional, open_input=True)
     add_object("SynthesisStats", "kiln_eval::synthesis::SynthesisStats", {"trajectories_seen": ref("NonNegativeInteger"), "trajectories_used": ref("NonNegativeInteger"), "examples_generated": ref("NonNegativeInteger"), "skipped_no_target": ref("NonNegativeInteger"), "skipped_prompt_too_long": ref("NonNegativeInteger"), "skipped_target_too_long": ref("NonNegativeInteger"), "skipped_duplicate": ref("NonNegativeInteger"), "skipped_strategy_match": ref("NonNegativeInteger"), "sample_kept": ref("NonNegativeInteger"), "effective_seed": ref("DecimalU64"), "auto_scorer_histogram": mapping(ref("NonNegativeInteger"))}, "Complete synthesis filtering and deterministic seed statistics. The u64 seed is emitted as an exact decimal string.")
-    add_object("SynthesisPreview", "SynthesisPreview", {"examples": array(ref("EvalExample")), "stats": ref("SynthesisStats"), "suite_name": ref("EvalResourceName"), "default_scorer_kind": ref("NonEmptyString")}, "Non-persisted synthesis preview.")
+    add_object("SynthesisPreview", "SynthesisPreview", {"examples": array(ref("EvalExample")), "stats": ref("SynthesisStats"), "suite_name": ref("EvalResourceName"), "default_scorer_kind": ref("NonEmptyString"), "aggregation": ref("EvalAggregation"), "completions_per_example": {"type": "integer", "minimum": 1, "maximum": 128}}, "Non-persisted synthesis preview including the completion reduction that would be persisted.")
     add_object("SynthesizeDatasetResponse", "SynthesizeDatasetResponse", {"suite": ref("EvalSuiteSummary"), "stats": ref("SynthesisStats"), "queued_eval_job_ids": array(ref("String"))}, "Persisted suite summary plus any auto-queued eval job IDs.")
 
 
@@ -493,7 +524,7 @@ def build_judgment_types() -> None:
 def metrics_example() -> dict[str, Any]:
     interval = {"confidence_level": 0.95, "lower": 0.2, "upper": 1.0}
     return {
-        "num_examples": 1, "num_pass": 1, "num_fail": 0, "num_invalid": 0, "num_error": 0,
+        "num_examples": 1, "num_completions": 1, "num_pass": 1, "num_fail": 0, "num_invalid": 0, "num_error": 0,
         "accuracy": 1.0, "accuracy_confidence_interval": interval, "mean_score": 1.0,
         "weighted_mean_score": 1.0, "latency": {"p50_ms": 10.0, "p90_ms": 10.0, "p99_ms": 10.0, "mean_ms": 10.0, "max_ms": 10.0},
         "total_prompt_tokens": 8, "total_completion_tokens": 1, "elapsed_secs": 0.01,
@@ -509,8 +540,9 @@ def suite_example() -> dict[str, Any]:
         "name": "math-smoke", "description": "One deterministic arithmetic case",
         "default_scorer": {"kind": "exact_match", "case_sensitive": False, "strip_whitespace": True},
         "generation": {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "max_tokens": 32, "n": 1, "stop": [], "seed": None},
+        "aggregation": {"kind": "single"},
         "examples": [{"id": "two-plus-two", "messages": [{"role": "user", "content": "2 + 2?"}], "target": "4", "weight": 1.0}],
-        "schema_version": 1,
+        "schema_version": 2,
     }
 
 
@@ -528,14 +560,15 @@ def stats_example() -> dict[str, Any]:
 
 def build_examples() -> dict[str, list[Any]]:
     suite = suite_example()
-    summary = {"name": "math-smoke", "description": "One deterministic arithmetic case", "num_examples": 1, "default_scorer_kind": "exact_match", "tags": {"math": 1}}
+    summary = {"name": "math-smoke", "description": "One deterministic arithmetic case", "num_examples": 1, "completions_per_example": 1, "aggregation": {"kind": "single"}, "schema_version": 2, "default_scorer_kind": "exact_match", "tags": {"math": 1}}
     dataset = dataset_example()
     judgment = judgment_example()
     outcome = {"example_id": "two-plus-two", "completion_index": 0, "generation_seed": "43", "completion_text": "4", "kind": "pass", "score": 1.0, "tags": ["math"]}
-    run = {"suite_name": "math-smoke", "adapter": None, "metrics": metrics_example(), "outcomes": [outcome], "started_at": "2026-07-14T12:00:00Z", "finished_at": "2026-07-14T12:00:01Z", "suite_hash": "suite-sha256"}
-    job = {"job_id": "eval-1", "suite_name": "math-smoke", "adapters": [None], "submission_kind": "on_demand", "effective_seed": "42", "state": "completed", "progress": {"examples_completed": 1, "examples_total": 1, "running_accuracy": 1.0, "running_mean_score": 1.0}, "finished_runs": [run], "headline_accuracy": 1.0, "error": None, "source_training_job_id": None, "submitted_at_iso": "2026-07-14T12:00:00Z", "started_at_iso": "2026-07-14T12:00:00Z", "finished_at_iso": "2026-07-14T12:00:01Z"}
+    aggregated = {"example_id": "two-plus-two", "kind": "pass", "score": 1.0, "completion_indices": [0], "representative_completion_index": 0, "num_pass": 1, "num_fail": 0, "num_invalid": 0, "num_error": 0, "tags": ["math"]}
+    run = {"suite_name": "math-smoke", "adapter": None, "aggregation": {"kind": "single"}, "metrics": metrics_example(), "aggregated_outcomes": [aggregated], "outcomes": [outcome], "started_at": "2026-07-14T12:00:00Z", "finished_at": "2026-07-14T12:00:01Z", "suite_hash": "suite-sha256"}
+    job = {"schema_version": 2, "job_id": "eval-1", "suite_name": "math-smoke", "adapters": [None], "submission_kind": "on_demand", "effective_seed": "42", "state": "completed", "progress": {"examples_completed": 1, "examples_total": 1, "running_accuracy": 1.0, "running_mean_score": 1.0}, "finished_runs": [run], "headline_accuracy": 1.0, "error": None, "source_training_job_id": None, "submitted_at_iso": "2026-07-14T12:00:00Z", "started_at_iso": "2026-07-14T12:00:00Z", "finished_at_iso": "2026-07-14T12:00:01Z"}
     append = {"prompt": [{"role": "user", "content": "Explain the answer."}], "adapter_a": None, "adapter_b": "concise-v1", "response_a": "A long answer", "response_b": "A concise answer", "winner": "b", "tags": ["style"]}
-    synth_body = {"suite_name": "math-smoke", "strategy": "final_assistant", "scorer": {"kind": "fixed", "scorer": {"kind": "exact_match"}}, "sampling": {"max_examples": 100, "seed": 42}, "force": True, "run_against": [""]}
+    synth_body = {"suite_name": "math-smoke", "strategy": "final_assistant", "scorer": {"kind": "fixed", "scorer": {"kind": "exact_match"}}, "aggregation": {"kind": "single"}, "sampling": {"max_examples": 100, "seed": 42}, "force": True, "run_against": [""]}
     examples: dict[str, list[Any]] = {
         "AppendJudgmentBody": [append],
         "AppendJudgmentResponse": [{"judgment_id": "judgment-1", **judgment}],
@@ -551,7 +584,7 @@ def build_examples() -> dict[str, list[Any]]:
         "DeleteSuiteResponse": [{"status": "deleted", "name": "math-smoke"}],
         "EvalCompareSpec": [{"suite": "math-smoke", "adapters": ["", "math-v1"], "seed": 42}],
         "EvalJobListResponse": [{"jobs": [job]}],
-        "EvalResult": [{"job_id": "eval-1", "state": "completed", "effective_seed": "42", "seed_derivation": "kiln.eval-seed.v1", "runs": [run]}],
+        "EvalResult": [{"schema_version": 2, "job_id": "eval-1", "state": "completed", "effective_seed": "42", "seed_derivation": "kiln.eval-seed.v1", "runs": [run]}],
         "EvalRunRequest": [{"suite": "math-smoke", "adapter": "math-v1", "seed": 42}],
         "EvalRunResponse": [{"job_id": "eval-1", "state": "queued", "effective_seed": "42", "message": "Queued eval against suite `math-smoke`"}],
         "EvalSuite": [suite],
@@ -562,7 +595,7 @@ def build_examples() -> dict[str, list[Any]]:
         "RerunBody": [{"adapter": "math-v2", "outcome_kinds": ["fail", "invalid", "error"], "include_pass": False, "seed": 42}],
         "SuiteListResponse": [{"suites": [summary]}],
         "SuiteSaveResponse": [{"name": "math-smoke", "path": "/srv/kiln/.eval/suites/math-smoke.json", "status": "created"}],
-        "SynthesisPreview": [{"examples": suite["examples"], "stats": stats_example(), "suite_name": "math-smoke", "default_scorer_kind": "exact_match"}],
+        "SynthesisPreview": [{"examples": suite["examples"], "stats": stats_example(), "suite_name": "math-smoke", "default_scorer_kind": "exact_match", "aggregation": {"kind": "single"}, "completions_per_example": 1}],
         "SynthesisPreviewBody": [{key: value for key, value in synth_body.items() if key not in {"force", "run_against"}} | {"head_n": 5}],
         "SynthesizeBody": [synth_body],
         "SynthesizeDatasetResponse": [{"suite": summary, "stats": stats_example(), "queued_eval_job_ids": ["eval-1"]}],

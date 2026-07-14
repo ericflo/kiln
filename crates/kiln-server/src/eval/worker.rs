@@ -246,6 +246,48 @@ async fn run_one_job_with_generator(
 /// - **Eval errored/cancelled**: leave the adapter on disk but do NOT
 ///   promote — an unmeasured adapter must not start serving. The verdict
 ///   on the training job says exactly that.
+fn paired_aggregate_flips(
+    baseline: &kiln_eval::SuiteResult,
+    candidate: &kiln_eval::SuiteResult,
+) -> Result<(u32, u32), String> {
+    if baseline.aggregation != candidate.aggregation {
+        return Err(format!(
+            "aggregation mismatch: baseline {} vs candidate {}",
+            baseline.aggregation.label(),
+            candidate.aggregation.label()
+        ));
+    }
+    if baseline.aggregated_outcomes.len() != candidate.aggregated_outcomes.len() {
+        return Err(format!(
+            "example-count mismatch: baseline {} vs candidate {}",
+            baseline.aggregated_outcomes.len(),
+            candidate.aggregated_outcomes.len()
+        ));
+    }
+    let candidate_by_id: std::collections::BTreeMap<_, _> = candidate
+        .aggregated_outcomes
+        .iter()
+        .map(|outcome| (outcome.example_id.as_str(), outcome))
+        .collect();
+    let mut improved = 0u32;
+    let mut regressed = 0u32;
+    for baseline_outcome in &baseline.aggregated_outcomes {
+        let Some(candidate_outcome) = candidate_by_id.get(baseline_outcome.example_id.as_str())
+        else {
+            return Err(format!(
+                "candidate is missing example {:?}",
+                baseline_outcome.example_id
+            ));
+        };
+        if candidate_outcome.score > baseline_outcome.score {
+            improved += 1;
+        } else if candidate_outcome.score < baseline_outcome.score {
+            regressed += 1;
+        }
+    }
+    Ok((improved, regressed))
+}
+
 async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::EvalJobInfo) {
     let Some(gate) = snapshot.post_eval_gate.clone() else {
         return;
@@ -330,18 +372,16 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
             .iter()
             .find(|run| run.adapter.as_deref() == Some(gate.adapter_name.as_str()))
         {
-            let mut improved = 0u32;
-            let mut regressed = 0u32;
-            for (b, n) in baseline_run.outcomes.iter().zip(new_run.outcomes.iter()) {
-                if b.example_id != n.example_id {
-                    continue;
+            let (improved, regressed) = match paired_aggregate_flips(baseline_run, new_run) {
+                Ok(flips) => flips,
+                Err(error) => {
+                    stamp_verdict(
+                        crate::state::GateOutcome::Error,
+                        format!("post-eval {error} — NOT promoted"),
+                    );
+                    return;
                 }
-                if n.score > b.score {
-                    improved += 1;
-                } else if n.score < b.score {
-                    regressed += 1;
-                }
-            }
+            };
             let test = kiln_eval::result::sign_test(improved, regressed);
             if regressed > improved && test.significant() {
                 stamp_verdict(
@@ -641,6 +681,94 @@ mod tests {
     use kiln_eval::{EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite};
     use tower::ServiceExt;
 
+    fn aggregate_outcome(
+        id: &str,
+        kind: kiln_eval::EvalOutcomeKind,
+        score: f32,
+    ) -> kiln_eval::AggregatedExampleOutcome {
+        kiln_eval::AggregatedExampleOutcome {
+            example_id: id.into(),
+            kind,
+            score,
+            completion_indices: vec![0, 1, 2],
+            representative_completion_index: 1,
+            num_pass: if kind == kiln_eval::EvalOutcomeKind::Pass {
+                2
+            } else {
+                1
+            },
+            num_fail: if kind == kiln_eval::EvalOutcomeKind::Pass {
+                1
+            } else {
+                2
+            },
+            num_invalid: 0,
+            num_error: 0,
+            tags: Vec::new(),
+            metadata: None,
+        }
+    }
+
+    fn raw_outcome(id: &str, kind: kiln_eval::EvalOutcomeKind) -> kiln_eval::ExampleOutcome {
+        kiln_eval::ExampleOutcome {
+            example_id: id.into(),
+            completion_index: 0,
+            generation_seed: None,
+            completion_text: String::new(),
+            raw_completion_text: None,
+            thinking_budget: None,
+            kind,
+            score: if kind == kiln_eval::EvalOutcomeKind::Pass {
+                1.0
+            } else {
+                0.0
+            },
+            detail: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            latency_ms: None,
+            tags: Vec::new(),
+            metadata: None,
+            reasoning_text: None,
+            unclosed_thinking: false,
+        }
+    }
+
+    fn paired_run(
+        adapter: &str,
+        aggregate: kiln_eval::AggregatedExampleOutcome,
+        raw: kiln_eval::ExampleOutcome,
+    ) -> kiln_eval::SuiteResult {
+        kiln_eval::SuiteResult {
+            suite_name: "paired".into(),
+            adapter: Some(adapter.into()),
+            aggregation: kiln_eval::EvalAggregation::MajorityAtK { k: 3 },
+            metrics: kiln_eval::AggregateMetrics::default(),
+            outcomes: vec![raw],
+            aggregated_outcomes: vec![aggregate],
+            started_at: "2026-07-14T00:00:00Z".into(),
+            finished_at: "2026-07-14T00:00:01Z".into(),
+            suite_hash: "suite".into(),
+            effective_generation_hash: "generation".into(),
+        }
+    }
+
+    #[test]
+    fn paired_promotion_flips_use_reduced_examples_not_completion_zero() {
+        let baseline = paired_run(
+            "base",
+            aggregate_outcome("e1", kiln_eval::EvalOutcomeKind::Fail, 0.0),
+            raw_outcome("e1", kiln_eval::EvalOutcomeKind::Pass),
+        );
+        let candidate = paired_run(
+            "candidate",
+            aggregate_outcome("e1", kiln_eval::EvalOutcomeKind::Pass, 1.0),
+            raw_outcome("e1", kiln_eval::EvalOutcomeKind::Fail),
+        );
+
+        assert_eq!(paired_aggregate_flips(&baseline, &candidate), Ok((1, 0)));
+    }
+
     struct PanicIfInvokedGenerator;
 
     impl crate::eval::generator::EvalGenerator for PanicIfInvokedGenerator {
@@ -698,6 +826,7 @@ mod tests {
                 case_sensitive: false,
             },
             generation: EvalGenerationParams::default(),
+            aggregation: kiln_eval::EvalAggregation::Single,
             system_prompt: None,
             examples: (0..n)
                 .map(|i| EvalExample {
@@ -897,6 +1026,7 @@ mod tests {
                 case_sensitive: false,
             },
             generation: EvalGenerationParams::default(),
+            aggregation: kiln_eval::EvalAggregation::Single,
             system_prompt: None,
             examples: vec![EvalExample {
                 id: Some("e0".into()),

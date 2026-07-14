@@ -306,13 +306,14 @@ pub fn qwen3_agentic_core() -> EvalSuite {
             max_tokens: 512,
             ..Default::default()
         },
+        aggregation: crate::suite::EvalAggregation::Single,
         system_prompt: Some(
             "You are a helpful, careful AI assistant. You may use tools when they are needed. \
              When a question can be answered directly, answer it without using a tool. \
              Do not invent tools that aren't listed.".into(),
         ),
         examples,
-        schema_version: 1,
+        schema_version: crate::SUITE_SCHEMA_VERSION,
         tools: Some(tools),
     }
 }

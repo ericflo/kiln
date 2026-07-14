@@ -29,7 +29,9 @@ use sha2::{Digest, Sha256};
 
 use crate::qwen3::{ParsedToolCall, extract_tool_calls, tool_calls_from_value};
 use crate::scorers::{ArgsScoring, NameMatch, Scorer};
-use crate::suite::{EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite};
+use crate::suite::{
+    EvalAggregation, EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite,
+};
 use crate::trajectory::{AnthropicBlock, AnthropicMessage, anthropic_turn_to_sft_conversation};
 
 /// JSONL shape to expect in the production trace export.
@@ -122,6 +124,8 @@ pub struct ProductionTraceSuiteConfig {
     pub sampling: ProductionTraceSampling,
     #[serde(default = "default_trace_generation")]
     pub generation: EvalGenerationParams,
+    #[serde(default)]
+    pub aggregation: EvalAggregation,
     /// Require Qwen3.5-native XML when scoring model outputs. Leave false
     /// when you want to score semantically-correct JSON emissions as pass
     /// while still surfacing the format regression in aggregate metrics.
@@ -145,6 +149,7 @@ impl ProductionTraceSuiteConfig {
             input_format: ProductionTraceFormat::Auto,
             sampling: ProductionTraceSampling::default(),
             generation: default_trace_generation(),
+            aggregation: EvalAggregation::Single,
             require_xml_format: false,
         }
     }
@@ -510,9 +515,10 @@ where
             require_xml_format: config.require_xml_format,
         },
         generation: config.generation.clone(),
+        aggregation: config.aggregation,
         system_prompt: None,
         examples,
-        schema_version: 1,
+        schema_version: crate::SUITE_SCHEMA_VERSION,
         tools: suite_tools,
     };
     Ok((suite, stats))

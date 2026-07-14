@@ -397,7 +397,7 @@ async fn rerun_job(
             .collect();
         let mut ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for run in &job.finished_runs {
-            for o in &run.outcomes {
+            for o in &run.aggregated_outcomes {
                 let kind = match o.kind {
                     kiln_eval::EvalOutcomeKind::Pass => "pass",
                     kiln_eval::EvalOutcomeKind::Fail => "fail",
@@ -1300,6 +1300,7 @@ mod tests {
                 integer_only: true,
             }),
             generation: EvalGenerationParams::default(),
+            aggregation: kiln_eval::EvalAggregation::Single,
             system_prompt: None,
             examples: vec![EvalExample {
                 id: Some("e1".into()),
@@ -1682,11 +1683,18 @@ mod tests {
             777,
         );
         original.state = EvalJobState::Completed;
+        let aggregated_outcomes = kiln_eval::aggregate_example_outcomes(
+            std::slice::from_ref(&outcome),
+            suite.aggregation,
+        )
+        .unwrap();
         original.finished_runs.push(kiln_eval::SuiteResult {
             suite_name: suite.name.clone(),
             adapter: None,
+            aggregation: suite.aggregation,
             metrics: kiln_eval::AggregateMetrics::default(),
             outcomes: vec![outcome],
+            aggregated_outcomes,
             started_at: "2026-07-10T00:00:00Z".into(),
             finished_at: "2026-07-10T00:00:01Z".into(),
             suite_hash: "suite".into(),

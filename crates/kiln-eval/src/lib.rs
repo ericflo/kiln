@@ -43,17 +43,19 @@ pub use production_trace::{
     synthesize_production_trace_suite_from_lines,
 };
 pub use result::{
-    AggregateMetrics, EVAL_SEED_DERIVATION_V1, EvalJobState, EvalOutcomeKind, EvalProgress,
+    AggregateMetrics, AggregatedExampleOutcome, EVAL_RESULT_SCHEMA_VERSION,
+    EVAL_SEED_DERIVATION_V1, EvalAggregationError, EvalJobState, EvalOutcomeKind, EvalProgress,
     EvalResult, EvalThinkingBudget, EvalThinkingBudgetOutcome, ExampleOutcome, FlipDiff,
     LatencyStats, PassRateConfidenceInterval, ReasoningLengthStats, ScorerBreakdown, SuiteResult,
-    TagBreakdown, ToolBreakdown, derive_eval_completion_seed,
+    TagBreakdown, ToolBreakdown, aggregate_example_outcomes, derive_eval_completion_seed,
 };
 pub use scorers::{
     ArgsScoring, CodeStyle, NameMatch, NumericTolerance, Scorer, ScorerError, score_completion,
 };
 pub use suite::{
-    EvalBudgetOverride, EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams,
-    EvalSuite, EvalSuiteSummary, PostEvalConfig, default_max_tokens, default_temperature,
+    EvalAggregation, EvalBudgetOverride, EvalChatMessage, EvalCompareSpec, EvalExample,
+    EvalGenerationParams, EvalSuite, EvalSuiteSummary, PostEvalConfig, default_max_tokens,
+    default_temperature,
 };
 pub use synthesis::{
     Sampling, ScorerChoice, SftConversation, SftMessage, SynthesisConfig, SynthesisError,
@@ -66,4 +68,4 @@ pub use trajectory::{
 /// Schema version of suite JSON files. Bumped when an incompatible field is
 /// added. Suite files without `schema_version` are assumed to be v1 so existing
 /// JSONL on disk keeps loading.
-pub const SUITE_SCHEMA_VERSION: u32 = 1;
+pub const SUITE_SCHEMA_VERSION: u32 = 2;

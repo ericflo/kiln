@@ -550,9 +550,10 @@ pub fn build_validation_suite(
             max_tokens: 64,
             ..Default::default()
         },
+        aggregation: kiln_eval::EvalAggregation::Single,
         system_prompt: None,
         examples,
-        schema_version: 1,
+        schema_version: kiln_eval::SUITE_SCHEMA_VERSION,
         tools: None,
     })
 }

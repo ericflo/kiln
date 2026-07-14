@@ -841,6 +841,23 @@
               </select>
             </div>
             <div class="form-group">
+              <label for="synth-aggregation">Completion reduction</label>
+              <select id="synth-aggregation">
+                <option value="single">Single</option>
+                <option value="mean_at_k">Mean @ k</option>
+                <option value="pass_at_k">Pass @ k</option>
+                <option value="majority_at_k">Majority @ k</option>
+              </select>
+            </div>
+            <div class="form-group" id="synth-k-group" hidden>
+              <label for="synth-k">Completions (k)</label>
+              <input id="synth-k" type="number" value="3" min="1" max="128" step="1">
+            </div>
+            <div class="form-group">
+              <label for="synth-temperature">Temperature</label>
+              <input id="synth-temperature" type="number" value="0" min="0" max="2" step="0.1">
+            </div>
+            <div class="form-group">
               <label for="synth-max-examples">Max examples</label>
               <input id="synth-max-examples" type="number" value="100" min="1" max="10000">
             </div>

@@ -29,6 +29,16 @@ fn job_path(adapter_dir: &Path, job_id: &str) -> PathBuf {
 }
 
 fn validate_artifact_provenance(job: &EvalJobInfo) -> io::Result<()> {
+    if job.schema_version != kiln_eval::EVAL_RESULT_SCHEMA_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported archived eval result schema_version {}; expected {}; legacy multi-completion results are ambiguous and must be rerun",
+                job.schema_version,
+                kiln_eval::EVAL_RESULT_SCHEMA_VERSION
+            ),
+        ));
+    }
     if let Some(manifest) = job.base_weight_shard_manifest.as_ref() {
         manifest
             .validate()
@@ -40,6 +50,27 @@ fn validate_artifact_provenance(job: &EvalJobInfo) -> io::Result<()> {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     }
     Ok(())
+}
+
+fn decode_archive(bytes: &[u8]) -> io::Result<EvalJobInfo> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64);
+    if version != Some(kiln_eval::EVAL_RESULT_SCHEMA_VERSION as u64) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported archived eval result schema_version {}; expected {}; legacy multi-completion results are ambiguous and must be rerun",
+                version
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "<missing>".to_string()),
+                kiln_eval::EVAL_RESULT_SCHEMA_VERSION
+            ),
+        ));
+    }
+    serde_json::from_value(value).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 pub fn save(adapter_dir: &Path, job: &EvalJobInfo) -> io::Result<()> {
@@ -78,8 +109,7 @@ pub fn load_all(adapter_dir: &Path) -> Vec<EvalJobInfo> {
             continue;
         }
         match fs::read(&path).and_then(|b| {
-            let job: EvalJobInfo = serde_json::from_slice(&b)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let job = decode_archive(&b)?;
             validate_artifact_provenance(&job)?;
             Ok(job)
         }) {
@@ -193,5 +223,24 @@ mod tests {
         job.execution_provenance.as_mut().unwrap().backend.device = "tampered:0".to_string();
         let error = save(temp.path(), &job).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn eval_archive_rejects_missing_and_legacy_result_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let job = completed_job();
+        save(temp.path(), &job).unwrap();
+        let path = job_path(temp.path(), &job.job_id);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+
+        value.as_object_mut().unwrap().remove("schema_version");
+        let error = decode_archive(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("schema_version <missing>"));
+
+        value["schema_version"] = serde_json::json!(1);
+        let error = decode_archive(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("schema_version 1"));
+        assert!(error.to_string().contains("ambiguous"));
     }
 }
