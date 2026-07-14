@@ -84,6 +84,53 @@ PROMPT_IDENTITY = "variant_invariant_fixed_output_v2"
 PROMPT_MARKER_FORMAT = "QUAL-{seed}-{role}"
 
 
+@dataclasses.dataclass(frozen=True)
+class SourceBuildSpec:
+    """Immutable source-build policy recorded by qualification receipts."""
+
+    backend: str
+    features: str
+    package: str = BUILD_PACKAGE
+    binary: str = BUILD_BINARY
+    profile: str = BUILD_PROFILE
+    cargo_wrapper: str = BUILD_CARGO_WRAPPER
+    cargo_jobs: int = BUILD_CARGO_JOBS
+    cargo_min_available_gib: int = BUILD_CARGO_MIN_AVAILABLE_GIB
+    cargo_memory_scope: str = BUILD_CARGO_MEMORY_SCOPE
+    environment: tuple[tuple[str, str], ...] = ()
+
+    def effective_config(self) -> dict[str, Any]:
+        config: dict[str, Any] = {
+            "binary": self.binary,
+            "cargo_jobs": self.cargo_jobs,
+            "cargo_memory_scope": self.cargo_memory_scope,
+            "cargo_min_available_gib": self.cargo_min_available_gib,
+            "cargo_wrapper": self.cargo_wrapper,
+            "features": self.features,
+            "locked": True,
+            "no_default_features": True,
+            "offline": True,
+            "package": self.package,
+            "profile": self.profile,
+        }
+        config.update(dict(self.environment))
+        return config
+
+
+ROCM_BUILD_SPEC = SourceBuildSpec(
+    backend="ROCm",
+    features=BUILD_FEATURES,
+    environment=(
+        ("rocm_archs", BUILD_ROCM_ARCHS),
+        ("rocm_path", BUILD_ROCM_PATH),
+    ),
+)
+VULKAN_BUILD_SPEC = SourceBuildSpec(
+    backend="Vulkan",
+    features="vulkan",
+)
+
+
 def _variant_config(
     *,
     serving_profile: str,
@@ -95,21 +142,7 @@ def _variant_config(
     rocm_graphs_enabled: bool,
 ) -> dict[str, Any]:
     return {
-        "build": {
-            "binary": BUILD_BINARY,
-            "cargo_jobs": BUILD_CARGO_JOBS,
-            "cargo_memory_scope": BUILD_CARGO_MEMORY_SCOPE,
-            "cargo_min_available_gib": BUILD_CARGO_MIN_AVAILABLE_GIB,
-            "cargo_wrapper": BUILD_CARGO_WRAPPER,
-            "features": BUILD_FEATURES,
-            "locked": True,
-            "no_default_features": True,
-            "offline": True,
-            "package": BUILD_PACKAGE,
-            "profile": BUILD_PROFILE,
-            "rocm_archs": BUILD_ROCM_ARCHS,
-            "rocm_path": BUILD_ROCM_PATH,
-        },
+        "build": ROCM_BUILD_SPEC.effective_config(),
         "runtime": {
             "serving_profile": serving_profile,
             "kv_autoscale_requested": kv_autoscale_requested,
@@ -912,9 +945,12 @@ def run_stream(
     cancel_after: int | None = None,
     absolute_deadline: float | None = None,
     abort_event: threading.Event | None = None,
+    request_timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
 ) -> StreamResult:
     started = time.monotonic()
-    deadline = started + REQUEST_TIMEOUT_SECONDS
+    if not math.isfinite(request_timeout_seconds) or request_timeout_seconds <= 0:
+        raise QualificationError("request timeout must be finite and positive")
+    deadline = started + request_timeout_seconds
     if absolute_deadline is not None:
         deadline = min(deadline, absolute_deadline)
     semantic_times: list[float] = []
@@ -1605,35 +1641,49 @@ def resolve_cargo_executable(environment: dict[str, str]) -> str:
     )
 
 
-def source_bound_build_command() -> list[str]:
+def source_bound_build_command(spec: SourceBuildSpec = ROCM_BUILD_SPEC) -> list[str]:
     return [
-        str(ROOT / BUILD_CARGO_WRAPPER),
+        str(ROOT / spec.cargo_wrapper),
         "build",
         "--quiet",
-        f"--{BUILD_PROFILE}",
+        f"--{spec.profile}",
         "--locked",
         "--offline",
         "-p",
-        BUILD_PACKAGE,
+        spec.package,
         "--bin",
-        BUILD_BINARY,
+        spec.binary,
         "--no-default-features",
         "--features",
-        BUILD_FEATURES,
+        spec.features,
     ]
 
 
-def source_bound_build_environment(source: dict[str, str]) -> dict[str, str]:
+def source_bound_build_environment(
+    source: dict[str, str], spec: SourceBuildSpec = ROCM_BUILD_SPEC
+) -> dict[str, str]:
     environment = sanitized_environment(source)
+    # Backend selection is closed: ambient toolchain variables from another
+    # backend cannot survive into a source-bound build.
+    for key in ("ROCM_PATH", "HIP_PATH"):
+        environment.pop(key, None)
     environment.update(
         {
             "CARGO_NET_OFFLINE": "true",
-            "KILN_CARGO_JOBS": str(BUILD_CARGO_JOBS),
-            "KILN_CARGO_MIN_AVAILABLE_GIB": str(BUILD_CARGO_MIN_AVAILABLE_GIB),
-            "KILN_ROCM_ARCHS": BUILD_ROCM_ARCHS,
-            "ROCM_PATH": BUILD_ROCM_PATH,
+            "KILN_CARGO_JOBS": str(spec.cargo_jobs),
+            "KILN_CARGO_MIN_AVAILABLE_GIB": str(spec.cargo_min_available_gib),
         }
     )
+    for key, value in spec.environment:
+        environment_key = {
+            "rocm_archs": "KILN_ROCM_ARCHS",
+            "rocm_path": "ROCM_PATH",
+        }.get(key)
+        if environment_key is None:
+            raise QualificationError(
+                f"unsupported {spec.backend} source-build environment field {key!r}"
+            )
+        environment[environment_key] = value
     cargo_executable = resolve_cargo_executable(environment)
     if Path(cargo_executable).name not in {"cargo", "cargo.exe"}:
         raise QualificationError(
@@ -1643,10 +1693,15 @@ def source_bound_build_environment(source: dict[str, str]) -> dict[str, str]:
     return environment
 
 
-def build_binary(absolute_deadline: float) -> tuple[Path, str, float]:
+def build_binary(
+    absolute_deadline: float,
+    spec: SourceBuildSpec = ROCM_BUILD_SPEC,
+    *,
+    build_timeout_seconds: float = STARTUP_TIMEOUT_SECONDS,
+) -> tuple[Path, str, float]:
     started = time.monotonic()
-    environment = source_bound_build_environment(dict(os.environ))
-    command = source_bound_build_command()
+    environment = source_bound_build_environment(dict(os.environ), spec)
+    command = source_bound_build_command(spec)
     completed = subprocess.run(
         command,
         cwd=ROOT,
@@ -1654,14 +1709,18 @@ def build_binary(absolute_deadline: float) -> tuple[Path, str, float]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=remaining_until(
-            absolute_deadline, "source-bound ROCm build", STARTUP_TIMEOUT_SECONDS
+            absolute_deadline,
+            f"source-bound {spec.backend} build",
+            build_timeout_seconds,
         ),
         check=False,
     )
     if completed.returncode != 0:
         tail = completed.stderr.decode("utf-8", errors="replace")[-4000:]
-        raise QualificationError(f"source-bound ROCm build failed ({completed.returncode}): {tail}")
-    binary = ROOT / "target" / BUILD_PROFILE / BUILD_BINARY
+        raise QualificationError(
+            f"source-bound {spec.backend} build failed ({completed.returncode}): {tail}"
+        )
+    binary = ROOT / "target" / spec.profile / spec.binary
     if not binary.is_file():
         raise QualificationError(f"build succeeded without {binary}")
     return binary, sha256_file(binary), time.monotonic() - started
@@ -1669,9 +1728,15 @@ def build_binary(absolute_deadline: float) -> tuple[Path, str, float]:
 
 def server_environment(
     variant: str,
+    spec: SourceBuildSpec = ROCM_BUILD_SPEC,
 ) -> dict[str, str]:
     config = VARIANT_CONFIGS[variant]
     environment = sanitized_environment(dict(os.environ))
+    for key in ("ROCM_PATH", "HIP_PATH"):
+        environment.pop(key, None)
+    build_environment = dict(spec.environment)
+    if rocm_path := build_environment.get("rocm_path"):
+        environment["ROCM_PATH"] = rocm_path
     environment.update(
         {
             # Debug endpoint access is an internal qualification capability,

@@ -728,6 +728,24 @@ class ServeMixedLoadTests(unittest.TestCase):
                 "rocm",
             ],
         )
+        self.assertEqual(
+            serve.source_bound_build_command(serve.VULKAN_BUILD_SPEC),
+            [
+                str(ROOT / "scripts/cargo-bounded.sh"),
+                "build",
+                "--quiet",
+                "--release",
+                "--locked",
+                "--offline",
+                "-p",
+                "kiln-server",
+                "--bin",
+                "kiln",
+                "--no-default-features",
+                "--features",
+                "vulkan",
+            ],
+        )
 
         parsed = serve.parse_args(["--model-path", "/models/test", "--seed", "7"])
         self.assertEqual(parsed.model_path, Path("/models/test"))
@@ -784,6 +802,64 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
         self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
         self.assertEqual(environment["KILN_ROCM_ARCHS"], serve.BUILD_ROCM_ARCHS)
+
+    def test_vulkan_source_build_is_bounded_without_rocm_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cargo = Path(temp_dir) / "cargo"
+            cargo.write_text("#!/bin/sh\n")
+            cargo.chmod(0o755)
+            environment = serve.source_bound_build_environment(
+                {
+                    "CARGO": str(cargo),
+                    "HOME": temp_dir,
+                    "PATH": "/usr/bin",
+                    "ROCM_PATH": "/ambient/rocm",
+                    serve.RESULT_ENV: "/tmp/result.json",
+                    serve.VARIANT_ENV: "vulkan-serving-baseline",
+                },
+                serve.VULKAN_BUILD_SPEC,
+            )
+        self.assertEqual(environment["CARGO"], str(cargo))
+        self.assertEqual(environment["CARGO_NET_OFFLINE"], "true")
+        self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
+        self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
+        self.assertNotIn("ROCM_PATH", environment)
+        self.assertNotIn("KILN_ROCM_ARCHS", environment)
+        self.assertEqual(
+            serve.VULKAN_BUILD_SPEC.effective_config(),
+            {
+                "binary": "kiln",
+                "cargo_jobs": 1,
+                "cargo_memory_scope": "systemd_user_memory_max_no_swap",
+                "cargo_min_available_gib": 15,
+                "cargo_wrapper": "scripts/cargo-bounded.sh",
+                "features": "vulkan",
+                "locked": True,
+                "no_default_features": True,
+                "offline": True,
+                "package": "kiln-server",
+                "profile": "release",
+            },
+        )
+
+    def test_vulkan_server_environment_cannot_inherit_rocm_toolchain(self) -> None:
+        with mock.patch.dict(
+            serve.os.environ,
+            {
+                "PATH": "/usr/bin",
+                "ROCM_PATH": "/ambient/rocm",
+                "HIP_PATH": "/ambient/hip",
+                serve.RESULT_ENV: "/tmp/result.json",
+                serve.VARIANT_ENV: "default",
+            },
+            clear=True,
+        ):
+            vulkan = serve.server_environment("default", serve.VULKAN_BUILD_SPEC)
+            rocm = serve.server_environment("default")
+        self.assertNotIn("ROCM_PATH", vulkan)
+        self.assertNotIn("HIP_PATH", vulkan)
+        self.assertEqual(rocm["ROCM_PATH"], serve.BUILD_ROCM_PATH)
+        self.assertNotIn("HIP_PATH", rocm)
 
     def test_source_bound_build_environment_rejects_wrapper_recursion(self) -> None:
         with self.assertRaisesRegex(serve.QualificationError, "must name the cargo"):

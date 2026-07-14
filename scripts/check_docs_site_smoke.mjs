@@ -478,6 +478,12 @@ const generatedDocsPages = [
       'shape-dependent attention geometry',
       'poisons only a live graph',
       'Missing devices and skipped tests are failures',
+      'Vulkan serving baseline',
+      'serving-vulkan-baseline-v1.json',
+      'concurrency 1, 4, 8, and 12',
+      '25 measured requests',
+      'ordered canonical',
+      'It does not close the CPU/HF oracle comparison',
     ],
   },
 ];

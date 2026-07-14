@@ -44,10 +44,13 @@ building. Configuration changes must be declared in a committed workload
 variant; inherited shell overrides are never silently ignored or accepted as
 source-bound evidence.
 
-Source-building ROCm serving workloads never invoke Cargo directly. Their
-drivers resolve the requested toolchain, then execute the exact package, bin,
-feature, locked, and offline build through `scripts/cargo-bounded.sh` with one
-job and a 15 GiB `MemAvailable` floor. The wrapper refuses overlapping
+Source-building ROCm and Vulkan serving workloads never invoke Cargo directly.
+Their drivers select an immutable backend build specification, resolve the
+requested toolchain, then execute the exact package, binary, feature, locked,
+and offline build through `scripts/cargo-bounded.sh` with one job and a 15 GiB
+`MemAvailable` floor. ROCm alone receives `ROCM_PATH` and
+`KILN_ROCM_ARCHS`; the Vulkan build strips ambient ROCm toolchain variables and
+uses only the `vulkan` feature. The wrapper refuses overlapping
 Cargo/rustc processes and runs the complete compiler/linker tree in a transient
 systemd user scope with an aggregate `MemoryMax`, host reserve, and zero swap.
 The committed effective build config records the wrapper, job count, floor, and
@@ -234,7 +237,7 @@ model directory and `--model-id` with its public identity. Select each declared
 A/B arm explicitly; the manifest, not an ambient environment variable, owns
 the effective configuration recorded in the receipt.
 
-The ROCm serving drivers materialize that declared policy as a private TOML
+The source-bound serving drivers materialize that declared policy as a private TOML
 file inside the ignored run directory and start `kiln serve --config <file>`.
 Server profile, bind address, model/snapshot/adapter paths, thinking default,
 transport bounds, scheduling ceilings, logging, memory reclaim, synchronization,
@@ -250,6 +253,70 @@ grants the trusted debug readback, not public server policy. `RUST_LOG` remains
 the ordinary tracing filter. Qualification rejects every other ambient runtime
 control, including the deprecated `KILN_KV_AUTOSCALE` and
 `KILN_KV_FORCE_BLOCKS` aliases.
+
+### Vulkan serving baseline
+
+Run this only after the required ROCm receipts have passed on the same clean,
+pushed source tree. It is the first full-server Vulkan gate; the earlier core
+and prefill workloads exercise lower-level routes but do not prove the public
+SSE server, source-built executable identity, batching actor, or teardown.
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant vulkan-serving-baseline \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen3.5-4B \
+  qualification/workloads/serving-vulkan-baseline-v1.json
+```
+
+The driver builds `kiln-server` once with `--no-default-features --features
+vulkan`, through the bounded wrapper, offline, with one compile job and the
+unchanged 15 GiB host-memory admission floor. The compile window is 900 seconds
+and is separate from the 240-second server-readiness window. The generated
+private TOML selects the experimental profile only to keep the batching actor
+available; it explicitly disables KV autoscaling, allocator reclaim, and ROCm
+graphs. Runtime attestation requires all three policies and their
+`config_file` provenance before measurement and again after the final wave.
+
+After one fixed warmup, four thread-barrier waves dispatch concurrency 1, 4, 8,
+and 12 with mixed prompt lengths from 16 through 1,024 deterministic words.
+All 25 measured requests disable thinking and sampling, ignore EOS, stream
+usage and performance metadata, and must finish by the exact 32-token limit.
+The final two waves cover the configured eight decode slots and the four
+derived short-prefill staging slots. Batching counters must prove at least one
+multi-row decode, more decode rows than forwards, and a prefill forward for
+every request. The receipt publishes per-wave p99 TTFT, ITL, and end-to-end
+latency, duration and token throughput, plus aggregate batching width, row,
+prefill, synchronization, memory, and capacity evidence. These values are a
+Vulkan scaling baseline, not a claim of parity with vLLM.
+
+`/health.execution_identity` must agree exactly with the complete trusted-debug
+execution provenance. The backend must be `vulkan`, the device must be
+`vulkan:0`, the compiled kernel feature set must include `vulkan` and exclude
+`rocm`, the source must be clean, and the executable digest must equal the
+binary built by the driver. Compact result details bind that executable, the
+generated TOML, the effective server/environment configuration identities, the
+kernel contract, the execution-provenance envelope, and one ordered canonical
+hash of all 25 streamed semantic outputs. Dynamic response IDs and timestamps
+are excluded from the semantic hash; request names, usage counts, and semantic
+deltas are included.
+
+The gate fails on any request error, non-length or short output, missing actor
+timing, adapter identity, device fault, resize/reclaim/graph event, batching
+error, failed or at-least-100-ms external-yield synchronization, changed KV
+capacity, missing memory sample, unexplained adaptive ITL outlier, or ITL gap
+above two seconds. Gaps above 250 ms are always counted as stall evidence even
+when they remain below the hard pause gate. The server must drain, exit zero
+without force inside the shared 60-second grace period, and leave no private
+snapshot payload.
+
+A passing receipt closes only the Phase 6 short/mixed/long serving-baseline
+item and the no-silent-skip/no-unexplained-outlier condition for this bounded
+run. It does not close the CPU/HF oracle comparison, 30-minute development
+soak, eight-hour final soak, cross-engine benchmark, or final common-source-tree
+release gate. Keep those items open until their separate receipts exist.
 
 A positive `memory.kv_force_blocks` value is intentionally narrower than the
 normal control loop. It is accepted only with `memory.kv_autoscale = true` and

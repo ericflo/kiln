@@ -1,0 +1,255 @@
+{
+  "schema_version": 1,
+  "workload_id": "serving-vulkan-baseline-v1",
+  "kind": "performance",
+  "description": "Build one source-bound Vulkan server and run synchronized 1/4/8/12-request waves with exact runtime identity, batching, pause, memory, and lifecycle evidence.",
+  "determinism": {
+    "seed": 20260713,
+    "seed_delivery": "argv",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "vulkan-serving-baseline",
+      "description": "Exercise fixed-output Vulkan serving from single-request latency through twelve-request saturation on one immutable binary and typed config.",
+      "backend": "vulkan",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "cargo_jobs": 1,
+          "cargo_memory_scope": "systemd_user_memory_max_no_swap",
+          "cargo_min_available_gib": 15,
+          "cargo_wrapper": "scripts/cargo-bounded.sh",
+          "features": "vulkan",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "timeout_seconds": 900
+        },
+        "runtime": {
+          "serving_profile": "experimental",
+          "kv_autoscale_requested": false,
+          "kv_autoscale_enabled": false,
+          "memory_reclaim_requested_mode": "off",
+          "memory_reclaim_mode": "off",
+          "rocm_graphs_requested": false,
+          "rocm_graphs_enabled": false
+        },
+        "server": {
+          "chat_performance_metadata_enabled": true,
+          "debug_endpoints_enabled": true,
+          "default_thinking_enabled": false,
+          "http_send_buffer_bytes": 4096,
+          "log_format": "json",
+          "request_timeout_seconds": 180,
+          "stream_stall_grace_ms": 2000,
+          "max_decode_batch": 8,
+          "max_prefill_staging_slots": 4,
+          "max_active_requests": 12,
+          "max_prefill_staging_priority_burst": 4,
+          "max_prefill_tokens_per_cycle": 64,
+          "max_prefill_layers_per_cycle": 4
+        },
+        "workload": {
+          "expected_completion_tokens": 800,
+          "expected_finish_reason": "length",
+          "expected_request_count": 25,
+          "ignore_eos": true,
+          "max_tokens": 32,
+          "overall_timeout_seconds": 1800,
+          "pause_gate_ms": 2000,
+          "request_timeout_seconds": 180,
+          "semantic_output_evidence": "ordered_canonical_sha256",
+          "simultaneous_dispatch": "per_wave_thread_barrier",
+          "stall_evidence_ms": 250,
+          "warmup_max_tokens": 16,
+          "waves": {
+            "single": {
+              "slot_0": 16
+            },
+            "batch-4": {
+              "slot_0": 16,
+              "slot_1": 64,
+              "slot_2": 192,
+              "slot_3": 384
+            },
+            "batch-8": {
+              "slot_0": 16,
+              "slot_1": 32,
+              "slot_2": 64,
+              "slot_3": 96,
+              "slot_4": 192,
+              "slot_5": 384,
+              "slot_6": 512,
+              "slot_7": 768
+            },
+            "saturation-12": {
+              "slot_0": 16,
+              "slot_1": 24,
+              "slot_2": 32,
+              "slot_3": 48,
+              "slot_4": 64,
+              "slot_5": 96,
+              "slot_6": 128,
+              "slot_7": 192,
+              "slot_8": 256,
+              "slot_9": 384,
+              "slot_10": 512,
+              "slot_11": 1024
+            }
+          }
+        }
+      },
+      "cases": [
+        {
+          "id": "vulkan-serving-baseline",
+          "description": "Require a real Vulkan execution identity, exact fixed outputs, multi-row batching, no device faults or runtime mutation, no two-second ITL pause, and clean teardown.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_vulkan_baseline.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1"
+          },
+          "timeout_seconds": 2100,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no vulkan device|skipp(?:ed|ing).*vulkan|falling back to cpu)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "attributed_itl_outlier_count",
+              "batch_4_completion_token_count",
+              "batch_4_duration_seconds",
+              "batch_4_e2e_ms_p99",
+              "batch_4_itl_ms_p99",
+              "batch_4_output_tokens_per_second",
+              "batch_4_request_count",
+              "batch_4_request_failure_count",
+              "batch_4_ttft_ms_p99",
+              "batch_8_completion_token_count",
+              "batch_8_duration_seconds",
+              "batch_8_e2e_ms_p99",
+              "batch_8_itl_ms_p99",
+              "batch_8_output_tokens_per_second",
+              "batch_8_request_count",
+              "batch_8_request_failure_count",
+              "batch_8_ttft_ms_p99",
+              "batching_batched_decode_forward_count",
+              "batching_decode_forward_count",
+              "batching_decode_row_count",
+              "batching_max_observed_active_requests",
+              "batching_max_observed_batch_size",
+              "batching_prefill_forward_count",
+              "batching_prefill_layer_count",
+              "batching_prefill_layer_yield_count",
+              "batching_total_error_count",
+              "binary_build_count",
+              "completion_token_count",
+              "device_fault_count",
+              "external_yield_sync_call_count",
+              "external_yield_sync_failure_count",
+              "external_yield_sync_max_ms",
+              "external_yield_sync_slow_count",
+              "external_yield_sync_total_ms",
+              "graph_activity_count",
+              "itl_pause_count",
+              "itl_stall_count",
+              "kv_blocks_end",
+              "kv_blocks_start",
+              "kv_resize_event_count",
+              "length_terminated_request_count",
+              "memory_reclaim_event_count",
+              "memory_sample_count",
+              "memory_sampler_error_count",
+              "output_token_throughput_per_second",
+              "peak_gpu_memory_used_bytes",
+              "policy_attestation_failure_count",
+              "prompt_token_count",
+              "request_count",
+              "request_failure_count",
+              "saturation_12_completion_token_count",
+              "saturation_12_duration_seconds",
+              "saturation_12_e2e_ms_p99",
+              "saturation_12_itl_ms_p99",
+              "saturation_12_output_tokens_per_second",
+              "saturation_12_request_count",
+              "saturation_12_request_failure_count",
+              "saturation_12_ttft_ms_p99",
+              "semantic_output_record_count",
+              "shutdown_forced_count",
+              "shutdown_nonzero_count",
+              "single_completion_token_count",
+              "single_duration_seconds",
+              "single_e2e_ms_p99",
+              "single_itl_ms_p99",
+              "single_output_tokens_per_second",
+              "single_request_count",
+              "single_request_failure_count",
+              "single_ttft_ms_p99",
+              "snapshot_residue_count",
+              "unexplained_itl_outlier_count"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "same_environment_performance",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": [
+      {
+        "scope": "result",
+        "result_id": "vulkan-serving-baseline",
+        "metric": "request_failure_count",
+        "metric_class": "performance",
+        "unit": "count",
+        "aggregation": "sum",
+        "lower_is_better": true,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "vulkan-serving-baseline",
+        "metric": "itl_pause_count",
+        "metric_class": "performance",
+        "unit": "count",
+        "aggregation": "sum",
+        "lower_is_better": true,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      }
+    ]
+  }
+}
