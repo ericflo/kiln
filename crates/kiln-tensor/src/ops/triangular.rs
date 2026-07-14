@@ -86,7 +86,7 @@ fn apply_triangle(t: &Tensor, keep_upper: bool, name: &str) -> Result<Tensor> {
     apply_triangle_cpu(t, keep_upper, name)
 }
 
-fn apply_triangle_cpu(t: &Tensor, keep_upper: bool, name: &str) -> Result<Tensor> {
+fn apply_triangle_cpu(t: &Tensor, keep_upper: bool, _name: &str) -> Result<Tensor> {
     let n = t.shape()[0];
     let dtype = t.dtype();
     let per = dtype.size_in_bytes();

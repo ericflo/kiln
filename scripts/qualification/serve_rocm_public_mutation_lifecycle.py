@@ -32,7 +32,7 @@ GRAPH_CACHE_MAX_BYTES = 1 << 30
 MAX_TOKENS = 16
 PROMPT_WORDS = 64
 WARMUP_ATTEMPTS = 8
-OVERALL_TIMEOUT_SECONDS = 1200.0
+OVERALL_TIMEOUT_SECONDS = 1800.0
 ARM_ORDER = ("adapter", "maintenance_resize")
 RESULT_ENV = mixed.RESULT_ENV
 VARIANT_ENV = mixed.VARIANT_ENV
@@ -101,6 +101,7 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
         "graph_cache_entries": GRAPH_CACHE_ENTRIES,
         "graph_cache_max_bytes": GRAPH_CACHE_MAX_BYTES,
         "max_tokens": MAX_TOKENS,
+        "overall_timeout_seconds": int(OVERALL_TIMEOUT_SECONDS),
         "prompt_words": PROMPT_WORDS,
         "public_endpoints": {
             "endpoint_0": "POST /v1/adapters/load",

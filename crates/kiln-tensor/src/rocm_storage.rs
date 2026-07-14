@@ -759,7 +759,7 @@ pub fn rocm_synchronize_compute_stream_for(
         return Ok(());
     }
     let ctx = primary_rocm_context(device_index)?;
-    let stream = crate::active_rocm_stream(ctx);
+    let stream = crate::active_rocm_stream(&ctx);
     ctx.synchronize_stream_for(&stream, reason).map_err(|e| {
         Error::Msg(format!(
             "rocm_synchronize_compute_stream_for({device_index}, {}): {e:?}",

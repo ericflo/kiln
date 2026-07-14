@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use crate::{DType, Device, Error, Layout, Result, RocmStorage, StorageBackend, Tensor, TensorId};
+use crate::{DType, Device, Error, Layout, Result, RocmStorage, Tensor, TensorId};
 
 // Same stable C ABI as the CUDA build's `kiln_fp8_quantize_async` /
 // `kiln_fp8_dequantize_async` in `csrc/fp8.cu`.

@@ -32,7 +32,9 @@
 
 use std::sync::Arc;
 
-use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
+#[cfg(test)]
+use crate::DType;
+use crate::{CpuStorage, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn stack(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
     if inputs.is_empty() {

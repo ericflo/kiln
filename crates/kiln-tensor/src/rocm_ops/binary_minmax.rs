@@ -1,7 +1,7 @@
 //! ROCm wrappers for the binary_minmax kernel(s) (Phase R.5).
 use std::sync::Arc;
 
-use crate::{DType, Device, Error, Layout, Result, RocmStorage, StorageBackend, Tensor, TensorId};
+use crate::{DType, Device, Error, Layout, Result, RocmStorage, Tensor, TensorId};
 
 // Stable C ABI launcher compiled by `build.rs::build_rocm()` from
 // `csrc/binary_minmax.cu`. Signature is identical to the CUDA-side decl in

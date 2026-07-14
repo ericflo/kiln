@@ -19,7 +19,6 @@
 use std::sync::Arc;
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-use crate::DeviceOp3;
 use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 #[derive(Debug, Clone, Copy)]

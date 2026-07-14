@@ -25,7 +25,7 @@ RESULT_ENV = mixed.RESULT_ENV
 VARIANT_ENV = mixed.VARIANT_ENV
 GRAPH_CACHE_MAX = 12
 REQUEST_TIMEOUT_SECONDS = 240.0
-OVERALL_TIMEOUT_SECONDS = 1200.0
+OVERALL_TIMEOUT_SECONDS = 1800.0
 MAX_TOKENS = 48
 SCENARIOS = (
     ("short", 16),
@@ -58,6 +58,7 @@ def mode_config(graphs: bool) -> dict[str, Any]:
         "comparison": "exact_action_tokens_and_selected_logprobs",
         "graph_cache_entries": GRAPH_CACHE_MAX,
         "max_tokens": MAX_TOKENS,
+        "overall_timeout_seconds": int(OVERALL_TIMEOUT_SECONDS),
         "request_timeout_seconds": int(REQUEST_TIMEOUT_SECONDS),
         "scenarios": {name: words for name, words in SCENARIOS},
         "warm_then_measure": True,

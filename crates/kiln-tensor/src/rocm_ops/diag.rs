@@ -1,7 +1,7 @@
 //! ROCm wrappers for the diag kernel(s) (Phase R.5).
 use std::sync::Arc;
 
-use crate::{DType, Device, Error, Layout, Result, RocmStorage, StorageBackend, Tensor, TensorId};
+use crate::{DType, Device, Error, Layout, Result, RocmStorage, Tensor, TensorId};
 
 // Mirrors `kiln_diagonal_extract_async` / `kiln_diag_build_async` from
 // `cuda_storage.rs` (same stable C ABI symbols, compiled into

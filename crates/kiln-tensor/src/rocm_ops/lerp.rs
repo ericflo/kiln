@@ -1,7 +1,7 @@
 //! ROCm wrappers for the lerp kernel(s) (Phase R.5).
 use std::sync::Arc;
 
-use crate::{DType, Device, Error, Layout, Result, RocmStorage, StorageBackend, Tensor, TensorId};
+use crate::{DType, Device, Error, Layout, Result, RocmStorage, Tensor, TensorId};
 
 // The ROCm-side kernel launcher lives in `csrc/lerp.cu`, compiled by
 // `build.rs::build_rocm()` into `libkiln_tensor_rocm_ops.a` (same stable C ABI

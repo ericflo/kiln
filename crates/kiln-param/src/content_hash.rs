@@ -28,7 +28,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use kiln_tensor::{Result, Storage, StorageBackend};
+use kiln_tensor::{Result, Storage};
 
 /// Compute a content hash of a storage's bytes.
 ///

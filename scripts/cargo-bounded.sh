@@ -20,6 +20,8 @@ Overrides:
   KILN_CARGO_MAX_MEMORY_GIB       Explicit aggregate ceiling (default: available minus reserve)
   KILN_CARGO_EXECUTION_MODE       scope (default) or transient-service
   KILN_CARGO_PRIVATE_NETWORK      1 requires a private network in transient-service mode
+  KILN_CARGO_ENVIRONMENT_POLICY   closed-source-build-v1 (transient-service default)
+                                  or inherit
   KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS
                                   Hard transient-service deadline (default: 3600)
 EOF
@@ -145,13 +147,25 @@ if [[ "$execution_mode" == "scope" && "$private_network" != "0" ]]; then
     echo "error: KILN_CARGO_PRIVATE_NETWORK=1 requires transient-service mode" >&2
     exit 2
 fi
+environment_policy="${KILN_CARGO_ENVIRONMENT_POLICY:-}"
+if [[ -z "$environment_policy" ]]; then
+    if [[ "$execution_mode" == "transient-service" ]]; then
+        environment_policy="closed-source-build-v1"
+    else
+        environment_policy="inherit"
+    fi
+fi
+if [[ "$environment_policy" != "closed-source-build-v1" && "$environment_policy" != "inherit" ]]; then
+    echo "error: KILN_CARGO_ENVIRONMENT_POLICY must be closed-source-build-v1 or inherit, got '$environment_policy'" >&2
+    exit 2
+fi
 service_runtime_max_seconds="${KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS:-3600}"
 if [[ ! "$service_runtime_max_seconds" =~ ^[1-9][0-9]*$ ]]; then
     echo "error: KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS must be a positive decimal integer, got '$service_runtime_max_seconds'" >&2
     exit 2
 fi
 
-echo "bounded-cargo: mode=$execution_mode jobs=$jobs available=${available_gib}GiB reserve=${reserve_gib}GiB aggregate_limit=${limit_gib}GiB swap_limit=0 private_network=$private_network" >&2
+echo "bounded-cargo: mode=$execution_mode jobs=$jobs available=${available_gib}GiB reserve=${reserve_gib}GiB aggregate_limit=${limit_gib}GiB swap_limit=0 private_network=$private_network environment_policy=$environment_policy" >&2
 if [[ "$execution_mode" == "scope" ]]; then
     exec systemd-run \
         --user \
@@ -176,11 +190,41 @@ cleanup_service() {
 trap cleanup_service EXIT
 
 environment_args=()
-while IFS= read -r name; do
-    if [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-        environment_args+=("--setenv=$name")
-    fi
-done < <(compgen -e)
+if [[ "$environment_policy" == "inherit" ]]; then
+    while IFS= read -r name; do
+        if [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            environment_args+=("--setenv=$name")
+        fi
+    done < <(compgen -e)
+else
+    # This versioned policy is shared with the source-bound qualification
+    # driver. It deliberately excludes ambient compiler flags, target paths,
+    # credentials, and API tokens so they cannot change or enter the build.
+    closed_source_build_environment=(
+        CARGO_BUILD_JOBS
+        CARGO_HOME
+        CARGO_NET_OFFLINE
+        DBUS_SESSION_BUS_ADDRESS
+        HOME
+        KILN_ROCM_ARCHS
+        LANG
+        LC_ALL
+        LC_CTYPE
+        LOGNAME
+        PATH
+        ROCM_PATH
+        RUSTUP_HOME
+        SHELL
+        TMPDIR
+        USER
+        XDG_RUNTIME_DIR
+    )
+    for name in "${closed_source_build_environment[@]}"; do
+        if [[ -v "$name" ]]; then
+            environment_args+=("--setenv=$name")
+        fi
+    done
+fi
 
 private_network_property="PrivateNetwork=no"
 if [[ "$private_network" == "1" ]]; then

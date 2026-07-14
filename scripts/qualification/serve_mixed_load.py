@@ -45,11 +45,12 @@ BUILD_CARGO_MIN_AVAILABLE_GIB = 15
 BUILD_CARGO_MEMORY_SCOPE = "systemd_user_transient_service_memory_max_no_swap"
 BUILD_CARGO_EXECUTION_MODE = "transient-service"
 BUILD_CARGO_PRIVATE_NETWORK = True
-BUILD_CARGO_SERVICE_RUNTIME_MAX_SECONDS = 300
-BUILD_TIMEOUT_SECONDS = 360.0
+BUILD_CARGO_ENVIRONMENT_POLICY = "closed-source-build-v1"
+BUILD_CARGO_SERVICE_RUNTIME_MAX_SECONDS = 840
+BUILD_TIMEOUT_SECONDS = 900.0
 STARTUP_TIMEOUT_SECONDS = 240.0
 REQUEST_TIMEOUT_SECONDS = 120.0
-OVERALL_TIMEOUT_SECONDS = 420.0
+OVERALL_TIMEOUT_SECONDS = 1200.0
 NORMAL_REQUESTS = 8
 NORMAL_MAX_TOKENS = 128
 LONG_PREFILL_WORDS = 1536
@@ -103,6 +104,7 @@ class SourceBuildSpec:
     cargo_memory_scope: str = BUILD_CARGO_MEMORY_SCOPE
     cargo_execution_mode: str = BUILD_CARGO_EXECUTION_MODE
     cargo_private_network: bool = BUILD_CARGO_PRIVATE_NETWORK
+    cargo_environment_policy: str = BUILD_CARGO_ENVIRONMENT_POLICY
     cargo_service_runtime_max_seconds: int = BUILD_CARGO_SERVICE_RUNTIME_MAX_SECONDS
     timeout_seconds: float = BUILD_TIMEOUT_SECONDS
     environment: tuple[tuple[str, str], ...] = ()
@@ -112,6 +114,7 @@ class SourceBuildSpec:
             "binary": self.binary,
             "cargo_jobs": self.cargo_jobs,
             "cargo_execution_mode": self.cargo_execution_mode,
+            "cargo_environment_policy": self.cargo_environment_policy,
             "cargo_memory_scope": self.cargo_memory_scope,
             "cargo_min_available_gib": self.cargo_min_available_gib,
             "cargo_private_network": self.cargo_private_network,
@@ -1835,7 +1838,28 @@ def source_bound_build_command(spec: SourceBuildSpec = ROCM_BUILD_SPEC) -> list[
 def source_bound_build_environment(
     source: dict[str, str], spec: SourceBuildSpec = ROCM_BUILD_SPEC
 ) -> dict[str, str]:
-    environment = sanitized_environment(source)
+    sanitized = sanitized_environment(source)
+    closed_source_build_environment = {
+        "CARGO",
+        "CARGO_HOME",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LOGNAME",
+        "PATH",
+        "RUSTUP_HOME",
+        "SHELL",
+        "TMPDIR",
+        "USER",
+        "XDG_RUNTIME_DIR",
+    }
+    environment = {
+        key: value
+        for key, value in sanitized.items()
+        if key in closed_source_build_environment
+    }
     # Backend selection is closed: ambient toolchain variables from another
     # backend cannot survive into a source-bound build.
     for key in ("ROCM_PATH", "HIP_PATH"):
@@ -1843,6 +1867,7 @@ def source_bound_build_environment(
     environment.update(
         {
             "CARGO_NET_OFFLINE": "true",
+            "KILN_CARGO_ENVIRONMENT_POLICY": spec.cargo_environment_policy,
             "KILN_CARGO_EXECUTION_MODE": spec.cargo_execution_mode,
             "KILN_CARGO_JOBS": str(spec.cargo_jobs),
             "KILN_CARGO_MIN_AVAILABLE_GIB": str(spec.cargo_min_available_gib),

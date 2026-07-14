@@ -38,6 +38,7 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
     "build": {
         "cargo_jobs": mixed.BUILD_CARGO_JOBS,
         "cargo_execution_mode": mixed.BUILD_CARGO_EXECUTION_MODE,
+        "cargo_environment_policy": mixed.BUILD_CARGO_ENVIRONMENT_POLICY,
         "cargo_memory_scope": mixed.BUILD_CARGO_MEMORY_SCOPE,
         "cargo_min_available_gib": mixed.BUILD_CARGO_MIN_AVAILABLE_GIB,
         "cargo_private_network": mixed.BUILD_CARGO_PRIVATE_NETWORK,

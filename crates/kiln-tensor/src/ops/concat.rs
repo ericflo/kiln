@@ -32,7 +32,9 @@
 
 use std::sync::Arc;
 
-use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
+#[cfg(test)]
+use crate::DType;
+use crate::{CpuStorage, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// Concat op handle. Carries the concat axis. Convenience for naming
 /// + future per-backend dispatch.

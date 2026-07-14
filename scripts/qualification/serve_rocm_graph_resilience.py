@@ -32,7 +32,7 @@ GRAPH_CACHE_ENTRIES = 64
 HEADROOM_BUDGET_BYTES = 1 << 30
 TIGHT_BUDGET_BYTES = 64 << 20
 REQUEST_TIMEOUT_SECONDS = 120.0
-OVERALL_TIMEOUT_SECONDS = 1200.0
+OVERALL_TIMEOUT_SECONDS = 2100.0
 ARM_ORDER = ("headroom", "tight")
 ARM_BUDGETS = {
     "headroom": HEADROOM_BUDGET_BYTES,
@@ -74,6 +74,7 @@ def _base_config() -> dict[str, Any]:
         "headroom_budget_bytes": HEADROOM_BUDGET_BYTES,
         "max_tokens": MAX_TOKENS,
         "output_comparison": "exact_canonical_streamed_semantic_deltas",
+        "overall_timeout_seconds": int(OVERALL_TIMEOUT_SECONDS),
         "pause_policy": "zero_attributed_or_unexplained_itl_outliers",
         "prompt_word_buckets": {
             f"bucket_{index}": words

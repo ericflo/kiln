@@ -1608,11 +1608,6 @@ impl RocmStream {
         )
     }
 
-    fn synchronize_for(&self, reason: RocmSyncReason) -> Result<()> {
-        let submission = self.execution_permit("RocmStream::synchronize_for")?;
-        self.synchronize_admitted_for(&submission, reason)
-    }
-
     /// Settle a stream while retaining an admission acquired before the async
     /// operation. A concurrent STOP cannot open a gap between enqueue and wait.
     fn synchronize_admitted_for(

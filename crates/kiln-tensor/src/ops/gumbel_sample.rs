@@ -133,7 +133,6 @@ impl GumbelSampler {
             .ok_or_else(|| Error::from_str("GumbelSampler: storage must be CpuStorage on CPU"))?;
         let bytes = cpu.as_bytes();
         let dtype = logits.dtype();
-        let per = dtype.size_in_bytes();
 
         let mut out = Vec::with_capacity(batch);
         let mut rng = self.rng.lock().unwrap();

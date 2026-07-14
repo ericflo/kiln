@@ -35,8 +35,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
-    Allocator, AllocatorMode, CpuStorage, DType, Device, Error, Result, Storage,
-    allocator_frozen_error,
+    Allocator, AllocatorMode, CpuStorage, DType, Device, Result, Storage, allocator_frozen_error,
 };
 
 /// CPU allocator. See module doc.

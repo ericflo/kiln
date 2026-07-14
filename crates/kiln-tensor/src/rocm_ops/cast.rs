@@ -1,7 +1,7 @@
 //! ROCm wrappers for the cast kernel(s) (Phase R.5).
 use std::sync::Arc;
 
-use crate::{DType, Device, Error, Layout, Result, RocmStorage, StorageBackend, Tensor, TensorId};
+use crate::{DType, Device, Error, Layout, Result, RocmStorage, Tensor, TensorId};
 
 // Mirrors `kiln_cast_async` from `cuda_storage.rs` (same stable C ABI symbol,
 // compiled into `libkiln_tensor_rocm_ops.a` by `build.rs::build_rocm()`).

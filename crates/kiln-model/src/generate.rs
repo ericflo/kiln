@@ -19,12 +19,14 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
+#[cfg(test)]
+use crate::backend::capability::DecodeBatcherPolicy;
 use crate::backend::{
     self, BackendIdentity, BackendRuntime, LinearBackend, ReplayBackend, ResidencyBackend,
     SamplingBackend, StartupBackend, TrainingLossBackend, TrainingPrecisionPolicy,
     capability::{
-        BackendCapabilities, BackendCapabilityQueries, DecodeBatcherPolicy, ReplayNativePrimitive,
-        ReplayRequest, Support, decode_hot_path_fallback_policy_for_backend,
+        BackendCapabilities, BackendCapabilityQueries, ReplayNativePrimitive, ReplayRequest,
+        Support, decode_hot_path_fallback_policy_for_backend,
         decode_hot_path_generic_fallback_enabled_for_backend,
     },
 };
@@ -351,10 +353,11 @@ impl Drop for ModelRunner {
     fn drop(&mut self) {
         #[cfg(feature = "rocm")]
         if self.backend_health.snapshot().quarantined
-            && matches!(self.weights.embed_tokens.device(), Device::Rocm(_))
+            && matches!(
+                self.weights.embed_tokens.device(),
+                kiln_tensor::Device::Rocm(_)
+            )
         {
-            use kiln_tensor::StorageBackend;
-
             if let Some(storage) = self
                 .weights
                 .embed_tokens
@@ -2684,7 +2687,7 @@ impl ModelRunner {
     pub fn ensure_backend_healthy(&self) -> Result<()> {
         self.backend_health.ensure_healthy()?;
         #[cfg(feature = "rocm")]
-        if let Device::Rocm(device_index) = self.weights.embed_tokens.device() {
+        if let kiln_tensor::Device::Rocm(device_index) = self.weights.embed_tokens.device() {
             if kiln_tensor::rocm_cleanup_quarantined(device_index)
                 .context("query ROCm cleanup quarantine")?
             {

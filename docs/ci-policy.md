@@ -97,9 +97,13 @@ qualification cases run inside a bubblewrap PID namespace, which cannot attach
 its namespaced Cargo PID to the host user manager as a scope. Those declared
 builds use the wrapper's transient-service mode instead: the service has the
 same aggregate memory/no-swap cgroup, a private network, a hard runtime limit,
-and control-group teardown, while the device runtime remains in the original
-network/PID-isolated case. Qualification workloads must not overlap a separate
-Cargo build; build first, then run the device workload.
+and control-group teardown. Its versioned closed-source environment policy
+admits only the pinned Cargo/ROCm paths, locale, user-home, and user-systemd
+connection variables required to build; ambient compiler flags, target paths,
+credentials, and API tokens do not enter the wrapper or service. The device
+runtime remains in the original network/PID-isolated case. Qualification
+workloads must not overlap a separate Cargo build; build first, then run the
+device workload.
 
 ```bash
 scripts/cargo-bounded.sh check --locked -p kiln-server --lib

@@ -366,7 +366,6 @@ fn build_scalar_tensor(dtype: DType, value: f32) -> Result<Option<Tensor>> {
 
 fn reduce_axis(x: &Tensor, axis: usize, kind: ReductionKind, xv: &[f32]) -> Result<Tensor> {
     let shape = x.shape();
-    let rank = shape.len();
     let reduced_dim = shape[axis];
 
     // Outer = product of axes [0..axis]; inner = product of axes [axis+1..rank].

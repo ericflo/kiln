@@ -93,6 +93,7 @@ class BoundedCargoTests(unittest.TestCase):
                     "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
                     "KILN_CARGO_PRIVATE_NETWORK": "1",
                     "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS": "300",
+                    "KILN_TEST_SECRET_TOKEN": "must-not-enter-service",
                     "KILN_TEST_SYSTEMD_RUN_ARGS": str(arguments_path),
                     "PATH": f"{tool_dir}:{environment['PATH']}",
                 }
@@ -112,6 +113,7 @@ class BoundedCargoTests(unittest.TestCase):
                 "--wait",
                 "--collect",
                 "--pipe",
+                "--setenv=PATH",
                 "MemorySwapMax=0",
                 "KillMode=control-group",
                 "RuntimeMaxSec=300s",
@@ -120,6 +122,7 @@ class BoundedCargoTests(unittest.TestCase):
                 "check",
             ):
                 self.assertIn(expected, arguments)
+            self.assertNotIn("--setenv=KILN_TEST_SECRET_TOKEN", arguments)
 
     def test_private_network_requires_transient_service(self) -> None:
         environment = dict(os.environ)

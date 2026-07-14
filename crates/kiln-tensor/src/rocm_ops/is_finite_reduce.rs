@@ -1,5 +1,5 @@
 //! ROCm wrappers for the is_finite_reduce kernel(s) (Phase R.5).
-use crate::{DType, Device, Error, Result, RocmStorage, StorageBackend, Tensor};
+use crate::{DType, Device, Error, Result, RocmStorage, Tensor};
 
 // The ROCm-side launcher for `csrc/is_finite_reduce.cu`, compiled into
 // `libkiln_tensor_rocm_ops.a` by `build.rs::build_rocm()`. Same stable C ABI
