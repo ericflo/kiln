@@ -5269,7 +5269,11 @@ mod tests {
             },
         );
 
-        actor.submit_token_delivery(0, 111, Instant::now());
+        actor.submit_token_delivery(
+            0,
+            111,
+            EngineTokenTiming::ready(Instant::now(), TokenPhaseDurations::default()),
+        );
         assert_token_event(response_rx.blocking_recv(), 111);
         assert!(matches!(
             actor.active[0].delivery_state,
@@ -5319,7 +5323,11 @@ mod tests {
             },
         );
 
-        actor.submit_token_delivery(0, 111, Instant::now());
+        actor.submit_token_delivery(
+            0,
+            111,
+            EngineTokenTiming::ready(Instant::now(), TokenPhaseDurations::default()),
+        );
         let mut held_closed = actor
             .delivery_results
             .recv_timeout(Duration::from_secs(1))
@@ -5478,7 +5486,11 @@ mod tests {
             },
         );
 
-        actor.submit_token_delivery(0, 111, Instant::now());
+        actor.submit_token_delivery(
+            0,
+            111,
+            EngineTokenTiming::ready(Instant::now(), TokenPhaseDurations::default()),
+        );
         settle_active_deliveries(&mut actor);
         assert!(actor.active.is_empty());
         assert_eq!(actor.snapshot.response_channel_closed, 1);
